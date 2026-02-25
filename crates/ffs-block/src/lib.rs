@@ -6383,4 +6383,532 @@ mod tests {
             );
         }
     }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn proptest_lab_arc_cache_seeded_determinism_and_invariants(
+            seed in any::<u64>(),
+        ) {
+            const READERS: usize = 3;
+            const WRITERS: usize = 2;
+            const READ_OPS: usize = 40;
+            const WRITE_OPS: usize = 25;
+            const EXPECTED_READS: usize = READERS * READ_OPS;
+            const EXPECTED_ACCESSES: usize = EXPECTED_READS + (WRITERS * WRITE_OPS);
+            const CAPACITY: usize = 4;
+
+            let first = run_lab_arc_cache_scenario(seed);
+            let second = run_lab_arc_cache_scenario(seed);
+            prop_assert_eq!(first, second, "same seed should produce same lab summary");
+
+            prop_assert_eq!(first.read_events, EXPECTED_READS);
+            prop_assert_eq!(
+                first.hits + first.misses,
+                u64::try_from(EXPECTED_ACCESSES).expect("expected accesses fit u64"),
+            );
+            prop_assert!(
+                first.resident <= CAPACITY,
+                "resident {} exceeds capacity {}",
+                first.resident,
+                CAPACITY,
+            );
+            prop_assert_eq!(
+                first.dirty_blocks, 0,
+                "write-through cache should not retain dirty blocks",
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        // ── Additional property tests (GreenSnow) ─────────────────────
+
+        /// AlignedVec alignment guarantee: exposed slice starts at the
+        /// requested alignment for all sizes and alignment values.
+        #[test]
+        fn proptest_aligned_vec_alignment_guarantee(
+            size in 0_usize..=8192,
+            alignment_shift in 0_u32..=12,
+        ) {
+            let alignment = 1_usize << alignment_shift;
+            let aligned = AlignedVec::new(size, alignment);
+            prop_assert_eq!(aligned.len(), size);
+            if size > 0 {
+                let ptr = aligned.as_slice().as_ptr() as usize;
+                prop_assert_eq!(
+                    ptr % alignment, 0,
+                    "ptr {:#x} not aligned to {}", ptr, alignment,
+                );
+            }
+        }
+
+        /// AlignedVec from_vec preserves data byte-for-byte.
+        #[test]
+        fn proptest_aligned_vec_from_vec_preserves_data(
+            data in prop::collection::vec(any::<u8>(), 0..=1024),
+            alignment_shift in 0_u32..=12,
+        ) {
+            let alignment = 1_usize << alignment_shift;
+            let aligned = AlignedVec::from_vec(data.clone(), alignment);
+            prop_assert_eq!(aligned.as_slice(), data.as_slice());
+            prop_assert_eq!(aligned.len(), data.len());
+        }
+
+        /// AlignedVec into_vec roundtrip preserves data.
+        #[test]
+        fn proptest_aligned_vec_into_vec_roundtrip(
+            data in prop::collection::vec(any::<u8>(), 0..=1024),
+            alignment_shift in 0_u32..=12,
+        ) {
+            let alignment = 1_usize << alignment_shift;
+            let aligned = AlignedVec::from_vec(data.clone(), alignment);
+            let recovered = aligned.into_vec();
+            prop_assert_eq!(recovered, data);
+        }
+
+        /// BlockBuf CoW semantics: clone_ref shares data, make_mut
+        /// triggers copy-on-write, original is preserved.
+        #[test]
+        fn proptest_block_buf_cow_semantics(
+            data in prop::collection::vec(any::<u8>(), 1..=512),
+            mutate_byte in any::<u8>(),
+        ) {
+            let mut buf = BlockBuf::new(data.clone());
+            let clone = buf.clone_ref();
+
+            // Clone shares the same data.
+            prop_assert_eq!(clone.as_slice(), data.as_slice());
+
+            // Mutate original via make_mut.
+            buf.make_mut()[0] = mutate_byte;
+
+            // Clone is unaffected (CoW).
+            prop_assert_eq!(clone.as_slice(), data.as_slice());
+            prop_assert_eq!(buf.as_slice()[0], mutate_byte);
+        }
+
+        /// BlockBuf::zeroed creates an all-zero buffer of the right length.
+        #[test]
+        fn proptest_block_buf_zeroed(
+            len in 0_usize..=8192,
+        ) {
+            let buf = BlockBuf::zeroed(len);
+            prop_assert_eq!(buf.len(), len);
+            prop_assert!(buf.as_slice().iter().all(|&b| b == 0));
+        }
+
+        /// BlockBuf into_inner roundtrip preserves data.
+        #[test]
+        fn proptest_block_buf_into_inner_roundtrip(
+            data in prop::collection::vec(any::<u8>(), 0..=512),
+        ) {
+            let buf = BlockBuf::new(data.clone());
+            prop_assert_eq!(buf.into_inner(), data);
+        }
+
+        /// DirtyTracker: mark N blocks, dirty_count matches.
+        #[test]
+        fn proptest_dirty_tracker_count_matches_marks(
+            block_ids in prop::collection::hash_set(0_u64..100, 0..=50),
+        ) {
+            let mut tracker = DirtyTracker::default();
+            for &id in &block_ids {
+                tracker.mark_dirty(
+                    BlockNumber(id), 4096, TxnId(0), None, DirtyState::InFlight,
+                );
+            }
+            prop_assert_eq!(tracker.dirty_count(), block_ids.len());
+            prop_assert_eq!(tracker.dirty_bytes(), block_ids.len() * 4096);
+        }
+
+        /// DirtyTracker: clear restores count to zero.
+        #[test]
+        fn proptest_dirty_tracker_clear_restores_zero(
+            block_ids in prop::collection::vec(0_u64..50, 1..=20),
+        ) {
+            let mut tracker = DirtyTracker::default();
+            for &id in &block_ids {
+                tracker.mark_dirty(
+                    BlockNumber(id), 4096, TxnId(0), None, DirtyState::Committed,
+                );
+            }
+            let unique: HashSet<u64> = block_ids.iter().copied().collect();
+            for &id in &unique {
+                tracker.clear_dirty(BlockNumber(id));
+            }
+            prop_assert_eq!(tracker.dirty_count(), 0);
+            prop_assert_eq!(tracker.dirty_bytes(), 0);
+        }
+
+        /// DirtyTracker: oldest_first ordering is FIFO by insertion order.
+        #[test]
+        fn proptest_dirty_tracker_fifo_ordering(
+            block_ids in prop::collection::vec(0_u64..200, 1..=30),
+        ) {
+            let mut tracker = DirtyTracker::default();
+            for &id in &block_ids {
+                tracker.mark_dirty(
+                    BlockNumber(id), 4096, TxnId(0), None, DirtyState::InFlight,
+                );
+            }
+            // Re-derive insertion order: last occurrence of each unique ID
+            // (re-marking moves to end).
+            let mut last_seen_order = Vec::new();
+            let mut seen_rev = HashSet::new();
+            for &id in block_ids.iter().rev() {
+                if seen_rev.insert(id) {
+                    last_seen_order.push(id);
+                }
+            }
+            last_seen_order.reverse();
+            let oldest_first = tracker.dirty_blocks_oldest_first();
+            let oldest_ids: Vec<u64> = oldest_first.iter().map(|b| b.0).collect();
+            prop_assert_eq!(oldest_ids, last_seen_order);
+        }
+
+        /// DirtyTracker: double-mark replaces old entry, count stays same.
+        #[test]
+        fn proptest_dirty_tracker_double_mark_replaces(
+            block_id in 0_u64..100,
+            bytes1 in 1_usize..=8192,
+            bytes2 in 1_usize..=8192,
+        ) {
+            let mut tracker = DirtyTracker::default();
+            tracker.mark_dirty(
+                BlockNumber(block_id), bytes1, TxnId(0), None, DirtyState::InFlight,
+            );
+            prop_assert_eq!(tracker.dirty_count(), 1);
+            prop_assert_eq!(tracker.dirty_bytes(), bytes1);
+
+            tracker.mark_dirty(
+                BlockNumber(block_id), bytes2, TxnId(1), None, DirtyState::Committed,
+            );
+            prop_assert_eq!(tracker.dirty_count(), 1);
+            prop_assert_eq!(tracker.dirty_bytes(), bytes2);
+        }
+
+        /// MemoryPressure::target_capacity always in [1, max_capacity].
+        #[test]
+        fn proptest_memory_pressure_target_in_range(
+            max_capacity in 1_usize..=10000,
+            pressure_idx in 0_u8..=4,
+        ) {
+            let pressure = match pressure_idx {
+                0 => MemoryPressure::None,
+                1 => MemoryPressure::Low,
+                2 => MemoryPressure::Medium,
+                3 => MemoryPressure::High,
+                _ => MemoryPressure::Critical,
+            };
+            let target = pressure.target_capacity(max_capacity);
+            prop_assert!(target >= 1, "target {} < 1", target);
+            prop_assert!(
+                target <= max_capacity,
+                "target {} > max {}", target, max_capacity,
+            );
+        }
+
+        /// CacheMetrics hit_ratio is always in [0.0, 1.0].
+        #[test]
+        fn proptest_cache_metrics_hit_ratio_bounded(
+            hits in 0_u64..=1_000_000,
+            misses in 0_u64..=1_000_000,
+        ) {
+            let metrics = CacheMetrics {
+                hits, misses,
+                evictions: 0, dirty_flushes: 0,
+                t1_len: 0, t2_len: 0, b1_len: 0, b2_len: 0,
+                resident: 0, dirty_blocks: 0, dirty_bytes: 0,
+                oldest_dirty_age_ticks: None, capacity: 100, p: 0,
+            };
+            let ratio = metrics.hit_ratio();
+            prop_assert!((0.0..=1.0).contains(&ratio), "ratio {}", ratio);
+        }
+
+        /// CacheMetrics dirty_ratio in [0.0, 1.0] when dirty_blocks <= capacity.
+        #[test]
+        fn proptest_cache_metrics_dirty_ratio_bounded(
+            dirty_blocks in 0_usize..=100,
+            capacity in 1_usize..=100,
+        ) {
+            prop_assume!(dirty_blocks <= capacity);
+            let metrics = CacheMetrics {
+                hits: 0, misses: 0, evictions: 0, dirty_flushes: 0,
+                t1_len: 0, t2_len: 0, b1_len: 0, b2_len: 0,
+                resident: 0, dirty_blocks, dirty_bytes: 0,
+                oldest_dirty_age_ticks: None, capacity, p: 0,
+            };
+            let ratio = metrics.dirty_ratio();
+            prop_assert!((0.0..=1.0).contains(&ratio), "ratio {}", ratio);
+        }
+
+        /// normalized_alignment always returns 1 or a power of 2.
+        #[test]
+        fn proptest_normalized_alignment_power_of_two(
+            requested in 0_usize..=65536,
+        ) {
+            let result = normalized_alignment(requested);
+            prop_assert!(
+                result == 1 || result.is_power_of_two(),
+                "normalized_alignment({}) = {} is not 1 or power of 2",
+                requested, result,
+            );
+            prop_assert!(
+                result >= requested || requested <= 1,
+                "normalized_alignment({}) = {} is less than requested",
+                requested, result,
+            );
+        }
+
+        /// ARC evictions monotonically increase with access count.
+        #[test]
+        fn proptest_arc_evictions_monotonic(
+            capacity in 1_usize..8,
+            accesses in prop::collection::vec(0_u64..64, 1..100),
+        ) {
+            let mut state = ArcState::new(capacity);
+            let mut prev_evictions = 0_u64;
+            for &key in &accesses {
+                arc_access(&mut state, BlockNumber(key));
+                prop_assert!(
+                    state.evictions >= prev_evictions,
+                    "evictions decreased from {} to {}",
+                    prev_evictions, state.evictions,
+                );
+                prev_evictions = state.evictions;
+            }
+        }
+
+        /// DirtyTracker state_counts partitions into in_flight + committed == dirty_count.
+        #[test]
+        fn proptest_dirty_tracker_state_counts_partition(
+            ops in proptest::collection::vec(
+                (0_u64..32, any::<bool>()),
+                1..32,
+            ),
+        ) {
+            let mut tracker = DirtyTracker::default();
+            for (i, &(block, committed)) in ops.iter().enumerate() {
+                let state = if committed {
+                    DirtyState::Committed
+                } else {
+                    DirtyState::InFlight
+                };
+                tracker.mark_dirty(
+                    BlockNumber(block),
+                    8,
+                    TxnId(0),
+                    if committed { Some(CommitSeq(i as u64)) } else { None },
+                    state,
+                );
+            }
+            let (in_flight, committed) = tracker.state_counts();
+            prop_assert_eq!(
+                in_flight + committed,
+                tracker.dirty_count(),
+                "state_counts sum ({} + {}) != dirty_count ({})",
+                in_flight, committed, tracker.dirty_count(),
+            );
+        }
+
+        /// DirtyTracker dirty_bytes matches the sum of bytes of all tracked blocks.
+        #[test]
+        fn proptest_dirty_tracker_bytes_accounting(
+            ops in proptest::collection::vec(
+                (0_u64..16, 1_usize..256),
+                1..32,
+            ),
+        ) {
+            let mut tracker = DirtyTracker::default();
+            let mut expected_blocks = HashMap::<u64, usize>::new();
+            for &(block, bytes) in &ops {
+                tracker.mark_dirty(
+                    BlockNumber(block),
+                    bytes,
+                    TxnId(0),
+                    None,
+                    DirtyState::Committed,
+                );
+                expected_blocks.insert(block, bytes);
+            }
+            let expected_bytes: usize = expected_blocks.values().sum();
+            prop_assert_eq!(
+                tracker.dirty_bytes(),
+                expected_bytes,
+                "dirty_bytes mismatch",
+            );
+        }
+
+        /// DirtyTracker oldest_dirty_age_ticks is monotonic — each new mark
+        /// does not decrease the age of the oldest entry.
+        #[test]
+        fn proptest_dirty_tracker_oldest_age_monotonic(
+            blocks in proptest::collection::vec(0_u64..64, 2..16),
+        ) {
+            let mut tracker = DirtyTracker::default();
+            // Mark first block
+            tracker.mark_dirty(
+                BlockNumber(blocks[0]),
+                8,
+                TxnId(0),
+                None,
+                DirtyState::Committed,
+            );
+            let mut prev_age = tracker.oldest_dirty_age_ticks().unwrap_or(0);
+            // Mark subsequent blocks; age of oldest should increase or stay same
+            for &block in &blocks[1..] {
+                tracker.mark_dirty(
+                    BlockNumber(block),
+                    8,
+                    TxnId(0),
+                    None,
+                    DirtyState::Committed,
+                );
+                let age = tracker.oldest_dirty_age_ticks().unwrap_or(0);
+                prop_assert!(
+                    age >= prev_age,
+                    "oldest age decreased from {} to {} after marking block {}",
+                    prev_age, age, block,
+                );
+                prev_age = age;
+            }
+        }
+
+        /// FlushDaemonConfig::validate accepts valid configs.
+        #[test]
+        fn proptest_flush_daemon_config_valid_accepted(
+            interval_ms in 1_u64..10_000,
+            batch_size in 1_usize..1024,
+            reduced_batch_size in 1_usize..256,
+            high_wm in 0.01_f64..0.5,
+            critical_delta in 0.01_f64..0.5,
+        ) {
+            let critical_wm = (high_wm + critical_delta).min(1.0);
+            // Only test when the constraint actually holds
+            prop_assume!(high_wm < critical_wm && critical_wm <= 1.0);
+            let config = FlushDaemonConfig {
+                interval: Duration::from_millis(interval_ms),
+                batch_size,
+                budget_poll_quota_threshold: 256,
+                reduced_batch_size,
+                budget_yield_sleep: Duration::from_millis(10),
+                high_watermark: high_wm,
+                critical_watermark: critical_wm,
+            };
+            prop_assert!(config.validate().is_ok(), "valid config rejected");
+        }
+
+        /// FlushDaemonConfig::validate rejects zero interval.
+        #[test]
+        fn proptest_flush_daemon_config_rejects_zero_interval(
+            batch_size in 1_usize..256,
+        ) {
+            let config = FlushDaemonConfig {
+                interval: Duration::ZERO,
+                batch_size,
+                ..FlushDaemonConfig::default()
+            };
+            prop_assert!(config.validate().is_err());
+        }
+
+        /// FlushDaemonConfig::validate rejects invalid watermarks.
+        #[test]
+        fn proptest_flush_daemon_config_rejects_inverted_watermarks(
+            high in 0.5_f64..1.0,
+            critical in 0.0_f64..0.5,
+        ) {
+            // high >= critical should always fail
+            prop_assume!(high >= critical);
+            let config = FlushDaemonConfig {
+                high_watermark: high,
+                critical_watermark: critical,
+                ..FlushDaemonConfig::default()
+            };
+            prop_assert!(config.validate().is_err());
+        }
+
+        /// MemoryPressure target_capacity ordering:
+        /// Critical <= High <= Medium <= Low <= None == max_capacity.
+        #[test]
+        fn proptest_memory_pressure_ordering(
+            max_capacity in 2_usize..1024,
+        ) {
+            let none = MemoryPressure::None.target_capacity(max_capacity);
+            let low = MemoryPressure::Low.target_capacity(max_capacity);
+            let med = MemoryPressure::Medium.target_capacity(max_capacity);
+            let high = MemoryPressure::High.target_capacity(max_capacity);
+            let crit = MemoryPressure::Critical.target_capacity(max_capacity);
+            prop_assert!(crit <= high, "Critical {} > High {}", crit, high);
+            prop_assert!(high <= med, "High {} > Medium {}", high, med);
+            prop_assert!(med <= low, "Medium {} > Low {}", med, low);
+            prop_assert!(low <= none, "Low {} > None {}", low, none);
+            prop_assert_eq!(none, max_capacity);
+        }
+
+        /// ArcCache stage/commit/abort via ArcState internal API:
+        /// staged writes are accessible after staging, and abort clears them.
+        #[test]
+        fn proptest_arc_state_stage_commit_abort(
+            blocks in proptest::collection::vec(0_u64..32, 1..8),
+            abort in any::<bool>(),
+        ) {
+            let mut state = ArcState::new(64);
+            let txn_id = TxnId(1);
+            for &block in &blocks {
+                state.stage_txn_write(txn_id, BlockNumber(block), &[0xAA; 8])
+                    .expect("stage");
+            }
+
+            if abort {
+                let taken = state.take_staged_txn(txn_id);
+                // Taken set should contain all unique blocks staged
+                let unique_blocks: std::collections::BTreeSet<_> = blocks.iter().copied().collect();
+                prop_assert_eq!(taken.len(), unique_blocks.len());
+                // After take, staging again for same txn should work
+                let taken2 = state.take_staged_txn(txn_id);
+                prop_assert!(taken2.is_empty());
+            } else {
+                // Commit path: take + insert into resident + mark dirty
+                let taken = state.take_staged_txn(txn_id);
+                for (block, data) in &taken {
+                    state.on_miss_or_ghost_hit(*block);
+                    state.resident.insert(*block, BlockBuf::new(data.clone()));
+                    state.mark_dirty(
+                        *block,
+                        data.len(),
+                        txn_id,
+                        Some(CommitSeq(1)),
+                        DirtyState::Committed,
+                    );
+                }
+                let unique_blocks: std::collections::BTreeSet<_> = blocks.iter().copied().collect();
+                prop_assert_eq!(state.dirty.dirty_count(), unique_blocks.len());
+                // All committed blocks should be resident
+                for &block in &unique_blocks {
+                    prop_assert!(state.resident.contains_key(&BlockNumber(block)));
+                }
+            }
+        }
+
+        /// ArcCache: staged block ownership prevents cross-txn staging.
+        #[test]
+        fn proptest_arc_state_staged_block_ownership(
+            block in 0_u64..64,
+        ) {
+            let mut state = ArcState::new(64);
+            let txn_a = TxnId(1);
+            let txn_b = TxnId(2);
+            state.stage_txn_write(txn_a, BlockNumber(block), &[0xAA; 8])
+                .expect("stage by txn_a");
+            // Staging same block by different txn should fail
+            let result = state.stage_txn_write(txn_b, BlockNumber(block), &[0xBB; 8]);
+            prop_assert!(result.is_err(), "cross-txn staging should fail");
+            // Same txn can re-stage (overwrite)
+            state.stage_txn_write(txn_a, BlockNumber(block), &[0xCC; 8])
+                .expect("re-stage by same txn");
+        }
+    }
 }

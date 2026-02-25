@@ -298,6 +298,35 @@ impl IoEngine for MemIoEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Clone, Debug)]
+    enum MemOpPlan {
+        Read { offset: usize, len: usize },
+        Write { offset: usize, data: Vec<u8> },
+        Sync,
+    }
+
+    fn mem_op_plan_strategy(max_size: usize) -> impl Strategy<Value = MemOpPlan> {
+        let read_op = (0_usize..max_size)
+            .prop_flat_map(move |offset| {
+                let max_len = (max_size - offset).min(64);
+                (Just(offset), 1_usize..=max_len)
+            })
+            .prop_map(|(offset, len)| MemOpPlan::Read { offset, len });
+
+        let write_op = (0_usize..max_size)
+            .prop_flat_map(move |offset| {
+                let max_len = (max_size - offset).min(64);
+                (
+                    Just(offset),
+                    prop::collection::vec(any::<u8>(), 1_usize..=max_len),
+                )
+            })
+            .prop_map(|(offset, data)| MemOpPlan::Write { offset, data });
+
+        prop_oneof![3 => read_op, 3 => write_op, 1 => Just(MemOpPlan::Sync)]
+    }
 
     #[test]
     fn mem_engine_read_write_roundtrip() {
@@ -495,5 +524,131 @@ mod tests {
     fn engine_name_correct() {
         let mem = MemIoEngine::new(1024);
         assert_eq!(mem.name(), "memory");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        #[test]
+        fn mem_engine_proptest_batch_semantics_and_stats(
+            script in prop::collection::vec(mem_op_plan_strategy(512), 1..80),
+        ) {
+            const MEM_SIZE: usize = 512;
+
+            let engine = MemIoEngine::new(MEM_SIZE);
+            let mut model = vec![0_u8; MEM_SIZE];
+
+            let ops: Vec<IoOp> = script
+                .iter()
+                .map(|plan| match plan {
+                    MemOpPlan::Read { offset, len } => IoOp::Read {
+                        offset: u64::try_from(*offset).expect("offset fits in u64"),
+                        buf: vec![0_u8; *len],
+                    },
+                    MemOpPlan::Write { offset, data } => IoOp::Write {
+                        offset: u64::try_from(*offset).expect("offset fits in u64"),
+                        data: data.clone(),
+                    },
+                    MemOpPlan::Sync => IoOp::Sync,
+                })
+                .collect();
+
+            let completions = engine.submit_batch(ops);
+            prop_assert_eq!(completions.len(), script.len());
+
+            let mut expected_reads = 0_u64;
+            let mut expected_writes = 0_u64;
+            let mut expected_syncs = 0_u64;
+            let mut expected_bytes_read = 0_u64;
+            let mut expected_bytes_written = 0_u64;
+
+            for (plan, completion) in script.iter().zip(completions.iter()) {
+                match plan {
+                    MemOpPlan::Read { offset, len } => {
+                        expected_reads += 1;
+                        expected_bytes_read +=
+                            u64::try_from(*len).expect("read length fits in u64");
+                        match completion {
+                            IoCompletion::Read(buf) => {
+                                prop_assert_eq!(buf.len(), *len);
+                                prop_assert_eq!(buf.as_slice(), &model[*offset..(*offset + *len)]);
+                            }
+                            other => prop_assert!(false, "expected Read completion, got {other:?}"),
+                        }
+                    }
+                    MemOpPlan::Write { offset, data } => {
+                        expected_writes += 1;
+                        expected_bytes_written +=
+                            u64::try_from(data.len()).expect("write length fits in u64");
+                        match completion {
+                            IoCompletion::Write => {
+                                model[*offset..(*offset + data.len())].copy_from_slice(data);
+                            }
+                            other => prop_assert!(false, "expected Write completion, got {other:?}"),
+                        }
+                    }
+                    MemOpPlan::Sync => {
+                        expected_syncs += 1;
+                        prop_assert!(matches!(completion, IoCompletion::Sync));
+                    }
+                }
+            }
+
+            let stats = engine.stats();
+            prop_assert_eq!(stats.batches, 1);
+            prop_assert_eq!(stats.reads, expected_reads);
+            prop_assert_eq!(stats.writes, expected_writes);
+            prop_assert_eq!(stats.syncs, expected_syncs);
+            prop_assert_eq!(stats.bytes_read, expected_bytes_read);
+            prop_assert_eq!(stats.bytes_written, expected_bytes_written);
+        }
+
+        #[test]
+        fn mem_engine_proptest_read_oob_is_error_and_not_counted(
+            size in 1_usize..1024,
+            offset in 0_usize..2048,
+            len in 1_usize..1024,
+        ) {
+            prop_assume!(offset > size || len > (size - offset));
+
+            let engine = MemIoEngine::new(size);
+            let completions = engine.submit_batch(vec![IoOp::Read {
+                offset: u64::try_from(offset).expect("offset fits in u64"),
+                buf: vec![0_u8; len],
+            }]);
+
+            prop_assert_eq!(completions.len(), 1);
+            prop_assert!(matches!(completions[0], IoCompletion::Error(_)));
+
+            let stats = engine.stats();
+            prop_assert_eq!(stats.batches, 1);
+            prop_assert_eq!(stats.reads, 0);
+            prop_assert_eq!(stats.bytes_read, 0);
+        }
+
+        #[test]
+        fn mem_engine_proptest_write_oob_is_error_and_not_counted(
+            size in 1_usize..1024,
+            offset in 0_usize..2048,
+            len in 1_usize..1024,
+            payload in prop::collection::vec(any::<u8>(), 1_usize..1024),
+        ) {
+            let write_len = len.min(payload.len());
+            prop_assume!(offset > size || write_len > (size - offset));
+
+            let engine = MemIoEngine::new(size);
+            let completions = engine.submit_batch(vec![IoOp::Write {
+                offset: u64::try_from(offset).expect("offset fits in u64"),
+                data: payload[..write_len].to_vec(),
+            }]);
+
+            prop_assert_eq!(completions.len(), 1);
+            prop_assert!(matches!(completions[0], IoCompletion::Error(_)));
+
+            let stats = engine.stats();
+            prop_assert_eq!(stats.batches, 1);
+            prop_assert_eq!(stats.writes, 0);
+            prop_assert_eq!(stats.bytes_written, 0);
+        }
     }
 }

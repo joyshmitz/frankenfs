@@ -310,4 +310,118 @@ mod tests {
         assert_eq!(policy.max_chain_length, None);
         assert_eq!(policy.algo, CompressionAlgo::None);
     }
+
+    // ── Property-based tests (proptest) ────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    /// Strategy that generates a version chain of Full and Identical entries.
+    /// Ensures the chain starts with Full so resolve always succeeds.
+    fn version_chain_strategy() -> impl Strategy<Value = Vec<VersionData>> {
+        proptest::collection::vec(any::<bool>(), 1..16).prop_flat_map(|bools| {
+            let len = bools.len();
+            proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..32), len..=len)
+                .prop_map(move |datas| {
+                    let mut chain = Vec::with_capacity(len);
+                    for (i, is_identical) in bools.iter().enumerate() {
+                        if i == 0 || !is_identical {
+                            chain.push(VersionData::Full(datas[i].clone()));
+                        } else {
+                            chain.push(VersionData::Identical);
+                        }
+                    }
+                    chain
+                })
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// VersionData::Full memory_bytes matches data length.
+        #[test]
+        fn proptest_version_data_full_memory_bytes(
+            data in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            let vd = VersionData::Full(data.clone());
+            prop_assert_eq!(vd.memory_bytes(), data.len());
+            prop_assert!(vd.is_full());
+            prop_assert!(!vd.is_identical());
+        }
+
+        /// VersionData::Identical always has zero memory_bytes.
+        #[test]
+        fn proptest_version_data_identical_zero_memory(
+            _seed in any::<u64>(),
+        ) {
+            let vd = VersionData::Identical;
+            prop_assert_eq!(vd.memory_bytes(), 0);
+            prop_assert!(vd.is_identical());
+            prop_assert!(!vd.is_full());
+        }
+
+        /// resolve_data_with on a valid chain always returns Some for any index.
+        #[test]
+        fn proptest_resolve_data_with_always_resolves(
+            chain in version_chain_strategy(),
+        ) {
+            for i in 0..chain.len() {
+                let result = resolve_data_with(&chain, i, |d| d);
+                prop_assert!(result.is_some(), "resolve failed at index {}", i);
+            }
+        }
+
+        /// resolve_data_with returns the same data for consecutive Identical entries.
+        #[test]
+        fn proptest_resolve_identical_same_as_predecessor(
+            chain in version_chain_strategy(),
+        ) {
+            for i in 1..chain.len() {
+                if chain[i].is_identical() {
+                    let prev = resolve_data_with(&chain, i - 1, |d| d);
+                    let curr = resolve_data_with(&chain, i, |d| d);
+                    prop_assert_eq!(
+                        prev.as_deref(), curr.as_deref(),
+                        "Identical at index {} should match predecessor", i,
+                    );
+                }
+            }
+        }
+
+        /// CompressionStats dedup_ratio is always in [0.0, 1.0].
+        #[test]
+        fn proptest_compression_stats_dedup_ratio_bounded(
+            full in 0_usize..100,
+            identical in 0_usize..100,
+            stored in 0_usize..10000,
+            saved in 0_usize..10000,
+        ) {
+            let stats = CompressionStats {
+                full_versions: full,
+                identical_versions: identical,
+                bytes_saved: saved,
+                bytes_stored: stored,
+            };
+            let ratio = stats.dedup_ratio();
+            prop_assert!((0.0..=1.0).contains(&ratio), "dedup_ratio {} out of range", ratio);
+        }
+
+        /// CompressionStats compression_ratio is always in [0.0, 1.0].
+        #[test]
+        fn proptest_compression_stats_compression_ratio_bounded(
+            full in 0_usize..100,
+            identical in 0_usize..100,
+            stored in 0_usize..10000,
+            saved in 0_usize..10000,
+        ) {
+            let stats = CompressionStats {
+                full_versions: full,
+                identical_versions: identical,
+                bytes_saved: saved,
+                bytes_stored: stored,
+            };
+            let ratio = stats.compression_ratio();
+            prop_assert!((0.0..=1.0).contains(&ratio), "compression_ratio {} out of range", ratio);
+        }
+    }
 }

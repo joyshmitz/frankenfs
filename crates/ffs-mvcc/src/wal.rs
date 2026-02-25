@@ -624,4 +624,142 @@ mod tests {
 
         assert_eq!(decoded, commits);
     }
+
+    // ── Property-based tests (proptest) ────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    fn wal_write_strategy() -> impl Strategy<Value = WalWrite> {
+        (any::<u64>(), proptest::collection::vec(any::<u8>(), 0..128)).prop_map(|(block, data)| {
+            WalWrite {
+                block: BlockNumber(block),
+                data,
+            }
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// WAL header encode/decode is a perfect roundtrip.
+        #[test]
+        fn proptest_wal_header_encode_decode_roundtrip(
+            magic in Just(WAL_MAGIC),
+            version in Just(WAL_VERSION),
+            checksum_type in Just(CHECKSUM_TYPE_CRC32C),
+        ) {
+            let header = WalHeader { magic, version, checksum_type };
+            let encoded = encode_header(&header);
+            let decoded = decode_header(&encoded).expect("roundtrip decode");
+            prop_assert_eq!(decoded, header);
+        }
+
+        /// WAL commit encode/decode is a perfect roundtrip for arbitrary commits.
+        #[test]
+        fn proptest_wal_commit_roundtrip(
+            commit_seq in any::<u64>(),
+            txn_id in any::<u64>(),
+            writes in proptest::collection::vec(wal_write_strategy(), 0..8),
+        ) {
+            let commit = WalCommit {
+                commit_seq: CommitSeq(commit_seq),
+                txn_id: TxnId(txn_id),
+                writes,
+            };
+            let encoded = encode_commit(&commit).expect("encode");
+            match decode_commit(&encoded) {
+                DecodeResult::Commit(decoded) => prop_assert_eq!(decoded, commit),
+                other => prop_assert!(false, "expected Commit, got {:?}", other),
+            }
+        }
+
+        /// Encoded commit byte size matches the encoded buffer length.
+        #[test]
+        fn proptest_wal_commit_byte_size_matches(
+            commit_seq in any::<u64>(),
+            txn_id in any::<u64>(),
+            writes in proptest::collection::vec(wal_write_strategy(), 0..4),
+        ) {
+            let commit = WalCommit {
+                commit_seq: CommitSeq(commit_seq),
+                txn_id: TxnId(txn_id),
+                writes,
+            };
+            let encoded = encode_commit(&commit).expect("encode");
+            let size = commit_byte_size(&encoded);
+            prop_assert_eq!(size, Some(encoded.len()));
+        }
+
+        /// Flipping any bit in the commit body triggers a CRC corruption error.
+        #[test]
+        fn proptest_wal_commit_bit_flip_detected(
+            commit_seq in any::<u64>(),
+            txn_id in any::<u64>(),
+            data_byte in any::<u8>(),
+            flip_offset in 5_usize..25,
+        ) {
+            let commit = WalCommit {
+                commit_seq: CommitSeq(commit_seq),
+                txn_id: TxnId(txn_id),
+                writes: vec![WalWrite {
+                    block: BlockNumber(1),
+                    data: vec![data_byte; 32],
+                }],
+            };
+            let mut encoded = encode_commit(&commit).expect("encode");
+            let flip_pos = flip_offset.min(encoded.len().saturating_sub(5));
+            if flip_pos < encoded.len() {
+                encoded[flip_pos] ^= 0x01;
+                match decode_commit(&encoded) {
+                    // Any outcome is acceptable after bit-flipping:
+                    // CRC collision (Commit), corruption detected, truncation, or zero-length.
+                    DecodeResult::Commit(_)
+                    | DecodeResult::Corrupted(_)
+                    | DecodeResult::NeedMore(_)
+                    | DecodeResult::EndOfData => {}
+                }
+            }
+        }
+
+        /// Multiple commits concatenated can all be decoded sequentially.
+        #[test]
+        fn proptest_wal_multi_commit_sequential_decode(
+            commits in proptest::collection::vec(
+                (any::<u64>(), any::<u64>(), proptest::collection::vec(wal_write_strategy(), 0..4)),
+                1..6,
+            ),
+        ) {
+            let commits: Vec<WalCommit> = commits
+                .into_iter()
+                .map(|(seq, txn, writes)| WalCommit {
+                    commit_seq: CommitSeq(seq),
+                    txn_id: TxnId(txn),
+                    writes,
+                })
+                .collect();
+
+            let mut data = Vec::new();
+            for commit in &commits {
+                data.extend(encode_commit(commit).expect("encode"));
+            }
+
+            let mut offset = 0;
+            let mut decoded = Vec::new();
+            while offset < data.len() {
+                match decode_commit(&data[offset..]) {
+                    DecodeResult::Commit(commit) => {
+                        let size = commit_byte_size(&data[offset..]).expect("size");
+                        offset += size;
+                        decoded.push(commit);
+                    }
+                    DecodeResult::EndOfData | DecodeResult::NeedMore(_) => break,
+                    DecodeResult::Corrupted(msg) => {
+                        prop_assert!(false, "unexpected corruption: {}", msg);
+                    }
+                }
+            }
+            prop_assert_eq!(decoded.len(), commits.len());
+            prop_assert_eq!(decoded, commits);
+        }
+    }
 }

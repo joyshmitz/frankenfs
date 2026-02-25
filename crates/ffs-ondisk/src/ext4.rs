@@ -7223,7 +7223,7 @@ mod tests {
 
             let mut iter = iter_dir_block(&block, block_size);
             let mut iter_entries = Vec::new();
-            while let Some(entry) = iter.next() {
+            for entry in iter.by_ref() {
                 iter_entries.push(entry.expect("iterator must parse synthesized block").to_owned());
             }
             let iter_tail = iter.checksum_tail();
@@ -7556,12 +7556,14 @@ mod tests {
             name in proptest::collection::vec(any::<u8>(), 1..=32),
             value in proptest::collection::vec(any::<u8>(), 0..=96),
             name_index in any::<u8>(),
-            value_pad in 0_usize..=64,
+            // Minimum pad of 4 to leave room for the 2-byte terminator
+            // between the entry and value without overlap.
+            value_pad in 4_usize..=64,
         ) {
             let entry_len = (16 + name.len() + 3) & !3;
             let value_off = entry_len + value_pad;
             let value_end = value_off + value.len();
-            let data_len = entry_len.max(value_end + 4);
+            let data_len = (entry_len + 4).max(value_end + 4);
             let mut data = vec![0_u8; data_len];
 
             data[0] = u8::try_from(name.len()).expect("name length bounded by strategy");
@@ -7577,11 +7579,12 @@ mod tests {
                     .to_le_bytes(),
             );
             data[16..16 + name.len()].copy_from_slice(&name);
+            // Write terminator BEFORE value so there is no overlap
+            data[entry_len] = 0;
+            data[entry_len + 1] = 0;
             if !value.is_empty() {
                 data[value_off..value_off + value.len()].copy_from_slice(&value);
             }
-            data[entry_len] = 0;
-            data[entry_len + 1] = 0;
 
             let parsed = parse_xattr_entries(&data, &data).expect("valid entry should parse");
             prop_assert_eq!(parsed.len(), 1);
@@ -7801,7 +7804,7 @@ mod tests {
             xattr_ibody in proptest::collection::vec(any::<u8>(), 0..=256),
         ) {
             let inode = Ext4Inode {
-                mode: 0o100644,
+                mode: 0o100_644,
                 uid: 0,
                 gid: 0,
                 size: 0,
@@ -7846,8 +7849,11 @@ mod tests {
         ) {
             let mode = ftype | perm;
             let mut bytes = vec![0u8; 128];
-            bytes[0] = mode as u8;
-            bytes[1] = (mode >> 8) as u8;
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                bytes[0] = mode as u8;
+                bytes[1] = (mode >> 8) as u8;
+            }
             if let Ok(inode) = Ext4Inode::parse_from_bytes(&bytes) {
                 // file_type should return a recognized type for valid S_IFMT bits
                 let _ = inode.file_type_mode();
@@ -7863,7 +7869,7 @@ mod tests {
             block_size in prop_oneof![Just(1024_u32), Just(2048_u32), Just(4096_u32)],
         ) {
             let entries: Vec<_> = iter_dir_block(&block, block_size)
-                .filter_map(|e| e.ok())
+                .filter_map(Result::ok)
                 .collect();
             // Total rec_len of all entries should not exceed block length
             let total_rec_len: u64 = entries.iter().map(|e| u64::from(e.rec_len)).sum();
@@ -7895,5 +7901,467 @@ mod tests {
                 full
             );
         }
+
+        // ── Inode field preservation (structured construction) ───────
+
+        /// Constructing a 128-byte inode buffer with known field values and
+        /// parsing it back preserves the core fields.
+        #[test]
+        fn ext4_proptest_inode_fields_preserved(
+            mode in any::<u16>(),
+            uid_lo in any::<u16>(),
+            gid_lo in any::<u16>(),
+            size_lo in any::<u32>(),
+            atime in any::<u32>(),
+            ctime in any::<u32>(),
+            mtime in any::<u32>(),
+            dtime in any::<u32>(),
+            links_count in any::<u16>(),
+            blocks_lo in any::<u32>(),
+            flags in any::<u32>(),
+            generation in any::<u32>(),
+        ) {
+            let mut buf = [0u8; 128];
+            buf[0x00..0x02].copy_from_slice(&mode.to_le_bytes());
+            buf[0x02..0x04].copy_from_slice(&uid_lo.to_le_bytes());
+            buf[0x04..0x08].copy_from_slice(&size_lo.to_le_bytes());
+            buf[0x08..0x0C].copy_from_slice(&atime.to_le_bytes());
+            buf[0x0C..0x10].copy_from_slice(&ctime.to_le_bytes());
+            buf[0x10..0x14].copy_from_slice(&mtime.to_le_bytes());
+            buf[0x14..0x18].copy_from_slice(&dtime.to_le_bytes());
+            buf[0x18..0x1A].copy_from_slice(&gid_lo.to_le_bytes());
+            buf[0x1A..0x1C].copy_from_slice(&links_count.to_le_bytes());
+            buf[0x1C..0x20].copy_from_slice(&blocks_lo.to_le_bytes());
+            buf[0x20..0x24].copy_from_slice(&flags.to_le_bytes());
+            buf[0x64..0x68].copy_from_slice(&generation.to_le_bytes());
+
+            let inode = Ext4Inode::parse_from_bytes(&buf).expect("128-byte inode parse");
+            prop_assert_eq!(inode.mode, mode);
+            prop_assert_eq!(inode.uid & 0xFFFF, u32::from(uid_lo));
+            prop_assert_eq!(inode.gid & 0xFFFF, u32::from(gid_lo));
+            prop_assert_eq!(inode.atime, atime);
+            prop_assert_eq!(inode.ctime, ctime);
+            prop_assert_eq!(inode.mtime, mtime);
+            prop_assert_eq!(inode.dtime, dtime);
+            prop_assert_eq!(inode.links_count, links_count);
+            prop_assert_eq!(inode.generation, generation);
+            prop_assert_eq!(inode.flags, flags);
+        }
+
+        /// Inode with extended area: extended timestamps preserved through parse.
+        #[test]
+        fn ext4_proptest_inode_extended_timestamps_preserved(
+            atime_extra in any::<u32>(),
+            ctime_extra in any::<u32>(),
+            mtime_extra in any::<u32>(),
+            crtime in any::<u32>(),
+            crtime_extra in any::<u32>(),
+        ) {
+            let mut buf = [0u8; 256];
+            buf[0x80..0x82].copy_from_slice(&128_u16.to_le_bytes());
+            buf[0x84..0x88].copy_from_slice(&ctime_extra.to_le_bytes());
+            buf[0x88..0x8C].copy_from_slice(&mtime_extra.to_le_bytes());
+            buf[0x8C..0x90].copy_from_slice(&atime_extra.to_le_bytes());
+            buf[0x90..0x94].copy_from_slice(&crtime.to_le_bytes());
+            buf[0x94..0x98].copy_from_slice(&crtime_extra.to_le_bytes());
+
+            let inode = Ext4Inode::parse_from_bytes(&buf).expect("256-byte inode parse");
+            prop_assert_eq!(inode.atime_extra, atime_extra);
+            prop_assert_eq!(inode.ctime_extra, ctime_extra);
+            prop_assert_eq!(inode.mtime_extra, mtime_extra);
+            prop_assert_eq!(inode.crtime, crtime);
+            prop_assert_eq!(inode.crtime_extra, crtime_extra);
+        }
+
+        // ── Structured extent tree roundtrip ─────────────────────────
+
+        /// Building a valid leaf extent tree and parsing it recovers
+        /// header fields and all extent entries.
+        #[test]
+        fn ext4_proptest_extent_tree_leaf_roundtrip(
+            n_entries in 0_u16..=10,
+            max_entries in 10_u16..=20,
+            generation in any::<u32>(),
+            logical_blocks in proptest::collection::vec(any::<u32>(), 10),
+            raw_lens in proptest::collection::vec(1_u16..=EXT_INIT_MAX_LEN, 10),
+            phys_starts in proptest::collection::vec(any::<u64>(), 10),
+        ) {
+            let entries = usize::from(n_entries);
+            let buf_len = 12 + entries * 12;
+            let mut buf = vec![0u8; buf_len];
+            buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+            buf[2..4].copy_from_slice(&n_entries.to_le_bytes());
+            buf[4..6].copy_from_slice(&max_entries.to_le_bytes());
+            buf[6..8].copy_from_slice(&0_u16.to_le_bytes());
+            buf[8..12].copy_from_slice(&generation.to_le_bytes());
+            for i in 0..entries {
+                let base = 12 + i * 12;
+                let ps = phys_starts[i] & 0x0000_FFFF_FFFF_FFFF;
+                let ps_lo = u32::try_from(ps & u64::from(u32::MAX)).expect("masked to 32 bits");
+                buf[base..base + 4].copy_from_slice(&logical_blocks[i].to_le_bytes());
+                buf[base + 4..base + 6].copy_from_slice(&raw_lens[i].to_le_bytes());
+                buf[base + 6..base + 8].copy_from_slice(&(ps >> 32).to_le_bytes()[..2]);
+                buf[base + 8..base + 12].copy_from_slice(&ps_lo.to_le_bytes());
+            }
+            let (hdr, tree) = parse_extent_tree(&buf).expect("valid leaf extent tree");
+            prop_assert_eq!(hdr.magic, EXT4_EXTENT_MAGIC);
+            prop_assert_eq!(hdr.entries, n_entries);
+            prop_assert_eq!(hdr.max_entries, max_entries);
+            prop_assert_eq!(hdr.depth, 0);
+            prop_assert_eq!(hdr.generation, generation);
+            if let ExtentTree::Leaf(exts) = tree {
+                prop_assert_eq!(exts.len(), entries);
+                for i in 0..entries {
+                    prop_assert_eq!(exts[i].logical_block, logical_blocks[i]);
+                    prop_assert_eq!(exts[i].raw_len, raw_lens[i]);
+                    prop_assert_eq!(exts[i].physical_start, phys_starts[i] & 0x0000_FFFF_FFFF_FFFF);
+                }
+            } else {
+                prop_assert!(false, "expected Leaf extent tree, got Index");
+            }
+        }
+
+        /// Building a valid index extent tree (depth > 0) and parsing it
+        /// recovers the header and index entries.
+        #[test]
+        fn ext4_proptest_extent_tree_index_roundtrip(
+            n_entries in 0_u16..=10,
+            max_entries in 10_u16..=20,
+            depth in 1_u16..=5,
+            generation in any::<u32>(),
+            logical_blocks in proptest::collection::vec(any::<u32>(), 10),
+            leaf_blocks in proptest::collection::vec(any::<u64>(), 10),
+        ) {
+            let entries = usize::from(n_entries);
+            let buf_len = 12 + entries * 12;
+            let mut buf = vec![0u8; buf_len];
+            buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+            buf[2..4].copy_from_slice(&n_entries.to_le_bytes());
+            buf[4..6].copy_from_slice(&max_entries.to_le_bytes());
+            buf[6..8].copy_from_slice(&depth.to_le_bytes());
+            buf[8..12].copy_from_slice(&generation.to_le_bytes());
+            for i in 0..entries {
+                let base = 12 + i * 12;
+                let leaf = leaf_blocks[i] & 0x0000_FFFF_FFFF_FFFF;
+                let leaf_lo =
+                    u32::try_from(leaf & u64::from(u32::MAX)).expect("masked to 32 bits");
+                buf[base..base + 4].copy_from_slice(&logical_blocks[i].to_le_bytes());
+                buf[base + 4..base + 8].copy_from_slice(&leaf_lo.to_le_bytes());
+                buf[base + 8..base + 10].copy_from_slice(&(leaf >> 32).to_le_bytes()[..2]);
+            }
+            let (hdr, tree) = parse_extent_tree(&buf).expect("valid index extent tree");
+            prop_assert_eq!(hdr.depth, depth);
+            prop_assert_eq!(hdr.entries, n_entries);
+            if let ExtentTree::Index(idxs) = tree {
+                prop_assert_eq!(idxs.len(), entries);
+                for i in 0..entries {
+                    prop_assert_eq!(idxs[i].logical_block, logical_blocks[i]);
+                    prop_assert_eq!(idxs[i].leaf_block, leaf_blocks[i] & 0x0000_FFFF_FFFF_FFFF);
+                }
+            } else {
+                prop_assert!(false, "expected Index extent tree, got Leaf");
+            }
+        }
+
+        /// Extent entries > max_entries is always rejected.
+        #[test]
+        fn ext4_proptest_extent_tree_entries_gt_max_rejected(n_entries in 2_u16..=20) {
+            let max_entries = n_entries - 1;
+            let mut buf = vec![0u8; 12 + usize::from(n_entries) * 12];
+            buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+            buf[2..4].copy_from_slice(&n_entries.to_le_bytes());
+            buf[4..6].copy_from_slice(&max_entries.to_le_bytes());
+            prop_assert!(parse_extent_tree(&buf).is_err(), "entries > max should fail");
+        }
+
+        /// Bad magic in extent header always fails.
+        #[test]
+        fn ext4_proptest_extent_tree_bad_magic_rejected(magic in any::<u16>()) {
+            prop_assume!(magic != EXT4_EXTENT_MAGIC);
+            let mut buf = vec![0u8; 12];
+            buf[0..2].copy_from_slice(&magic.to_le_bytes());
+            prop_assert!(parse_extent_tree(&buf).is_err(), "wrong magic should fail");
+        }
+
+        // ── Directory entry structured construction & lookup ─────────
+
+        /// Building a valid dir block with structured entries, parsing
+        /// recovers entries and lookup finds them.
+        #[test]
+        fn ext4_proptest_dir_block_structured_roundtrip(
+            inode1 in 1_u32..=u32::MAX,
+            inode2 in 1_u32..=u32::MAX,
+            ft1 in 0_u8..=7,
+            ft2 in 0_u8..=7,
+            name1_len in 1_u8..=20,
+            name2_len in 1_u8..=20,
+            fill1 in any::<u8>(),
+            fill2 in any::<u8>(),
+        ) {
+            let block_size = 1024_u32;
+            let mut block = vec![0u8; block_size as usize];
+            let actual1 = (8 + usize::from(name1_len) + 3) & !3;
+            let actual1_u16 = u16::try_from(actual1).expect("block_size bounds rec_len");
+            let rec_len2 = block_size as usize - actual1;
+            let rec_len2_u16 = u16::try_from(rec_len2).expect("block_size bounds rec_len");
+            block[0..4].copy_from_slice(&inode1.to_le_bytes());
+            block[4..6].copy_from_slice(&actual1_u16.to_le_bytes());
+            block[6] = name1_len;
+            block[7] = ft1;
+            let name1: Vec<u8> = (0..name1_len).map(|i| b'a' + (fill1.wrapping_add(i)) % 26).collect();
+            block[8..8 + usize::from(name1_len)].copy_from_slice(&name1);
+            let off2 = actual1;
+            block[off2..off2 + 4].copy_from_slice(&inode2.to_le_bytes());
+            block[off2 + 4..off2 + 6].copy_from_slice(&rec_len2_u16.to_le_bytes());
+            block[off2 + 6] = name2_len;
+            block[off2 + 7] = ft2;
+            let name2: Vec<u8> = (0..name2_len).map(|i| b'A' + (fill2.wrapping_add(i)) % 26).collect();
+            block[off2 + 8..off2 + 8 + usize::from(name2_len)].copy_from_slice(&name2);
+            let (entries, _tail) = parse_dir_block(&block, block_size).expect("valid dir block");
+            prop_assert_eq!(entries.len(), 2);
+            prop_assert_eq!(entries[0].inode, inode1);
+            prop_assert_eq!(&entries[0].name, &name1);
+            prop_assert_eq!(entries[1].inode, inode2);
+            prop_assert_eq!(&entries[1].name, &name2);
+            let found1 = lookup_in_dir_block(&block, block_size, &name1);
+            prop_assert!(found1.is_some());
+            prop_assert_eq!(found1.unwrap().inode, inode1);
+            let found2 = lookup_in_dir_block(&block, block_size, &name2);
+            prop_assert!(found2.is_some());
+            prop_assert_eq!(found2.unwrap().inode, inode2);
+            prop_assert!(lookup_in_dir_block(&block, block_size, b"ZZZZZZ_NONEXISTENT").is_none());
+        }
+
+        /// parse_dir_block and iter_dir_block produce the same entries.
+        #[test]
+        fn ext4_proptest_dir_parse_iter_consistency(
+            inode_val in 1_u32..=u32::MAX,
+            name_len in 1_u8..=30,
+        ) {
+            let block_size = 1024_u32;
+            let mut block = vec![0u8; block_size as usize];
+            block[0..4].copy_from_slice(&inode_val.to_le_bytes());
+            let block_size_u16 = u16::try_from(block_size).expect("strategy uses 1024 block size");
+            block[4..6].copy_from_slice(&block_size_u16.to_le_bytes());
+            block[6] = name_len;
+            block[7] = 1;
+            let name: Vec<u8> = (0..name_len).map(|i| b'x' + (i % 3)).collect();
+            block[8..8 + usize::from(name_len)].copy_from_slice(&name);
+            let (parsed_entries, _) = parse_dir_block(&block, block_size).expect("parse");
+            let iter_entries: Vec<_> = iter_dir_block(&block, block_size)
+                .filter_map(Result::ok)
+                .collect();
+            prop_assert_eq!(parsed_entries.len(), iter_entries.len());
+            for (pe, ie) in parsed_entries.iter().zip(iter_entries.iter()) {
+                prop_assert_eq!(pe.inode, ie.inode);
+                prop_assert_eq!(&pe.name[..], ie.name);
+                prop_assert_eq!(pe.name_len, ie.name_len);
+            }
+        }
+
+        // ── Ext4FileType from_raw ────────────────────────────────────
+
+        /// from_raw returns Unknown for values > 7.
+        #[test]
+        fn ext4_proptest_file_type_from_raw_no_panic(val in any::<u8>()) {
+            let ft = Ext4FileType::from_raw(val);
+            if val > 7 {
+                prop_assert_eq!(ft, Ext4FileType::Unknown);
+            }
+        }
+
+        // ── Checksum stamp+verify roundtrips ─────────────────────────
+
+        /// Dir block with stamped checksum passes verification.
+        #[test]
+        fn ext4_proptest_dir_block_checksum_stamp_verify(
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            block_size in prop_oneof![Just(1024_usize), Just(2048_usize), Just(4096_usize)],
+        ) {
+            let mut block = vec![0u8; block_size];
+            for (i, b) in block.iter_mut().enumerate() {
+                *b = u8::try_from(i & 0xFF).unwrap();
+            }
+            let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
+            let seed = ext4_chksum(seed, &generation.to_le_bytes());
+            let csum = ext4_chksum(seed, &block[..block_size - 12]);
+            block[block_size - 4..].copy_from_slice(&csum.to_le_bytes());
+            prop_assert!(verify_dir_block_checksum(&block, csum_seed, ino, generation).is_ok());
+        }
+
+        /// Extent block with stamped checksum passes verification.
+        #[test]
+        fn ext4_proptest_extent_block_checksum_stamp_verify(
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            eh_max in 1_u16..=10,
+        ) {
+            let tail_off = 12 + usize::from(eh_max) * 12;
+            let mut block = vec![0u8; tail_off + 4];
+            block[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+            block[4..6].copy_from_slice(&eh_max.to_le_bytes());
+            let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
+            let seed = ext4_chksum(seed, &generation.to_le_bytes());
+            let csum = ext4_chksum(seed, &block[..tail_off]);
+            block[tail_off..tail_off + 4].copy_from_slice(&csum.to_le_bytes());
+            prop_assert!(verify_extent_block_checksum(&block, csum_seed, ino, generation).is_ok());
+        }
+
+        // ── Block bitmap ─────────────────────────────────────────────
+
+        /// verify_block_bitmap_free_count with correct count passes.
+        #[test]
+        fn ext4_proptest_block_bitmap_verify_correct_passes(
+            byte_len in 1_usize..=128,
+            fill_seed in any::<u64>(),
+        ) {
+            let total_bits = u32::try_from(byte_len * 8).unwrap();
+            let mut bm = vec![0u8; byte_len];
+            let mut rng = fill_seed;
+            for b in &mut bm {
+                rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                *b = rng.to_le_bytes()[7];
+            }
+            let used: u32 = bm.iter().map(|b| b.count_ones()).sum();
+            let free = total_bits.saturating_sub(used);
+            prop_assert!(verify_block_bitmap_free_count(&bm, total_bits, free).is_ok());
+        }
+
+        // ── Superblock geometry and validation ───────────────────────
+
+        /// Well-formed superblock always passes validate_geometry().
+        #[test]
+        fn ext4_proptest_superblock_validate_geometry(
+            log_block_size in 0_u32..=2,
+            blocks_per_group in 1_u32..=8192,
+            inodes_per_group in 1_u32..=8192,
+        ) {
+            let incompat = Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0;
+            let sb = make_proptest_valid_ext4_superblock(
+                log_block_size, blocks_per_group, inodes_per_group,
+                64, incompat, b"geom-val",
+            );
+            let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse sb");
+            prop_assert!(parsed.validate_geometry().is_ok());
+        }
+
+        /// validate_v1 accepts FILETYPE+EXTENTS, rejects without.
+        #[test]
+        fn ext4_proptest_superblock_validate_v1_requires_flags(
+            has_filetype in any::<bool>(),
+            has_extents in any::<bool>(),
+        ) {
+            let mut incompat = 0_u32;
+            if has_filetype { incompat |= Ext4IncompatFeatures::FILETYPE.0; }
+            if has_extents { incompat |= Ext4IncompatFeatures::EXTENTS.0; }
+            let sb = make_proptest_valid_ext4_superblock(
+                2, 8192, 4096, 64, incompat, b"v1-check",
+            );
+            let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse sb");
+            let result = parsed.validate_v1();
+            if has_filetype && has_extents {
+                prop_assert!(result.is_ok());
+            } else {
+                prop_assert!(result.is_err());
+            }
+        }
+
+        // ── Ext4Extent properties ────────────────────────────────────
+
+        /// actual_len is always in [1, EXT_INIT_MAX_LEN].
+        #[test]
+        fn ext4_proptest_extent_actual_len_bounded(raw_len in 1_u16..=u16::MAX) {
+            let ext = Ext4Extent { logical_block: 0, raw_len, physical_start: 0 };
+            let len = ext.actual_len();
+            prop_assert!(len >= 1);
+            prop_assert!(len <= EXT_INIT_MAX_LEN);
+        }
+
+        /// is_unwritten iff raw_len > EXT_INIT_MAX_LEN.
+        #[test]
+        fn ext4_proptest_extent_is_unwritten_consistent(raw_len in 1_u16..=u16::MAX) {
+            let ext = Ext4Extent { logical_block: 0, raw_len, physical_start: 0 };
+            prop_assert_eq!(ext.is_unwritten(), raw_len > EXT_INIT_MAX_LEN);
+        }
+
+        // ── ext4_chksum incremental chaining ─────────────────────────
+
+        /// Feeding data in two chunks equals one-shot.
+        #[test]
+        fn ext4_proptest_chksum_incremental(
+            seed in any::<u32>(),
+            data1 in proptest::collection::vec(any::<u8>(), 0..=128),
+            data2 in proptest::collection::vec(any::<u8>(), 0..=128),
+        ) {
+            let mut combined = data1.clone();
+            combined.extend_from_slice(&data2);
+            prop_assert_eq!(
+                ext4_chksum(seed, &combined),
+                ext4_chksum(ext4_chksum(seed, &data1), &data2),
+                "CRC chaining must equal one-shot"
+            );
+        }
+
+        // ── DirEntry actual_size ─────────────────────────────────────
+
+        /// actual_size is always 4-byte aligned and >= 8.
+        #[test]
+        fn ext4_proptest_dir_entry_actual_size_aligned(name_len in 0_u8..=255) {
+            let entry = Ext4DirEntry {
+                inode: 1, rec_len: 0, name_len,
+                file_type: Ext4FileType::RegFile,
+                name: vec![b'a'; usize::from(name_len)],
+            };
+            let size = entry.actual_size();
+            prop_assert!(size >= 8);
+            prop_assert_eq!(size % 4, 0);
+        }
+
+        // ── rec_len_from_disk ────────────────────────────────────────
+
+        /// 4-byte-aligned rec_len decodes to itself for standard blocks.
+        #[test]
+        fn ext4_proptest_rec_len_from_disk_aligned_identity(
+            raw in (2_u16..=255).prop_map(|v| v * 4),
+            block_size in prop_oneof![Just(1024_u32), Just(2048_u32), Just(4096_u32)],
+        ) {
+            prop_assert_eq!(rec_len_from_disk(raw, block_size), u32::from(raw));
+        }
+
+        /// Sentinel values (0 and 0xFFFC) decode to block_size.
+        #[test]
+        fn ext4_proptest_rec_len_from_disk_sentinel(
+            block_size in prop_oneof![Just(1024_u32), Just(2048_u32), Just(4096_u32)],
+        ) {
+            prop_assert_eq!(rec_len_from_disk(0xFFFC, block_size), block_size);
+            prop_assert_eq!(rec_len_from_disk(0, block_size), block_size);
+        }
+
+        // ── Superblock 64-bit block count ────────────────────────────
+
+        /// 64BIT flag: low 32 bits of blocks_count preserved.
+        #[test]
+        fn ext4_proptest_superblock_64bit_block_count(
+            blocks_lo in any::<u32>(),
+            blocks_hi in any::<u32>(),
+        ) {
+            let incompat = Ext4IncompatFeatures::FILETYPE.0
+                | Ext4IncompatFeatures::EXTENTS.0
+                | Ext4IncompatFeatures::BIT64.0;
+            let mut sb = make_proptest_valid_ext4_superblock(
+                2, 8192, 4096, 64, incompat, b"64bit",
+            );
+            sb[0x04..0x08].copy_from_slice(&blocks_lo.to_le_bytes());
+            if sb.len() > 0x154 {
+                sb[0x150..0x154].copy_from_slice(&blocks_hi.to_le_bytes());
+            }
+            let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse 64bit sb");
+            prop_assert!(parsed.is_64bit());
+            prop_assert_eq!(parsed.blocks_count & u64::from(u32::MAX), u64::from(blocks_lo));
+        }
+
     }
 }

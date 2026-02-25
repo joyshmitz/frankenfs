@@ -652,4 +652,114 @@ mod tests {
             assert_eq!(reads, 100_000);
         }
     }
+
+    // ── Property-based tests (proptest) ────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// RcuCell: update then load always returns the latest value.
+        #[test]
+        fn proptest_rcu_cell_update_load_consistency(
+            values in proptest::collection::vec(any::<u64>(), 1..16),
+        ) {
+            let cell = RcuCell::new(0_u64);
+            for &v in &values {
+                cell.update(v);
+                prop_assert_eq!(**cell.load(), v);
+            }
+            prop_assert_eq!(cell.update_count(), values.len() as u64);
+        }
+
+        /// RcuCell: swap returns the previous value.
+        #[test]
+        fn proptest_rcu_cell_swap_returns_previous(
+            initial in any::<u32>(),
+            new_val in any::<u32>(),
+        ) {
+            let cell = RcuCell::new(initial);
+            let old = cell.swap(new_val);
+            prop_assert_eq!(*old, initial);
+            prop_assert_eq!(**cell.load(), new_val);
+        }
+
+        /// RcuCell: from_arc roundtrip preserves value.
+        #[test]
+        fn proptest_rcu_cell_from_arc_roundtrip(value in any::<u64>()) {
+            let cell = RcuCell::from_arc(Arc::new(value));
+            prop_assert_eq!(**cell.load(), value);
+            let arc = cell.load_arc();
+            prop_assert_eq!(*arc, value);
+        }
+
+        /// RcuMap: insert/get roundtrip for arbitrary keys and values.
+        #[test]
+        fn proptest_rcu_map_insert_get_roundtrip(
+            entries in proptest::collection::vec((1_u64..256, any::<u64>()), 1..16),
+        ) {
+            let map: RcuMap<u64, u64> = RcuMap::new();
+            let mut expected = std::collections::BTreeMap::new();
+            for &(k, v) in &entries {
+                map.insert(k, v);
+                expected.insert(k, v);
+            }
+            for (&k, &v) in &expected {
+                let got = map.get(&k).expect("key must exist");
+                prop_assert_eq!(*got, v, "mismatch for key {}", k);
+            }
+            prop_assert_eq!(map.len(), expected.len());
+        }
+
+        /// RcuMap: remove returns true for existing keys, false for missing.
+        #[test]
+        fn proptest_rcu_map_remove_semantics(
+            key in 1_u64..100,
+            value in any::<u64>(),
+        ) {
+            let map: RcuMap<u64, u64> = RcuMap::new();
+            prop_assert!(!map.remove(&key));  // not yet inserted
+            map.insert(key, value);
+            prop_assert!(map.remove(&key));   // now present
+            prop_assert!(map.get(&key).is_none());
+        }
+
+        /// RcuMap: snapshot isolation — old load_arc sees original state.
+        #[test]
+        fn proptest_rcu_map_snapshot_isolation(
+            initial in any::<u64>(),
+            updated in any::<u64>(),
+        ) {
+            let map: RcuMap<u64, u64> = RcuMap::new();
+            map.insert(1, initial);
+            let snapshot = map.load_arc();
+            map.insert(1, updated);
+            // Old snapshot sees original
+            prop_assert_eq!(**snapshot.get(&1).unwrap(), initial);
+            // New read sees updated
+            prop_assert_eq!(*map.get(&1).unwrap(), updated);
+        }
+
+        /// AtomicWatermark: store/load roundtrip.
+        #[test]
+        fn proptest_atomic_watermark_store_load(value in any::<u64>()) {
+            // Exclude u64::MAX since it's the sentinel for "empty"
+            if value != u64::MAX {
+                let wm = AtomicWatermark::new();
+                wm.store(value);
+                prop_assert_eq!(wm.load(), Some(value));
+                prop_assert_eq!(wm.load_raw(), value);
+            }
+        }
+
+        /// AtomicWatermark: clear sets load to None.
+        #[test]
+        fn proptest_atomic_watermark_clear(value in 0_u64..u64::MAX) {
+            let wm = AtomicWatermark::with_value(value);
+            prop_assert_eq!(wm.load(), Some(value));
+            wm.clear();
+            prop_assert_eq!(wm.load(), None);
+        }
+    }
 }

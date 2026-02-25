@@ -6119,5 +6119,138 @@ mod tests {
                 prop_assert!(result.is_none(), "aborted write to block {} should not be visible", block);
             }
         }
+
+        /// critical_chain_len is always strictly greater than max_len.
+        #[test]
+        fn proptest_critical_chain_len_greater_than_input(
+            max_len in 0_usize..10_000,
+        ) {
+            let critical = MvccStore::critical_chain_len(max_len);
+            prop_assert!(
+                critical > max_len,
+                "critical_chain_len({}) = {} should be > {}",
+                max_len, critical, max_len,
+            );
+        }
+
+        /// critical_chain_len is monotonically non-decreasing.
+        #[test]
+        fn proptest_critical_chain_len_monotonic(
+            a in 0_usize..5000,
+            b in 0_usize..5000,
+        ) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let c_lo = MvccStore::critical_chain_len(lo);
+            let c_hi = MvccStore::critical_chain_len(hi);
+            prop_assert!(
+                c_lo <= c_hi,
+                "critical_chain_len({}) = {} > critical_chain_len({}) = {}",
+                lo, c_lo, hi, c_hi,
+            );
+        }
+
+        /// Snapshot register/release ref-counting: watermark tracks the minimum.
+        #[test]
+        fn proptest_snapshot_register_release_refcount(
+            commits in 2_usize..8,
+            register_at in 0_usize..2,
+        ) {
+            let mut store = MvccStore::new();
+
+            // Generate multiple commits.
+            let mut all_seqs = Vec::new();
+            for i in 0..commits {
+                let mut txn = store.begin();
+                #[allow(clippy::cast_possible_truncation)]
+                txn.stage_write(BlockNumber(0), vec![i as u8; 64]);
+                let seq = store.commit(txn).expect("commit");
+                all_seqs.push(seq);
+            }
+
+            let snap_idx = register_at.min(all_seqs.len() - 1);
+            let snap = Snapshot { high: all_seqs[snap_idx] };
+            store.register_snapshot(snap);
+            prop_assert_eq!(store.active_snapshot_count(), 1);
+            prop_assert_eq!(store.watermark(), Some(snap.high));
+
+            store.release_snapshot(snap);
+            prop_assert_eq!(store.active_snapshot_count(), 0);
+            prop_assert_eq!(store.watermark(), None);
+        }
+
+        /// Snapshot watermark is always the minimum of registered snapshots.
+        #[test]
+        fn proptest_watermark_is_minimum_snapshot(
+            seq_a in 1_u64..1000,
+            seq_b in 1_u64..1000,
+        ) {
+            let mut store = MvccStore::new();
+            // Advance store commit counter past our snapshot values.
+            let max_seq = seq_a.max(seq_b) + 1;
+            for i in 0..max_seq {
+                let mut txn = store.begin();
+                #[allow(clippy::cast_possible_truncation)]
+                txn.stage_write(BlockNumber(i), vec![1; 8]);
+                store.commit(txn).expect("commit");
+            }
+
+            let snap_a = Snapshot { high: CommitSeq(seq_a) };
+            let snap_b = Snapshot { high: CommitSeq(seq_b) };
+            store.register_snapshot(snap_a);
+            store.register_snapshot(snap_b);
+            let expected_min = CommitSeq(seq_a.min(seq_b));
+            prop_assert_eq!(store.watermark(), Some(expected_min));
+
+            store.release_snapshot(snap_a);
+            store.release_snapshot(snap_b);
+        }
+
+        /// Compression dedup: writing identical data produces Identical markers.
+        #[test]
+        fn proptest_compression_dedup_identical_writes(
+            data_byte in any::<u8>(),
+            repeat_count in 2_usize..8,
+        ) {
+            let mut store = MvccStore::new();
+            for _ in 0..repeat_count {
+                let mut txn = store.begin();
+                txn.stage_write(BlockNumber(0), vec![data_byte; 64]);
+                store.commit(txn).expect("commit");
+            }
+            let stats = store.compression_stats();
+            // First write is Full, subsequent writes are Identical (dedup enabled by default).
+            prop_assert_eq!(stats.full_versions, 1, "should be exactly 1 Full version");
+            prop_assert_eq!(
+                stats.identical_versions,
+                repeat_count - 1,
+                "should have {} Identical versions",
+                repeat_count - 1,
+            );
+        }
+
+        /// SSI log prune removes records at or before the given commit.
+        #[test]
+        fn proptest_prune_ssi_log_removes_old_records(
+            num_commits in 2_usize..16,
+            prune_at in 0_usize..8,
+        ) {
+            let mut store = MvccStore::new();
+            for i in 0..num_commits {
+                let mut txn = store.begin();
+                #[allow(clippy::cast_possible_truncation)]
+                txn.stage_write(BlockNumber(u64::try_from(i).unwrap()), vec![1; 8]);
+                store.commit(txn).expect("commit");
+            }
+            let prune_seq = CommitSeq(u64::try_from(prune_at.min(num_commits)).unwrap());
+            store.prune_ssi_log(prune_seq);
+            // All remaining SSI entries must have commit_seq > prune_seq.
+            for record in &store.ssi_log {
+                prop_assert!(
+                    record.commit_seq > prune_seq,
+                    "SSI record at {:?} should have been pruned at {:?}",
+                    record.commit_seq, prune_seq,
+                );
+            }
+        }
     }
 }

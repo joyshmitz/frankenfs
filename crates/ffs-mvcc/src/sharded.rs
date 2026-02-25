@@ -817,4 +817,127 @@ mod tests {
         assert_eq!(store.read_visible(BlockNumber(3), snap).unwrap(), vec![13]);
         assert_eq!(seq, CommitSeq(1));
     }
+
+    // ── Property-based tests (proptest) ────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Shard index is always in [0, shard_count).
+        #[test]
+        fn proptest_shard_index_in_range(
+            shard_count in 1_usize..64,
+            block_num in any::<u64>(),
+        ) {
+            let store = make_store(shard_count);
+            let idx = store.shard_index(BlockNumber(block_num));
+            prop_assert!(idx < shard_count, "shard_index {} >= {}", idx, shard_count);
+        }
+
+        /// Committed writes are visible in ShardedMvccStore.
+        #[test]
+        fn proptest_sharded_committed_writes_visible(
+            shard_count in 1_usize..8,
+            ops in proptest::collection::vec((0_u16..64, any::<u8>()), 1..16),
+        ) {
+            let store = make_store(shard_count);
+            let mut expected = std::collections::BTreeMap::<u16, u8>::new();
+            let mut txn = store.begin();
+            for &(block, byte) in &ops {
+                txn.stage_write(BlockNumber(u64::from(block)), vec![byte; 8]);
+                expected.insert(block, byte);
+            }
+            store.commit(txn).expect("commit");
+
+            let snap = store.current_snapshot();
+            for (&block, &byte) in &expected {
+                let data = store
+                    .read_visible(BlockNumber(u64::from(block)), snap)
+                    .expect("visible");
+                prop_assert_eq!(data[0], byte, "block {} data mismatch", block);
+            }
+        }
+
+        /// FCW conflict detection in ShardedMvccStore.
+        #[test]
+        fn proptest_sharded_fcw_conflict(
+            shard_count in 1_usize..8,
+            block_id in 0_u64..64,
+            byte_a in any::<u8>(),
+            byte_b in any::<u8>(),
+        ) {
+            let store = make_store(shard_count);
+            let block = BlockNumber(block_id);
+            let mut t1 = store.begin();
+            let mut t2 = store.begin();
+            t1.stage_write(block, vec![byte_a; 8]);
+            t2.stage_write(block, vec![byte_b; 8]);
+            store.commit(t1).expect("t1 first");
+            let result = store.commit(t2);
+            prop_assert!(result.is_err(), "FCW should reject t2 for block {}", block_id);
+        }
+
+        /// Snapshot isolation in ShardedMvccStore.
+        #[test]
+        fn proptest_sharded_snapshot_isolation(
+            shard_count in 1_usize..8,
+            block_id in 0_u64..32,
+            byte_v1 in any::<u8>(),
+            byte_v2 in any::<u8>(),
+        ) {
+            let store = make_store(shard_count);
+            let block = BlockNumber(block_id);
+
+            let mut t1 = store.begin();
+            t1.stage_write(block, vec![byte_v1; 8]);
+            store.commit(t1).expect("commit v1");
+
+            let snap = store.current_snapshot();
+
+            let mut t2 = store.begin();
+            t2.stage_write(block, vec![byte_v2; 8]);
+            store.commit(t2).expect("commit v2");
+
+            // snap must still see v1
+            let data = store.read_visible(block, snap).expect("visible");
+            prop_assert_eq!(data[0], byte_v1);
+        }
+
+        /// Snapshot register/release ref-counting in ShardedMvccStore.
+        #[test]
+        fn proptest_sharded_snapshot_refcount(
+            register_count in 1_usize..8,
+        ) {
+            let store = make_store(4);
+            let mut txn = store.begin();
+            txn.stage_write(BlockNumber(0), vec![1]);
+            store.commit(txn).expect("commit");
+
+            let snap = store.current_snapshot();
+            for _ in 0..register_count {
+                store.register_snapshot(snap);
+            }
+            prop_assert_eq!(store.active_snapshot_count(), register_count);
+            prop_assert_eq!(store.watermark(), Some(snap.high));
+
+            for _ in 0..register_count {
+                prop_assert!(store.release_snapshot(snap));
+            }
+            prop_assert_eq!(store.active_snapshot_count(), 0);
+            prop_assert_eq!(store.watermark(), None);
+        }
+
+        /// Unwritten blocks return None in ShardedMvccStore.
+        #[test]
+        fn proptest_sharded_unwritten_returns_none(
+            shard_count in 1_usize..8,
+            block_id in 0_u64..1024,
+        ) {
+            let store = make_store(shard_count);
+            let snap = store.current_snapshot();
+            prop_assert!(store.read_visible(BlockNumber(block_id), snap).is_none());
+        }
+    }
 }

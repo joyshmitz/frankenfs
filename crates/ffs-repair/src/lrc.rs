@@ -808,13 +808,17 @@ mod tests {
             let local = encode_local(&cfg, &data);
             prop_assert_eq!(local.len(), cfg.num_groups() as usize);
 
-            for g in 0..cfg.num_groups() as usize {
+            for (g, local_parity) in local
+                .iter()
+                .enumerate()
+                .take(cfg.num_groups() as usize)
+            {
                 let base = g * group_size as usize;
                 let mut expected = vec![0_u8; block_size];
                 for i in 0..group_size as usize {
                     xor_into(&mut expected, &data[base + i]);
                 }
-                prop_assert_eq!(&local[g], &expected, "group {} parity mismatch", g);
+                prop_assert_eq!(local_parity, &expected, "group {} parity mismatch", g);
             }
         }
 
@@ -910,8 +914,8 @@ mod tests {
                 .iter()
                 .map(|b| Some(b.clone()))
                 .collect();
-            for i in 0..num_failures as usize {
-                data_availability[i] = None;
+            for block in data_availability.iter_mut().take(num_failures as usize) {
+                *block = None;
             }
 
             let availability = BlockAvailability {

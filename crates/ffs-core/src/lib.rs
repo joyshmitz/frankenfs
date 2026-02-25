@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use asupersync::{Cx, RaptorQConfig, SystemPressure};
-use ffs_alloc::{AllocHint, FsGeometry, GroupStats, PersistCtx, bitmap_count_free};
+use ffs_alloc::{AllocHint, FsGeometry, GroupStats, PersistCtx, bitmap_count_free, bitmap_get};
 use ffs_block::{
     BlockBuf, BlockDevice, ByteDevice, FileByteDevice, read_btrfs_superblock_region,
     read_ext4_superblock_region,
@@ -8462,6 +8462,7 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     let inodes_count = sb.inodes_count;
     let first_ino = sb.first_ino;
     let inode_size = usize::from(sb.inode_size);
+    let block_size_usize = sb.block_size as usize;
 
     // Always check root inode (2) and first non-reserved inode
     let check_limit = if max_inodes == 0 {
@@ -8473,6 +8474,10 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     let mut inodes_checked = 0_u64;
     let mut inodes_clean = 0_u64;
     let mut inodes_corrupt = 0_u64;
+
+    // Cache inode bitmaps per group to avoid re-reading.
+    let mut inode_bitmap_cache: std::collections::HashMap<u32, Vec<u8>> =
+        std::collections::HashMap::new();
 
     // Check inodes: root (2), then first_ino..first_ino+check_limit
     let ino_list: Vec<u32> = {
@@ -8492,6 +8497,26 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     for &ino in &ino_list {
         if inodes_checked >= u64::from(check_limit) {
             break;
+        }
+
+        // Skip unallocated inodes by consulting the inode bitmap.
+        let group_idx = (ino - 1) / sb.inodes_per_group;
+        let local = (ino - 1) % sb.inodes_per_group;
+        let bitmap = inode_bitmap_cache.entry(group_idx).or_insert_with(|| {
+            let group = ffs_types::GroupNumber(group_idx);
+            if let Ok(gd) = reader.read_group_desc(image, group) {
+                let bm_off = usize::try_from(gd.inode_bitmap * u64::from(sb.block_size))
+                    .unwrap_or(usize::MAX);
+                if bm_off.saturating_add(block_size_usize) <= image.len() {
+                    return image[bm_off..bm_off + block_size_usize].to_vec();
+                }
+            }
+            Vec::new()
+        });
+        if !bitmap.is_empty() && !bitmap_get(bitmap, local) {
+            // Inode not allocated — skip without counting as a failure.
+            inodes_checked += 1;
+            continue;
         }
 
         // Read raw inode bytes for checksum verification
@@ -15768,5 +15793,667 @@ mod tests {
             free_after < free_before,
             "statfs should reflect decreased free space: before={free_before}, after={free_after}"
         );
+    }
+
+    // ── verify_ext4_integrity direct tests (GreenSnow) ────────────────
+
+    /// Helper: resolve the ext4_small.img fixture path, returning None in CI
+    /// where fixtures may be absent.
+    fn ext4_small_fixture_path() -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new("tests/fixtures/images/ext4_small.img");
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+        let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/images/ext4_small.img");
+        if ws.exists() {
+            Some(ws)
+        } else {
+            None
+        }
+    }
+
+    /// Helper: load the ext4_small fixture image bytes, or skip test.
+    fn load_ext4_small_image() -> Option<Vec<u8>> {
+        ext4_small_fixture_path().map(|p| std::fs::read(p).expect("read ext4_small.img"))
+    }
+
+    #[test]
+    fn verify_ext4_integrity_clean_image_has_zero_failures() {
+        let Some(image) = load_ext4_small_image() else {
+            return;
+        };
+        let report = verify_ext4_integrity(&image, 64).expect("integrity check should succeed");
+        assert_eq!(
+            report.failed, 0,
+            "clean ext4_small.img should have zero failures, got: passed={}, failed={}",
+            report.passed, report.failed
+        );
+        assert!(report.passed > 0, "should have at least one passing check");
+        // Should have verdicts for superblock, group descs, and inodes.
+        assert!(
+            !report.verdicts.is_empty(),
+            "should have at least one verdict"
+        );
+        // All individual verdicts should have passed.
+        for v in &report.verdicts {
+            assert!(
+                v.passed,
+                "verdict for '{}' should pass on clean image: {}",
+                v.component, v.detail
+            );
+        }
+        // Superblock checksum should pass on a clean mkfs'd image.
+        let sb_verdict = report
+            .verdicts
+            .iter()
+            .find(|v| v.component == "superblock");
+        assert!(
+            sb_verdict.is_some(),
+            "should have a superblock verdict"
+        );
+        // Bayesian posterior should reflect zero failures.
+        assert!(
+            (report.posterior_alpha - 1.0).abs() < 1e-6,
+            "alpha should be 1.0 (no failures), got {}",
+            report.posterior_alpha
+        );
+    }
+
+    #[test]
+    fn verify_ext4_integrity_corrupt_superblock_checksum() {
+        let Some(mut image) = load_ext4_small_image() else {
+            return;
+        };
+        // Tamper with a byte in the superblock region (after the magic, before checksum).
+        // Offset 1024 is superblock start; byte at offset 1024+0x60 is in the middle.
+        let tamper_off = ffs_types::EXT4_SUPERBLOCK_OFFSET + 0x60;
+        image[tamper_off] ^= 0xFF;
+
+        let report = verify_ext4_integrity(&image, 8).expect("should still return a report");
+        // The superblock checksum should have failed.
+        let sb_verdict = report
+            .verdicts
+            .iter()
+            .find(|v| v.component == "superblock");
+        assert!(
+            sb_verdict.is_some(),
+            "should have a superblock verdict after tampering"
+        );
+        let sb = sb_verdict.unwrap();
+        assert!(
+            !sb.passed,
+            "superblock checksum should fail after tampering"
+        );
+        assert!(report.failed > 0, "should have at least one failure");
+    }
+
+    #[test]
+    fn verify_ext4_integrity_corrupt_group_desc_checksum() {
+        let Some(mut image) = load_ext4_small_image() else {
+            return;
+        };
+        // Parse the superblock to find group descriptor location.
+        let sb = ffs_ondisk::Ext4Superblock::parse_from_image(&image)
+            .expect("parse superblock for fixture");
+        // Group 0 descriptor is at the block after the superblock.
+        // For 4K block size: block 0 = boot+sb, block 1 = group desc table.
+        if let Some(gd_off) = sb.group_desc_offset(ffs_types::GroupNumber(0)) {
+            let off = usize::try_from(gd_off).unwrap();
+            // Tamper with byte at offset+4 (inode_bitmap field), avoiding the
+            // checksum field itself (offset 0x1E).
+            if off + 4 < image.len() {
+                image[off + 4] ^= 0xFF;
+            }
+        }
+
+        let report = verify_ext4_integrity(&image, 8).expect("should still return a report");
+        // Should have at least one group_desc failure.
+        let gd_failures: Vec<_> = report
+            .verdicts
+            .iter()
+            .filter(|v| v.component.starts_with("group_desc[") && !v.passed)
+            .collect();
+        assert!(
+            !gd_failures.is_empty(),
+            "should have at least one group_desc checksum failure, verdicts: {:?}",
+            report
+                .verdicts
+                .iter()
+                .map(|v| format!("{}:{}", v.component, v.passed))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn verify_ext4_integrity_garbage_image_returns_error() {
+        // An image full of zeros should fail to parse as ext4.
+        let image = vec![0u8; 8192];
+        let result = verify_ext4_integrity(&image, 0);
+        assert!(
+            result.is_err(),
+            "garbage image should fail: got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_ext4_integrity_truncated_image_returns_error() {
+        // An image shorter than the superblock should fail.
+        let image = vec![0u8; 512];
+        let result = verify_ext4_integrity(&image, 0);
+        assert!(
+            result.is_err(),
+            "truncated image should fail: got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_ext4_integrity_max_inodes_zero_checks_all() {
+        let Some(image) = load_ext4_small_image() else {
+            return;
+        };
+        // max_inodes=0 means "check all inodes"
+        let report_all = verify_ext4_integrity(&image, 0).expect("integrity check should succeed");
+        assert_eq!(
+            report_all.failed, 0,
+            "clean image with all inodes should have zero failures"
+        );
+        let report_limited =
+            verify_ext4_integrity(&image, 8).expect("limited integrity check should succeed");
+        // Checking all inodes should examine at least as many checks total.
+        assert!(
+            report_all.passed >= report_limited.passed,
+            "checking all inodes should have >= passing checks: all={}, limited={}",
+            report_all.passed,
+            report_limited.passed
+        );
+    }
+
+    #[test]
+    fn verify_ext4_integrity_bayesian_posterior_is_consistent() {
+        let Some(image) = load_ext4_small_image() else {
+            return;
+        };
+        let report = verify_ext4_integrity(&image, 16).expect("integrity check should succeed");
+        // For a clean image with bitmap filtering: posterior_alpha = 1 + 0 = 1
+        assert!(
+            (report.posterior_alpha - 1.0).abs() < 1e-6,
+            "alpha: expected 1.0 (no failures), got {}",
+            report.posterior_alpha
+        );
+        let expected_beta = 1.0 + report.passed as f64;
+        assert!(
+            (report.posterior_beta - expected_beta).abs() < 1e-6,
+            "beta: expected {expected_beta}, got {}",
+            report.posterior_beta
+        );
+        // Expected corruption rate should be very small for a clean image.
+        assert!(
+            report.expected_corruption_rate < 0.1,
+            "expected low corruption rate for clean image, got {}",
+            report.expected_corruption_rate
+        );
+        // Upper bound should be >= expected rate
+        assert!(
+            report.upper_bound_corruption_rate >= report.expected_corruption_rate,
+            "upper bound {} should be >= expected rate {}",
+            report.upper_bound_corruption_rate,
+            report.expected_corruption_rate
+        );
+    }
+
+    // ── detect_filesystem_on_device / at_path tests (GreenSnow) ────────
+
+    #[test]
+    fn detect_filesystem_on_device_finds_ext4() {
+        let Some(image) = load_ext4_small_image() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = TestDevice::from_vec(image);
+        let result = detect_filesystem_on_device(&cx, &dev);
+        assert!(result.is_ok(), "should detect ext4: {result:?}");
+        assert!(
+            matches!(result.unwrap(), FsFlavor::Ext4(_)),
+            "should be FsFlavor::Ext4"
+        );
+    }
+
+    #[test]
+    fn detect_filesystem_on_device_rejects_zeros() {
+        let cx = Cx::for_testing();
+        let dev = TestDevice::from_vec(vec![0u8; 1024 * 1024]);
+        let result = detect_filesystem_on_device(&cx, &dev);
+        assert!(
+            matches!(result, Err(DetectionError::UnsupportedImage)),
+            "should return UnsupportedImage for zero-filled device: {result:?}"
+        );
+    }
+
+    #[test]
+    fn detect_filesystem_on_device_rejects_too_small() {
+        let cx = Cx::for_testing();
+        // Device smaller than ext4 superblock end (1024+1024=2048) and btrfs offset.
+        let dev = TestDevice::from_vec(vec![0u8; 512]);
+        let result = detect_filesystem_on_device(&cx, &dev);
+        assert!(
+            matches!(result, Err(DetectionError::UnsupportedImage)),
+            "should return UnsupportedImage for tiny device: {result:?}"
+        );
+    }
+
+    #[test]
+    fn detect_filesystem_at_path_finds_ext4() {
+        let Some(path) = ext4_small_fixture_path() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let result = detect_filesystem_at_path(&cx, &path);
+        assert!(result.is_ok(), "should detect ext4 at path: {result:?}");
+        assert!(
+            matches!(result.unwrap(), FsFlavor::Ext4(_)),
+            "should be FsFlavor::Ext4"
+        );
+    }
+
+    #[test]
+    fn detect_filesystem_at_path_returns_error_for_nonexistent() {
+        let cx = Cx::for_testing();
+        let result =
+            detect_filesystem_at_path(&cx, "/nonexistent/path/that/does/not/exist.img");
+        assert!(result.is_err(), "should fail for nonexistent path");
+    }
+
+    // ── Proptest property-based tests ────────────────────────────────────
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // ── DegradationLevel properties ──────────────────────────────
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// from_raw always returns a valid DegradationLevel for any u8.
+            #[test]
+            fn degradation_level_from_raw_total(raw in any::<u8>()) {
+                let level = DegradationLevel::from_raw(raw);
+                // Must be one of the 5 valid levels
+                let as_u8 = u8::from(level);
+                prop_assert!(as_u8 <= 4, "level as u8 must be 0..=4, got {as_u8}");
+            }
+
+            /// from_raw roundtrips for valid values (0..=4).
+            #[test]
+            fn degradation_level_roundtrip(raw in 0_u8..=4) {
+                let level = DegradationLevel::from_raw(raw);
+                prop_assert_eq!(u8::from(level), raw);
+            }
+
+            /// from_raw maps all values >= 4 to Emergency.
+            #[test]
+            fn degradation_level_overflow_is_emergency(raw in 5_u8..=255) {
+                let level = DegradationLevel::from_raw(raw);
+                prop_assert_eq!(level, DegradationLevel::Emergency);
+            }
+
+            /// should_* decision methods are monotonic with level severity.
+            #[test]
+            fn degradation_level_monotonic_thresholds(raw in 0_u8..=4) {
+                let level = DegradationLevel::from_raw(raw);
+                // If read_only is true, throttle_writes must also be true (stricter implies all below)
+                if level.should_read_only() {
+                    prop_assert!(level.should_throttle_writes());
+                }
+                if level.should_throttle_writes() {
+                    prop_assert!(level.should_reduce_cache());
+                }
+                if level.should_reduce_cache() {
+                    prop_assert!(level.should_pause_background());
+                }
+            }
+
+            /// label always returns a non-empty string.
+            #[test]
+            fn degradation_level_label_non_empty(raw in 0_u8..=4) {
+                let level = DegradationLevel::from_raw(raw);
+                prop_assert!(!level.label().is_empty());
+            }
+
+            // ── RequestOp properties ─────────────────────────────────
+
+            /// is_write is correctly classified for all known write ops.
+            #[test]
+            fn request_op_write_classification(
+                op in prop_oneof![
+                    Just(RequestOp::Create),
+                    Just(RequestOp::Mkdir),
+                    Just(RequestOp::Unlink),
+                    Just(RequestOp::Rmdir),
+                    Just(RequestOp::Rename),
+                    Just(RequestOp::Link),
+                    Just(RequestOp::Symlink),
+                    Just(RequestOp::Fallocate),
+                    Just(RequestOp::Setattr),
+                    Just(RequestOp::Setxattr),
+                    Just(RequestOp::Removexattr),
+                    Just(RequestOp::Write),
+                    Just(RequestOp::Fsync),
+                    Just(RequestOp::Fsyncdir),
+                ],
+            ) {
+                prop_assert!(op.is_write(), "{op:?} should be a write op");
+            }
+
+            /// is_write returns false for all known read ops.
+            #[test]
+            fn request_op_read_classification(
+                op in prop_oneof![
+                    Just(RequestOp::Getattr),
+                    Just(RequestOp::Statfs),
+                    Just(RequestOp::Getxattr),
+                    Just(RequestOp::Lookup),
+                    Just(RequestOp::Listxattr),
+                    Just(RequestOp::Flush),
+                    Just(RequestOp::Open),
+                    Just(RequestOp::Opendir),
+                    Just(RequestOp::Read),
+                    Just(RequestOp::Readdir),
+                    Just(RequestOp::Readlink),
+                ],
+            ) {
+                prop_assert!(!op.is_write(), "{op:?} should be a read op");
+            }
+
+            // ── BackpressureGate properties ──────────────────────────
+
+            /// At Normal/Warning, all ops proceed regardless of type.
+            #[test]
+            fn backpressure_normal_warning_all_proceed(
+                level in prop_oneof![
+                    Just(DegradationLevel::Normal),
+                    Just(DegradationLevel::Warning),
+                ],
+                is_write_op in any::<bool>(),
+            ) {
+                let pressure = Arc::new(SystemPressure::new());
+                // Set headroom to match the target level
+                let headroom = match level {
+                    DegradationLevel::Normal => 0.6,
+                    DegradationLevel::Warning => 0.35,
+                    _ => unreachable!(),
+                };
+                pressure.set_headroom(headroom);
+
+                let fsm = Arc::new(DegradationFsm::new(pressure, 1));
+                fsm.tick(); // apply the level
+
+                let gate = BackpressureGate::new(fsm);
+                let op = if is_write_op { RequestOp::Write } else { RequestOp::Read };
+                let decision = gate.check(op);
+                prop_assert_eq!(decision, BackpressureDecision::Proceed);
+            }
+
+            /// At Emergency, writes are shed and reads proceed.
+            #[test]
+            fn backpressure_emergency_writes_shed(is_write_op in any::<bool>()) {
+                let pressure = Arc::new(SystemPressure::new());
+                pressure.set_headroom(0.01); // Emergency
+                let fsm = Arc::new(DegradationFsm::new(pressure, 1));
+                fsm.tick();
+
+                let gate = BackpressureGate::new(fsm);
+                let op = if is_write_op { RequestOp::Write } else { RequestOp::Read };
+                let decision = gate.check(op);
+
+                if is_write_op {
+                    prop_assert_eq!(decision, BackpressureDecision::Shed);
+                } else {
+                    prop_assert_eq!(decision, BackpressureDecision::Proceed);
+                }
+            }
+
+            /// Reads always proceed at any degradation level.
+            #[test]
+            fn backpressure_reads_always_proceed(
+                headroom_pct in 0_u32..=100,
+            ) {
+                let pressure = Arc::new(SystemPressure::new());
+                #[allow(clippy::cast_precision_loss)]
+                let headroom = headroom_pct as f32 / 100.0;
+                pressure.set_headroom(headroom);
+                let fsm = Arc::new(DegradationFsm::new(pressure, 1));
+                fsm.tick();
+
+                let gate = BackpressureGate::new(fsm);
+                let decision = gate.check(RequestOp::Read);
+                prop_assert_eq!(decision, BackpressureDecision::Proceed);
+            }
+
+            // ── DurabilityPosterior properties ───────────────────────
+
+            /// expected_corruption_rate is always in [0, 1].
+            #[test]
+            fn posterior_rate_bounded(
+                alpha in 0.001_f64..=1000.0,
+                beta in 0.001_f64..=1000.0,
+            ) {
+                let p = DurabilityPosterior { alpha, beta };
+                let rate = p.expected_corruption_rate();
+                prop_assert!((0.0..=1.0).contains(&rate),
+                    "rate must be in [0,1], got {rate}");
+            }
+
+            /// variance is always non-negative.
+            #[test]
+            fn posterior_variance_non_negative(
+                alpha in 0.001_f64..=1000.0,
+                beta in 0.001_f64..=1000.0,
+            ) {
+                let p = DurabilityPosterior { alpha, beta };
+                let v = p.variance();
+                prop_assert!(v >= 0.0, "variance must be >= 0, got {v}");
+            }
+
+            /// observe_blocks always increases alpha + beta.
+            #[test]
+            fn posterior_observe_grows_params(
+                scanned in 1_u64..=10000,
+                corrupted_frac in 0_u32..=100,
+            ) {
+                let mut p = DurabilityPosterior::default();
+                let before_sum = p.alpha + p.beta;
+                let corrupted = u64::from(corrupted_frac) * scanned / 100;
+                p.observe_blocks(scanned, corrupted);
+                let after_sum = p.alpha + p.beta;
+                prop_assert!(after_sum >= before_sum,
+                    "alpha+beta must not decrease: {before_sum} -> {after_sum}");
+            }
+
+            /// observe_blocks: corrupted clamped to scanned.
+            #[test]
+            fn posterior_observe_clamps_corrupted(
+                scanned in 1_u64..=1000,
+                corrupted in 0_u64..=2000,
+            ) {
+                let mut p = DurabilityPosterior { alpha: 1.0, beta: 1.0 };
+                let before_sum = p.alpha + p.beta;
+                p.observe_blocks(scanned, corrupted);
+                let increase = (p.alpha + p.beta) - before_sum;
+                // Increase should be exactly scanned (since corrupted is clamped)
+                let expected_increase = scanned as f64;
+                prop_assert!(
+                    (increase - expected_increase).abs() < 1e-10,
+                    "total increase should equal scanned={scanned}, got {increase}"
+                );
+            }
+
+            // ── Math function properties ─────────────────────────────
+
+            /// ln_gamma(1) == 0 (since Γ(1) = 0! = 1).
+            #[test]
+            fn ln_gamma_one_is_zero(_dummy in Just(())) {
+                let val = ln_gamma(1.0);
+                prop_assert!((val).abs() < 1e-10, "ln_gamma(1) should be ~0, got {val}");
+            }
+
+            /// ln_gamma(x) for positive integers satisfies Γ(n) = (n-1)!.
+            #[test]
+            fn ln_gamma_factorial_property(n in 3_u32..=12) {
+                // Start at 3 to avoid n=2 where expected=ln(1!)=0 and rel_err is ill-defined.
+                let expected_factorial: u64 = (1..u64::from(n)).product();
+                let expected = (expected_factorial as f64).ln();
+                let actual = ln_gamma(f64::from(n));
+                let rel_err = ((actual - expected) / expected).abs();
+                prop_assert!(rel_err < 1e-8,
+                    "ln_gamma({n}) = {actual}, expected ln(({n}-1)!) = {expected}, rel_err = {rel_err}");
+            }
+
+            /// ln_gamma is positive for x > 2 (since Γ(x) > 1 for x > 2).
+            #[test]
+            fn ln_gamma_positive_for_large(x in 2.1_f64..=100.0) {
+                let val = ln_gamma(x);
+                prop_assert!(val > 0.0, "ln_gamma({x}) should be > 0, got {val}");
+            }
+
+            /// erfc_approx is in [0, 2] for all finite inputs.
+            #[test]
+            fn erfc_bounded(x in -10.0_f64..=10.0) {
+                let val = erfc_approx(x);
+                prop_assert!((0.0..=2.0).contains(&val),
+                    "erfc({x}) should be in [0,2], got {val}");
+            }
+
+            /// erfc_approx(0) ≈ 1.0.
+            #[test]
+            fn erfc_zero_is_one(_dummy in Just(())) {
+                let val = erfc_approx(0.0);
+                prop_assert!((val - 1.0).abs() < 1e-6,
+                    "erfc(0) should be ~1.0, got {val}");
+            }
+
+            /// erfc_approx is monotonically non-increasing for positive x.
+            #[test]
+            fn erfc_monotone_decreasing(x1 in 0.0_f64..=5.0, delta in 0.01_f64..=5.0) {
+                let x2 = x1 + delta;
+                let e1 = erfc_approx(x1);
+                let e2 = erfc_approx(x2);
+                prop_assert!(e2 <= e1 + 1e-10,
+                    "erfc should be non-increasing: erfc({x1})={e1}, erfc({x2})={e2}");
+            }
+
+            /// ln_beta symmetry: ln_beta(a,b) == ln_beta(b,a).
+            #[test]
+            fn ln_beta_symmetric(
+                a in 0.1_f64..=50.0,
+                b in 0.1_f64..=50.0,
+            ) {
+                let ab = ln_beta(a, b);
+                let ba = ln_beta(b, a);
+                prop_assert!((ab - ba).abs() < 1e-10,
+                    "ln_beta({a},{b})={ab} != ln_beta({b},{a})={ba}");
+            }
+
+            // ── DurabilityAutopilot properties ───────────────────────
+
+            /// choose_overhead always returns a valid overhead in [1.01, 1.10] for valid candidates.
+            #[test]
+            fn autopilot_overhead_in_range(
+                n_events in 0_u32..=20,
+                corruption_count in 0_u32..=5,
+            ) {
+                let mut ap = DurabilityAutopilot::new();
+                for i in 0..n_events {
+                    ap.observe_event(i < corruption_count);
+                }
+                let candidates = vec![1.01, 1.02, 1.03, 1.05, 1.07, 1.10];
+                let decision = ap.choose_overhead(&candidates);
+                prop_assert!(
+                    decision.repair_overhead >= 1.01 && decision.repair_overhead <= 1.10,
+                    "overhead should be in [1.01, 1.10], got {}",
+                    decision.repair_overhead
+                );
+            }
+
+            /// choose_overhead: expected_loss = redundancy_loss + corruption_loss.
+            #[test]
+            fn autopilot_loss_decomposition(
+                scanned in 100_u64..=10000,
+                corrupted_frac in 0_u32..=50,
+            ) {
+                let mut ap = DurabilityAutopilot::new();
+                let corrupted = u64::from(corrupted_frac) * scanned / 100;
+                ap.observe_scrub(scanned, corrupted);
+                let candidates = vec![1.01, 1.03, 1.05, 1.07, 1.10];
+                let d = ap.choose_overhead(&candidates);
+                let sum = d.redundancy_loss + d.corruption_loss;
+                prop_assert!(
+                    (d.expected_loss - sum).abs() < 1e-10,
+                    "expected_loss ({}) should equal redundancy_loss ({}) + corruption_loss ({})",
+                    d.expected_loss, d.redundancy_loss, d.corruption_loss
+                );
+            }
+
+            /// choose_overhead with empty candidates returns default overhead (1.05).
+            #[test]
+            fn autopilot_empty_candidates_default(_dummy in Just(())) {
+                let ap = DurabilityAutopilot::new();
+                let d = ap.choose_overhead(&[]);
+                prop_assert!(
+                    (d.repair_overhead - 1.05).abs() < 1e-10,
+                    "empty candidates should give default 1.05, got {}",
+                    d.repair_overhead
+                );
+            }
+
+            /// choose_overhead: posterior rates are always in [0, 1].
+            #[test]
+            fn autopilot_posterior_rates_bounded(
+                scanned in 1_u64..=5000,
+                corrupted_frac in 0_u32..=100,
+            ) {
+                let mut ap = DurabilityAutopilot::new();
+                let corrupted = u64::from(corrupted_frac) * scanned / 100;
+                ap.observe_scrub(scanned, corrupted);
+                let candidates = vec![1.01, 1.05, 1.10];
+                let d = ap.choose_overhead(&candidates);
+                prop_assert!(
+                    d.posterior_mean_corruption_rate >= 0.0
+                        && d.posterior_mean_corruption_rate <= 1.0,
+                    "mean rate should be in [0,1], got {}",
+                    d.posterior_mean_corruption_rate
+                );
+                prop_assert!(
+                    d.posterior_hi_corruption_rate >= 0.0
+                        && d.posterior_hi_corruption_rate <= 1.0,
+                    "hi rate should be in [0,1], got {}",
+                    d.posterior_hi_corruption_rate
+                );
+            }
+
+            /// choose_overhead: risk bound is in [0, 1].
+            #[test]
+            fn autopilot_risk_bound_valid(
+                scanned in 1_u64..=5000,
+                corrupted_frac in 0_u32..=100,
+                source_blocks in 1_u32..=100_000,
+            ) {
+                let mut ap = DurabilityAutopilot::new();
+                let corrupted = u64::from(corrupted_frac) * scanned / 100;
+                ap.observe_scrub(scanned, corrupted);
+                let candidates = vec![1.01, 1.03, 1.05, 1.07, 1.10];
+                let d = ap.choose_overhead_for_group(&candidates, source_blocks);
+                prop_assert!(
+                    d.unrecoverable_risk_bound >= 0.0 && d.unrecoverable_risk_bound <= 1.0,
+                    "risk bound should be in [0,1], got {}",
+                    d.unrecoverable_risk_bound
+                );
+            }
+        }
     }
 }

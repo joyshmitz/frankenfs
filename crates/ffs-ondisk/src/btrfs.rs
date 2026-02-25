@@ -1232,6 +1232,12 @@ mod tests {
         block
     }
 
+    fn write_disk_key(buf: &mut [u8], base: usize, key: BtrfsKey) {
+        buf[base..base + 8].copy_from_slice(&key.objectid.to_le_bytes());
+        buf[base + 8] = key.item_type;
+        buf[base + 9..base + 17].copy_from_slice(&key.offset.to_le_bytes());
+    }
+
     // Reproduce any failing case with:
     // PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p ffs-ondisk <test_name> -- --nocapture
     proptest! {
@@ -1326,6 +1332,713 @@ mod tests {
             let block = make_proptest_header_block(block_size, nritems, level);
             let header = BtrfsHeader::parse_from_block(&block).expect("parse header");
             prop_assert!(header.validate(block_size, Some(0x1000)).is_ok());
+        }
+
+        #[test]
+        fn btrfs_proptest_parse_from_image_matches_region_parser(
+            sector_shift in 12_u32..=16,
+            node_shift in 12_u32..=16,
+            sys_chunk_array in proptest::collection::vec(any::<u8>(), 0..=128),
+            prefix in proptest::collection::vec(any::<u8>(), BTRFS_SUPER_INFO_OFFSET..=BTRFS_SUPER_INFO_OFFSET),
+            suffix in proptest::collection::vec(any::<u8>(), 0..=1024),
+        ) {
+            let sectorsize = 1_u32 << sector_shift;
+            let nodesize = 1_u32 << node_shift;
+            let sb = make_proptest_valid_btrfs_superblock(sectorsize, nodesize, &sys_chunk_array);
+            let from_region = BtrfsSuperblock::parse_superblock_region(&sb).expect("structured region parse");
+
+            let mut image = prefix;
+            image.extend_from_slice(&sb);
+            image.extend_from_slice(&suffix);
+
+            let from_image = BtrfsSuperblock::parse_from_image(&image).expect("structured image parse");
+            prop_assert_eq!(from_image, from_region);
+        }
+
+        #[test]
+        fn btrfs_proptest_leaf_items_structured_key_roundtrip(
+            n_items in 1_usize..=8,
+            bytenr in any::<u64>(),
+            objectids in proptest::collection::vec(any::<u64>(), 8),
+            item_types in proptest::collection::vec(any::<u8>(), 8),
+            key_offsets in proptest::collection::vec(any::<u64>(), 8),
+        ) {
+            let mut block = vec![0_u8; 4096];
+            block[0x30..0x38].copy_from_slice(&bytenr.to_le_bytes());
+            let n_items_u32 = u32::try_from(n_items).expect("bounded n_items fits in u32");
+            block[0x60..0x64].copy_from_slice(&n_items_u32.to_le_bytes());
+            block[0x64] = 0;
+
+            let data_offset = u32::try_from(BTRFS_HEADER_SIZE + n_items * BTRFS_ITEM_SIZE)
+                .expect("leaf item table endpoint fits in u32");
+
+            for i in 0..n_items {
+                let base = BTRFS_HEADER_SIZE + i * BTRFS_ITEM_SIZE;
+                let key = BtrfsKey {
+                    objectid: objectids[i],
+                    item_type: item_types[i],
+                    offset: key_offsets[i],
+                };
+                write_disk_key(&mut block, base, key);
+                block[base + 17..base + 21].copy_from_slice(&data_offset.to_le_bytes());
+                block[base + 21..base + 25].copy_from_slice(&0_u32.to_le_bytes());
+            }
+
+            let (header, items) = parse_leaf_items(&block).expect("structured leaf parse");
+            prop_assert_eq!(usize::try_from(header.nritems).ok(), Some(n_items));
+            prop_assert_eq!(items.len(), n_items);
+
+            for i in 0..n_items {
+                prop_assert_eq!(items[i].key.objectid, objectids[i]);
+                prop_assert_eq!(items[i].key.item_type, item_types[i]);
+                prop_assert_eq!(items[i].key.offset, key_offsets[i]);
+                prop_assert_eq!(items[i].data_offset, data_offset);
+                prop_assert_eq!(items[i].data_size, 0);
+            }
+        }
+
+        #[test]
+        fn btrfs_proptest_internal_items_structured_roundtrip(
+            n_items in 1_usize..=8,
+            level in 1_u8..=BTRFS_MAX_LEVEL,
+            bytenr in any::<u64>(),
+            objectids in proptest::collection::vec(any::<u64>(), 8),
+            item_types in proptest::collection::vec(any::<u8>(), 8),
+            key_offsets in proptest::collection::vec(any::<u64>(), 8),
+            blockptrs in proptest::collection::vec(1_u64..=u64::MAX, 8),
+            generations in proptest::collection::vec(any::<u64>(), 8),
+        ) {
+            let mut block = vec![0_u8; 4096];
+            block[0x30..0x38].copy_from_slice(&bytenr.to_le_bytes());
+            let n_items_u32 = u32::try_from(n_items).expect("bounded n_items fits in u32");
+            block[0x60..0x64].copy_from_slice(&n_items_u32.to_le_bytes());
+            block[0x64] = level;
+
+            for i in 0..n_items {
+                let base = BTRFS_HEADER_SIZE + i * BTRFS_KEY_PTR_SIZE;
+                let key = BtrfsKey {
+                    objectid: objectids[i],
+                    item_type: item_types[i],
+                    offset: key_offsets[i],
+                };
+                write_disk_key(&mut block, base, key);
+                block[base + 17..base + 25].copy_from_slice(&blockptrs[i].to_le_bytes());
+                block[base + 25..base + 33].copy_from_slice(&generations[i].to_le_bytes());
+            }
+
+            let (header, ptrs) = parse_internal_items(&block).expect("structured internal parse");
+            prop_assert_eq!(header.level, level);
+            prop_assert_eq!(usize::try_from(header.nritems).ok(), Some(n_items));
+            prop_assert_eq!(ptrs.len(), n_items);
+
+            for i in 0..n_items {
+                prop_assert_eq!(ptrs[i].key.objectid, objectids[i]);
+                prop_assert_eq!(ptrs[i].key.item_type, item_types[i]);
+                prop_assert_eq!(ptrs[i].key.offset, key_offsets[i]);
+                prop_assert_eq!(ptrs[i].blockptr, blockptrs[i]);
+                prop_assert_eq!(ptrs[i].generation, generations[i]);
+            }
+        }
+
+        #[test]
+        fn btrfs_proptest_sys_chunk_array_structured_single_entry_roundtrip(
+            key_objectid in any::<u64>(),
+            key_type in any::<u8>(),
+            key_offset in any::<u64>(),
+            length in 1_u64..=1_000_000_u64,
+            owner in any::<u64>(),
+            stripe_len in 1_u64..=1_000_000_u64,
+            chunk_type in any::<u64>(),
+            io_align in any::<u32>(),
+            io_width in any::<u32>(),
+            sector_size in 1_u32..=65536_u32,
+            num_stripes in 1_u16..=4_u16,
+            sub_stripes in any::<u16>(),
+            devids in proptest::collection::vec(any::<u64>(), 4),
+            offsets in proptest::collection::vec(any::<u64>(), 4),
+        ) {
+            let stripes_count = usize::from(num_stripes);
+            let entry_len = BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE + stripes_count * BTRFS_STRIPE_SIZE;
+            let mut data = vec![0_u8; entry_len];
+
+            let key = BtrfsKey {
+                objectid: key_objectid,
+                item_type: key_type,
+                offset: key_offset,
+            };
+            write_disk_key(&mut data, 0, key);
+
+            let chunk_base = BTRFS_DISK_KEY_SIZE;
+            data[chunk_base..chunk_base + 8].copy_from_slice(&length.to_le_bytes());
+            data[chunk_base + 8..chunk_base + 16].copy_from_slice(&owner.to_le_bytes());
+            data[chunk_base + 16..chunk_base + 24].copy_from_slice(&stripe_len.to_le_bytes());
+            data[chunk_base + 24..chunk_base + 32].copy_from_slice(&chunk_type.to_le_bytes());
+            data[chunk_base + 32..chunk_base + 36].copy_from_slice(&io_align.to_le_bytes());
+            data[chunk_base + 36..chunk_base + 40].copy_from_slice(&io_width.to_le_bytes());
+            data[chunk_base + 40..chunk_base + 44].copy_from_slice(&sector_size.to_le_bytes());
+            data[chunk_base + 44..chunk_base + 46].copy_from_slice(&num_stripes.to_le_bytes());
+            data[chunk_base + 46..chunk_base + 48].copy_from_slice(&sub_stripes.to_le_bytes());
+
+            let mut stripe_base = chunk_base + BTRFS_CHUNK_FIXED_SIZE;
+            for i in 0..stripes_count {
+                data[stripe_base..stripe_base + 8].copy_from_slice(&devids[i].to_le_bytes());
+                data[stripe_base + 8..stripe_base + 16].copy_from_slice(&offsets[i].to_le_bytes());
+                stripe_base += BTRFS_STRIPE_SIZE;
+            }
+
+            let parsed = parse_sys_chunk_array(&data).expect("structured sys_chunk parse");
+            prop_assert_eq!(parsed.len(), 1);
+            let entry = &parsed[0];
+            prop_assert_eq!(entry.key, key);
+            prop_assert_eq!(entry.length, length);
+            prop_assert_eq!(entry.owner, owner);
+            prop_assert_eq!(entry.stripe_len, stripe_len);
+            prop_assert_eq!(entry.chunk_type, chunk_type);
+            prop_assert_eq!(entry.io_align, io_align);
+            prop_assert_eq!(entry.io_width, io_width);
+            prop_assert_eq!(entry.sector_size, sector_size);
+            prop_assert_eq!(entry.num_stripes, num_stripes);
+            prop_assert_eq!(entry.sub_stripes, sub_stripes);
+            prop_assert_eq!(entry.stripes.len(), stripes_count);
+            for i in 0..stripes_count {
+                prop_assert_eq!(entry.stripes[i].devid, devids[i]);
+                prop_assert_eq!(entry.stripes[i].offset, offsets[i]);
+            }
+        }
+
+        #[test]
+        fn btrfs_proptest_map_logical_to_physical_single_chunk(
+            chunk_start in 0_u64..=1_000_000_u64,
+            length in 1_u64..=1_000_000_u64,
+            stripe_devid in any::<u64>(),
+            stripe_offset in 0_u64..=1_000_000_u64,
+            delta in 0_u64..=1_000_000_u64,
+        ) {
+            prop_assume!(delta < length);
+            let logical = chunk_start.checked_add(delta).expect("bounded logical address");
+            let physical = stripe_offset.checked_add(delta).expect("bounded physical address");
+            let chunk = BtrfsChunkEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: 228,
+                    offset: chunk_start,
+                },
+                length,
+                owner: 2,
+                stripe_len: 64 * 1024,
+                chunk_type: 1,
+                io_align: 4096,
+                io_width: 4096,
+                sector_size: 4096,
+                num_stripes: 1,
+                sub_stripes: 1,
+                stripes: vec![BtrfsStripe {
+                    devid: stripe_devid,
+                    offset: stripe_offset,
+                    dev_uuid: [0_u8; 16],
+                }],
+            };
+
+            let mapped = map_logical_to_physical(&[chunk], logical).expect("map should succeed");
+            prop_assert_eq!(
+                mapped,
+                Some(BtrfsPhysicalMapping {
+                    devid: stripe_devid,
+                    physical,
+                })
+            );
+        }
+
+        #[test]
+        fn btrfs_proptest_superblock_checksum_roundtrip_with_tamper_detection(
+            sector_shift in 12_u32..=16,
+            node_shift in 12_u32..=16,
+            sys_chunk_array in proptest::collection::vec(any::<u8>(), 0..=64),
+            flip_index in 0x20_usize..BTRFS_SUPER_INFO_SIZE,
+        ) {
+            let sectorsize = 1_u32 << sector_shift;
+            let nodesize = 1_u32 << node_shift;
+            let mut sb = make_proptest_valid_btrfs_superblock(sectorsize, nodesize, &sys_chunk_array);
+            sb[0xC4..0xC6].copy_from_slice(&ffs_types::BTRFS_CSUM_TYPE_CRC32C.to_le_bytes());
+            let csum = crc32c::crc32c(&sb[0x20..]);
+            sb[0..4].copy_from_slice(&csum.to_le_bytes());
+
+            verify_superblock_checksum(&sb).expect("checksum should verify before tamper");
+            sb[flip_index] ^= 0x01;
+            prop_assert!(verify_superblock_checksum(&sb).is_err());
+        }
+
+        #[test]
+        fn btrfs_proptest_tree_block_checksum_roundtrip_with_tamper_detection(
+            block_len in 256_usize..=4096_usize,
+            seed in any::<u8>(),
+            flip_index in 0x20_usize..4096_usize,
+        ) {
+            prop_assume!(flip_index < block_len);
+            let mut block = vec![seed; block_len];
+            let csum = crc32c::crc32c(&block[0x20..]);
+            block[0..4].copy_from_slice(&csum.to_le_bytes());
+            verify_tree_block_checksum(&block, ffs_types::BTRFS_CSUM_TYPE_CRC32C)
+                .expect("tree block checksum should verify before tamper");
+
+            block[flip_index] ^= 0x80;
+            prop_assert!(
+                verify_tree_block_checksum(&block, ffs_types::BTRFS_CSUM_TYPE_CRC32C).is_err()
+            );
+        }
+
+        #[test]
+        fn btrfs_proptest_header_validate_bytenr_match_contract(
+            bytenr in any::<u64>(),
+            expected in any::<u64>(),
+        ) {
+            let mut block = make_proptest_header_block(4096, 0, 0);
+            block[0x30..0x38].copy_from_slice(&bytenr.to_le_bytes());
+            let header = BtrfsHeader::parse_from_block(&block).expect("parse header");
+
+            let result = header.validate(block.len(), Some(expected));
+            if bytenr == expected {
+                prop_assert!(result.is_ok());
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(ParseError::InvalidField {
+                        field: "bytenr",
+                        ..
+                    })
+                ));
+            }
+        }
+
+        #[test]
+        fn btrfs_proptest_header_validate_rejects_levels_above_max(level in (BTRFS_MAX_LEVEL + 1)..=u8::MAX) {
+            let block = make_proptest_header_block(4096, 0, level);
+            let header = BtrfsHeader::parse_from_block(&block).expect("parse header");
+            assert!(matches!(
+                header.validate(block.len(), None),
+                Err(ParseError::InvalidField {
+                    field: "level",
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn btrfs_proptest_superblock_rejects_invalid_non_power_of_two_stripesize(
+            stripesize in 1_u32..=200_000_u32,
+        ) {
+            prop_assume!(!stripesize.is_power_of_two());
+            let mut sb = make_proptest_valid_btrfs_superblock(4096, 16384, &[]);
+            sb[0x9C..0xA0].copy_from_slice(&stripesize.to_le_bytes());
+            assert!(matches!(
+                BtrfsSuperblock::parse_superblock_region(&sb),
+                Err(ParseError::InvalidField {
+                    field: "stripesize",
+                    ..
+                })
+            ));
+        }
+
+        // ── Additional semantic / roundtrip proptest tests (GreenSnow) ──
+
+        /// Superblock field preservation: construct a valid SB with random
+        /// field values, parse it, verify all scalar fields are preserved.
+        #[test]
+        fn btrfs_proptest_superblock_fields_preserved(
+            sector_shift in 12_u32..=17,
+            node_shift in 12_u32..=17,
+            generation in any::<u64>(),
+            root in any::<u64>(),
+            chunk_root in any::<u64>(),
+            log_root in any::<u64>(),
+            total_bytes in any::<u64>(),
+            bytes_used in any::<u64>(),
+            root_dir_objectid in any::<u64>(),
+            num_devices in any::<u64>(),
+            compat_flags in any::<u64>(),
+            compat_ro_flags in any::<u64>(),
+            incompat_flags in any::<u64>(),
+            csum_type in any::<u16>(),
+            root_level in 0_u8..=BTRFS_MAX_LEVEL,
+            chunk_root_level in 0_u8..=BTRFS_MAX_LEVEL,
+            log_root_level in 0_u8..=BTRFS_MAX_LEVEL,
+        ) {
+            let sectorsize = 1_u32 << sector_shift;
+            let nodesize = 1_u32 << node_shift;
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+            sb[0x48..0x50].copy_from_slice(&generation.to_le_bytes());
+            sb[0x50..0x58].copy_from_slice(&root.to_le_bytes());
+            sb[0x58..0x60].copy_from_slice(&chunk_root.to_le_bytes());
+            sb[0x60..0x68].copy_from_slice(&log_root.to_le_bytes());
+            sb[0x70..0x78].copy_from_slice(&total_bytes.to_le_bytes());
+            sb[0x78..0x80].copy_from_slice(&bytes_used.to_le_bytes());
+            sb[0x80..0x88].copy_from_slice(&root_dir_objectid.to_le_bytes());
+            sb[0x88..0x90].copy_from_slice(&num_devices.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&sectorsize.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&nodesize.to_le_bytes());
+            sb[0x9C..0xA0].copy_from_slice(&sectorsize.to_le_bytes()); // stripesize
+            sb[0xAC..0xB4].copy_from_slice(&compat_flags.to_le_bytes());
+            sb[0xB4..0xBC].copy_from_slice(&compat_ro_flags.to_le_bytes());
+            sb[0xBC..0xC4].copy_from_slice(&incompat_flags.to_le_bytes());
+            sb[0xC4..0xC6].copy_from_slice(&csum_type.to_le_bytes());
+            sb[0xC6] = root_level;
+            sb[0xC7] = chunk_root_level;
+            sb[0xC8] = log_root_level;
+
+            let parsed = BtrfsSuperblock::parse_superblock_region(&sb)
+                .expect("parse structured sb");
+            prop_assert_eq!(parsed.magic, BTRFS_MAGIC);
+            prop_assert_eq!(parsed.generation, generation);
+            prop_assert_eq!(parsed.root, root);
+            prop_assert_eq!(parsed.chunk_root, chunk_root);
+            prop_assert_eq!(parsed.log_root, log_root);
+            prop_assert_eq!(parsed.total_bytes, total_bytes);
+            prop_assert_eq!(parsed.bytes_used, bytes_used);
+            prop_assert_eq!(parsed.root_dir_objectid, root_dir_objectid);
+            prop_assert_eq!(parsed.num_devices, num_devices);
+            prop_assert_eq!(parsed.sectorsize, sectorsize);
+            prop_assert_eq!(parsed.nodesize, nodesize);
+            prop_assert_eq!(parsed.stripesize, sectorsize);
+            prop_assert_eq!(parsed.compat_flags, compat_flags);
+            prop_assert_eq!(parsed.compat_ro_flags, compat_ro_flags);
+            prop_assert_eq!(parsed.incompat_flags, incompat_flags);
+            prop_assert_eq!(parsed.csum_type, csum_type);
+            prop_assert_eq!(parsed.root_level, root_level);
+            prop_assert_eq!(parsed.chunk_root_level, chunk_root_level);
+            prop_assert_eq!(parsed.log_root_level, log_root_level);
+        }
+
+        /// Superblock label preservation: random ASCII labels survive roundtrip.
+        #[test]
+        fn btrfs_proptest_superblock_label_preserved(
+            label_bytes in proptest::collection::vec(0x21_u8..=0x7E, 0..=64),
+        ) {
+            let expected_label = String::from_utf8(label_bytes.clone())
+                .unwrap_or_default();
+            let mut sb = make_proptest_valid_btrfs_superblock(4096, 16384, &[]);
+            for (i, &b) in label_bytes.iter().enumerate() {
+                if i < BTRFS_SUPER_LABEL_LEN {
+                    sb[BTRFS_SUPER_LABEL_OFFSET + i] = b;
+                }
+            }
+            if label_bytes.len() < BTRFS_SUPER_LABEL_LEN {
+                sb[BTRFS_SUPER_LABEL_OFFSET + label_bytes.len()] = 0;
+            }
+
+            let parsed = BtrfsSuperblock::parse_superblock_region(&sb)
+                .expect("parse sb with label");
+            prop_assert_eq!(parsed.label, expected_label);
+        }
+
+        /// BtrfsKey roundtrip via leaf item: write key bytes, parse, verify.
+        #[test]
+        fn btrfs_proptest_key_roundtrip_via_leaf(
+            objectid in any::<u64>(),
+            item_type in any::<u8>(),
+            offset in any::<u64>(),
+        ) {
+            let mut block = vec![0_u8; 512];
+            block[0x60..0x64].copy_from_slice(&1_u32.to_le_bytes());
+            block[0x64] = 0; // leaf
+            let base = BTRFS_HEADER_SIZE;
+            let key = BtrfsKey { objectid, item_type, offset };
+            write_disk_key(&mut block, base, key);
+            block[base + 17..base + 21].copy_from_slice(&200_u32.to_le_bytes());
+            block[base + 21..base + 25].copy_from_slice(&8_u32.to_le_bytes());
+
+            let (_, items) = parse_leaf_items(&block).expect("parse leaf");
+            prop_assert_eq!(items[0].key.objectid, objectid);
+            prop_assert_eq!(items[0].key.item_type, item_type);
+            prop_assert_eq!(items[0].key.offset, offset);
+        }
+
+        /// BtrfsHeader field preservation: random fields, parse, verify all.
+        #[test]
+        fn btrfs_proptest_header_fields_preserved(
+            csum in proptest::collection::vec(any::<u8>(), 32..=32),
+            fsid in proptest::collection::vec(any::<u8>(), 16..=16),
+            bytenr in any::<u64>(),
+            flags in any::<u64>(),
+            chunk_tree_uuid in proptest::collection::vec(any::<u8>(), 16..=16),
+            generation in any::<u64>(),
+            owner in any::<u64>(),
+            nritems in 0_u32..=10,
+            level in 0_u8..=BTRFS_MAX_LEVEL,
+        ) {
+            let mut block = vec![0_u8; 4096];
+            block[0x00..0x20].copy_from_slice(&csum);
+            block[0x20..0x30].copy_from_slice(&fsid);
+            block[0x30..0x38].copy_from_slice(&bytenr.to_le_bytes());
+            block[0x38..0x40].copy_from_slice(&flags.to_le_bytes());
+            block[0x40..0x50].copy_from_slice(&chunk_tree_uuid);
+            block[0x50..0x58].copy_from_slice(&generation.to_le_bytes());
+            block[0x58..0x60].copy_from_slice(&owner.to_le_bytes());
+            block[0x60..0x64].copy_from_slice(&nritems.to_le_bytes());
+            block[0x64] = level;
+
+            let header = BtrfsHeader::parse_from_block(&block)
+                .expect("parse header");
+            prop_assert_eq!(&header.csum, csum.as_slice());
+            prop_assert_eq!(&header.fsid, fsid.as_slice());
+            prop_assert_eq!(header.bytenr, bytenr);
+            prop_assert_eq!(header.flags, flags);
+            prop_assert_eq!(&header.chunk_tree_uuid, chunk_tree_uuid.as_slice());
+            prop_assert_eq!(header.generation, generation);
+            prop_assert_eq!(header.owner, owner);
+            prop_assert_eq!(header.nritems, nritems);
+            prop_assert_eq!(header.level, level);
+        }
+
+        /// map_logical_to_physical miss: address outside any chunk returns None.
+        #[test]
+        fn btrfs_proptest_logical_to_physical_miss(
+            chunk_start in 0x1000_u64..=0xFFFF_FFFF,
+            chunk_length in 1_u64..=0x100_0000,
+        ) {
+            let chunks = vec![BtrfsChunkEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: 228,
+                    offset: chunk_start,
+                },
+                length: chunk_length,
+                owner: 2,
+                stripe_len: 0x1_0000,
+                chunk_type: 2,
+                io_align: 4096,
+                io_width: 4096,
+                sector_size: 4096,
+                num_stripes: 1,
+                sub_stripes: 0,
+                stripes: vec![BtrfsStripe {
+                    devid: 1,
+                    offset: 0,
+                    dev_uuid: [0; 16],
+                }],
+            }];
+
+            // Address before chunk start
+            if chunk_start > 0 {
+                let result = map_logical_to_physical(&chunks, chunk_start - 1)
+                    .expect("no error");
+                prop_assert!(result.is_none(), "Address before chunk should miss");
+            }
+
+            // Address at chunk_start + length (one past end)
+            if let Some(end) = chunk_start.checked_add(chunk_length) {
+                let result = map_logical_to_physical(&chunks, end)
+                    .expect("no error");
+                prop_assert!(result.is_none(), "Address at chunk end should miss");
+            }
+        }
+
+        /// Superblock rejects zero sectorsize.
+        #[test]
+        fn btrfs_proptest_superblock_rejects_zero_sectorsize(
+            nodesize_shift in 12_u32..=17,
+        ) {
+            let nodesize = 1_u32 << nodesize_shift;
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&0_u32.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&nodesize.to_le_bytes());
+            let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+            assert!(matches!(
+                err,
+                ParseError::InvalidField { field: "sectorsize", .. }
+            ));
+        }
+
+        /// Superblock rejects zero nodesize.
+        #[test]
+        fn btrfs_proptest_superblock_rejects_zero_nodesize(
+            sectorsize_shift in 12_u32..=17,
+        ) {
+            let sectorsize = 1_u32 << sectorsize_shift;
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&sectorsize.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&0_u32.to_le_bytes());
+            let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+            assert!(matches!(
+                err,
+                ParseError::InvalidField { field: "nodesize", .. }
+            ));
+        }
+
+        /// Superblock rejects sectorsize > 256K.
+        #[test]
+        fn btrfs_proptest_superblock_rejects_oversized_sectorsize(
+            shift in 19_u32..=30,
+        ) {
+            let sectorsize = 1_u32 << shift;
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&sectorsize.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+            let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+            assert!(matches!(
+                err,
+                ParseError::InvalidField { field: "sectorsize", .. }
+            ));
+        }
+
+        /// Superblock rejects nodesize > 256K.
+        #[test]
+        fn btrfs_proptest_superblock_rejects_oversized_nodesize(
+            shift in 19_u32..=30,
+        ) {
+            let nodesize = 1_u32 << shift;
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&nodesize.to_le_bytes());
+            let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+            assert!(matches!(
+                err,
+                ParseError::InvalidField { field: "nodesize", .. }
+            ));
+        }
+
+        /// Header validate rejects nritems above leaf capacity.
+        #[test]
+        fn btrfs_proptest_header_validate_rejects_overflow_leaf(
+            nritems in 160_u32..=500,
+        ) {
+            let block = make_proptest_header_block(4096, nritems, 0);
+            let header = BtrfsHeader::parse_from_block(&block)
+                .expect("parse");
+            let result = header.validate(4096, None);
+            prop_assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                ParseError::InvalidField { field: "nritems", .. }
+            ));
+        }
+
+        /// Header validate rejects nritems above internal capacity.
+        #[test]
+        fn btrfs_proptest_header_validate_rejects_overflow_internal(
+            nritems in 122_u32..=500,
+            level in 1_u8..=BTRFS_MAX_LEVEL,
+        ) {
+            let block = make_proptest_header_block(4096, nritems, level);
+            let header = BtrfsHeader::parse_from_block(&block)
+                .expect("parse");
+            let result = header.validate(4096, None);
+            prop_assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                ParseError::InvalidField { field: "nritems", .. }
+            ));
+        }
+
+        /// parse_leaf_items rejects blocks with level > 0.
+        #[test]
+        fn btrfs_proptest_parse_leaf_rejects_nonzero_level(
+            level in 1_u8..=BTRFS_MAX_LEVEL,
+        ) {
+            let block = make_proptest_header_block(4096, 0, level);
+            let result = parse_leaf_items(&block);
+            prop_assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                ParseError::InvalidField { field: "level", .. }
+            ));
+        }
+
+        /// parse_internal_items rejects blocks with level == 0.
+        #[test]
+        fn btrfs_proptest_parse_internal_rejects_level_zero(
+            nritems in 0_u32..=10,
+        ) {
+            let block = make_proptest_header_block(4096, nritems, 0);
+            let result = parse_internal_items(&block);
+            prop_assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                ParseError::InvalidField { field: "level", .. }
+            ));
+        }
+
+        /// verify_tree_block_checksum rejects unsupported csum_type.
+        #[test]
+        fn btrfs_proptest_tree_block_checksum_rejects_unsupported_type(
+            csum_type in 1_u16..=u16::MAX,
+        ) {
+            let block = vec![0_u8; 4096];
+            let result = verify_tree_block_checksum(&block, csum_type);
+            prop_assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                ParseError::InvalidField { field: "csum_type", .. }
+            ));
+        }
+
+        /// verify_superblock_checksum rejects too-short regions.
+        #[test]
+        fn btrfs_proptest_superblock_checksum_rejects_short_region(
+            len in 0_usize..BTRFS_SUPER_INFO_SIZE,
+        ) {
+            let region = vec![0_u8; len];
+            let result = verify_superblock_checksum(&region);
+            prop_assert!(result.is_err());
+        }
+
+        /// Superblock rejects wrong magic.
+        #[test]
+        fn btrfs_proptest_superblock_rejects_wrong_magic(
+            magic in any::<u64>().prop_filter("not btrfs magic", |m| *m != BTRFS_MAGIC),
+        ) {
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&magic.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+            let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+            assert!(matches!(err, ParseError::InvalidMagic { .. }));
+        }
+
+        /// parse_sys_chunk_array rejects zero num_stripes.
+        #[test]
+        fn btrfs_proptest_sys_chunk_array_rejects_zero_stripes(
+            key_objectid in any::<u64>(),
+            key_offset in any::<u64>(),
+        ) {
+            let mut data = vec![0_u8; BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE];
+            data[0..8].copy_from_slice(&key_objectid.to_le_bytes());
+            data[8] = 228;
+            data[9..17].copy_from_slice(&key_offset.to_le_bytes());
+            let c = BTRFS_DISK_KEY_SIZE;
+            data[c..c + 8].copy_from_slice(&1_u64.to_le_bytes());
+            // num_stripes at c+44..c+46 stays 0
+            let result = parse_sys_chunk_array(&data);
+            prop_assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                ParseError::InvalidField { field: "num_stripes", .. }
+            ));
+        }
+
+        /// Superblock rejects sys_chunk_array_size > 2048.
+        #[test]
+        fn btrfs_proptest_superblock_rejects_oversized_sys_chunk_array(
+            excess in 1_u32..=1000,
+        ) {
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+            sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
+            let max_sys_chunk_array_size =
+                u32::try_from(BTRFS_SYS_CHUNK_ARRAY_MAX).expect("constant fits in u32");
+            let bad_size = max_sys_chunk_array_size + excess;
+            sb[0xA0..0xA4].copy_from_slice(&bad_size.to_le_bytes());
+            let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+            assert!(matches!(
+                err,
+                ParseError::InvalidField { field: "sys_chunk_array_size", .. }
+            ));
         }
     }
 }
