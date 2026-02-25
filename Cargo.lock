@@ -676,6 +676,7 @@ dependencies = [
  "ffs-error",
  "ffs-ondisk",
  "ffs-types",
+ "proptest",
 ]
 
 [[package]]
@@ -822,6 +823,7 @@ dependencies = [
  "ffs-error",
  "ffs-ondisk",
  "ffs-types",
+ "proptest",
 ]
 
 [[package]]

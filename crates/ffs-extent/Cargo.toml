@@ -15,5 +15,8 @@ ffs-alloc = { workspace = true }
 ffs-ondisk = { workspace = true }
 asupersync = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true

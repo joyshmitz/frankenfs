@@ -1749,4 +1749,213 @@ mod tests {
         let final_free: u32 = groups.iter().map(|g| g.free_blocks).sum();
         assert_eq!(final_free, initial_free);
     }
+
+    // ── Proptest property-based tests ─────────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        /// split_for_mark_written output covers all logical blocks of input.
+        #[test]
+        fn proptest_split_total_blocks_preserved(
+            logical_block in 0_u32..1000,
+            actual_len in 1_u16..100,
+            physical_start in 1_u64..100_000,
+            mark_offset in 0_u32..200,
+            mark_len in 1_u32..200,
+        ) {
+            let ext_end = logical_block.saturating_add(u32::from(actual_len));
+            let mark_start = logical_block.saturating_add(mark_offset % u32::from(actual_len));
+            let mark_end = mark_start.saturating_add(mark_len).min(ext_end + 50);
+            let mark_count = mark_end.saturating_sub(mark_start);
+
+            // Only test when mark range overlaps the extent.
+            prop_assume!(mark_start < ext_end && mark_end > logical_block && mark_count > 0);
+
+            let ext = Ext4Extent {
+                logical_block,
+                raw_len: actual_len | UNWRITTEN_FLAG,
+                physical_start,
+            };
+
+            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+            prop_assert!(!parts.is_empty(), "split should produce at least one extent");
+
+            // Total actual_len of output should equal input actual_len.
+            let total_out: u32 = parts.iter().map(|p| u32::from(p.actual_len())).sum();
+            prop_assert_eq!(total_out, u32::from(actual_len));
+        }
+
+        /// split_for_mark_written output is contiguous and starts at the same logical block.
+        #[test]
+        fn proptest_split_contiguous_and_aligned(
+            logical_block in 0_u32..1000,
+            actual_len in 1_u16..100,
+            physical_start in 1_u64..100_000,
+            mark_offset in 0_u32..200,
+            mark_len in 1_u32..200,
+        ) {
+            let ext_end = logical_block.saturating_add(u32::from(actual_len));
+            let mark_start = logical_block.saturating_add(mark_offset % u32::from(actual_len));
+            let mark_end = mark_start.saturating_add(mark_len).min(ext_end + 50);
+            let mark_count = mark_end.saturating_sub(mark_start);
+            prop_assume!(mark_start < ext_end && mark_end > logical_block && mark_count > 0);
+
+            let ext = Ext4Extent {
+                logical_block,
+                raw_len: actual_len | UNWRITTEN_FLAG,
+                physical_start,
+            };
+
+            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+
+            // First part starts at the original logical_block.
+            prop_assert_eq!(parts[0].logical_block, logical_block);
+
+            // Parts are contiguous.
+            for i in 1..parts.len() {
+                let prev_end = parts[i - 1].logical_block + u32::from(parts[i - 1].actual_len());
+                prop_assert_eq!(parts[i].logical_block, prev_end);
+            }
+        }
+
+        /// split_for_mark_written physical addresses are monotonically increasing.
+        #[test]
+        fn proptest_split_physical_monotonic(
+            logical_block in 0_u32..1000,
+            actual_len in 1_u16..100,
+            physical_start in 1_u64..100_000,
+            mark_offset in 0_u32..200,
+            mark_len in 1_u32..200,
+        ) {
+            let ext_end = logical_block.saturating_add(u32::from(actual_len));
+            let mark_start = logical_block.saturating_add(mark_offset % u32::from(actual_len));
+            let mark_end = mark_start.saturating_add(mark_len).min(ext_end + 50);
+            let mark_count = mark_end.saturating_sub(mark_start);
+            prop_assume!(mark_start < ext_end && mark_end > logical_block && mark_count > 0);
+
+            let ext = Ext4Extent {
+                logical_block,
+                raw_len: actual_len | UNWRITTEN_FLAG,
+                physical_start,
+            };
+
+            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+
+            // First part starts at the same physical_start.
+            prop_assert_eq!(parts[0].physical_start, physical_start);
+
+            // Physical starts are strictly increasing.
+            for i in 1..parts.len() {
+                prop_assert!(
+                    parts[i].physical_start > parts[i - 1].physical_start,
+                    "physical_start must be monotonically increasing"
+                );
+            }
+        }
+
+        /// allocate then map: mapping covers the allocated extent with correct physical address.
+        #[test]
+        fn proptest_allocate_map_roundtrip(
+            logical_start in 0_u32..100,
+            count in 1_u32..50,
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let geo = make_geometry();
+            let mut groups = make_groups(&geo);
+            let mut root = empty_root();
+            let pctx = mock_pctx();
+
+            let alloc = allocate_extent(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                logical_start, count,
+                &AllocHint::default(), &pctx,
+            ).unwrap();
+
+            prop_assert_eq!(alloc.logical_start, logical_start);
+            prop_assert_eq!(alloc.count, count);
+
+            let maps = map_logical_to_physical(
+                &cx, &dev, &root, logical_start, count,
+            ).unwrap();
+
+            // Total mapped blocks should equal count.
+            let total: u32 = maps.iter().map(|m| m.count).sum();
+            prop_assert_eq!(total, count);
+
+            // All mapped blocks should point to the allocated physical range.
+            prop_assert_eq!(maps.len(), 1, "single allocation should yield single mapping");
+            prop_assert_eq!(maps[0].physical_start, alloc.physical_start);
+            prop_assert_eq!(maps[0].count, count);
+        }
+
+        /// allocate then truncate: all blocks freed.
+        #[test]
+        fn proptest_allocate_truncate_frees_all(
+            count in 1_u32..50,
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let geo = make_geometry();
+            let mut groups = make_groups(&geo);
+            let mut root = empty_root();
+            let pctx = mock_pctx();
+
+            let initial_free: u32 = groups.iter().map(|g| g.free_blocks).sum();
+
+            allocate_extent(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                0, count,
+                &AllocHint::default(), &pctx,
+            ).unwrap();
+
+            let freed = truncate_extents(
+                &cx, &dev, &mut root, &geo, &mut groups, 0, &pctx,
+            ).unwrap();
+
+            prop_assert_eq!(freed, u64::from(count));
+
+            let final_free: u32 = groups.iter().map(|g| g.free_blocks).sum();
+            prop_assert_eq!(final_free, initial_free);
+        }
+
+        /// punch_hole is idempotent: second punch frees zero blocks.
+        #[test]
+        fn proptest_punch_hole_idempotent(
+            count in 1_u32..50,
+            hole_offset in 0_u32..50,
+            hole_len in 1_u32..50,
+        ) {
+            prop_assume!(hole_offset < count);
+            let actual_hole_len = hole_len.min(count - hole_offset);
+
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let geo = make_geometry();
+            let mut groups = make_groups(&geo);
+            let mut root = empty_root();
+            let pctx = mock_pctx();
+
+            allocate_extent(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                0, count,
+                &AllocHint::default(), &pctx,
+            ).unwrap();
+
+            let freed1 = punch_hole(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                hole_offset, actual_hole_len, &pctx,
+            ).unwrap();
+            prop_assert_eq!(freed1, u64::from(actual_hole_len));
+
+            let freed2 = punch_hole(
+                &cx, &dev, &mut root, &geo, &mut groups,
+                hole_offset, actual_hole_len, &pctx,
+            ).unwrap();
+            prop_assert_eq!(freed2, 0_u64, "second punch of same range should free 0 blocks");
+        }
+    }
 }

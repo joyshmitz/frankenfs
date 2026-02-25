@@ -813,4 +813,170 @@ mod tests {
         assert!(!access.has_cap_fowner);
         assert!(!access.has_cap_sys_admin);
     }
+
+    // ── Proptest property-based tests ──────────────────────────────────
+
+    use proptest::prelude::*;
+
+    /// Generate a valid xattr suffix name (1..20 alphanumeric bytes).
+    fn xattr_suffix_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(
+                (b'a'..=b'z')
+                    .chain(b'A'..=b'Z')
+                    .chain(b'0'..=b'9')
+                    .collect::<Vec<u8>>(),
+            ),
+            1..20,
+        )
+        .prop_map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
+    /// Generate a small xattr value (0..64 bytes).
+    fn xattr_value_strategy() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..64)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        /// set_xattr followed by get_xattr always returns the set value.
+        #[test]
+        fn proptest_set_get_roundtrip(
+            name in xattr_suffix_strategy(),
+            value in xattr_value_strategy(),
+        ) {
+            let mut inode = make_inode(256);
+            let mut external = vec![0_u8; 1024];
+            let access = XattrWriteAccess { is_owner: true, ..Default::default() };
+            let full_name = format!("user.{name}");
+
+            set_xattr(&mut inode, Some(&mut external), &full_name, &value, access)
+                .unwrap();
+            let got = get_xattr(&inode, Some(&external), &full_name).unwrap();
+            prop_assert_eq!(got, Some(value));
+        }
+
+        /// set then remove ⟹ get returns None.
+        #[test]
+        fn proptest_set_remove_get_none(
+            name in xattr_suffix_strategy(),
+            value in xattr_value_strategy(),
+        ) {
+            let mut inode = make_inode(256);
+            let mut external = vec![0_u8; 1024];
+            let access = XattrWriteAccess { is_owner: true, ..Default::default() };
+            let full_name = format!("user.{name}");
+
+            set_xattr(&mut inode, Some(&mut external), &full_name, &value, access)
+                .unwrap();
+            remove_xattr(&mut inode, Some(&mut external), &full_name, access).unwrap();
+            let got = get_xattr(&inode, Some(&external), &full_name).unwrap();
+            prop_assert_eq!(got, None);
+        }
+
+        /// Overwriting a value preserves other xattrs.
+        #[test]
+        fn proptest_overwrite_preserves_others(
+            suffix_a in xattr_suffix_strategy(),
+            suffix_b in xattr_suffix_strategy(),
+            val_a in xattr_value_strategy(),
+            val_b1 in xattr_value_strategy(),
+        ) {
+            // Ensure distinct names.
+            prop_assume!(suffix_a != suffix_b);
+
+            let mut inode = make_inode(256);
+            let mut external = vec![0_u8; 1024];
+            let access = XattrWriteAccess { is_owner: true, ..Default::default() };
+            let name_a = format!("user.{suffix_a}");
+            let name_b = format!("user.{suffix_b}");
+
+            set_xattr(&mut inode, Some(&mut external), &name_a, &val_a, access).unwrap();
+            set_xattr(&mut inode, Some(&mut external), &name_b, &val_b1, access).unwrap();
+
+            // Overwrite B with new value.
+            let new_b = b"replaced";
+            set_xattr(&mut inode, Some(&mut external), &name_b, new_b, access).unwrap();
+
+            // A should be unchanged.
+            let got_a = get_xattr(&inode, Some(&external), &name_a).unwrap();
+            prop_assert_eq!(got_a, Some(val_a));
+            // B should be the new value.
+            let got_b = get_xattr(&inode, Some(&external), &name_b).unwrap();
+            prop_assert_eq!(got_b, Some(new_b.to_vec()));
+        }
+
+        /// Setting N unique xattrs ⟹ list returns exactly those N names.
+        #[test]
+        fn proptest_set_multiple_list_complete(
+            suffixes in prop::collection::hash_set(xattr_suffix_strategy(), 1..8),
+        ) {
+            let mut inode = make_inode(256);
+            let mut external = vec![0_u8; 4096];
+            let access = XattrWriteAccess { is_owner: true, ..Default::default() };
+
+            let mut expected: Vec<String> = Vec::new();
+            for suffix in &suffixes {
+                let full_name = format!("user.{suffix}");
+                set_xattr(&mut inode, Some(&mut external), &full_name, b"v", access)
+                    .unwrap();
+                expected.push(full_name);
+            }
+
+            let mut listed = list_xattrs(&inode, Some(&external)).unwrap();
+            listed.sort();
+            expected.sort();
+            prop_assert_eq!(listed, expected);
+        }
+
+        /// encode_entries_region → parse roundtrip: encoded entries parse back identically.
+        #[test]
+        fn proptest_encode_parse_external_roundtrip(
+            suffixes in prop::collection::hash_set(xattr_suffix_strategy(), 1..5),
+            values in prop::collection::vec(xattr_value_strategy(), 1..5),
+        ) {
+            let entries: Vec<Ext4Xattr> = suffixes.iter().zip(values.iter()).map(|(s, v)| {
+                Ext4Xattr {
+                    name_index: EXT4_XATTR_INDEX_USER,
+                    name: s.as_bytes().to_vec(),
+                    value: v.clone(),
+                }
+            }).collect();
+
+            // Build an external block and parse it back.
+            let block_len = 4096;
+            let block = build_external_block(block_len, &entries).unwrap();
+            let parsed = parse_external_entries(&block, false).unwrap();
+
+            prop_assert_eq!(parsed.len(), entries.len());
+            for (orig, parsed_e) in entries.iter().zip(parsed.iter()) {
+                prop_assert_eq!(orig.name_index, parsed_e.name_index);
+                prop_assert_eq!(&orig.name, &parsed_e.name);
+                prop_assert_eq!(&orig.value, &parsed_e.value);
+            }
+        }
+
+        /// Removing all xattrs one-by-one leaves list empty.
+        #[test]
+        fn proptest_remove_all_leaves_empty(
+            suffixes in prop::collection::hash_set(xattr_suffix_strategy(), 1..6),
+        ) {
+            let mut inode = make_inode(256);
+            let mut external = vec![0_u8; 4096];
+            let access = XattrWriteAccess { is_owner: true, ..Default::default() };
+
+            let names: Vec<String> = suffixes.iter().map(|s| format!("user.{s}")).collect();
+            for name in &names {
+                set_xattr(&mut inode, Some(&mut external), name, b"val", access).unwrap();
+            }
+
+            for name in &names {
+                remove_xattr(&mut inode, Some(&mut external), name, access).unwrap();
+            }
+
+            let listed = list_xattrs(&inode, Some(&external)).unwrap();
+            prop_assert!(listed.is_empty(), "expected empty list, got: {:?}", listed);
+        }
+    }
 }
