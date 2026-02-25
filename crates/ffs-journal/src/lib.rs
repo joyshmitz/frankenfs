@@ -2694,8 +2694,11 @@ mod tests {
 
     #[test]
     fn adversarial_descriptor_with_zero_tags() {
-        // A descriptor block where all tag slots are zero (no valid tags).
-        // Should be handled gracefully.
+        // A descriptor block where all tag slots are zero — no LAST flag set,
+        // so the parser fills the entire tags area: (512 - 12) / 8 = 62 tags.
+        // Since those 62 data blocks don't fit in the 4-block region, replay
+        // treats this as a truncated transaction and stops scanning. The commit
+        // block at position 11 is never reached.
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 64);
         let region = JournalRegion {
@@ -2703,17 +2706,16 @@ mod tests {
             blocks: 4,
         };
 
-        // Descriptor with no tags (all zeros after header).
         let mut desc = vec![0_u8; 512];
         encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, 1);
-        // Tags area is all zeros → parse_descriptor_tags returns empty vec.
         dev.raw_write(BlockNumber(10), desc);
         dev.raw_write(BlockNumber(11), commit_block(512, 1));
 
         let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
-        assert_eq!(out.committed_sequences, vec![1]);
+        // Truncated transaction: commit block never reached.
+        assert!(out.committed_sequences.is_empty());
         assert_eq!(out.stats.descriptor_blocks, 1);
-        assert_eq!(out.stats.descriptor_tags, 0);
+        assert_eq!(out.stats.descriptor_tags, 62);
         assert_eq!(out.stats.replayed_blocks, 0);
     }
 
@@ -2814,7 +2816,7 @@ mod tests {
             start_seq in 1_u32..1000,
         ) {
             let cx = test_cx();
-            let dev = MemBlockDevice::new(512, 512);
+            let dev = MemBlockDevice::new(512, 1024);
             let region = JournalRegion {
                 start: BlockNumber(100),
                 blocks: 128,
@@ -2823,10 +2825,13 @@ mod tests {
             let mut writer = Jbd2Writer::new(region, start_seq);
             let mut txn = writer.begin_transaction();
 
-            // Each write targets a distinct block in [0, num_writes).
+            // Each write targets a distinct block starting at 500 (well
+            // outside the journal region at 100..228).
+            let base_target = 500_u64;
             for i in 0..num_writes {
-                let target = BlockNumber(u64::try_from(i).unwrap());
-                let byte = payload_byte.wrapping_add(u8::try_from(i % 256).unwrap());
+                let target = BlockNumber(base_target + u64::try_from(i).unwrap());
+                let byte = payload_byte | 0x80; // ensure non-zero so data ≠ empty block
+                let byte = byte.wrapping_add(u8::try_from(i % 128).unwrap());
                 txn.add_write(target, vec![byte; 512]);
             }
 
@@ -2841,13 +2846,14 @@ mod tests {
 
             // Verify each target block contains the correct data.
             for i in 0..num_writes {
-                let target = BlockNumber(u64::try_from(i).unwrap());
-                let expected_byte = payload_byte.wrapping_add(u8::try_from(i % 256).unwrap());
+                let target = BlockNumber(base_target + u64::try_from(i).unwrap());
+                let expected_byte = (payload_byte | 0x80).wrapping_add(u8::try_from(i % 128).unwrap());
                 let data = dev.read_block(&cx, target).expect("read target");
                 prop_assert_eq!(
                     data.as_slice()[0], expected_byte,
                     "target block {} should contain {:#x}",
-                    i, expected_byte,
+                    base_target + u64::try_from(i).unwrap(),
+                    expected_byte,
                 );
             }
         }
@@ -2861,20 +2867,25 @@ mod tests {
             let actual_revoke_idx = revoke_idx % num_writes;
 
             let cx = test_cx();
-            let dev = MemBlockDevice::new(512, 512);
+            let dev = MemBlockDevice::new(512, 1024);
             let region = JournalRegion {
                 start: BlockNumber(200),
                 blocks: 128,
             };
 
+            // Use target blocks starting at 500 (well outside the journal
+            // region at 200..328).
+            let base_target = 500_u64;
             let mut writer = Jbd2Writer::new(region, 1);
             let mut txn = writer.begin_transaction();
 
             for i in 0..num_writes {
-                txn.add_write(BlockNumber(u64::try_from(i).unwrap()), vec![0xAA; 512]);
+                let t = base_target + u64::try_from(i).unwrap();
+                txn.add_write(BlockNumber(t), vec![0xAA; 512]);
             }
             // Revoke one of the writes.
-            txn.add_revoke(BlockNumber(u64::try_from(actual_revoke_idx).unwrap()));
+            let revoked_block = base_target + u64::try_from(actual_revoke_idx).unwrap();
+            txn.add_revoke(BlockNumber(revoked_block));
 
             writer.commit_transaction(&cx, &dev, &txn).expect("commit");
 
@@ -2887,13 +2898,13 @@ mod tests {
 
             // Revoked block should be untouched (zeros).
             let revoked = dev
-                .read_block(&cx, BlockNumber(u64::try_from(actual_revoke_idx).unwrap()))
+                .read_block(&cx, BlockNumber(revoked_block))
                 .expect("read revoked");
             prop_assert_eq!(
                 revoked.as_slice(),
                 &[0_u8; 512],
                 "revoked block {} should be untouched",
-                actual_revoke_idx,
+                revoked_block,
             );
         }
 
@@ -3016,7 +3027,7 @@ mod tests {
                         &dev,
                         CommitSeq(1),
                         BlockNumber(u64::try_from(i).unwrap()),
-                        &vec![byte; 64],
+                        &[byte; 64],
                     )
                     .expect("write");
             }
