@@ -7065,6 +7065,177 @@ mod tests {
         }
 
         #[test]
+        fn ext4_proptest_image_reader_no_panic_on_mutated_image(
+            mutators in proptest::collection::vec((0_usize..(64 * 4096), any::<u8>()), 0..=32),
+            inode in 0_u32..=16_384,
+            group in 0_u32..=32,
+            block in 0_u64..=2048,
+        ) {
+            let mut image = build_test_image();
+            let len = image.len();
+            for (idx, value) in mutators {
+                image[idx % len] = value;
+            }
+
+            if let Ok(reader) = Ext4ImageReader::new(&image) {
+                let _ = reader.read_group_desc(&image, ffs_types::GroupNumber(group));
+                let _ = reader.read_inode(&image, ffs_types::InodeNumber(u64::from(inode)));
+                let _ = reader.read_block(&image, ffs_types::BlockNumber(block));
+            }
+        }
+
+        #[test]
+        fn ext4_proptest_image_reader_no_panic_on_truncated_image(
+            image_len in 0_usize..=(64 * 4096),
+            inode in 0_u32..=16_384,
+        ) {
+            let mut image = build_test_image();
+            image.truncate(image_len);
+
+            if let Ok(reader) = Ext4ImageReader::new(&image) {
+                let _ = reader.read_group_desc(&image, ffs_types::GroupNumber(0));
+                let _ = reader.read_inode(&image, ffs_types::InodeNumber(u64::from(inode)));
+                let _ = reader.read_block(&image, ffs_types::BlockNumber(0));
+            }
+        }
+
+        #[test]
+        fn ext4_proptest_image_reader_known_inodes_preserve_file_kind(
+            inode in prop_oneof![Just(2_u32), Just(11_u32), Just(12_u32), Just(13_u32)],
+        ) {
+            let image = build_test_image();
+            let reader = Ext4ImageReader::new(&image).expect("open synthetic image");
+            let parsed = reader
+                .read_inode(&image, ffs_types::InodeNumber(u64::from(inode)))
+                .expect("known inode should be readable");
+
+            match inode {
+                2 | 12 => {
+                    prop_assert!(parsed.is_dir());
+                    prop_assert!(!parsed.is_regular());
+                }
+                11 | 13 => {
+                    prop_assert!(parsed.is_regular());
+                    prop_assert!(!parsed.is_dir());
+                }
+                _ => unreachable!("strategy only generates known test inodes"),
+            }
+        }
+
+        #[test]
+        fn ext4_proptest_parse_from_image_matches_region_parser(
+            mut image in proptest::collection::vec(
+                any::<u8>(),
+                (EXT4_SUPERBLOCK_OFFSET + EXT4_SUPERBLOCK_SIZE)..=(EXT4_SUPERBLOCK_OFFSET + EXT4_SUPERBLOCK_SIZE + 1024),
+            ),
+            log_block_size in 0_u32..=2,
+            blocks_per_group in 1_u32..=8192,
+            inodes_per_group in 1_u32..=8192,
+            desc_size in 0_u16..=255,
+            use_64bit in any::<bool>(),
+            raw_name in proptest::collection::vec(any::<u8>(), 0..=16),
+        ) {
+            let mut incompat = Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0;
+            if use_64bit {
+                incompat |= Ext4IncompatFeatures::BIT64.0;
+            }
+
+            let sb = make_proptest_valid_ext4_superblock(
+                log_block_size,
+                blocks_per_group,
+                inodes_per_group,
+                desc_size,
+                incompat,
+                &raw_name,
+            );
+            image[EXT4_SUPERBLOCK_OFFSET..EXT4_SUPERBLOCK_OFFSET + EXT4_SUPERBLOCK_SIZE]
+                .copy_from_slice(&sb);
+
+            let from_region = Ext4Superblock::parse_superblock_region(&sb).expect("region parser");
+            let from_image = Ext4Superblock::parse_from_image(&image).expect("image parser");
+
+            prop_assert_eq!(from_image, from_region);
+            prop_assert_eq!(
+                from_image.validate_geometry().is_ok(),
+                from_region.validate_geometry().is_ok()
+            );
+        }
+
+        #[test]
+        fn ext4_proptest_parse_and_iter_dir_block_equivalent_on_valid_blocks(
+            block_size in prop_oneof![Just(1024_u32), Just(2048_u32), Just(4096_u32)],
+            include_tail in any::<bool>(),
+            tail_checksum in any::<u32>(),
+            specs in proptest::collection::vec(
+                (0_u32..=4096_u32, 0_u8..=7_u8, proptest::collection::vec(any::<u8>(), 1..=32)),
+                1..=8,
+            ),
+        ) {
+            let block_len = usize::try_from(block_size).expect("block_size in usize range");
+            let tail_len = if include_tail { 12_usize } else { 0_usize };
+            let min_payload: usize = specs
+                .iter()
+                .map(|(_, _, name)| (8 + name.len() + 3) & !3)
+                .sum();
+            prop_assume!(min_payload <= block_len.saturating_sub(tail_len));
+
+            let mut block = vec![0_u8; block_len];
+            let mut offset = 0_usize;
+            let entry_region_end = block_len - tail_len;
+
+            for (idx, (inode, file_type_raw, name)) in specs.iter().enumerate() {
+                let min_rec_len = (8 + name.len() + 3) & !3;
+                let is_last = idx + 1 == specs.len();
+                let rec_len_usize = if is_last {
+                    entry_region_end.saturating_sub(offset)
+                } else {
+                    min_rec_len
+                };
+
+                prop_assume!(rec_len_usize >= min_rec_len);
+                prop_assume!(offset + rec_len_usize <= entry_region_end);
+                let rec_len = u16::try_from(rec_len_usize).expect("record length fits u16");
+
+                write_dir_entry(
+                    &mut block,
+                    offset,
+                    *inode,
+                    *file_type_raw,
+                    name,
+                    rec_len,
+                );
+                offset += rec_len_usize;
+            }
+
+            prop_assert_eq!(offset, entry_region_end);
+
+            if include_tail {
+                let tail_off = block_len - 12;
+                block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+                block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+                block[tail_off + 6] = 0;
+                block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+                block[tail_off + 8..tail_off + 12].copy_from_slice(&tail_checksum.to_le_bytes());
+            }
+
+            let (parsed_entries, parsed_tail) =
+                parse_dir_block(&block, block_size).expect("valid synthesized dir block parses");
+
+            let mut iter = iter_dir_block(&block, block_size);
+            let mut iter_entries = Vec::new();
+            while let Some(entry) = iter.next() {
+                iter_entries.push(entry.expect("iterator must parse synthesized block").to_owned());
+            }
+            let iter_tail = iter.checksum_tail();
+
+            prop_assert_eq!(parsed_entries, iter_entries);
+            prop_assert_eq!(parsed_tail, iter_tail);
+            for entry in &parsed_entries {
+                prop_assert!(usize::try_from(entry.rec_len).expect("rec_len in usize") >= entry.actual_size());
+            }
+        }
+
+        #[test]
         fn ext4_proptest_volume_name_trimmed(
             raw_name in proptest::collection::vec(any::<u8>(), 0..=16),
         ) {
@@ -7326,7 +7497,159 @@ mod tests {
             let _ = parse_dx_root(&block);
         }
 
+        #[test]
+        fn ext4_proptest_parse_dx_entries_count_limit_and_truncation(
+            limit in 0_u16..=64,
+            count in 0_u16..=64,
+            pairs in proptest::collection::vec((any::<u32>(), any::<u32>()), 0..=64),
+        ) {
+            let mut data = vec![0_u8; 4 + pairs.len() * 8];
+            data[0..2].copy_from_slice(&limit.to_le_bytes());
+            data[2..4].copy_from_slice(&count.to_le_bytes());
+            for (idx, (hash, block)) in pairs.iter().copied().enumerate() {
+                let off = 4 + idx * 8;
+                data[off..off + 4].copy_from_slice(&hash.to_le_bytes());
+                data[off + 4..off + 8].copy_from_slice(&block.to_le_bytes());
+            }
+
+            if count > limit {
+                let err = parse_dx_entries(&data, 0).expect_err("count > limit should reject");
+                prop_assert_eq!(
+                    err,
+                    ParseError::InvalidField {
+                        field: "dx_count",
+                        reason: "count exceeds limit",
+                    }
+                );
+            } else {
+                let parsed = parse_dx_entries(&data, 0).expect("count <= limit should parse");
+                let expected_len = usize::from(count).min(pairs.len());
+                prop_assert_eq!(parsed.len(), expected_len);
+                for (idx, entry) in parsed.iter().enumerate() {
+                    prop_assert_eq!(entry.hash, pairs[idx].0);
+                    prop_assert_eq!(entry.block, pairs[idx].1);
+                }
+            }
+        }
+
+        #[test]
+        fn ext4_proptest_parse_dx_entries_header_bounds_rejected(
+            data in proptest::collection::vec(any::<u8>(), 0..=64),
+            offset in 0_usize..=80,
+        ) {
+            prop_assume!(offset + 4 > data.len());
+            let err = parse_dx_entries(&data, offset).expect_err("out-of-range header should fail");
+            prop_assert_eq!(
+                err,
+                ParseError::InsufficientData {
+                    needed: offset + 4,
+                    offset: 0,
+                    actual: data.len(),
+                }
+            );
+        }
+
         // ── parse_xattr_block properties ──────────────────────────────
+
+        #[test]
+        fn ext4_proptest_parse_xattr_entries_single_roundtrip(
+            name in proptest::collection::vec(any::<u8>(), 1..=32),
+            value in proptest::collection::vec(any::<u8>(), 0..=96),
+            name_index in any::<u8>(),
+            value_pad in 0_usize..=64,
+        ) {
+            let entry_len = (16 + name.len() + 3) & !3;
+            let value_off = entry_len + value_pad;
+            let value_end = value_off + value.len();
+            let data_len = entry_len.max(value_end + 4);
+            let mut data = vec![0_u8; data_len];
+
+            data[0] = u8::try_from(name.len()).expect("name length bounded by strategy");
+            data[1] = name_index;
+            data[2..4].copy_from_slice(
+                &u16::try_from(value_off)
+                    .expect("value offset bounded by strategy")
+                    .to_le_bytes(),
+            );
+            data[4..8].copy_from_slice(
+                &u32::try_from(value.len())
+                    .expect("value length bounded by strategy")
+                    .to_le_bytes(),
+            );
+            data[16..16 + name.len()].copy_from_slice(&name);
+            if !value.is_empty() {
+                data[value_off..value_off + value.len()].copy_from_slice(&value);
+            }
+            data[entry_len] = 0;
+            data[entry_len + 1] = 0;
+
+            let parsed = parse_xattr_entries(&data, &data).expect("valid entry should parse");
+            prop_assert_eq!(parsed.len(), 1);
+            prop_assert_eq!(parsed[0].name_index, name_index);
+            prop_assert_eq!(&parsed[0].name, &name);
+            prop_assert_eq!(&parsed[0].value, &value);
+        }
+
+        #[test]
+        fn ext4_proptest_parse_xattr_entries_name_bounds_rejected(
+            data_len in 16_usize..=128,
+            name_len in 1_u8..=u8::MAX,
+            name_index in any::<u8>(),
+        ) {
+            let mut data = vec![0_u8; data_len];
+            data[0] = name_len;
+            data[1] = name_index;
+
+            prop_assume!(16 + usize::from(name_len) > data.len());
+            let err = parse_xattr_entries(&data, &data).expect_err("name overflow should reject");
+            prop_assert_eq!(
+                err,
+                ParseError::InvalidField {
+                    field: "xattr_name",
+                    reason: "name extends past data boundary",
+                }
+            );
+        }
+
+        #[test]
+        fn ext4_proptest_parse_xattr_entries_value_bounds_rejected(
+            data_len in 36_usize..=256,
+            name_len in 1_usize..=16,
+            value_size in 1_usize..=64,
+            name_index in any::<u8>(),
+        ) {
+            let mut data = vec![0_u8; data_len];
+            let entry_len = (16 + name_len + 3) & !3;
+            prop_assume!(entry_len + 1 < data.len());
+
+            let value_off = data_len.saturating_sub(value_size.saturating_sub(1));
+            prop_assume!(value_off + value_size > data.len());
+
+            data[0] = u8::try_from(name_len).expect("name length bounded by strategy");
+            data[1] = name_index;
+            data[2..4].copy_from_slice(
+                &u16::try_from(value_off)
+                    .expect("value offset bounded by strategy")
+                    .to_le_bytes(),
+            );
+            data[4..8].copy_from_slice(
+                &u32::try_from(value_size)
+                    .expect("value size bounded by strategy")
+                    .to_le_bytes(),
+            );
+            data[16..16 + name_len].fill(b'x');
+            data[entry_len] = 0;
+            data[entry_len + 1] = 0;
+
+            let err = parse_xattr_entries(&data, &data).expect_err("value overflow should reject");
+            prop_assert_eq!(
+                err,
+                ParseError::InvalidField {
+                    field: "xattr_value",
+                    reason: "value extends past data boundary",
+                }
+            );
+        }
 
         /// parse_xattr_block never panics on arbitrary input.
         #[test]
