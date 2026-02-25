@@ -556,6 +556,7 @@ dependencies = [
  "ffs-error",
  "ffs-types",
  "parking_lot",
+ "proptest",
  "tempfile",
  "tracing",
 ]

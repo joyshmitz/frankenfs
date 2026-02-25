@@ -6232,4 +6232,155 @@ mod tests {
         assert_eq!(cache.dirty_count(), 0);
         assert_eq!(cache.inner().write_count(), 3);
     }
+
+    // ── Property-based tests (proptest) ────────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        /// ARC invariants hold after arbitrary access sequences.
+        #[test]
+        fn proptest_arc_invariants_under_random_access(
+            capacity in 1_usize..32,
+            accesses in prop::collection::vec(0_u64..128, 1..200),
+        ) {
+            let mut state = ArcState::new(capacity);
+            for &key in &accesses {
+                arc_access(&mut state, BlockNumber(key));
+            }
+            // Final invariant checks (arc_access already asserts per-access).
+            prop_assert_eq!(state.resident.len(), state.t1.len() + state.t2.len());
+            prop_assert!(state.resident.len() <= state.capacity);
+        }
+
+        /// All distinct accessed keys are trackable in the ARC loc map.
+        #[test]
+        fn proptest_arc_loc_map_consistent(
+            capacity in 2_usize..16,
+            accesses in prop::collection::vec(0_u64..64, 1..100),
+        ) {
+            let mut state = ArcState::new(capacity);
+            for &key in &accesses {
+                arc_access(&mut state, BlockNumber(key));
+            }
+            // Every key in T1/T2/B1/B2 must be in loc.
+            for &k in &state.t1 {
+                prop_assert!(state.loc.contains_key(&k), "T1 key {:?} not in loc", k);
+            }
+            for &k in &state.t2 {
+                prop_assert!(state.loc.contains_key(&k), "T2 key {:?} not in loc", k);
+            }
+            for &k in &state.b1 {
+                prop_assert!(state.loc.contains_key(&k), "B1 key {:?} not in loc", k);
+            }
+            for &k in &state.b2 {
+                prop_assert!(state.loc.contains_key(&k), "B2 key {:?} not in loc", k);
+            }
+        }
+
+        /// Repeated access to the same key always results in a hit (after first miss).
+        #[test]
+        fn proptest_repeated_access_is_hit(
+            capacity in 1_usize..16,
+            key in 0_u64..100,
+            repeats in 2_usize..20,
+        ) {
+            let mut state = ArcState::new(capacity);
+            // First access: miss.
+            arc_access(&mut state, BlockNumber(key));
+            prop_assert_eq!(state.misses, 1);
+
+            let hits_before = state.hits;
+            for _ in 1..repeats {
+                arc_access(&mut state, BlockNumber(key));
+            }
+            // All subsequent accesses should be hits.
+            prop_assert_eq!(
+                state.hits,
+                hits_before + (repeats as u64 - 1),
+                "repeated access should always hit",
+            );
+        }
+
+        /// Dirty blocks are never evicted by ARC replacement.
+        /// When dirty blocks pin, resident may temporarily exceed capacity;
+        /// we test only that the dirty block is never removed from resident.
+        #[test]
+        fn proptest_dirty_blocks_not_evicted(
+            capacity in 2_usize..8,
+            dirty_key in 0_u64..4,
+            other_keys in prop::collection::vec(4_u64..32, 10..50),
+        ) {
+            let mut state = ArcState::new(capacity);
+
+            // Insert and mark the dirty block.
+            state.on_miss_or_ghost_hit(BlockNumber(dirty_key));
+            state.resident.insert(BlockNumber(dirty_key), BlockBuf::new(vec![0xDD]));
+            state.dirty.mark_dirty(
+                BlockNumber(dirty_key),
+                1,
+                TxnId(0),
+                None,
+                DirtyState::InFlight,
+            );
+
+            // Access many other distinct keys to force eviction pressure.
+            for &key in &other_keys {
+                if state.resident.contains_key(&BlockNumber(key)) {
+                    state.on_hit(BlockNumber(key));
+                } else {
+                    state.on_miss_or_ghost_hit(BlockNumber(key));
+                    state.resident.insert(BlockNumber(key), BlockBuf::new(vec![0_u8]));
+                }
+            }
+
+            // The dirty block must still be resident (never evicted).
+            prop_assert!(
+                state.resident.contains_key(&BlockNumber(dirty_key)),
+                "dirty block {} was evicted from resident map",
+                dirty_key,
+            );
+        }
+
+        /// Cache capacity is respected: resident count never exceeds capacity.
+        #[test]
+        fn proptest_capacity_never_exceeded(
+            capacity in 1_usize..16,
+            accesses in prop::collection::vec(0_u64..256, 1..300),
+        ) {
+            let mut state = ArcState::new(capacity);
+            for &key in &accesses {
+                arc_access(&mut state, BlockNumber(key));
+                prop_assert!(
+                    state.resident.len() <= state.capacity,
+                    "resident {} exceeds capacity {} after accessing key {}",
+                    state.resident.len(),
+                    state.capacity,
+                    key,
+                );
+            }
+        }
+
+        /// hits + misses equals the total number of accesses.
+        #[test]
+        fn proptest_hits_plus_misses_equals_accesses(
+            capacity in 1_usize..16,
+            accesses in prop::collection::vec(0_u64..64, 1..100),
+        ) {
+            let mut state = ArcState::new(capacity);
+            for &key in &accesses {
+                arc_access(&mut state, BlockNumber(key));
+            }
+            prop_assert_eq!(
+                state.hits + state.misses,
+                accesses.len() as u64,
+                "hits ({}) + misses ({}) != accesses ({})",
+                state.hits,
+                state.misses,
+                accesses.len(),
+            );
+        }
+    }
 }
