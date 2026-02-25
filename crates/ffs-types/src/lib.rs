@@ -1135,4 +1135,238 @@ mod tests {
             }
         }
     }
+
+    // ── Property-based tests (proptest) ────────────────────────────────
+
+    use proptest::prelude::*;
+
+    fn valid_block_size_strategy() -> impl Strategy<Value = u32> {
+        prop::sample::select(vec![1024_u32, 2048, 4096, 8192, 16384, 32768, 65536])
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn proptest_block_size_byte_block_roundtrip(
+            raw_bs in valid_block_size_strategy(),
+            byte_offset in 0_u64..=(u64::MAX / 65536),
+        ) {
+            let bs = BlockSize::new(raw_bs).unwrap();
+            let block = bs.byte_to_block(byte_offset);
+            let round_tripped = bs.block_to_byte(block).unwrap();
+            // block_to_byte(byte_to_block(x)) == align_down(x, bs)
+            prop_assert_eq!(round_tripped, byte_offset & !(u64::from(raw_bs) - 1));
+        }
+
+        #[test]
+        fn proptest_block_size_rejects_invalid(value in 0_u32..=200_000) {
+            let valid = value.is_power_of_two() && (1024..=65536).contains(&value);
+            prop_assert_eq!(BlockSize::new(value).is_ok(), valid);
+        }
+
+        #[test]
+        fn proptest_align_down_le_input(
+            value in 0_u64..=u64::MAX,
+            shift in 0_u32..32,
+        ) {
+            let alignment = 1_u64 << shift;
+            let result = align_down(value, alignment).unwrap();
+            prop_assert!(result <= value);
+            prop_assert!(value - result < alignment);
+            prop_assert_eq!(result % alignment, 0);
+        }
+
+        #[test]
+        fn proptest_align_up_ge_input(
+            value in 0_u64..=(u64::MAX - (1_u64 << 31)),
+            shift in 0_u32..32,
+        ) {
+            let alignment = 1_u64 << shift;
+            if let Some(result) = align_up(value, alignment) {
+                prop_assert!(result >= value);
+                prop_assert!(result - value < alignment);
+                prop_assert_eq!(result % alignment, 0);
+            }
+        }
+
+        #[test]
+        fn proptest_align_down_up_bracket(
+            value in 0_u64..=(u64::MAX - (1_u64 << 31)),
+            shift in 0_u32..32,
+        ) {
+            let alignment = 1_u64 << shift;
+            let down = align_down(value, alignment).unwrap();
+            if let Some(up) = align_up(value, alignment) {
+                prop_assert!(down <= value);
+                prop_assert!(up >= value);
+                prop_assert!(up - down <= alignment);
+                if value % alignment == 0 {
+                    prop_assert_eq!(down, up);
+                } else {
+                    prop_assert_eq!(up - down, alignment);
+                }
+            }
+        }
+
+        #[test]
+        fn proptest_block_to_group_first_block_inverse(
+            group_idx in 0_u32..1000,
+            bpg in prop::sample::select(vec![8192_u32, 16384, 32768]),
+            first_data in prop::sample::select(vec![0_u32, 1]),
+        ) {
+            let first_block = group_first_block(GroupNumber(group_idx), bpg, first_data).unwrap();
+            let computed_group = block_to_group(first_block, bpg, first_data);
+            prop_assert_eq!(computed_group, GroupNumber(group_idx));
+        }
+
+        #[test]
+        fn proptest_inode_group_index_partition(
+            ino in 1_u64..=100_000,
+            ipg in prop::sample::select(vec![256_u32, 512, 1024, 2048, 8192]),
+        ) {
+            let group = inode_to_group(InodeNumber(ino), ipg);
+            let index = inode_index_in_group(InodeNumber(ino), ipg);
+            // Reconstruct: (group * ipg) + index + 1 == ino
+            let reconstructed = u64::from(group.0) * u64::from(ipg) + u64::from(index) + 1;
+            prop_assert_eq!(reconstructed, ino);
+            prop_assert!(index < ipg);
+        }
+
+        #[test]
+        fn proptest_crc32c_seed_zero_equiv(data in prop::collection::vec(any::<u8>(), 0..256)) {
+            let unseeded = crc32c(&data);
+            let seeded = crc32c_append(0, &data);
+            prop_assert_eq!(unseeded, seeded);
+        }
+
+        #[test]
+        fn proptest_device_id_uuid_roundtrip(raw in any::<[u8; 16]>()) {
+            let id = DeviceId::from_uuid_bytes_be(raw);
+            let back = id.to_uuid_bytes_be();
+            prop_assert_eq!(raw, back);
+        }
+
+        #[test]
+        fn proptest_ext4_inode_number_roundtrip(val in 0_u32..=u32::MAX) {
+            let ext4 = Ext4InodeNumber(val);
+            let canonical: InodeNumber = ext4.into();
+            prop_assert_eq!(canonical.to_ext4().unwrap(), ext4);
+        }
+
+        #[test]
+        fn proptest_ensure_slice_bounds(
+            buf_len in 0_usize..=512,
+            offset in 0_usize..=512,
+            len in 0_usize..=512,
+        ) {
+            let buf = vec![0_u8; buf_len];
+            let result = ensure_slice(&buf, offset, len);
+            match offset.checked_add(len) {
+                Some(end) if end <= buf_len => {
+                    prop_assert!(result.is_ok());
+                    prop_assert_eq!(result.unwrap().len(), len);
+                }
+                _ => {
+                    prop_assert!(result.is_err());
+                }
+            }
+        }
+
+        /// ByteOffset::checked_add returns None on overflow, Some otherwise.
+        #[test]
+        fn proptest_byte_offset_checked_add(a in any::<u64>(), b in any::<u64>()) {
+            let result = ByteOffset(a).checked_add(b);
+            if let Some(sum) = a.checked_add(b) {
+                prop_assert_eq!(result, Some(ByteOffset(sum)));
+            } else {
+                prop_assert_eq!(result, None);
+            }
+        }
+
+        /// ByteOffset::checked_sub returns None on underflow, Some otherwise.
+        #[test]
+        fn proptest_byte_offset_checked_sub(a in any::<u64>(), b in any::<u64>()) {
+            let result = ByteOffset(a).checked_sub(b);
+            if let Some(diff) = a.checked_sub(b) {
+                prop_assert_eq!(result, Some(ByteOffset(diff)));
+            } else {
+                prop_assert_eq!(result, None);
+            }
+        }
+
+        /// BlockNumber::checked_add/sub roundtrip: add then sub returns original.
+        #[test]
+        fn proptest_block_number_add_sub_roundtrip(
+            base in 0_u64..=(u64::MAX / 2),
+            delta in 0_u64..=(u64::MAX / 2),
+        ) {
+            if let Some(sum) = BlockNumber(base).checked_add(delta) {
+                let back = sum.checked_sub(delta);
+                prop_assert_eq!(back, Some(BlockNumber(base)));
+            }
+        }
+
+        /// BtrfsObjectId → InodeNumber → BtrfsObjectId roundtrip.
+        #[test]
+        fn proptest_btrfs_object_id_roundtrip(val in any::<u64>()) {
+            let btrfs = BtrfsObjectId(val);
+            let canonical: InodeNumber = btrfs.into();
+            prop_assert_eq!(canonical.to_btrfs(), btrfs);
+        }
+
+        /// write_le_u16 → read_le_u16 roundtrip.
+        #[test]
+        fn proptest_read_write_le_u16_roundtrip(val in any::<u16>(), offset in 0_usize..100) {
+            let mut buf = vec![0_u8; offset + 2];
+            write_le_u16(&mut buf, offset, val);
+            let read_back = read_le_u16(&buf, offset).unwrap();
+            prop_assert_eq!(read_back, val);
+        }
+
+        /// write_le_u32 → read_le_u32 roundtrip.
+        #[test]
+        fn proptest_read_write_le_u32_roundtrip(val in any::<u32>(), offset in 0_usize..100) {
+            let mut buf = vec![0_u8; offset + 4];
+            write_le_u32(&mut buf, offset, val);
+            let read_back = read_le_u32(&buf, offset).unwrap();
+            prop_assert_eq!(read_back, val);
+        }
+
+        /// ext4_block_size_from_log produces valid block sizes for log values 0..=6.
+        #[test]
+        fn proptest_ext4_block_size_from_log_valid(log_val in 0_u32..=6) {
+            let bs = ext4_block_size_from_log(log_val);
+            prop_assert!(bs.is_some());
+            let size = bs.unwrap();
+            prop_assert!(size.is_power_of_two());
+            prop_assert_eq!(size, 1_u32 << (10 + log_val));
+        }
+
+        /// batch_checksum CRC32C matches individual crc32c_append results.
+        #[test]
+        fn proptest_batch_checksum_matches_scalar(
+            seed in any::<u32>(),
+            n_blocks in 1_usize..8,
+            fill_byte in any::<u8>(),
+        ) {
+            let block_data: Vec<Vec<u8>> = (0..n_blocks)
+                .map(|i| vec![fill_byte.wrapping_add(u8::try_from(i % 256).unwrap()); 64])
+                .collect();
+            let block_refs: Vec<&[u8]> = block_data.iter().map(Vec::as_slice).collect();
+            let batch_result = batch_checksum(&block_refs, ChecksumAlgo::Crc32c { seed });
+            let scalar_result: Vec<u32> = block_refs.iter().map(|b| crc32c_append(seed, b)).collect();
+            prop_assert_eq!(batch_result, scalar_result);
+        }
+
+        /// trim_nul_padded on a string without NUL bytes preserves the string.
+        #[test]
+        fn proptest_trim_nul_padded_no_nul(
+            s in "[a-zA-Z0-9]{0,32}",
+        ) {
+            let bytes = s.as_bytes();
+            let result = trim_nul_padded(bytes);
+            prop_assert_eq!(result, s.trim());
+        }
+    }
 }
