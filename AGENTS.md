@@ -178,7 +178,7 @@ Every component crate includes inline `#[cfg(test)]` unit tests alongside the im
 - Edge cases (empty input, max values, boundary conditions)
 - Error conditions
 
-Cross-component integration tests live in the workspace `tests/` directory.
+Cross-component integration tests primarily live in crate-local `crates/*/tests/` suites; the workspace `tests/` directory provides shared fixtures/corpus consumed by those suites.
 
 ### Unit Tests
 
@@ -232,8 +232,8 @@ cargo test --workspace --all-features
 | `ffs-core` | High-level filesystem orchestration |
 | `ffs-harness` | Conformance harness, fixture-driven golden tests, benchmarks |
 | `ffs-ext4` | Legacy ext4 format extraction reference |
-| `ffs-btrfs` | Legacy btrfs format extraction reference |
-| `tests/` (workspace) | Cross-component integration, full pipeline end-to-end |
+| `ffs-btrfs` | Btrfs structures/tree/mutation logic used by `ffs-core`, plus legacy extraction reference coverage |
+| `tests/` (workspace) | Shared cross-component fixtures/corpus (goldens + fuzz seeds) consumed by integration suites |
 | `benches/` (workspace) | Performance benchmarks with regression detection |
 
 ### Test Fixtures
@@ -288,13 +288,13 @@ frankenfs/
 │   ├── ffs-fuse/                  # FUSE mount surface
 │   ├── ffs-repair/                # Self-healing repair (fountain codes)
 │   ├── ffs-core/                  # High-level orchestration
-│   ├── ffs/                       # Facade crate (re-exports everything)
+│   ├── ffs/                       # Facade crate (thin re-export of `ffs-core` public API)
 │   ├── ffs-cli/                   # CLI binary
 │   ├── ffs-tui/                   # TUI diagnostics (frankentui)
 │   ├── ffs-harness/               # Conformance harness + benchmarks
 │   ├── ffs-ext4/                  # Legacy ext4 extraction reference
-│   └── ffs-btrfs/                 # Legacy btrfs extraction reference
-├── tests/                         # Cross-component integration tests
+│   └── ffs-btrfs/                 # Btrfs tree/mutation layer + legacy extraction reference
+├── tests/                         # Shared fixtures/corpus for integration tests
 │   └── fixtures/                  # Golden test fixtures
 ├── benches/                       # Performance benchmarks
 └── legacy_ext4_and_btrfs_code/    # Original C source for behavior extraction

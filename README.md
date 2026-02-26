@@ -125,7 +125,7 @@ Parser crates are pure (no I/O). MVCC knows nothing about files. FUSE knows noth
 
 ## Architecture
 
-FrankenFS is a 21-crate Cargo workspace (19 core crates + 2 legacy/reference wrappers) with a strict DAG dependency graph:
+FrankenFS is a 21-crate Cargo workspace (19 core crates + 2 extraction/reference crates, with `ffs-btrfs` also hosting active tree/mutation logic used by `ffs-core`) with a strict DAG dependency graph:
 `ffs-harness` links directly against `ffs-core` for conformance/perf surfaces, and `ffs-cli` depends on both `ffs-core` and `ffs-harness`.
 
 ```
