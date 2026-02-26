@@ -562,6 +562,217 @@ mod tests {
         );
     }
 
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn repair_parse_error_display_insufficient_data() {
+        let err = RepairParseError::InsufficientData {
+            needed: 32,
+            actual: 10,
+        };
+        let s = err.to_string();
+        assert!(s.contains("32"), "should mention needed size");
+        assert!(s.contains("10"), "should mention actual size");
+    }
+
+    #[test]
+    fn repair_parse_error_display_bad_magic() {
+        let err = RepairParseError::BadMagic {
+            expected: 0x5251_5342,
+            actual: 0xDEAD_BEEF,
+        };
+        let s = err.to_string();
+        assert!(s.contains("0x52515342") || s.contains("52515342"));
+        assert!(s.contains("0xdeadbeef") || s.contains("DEADBEEF") || s.contains("deadbeef"));
+    }
+
+    #[test]
+    fn repair_parse_error_display_checksum_mismatch() {
+        let err = RepairParseError::ChecksumMismatch {
+            stored: 0xAAAA_BBBB,
+            computed: 0xCCCC_DDDD,
+        };
+        let s = err.to_string();
+        assert!(s.contains("checksum"));
+    }
+
+    #[test]
+    fn repair_parse_error_is_std_error() {
+        let err = RepairParseError::InsufficientData {
+            needed: 1,
+            actual: 0,
+        };
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn repair_parse_error_clone_and_eq() {
+        let err = RepairParseError::BadMagic {
+            expected: 1,
+            actual: 2,
+        };
+        let err2 = err.clone();
+        assert_eq!(err, err2);
+    }
+
+    #[test]
+    fn repair_block_header_max_u16_values() {
+        let header = RepairBlockHeader {
+            first_esi: u32::MAX,
+            symbol_count: u16::MAX,
+            symbol_size: u16::MAX,
+            block_group: GroupNumber(u32::MAX),
+            repair_generation: u64::MAX,
+            checksum: 0,
+        };
+        let bytes = header.to_bytes();
+        let parsed = RepairBlockHeader::parse(&bytes).expect("parse");
+        assert_eq!(parsed.first_esi, u32::MAX);
+        assert_eq!(parsed.symbol_count, u16::MAX);
+        assert_eq!(parsed.symbol_size, u16::MAX);
+    }
+
+    #[test]
+    fn repair_block_header_payload_size_zero_count() {
+        let header = RepairBlockHeader {
+            first_esi: 0,
+            symbol_count: 0,
+            symbol_size: 1024,
+            block_group: GroupNumber(0),
+            repair_generation: 0,
+            checksum: 0,
+        };
+        assert_eq!(header.payload_size(), 0);
+    }
+
+    #[test]
+    fn repair_block_header_payload_size_zero_size() {
+        let header = RepairBlockHeader {
+            first_esi: 0,
+            symbol_count: 100,
+            symbol_size: 0,
+            block_group: GroupNumber(0),
+            repair_generation: 0,
+            checksum: 0,
+        };
+        assert_eq!(header.payload_size(), 0);
+    }
+
+    #[test]
+    fn repair_group_desc_ext_insufficient_data() {
+        let err = RepairGroupDescExt::parse(&[0; 20]).unwrap_err();
+        assert!(matches!(
+            err,
+            RepairParseError::InsufficientData {
+                needed: 48,
+                actual: 20
+            }
+        ));
+    }
+
+    #[test]
+    fn repair_group_desc_ext_checksum_mismatch() {
+        let desc = RepairGroupDescExt {
+            transfer_length: 1024,
+            symbol_size: 256,
+            source_block_count: 4,
+            sub_blocks: 1,
+            symbol_alignment: 4,
+            repair_start_block: BlockNumber(100),
+            repair_block_count: 1,
+            repair_generation: 1,
+            checksum: 0,
+        };
+        let mut bytes = desc.to_bytes();
+        bytes[10] ^= 0xFF; // corrupt a field
+        let err = RepairGroupDescExt::parse(&bytes).unwrap_err();
+        assert!(matches!(err, RepairParseError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn symbol_digest_insufficient_data() {
+        let err = SymbolDigest::parse(&[0; 10]).unwrap_err();
+        assert!(matches!(
+            err,
+            RepairParseError::InsufficientData {
+                needed: 36,
+                actual: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn compute_repair_block_count_no_overhead() {
+        // overhead_ratio = 1.0 means 0 extra blocks
+        assert_eq!(RepairGroupDescExt::compute_repair_block_count(1000, 1.0), 0);
+    }
+
+    #[test]
+    fn compute_repair_block_count_below_one_clamped() {
+        // overhead_ratio < 1.0 means negative extra, clamped to 0
+        assert_eq!(RepairGroupDescExt::compute_repair_block_count(1000, 0.5), 0);
+    }
+
+    #[test]
+    fn compute_repair_block_count_zero_source_blocks() {
+        assert_eq!(RepairGroupDescExt::compute_repair_block_count(0, 1.05), 0);
+    }
+
+    #[test]
+    fn repair_block_header_clone_and_eq() {
+        let h = RepairBlockHeader {
+            first_esi: 42,
+            symbol_count: 10,
+            symbol_size: 256,
+            block_group: GroupNumber(7),
+            repair_generation: 99,
+            checksum: 0,
+        };
+        let bytes = h.to_bytes();
+        let parsed = RepairBlockHeader::parse(&bytes).expect("parse");
+        let cloned = parsed.clone();
+        assert_eq!(parsed, cloned);
+    }
+
+    #[test]
+    fn repair_group_desc_ext_clone_and_eq() {
+        let desc = RepairGroupDescExt {
+            transfer_length: 8192,
+            symbol_size: 128,
+            source_block_count: 64,
+            sub_blocks: 2,
+            symbol_alignment: 8,
+            repair_start_block: BlockNumber(500),
+            repair_block_count: 10,
+            repair_generation: 3,
+            checksum: 0,
+        };
+        let bytes = desc.to_bytes();
+        let parsed = RepairGroupDescExt::parse(&bytes).expect("parse");
+        let cloned = parsed.clone();
+        assert_eq!(parsed, cloned);
+    }
+
+    #[test]
+    fn symbol_digest_clone_and_eq() {
+        let d = SymbolDigest {
+            esi: 99,
+            digest: [0x42; 32],
+        };
+        let d2 = d.clone();
+        assert_eq!(d, d2);
+    }
+
+    #[test]
+    fn repair_seed_different_uuids_same_group() {
+        let seed_a = repair_seed(&[0; 16], GroupNumber(0));
+        let seed_b = repair_seed(&[1; 16], GroupNumber(0));
+        assert_ne!(
+            seed_a, seed_b,
+            "different UUIDs should yield different seeds"
+        );
+    }
+
     proptest! {
         /// RepairBlockHeader round-trips through to_bytes/parse for all field values.
         #[test]

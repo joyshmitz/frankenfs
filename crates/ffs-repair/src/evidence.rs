@@ -1283,4 +1283,126 @@ mod tests {
         // checkpoint_commit_seq should be omitted from JSON
         assert!(!json.contains("checkpoint_commit_seq"));
     }
+
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn evidence_event_type_serde_all_variants() {
+        use EvidenceEventType::*;
+        let variants = [
+            CorruptionDetected,
+            RepairAttempted,
+            RepairSucceeded,
+            RepairFailed,
+            ScrubCycleComplete,
+            PolicyDecision,
+            SymbolRefresh,
+            WalRecovery,
+            TransactionCommit,
+            TxnAborted,
+            SerializationConflict,
+            VersionGc,
+            SnapshotAdvanced,
+            FlushBatch,
+            BackpressureActivated,
+            DirtyBlockDiscarded,
+            DurabilityPolicyChanged,
+            RefreshPolicyChanged,
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            let parsed: EvidenceEventType = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, variant, "round-trip failed for {variant:?}");
+        }
+    }
+
+    #[test]
+    fn evidence_event_type_hash_consistent() {
+        use std::collections::HashSet;
+        let set: HashSet<EvidenceEventType> = [
+            EvidenceEventType::CorruptionDetected,
+            EvidenceEventType::CorruptionDetected,
+            EvidenceEventType::RepairFailed,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn evidence_record_with_block_range_appears_in_json() {
+        let record = EvidenceRecord::corruption_detected(0, sample_corruption_detail())
+            .with_block_range(10, 20)
+            .with_timestamp(42);
+        let json = record.to_json().expect("serialize");
+        assert!(json.contains("\"block_range\""));
+        assert!(json.contains("10"));
+        assert!(json.contains("20"));
+    }
+
+    #[test]
+    fn evidence_record_with_timestamp_overrides_auto() {
+        let record =
+            EvidenceRecord::corruption_detected(0, sample_corruption_detail()).with_timestamp(999);
+        assert_eq!(record.timestamp_ns, 999);
+    }
+
+    #[test]
+    fn corruption_detail_clone_and_eq() {
+        let d = sample_corruption_detail();
+        let d2 = d.clone();
+        assert_eq!(d, d2);
+    }
+
+    #[test]
+    fn txn_abort_reason_serde_all_variants() {
+        for variant in [
+            TxnAbortReason::FcwConflict,
+            TxnAbortReason::SsiCycle,
+            TxnAbortReason::Timeout,
+            TxnAbortReason::DurabilityFailure,
+            TxnAbortReason::UserAbort,
+        ] {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            let parsed: TxnAbortReason = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn ledger_into_inner_returns_writer() {
+        let buf: Vec<u8> = Vec::new();
+        let ledger = EvidenceLedger::new(buf);
+        let inner = ledger.into_inner();
+        assert!(inner.is_empty());
+    }
+
+    #[test]
+    fn parse_evidence_ledger_empty_input() {
+        let records = parse_evidence_ledger(b"");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn parse_evidence_ledger_all_blank_lines() {
+        let records = parse_evidence_ledger(b"\n\n\n");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn from_recovery_evidence_partial_maps_to_repair_failed() {
+        let ev = RecoveryEvidence {
+            group: 2,
+            generation: 1,
+            corrupt_count: 3,
+            symbols_available: 2,
+            symbols_used: 2,
+            decoder_stats: RecoveryDecoderStats::default(),
+            outcome: RecoveryOutcome::Partial,
+            reason: Some("partial decode".to_owned()),
+        };
+        let record = EvidenceRecord::from_recovery(&ev);
+        assert_eq!(record.event_type, EvidenceEventType::RepairFailed);
+        assert!(!record.repair.as_ref().unwrap().verify_pass);
+    }
 }

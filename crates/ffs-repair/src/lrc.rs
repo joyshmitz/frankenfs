@@ -771,6 +771,111 @@ mod tests {
         assert_eq!(parsed, cfg);
     }
 
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn lrc_config_num_groups_and_total() {
+        let cfg = LrcConfig::new(20, 5, 3);
+        assert_eq!(cfg.num_groups(), 4);
+        assert_eq!(cfg.local_parity_count(), 4);
+        assert_eq!(cfg.total_blocks(), 20 + 4 + 3); // 27
+    }
+
+    #[test]
+    fn lrc_config_overhead_fraction_correct() {
+        let cfg = LrcConfig::new(12, 4, 2);
+        // 3 local + 2 global = 5 parity / 12 data ≈ 0.4167
+        let overhead = cfg.overhead_fraction();
+        assert!((overhead - 5.0 / 12.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn lrc_config_minimum_viable() {
+        // Smallest valid config: 2 data blocks, group size 2, 1 global parity
+        let cfg = LrcConfig::new(2, 2, 1);
+        assert_eq!(cfg.num_groups(), 1);
+        assert_eq!(cfg.total_blocks(), 4); // 2 data + 1 local + 1 global
+    }
+
+    #[test]
+    #[should_panic(expected = "local_group_size must be > 0")]
+    fn lrc_config_rejects_zero_group_size() {
+        LrcConfig::new(4, 0, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be divisible by")]
+    fn lrc_config_rejects_indivisible() {
+        LrcConfig::new(7, 3, 1);
+    }
+
+    #[test]
+    fn lrc_config_clone_and_copy() {
+        let cfg = LrcConfig::new(8, 4, 2);
+        let cfg2 = cfg; // Copy
+        assert_eq!(cfg, cfg2);
+    }
+
+    #[test]
+    fn gf256_mul_associative_spot_check() {
+        // (a * b) * c == a * (b * c) for a few triples
+        for (a, b, c) in [(3_u8, 7, 11), (42, 99, 200), (255, 128, 1)] {
+            let left = gf256::mul(gf256::mul(a, b), c);
+            let right = gf256::mul(a, gf256::mul(b, c));
+            assert_eq!(left, right, "associativity failed for ({a}, {b}, {c})");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "inverse of zero")]
+    fn gf256_inv_zero_panics() {
+        gf256::inv(0);
+    }
+
+    #[test]
+    fn gf256_mul_self_inverse() {
+        // a * inv(a) == 1 for a few specific values
+        for a in [1_u8, 2, 127, 128, 254, 255] {
+            assert_eq!(
+                gf256::mul(a, gf256::inv(a)),
+                1,
+                "self-inverse failed for {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_local_produces_correct_count() {
+        let cfg = LrcConfig::new(8, 4, 1);
+        let data = make_data(8, 16);
+        let local = encode_local(&cfg, &data);
+        assert_eq!(local.len(), 2); // 8/4 = 2 groups
+    }
+
+    #[test]
+    fn encode_global_produces_correct_count() {
+        let cfg = LrcConfig::new(8, 4, 2);
+        let data = make_data(8, 16);
+        let global = encode_global(&cfg, &data);
+        assert_eq!(global.len(), 2);
+    }
+
+    #[test]
+    fn local_parity_is_xor_of_group() {
+        let cfg = LrcConfig::new(4, 2, 1);
+        let data = vec![
+            vec![0xAA_u8; 8],
+            vec![0x55_u8; 8],
+            vec![0xFF; 8],
+            vec![0x00; 8],
+        ];
+        let local = encode_local(&cfg, &data);
+        // Group 0: 0xAA ^ 0x55 = 0xFF
+        assert_eq!(local[0], vec![0xFF; 8]);
+        // Group 1: 0xFF ^ 0x00 = 0xFF
+        assert_eq!(local[1], vec![0xFF; 8]);
+    }
+
     // ── Property-based tests (proptest) ────────────────────────────────
 
     use proptest::prelude::*;

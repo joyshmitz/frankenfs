@@ -1189,6 +1189,112 @@ mod tests {
         assert!(s.contains("1 corrupt"));
     }
 
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn corruption_kind_display_all_variants() {
+        assert_eq!(
+            CorruptionKind::ChecksumMismatch.to_string(),
+            "checksum_mismatch"
+        );
+        assert_eq!(
+            CorruptionKind::StructuralInvariant.to_string(),
+            "structural_invariant"
+        );
+        assert_eq!(CorruptionKind::BadMagic.to_string(), "bad_magic");
+        assert_eq!(
+            CorruptionKind::UnexpectedZeroes.to_string(),
+            "unexpected_zeroes"
+        );
+        assert_eq!(CorruptionKind::IoError.to_string(), "io_error");
+    }
+
+    #[test]
+    fn severity_display_all_variants() {
+        assert_eq!(Severity::Info.to_string(), "info");
+        assert_eq!(Severity::Warning.to_string(), "warning");
+        assert_eq!(Severity::Error.to_string(), "error");
+        assert_eq!(Severity::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn scrub_report_empty_is_clean() {
+        let report = ScrubReport {
+            findings: vec![],
+            blocks_scanned: 0,
+            blocks_corrupt: 0,
+            blocks_io_error: 0,
+        };
+        assert!(report.is_clean());
+        assert_eq!(report.count_at_severity(Severity::Info), 0);
+    }
+
+    #[test]
+    fn corruption_kind_hash_consistent() {
+        use std::collections::HashSet;
+        let set: HashSet<CorruptionKind> = [
+            CorruptionKind::ChecksumMismatch,
+            CorruptionKind::ChecksumMismatch,
+            CorruptionKind::BadMagic,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn severity_hash_consistent() {
+        use std::collections::HashSet;
+        let set: HashSet<Severity> = [Severity::Info, Severity::Info, Severity::Critical]
+            .into_iter()
+            .collect();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn scrub_finding_display_includes_all_parts() {
+        let finding = ScrubFinding {
+            block: BlockNumber(999),
+            kind: CorruptionKind::BadMagic,
+            severity: Severity::Critical,
+            detail: "expected 0xEF53".into(),
+        };
+        let s = finding.to_string();
+        assert!(s.contains("999"));
+        assert!(s.contains("critical"));
+        assert!(s.contains("bad_magic"));
+        assert!(s.contains("expected 0xEF53"));
+    }
+
+    #[test]
+    fn scrub_report_display_with_io_errors() {
+        let report = ScrubReport {
+            findings: vec![],
+            blocks_scanned: 50,
+            blocks_corrupt: 0,
+            blocks_io_error: 3,
+        };
+        let s = report.to_string();
+        assert!(s.contains("50 blocks"));
+        assert!(s.contains("3 io_error"));
+    }
+
+    #[test]
+    fn severity_total_ordering_equality() {
+        assert_eq!(
+            Severity::Info.cmp(&Severity::Info),
+            std::cmp::Ordering::Equal
+        );
+        assert!(Severity::Critical >= Severity::Info);
+    }
+
+    #[test]
+    fn corruption_kind_copy_semantics() {
+        let a = CorruptionKind::IoError;
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+
     struct AlwaysCorruptValidator;
     impl BlockValidator for AlwaysCorruptValidator {
         fn validate(&self, _block: BlockNumber, _data: &BlockBuf) -> BlockVerdict {
