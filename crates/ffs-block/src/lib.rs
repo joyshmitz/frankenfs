@@ -6559,6 +6559,418 @@ mod tests {
         assert_eq!(cache.inner().write_count(), 3);
     }
 
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn aligned_vec_zero_size_is_empty() {
+        let v = AlignedVec::new(0, 4096);
+        assert!(v.is_empty());
+        assert_eq!(v.len(), 0);
+        assert_eq!(v.as_slice(), &[] as &[u8]);
+        assert_eq!(v.into_vec(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn aligned_vec_alignment_one_is_identity() {
+        let v = AlignedVec::new(16, 1);
+        assert_eq!(v.len(), 16);
+        assert_eq!(v.alignment(), 1);
+        assert_eq!(v.as_slice(), &[0_u8; 16]);
+    }
+
+    #[test]
+    fn aligned_vec_from_vec_already_aligned_avoids_copy() {
+        // When the vec is already aligned, from_vec should reuse it directly.
+        let data = vec![0xAA_u8; 4096];
+        let ptr_before = data.as_ptr();
+        let v = AlignedVec::from_vec(data, 1);
+        // With alignment=1, the original vec pointer should be preserved.
+        assert_eq!(v.as_slice().as_ptr(), ptr_before);
+        assert_eq!(v.len(), 4096);
+    }
+
+    #[test]
+    fn aligned_vec_from_vec_empty() {
+        let v = AlignedVec::from_vec(Vec::new(), 4096);
+        assert!(v.is_empty());
+        assert_eq!(v.alignment(), 4096);
+    }
+
+    #[test]
+    fn aligned_vec_into_vec_with_offset() {
+        // Test the non-trivial path where start > 0 and len < storage.len()
+        let v = AlignedVec::new(128, 512);
+        assert_eq!(v.into_vec().len(), 128);
+    }
+
+    #[test]
+    fn block_buf_zeroed_zero_length() {
+        let buf = BlockBuf::zeroed(0);
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn block_buf_make_mut_creates_independent_copy() {
+        let mut a = BlockBuf::new(vec![1, 2, 3]);
+        let b = a.clone_ref();
+        // Both share the same Arc.
+        a.make_mut()[0] = 99;
+        // After COW, b should still be original data.
+        assert_eq!(a.as_slice(), &[99, 2, 3]);
+        assert_eq!(b.as_slice(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn block_buf_into_inner_with_shared_ref_copies() {
+        let a = BlockBuf::new(vec![10, 20, 30]);
+        let _b = a.clone_ref();
+        // Arc refcount > 1, so into_inner must copy.
+        let v = a.into_inner();
+        assert_eq!(v, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn dirty_tracker_empty_has_zero_counts() {
+        let dt = DirtyTracker::default();
+        assert_eq!(dt.dirty_count(), 0);
+        assert_eq!(dt.dirty_bytes(), 0);
+        assert!(dt.oldest_dirty_age_ticks().is_none());
+        assert!(dt.dirty_blocks_oldest_first().is_empty());
+        assert!(!dt.is_dirty(BlockNumber(0)));
+        assert!(dt.entry(BlockNumber(0)).is_none());
+        let (in_flight, committed) = dt.state_counts();
+        assert_eq!(in_flight, 0);
+        assert_eq!(committed, 0);
+    }
+
+    #[test]
+    fn dirty_tracker_mark_clear_roundtrip() {
+        let mut dt = DirtyTracker::default();
+        dt.mark_dirty(BlockNumber(5), 4096, TxnId(1), None, DirtyState::InFlight);
+        assert!(dt.is_dirty(BlockNumber(5)));
+        assert_eq!(dt.dirty_count(), 1);
+        assert_eq!(dt.dirty_bytes(), 4096);
+
+        dt.clear_dirty(BlockNumber(5));
+        assert!(!dt.is_dirty(BlockNumber(5)));
+        assert_eq!(dt.dirty_count(), 0);
+        assert_eq!(dt.dirty_bytes(), 0);
+    }
+
+    #[test]
+    fn dirty_tracker_clear_nonexistent_is_noop() {
+        let mut dt = DirtyTracker::default();
+        dt.clear_dirty(BlockNumber(999)); // should not panic
+        assert_eq!(dt.dirty_count(), 0);
+    }
+
+    #[test]
+    fn dirty_tracker_remark_updates_age() {
+        let mut dt = DirtyTracker::default();
+        dt.mark_dirty(BlockNumber(1), 4096, TxnId(1), None, DirtyState::InFlight);
+        dt.mark_dirty(BlockNumber(2), 4096, TxnId(1), None, DirtyState::InFlight);
+        // Block 1 is oldest.
+        assert_eq!(dt.dirty_blocks_oldest_first()[0], BlockNumber(1));
+
+        // Re-mark block 1 — it should move to the tail (newest).
+        dt.mark_dirty(
+            BlockNumber(1),
+            4096,
+            TxnId(1),
+            Some(CommitSeq(1)),
+            DirtyState::Committed,
+        );
+        assert_eq!(dt.dirty_blocks_oldest_first()[0], BlockNumber(2));
+        assert_eq!(dt.dirty_count(), 2);
+    }
+
+    #[test]
+    fn dirty_tracker_state_counts_partition() {
+        let mut dt = DirtyTracker::default();
+        dt.mark_dirty(BlockNumber(1), 100, TxnId(1), None, DirtyState::InFlight);
+        dt.mark_dirty(
+            BlockNumber(2),
+            200,
+            TxnId(1),
+            Some(CommitSeq(1)),
+            DirtyState::Committed,
+        );
+        dt.mark_dirty(BlockNumber(3), 300, TxnId(2), None, DirtyState::InFlight);
+        let (in_flight, committed) = dt.state_counts();
+        assert_eq!(in_flight, 2);
+        assert_eq!(committed, 1);
+        assert_eq!(dt.dirty_bytes(), 600);
+    }
+
+    #[test]
+    fn cache_metrics_hit_ratio_zero_when_no_accesses() {
+        let m = CacheMetrics {
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            dirty_flushes: 0,
+            t1_len: 0,
+            t2_len: 0,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 0,
+            dirty_blocks: 0,
+            dirty_bytes: 0,
+            oldest_dirty_age_ticks: None,
+            capacity: 0,
+            p: 0,
+        };
+        assert_eq!(m.hit_ratio(), 0.0);
+        assert_eq!(m.dirty_ratio(), 0.0);
+    }
+
+    #[test]
+    fn cache_metrics_dirty_ratio_zero_when_zero_capacity() {
+        let m = CacheMetrics {
+            hits: 10,
+            misses: 5,
+            evictions: 0,
+            dirty_flushes: 0,
+            t1_len: 0,
+            t2_len: 0,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 0,
+            dirty_blocks: 5,
+            dirty_bytes: 20480,
+            oldest_dirty_age_ticks: Some(3),
+            capacity: 0,
+            p: 0,
+        };
+        assert_eq!(m.dirty_ratio(), 0.0);
+        // hit_ratio should still work.
+        let ratio = m.hit_ratio();
+        assert!((ratio - 10.0 / 15.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn memory_pressure_target_capacity_clamps_to_one() {
+        // Even under Critical pressure, target should be >= 1.
+        assert!(MemoryPressure::Critical.target_capacity(1) >= 1);
+        assert!(MemoryPressure::Critical.target_capacity(2) >= 1);
+        assert!(MemoryPressure::Critical.target_capacity(100) >= 1);
+    }
+
+    #[test]
+    fn memory_pressure_none_preserves_full_capacity() {
+        assert_eq!(MemoryPressure::None.target_capacity(100), 100);
+        assert_eq!(MemoryPressure::None.target_capacity(1), 1);
+    }
+
+    #[test]
+    fn memory_pressure_ordering_decreases_target() {
+        let cap = 100;
+        let none = MemoryPressure::None.target_capacity(cap);
+        let low = MemoryPressure::Low.target_capacity(cap);
+        let med = MemoryPressure::Medium.target_capacity(cap);
+        let high = MemoryPressure::High.target_capacity(cap);
+        let crit = MemoryPressure::Critical.target_capacity(cap);
+        assert!(none >= low);
+        assert!(low >= med);
+        assert!(med >= high);
+        assert!(high >= crit);
+        assert!(crit >= 1);
+    }
+
+    #[test]
+    fn flush_daemon_config_equal_watermarks_is_invalid() {
+        let config = FlushDaemonConfig {
+            high_watermark: 0.5,
+            critical_watermark: 0.5,
+            ..FlushDaemonConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn flush_daemon_config_inverted_watermarks_is_invalid() {
+        let config = FlushDaemonConfig {
+            high_watermark: 0.9,
+            critical_watermark: 0.8,
+            ..FlushDaemonConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn flush_daemon_config_out_of_range_watermarks_is_invalid() {
+        let config = FlushDaemonConfig {
+            high_watermark: 1.5,
+            critical_watermark: 2.0,
+            ..FlushDaemonConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn flush_daemon_config_zero_reduced_batch_is_invalid() {
+        let config = FlushDaemonConfig {
+            reduced_batch_size: 0,
+            ..FlushDaemonConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn byte_block_device_oob_read_returns_error() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 2);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        // Block 2 is out of bounds (only blocks 0, 1 exist).
+        let result = dev.read_block(&cx, BlockNumber(2));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn byte_block_device_oob_write_returns_error() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 2);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let result = dev.write_block(&cx, BlockNumber(2), &[0_u8; 4096]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn byte_block_device_block_count_and_size() {
+        let mem = MemoryByteDevice::new(4096 * 10);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        assert_eq!(dev.block_size(), 4096);
+        assert_eq!(dev.block_count(), 10);
+    }
+
+    #[test]
+    fn byte_block_device_write_wrong_size_returns_error() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 2);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        // Write data that is not exactly block_size.
+        let result = dev.write_block(&cx, BlockNumber(0), &[0_u8; 100]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn arc_cache_capacity_one() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new(dev, 1).expect("cache");
+
+        cache
+            .write_block(&cx, BlockNumber(0), &[0xAA; 4096])
+            .expect("write 0");
+        cache
+            .write_block(&cx, BlockNumber(1), &[0xBB; 4096])
+            .expect("write 1");
+
+        // With capacity 1, reading block 1 should succeed (most recent).
+        let r = cache.read_block(&cx, BlockNumber(1)).expect("read 1");
+        assert_eq!(r.as_slice()[0], 0xBB);
+
+        // Block 0 was evicted but still readable from device.
+        let r0 = cache.read_block(&cx, BlockNumber(0)).expect("read 0");
+        assert_eq!(r0.as_slice()[0], 0xAA);
+
+        let m = cache.metrics();
+        assert!(m.resident <= 1);
+    }
+
+    #[test]
+    fn arc_cache_metrics_after_sync_show_zero_dirty() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 8);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new_with_policy(dev, 4, ArcWritePolicy::WriteBack).expect("cache");
+
+        cache
+            .write_block(&cx, BlockNumber(0), &[1; 4096])
+            .expect("write");
+        assert!(cache.dirty_count() > 0);
+
+        cache.sync(&cx).expect("sync");
+        assert_eq!(cache.dirty_count(), 0);
+        let m = cache.metrics();
+        assert_eq!(m.dirty_blocks, 0);
+        assert_eq!(m.dirty_bytes, 0);
+    }
+
+    #[test]
+    fn arc_cache_write_back_read_returns_cached_dirty_data() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new_with_policy(dev, 4, ArcWritePolicy::WriteBack).expect("cache");
+
+        cache
+            .write_block(&cx, BlockNumber(0), &[0xFF; 4096])
+            .expect("write");
+        // The dirty data should be readable from cache before sync.
+        let r = cache.read_block(&cx, BlockNumber(0)).expect("read");
+        assert_eq!(r.as_slice(), &[0xFF; 4096]);
+    }
+
+    #[test]
+    fn fault_injector_reset_clears_rules_and_log() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let fi = FaultInjector::new(dev, 42);
+
+        fi.fail_on_read(BlockNumber(0), FaultMode::Persistent);
+        let _ = fi.read_block(&cx, BlockNumber(0)); // triggers fault
+        assert!(!fi.fault_log().is_empty());
+
+        fi.reset();
+        assert!(fi.fault_log().is_empty());
+        // After reset, read should succeed (no rules).
+        fi.read_block(&cx, BlockNumber(0))
+            .expect("read after reset");
+    }
+
+    #[test]
+    fn fault_injector_multiple_rules_same_block() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let fi = FaultInjector::new(dev, 0);
+
+        // Add two OneShot rules for the same read target.
+        fi.fail_on_read(BlockNumber(0), FaultMode::OneShot);
+        fi.fail_on_read(BlockNumber(0), FaultMode::OneShot);
+
+        // First read triggers first rule.
+        assert!(fi.read_block(&cx, BlockNumber(0)).is_err());
+        // Second read triggers second rule.
+        assert!(fi.read_block(&cx, BlockNumber(0)).is_err());
+        // Third read should succeed (both OneShot rules fired).
+        fi.read_block(&cx, BlockNumber(0)).expect("third read");
+        assert_eq!(fi.fault_log().len(), 2);
+    }
+
+    #[test]
+    fn flush_pin_token_noop_is_noop() {
+        let token = FlushPinToken::noop();
+        assert!(token.is_noop());
+        let real_token = FlushPinToken::new(42_u32);
+        assert!(!real_token.is_noop());
+    }
+
+    #[test]
+    fn normalized_alignment_edge_cases() {
+        assert_eq!(normalized_alignment(0), 1);
+        assert_eq!(normalized_alignment(1), 1);
+        assert_eq!(normalized_alignment(2), 2);
+        assert_eq!(normalized_alignment(3), 4);
+        assert_eq!(normalized_alignment(4), 4);
+        assert_eq!(normalized_alignment(5), 8);
+        assert_eq!(normalized_alignment(4096), 4096);
+    }
+
     // ── Property-based tests (proptest) ────────────────────────────────
 
     use proptest::prelude::*;

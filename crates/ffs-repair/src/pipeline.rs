@@ -3838,4 +3838,214 @@ mod tests {
             E2E_CORRUPTION_PERCENT,
         );
     }
+
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn recovery_report_is_fully_recovered_when_no_corruption() {
+        let report = RecoveryReport {
+            blocks_scanned: 100,
+            total_corrupt: 0,
+            total_recovered: 0,
+            total_unrecoverable: 0,
+            block_outcomes: BTreeMap::new(),
+            group_summaries: Vec::new(),
+        };
+        assert!(report.is_fully_recovered());
+    }
+
+    #[test]
+    fn recovery_report_not_fully_recovered_with_unrecoverable() {
+        let report = RecoveryReport {
+            blocks_scanned: 100,
+            total_corrupt: 2,
+            total_recovered: 1,
+            total_unrecoverable: 1,
+            block_outcomes: BTreeMap::from([(42, BlockOutcome::Unrecoverable)]),
+            group_summaries: Vec::new(),
+        };
+        assert!(!report.is_fully_recovered());
+    }
+
+    #[test]
+    fn recovery_report_serde_round_trip() {
+        let report = RecoveryReport {
+            blocks_scanned: 50,
+            total_corrupt: 1,
+            total_recovered: 1,
+            total_unrecoverable: 0,
+            block_outcomes: BTreeMap::from([
+                (10, BlockOutcome::Clean),
+                (11, BlockOutcome::Recovered),
+            ]),
+            group_summaries: vec![GroupRecoverySummary {
+                group: 0,
+                corrupt_count: 1,
+                recovered_count: 1,
+                unrecoverable_count: 0,
+                symbols_refreshed: true,
+                decoder_stats: None,
+            }],
+        };
+        let json = serde_json::to_string(&report).expect("serialize");
+        let parsed: RecoveryReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.blocks_scanned, 50);
+        assert_eq!(parsed.total_corrupt, 1);
+        assert!(parsed.is_fully_recovered());
+    }
+
+    #[test]
+    fn block_outcome_serde_round_trip() {
+        for outcome in [
+            BlockOutcome::Clean,
+            BlockOutcome::Recovered,
+            BlockOutcome::Unrecoverable,
+        ] {
+            let json = serde_json::to_string(&outcome).expect("serialize");
+            let parsed: BlockOutcome = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, outcome);
+        }
+    }
+
+    #[test]
+    fn scrub_daemon_config_default_has_sensible_values() {
+        let cfg = ScrubDaemonConfig::default();
+        assert!(!cfg.interval.is_zero());
+        assert!(!cfg.cancel_check_interval.is_zero());
+        assert!(cfg.budget_poll_quota_threshold > 0);
+        assert!(cfg.backpressure_headroom_threshold > 0.0);
+    }
+
+    #[test]
+    fn scrub_daemon_metrics_default_is_zeroed() {
+        let m = ScrubDaemonMetrics::default();
+        assert_eq!(m.blocks_scanned_total, 0);
+        assert_eq!(m.blocks_corrupt_found, 0);
+        assert_eq!(m.blocks_recovered, 0);
+        assert_eq!(m.blocks_unrecoverable, 0);
+        assert_eq!(m.scrub_rounds_completed, 0);
+        assert!(
+            (m.scrub_rate_blocks_per_sec - 0.0).abs() < f64::EPSILON,
+            "scrub_rate should be zero"
+        );
+        assert_eq!(m.backpressure_yields, 0);
+    }
+
+    #[test]
+    fn scrub_daemon_metrics_serde_round_trip() {
+        let m = ScrubDaemonMetrics {
+            blocks_scanned_total: 1000,
+            blocks_corrupt_found: 5,
+            blocks_recovered: 4,
+            blocks_unrecoverable: 1,
+            scrub_rounds_completed: 3,
+            current_group: 7,
+            scrub_rate_blocks_per_sec: 123.45,
+            backpressure_yields: 2,
+        };
+        let json = serde_json::to_string(&m).expect("serialize");
+        let parsed: ScrubDaemonMetrics = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.blocks_scanned_total, 1000);
+        assert_eq!(parsed.blocks_recovered, 4);
+    }
+
+    #[test]
+    fn scrub_daemon_step_serde_round_trip() {
+        let step = ScrubDaemonStep {
+            group: 3,
+            blocks_scanned: 64,
+            corrupt_count: 2,
+            recovered_count: 2,
+            unrecoverable_count: 0,
+            duration_ms: 150,
+        };
+        let json = serde_json::to_string(&step).expect("serialize");
+        let parsed: ScrubDaemonStep = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.group, 3);
+        assert_eq!(parsed.blocks_scanned, 64);
+    }
+
+    #[test]
+    fn refresh_mode_as_str_covers_all_variants() {
+        assert_eq!(RefreshMode::Recovery.as_str(), "recovery");
+        assert_eq!(RefreshMode::EagerWrite.as_str(), "eager_write");
+        assert_eq!(RefreshMode::LazyScrub.as_str(), "lazy_scrub");
+        assert_eq!(
+            RefreshMode::AdaptiveEagerWrite.as_str(),
+            "adaptive_eager_write"
+        );
+        assert_eq!(
+            RefreshMode::AdaptiveLazyScrub.as_str(),
+            "adaptive_lazy_scrub"
+        );
+        assert_eq!(RefreshMode::StalenessTimeout.as_str(), "staleness_timeout");
+    }
+
+    #[test]
+    fn queued_repair_refresh_empty_drain() {
+        let queue = QueuedRepairRefresh::from_group_configs(&[]);
+        let drained = queue.drain_queued_groups().expect("drain");
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn queued_repair_refresh_maps_blocks_to_groups() {
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let configs = vec![GroupConfig {
+            layout,
+            source_first_block: BlockNumber(0),
+            source_block_count: 32,
+        }];
+        let queue = QueuedRepairRefresh::from_group_configs(&configs);
+
+        // Block 10 is in group 0's source range.
+        let cx = Cx::for_testing();
+        queue
+            .on_flush_committed(&cx, &[BlockNumber(10)])
+            .expect("flush");
+        let drained = queue.drain_queued_groups().expect("drain");
+        assert_eq!(drained, vec![GroupNumber(0)]);
+
+        // Second drain should be empty.
+        let drained2 = queue.drain_queued_groups().expect("drain2");
+        assert!(drained2.is_empty());
+    }
+
+    #[test]
+    fn queued_repair_refresh_ignores_blocks_outside_any_group() {
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let configs = vec![GroupConfig {
+            layout,
+            source_first_block: BlockNumber(0),
+            source_block_count: 8,
+        }];
+        let queue = QueuedRepairRefresh::from_group_configs(&configs);
+
+        // Block 100 is outside all groups.
+        let cx = Cx::for_testing();
+        queue
+            .on_flush_committed(&cx, &[BlockNumber(100)])
+            .expect("flush");
+        let drained = queue.drain_queued_groups().expect("drain");
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn group_recovery_summary_serde_omits_none_decoder_stats() {
+        let summary = GroupRecoverySummary {
+            group: 1,
+            corrupt_count: 0,
+            recovered_count: 0,
+            unrecoverable_count: 0,
+            symbols_refreshed: false,
+            decoder_stats: None,
+        };
+        let json = serde_json::to_string(&summary).expect("serialize");
+        assert!(
+            !json.contains("decoder_stats"),
+            "None decoder_stats should be omitted"
+        );
+    }
 }

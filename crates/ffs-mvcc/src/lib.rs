@@ -6115,6 +6115,196 @@ mod tests {
         assert_eq!(data[0], 0xDE);
     }
 
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn transaction_new_has_empty_sets() {
+        let store = MvccStore::new();
+        let txn = Transaction::new(TxnId(1), store.current_snapshot());
+        assert_eq!(txn.id(), TxnId(1));
+        assert_eq!(txn.pending_writes(), 0);
+        assert!(txn.read_set().is_empty());
+        assert!(txn.write_set().is_empty());
+        assert!(txn.staged_write(BlockNumber(0)).is_none());
+        assert!(txn.staged_physical(BlockNumber(0)).is_none());
+    }
+
+    #[test]
+    fn transaction_record_read_only_tracks_first() {
+        let store = MvccStore::new();
+        let mut txn = Transaction::new(TxnId(1), store.current_snapshot());
+        txn.record_read(BlockNumber(5), CommitSeq(10));
+        txn.record_read(BlockNumber(5), CommitSeq(20)); // should be ignored
+        assert_eq!(txn.read_set().len(), 1);
+        assert_eq!(txn.read_set()[&BlockNumber(5)], CommitSeq(10));
+    }
+
+    #[test]
+    fn transaction_stage_write_overwrites_previous() {
+        let store = MvccStore::new();
+        let mut txn = Transaction::new(TxnId(1), store.current_snapshot());
+        txn.stage_write(BlockNumber(0), vec![1, 2, 3]);
+        txn.stage_write(BlockNumber(0), vec![4, 5, 6]);
+        assert_eq!(txn.pending_writes(), 1);
+        assert_eq!(txn.staged_write(BlockNumber(0)), Some(&[4, 5, 6][..]));
+    }
+
+    #[test]
+    fn block_version_bytes_inline_returns_none_for_identical() {
+        let v = BlockVersion {
+            block: BlockNumber(0),
+            commit_seq: CommitSeq(1),
+            writer: TxnId(1),
+            data: VersionData::Identical,
+        };
+        assert!(v.bytes_inline().is_none());
+    }
+
+    #[test]
+    fn block_version_bytes_inline_returns_some_for_full() {
+        let v = BlockVersion {
+            block: BlockNumber(0),
+            commit_seq: CommitSeq(1),
+            writer: TxnId(1),
+            data: VersionData::Full(vec![0xAA; 64]),
+        };
+        assert_eq!(v.bytes_inline().unwrap(), &[0xAA; 64]);
+    }
+
+    #[test]
+    fn ebr_version_stats_pending_versions() {
+        let s = EbrVersionStats {
+            retired_versions: 10,
+            reclaimed_versions: 3,
+        };
+        assert_eq!(s.pending_versions(), 7);
+
+        // Saturating: reclaimed > retired should give 0, not underflow.
+        let s2 = EbrVersionStats {
+            retired_versions: 0,
+            reclaimed_versions: 5,
+        };
+        assert_eq!(s2.pending_versions(), 0);
+    }
+
+    #[test]
+    fn commit_error_display_formats() {
+        let e = CommitError::Conflict {
+            block: BlockNumber(42),
+            snapshot: CommitSeq(1),
+            observed: CommitSeq(3),
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("42"), "should mention block number");
+
+        let e2 = CommitError::SsiConflict {
+            pivot_block: BlockNumber(7),
+            read_version: CommitSeq(1),
+            write_version: CommitSeq(2),
+            concurrent_txn: TxnId(5),
+        };
+        let msg2 = format!("{e2}");
+        assert!(msg2.contains("SSI"), "should mention SSI");
+
+        let e3 = CommitError::DurabilityFailure {
+            detail: "disk error".to_owned(),
+        };
+        let msg3 = format!("{e3}");
+        assert!(msg3.contains("disk error"));
+    }
+
+    #[test]
+    fn mvcc_store_new_is_consistent() {
+        let store = MvccStore::new();
+        assert_eq!(store.version_count(), 0);
+        assert_eq!(store.block_count_versioned(), 0);
+        assert!(store.watermark().is_none());
+        assert_eq!(store.active_snapshot_count(), 0);
+        let snap = store.current_snapshot();
+        assert_eq!(snap.high, CommitSeq(0));
+    }
+
+    #[test]
+    fn mvcc_store_commit_empty_transaction_advances_sequence() {
+        let mut store = MvccStore::new();
+        let txn = store.begin();
+        assert_eq!(txn.pending_writes(), 0);
+        let seq = store.commit(txn).expect("commit empty");
+        assert_eq!(seq, CommitSeq(1));
+        // Another empty commit advances again.
+        let txn2 = store.begin();
+        let seq2 = store.commit(txn2).expect("commit empty 2");
+        assert_eq!(seq2, CommitSeq(2));
+    }
+
+    #[test]
+    fn read_visible_returns_none_for_unwritten_block() {
+        let store = MvccStore::new();
+        let snap = store.current_snapshot();
+        assert!(store.read_visible(BlockNumber(999), snap).is_none());
+    }
+
+    #[test]
+    fn snapshot_double_register_and_release() {
+        let mut store = MvccStore::new();
+        let snap = Snapshot { high: CommitSeq(1) };
+        store.register_snapshot(snap);
+        store.register_snapshot(snap);
+        assert_eq!(store.active_snapshot_count(), 2);
+
+        assert!(store.release_snapshot(snap));
+        assert_eq!(store.active_snapshot_count(), 1);
+        assert!(store.release_snapshot(snap));
+        assert_eq!(store.active_snapshot_count(), 0);
+
+        // Release when already gone returns false.
+        assert!(!store.release_snapshot(snap));
+    }
+
+    #[test]
+    fn prune_safe_keeps_latest_version_per_block() {
+        let mut store = MvccStore::new();
+        // Write 3 versions to the same block.
+        for i in 0..3_u8 {
+            let mut txn = store.begin();
+            txn.stage_write(BlockNumber(0), vec![i; 8]);
+            store.commit(txn).expect("commit");
+        }
+        assert_eq!(store.version_count(), 3);
+
+        // No active snapshots, so prune_safe keeps only the latest.
+        store.prune_safe();
+        assert_eq!(store.version_count(), 1);
+
+        // The surviving version should be the last committed value.
+        let snap = store.current_snapshot();
+        let data = store
+            .read_visible(BlockNumber(0), snap)
+            .expect("visible after prune");
+        assert_eq!(&*data, &[2_u8; 8]);
+    }
+
+    #[test]
+    fn block_version_stats_reflect_chain_state() {
+        let mut store = MvccStore::new();
+        // Write 5 versions to block 0.
+        for i in 0..5_u8 {
+            let mut txn = store.begin();
+            txn.stage_write(BlockNumber(0), vec![i; 8]);
+            store.commit(txn).expect("commit");
+        }
+        let stats = store.block_version_stats();
+        assert_eq!(stats.tracked_blocks, 1);
+        assert_eq!(stats.max_chain_length, 5);
+    }
+
+    #[test]
+    fn gc_backpressure_config_default_is_sensible() {
+        let cfg = GcBackpressureConfig::default();
+        assert!(cfg.min_poll_quota > 0);
+        assert!(!cfg.throttle_sleep.is_zero());
+    }
+
     // ── Property-based tests (proptest) ────────────────────────────────────
 
     use proptest::prelude::*;

@@ -2753,12 +2753,12 @@ mod tests {
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
         };
-        let orig_ctime = inode.ctime;
-        let orig_mtime = inode.mtime;
+        let ct_before = inode.ctime;
+        let mt_before = inode.mtime;
         touch_atime(&mut inode, 9999, 123);
         assert_eq!(inode.atime, 9999);
-        assert_eq!(inode.ctime, orig_ctime, "ctime unchanged by touch_atime");
-        assert_eq!(inode.mtime, orig_mtime, "mtime unchanged by touch_atime");
+        assert_eq!(inode.ctime, ct_before, "ctime unchanged by touch_atime");
+        assert_eq!(inode.mtime, mt_before, "mtime unchanged by touch_atime");
     }
 
     #[test]
@@ -2788,12 +2788,12 @@ mod tests {
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
         };
-        let orig_atime = inode.atime;
-        let orig_mtime = inode.mtime;
+        let at_before = inode.atime;
+        let mt_before = inode.mtime;
         touch_ctime(&mut inode, 8888, 456);
         assert_eq!(inode.ctime, 8888);
-        assert_eq!(inode.atime, orig_atime, "atime unchanged by touch_ctime");
-        assert_eq!(inode.mtime, orig_mtime, "mtime unchanged by touch_ctime");
+        assert_eq!(inode.atime, at_before, "atime unchanged by touch_ctime");
+        assert_eq!(inode.mtime, mt_before, "mtime unchanged by touch_ctime");
     }
 
     #[test]
@@ -3236,24 +3236,20 @@ mod tests {
         compute_and_set_checksum(&mut raw_b, 0xDEAD, 2);
 
         // Compare full 32-bit checksum (lo + hi).
-        let full_a = u16::from_le_bytes([
+        let full_a = u32::from(u16::from_le_bytes([
             raw_a[INODE_CHECKSUM_LO_OFFSET],
             raw_a[INODE_CHECKSUM_LO_OFFSET + 1],
-        ]) as u32
-            | (u16::from_le_bytes([
-                raw_a[INODE_CHECKSUM_HI_OFFSET],
-                raw_a[INODE_CHECKSUM_HI_OFFSET + 1],
-            ]) as u32)
-                << 16;
-        let full_b = u16::from_le_bytes([
+        ])) | u32::from(u16::from_le_bytes([
+            raw_a[INODE_CHECKSUM_HI_OFFSET],
+            raw_a[INODE_CHECKSUM_HI_OFFSET + 1],
+        ])) << 16;
+        let full_b = u32::from(u16::from_le_bytes([
             raw_b[INODE_CHECKSUM_LO_OFFSET],
             raw_b[INODE_CHECKSUM_LO_OFFSET + 1],
-        ]) as u32
-            | (u16::from_le_bytes([
-                raw_b[INODE_CHECKSUM_HI_OFFSET],
-                raw_b[INODE_CHECKSUM_HI_OFFSET + 1],
-            ]) as u32)
-                << 16;
+        ])) | u32::from(u16::from_le_bytes([
+            raw_b[INODE_CHECKSUM_HI_OFFSET],
+            raw_b[INODE_CHECKSUM_HI_OFFSET + 1],
+        ])) << 16;
 
         assert_ne!(
             full_a, full_b,
@@ -3389,19 +3385,19 @@ mod tests {
         )
         .unwrap();
 
-        // Allocate a block and mark it as xattr.
-        let hint = ffs_alloc::AllocHint {
-            goal_group: Some(GroupNumber(0)),
-            ..Default::default()
-        };
-        let acl_blk =
-            ffs_alloc::alloc_blocks_persist(&cx, &dev, &geo, &mut groups, 1, &hint, &pctx).unwrap();
-        inode.file_acl = acl_blk.start.0;
-        // Write all zeros — invalid xattr magic.
-        dev.write_block(&cx, acl_blk.start, &[0u8; 4096]).unwrap();
+        // Pre-write an all-zero xattr block at block 600. Mark as allocated in bitmap.
+        let xattr_block = BlockNumber(600);
+        dev.write_block(&cx, xattr_block, &[0u8; 4096]).unwrap();
+        let bitmap_block = groups[0].block_bitmap_block;
+        let mut bitmap = vec![0u8; 4096];
+        bitmap[600 / 8] |= 1 << (600 % 8);
+        dev.write_block(&cx, bitmap_block, &bitmap).unwrap();
+        groups[0].free_blocks -= 1;
+
+        inode.file_acl = 600;
         write_inode(&cx, &dev, &geo, &groups, ino, &inode, 0).unwrap();
 
-        let free_before: u32 = groups.iter().map(|g| g.free_blocks).sum();
+        let free_before = groups[0].free_blocks;
         delete_inode(
             &cx,
             &dev,
@@ -3414,12 +3410,12 @@ mod tests {
             &pctx,
         )
         .unwrap();
-        let free_after: u32 = groups.iter().map(|g| g.free_blocks).sum();
 
-        assert_eq!(inode.file_acl, 0, "file_acl should be cleared");
-        assert!(
-            free_after > free_before,
-            "invalid xattr block should be freed"
+        assert_eq!(inode.file_acl, 0, "file_acl should be cleared after delete");
+        assert_eq!(
+            groups[0].free_blocks,
+            free_before + 1,
+            "zeroed xattr block should be freed"
         );
     }
 }

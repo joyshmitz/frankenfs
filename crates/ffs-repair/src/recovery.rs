@@ -1139,4 +1139,94 @@ mod tests {
             Some("decoder returned incomplete recovery")
         );
     }
+
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn recovery_decoder_stats_default_is_zeroed() {
+        let s = RecoveryDecoderStats::default();
+        assert_eq!(s.peeled, 0);
+        assert_eq!(s.inactivated, 0);
+        assert_eq!(s.gauss_ops, 0);
+        assert_eq!(s.pivots_selected, 0);
+    }
+
+    #[test]
+    fn recovery_outcome_serde_round_trip() {
+        for outcome in [
+            RecoveryOutcome::Recovered,
+            RecoveryOutcome::Partial,
+            RecoveryOutcome::Failed,
+        ] {
+            let json = serde_json::to_string(&outcome).expect("serialize");
+            let parsed: RecoveryOutcome = serde_json::from_str(&json).expect("parse");
+            assert_eq!(parsed, outcome);
+        }
+    }
+
+    #[test]
+    fn recovery_attempt_result_is_success_checks_outcome() {
+        let evidence = RecoveryEvidence {
+            group: 0,
+            generation: 1,
+            corrupt_count: 1,
+            symbols_available: 4,
+            symbols_used: 4,
+            decoder_stats: RecoveryDecoderStats::default(),
+            outcome: RecoveryOutcome::Recovered,
+            reason: None,
+        };
+        let result = RecoveryAttemptResult {
+            evidence,
+            repaired_blocks: vec![BlockNumber(0)],
+        };
+        assert!(result.is_success());
+
+        let failed_evidence = RecoveryEvidence {
+            outcome: RecoveryOutcome::Failed,
+            ..result.evidence.clone()
+        };
+        let failed_result = RecoveryAttemptResult {
+            evidence: failed_evidence,
+            repaired_blocks: Vec::new(),
+        };
+        assert!(!failed_result.is_success());
+    }
+
+    #[test]
+    fn recovery_evidence_to_json_is_valid() {
+        let evidence = RecoveryEvidence {
+            group: 3,
+            generation: 7,
+            corrupt_count: 2,
+            symbols_available: 8,
+            symbols_used: 6,
+            decoder_stats: RecoveryDecoderStats {
+                peeled: 1,
+                inactivated: 0,
+                gauss_ops: 5,
+                pivots_selected: 2,
+            },
+            outcome: RecoveryOutcome::Recovered,
+            reason: None,
+        };
+        let json = evidence.to_json().expect("to_json");
+        assert!(json.contains("\"recovered\""));
+        assert!(json.contains("\"group\":3"));
+    }
+
+    #[test]
+    fn map_corrupt_blocks_rejects_duplicate_indices() {
+        let device = MemBlockDevice::new(256, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let orch = GroupRecoveryOrchestrator::new(&device, test_uuid(), layout, BlockNumber(0), 32)
+            .expect("orch");
+
+        // Duplicate block numbers should be deduplicated (not rejected).
+        let indices = orch
+            .map_corrupt_blocks_to_indices(&[BlockNumber(5), BlockNumber(5)])
+            .expect("mapping");
+        assert_eq!(indices.len(), 1, "duplicates should be deduplicated");
+    }
 }
