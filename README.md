@@ -126,6 +126,7 @@ Parser crates are pure (no I/O). MVCC knows nothing about files. FUSE knows noth
 ## Architecture
 
 FrankenFS is a 21-crate Cargo workspace (19 core crates + 2 legacy/reference wrappers) with a strict DAG dependency graph:
+`ffs-harness` links directly against `ffs-core` for conformance/perf surfaces, and `ffs-cli` depends on both `ffs-core` and `ffs-harness`.
 
 ```
                     ┌──────────┐  ┌──────────┐
@@ -189,6 +190,7 @@ FrankenFS is a 21-crate Cargo workspace (19 core crates + 2 legacy/reference wra
 - **MVCC is transport-agnostic.** `ffs-mvcc` knows nothing about FUSE, files, or directories.
 - **FUSE delegates to ffs-core.** `ffs-fuse` maps FUSE protocol to `ffs-core::FrankenFsEngine` — it contains no filesystem logic.
 - **Repair is orthogonal.** `ffs-repair` operates on blocks, not files. It doesn't know about inodes or directories.
+- **Repair wiring is lifecycle-based.** `ffs-core` reaches repair functionality via `ffs-mvcc`/block flush integration rather than a direct `ffs-core -> ffs-repair` dependency edge.
 - **No dependency cycles.** The crate graph is a strict DAG.
 - **`Cx` everywhere.** Any operation that performs I/O or may block takes `&asupersync::Cx` as its first parameter.
 
@@ -223,8 +225,7 @@ userspace write(fd, buf, count)
           → ffs-btree: update extent tree
         → ffs-block: write through cache
       → ffs-journal: record transaction
-      → ffs-repair: refresh repair symbols
-      → ffs-mvcc: commit (SSI validation)
+      → ffs-mvcc: commit (SSI validation + repair refresh hooks)
     → ffs-core: return bytes written
   → fuser → kernel → userspace
 ```
@@ -415,7 +416,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 - **Linux only.** FUSE is the sole mount target. No macOS or Windows support planned.
 - **Nightly Rust required.** Edition 2024 features require the nightly toolchain.
 - **Runtime is still early-stage.** Even with full tracked parity, mount/write paths should still be treated as experimental in operational environments.
-- **External dependencies.** Requires `asupersync` and `ftui` as sibling project checkouts (not yet published to crates.io).
+- **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.
 - **Legacy reference corpus is checked in.** The Linux kernel ext4/btrfs source used for behavioral extraction is available under `legacy_ext4_and_btrfs_code/linux-fs/`. The extracted behavior is fully captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md).
 
 ---

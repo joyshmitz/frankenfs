@@ -7,10 +7,11 @@
 //! - `mkfs.ext4` and `debugfs` on `$PATH`
 //! - `fusermount3` permission to mount (may fail in containers)
 //!
-//! Tests are gated with `#[ignore = "requires /dev/fuse"]` so they only run when explicitly requested
-//! via `cargo test -- --ignored` or `cargo test -- --include-ignored`.
-//! If FUSE mounting fails (e.g. in restricted environments), the tests skip
-//! gracefully rather than panicking.
+//! A small read-only smoke subset runs by default and returns early when
+//! prerequisites are unavailable.
+//! Heavier write-path and btrfs coverage remains gated with
+//! `#[ignore = "requires /dev/fuse"]` and can be run explicitly via
+//! `cargo test -- --ignored` or `cargo test -- --include-ignored`.
 
 use asupersync::Cx;
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
@@ -145,7 +146,6 @@ fn try_mount_ffs(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSes
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_read_hello_txt() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -167,7 +167,6 @@ fn fuse_read_hello_txt() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_readdir_root() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -205,7 +204,6 @@ fn fuse_readdir_root() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_read_nested_file() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");

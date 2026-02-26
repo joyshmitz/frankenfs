@@ -3,8 +3,9 @@
 //!
 //! Pure parsing crate — no I/O, no side effects. Parses byte slices into
 //! typed Rust structures representing ext4 superblocks, group descriptors,
-//! inodes, extent trees, directory entries, JBD2 journal structures, and
-//! btrfs superblocks, headers, leaf item tables, and internal node key-pointers.
+//! inodes, extent trees, directory entries, and ext4 journal-related
+//! superblock fields, plus btrfs superblocks, headers, leaf item tables,
+//! and internal node key-pointers.
 
 pub mod btrfs;
 pub mod ext4;

@@ -641,12 +641,8 @@ dependencies = [
 name = "ffs-dir"
 version = "0.1.0"
 dependencies = [
- "asupersync",
- "ffs-block",
  "ffs-error",
- "ffs-inode",
  "ffs-ondisk",
- "ffs-types",
  "libc",
  "proptest",
 ]
@@ -775,7 +771,6 @@ name = "ffs-ondisk"
 version = "0.1.0"
 dependencies = [
  "crc32c",
- "ffs-error",
  "ffs-types",
  "proptest",
  "serde",
@@ -824,7 +819,6 @@ dependencies = [
 name = "ffs-xattr"
 version = "0.1.0"
 dependencies = [
- "ffs-block",
  "ffs-error",
  "ffs-ondisk",
  "ffs-types",
