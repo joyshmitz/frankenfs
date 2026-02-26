@@ -1195,6 +1195,358 @@ mod tests {
         );
     }
 
+    // ── Edge-case tests (SilverWaterfall) ─────────────────────────────
+
+    #[test]
+    fn parse_from_image_too_small() {
+        // Image is smaller than BTRFS_SUPER_INFO_OFFSET + BTRFS_SUPER_INFO_SIZE
+        let image = vec![0_u8; BTRFS_SUPER_INFO_OFFSET + 100];
+        let err = BtrfsSuperblock::parse_from_image(&image).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn parse_from_image_happy_path() {
+        // Build a valid superblock at the correct offset
+        let mut image = vec![0_u8; BTRFS_SUPER_INFO_OFFSET + BTRFS_SUPER_INFO_SIZE];
+        let sb_region = &mut image[BTRFS_SUPER_INFO_OFFSET..];
+        sb_region[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb_region[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        sb_region[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+        sb_region[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
+        sb_region[0x48..0x50].copy_from_slice(&42_u64.to_le_bytes());
+
+        let parsed = BtrfsSuperblock::parse_from_image(&image).expect("parse from image");
+        assert_eq!(parsed.magic, BTRFS_MAGIC);
+        assert_eq!(parsed.generation, 42);
+    }
+
+    #[test]
+    fn btrfs_key_equality_and_copy() {
+        let k1 = BtrfsKey {
+            objectid: 256,
+            item_type: 132,
+            offset: 0,
+        };
+        let k2 = k1; // Copy
+        assert_eq!(k1, k2);
+
+        let k3 = BtrfsKey {
+            objectid: 256,
+            item_type: 133,
+            offset: 0,
+        };
+        assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn btrfs_physical_mapping_equality_and_copy() {
+        let m1 = BtrfsPhysicalMapping {
+            devid: 1,
+            physical: 0x4000,
+        };
+        let m2 = m1; // Copy
+        assert_eq!(m1, m2);
+
+        let m3 = BtrfsPhysicalMapping {
+            devid: 2,
+            physical: 0x4000,
+        };
+        assert_ne!(m1, m3);
+    }
+
+    #[test]
+    fn header_parse_exactly_minimum_size() {
+        let block = vec![0_u8; BTRFS_HEADER_SIZE];
+        let header = BtrfsHeader::parse_from_block(&block).expect("parse at exact size");
+        assert_eq!(header.level, 0);
+        assert_eq!(header.nritems, 0);
+    }
+
+    #[test]
+    fn header_parse_too_small() {
+        let block = vec![0_u8; BTRFS_HEADER_SIZE - 1];
+        let err = BtrfsHeader::parse_from_block(&block).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn superblock_rejects_oversized_sys_chunk_array() {
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+        sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
+        // Set sys_chunk_array_size to max+1
+        let bad_size = (BTRFS_SYS_CHUNK_ARRAY_MAX as u32) + 1;
+        sb[0xA0..0xA4].copy_from_slice(&bad_size.to_le_bytes());
+        let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "sys_chunk_array_size",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn map_logical_at_exact_chunk_start() {
+        let chunks = vec![BtrfsChunkEntry {
+            key: BtrfsKey {
+                objectid: 256,
+                item_type: 228,
+                offset: 0x100_0000,
+            },
+            length: 0x80_0000,
+            owner: 2,
+            stripe_len: 0x1_0000,
+            chunk_type: 2,
+            io_align: 4096,
+            io_width: 4096,
+            sector_size: 4096,
+            num_stripes: 1,
+            sub_stripes: 0,
+            stripes: vec![BtrfsStripe {
+                devid: 1,
+                offset: 0x20_0000,
+                dev_uuid: [0; 16],
+            }],
+        }];
+
+        // Exact start should hit
+        let result = map_logical_to_physical(&chunks, 0x100_0000).expect("no error");
+        let mapping = result.expect("should hit at start");
+        assert_eq!(mapping.physical, 0x20_0000);
+    }
+
+    #[test]
+    fn map_logical_at_last_byte_of_chunk() {
+        let chunks = vec![BtrfsChunkEntry {
+            key: BtrfsKey {
+                objectid: 256,
+                item_type: 228,
+                offset: 0x100_0000,
+            },
+            length: 0x80_0000,
+            owner: 2,
+            stripe_len: 0x1_0000,
+            chunk_type: 2,
+            io_align: 4096,
+            io_width: 4096,
+            sector_size: 4096,
+            num_stripes: 1,
+            sub_stripes: 0,
+            stripes: vec![BtrfsStripe {
+                devid: 1,
+                offset: 0x20_0000,
+                dev_uuid: [0; 16],
+            }],
+        }];
+
+        // Last valid address = start + length - 1
+        let last_valid = 0x100_0000 + 0x80_0000 - 1;
+        let result = map_logical_to_physical(&chunks, last_valid).expect("no error");
+        let mapping = result.expect("should hit at last byte");
+        assert_eq!(mapping.physical, 0x20_0000 + 0x80_0000 - 1);
+
+        // One past end should miss
+        let past_end = 0x100_0000 + 0x80_0000;
+        let result = map_logical_to_physical(&chunks, past_end).expect("no error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn map_logical_multiple_chunks_selects_correct() {
+        let chunks = vec![
+            BtrfsChunkEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: 228,
+                    offset: 0x100_0000,
+                },
+                length: 0x80_0000,
+                owner: 2,
+                stripe_len: 0x1_0000,
+                chunk_type: 2,
+                io_align: 4096,
+                io_width: 4096,
+                sector_size: 4096,
+                num_stripes: 1,
+                sub_stripes: 0,
+                stripes: vec![BtrfsStripe {
+                    devid: 1,
+                    offset: 0x20_0000,
+                    dev_uuid: [0; 16],
+                }],
+            },
+            BtrfsChunkEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: 228,
+                    offset: 0x200_0000,
+                },
+                length: 0x40_0000,
+                owner: 2,
+                stripe_len: 0x1_0000,
+                chunk_type: 1,
+                io_align: 4096,
+                io_width: 4096,
+                sector_size: 4096,
+                num_stripes: 1,
+                sub_stripes: 0,
+                stripes: vec![BtrfsStripe {
+                    devid: 2,
+                    offset: 0xA0_0000,
+                    dev_uuid: [0xFF; 16],
+                }],
+            },
+        ];
+
+        // Address in second chunk
+        let result = map_logical_to_physical(&chunks, 0x210_0000).expect("no error");
+        let mapping = result.expect("should hit second chunk");
+        assert_eq!(mapping.devid, 2);
+        assert_eq!(mapping.physical, 0xB0_0000);
+    }
+
+    #[test]
+    fn verify_tree_block_checksum_at_minimum_size() {
+        let mut block = vec![0_u8; BTRFS_HEADER_SIZE];
+        let csum = crc32c::crc32c(&block[0x20..]);
+        block[0..4].copy_from_slice(&csum.to_le_bytes());
+        verify_tree_block_checksum(&block, 0).expect("valid at min size");
+    }
+
+    #[test]
+    fn verify_tree_block_checksum_too_small() {
+        let block = vec![0_u8; BTRFS_HEADER_SIZE - 1];
+        let err = verify_tree_block_checksum(&block, 0).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn parse_sys_chunk_array_truncated_chunk_header() {
+        // Just enough for a key but not enough for the chunk header
+        let mut data = vec![0_u8; BTRFS_DISK_KEY_SIZE + 10];
+        data[0..8].copy_from_slice(&256_u64.to_le_bytes());
+        data[8] = 228;
+        let err = parse_sys_chunk_array(&data).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn parse_sys_chunk_array_truncated_stripes() {
+        // Key + chunk fixed header, but not enough for the stripes
+        let mut data = vec![0_u8; BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE];
+        data[0..8].copy_from_slice(&256_u64.to_le_bytes());
+        data[8] = 228;
+        let c = BTRFS_DISK_KEY_SIZE;
+        data[c..c + 8].copy_from_slice(&1_u64.to_le_bytes()); // length
+        data[c + 44..c + 46].copy_from_slice(&2_u16.to_le_bytes()); // num_stripes=2
+        let err = parse_sys_chunk_array(&data).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn header_validate_with_no_expected_bytenr() {
+        let block = make_block(4096, 0, 0);
+        let header = BtrfsHeader::parse_from_block(&block).expect("parse");
+        // Should succeed with None for expected_bytenr
+        header.validate(4096, None).expect("should pass");
+    }
+
+    #[test]
+    fn superblock_rejects_zero_sectorsize() {
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&0_u32.to_le_bytes()); // zero sectorsize
+        sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+        let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "sectorsize",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn superblock_rejects_zero_nodesize() {
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        sb[0x94..0x98].copy_from_slice(&0_u32.to_le_bytes()); // zero nodesize
+        let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "nodesize",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn superblock_allows_zero_stripesize() {
+        // Zero stripesize is explicitly allowed (not power-of-two check)
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+        sb[0x9C..0xA0].copy_from_slice(&0_u32.to_le_bytes()); // zero stripesize
+        let parsed = BtrfsSuperblock::parse_superblock_region(&sb).expect("zero stripesize ok");
+        assert_eq!(parsed.stripesize, 0);
+    }
+
+    #[test]
+    fn leaf_items_zero_nritems() {
+        let block = make_block(512, 0, 0);
+        let (header, items) = parse_leaf_items(&block).expect("empty leaf");
+        assert_eq!(header.nritems, 0);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn superblock_debug_and_clone() {
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+        sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
+        let parsed = BtrfsSuperblock::parse_superblock_region(&sb).expect("parse");
+        let cloned = parsed.clone();
+        assert_eq!(parsed, cloned);
+        let dbg = format!("{parsed:?}");
+        assert!(dbg.contains("BtrfsSuperblock"));
+    }
+
+    #[test]
+    fn header_max_valid_level() {
+        let block = make_block(4096, 0, BTRFS_MAX_LEVEL);
+        let header = BtrfsHeader::parse_from_block(&block).expect("parse");
+        header.validate(4096, None).expect("max level ok");
+        assert_eq!(header.level, 7);
+    }
+
+    #[test]
+    fn key_ptr_debug_and_copy() {
+        let kp = BtrfsKeyPtr {
+            key: BtrfsKey {
+                objectid: 1,
+                item_type: 2,
+                offset: 3,
+            },
+            blockptr: 0x4000,
+            generation: 10,
+        };
+        let kp2 = kp; // Copy
+        assert_eq!(kp, kp2);
+        let dbg = format!("{kp:?}");
+        assert!(dbg.contains("BtrfsKeyPtr"));
+    }
+
     fn make_proptest_valid_btrfs_superblock(
         sectorsize: u32,
         nodesize: u32,

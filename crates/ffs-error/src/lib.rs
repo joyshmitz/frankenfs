@@ -682,6 +682,109 @@ mod tests {
 
     // ── Result type alias test ──────────────────────────────────────────
 
+    // ── Send + Sync compile-time check ──────────────────────────────
+
+    #[test]
+    fn ffs_error_is_send_and_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<FfsError>();
+        assert_sync::<FfsError>();
+    }
+
+    // ── IoError ErrorKind fallthrough to EIO ─────────────────────────
+
+    #[test]
+    fn io_error_write_zero_maps_to_eio() {
+        let err = FfsError::Io(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "short write",
+        ));
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_broken_pipe_maps_to_eio() {
+        let err = FfsError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        ));
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_connection_reset_maps_to_eio() {
+        let err = FfsError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_unexpected_eof_maps_to_eio() {
+        let err = FfsError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "eof",
+        ));
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    // ── MvccConflict zero values ─────────────────────────────────────
+
+    #[test]
+    fn mvcc_conflict_zero_tx_and_block() {
+        let err = FfsError::MvccConflict { tx: 0, block: 0 };
+        assert_eq!(err.to_errno(), libc::EAGAIN);
+        assert_eq!(
+            err.to_string(),
+            "MVCC conflict: transaction 0 conflicts on block 0"
+        );
+    }
+
+    // ── Unicode in string payloads ───────────────────────────────────
+
+    #[test]
+    fn unicode_in_string_payloads() {
+        let err = FfsError::NotFound("日本語ファイル.txt".into());
+        assert!(err.to_string().contains("日本語ファイル.txt"));
+        assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    // ── Raw errno passthrough negative test ──────────────────────────
+
+    #[test]
+    fn io_error_raw_errno_takes_precedence_over_kind_mapping() {
+        // from_raw_os_error sets both raw_os_error and a kind, but
+        // raw_os_error() should take precedence in our mapping.
+        let err = FfsError::Io(std::io::Error::from_raw_os_error(libc::ENOSYS));
+        assert_eq!(err.to_errno(), libc::ENOSYS);
+    }
+
+    // ── Debug formatting for all string variants ─────────────────────
+
+    #[test]
+    fn debug_includes_payload_for_string_variants() {
+        let err = FfsError::RepairFailed("reed-solomon decode fail".into());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RepairFailed"));
+        assert!(dbg.contains("reed-solomon decode fail"));
+    }
+
+    // ── Chained ? operator across error types ────────────────────────
+
+    #[test]
+    fn question_mark_chains_io_into_ffs_error() {
+        fn inner() -> Result<()> {
+            let io_res: std::result::Result<(), std::io::Error> =
+                Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            io_res?;
+            Ok(())
+        }
+        let err = inner().unwrap_err();
+        assert_eq!(err.to_errno(), libc::EPERM);
+    }
+
     #[test]
     fn result_alias_works_with_question_mark() {
         fn inner() -> Result<u64> {
