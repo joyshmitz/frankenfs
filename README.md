@@ -26,7 +26,7 @@
 
 **The problem:** Linux filesystems are trapped in kernel space. ext4 is 30 years old with a global journal lock (JBD2) that serializes all writes. btrfs has better internals but remains kernel-only, hard to test, and impossible to extend from userspace. Both lack automatic corruption recovery — you run `fsck` after the fact and hope.
 
-**The solution:** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19) and re-implements it idiomatically in Rust as a FUSE filesystem. It reads real ext4/btrfs disk images today (with experimental read-only ext4 mount) and is evolving toward safe write-path support, while adding two structural innovations that the kernel implementations can't:
+**The solution:** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19) and re-implements it idiomatically in Rust as a FUSE filesystem. It reads real ext4/btrfs disk images today and can mount both in experimental mode (default read-only, optional `--rw`), while write-path hardening continues.
 
 | What | How | Why it matters |
 |------|-----|----------------|
@@ -188,7 +188,7 @@ FrankenFS is a 21-crate Cargo workspace (19 core crates + 2 legacy/reference wra
 
 - **Parser crates are pure.** `ffs-ondisk` performs no I/O — it parses byte slices into typed structures.
 - **MVCC is transport-agnostic.** `ffs-mvcc` knows nothing about FUSE, files, or directories.
-- **FUSE delegates to ffs-core.** `ffs-fuse` maps FUSE protocol to `ffs-core::FrankenFsEngine` — it contains no filesystem logic.
+- **FUSE delegates to `FsOps`.** `ffs-fuse` maps FUSE protocol to an `ffs-core::FsOps` implementation (currently `OpenFs`) and contains no filesystem logic.
 - **Repair is orthogonal.** `ffs-repair` operates on blocks, not files. It doesn't know about inodes or directories.
 - **Repair wiring is lifecycle-based.** `ffs-core` reaches repair functionality via `ffs-mvcc`/block flush integration rather than a direct `ffs-core -> ffs-repair` dependency edge.
 - **No dependency cycles.** The crate graph is a strict DAG.
@@ -203,13 +203,9 @@ FrankenFS is a 21-crate Cargo workspace (19 core crates + 2 legacy/reference wra
 ```
 userspace read(fd, buf, count)
   → kernel FUSE → fuser → ffs-fuse::read()
-    → ffs-core: begin read transaction
-      → ffs-mvcc: get snapshot, read versioned blocks
-        → ffs-extent: resolve logical offset → physical blocks
-          → ffs-btree: walk extent B+tree
-        → ffs-block: read blocks through ARC cache
-          → BlockDevice::read_block()
-    → ffs-core: assemble response, end transaction
+    → ffs-core `FsOps` (`OpenFs`): flavor dispatch (ext4/btrfs)
+      → extent/chunk mapping + block reads (`ffs-extent`, `ffs-btree`, `ffs-block`)
+      → flavor-specific inode/file assembly in `ffs-core`
   → fuser → kernel → userspace
 ```
 
@@ -218,14 +214,10 @@ userspace read(fd, buf, count)
 ```
 userspace write(fd, buf, count)
   → kernel FUSE → fuser → ffs-fuse::write()
-    → ffs-core: begin write transaction
-      → ffs-mvcc: create new block versions (COW)
-        → ffs-extent: allocate physical blocks
-          → ffs-alloc: mballoc allocation
-          → ffs-btree: update extent tree
-        → ffs-block: write through cache
-      → ffs-journal: record transaction
-      → ffs-mvcc: commit (SSI validation + repair refresh hooks)
+    → ffs-core `FsOps` (`OpenFs`): flavor dispatch (ext4/btrfs), requires `mount --rw`
+      → allocation + extent/tree updates (`ffs-alloc`, `ffs-extent`, `ffs-btree`)
+      → block writes (`ffs-block`) and filesystem-level metadata updates
+      → journal/MVCC/repair integration paths where enabled by operation
     → ffs-core: return bytes written
   → fuser → kernel → userspace
 ```
@@ -307,8 +299,11 @@ cargo run -p ffs-cli -- dump inode 2 <image-path> --json
 cargo run -p ffs-cli -- dump extents 12 <image-path> --json
 cargo run -p ffs-cli -- dump dir 2 <image-path> --json
 
-# Mount an ext4 image via FUSE (read-only)
+# Mount an ext4 or btrfs image via FUSE (default read-only)
 cargo run -p ffs-cli -- mount <image-path> <mountpoint>
+
+# Enable experimental read-write mode
+cargo run -p ffs-cli -- mount <image-path> <mountpoint> --rw
 
 # Run a read-only scrub over image blocks
 cargo run -p ffs-cli -- scrub <image-path> --json
@@ -370,7 +365,7 @@ cargo test --workspace
 
 ## Project Status
 
-FrankenFS is in **early development**. The tracked V1 parity matrix is complete (100%), and ongoing work is focused on hardening, performance, and operational polish.
+FrankenFS is in **early development**. The tracked V1 parity matrix is complete (100%), and ongoing work is focused on hardening, performance, and operational polish. Current parity numbers are generated from the tracked `FEATURE_PARITY.md` matrix used by `ffs-harness`.
 
 ### Feature Parity
 
@@ -389,7 +384,7 @@ FrankenFS is in **early development**. The tracked V1 parity matrix is complete 
 - btrfs superblock, B-tree header, leaf item metadata decoding, and geometry validation
 - MVCC snapshot visibility, commit sequencing, first-committer-wins conflict detection
 - Bayesian durability policy model and RaptorQ config mapping
-- CLI `inspect`, `info`, `dump`, `fsck` (ext4 mount-time recovery + btrfs primary-superblock restoration via `--repair`, including bootstrap from backup mirrors when primary is unreadable), `repair` (ext4 mount-time recovery + btrfs primary-superblock restoration from validated backup mirrors + scrub verification), `mount` (ext4 read-only), `scrub`, and `parity` commands
+- CLI `inspect`, `info`, `dump`, `fsck` (ext4 mount-time recovery + btrfs primary-superblock restoration via `--repair`, including bootstrap from backup mirrors when primary is unreadable), `repair` (ext4 mount-time recovery + btrfs primary-superblock restoration from validated backup mirrors + scrub verification), `mount` (ext4 + btrfs, default read-only with optional `--rw`), `scrub`, and `parity` commands
 - Conformance fixture harness and Criterion benchmark scaffolding
 
 ### What's Next
@@ -405,9 +400,9 @@ See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [P
 
 ## V1 Filesystem Scope
 
-**ext4:** Single-device images with block sizes 1K/2K/4K. Requires `FILETYPE` + `EXTENTS` feature flags. Read-only FUSE mount. Features explicitly excluded: `COMPRESSION`, `ENCRYPT`, `CASEFOLD`, `INLINE_DATA`, `JOURNAL_DEV`. Images with excluded flags are rejected at mount time.
+**ext4:** Single-device images with block sizes 1K/2K/4K. Requires `FILETYPE` + `EXTENTS` feature flags. FUSE mount defaults to read-only; `--rw` is available but still experimental. Features explicitly excluded: `COMPRESSION`, `ENCRYPT`, `CASEFOLD`, `INLINE_DATA`, `JOURNAL_DEV`. Images with excluded flags are rejected at mount time.
 
-**btrfs:** Single-device images only. Metadata parsing + validation (superblock, leaf items, sys_chunk_array). Read-only mount is phased (not yet implemented). Multi-device, RAID profiles, transparent compression, and send/receive are out of scope for V1.
+**btrfs:** Single-device images only. Metadata parsing + validation (superblock, leaf items, sys_chunk_array). FUSE mount path is available in experimental mode (default read-only, optional `--rw`) with limited feature coverage. Multi-device, RAID profiles, transparent compression, and send/receive are out of scope for V1.
 
 See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md) for the full normative scope.
 
@@ -426,8 +421,8 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 **Q: Why reimplement ext4 and btrfs instead of just using them?**
 A: Kernel filesystems can't be extended with MVCC or self-healing from userspace. FrankenFS is a research vehicle for exploring what ext4/btrfs could look like with modern concurrency control and erasure coding, while remaining mount-compatible with existing images.
 
-**Q: Can I mount my real ext4 partition with this today?**
-A: `ffs mount` supports read-only ext4 mounting via FUSE for images with supported feature flags. This is experimental — do not rely on it for production data. btrfs mount is not yet supported.
+**Q: Can I mount real ext4/btrfs data with this today?**
+A: `ffs mount` supports both ext4 and btrfs images in experimental mode. Default behavior is read-only; `--rw` enables write paths that are still under active hardening. Do not rely on it for production data.
 
 **Q: What does "spec-first" mean?**
 A: Instead of translating C to Rust line by line, we first extract the *behavioral contract* of each kernel subsystem into specification documents (~400KB of structured Markdown). Then we implement from the spec in idiomatic Rust. This avoids carrying over C-isms and allows architectural improvements.

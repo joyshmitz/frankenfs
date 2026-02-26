@@ -9,5 +9,8 @@ rust-version.workspace = true
 [dependencies]
 ffs-core = { workspace = true }
 
+[dev-dependencies]
+asupersync = { workspace = true }
+
 [lints]
 workspace = true

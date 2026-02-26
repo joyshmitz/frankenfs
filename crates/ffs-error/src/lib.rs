@@ -58,7 +58,7 @@
 //!
 //! | Variant | errno | Constant |
 //! |---------|-------|----------|
-//! | `Io` | `EIO` | 5 |
+//! | `Io` | `raw_os_error` → passthrough, else `ErrorKind` map, else `EIO` | varies |
 //! | `Corruption` | `EIO` | 5 |
 //! | `Format` | `EINVAL` | 22 |
 //! | `Parse` | `EINVAL` | 22 |
@@ -225,7 +225,26 @@ impl FfsError {
     #[must_use]
     pub fn to_errno(&self) -> libc::c_int {
         match self {
-            Self::Io(err) => err.raw_os_error().unwrap_or(libc::EIO),
+            Self::Io(err) => err.raw_os_error().unwrap_or_else(|| match err.kind() {
+                std::io::ErrorKind::NotFound => libc::ENOENT,
+                std::io::ErrorKind::PermissionDenied => libc::EACCES,
+                std::io::ErrorKind::AlreadyExists => libc::EEXIST,
+                std::io::ErrorKind::WouldBlock => libc::EAGAIN,
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => libc::EINVAL,
+                std::io::ErrorKind::TimedOut => libc::ETIMEDOUT,
+                std::io::ErrorKind::Interrupted => libc::EINTR,
+                std::io::ErrorKind::WriteZero
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::AddrInUse
+                | std::io::ErrorKind::AddrNotAvailable
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::Unsupported
+                | _ => libc::EIO,
+            }),
             Self::Corruption { .. } | Self::RepairFailed(_) => libc::EIO,
             Self::Format(_) | Self::Parse(_) | Self::InvalidGeometry(_) => libc::EINVAL,
             Self::UnsupportedFeature(_)
@@ -363,5 +382,316 @@ mod tests {
 
         // EOPNOTSUPP != EINVAL (verifying the distinction matters)
         assert_ne!(unsup.to_errno(), geom.to_errno());
+    }
+
+    // ── Exhaustive Display formatting tests ─────────────────────────────
+
+    #[test]
+    fn display_all_string_carrying_variants() {
+        // Every variant that carries a String payload should include it in Display.
+        let cases: Vec<(FfsError, &str)> = vec![
+            (
+                FfsError::Format("bad magic 0xDEAD".into()),
+                "invalid on-disk format: bad magic 0xDEAD",
+            ),
+            (
+                FfsError::Parse("need 4 bytes".into()),
+                "parse error: need 4 bytes",
+            ),
+            (
+                FfsError::UnsupportedFeature("INLINE_DATA".into()),
+                "unsupported feature: INLINE_DATA",
+            ),
+            (
+                FfsError::IncompatibleFeature("missing EXTENTS".into()),
+                "incompatible feature set: missing EXTENTS",
+            ),
+            (
+                FfsError::UnsupportedBlockSize("16384".into()),
+                "unsupported block size: 16384",
+            ),
+            (
+                FfsError::InvalidGeometry("zero inodes_per_group".into()),
+                "invalid geometry: zero inodes_per_group",
+            ),
+            (
+                FfsError::NotFound("/lost+found".into()),
+                "not found: /lost+found",
+            ),
+            (
+                FfsError::RepairFailed("symbol decode failed".into()),
+                "repair failed: symbol decode failed",
+            ),
+        ];
+
+        for (err, expected) in &cases {
+            assert_eq!(err.to_string(), *expected, "Display mismatch for {err:?}");
+        }
+    }
+
+    #[test]
+    fn display_unit_variants() {
+        // Variants with no payload should produce fixed strings.
+        assert_eq!(FfsError::Cancelled.to_string(), "operation cancelled");
+        assert_eq!(FfsError::NoSpace.to_string(), "no space left on device");
+        assert_eq!(FfsError::PermissionDenied.to_string(), "permission denied");
+        assert_eq!(FfsError::ReadOnly.to_string(), "read-only filesystem");
+        assert_eq!(FfsError::NotDirectory.to_string(), "not a directory");
+        assert_eq!(FfsError::IsDirectory.to_string(), "is a directory");
+        assert_eq!(FfsError::NotEmpty.to_string(), "directory not empty");
+        assert_eq!(FfsError::NameTooLong.to_string(), "name too long");
+        assert_eq!(FfsError::Exists.to_string(), "file exists");
+    }
+
+    #[test]
+    fn display_structured_variants() {
+        let corruption = FfsError::Corruption {
+            block: 12345,
+            detail: "checksum mismatch: expected 0xABCD, got 0x1234".into(),
+        };
+        assert_eq!(
+            corruption.to_string(),
+            "corrupt metadata at block 12345: checksum mismatch: expected 0xABCD, got 0x1234"
+        );
+
+        let conflict = FfsError::MvccConflict { tx: 99, block: 256 };
+        assert_eq!(
+            conflict.to_string(),
+            "MVCC conflict: transaction 99 conflicts on block 256"
+        );
+    }
+
+    #[test]
+    fn display_corruption_with_block_zero() {
+        // Block 0 is the superblock — valid corruption target.
+        let err = FfsError::Corruption {
+            block: 0,
+            detail: "superblock magic invalid".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "corrupt metadata at block 0: superblock magic invalid"
+        );
+    }
+
+    #[test]
+    fn display_corruption_with_max_block() {
+        let err = FfsError::Corruption {
+            block: u64::MAX,
+            detail: "out of range".into(),
+        };
+        let s = err.to_string();
+        assert!(
+            s.contains(&u64::MAX.to_string()),
+            "max block number should appear in Display: {s}"
+        );
+    }
+
+    #[test]
+    fn display_mvcc_conflict_with_large_ids() {
+        let err = FfsError::MvccConflict {
+            tx: u64::MAX,
+            block: u64::MAX - 1,
+        };
+        let s = err.to_string();
+        assert!(s.contains(&u64::MAX.to_string()));
+        assert!(s.contains(&(u64::MAX - 1).to_string()));
+    }
+
+    // ── From<std::io::Error> conversion tests ───────────────────────────
+
+    #[test]
+    fn from_io_error_conversion() {
+        // Error::new() does NOT set raw_os_error — only from_raw_os_error() does.
+        // With ErrorKind mapping, NotFound now yields ENOENT even without raw errno.
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file gone");
+        let ffs_err: FfsError = io_err.into();
+        assert_eq!(ffs_err.to_errno(), libc::ENOENT);
+        assert!(ffs_err.to_string().contains("file gone"));
+
+        // With from_raw_os_error, the errno passes through.
+        let io_err2 = std::io::Error::from_raw_os_error(libc::ENOENT);
+        let ffs_err2: FfsError = io_err2.into();
+        assert_eq!(ffs_err2.to_errno(), libc::ENOENT);
+    }
+
+    #[test]
+    fn io_error_without_raw_os_error_falls_back_to_eio() {
+        // Error::other() uses ErrorKind::Other, which has no specific mapping → EIO.
+        let io_err = std::io::Error::other("custom error with no errno");
+        let ffs_err = FfsError::Io(io_err);
+        assert_eq!(ffs_err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_kind_mapping_without_raw_errno() {
+        // Verify ErrorKind → errno mapping when raw_os_error() is None.
+        let cases: Vec<(std::io::ErrorKind, libc::c_int)> = vec![
+            (std::io::ErrorKind::NotFound, libc::ENOENT),
+            (std::io::ErrorKind::PermissionDenied, libc::EACCES),
+            (std::io::ErrorKind::AlreadyExists, libc::EEXIST),
+            (std::io::ErrorKind::WouldBlock, libc::EAGAIN),
+            (std::io::ErrorKind::InvalidInput, libc::EINVAL),
+            (std::io::ErrorKind::InvalidData, libc::EINVAL),
+            (std::io::ErrorKind::TimedOut, libc::ETIMEDOUT),
+            (std::io::ErrorKind::Interrupted, libc::EINTR),
+            (std::io::ErrorKind::Unsupported, libc::EIO),
+            (std::io::ErrorKind::Other, libc::EIO),
+        ];
+        for (kind, expected_errno) in &cases {
+            let io_err = std::io::Error::new(*kind, "test");
+            let ffs_err = FfsError::Io(io_err);
+            assert_eq!(
+                ffs_err.to_errno(),
+                *expected_errno,
+                "ErrorKind::{kind:?} should map to errno {expected_errno}"
+            );
+        }
+    }
+
+    #[test]
+    fn io_error_preserves_various_raw_errnos() {
+        let errnos = [
+            libc::EPERM,
+            libc::ENOENT,
+            libc::EIO,
+            libc::ENOMEM,
+            libc::EACCES,
+            libc::EBUSY,
+            libc::ENOSPC,
+        ];
+        for errno in errnos {
+            let raw = std::io::Error::from_raw_os_error(errno);
+            let ffs = FfsError::Io(raw);
+            assert_eq!(
+                ffs.to_errno(),
+                errno,
+                "raw errno {errno} should pass through unchanged"
+            );
+        }
+    }
+
+    // ── Error trait implementation tests ─────────────────────────────────
+
+    #[test]
+    fn error_trait_source_for_io_variant() {
+        use std::error::Error;
+        let io_err = std::io::Error::other("underlying cause");
+        let ffs_err = FfsError::Io(io_err);
+        // Io variant should have a source (the wrapped std::io::Error).
+        assert!(ffs_err.source().is_some());
+    }
+
+    #[test]
+    fn error_trait_source_for_non_io_variants() {
+        use std::error::Error;
+        // Non-Io variants should have no source chain.
+        let cases: Vec<FfsError> = vec![
+            FfsError::Corruption {
+                block: 1,
+                detail: "x".into(),
+            },
+            FfsError::Format("x".into()),
+            FfsError::MvccConflict { tx: 1, block: 2 },
+            FfsError::Cancelled,
+            FfsError::NoSpace,
+            FfsError::NotFound("x".into()),
+            FfsError::RepairFailed("x".into()),
+        ];
+        for err in &cases {
+            assert!(
+                err.source().is_none(),
+                "expected no source for {err:?}, got {:?}",
+                err.source()
+            );
+        }
+    }
+
+    #[test]
+    fn debug_formatting_includes_variant_name() {
+        let err = FfsError::NoSpace;
+        let debug = format!("{err:?}");
+        assert!(
+            debug.contains("NoSpace"),
+            "Debug should include variant name: {debug}"
+        );
+
+        let err2 = FfsError::Corruption {
+            block: 7,
+            detail: "bad".into(),
+        };
+        let debug2 = format!("{err2:?}");
+        assert!(debug2.contains("Corruption"));
+        assert!(debug2.contains('7'));
+        assert!(debug2.contains("bad"));
+    }
+
+    // ── Errno value correctness (verify against libc constants) ─────────
+
+    #[test]
+    fn errno_values_match_expected_posix_constants() {
+        // Verify the actual integer values match POSIX expectations.
+        assert_eq!(libc::EIO, 5);
+        assert_eq!(libc::EINVAL, 22);
+        assert_eq!(libc::EOPNOTSUPP, 95);
+        assert_eq!(libc::EAGAIN, 11);
+        assert_eq!(libc::EINTR, 4);
+        assert_eq!(libc::ENOSPC, 28);
+        assert_eq!(libc::ENOENT, 2);
+        assert_eq!(libc::EACCES, 13);
+        assert_eq!(libc::EROFS, 30);
+        assert_eq!(libc::ENOTDIR, 20);
+        assert_eq!(libc::EISDIR, 21);
+        assert_eq!(libc::ENOTEMPTY, 39);
+        assert_eq!(libc::ENAMETOOLONG, 36);
+        assert_eq!(libc::EEXIST, 17);
+        assert_eq!(libc::EPERM, 1);
+    }
+
+    // ── Empty string payload tests ──────────────────────────────────────
+
+    #[test]
+    fn empty_string_payloads_produce_valid_display() {
+        // All string-carrying variants should handle empty strings gracefully.
+        let cases: Vec<FfsError> = vec![
+            FfsError::Format(String::new()),
+            FfsError::Parse(String::new()),
+            FfsError::UnsupportedFeature(String::new()),
+            FfsError::IncompatibleFeature(String::new()),
+            FfsError::UnsupportedBlockSize(String::new()),
+            FfsError::InvalidGeometry(String::new()),
+            FfsError::NotFound(String::new()),
+            FfsError::RepairFailed(String::new()),
+            FfsError::Corruption {
+                block: 0,
+                detail: String::new(),
+            },
+        ];
+
+        for err in &cases {
+            // Should not panic and should produce non-empty output.
+            let display = err.to_string();
+            assert!(
+                !display.is_empty(),
+                "Display should not be empty for {err:?}"
+            );
+            // Errno should still work.
+            let _ = err.to_errno();
+        }
+    }
+
+    // ── Result type alias test ──────────────────────────────────────────
+
+    #[test]
+    fn result_alias_works_with_question_mark() {
+        fn inner() -> Result<u64> {
+            let val: Result<u64> = Ok(42);
+            let v = val?;
+            Ok(v + 1)
+        }
+        assert_eq!(inner().unwrap(), 43);
+
+        let failing: Result<u64> = Err(FfsError::NoSpace);
+        assert!(failing.is_err());
     }
 }

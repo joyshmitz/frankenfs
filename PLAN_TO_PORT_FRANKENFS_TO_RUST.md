@@ -31,7 +31,7 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` complete.
 - [x] Reconcile ext4/btrfs scope statements (both formats are in-scope; btrfs phased)
 - [x] Fix math/spec errors in Section 18 (probabilistic conflict model) to be dimensionally correct and assumption-explicit
 - [x] Remove/repair any references to non-existent files (`ARCHITECTURE.md` -> `PROPOSED_ARCHITECTURE.md`, `CONVENTIONS.md` merged into `AGENTS.md`)
-- [x] Ensure dependency lists match `Cargo.toml` (zerocopy/bytes references removed; fuser planned for Phase 7; Appendix C updated to match actual Cargo.toml)
+- [x] Ensure dependency lists match `Cargo.toml` (zerocopy/bytes references removed; `fuser` reflected as an in-workspace dependency; Appendix C updated to match actual Cargo.toml)
 - [x] Doc fix: `COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md` Section 18 “Sequential writes” row is inconsistent with the stated formula (make assumptions explicit or remove the row)
 - [x] Doc fix: `COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md` Section 18 group/bitmap conflict math (`1/G` vs `(1/G)^2`) and version-chain length formula (dimensional correctness)
 - [x] Doc fix: `COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md` ext4 block-size support statements (format allows 1K–64K, but FrankenFS v1 support must be stated consistently)
@@ -109,7 +109,7 @@ novel capabilities shared across both filesystems:
 | Deliverable | Description |
 |---|---|
 | 21-crate Cargo workspace (19 core + 2 legacy/reference wrappers) | Modular, independently testable crates |
-| FUSE filesystem binary | Mounts ext4 images in Linux userspace via `fuser` (planned; Phase 7) |
+| FUSE filesystem binary | Mounts ext4 and btrfs images in Linux userspace via `fuser` (experimental runtime; default read-only, optional `--rw`) |
 | CLI (`ffs-cli`) | `mount`, `fsck`, `info`, `dump` commands |
 | TUI (`ffs-tui`) | Live monitoring dashboard (cache, MVCC, repair stats) |
 | Conformance harness | Automated comparison against Linux kernel ext4 driver |
@@ -154,7 +154,7 @@ novel capabilities shared across both filesystems:
 |---|---|---|
 | `asupersync` | Cx capability contexts, cooperative cancellation, RaptorQ codec, lab runtime for deterministic testing | workspace |
 | `ftui` (frankentui) | TUI rendering framework | workspace (path = /dp/frankentui/crates/ftui) |
-| `fuser` | FUSE protocol implementation | planned (Phase 7); not yet in workspace dependencies |
+| `fuser` | FUSE protocol implementation | workspace dependency (active mount runtime) |
 | `crc32c` | CRC32C checksums (ext4 metadata_csum) | ^0.6 |
 | `blake3` | BLAKE3 checksums (native-mode integrity) | ^1 |
 | `parking_lot` | Fast mutexes and RwLocks | ^0.12 |
@@ -178,7 +178,7 @@ exclusion is deliberate and documented to prevent scope creep.
 | **fscrypt (encrypted filesystem support)** | Filesystem-level encryption adds significant complexity (key management, per-file policies, filename encryption). This can be layered on in a future phase or handled by dm-crypt at the block layer. |
 | **Online resize (resize2fs equivalent)** | Resizing a mounted filesystem requires careful coordination with active I/O. Offline resize via `ffs-cli fsck --resize` may be added later. |
 | **Quota subsystem** | Disk quotas (usrquota, grpquota, prjquota) are an administrative feature. Excluding them removes ~3K LOC of quota tracking code. |
-| **btrfs advanced features** | Initial btrfs scope is single-device images + metadata parsing + read-only mount parity first. Multi-device/RAID profiles, send/receive, and transparent compression are phased later. |
+| **btrfs advanced features** | Initial btrfs scope is single-device images with experimental mount/runtime support (default read-only, optional `--rw`) and limited feature coverage. Multi-device/RAID profiles, send/receive, and transparent compression are phased later. |
 | **NFS export support** | NFS export requires stable file handle generation across remounts. This is a protocol concern orthogonal to filesystem correctness. |
 | **ext4 inline data** | The `EXT4_INLINE_DATA_FL` feature stores small files inside the inode itself. This optimization affects ~2% of files and can be added in a future phase. |
 | **Multi-device support** | FrankenFS operates on a single block device (disk image). RAID, LVM, and multi-device btrfs topologies are excluded. |

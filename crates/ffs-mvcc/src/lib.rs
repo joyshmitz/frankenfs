@@ -238,6 +238,8 @@ pub enum CommitError {
         critical_len: usize,
         watermark: CommitSeq,
     },
+    #[error("commit durability failure: {detail}")]
+    DurabilityFailure { detail: String },
 }
 
 /// Record of a committed transaction kept for SSI antidependency checking.
@@ -861,6 +863,13 @@ impl MvccStore {
             CommitError::ChainBackpressure { .. } => self.emit_txn_aborted(TxnAbortedDetail {
                 txn_id,
                 reason: TxnAbortReason::Timeout,
+                detail: Some(error.to_string()),
+                read_set_size,
+                write_set_size,
+            }),
+            CommitError::DurabilityFailure { .. } => self.emit_txn_aborted(TxnAbortedDetail {
+                txn_id,
+                reason: TxnAbortReason::DurabilityFailure,
                 detail: Some(error.to_string()),
                 read_set_size,
                 write_set_size,
@@ -2457,6 +2466,9 @@ mod tests {
             CommitError::SsiConflict { .. } => panic!("unexpected SSI conflict from FCW path"),
             CommitError::ChainBackpressure { .. } => {
                 panic!("unexpected chain backpressure from FCW path")
+            }
+            CommitError::DurabilityFailure { .. } => {
+                panic!("unexpected durability failure from in-memory FCW path")
             }
         }
     }
@@ -6031,24 +6043,24 @@ mod tests {
             high: CommitSeq(20),
         };
 
-        let _h1 = SnapshotRegistry::acquire(&registry, snap1);
+        let h1 = SnapshotRegistry::acquire(&registry, snap1);
         assert_eq!(registry.watermark_lockfree(), Some(CommitSeq(10)));
 
-        let _h2 = SnapshotRegistry::acquire(&registry, snap2);
+        let h2 = SnapshotRegistry::acquire(&registry, snap2);
         assert_eq!(
             registry.watermark_lockfree(),
             Some(CommitSeq(10)),
             "watermark should be min(10, 20) = 10"
         );
 
-        drop(_h1);
+        drop(h1);
         assert_eq!(
             registry.watermark_lockfree(),
             Some(CommitSeq(20)),
             "after releasing snap1, watermark should be 20"
         );
 
-        drop(_h2);
+        drop(h2);
         assert_eq!(
             registry.watermark_lockfree(),
             None,

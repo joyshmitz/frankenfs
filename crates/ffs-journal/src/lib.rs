@@ -2801,6 +2801,484 @@ mod tests {
         );
     }
 
+    // ── Additional adversarial / malformed input tests ─────────────────
+
+    #[test]
+    fn adversarial_all_zeros_journal_no_transactions() {
+        // A journal region filled with all-zero blocks should parse cleanly
+        // with zero committed transactions (zeros don't match JBD2_MAGIC).
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 8,
+        };
+        // All blocks default to zeros in MemBlockDevice — no writes needed.
+
+        let out = replay_jbd2(&cx, &dev, region).expect("should succeed on all-zero journal");
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.scanned_blocks, 8);
+        assert_eq!(out.stats.replayed_blocks, 0);
+    }
+
+    #[test]
+    fn adversarial_random_magic_bytes_ignored() {
+        // Blocks with non-zero, non-JBD2 magic should be skipped.
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 4,
+        };
+
+        // Write a block with random non-JBD2 magic.
+        let mut garbage = vec![0u8; 512];
+        garbage[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        garbage[4..8].copy_from_slice(&1u32.to_be_bytes()); // fake descriptor type
+        garbage[8..12].copy_from_slice(&1u32.to_be_bytes()); // fake sequence
+        dev.raw_write(BlockNumber(10), garbage);
+
+        let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.scanned_blocks, 4);
+    }
+
+    #[test]
+    fn adversarial_descriptor_payload_beyond_device_errors_gracefully() {
+        // A descriptor tag that targets a block beyond the device range.
+        // The replay itself doesn't validate target range — it writes using
+        // the block device, which enforces bounds. The committed write to
+        // an out-of-range target should cause the replay to fail gracefully.
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 32); // only 32 blocks
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 8,
+        };
+
+        // Descriptor writes to block 999 (way beyond device).
+        dev.raw_write(
+            BlockNumber(10),
+            descriptor_block(512, 1, &[(999, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(11), vec![0xAA; 512]);
+        dev.raw_write(BlockNumber(12), commit_block(512, 1));
+
+        // The replay should either error or succeed (depending on device
+        // semantics). We verify it doesn't panic.
+        let result = replay_jbd2(&cx, &dev, region);
+        // MemBlockDevice rejects out-of-range blocks, so this should error.
+        assert!(result.is_err(), "out-of-range target should cause an error");
+    }
+
+    #[test]
+    fn adversarial_descriptor_with_max_tags_no_panic() {
+        // Fill an entire block with descriptor tags (as many as fit).
+        let cx = test_cx();
+        let block_size = 4096_usize;
+        let dev = MemBlockDevice::new(u32::try_from(block_size).unwrap(), 4096);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 2048,
+        };
+
+        // Maximum tags that fit: (block_size - HEADER_SIZE) / TAG_SIZE
+        let max_tags = (block_size - JBD2_HEADER_SIZE) / JBD2_TAG_SIZE;
+        let mut tags: Vec<(u32, u32)> = (0..max_tags)
+            .map(|i| {
+                let target = u32::try_from(i).unwrap();
+                let flags = if i == max_tags - 1 {
+                    JBD2_TAG_FLAG_LAST
+                } else {
+                    0
+                };
+                (target, flags)
+            })
+            .collect();
+        // Ensure the last tag has LAST flag.
+        if let Some(last) = tags.last_mut() {
+            last.1 = JBD2_TAG_FLAG_LAST;
+        }
+
+        dev.raw_write(BlockNumber(100), descriptor_block(block_size, 1, &tags));
+        // Write payload blocks for each tag.
+        for i in 0..max_tags {
+            let jidx = u64::try_from(i + 1).unwrap();
+            dev.raw_write(BlockNumber(100 + jidx), vec![0xDD; block_size]);
+        }
+        // Commit block after all payloads.
+        let commit_idx = u64::try_from(max_tags + 1).unwrap();
+        dev.raw_write(BlockNumber(100 + commit_idx), commit_block(block_size, 1));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("should handle max tags");
+        assert_eq!(out.committed_sequences, vec![1]);
+        assert_eq!(out.stats.descriptor_tags, u64::try_from(max_tags).unwrap());
+        assert_eq!(out.stats.replayed_blocks, u64::try_from(max_tags).unwrap());
+    }
+
+    // ── Malformed input and edge-case hardening tests ──────────────────
+
+    #[test]
+    fn replay_jbd2_all_zero_blocks_produces_no_commits() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 8,
+        };
+        // Device is all zeros by default — no valid JBD2 headers.
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.scanned_blocks, 8);
+    }
+
+    #[test]
+    fn replay_jbd2_garbage_magic_skipped() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 4,
+        };
+        // Write blocks with valid header structure but wrong magic.
+        let mut block = vec![0_u8; 512];
+        block[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        block[4..8].copy_from_slice(&JBD2_BLOCKTYPE_DESCRIPTOR.to_be_bytes());
+        block[8..12].copy_from_slice(&1u32.to_be_bytes());
+        dev.raw_write(BlockNumber(10), block);
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.descriptor_blocks, 0);
+    }
+
+    #[test]
+    fn replay_jbd2_unknown_block_type_skipped() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 4,
+        };
+        // Block type 99 is not descriptor, commit, or revoke — should be skipped.
+        let mut block = vec![0_u8; 512];
+        block[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+        block[4..8].copy_from_slice(&99u32.to_be_bytes());
+        block[8..12].copy_from_slice(&1u32.to_be_bytes());
+        dev.raw_write(BlockNumber(10), block);
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.descriptor_blocks, 0);
+        assert_eq!(out.stats.commit_blocks, 0);
+    }
+
+    #[test]
+    fn replay_jbd2_commit_without_descriptor_is_orphaned() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 4,
+        };
+        // Commit block with no preceding descriptor for sequence 42.
+        dev.raw_write(BlockNumber(10), commit_block(512, 42));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert_eq!(out.committed_sequences, vec![42]);
+        assert_eq!(out.stats.orphaned_commit_blocks, 1);
+        assert_eq!(out.stats.replayed_blocks, 0);
+    }
+
+    #[test]
+    fn replay_jbd2_descriptor_truncated_at_region_end() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        // Region is only 2 blocks: descriptor at index 0 references data at index 1,
+        // but index 1 is the last block and there's no commit block.
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 2,
+        };
+        let descriptor = descriptor_block(512, 1, &[(5, JBD2_TAG_FLAG_LAST)]);
+        dev.raw_write(BlockNumber(10), descriptor);
+        dev.raw_write(BlockNumber(11), vec![0xAA; 512]);
+        // No room for commit block — transaction is incomplete.
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.incomplete_transactions, 1);
+    }
+
+    #[test]
+    fn replay_jbd2_revoke_then_later_write_at_higher_sequence_replays() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 16,
+        };
+        // Tx 1: write block 5 + revoke block 5 + commit
+        dev.raw_write(
+            BlockNumber(10),
+            descriptor_block(512, 1, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(11), vec![0x11; 512]);
+        dev.raw_write(BlockNumber(12), revoke_block(512, 1, &[5]));
+        dev.raw_write(BlockNumber(13), commit_block(512, 1));
+
+        // Tx 2: write block 5 again at a higher sequence (should NOT be revoked)
+        dev.raw_write(
+            BlockNumber(14),
+            descriptor_block(512, 2, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(15), vec![0x22; 512]);
+        dev.raw_write(BlockNumber(16), commit_block(512, 2));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert_eq!(out.committed_sequences, vec![1, 2]);
+
+        // Block 5 should have the Tx 2 payload (0x22), not Tx 1 (revoked).
+        let target = dev.read_block(&cx, BlockNumber(5)).expect("read");
+        assert_eq!(target.as_slice(), &[0x22; 512]);
+    }
+
+    #[test]
+    fn replay_jbd2_multiple_revokes_in_single_block() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 16,
+        };
+
+        // Descriptor with 3 tags.
+        let descriptor = descriptor_block(512, 1, &[(5, 0), (6, 0), (7, JBD2_TAG_FLAG_LAST)]);
+        dev.raw_write(BlockNumber(10), descriptor);
+        dev.raw_write(BlockNumber(11), vec![0xAA; 512]);
+        dev.raw_write(BlockNumber(12), vec![0xBB; 512]);
+        dev.raw_write(BlockNumber(13), vec![0xCC; 512]);
+        // Revoke blocks 5 and 7 in a single revoke entry.
+        dev.raw_write(BlockNumber(14), revoke_block(512, 1, &[5, 7]));
+        dev.raw_write(BlockNumber(15), commit_block(512, 1));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert_eq!(out.committed_sequences, vec![1]);
+        assert_eq!(out.stats.skipped_revoked_blocks, 2);
+        assert_eq!(out.stats.replayed_blocks, 1); // Only block 6.
+
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(6)).unwrap().as_slice(),
+            &[0xBB; 512]
+        );
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(7)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
+    }
+
+    #[test]
+    fn replay_jbd2_segments_empty_list_returns_error() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let result = replay_jbd2_segments(&cx, &dev, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replay_jbd2_segments_zero_length_segment_returns_error() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let segments = [JournalSegment {
+            start: BlockNumber(10),
+            blocks: 0,
+        }];
+        let result = replay_jbd2_segments(&cx, &dev, &segments);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replay_jbd2_segments_spanning_two_segments() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+
+        // Segment 1: descriptor at index 0
+        // Segment 2: data at index 0, commit at index 1
+        let descriptor = descriptor_block(512, 1, &[(5, JBD2_TAG_FLAG_LAST)]);
+        dev.raw_write(BlockNumber(10), descriptor);
+        dev.raw_write(BlockNumber(20), vec![0xFF; 512]); // Data in second segment.
+        dev.raw_write(BlockNumber(21), commit_block(512, 1));
+
+        let segments = [
+            JournalSegment {
+                start: BlockNumber(10),
+                blocks: 1,
+            },
+            JournalSegment {
+                start: BlockNumber(20),
+                blocks: 4,
+            },
+        ];
+        let out = replay_jbd2_segments(&cx, &dev, &segments).expect("replay");
+        assert_eq!(out.committed_sequences, vec![1]);
+        assert_eq!(out.stats.replayed_blocks, 1);
+
+        let target = dev.read_block(&cx, BlockNumber(5)).expect("read");
+        assert_eq!(target.as_slice(), &[0xFF; 512]);
+    }
+
+    #[test]
+    fn journal_segment_resolve_out_of_range() {
+        let seg = JournalSegment {
+            start: BlockNumber(10),
+            blocks: 5,
+        };
+        assert!(seg.resolve(5).is_none());
+        assert!(seg.resolve(100).is_none());
+        assert_eq!(seg.resolve(0), Some(BlockNumber(10)));
+        assert_eq!(seg.resolve(4), Some(BlockNumber(14)));
+    }
+
+    #[test]
+    fn journal_region_resolve_boundary_values() {
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 10,
+        };
+        // Last valid index.
+        assert_eq!(region.resolve(9), Some(BlockNumber(109)));
+        // First out-of-range.
+        assert!(region.resolve(10).is_none());
+    }
+
+    #[test]
+    fn journal_segment_is_empty() {
+        let empty = JournalSegment {
+            start: BlockNumber(0),
+            blocks: 0,
+        };
+        assert!(empty.is_empty());
+        let nonempty = JournalSegment {
+            start: BlockNumber(0),
+            blocks: 1,
+        };
+        assert!(!nonempty.is_empty());
+    }
+
+    #[test]
+    fn native_cow_empty_region_returns_no_records() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 16,
+        };
+        // Device is all zeros, so no valid COW magic.
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert!(recovered.is_empty());
+    }
+
+    #[test]
+    fn native_cow_uncommitted_write_not_recovered() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 16,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        journal
+            .append_write(&cx, &dev, CommitSeq(5), BlockNumber(10), &[0xAB; 64])
+            .expect("append write");
+        // No commit for sequence 5.
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert!(recovered.is_empty());
+    }
+
+    #[test]
+    fn native_cow_multiple_writes_same_commit_all_recovered() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 32,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(10), &[0x11; 64])
+            .expect("w1");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(11), &[0x22; 64])
+            .expect("w2");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(12), &[0x33; 64])
+            .expect("w3");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(1))
+            .expect("commit");
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].commit_seq, CommitSeq(1));
+        assert_eq!(recovered[0].writes.len(), 3);
+    }
+
+    #[test]
+    fn native_cow_two_committed_sequences_both_recovered() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 32,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(10), &[0x11; 64])
+            .expect("w1");
+        journal.append_commit(&cx, &dev, CommitSeq(1)).expect("c1");
+        journal
+            .append_write(&cx, &dev, CommitSeq(2), BlockNumber(11), &[0x22; 64])
+            .expect("w2");
+        journal.append_commit(&cx, &dev, CommitSeq(2)).expect("c2");
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered[0].commit_seq, CommitSeq(1));
+        assert_eq!(recovered[1].commit_seq, CommitSeq(2));
+    }
+
+    #[test]
+    fn replay_stats_default() {
+        let stats = ReplayStats::default();
+        assert_eq!(stats.scanned_blocks, 0);
+        assert_eq!(stats.descriptor_blocks, 0);
+        assert_eq!(stats.replayed_blocks, 0);
+        assert_eq!(stats.orphaned_commit_blocks, 0);
+    }
+
+    #[test]
+    fn apply_stats_default() {
+        let stats = ApplyStats::default();
+        assert_eq!(stats.blocks_written, 0);
+        assert_eq!(stats.blocks_verified, 0);
+        assert_eq!(stats.verify_mismatches, 0);
+    }
+
+    #[test]
+    fn replay_outcome_default() {
+        let outcome = ReplayOutcome::default();
+        assert!(outcome.committed_sequences.is_empty());
+        assert_eq!(outcome.stats, ReplayStats::default());
+    }
+
     // ── Property-based tests (proptest) ────────────────────────────────
 
     use proptest::prelude::*;

@@ -2109,6 +2109,46 @@ mod tests {
             prop_assert_eq!(parsed.file_acl, file_acl, "file_acl 48-bit roundtrip failed");
         }
 
+        /// A single bit-flip in the raw inode buffer should be detected
+        /// by checksum verification (except flips in the checksum fields
+        /// themselves, which can produce false-positive matches).
+        #[test]
+        fn proptest_checksum_detects_bitflip(
+            csum_seed in any::<u32>(),
+            ino in 1_u32..100_000,
+            // Flip position in bytes 0..0x7C (before checksum_lo) or 0x84..=0xFF
+            // (after checksum_hi). Avoids the 4 checksum bytes at 0x7C-0x7D
+            // and 0x82-0x83 since flipping those produces unpredictable results.
+            flip_byte in (0_usize..124).prop_union(132_usize..256),
+            flip_bit in 0_u8..8,
+        ) {
+            let inode = Ext4Inode {
+                mode: 0o100_644, uid: 1000, gid: 1000, size: 4096,
+                links_count: 1, blocks: 8, flags: EXT4_EXTENTS_FL, generation: 42,
+                file_acl: 0, atime: 1_700_000_000, ctime: 1_700_000_000,
+                mtime: 1_700_000_000, dtime: 0,
+                atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
+                crtime: 1_700_000_000, crtime_extra: 0, extra_isize: 32,
+                checksum: 0, projid: 0,
+                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+            };
+
+            let mut raw = serialize_inode(&inode, 256);
+            compute_and_set_checksum(&mut raw, csum_seed, ino);
+
+            // Verify good checksum first.
+            let ok = ffs_ondisk::verify_inode_checksum(&raw, csum_seed, ino, 256);
+            prop_assert!(ok.is_ok(), "valid checksum should pass");
+
+            // Flip one bit.
+            raw[flip_byte] ^= 1 << flip_bit;
+
+            // Verification should now fail.
+            let corrupted = ffs_ondisk::verify_inode_checksum(&raw, csum_seed, ino, 256);
+            prop_assert!(corrupted.is_err(),
+                "bit-flip at byte {flip_byte} bit {flip_bit} was not detected (seed={csum_seed:#x} ino={ino})");
+        }
+
         /// serialize → parse roundtrip preserves xattr ibody bytes.
         #[test]
         fn proptest_serialize_xattr_ibody_roundtrip(

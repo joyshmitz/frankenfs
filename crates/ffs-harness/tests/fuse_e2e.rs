@@ -226,7 +226,6 @@ fn fuse_read_nested_file() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_getattr_file_metadata() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -257,7 +256,6 @@ fn fuse_getattr_file_metadata() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_readlink_and_symlink_detection() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");

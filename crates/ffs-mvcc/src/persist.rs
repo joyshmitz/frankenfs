@@ -399,14 +399,25 @@ impl PersistentMvccStore {
             writes,
         };
 
-        let encoded = wal::encode_commit(&wal_commit).map_err(|_| CommitError::Conflict {
-            block: BlockNumber(0),
-            snapshot: CommitSeq(0),
-            observed: CommitSeq(0),
-        })?;
+        let encoded = match wal::encode_commit(&wal_commit) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                rollback_in_memory_commit(
+                    &mut store_guard,
+                    txn_id.0,
+                    commit_seq,
+                    &write_blocks,
+                    &cow_blocks,
+                    use_ssi,
+                );
+                return Err(CommitError::DurabilityFailure {
+                    detail: format!("failed to encode WAL commit record: {error}"),
+                });
+            }
+        };
 
         let mut wal_guard = self.wal.write();
-        if wal_guard.append(&encoded).is_err() {
+        if let Err(error) = wal_guard.append(&encoded) {
             rollback_in_memory_commit(
                 &mut store_guard,
                 txn_id.0,
@@ -415,13 +426,13 @@ impl PersistentMvccStore {
                 &cow_blocks,
                 use_ssi,
             );
-            return Err(CommitError::Conflict {
-                block: BlockNumber(0),
-                snapshot: CommitSeq(0),
-                observed: CommitSeq(0),
+            return Err(CommitError::DurabilityFailure {
+                detail: format!("failed to append WAL commit record: {error}"),
             });
         }
-        if self.options.sync_on_commit && wal_guard.sync().is_err() {
+        if self.options.sync_on_commit
+            && let Err(error) = wal_guard.sync()
+        {
             rollback_in_memory_commit(
                 &mut store_guard,
                 txn_id.0,
@@ -430,10 +441,8 @@ impl PersistentMvccStore {
                 &cow_blocks,
                 use_ssi,
             );
-            return Err(CommitError::Conflict {
-                block: BlockNumber(0),
-                snapshot: CommitSeq(0),
-                observed: CommitSeq(0),
+            return Err(CommitError::DurabilityFailure {
+                detail: format!("failed to sync WAL commit record: {error}"),
             });
         }
 
@@ -1235,7 +1244,11 @@ mod tests {
         let mut txn = store.begin();
         txn.stage_write(BlockNumber(77), vec![7; 8]);
         let result = store.commit(txn);
-        assert!(result.is_err(), "commit must fail when WAL append fails");
+        let err = result.expect_err("commit must fail when WAL append fails");
+        assert!(
+            matches!(err, CommitError::DurabilityFailure { .. }),
+            "expected durability failure, got {err:?}"
+        );
 
         // In-memory state must be unchanged.
         let after = store.current_snapshot();
@@ -1264,9 +1277,10 @@ mod tests {
         let mut txn = store.begin();
         txn.stage_write(BlockNumber(91), vec![9; 16]);
         let result = store.commit_ssi(txn);
+        let err = result.expect_err("SSI commit must fail when WAL append fails");
         assert!(
-            result.is_err(),
-            "SSI commit must fail when WAL append fails"
+            matches!(err, CommitError::DurabilityFailure { .. }),
+            "expected durability failure, got {err:?}"
         );
 
         // No committed data, no SSI history side-effects.

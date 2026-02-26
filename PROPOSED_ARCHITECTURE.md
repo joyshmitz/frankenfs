@@ -20,9 +20,9 @@
 | 10 | `ffs-dir` | Directory operations: linear scan, htree (hashed B-tree) lookup, dx_hash, create/delete entries | `ffs-types`, `ffs-error`, `ffs-inode` | 5 |
 | 11 | `ffs-extent` | Extent mapping: logical→physical block resolution, extent allocation, hole detection | `ffs-types`, `ffs-error`, `ffs-btree`, `ffs-alloc` | 4 |
 | 12 | `ffs-xattr` | Extended attributes: inline (after inode extra fields), external block, namespace routing (user/system/security/trusted) | `ffs-types`, `ffs-error`, `ffs-block`, `ffs-ondisk` | 5 |
-| 13 | `ffs-fuse` | FUSE interface: FuseBackend trait, MountOptions, FrankenFuseMount — delegates to ffs-core engine (not domain crates directly) | `ffs-core`, `ffs-types`, `ffs-error`, `asupersync`, `fuser`, `libc`, `serde`, `thiserror`, `tracing` | 7 |
+| 13 | `ffs-fuse` | FUSE interface: FuseBackend trait, MountOptions, FrankenFuseMount — delegates to `ffs-core::FsOps` implementations (currently `OpenFs`) and does not depend on domain crates directly | `ffs-core`, `ffs-types`, `ffs-error`, `asupersync`, `fuser`, `libc`, `serde`, `thiserror`, `tracing` | 7 |
 | 14 | `ffs-repair` | RaptorQ self-healing: generate/store repair symbols per block group, detect corruption via checksum, recover blocks, background scrub | `ffs-types`, `ffs-error`, `ffs-block`, `asupersync`, `blake3`, `crc32c` | 8 |
-| 15 | `ffs-core` | Engine integration: format detection (FsFlavor), FrankenFsEngine (MVCC wrapper), DurabilityAutopilot (Bayesian redundancy), mount orchestration | `ffs-types`, `ffs-error`, `ffs-ondisk`, `ffs-block`, `ffs-mvcc`, `ffs-btrfs`, `asupersync`, `serde`, `thiserror` | 7 |
+| 15 | `ffs-core` | Engine integration: format detection (`FsFlavor`), `OpenFs` (`FsOps` implementation for ext4/btrfs dispatch), `FrankenFsEngine` MVCC utility APIs, DurabilityAutopilot (Bayesian redundancy), mount orchestration | `ffs-types`, `ffs-error`, `ffs-ondisk`, `ffs-block`, `ffs-mvcc`, `ffs-btrfs`, `asupersync`, `serde`, `thiserror` | 7 |
 | 16 | `ffs` | Public API facade: re-exports core functionality, stable external interface | `ffs-core` | 9 |
 | 17 | `ffs-cli` | CLI binary: `ffs inspect`, `ffs info`, `ffs dump`, `ffs fsck`, `ffs repair`, `ffs mount`, `ffs scrub`, `ffs parity` | `ffs-core`, `ffs-block`, `ffs-fuse`, `ffs-harness`, `ffs-ondisk`, `ffs-repair`, `ffs-types`, `anyhow`, `asupersync`, `clap`, `serde`, `serde_json` | 9 |
 | 18 | `ffs-tui` | TUI monitoring: live cache stats, MVCC version counts, repair status, I/O throughput | `ffs`, `ftui` | 9 |
@@ -230,7 +230,7 @@ pub trait RepairManager: Send + Sync {
 
 1. **Parser crates are pure.** `ffs-ondisk` performs no I/O — it parses byte slices into typed structures.
 2. **MVCC is transport-agnostic.** `ffs-mvcc` operates on blocks, not files or directories. It depends on `ffs-block` for versioned block storage but has no knowledge of FUSE, inodes, or directory entries.
-3. **FUSE adapter delegates to ffs-core.** `ffs-fuse` maps FUSE protocol to `ffs-core::FrankenFsEngine` — it contains no filesystem logic and does not depend on domain crates directly.
+3. **FUSE adapter delegates to ffs-core.** `ffs-fuse` maps FUSE protocol to the `ffs-core::FsOps` trait (runtime path currently uses `OpenFs`) — it contains no filesystem logic and does not depend on domain crates directly.
 4. **Repair is orthogonal.** `ffs-repair` operates on blocks, not files. It doesn't know about inodes or directories.
 5. **Harness depends on everything.** `ffs-harness` may use any internal crate. No production crate depends on harness.
 6. **No cycles.** The dependency graph is a DAG. If crate A depends on B, B must not depend on A.
@@ -267,7 +267,7 @@ pub trait RepairManager: Send + Sync {
 | `MountOption` | Mount configuration (read-only, allow_other, auto_unmount) |
 | `Session` | FUSE session lifecycle management |
 
-> **Status:** `fuser` is a workspace dependency. `ffs-fuse` implements the `fuser::Filesystem` trait for read-only ext4 mounts via `ffs mount`. Write support and btrfs mount are Phase 7+ work.
+> **Status:** `fuser` is a workspace dependency. `ffs-fuse` implements the `fuser::Filesystem` trait and `ffs mount` currently reaches both ext4 and btrfs paths in experimental mode. Default mount is read-only; `--rw` enables write paths that are still under active hardening.
 
 ---
 
@@ -451,11 +451,13 @@ pub struct MountConfig {
 
 ## 10. Upgrade Path
 
-1. **Phase 1 (current):** Workspace scaffolding, specs, empty stubs
-2. **Phase 2:** On-disk parsing (read-only ext4 image access)
+_This section tracks original implementation sequencing, not current parity status._
+
+1. **Phase 1:** Workspace scaffolding, specs, empty stubs
+2. **Phase 2:** On-disk parsing (ext4 + btrfs metadata ingestion)
 3. **Phase 3:** Block I/O with ARC cache
 4. **Phase 4:** Extent tree traversal and block allocation
-5. **Phase 5:** Inode and directory operations (read-only mount)
+5. **Phase 5:** Inode and directory operations (initial mount path)
 6. **Phase 6:** Journal replay and MVCC (read-write mount)
 7. **Phase 7:** Full FUSE interface
 8. **Phase 8:** RaptorQ self-healing

@@ -77,7 +77,7 @@ pub fn search(
     if header.depth == 0 {
         // Leaf: search extents directly in root.
         let extents = parse_leaf_entries(root_bytes, &header)?;
-        return Ok(search_leaf(&extents, target));
+        return search_leaf(&extents, target);
     }
 
     // Internal: descend through index levels.
@@ -115,7 +115,7 @@ fn descend_search(
 
     if depth == 0 {
         let extents = parse_leaf_entries(data, &header)?;
-        Ok(search_leaf(&extents, target))
+        search_leaf(&extents, target)
     } else {
         let indexes = parse_index_entries(data, &header)?;
         let child = find_index_child(&indexes, target)?;
@@ -124,9 +124,22 @@ fn descend_search(
 }
 
 /// Binary search leaf extents for the target logical block.
-fn search_leaf(extents: &[Ext4Extent], target: u32) -> SearchResult {
+fn search_leaf(extents: &[Ext4Extent], target: u32) -> Result<SearchResult> {
     if extents.is_empty() {
-        return SearchResult::Hole { hole_len: u32::MAX };
+        return Ok(SearchResult::Hole { hole_len: u32::MAX });
+    }
+
+    // Validate: reject zero-length extents (on-disk corruption).
+    for ext in extents {
+        if actual_len(ext.raw_len) == 0 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "zero-length extent traversal at logical block {}",
+                    ext.logical_block,
+                ),
+            });
+        }
     }
 
     // Binary search: find the last extent with logical_block <= target.
@@ -137,10 +150,10 @@ fn search_leaf(extents: &[Ext4Extent], target: u32) -> SearchResult {
         let len = actual_len(ext.raw_len);
         let end = ext.logical_block.saturating_add(u32::from(len));
         if target < end {
-            return SearchResult::Found {
+            return Ok(SearchResult::Found {
                 extent: *ext,
                 offset_in_extent: target - ext.logical_block,
-            };
+            });
         }
     }
 
@@ -151,7 +164,7 @@ fn search_leaf(extents: &[Ext4Extent], target: u32) -> SearchResult {
         u32::MAX
     };
     let hole_len = next_start.saturating_sub(target);
-    SearchResult::Hole { hole_len }
+    Ok(SearchResult::Hole { hole_len })
 }
 
 /// Find the child block to descend into for the given target.
@@ -1037,6 +1050,15 @@ fn parse_leaf_entries(data: &[u8], header: &Ext4ExtentHeader) -> Result<Vec<Ext4
         let start_lo =
             u32::from_le_bytes([data[off + 8], data[off + 9], data[off + 10], data[off + 11]]);
         let physical_start = u64::from(start_lo) | (u64::from(start_hi) << 32);
+
+        if actual_len(raw_len) == 0 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "zero-length extent traversal at leaf entry {i} (logical_block {logical_block})"
+                ),
+            });
+        }
 
         extents.push(Ext4Extent {
             logical_block,
@@ -2235,28 +2257,28 @@ mod tests {
 
     // ── Error-path and edge-case hardening tests ─────────────────────────
 
+    struct FailAfter {
+        remaining: usize,
+    }
+    impl BlockAllocator for FailAfter {
+        fn alloc_block(&mut self, _cx: &Cx) -> Result<BlockNumber> {
+            if self.remaining == 0 {
+                return Err(FfsError::NoSpace);
+            }
+            self.remaining -= 1;
+            // Return a unique block each time.
+            Ok(BlockNumber(500 + self.remaining as u64))
+        }
+        fn free_block(&mut self, _cx: &Cx, _block: BlockNumber) -> Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn alloc_failure_during_root_split_propagates_error() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let mut root = make_root();
-
-        struct FailAfter {
-            remaining: usize,
-        }
-        impl BlockAllocator for FailAfter {
-            fn alloc_block(&mut self, _cx: &Cx) -> Result<BlockNumber> {
-                if self.remaining == 0 {
-                    return Err(FfsError::NoSpace);
-                }
-                self.remaining -= 1;
-                // Return a unique block each time.
-                Ok(BlockNumber(500 + self.remaining as u64))
-            }
-            fn free_block(&mut self, _cx: &Cx, _block: BlockNumber) -> Result<()> {
-                Ok(())
-            }
-        }
 
         // Fill root with 4 extents using a working allocator.
         let mut alloc = SeqAllocator::new(100);

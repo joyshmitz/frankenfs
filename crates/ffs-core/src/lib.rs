@@ -40,7 +40,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 // ── Compute budget and degradation ─────────────────────────────────────────
 
@@ -1706,6 +1706,15 @@ impl OpenFs {
                     "txn_commit_backpressure"
                 );
             }
+            Err(CommitError::DurabilityFailure { detail }) => {
+                error!(
+                    target: "ffs::mvcc",
+                    txn_id = txn_id.0,
+                    detail = %detail,
+                    error_type = "durability_failure",
+                    "txn_commit_durability_failure"
+                );
+            }
         }
 
         result
@@ -2019,6 +2028,9 @@ impl OpenFs {
                     tx: txn_id.0,
                     block: pivot_block.0,
                 },
+                CommitError::DurabilityFailure { detail } => FfsError::Io(std::io::Error::other(
+                    format!("MVCC durability failure during preflight: {detail}"),
+                )),
             }
         })?;
 

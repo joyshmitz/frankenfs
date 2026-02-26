@@ -662,6 +662,112 @@ mod tests {
         assert!(matches!(err, FfsError::Format(_)));
     }
 
+    #[test]
+    fn set_xattr_rejects_external_block_shorter_than_header() {
+        let mut inode = make_inode(128);
+        let mut short_external = vec![0_u8; EXTERNAL_HEADER_LEN - 1];
+        let err = set_xattr(
+            &mut inode,
+            Some(&mut short_external),
+            "user.key",
+            b"value",
+            XattrWriteAccess {
+                is_owner: true,
+                has_cap_fowner: false,
+                has_cap_sys_admin: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn list_xattrs_rejects_corrupt_external_magic() {
+        let inode = make_inode(128);
+        let mut external = vec![0_u8; 1024];
+        external[0] = 0x7f; // Non-zero garbage magic, not all-zero initialized.
+        let err = list_xattrs(&inode, Some(&external)).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn updating_inline_xattr_spills_to_external_and_preserves_others() {
+        let mut inode = make_inode(80);
+        let mut external = vec![0_u8; 1024];
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+
+        set_xattr(&mut inode, None, "user.keep", b"k", access).unwrap();
+        set_xattr(&mut inode, None, "user.move", b"small", access).unwrap();
+
+        let big_value = vec![b'Z'; 80];
+        let stored = set_xattr(
+            &mut inode,
+            Some(&mut external),
+            "user.move",
+            &big_value,
+            access,
+        )
+        .unwrap();
+        assert_eq!(stored, XattrStorage::External);
+        assert_eq!(
+            get_xattr(&inode, Some(&external), "user.keep").unwrap(),
+            Some(b"k".to_vec())
+        );
+        assert_eq!(
+            get_xattr(&inode, Some(&external), "user.move").unwrap(),
+            Some(big_value)
+        );
+    }
+
+    #[test]
+    fn spillover_failure_keeps_existing_inline_value_intact() {
+        let mut inode = make_inode(80);
+        let mut external = vec![0_u8; EXTERNAL_HEADER_LEN];
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+
+        set_xattr(&mut inode, None, "user.move", b"old", access).unwrap();
+        let err = set_xattr(
+            &mut inode,
+            Some(&mut external),
+            "user.move",
+            &[b'X'; 64],
+            access,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace));
+        assert_eq!(
+            get_xattr(&inode, None, "user.move").unwrap(),
+            Some(b"old".to_vec())
+        );
+        assert!(external.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn remove_xattr_requires_external_block_when_file_acl_is_set() {
+        let mut inode = make_inode(128);
+        inode.file_acl = 42;
+        let err = remove_xattr(
+            &mut inode,
+            None,
+            "user.any",
+            XattrWriteAccess {
+                is_owner: true,
+                has_cap_fowner: false,
+                has_cap_sys_admin: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
     // ── Additional edge-case tests ───────────────────────────────────
 
     #[test]

@@ -1,6 +1,6 @@
 # COMPREHENSIVE SPECIFICATION FOR FRANKENFS V1
 
-> A memory-safe, FUSE-based Rust reimplementation of ext4 with block-level MVCC
+> A memory-safe, FUSE-based Rust reimplementation of ext4 and btrfs with block-level MVCC
 > (replacing JBD2's global journal lock) and RaptorQ self-healing (fountain-coded
 > corruption recovery per block group).
 
@@ -32,6 +32,7 @@ This section records *current* (not historical) drift between this spec and the 
 
 - **ParseError -> FfsError context drift:** The crate boundary is now explicit: `ffs-ondisk` returns `ParseError` (pure parsing + checksum verification), while user-facing layers return `FfsError` and convert at the orchestration boundary (`ffs-core`). However, the conversion still lacks a structured context object (structure + offsets + inode/group) for actionable diagnostics. Track: `bd-2fy`.
 - **Missing normative traits (integration points):** Spec §8/§9/§14 define normative traits (repair manager, scrub progress, semantics ops) that are not yet fully present as explicit contracts in code (`crates/ffs-repair` now ships scrub/recovery pipelines and evidence wiring, and `crates/ffs-fuse` ships production mount scaffolding). Resolution: promote the remaining behavior to explicit trait contracts in the owning crates without creating dependency cycles, then migrate call sites to those contracts. Tracks: `bd-2l4`, `bd-3bf`, `bd-hv6`.
+- **Engine terminology drift:** This spec frequently uses `FrankenFsEngine` as the orchestration name. In current code, the active FUSE runtime path is `ffs-fuse -> ffs-core::FsOps` (currently `OpenFs`). Treat `FrankenFsEngine` mentions as conceptual/utility naming unless a section explicitly requires that concrete type. Track: `bd-vyt6`.
 
 ### 0.1.2 Audit Checklist (Mechanical)
 
@@ -192,7 +193,7 @@ Core MVCC types are defined in `ffs-types` / `ffs-mvcc` and specified in §5 (MV
 |-----------|------|------------|---------|
 | **asupersync** | `/dp/asupersync` | Cx, Budget, Region, Lab, RaptorQ codec, blocking_pool | Concurrency, cancellation, deterministic testing, fountain codes |
 | **frankentui** | `/dp/frankentui` (`ftui`) | Theme, widgets, event loop | TUI rendering for `ffs-tui` |
-| **fuser** | crates.io | `Filesystem` trait, `MountOption`, `Session` | FUSE protocol bindings (planned; introduced in Phase 7) |
+| **fuser** | crates.io | `Filesystem` trait, `MountOption`, `Session` | FUSE protocol bindings (active workspace dependency used by current mount runtime) |
 
 **Hard constraints:**
 

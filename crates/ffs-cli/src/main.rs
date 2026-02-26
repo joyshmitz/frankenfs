@@ -547,6 +547,14 @@ struct RepairInfoOutput {
     configured_overhead_ratio: f64,
     metrics_available: bool,
     note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    groups_total: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    groups_fresh: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    groups_stale: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    groups_untracked: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1381,15 +1389,7 @@ fn build_info_output(
     };
 
     let repair_output = if options.sections.repair() {
-        limitations.push(
-            "Repair status currently reports static policy defaults; live symbol coverage/scrub counters are not yet exposed through CLI info"
-                .to_owned(),
-        );
-        Some(RepairInfoOutput {
-            configured_overhead_ratio: 1.05,
-            metrics_available: false,
-            note: "live repair metrics are not yet exposed through OpenFs".to_owned(),
-        })
+        Some(build_repair_info(path, open_fs, &mut limitations))
     } else {
         None
     };
@@ -1540,6 +1540,122 @@ fn build_mvcc_info(open_fs: &OpenFs) -> MvccInfoOutput {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RepairStalenessSummary {
+    total: u32,
+    fresh: u32,
+    stale: u32,
+    untracked: u32,
+}
+
+fn summarize_repair_staleness(states: &[(u32, Ext4RepairStaleness)]) -> RepairStalenessSummary {
+    let mut summary = RepairStalenessSummary {
+        total: u32::try_from(states.len()).unwrap_or(u32::MAX),
+        ..RepairStalenessSummary::default()
+    };
+
+    for (_, state) in states {
+        match state {
+            Ext4RepairStaleness::Fresh => {
+                summary.fresh = summary.fresh.saturating_add(1);
+            }
+            Ext4RepairStaleness::Stale => {
+                summary.stale = summary.stale.saturating_add(1);
+            }
+            Ext4RepairStaleness::Untracked => {
+                summary.untracked = summary.untracked.saturating_add(1);
+            }
+        }
+    }
+
+    summary
+}
+
+fn build_repair_info(
+    path: &PathBuf,
+    open_fs: &OpenFs,
+    limitations: &mut Vec<String>,
+) -> RepairInfoOutput {
+    match &open_fs.flavor {
+        FsFlavor::Ext4(sb) => {
+            match build_ext4_repair_group_specs(sb).and_then(|specs| {
+                probe_ext4_repair_staleness(path, sb.block_size, &specs)
+                    .map(|states| summarize_repair_staleness(&states))
+            }) {
+                Ok(summary) => RepairInfoOutput {
+                    configured_overhead_ratio: DEFAULT_REPAIR_OVERHEAD_RATIO,
+                    metrics_available: true,
+                    note: "live ext4 repair-group descriptor/symbol status".to_owned(),
+                    groups_total: Some(summary.total),
+                    groups_fresh: Some(summary.fresh),
+                    groups_stale: Some(summary.stale),
+                    groups_untracked: Some(summary.untracked),
+                },
+                Err(error) => {
+                    limitations.push(format!(
+                        "repair metrics probe failed for ext4 image: {error:#}"
+                    ));
+                    RepairInfoOutput {
+                        configured_overhead_ratio: DEFAULT_REPAIR_OVERHEAD_RATIO,
+                        metrics_available: false,
+                        note: "live ext4 repair metrics unavailable (see limitations)".to_owned(),
+                        groups_total: None,
+                        groups_fresh: None,
+                        groups_stale: None,
+                        groups_untracked: None,
+                    }
+                }
+            }
+        }
+        FsFlavor::Btrfs(sb) => {
+            let metrics = std::fs::metadata(path)
+                .with_context(|| format!("failed to inspect image metadata: {}", path.display()))
+                .map(|meta| meta.len())
+                .and_then(|image_len| {
+                    choose_btrfs_scrub_block_size(image_len, sb.nodesize, sb.sectorsize)
+                        .with_context(|| {
+                            format!(
+                                "failed to determine btrfs scrub block size (len_bytes={image_len}, nodesize={}, sectorsize={})",
+                                sb.nodesize, sb.sectorsize
+                            )
+                        })
+                })
+                .and_then(|block_size| {
+                    discover_btrfs_repair_group_specs(path, block_size).and_then(|specs| {
+                        probe_btrfs_repair_staleness(path, block_size, &specs)
+                            .map(|states| summarize_repair_staleness(&states))
+                    })
+                });
+
+            match metrics {
+                Ok(summary) => RepairInfoOutput {
+                    configured_overhead_ratio: DEFAULT_REPAIR_OVERHEAD_RATIO,
+                    metrics_available: true,
+                    note: "live btrfs repair-group descriptor/symbol status".to_owned(),
+                    groups_total: Some(summary.total),
+                    groups_fresh: Some(summary.fresh),
+                    groups_stale: Some(summary.stale),
+                    groups_untracked: Some(summary.untracked),
+                },
+                Err(error) => {
+                    limitations.push(format!(
+                        "repair metrics probe failed for btrfs image: {error:#}"
+                    ));
+                    RepairInfoOutput {
+                        configured_overhead_ratio: DEFAULT_REPAIR_OVERHEAD_RATIO,
+                        metrics_available: false,
+                        note: "live btrfs repair metrics unavailable (see limitations)".to_owned(),
+                        groups_total: None,
+                        groups_fresh: None,
+                        groups_stale: None,
+                        groups_untracked: None,
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn build_ext4_journal_info(cx: &Cx, open_fs: &OpenFs, sb: &Ext4Superblock) -> JournalInfoOutput {
     let journal_size_bytes = if sb.journal_inum == 0 {
         None
@@ -1605,100 +1721,131 @@ fn print_info_output(json: bool, output: &InfoOutput) -> Result<()> {
     print_superblock_info(&output.superblock);
 
     if let Some(groups) = &output.groups {
-        println!();
-        println!("groups: {}", groups.len());
-        for group in groups {
-            println!(
-                "  group={} blocks={}..{} free_blocks={} inodes={}..{} free_inodes={} flags={}",
-                group.group,
-                group.block_start,
-                group.block_end_inclusive,
-                group.free_blocks,
-                group.inode_start,
-                group.inode_end_inclusive,
-                group.free_inodes,
-                group.flags.join("|")
-            );
-        }
+        print_groups_info(groups);
     }
 
     if let Some(mvcc) = &output.mvcc {
-        println!();
-        println!("mvcc:");
-        println!("  current_commit_seq: {}", mvcc.current_commit_seq);
-        println!("  active_snapshot_count: {}", mvcc.active_snapshot_count);
-        println!(
-            "  oldest_active_snapshot: {}",
-            mvcc.oldest_active_snapshot
-                .map_or_else(|| "none".to_owned(), |value| value.to_string())
-        );
-        println!("  total_versioned_blocks: {}", mvcc.total_versioned_blocks);
-        println!("  max_chain_depth: {}", mvcc.max_chain_depth);
-        println!("  average_chain_depth: {}", mvcc.average_chain_depth);
-        println!("  blocks_pending_gc: {}", mvcc.blocks_pending_gc);
+        print_mvcc_info(mvcc);
     }
 
     if let Some(repair) = &output.repair {
-        println!();
-        println!("repair:");
-        println!(
-            "  configured_overhead_ratio: {:.3}",
-            repair.configured_overhead_ratio
-        );
-        println!("  metrics_available: {}", repair.metrics_available);
-        println!("  note: {}", repair.note);
+        print_repair_info(repair);
     }
 
     if let Some(journal) = &output.journal {
-        println!();
-        match journal {
-            JournalInfoOutput::Ext4 {
-                journal_inode,
-                external_journal_dev,
-                journal_uuid,
-                journal_size_bytes,
-                replayed_transactions,
-                replayed_blocks,
-                scanned_blocks,
-                descriptor_blocks,
-                commit_blocks,
-                revoke_blocks,
-                skipped_revoked_blocks,
-                incomplete_transactions,
-            } => {
-                println!("journal:");
-                println!("  inode: {journal_inode}");
-                println!("  external_dev: {external_journal_dev}");
-                println!("  uuid: {journal_uuid}");
-                println!(
-                    "  size_bytes: {}",
-                    journal_size_bytes
-                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
-                );
-                println!("  replayed_transactions: {replayed_transactions}");
-                println!("  replayed_blocks: {replayed_blocks}");
-                println!("  scanned_blocks: {scanned_blocks}");
-                println!("  descriptor_blocks: {descriptor_blocks}");
-                println!("  commit_blocks: {commit_blocks}");
-                println!("  revoke_blocks: {revoke_blocks}");
-                println!("  skipped_revoked_blocks: {skipped_revoked_blocks}");
-                println!("  incomplete_transactions: {incomplete_transactions}");
-            }
-            JournalInfoOutput::Unsupported { reason } => {
-                println!("journal: unsupported ({reason})");
-            }
-        }
+        print_journal_info(journal);
     }
 
     if !output.limitations.is_empty() {
-        println!();
-        println!("limitations:");
-        for limitation in &output.limitations {
-            println!("  - {limitation}");
-        }
+        print_limitations(&output.limitations);
     }
 
     Ok(())
+}
+
+fn print_groups_info(groups: &[Ext4GroupInfoOutput]) {
+    println!();
+    println!("groups: {}", groups.len());
+    for group in groups {
+        println!(
+            "  group={} blocks={}..{} free_blocks={} inodes={}..{} free_inodes={} flags={}",
+            group.group,
+            group.block_start,
+            group.block_end_inclusive,
+            group.free_blocks,
+            group.inode_start,
+            group.inode_end_inclusive,
+            group.free_inodes,
+            group.flags.join("|")
+        );
+    }
+}
+
+fn print_mvcc_info(mvcc: &MvccInfoOutput) {
+    println!();
+    println!("mvcc:");
+    println!("  current_commit_seq: {}", mvcc.current_commit_seq);
+    println!("  active_snapshot_count: {}", mvcc.active_snapshot_count);
+    println!(
+        "  oldest_active_snapshot: {}",
+        mvcc.oldest_active_snapshot
+            .map_or_else(|| "none".to_owned(), |value| value.to_string())
+    );
+    println!("  total_versioned_blocks: {}", mvcc.total_versioned_blocks);
+    println!("  max_chain_depth: {}", mvcc.max_chain_depth);
+    println!("  average_chain_depth: {}", mvcc.average_chain_depth);
+    println!("  blocks_pending_gc: {}", mvcc.blocks_pending_gc);
+}
+
+fn print_repair_info(repair: &RepairInfoOutput) {
+    println!();
+    println!("repair:");
+    println!(
+        "  configured_overhead_ratio: {:.3}",
+        repair.configured_overhead_ratio
+    );
+    println!("  metrics_available: {}", repair.metrics_available);
+    println!("  note: {}", repair.note);
+    if let Some(groups_total) = repair.groups_total {
+        println!("  groups_total: {groups_total}");
+    }
+    if let Some(groups_fresh) = repair.groups_fresh {
+        println!("  groups_fresh: {groups_fresh}");
+    }
+    if let Some(groups_stale) = repair.groups_stale {
+        println!("  groups_stale: {groups_stale}");
+    }
+    if let Some(groups_untracked) = repair.groups_untracked {
+        println!("  groups_untracked: {groups_untracked}");
+    }
+}
+
+fn print_journal_info(journal: &JournalInfoOutput) {
+    println!();
+    match journal {
+        JournalInfoOutput::Ext4 {
+            journal_inode,
+            external_journal_dev,
+            journal_uuid,
+            journal_size_bytes,
+            replayed_transactions,
+            replayed_blocks,
+            scanned_blocks,
+            descriptor_blocks,
+            commit_blocks,
+            revoke_blocks,
+            skipped_revoked_blocks,
+            incomplete_transactions,
+        } => {
+            println!("journal:");
+            println!("  inode: {journal_inode}");
+            println!("  external_dev: {external_journal_dev}");
+            println!("  uuid: {journal_uuid}");
+            println!(
+                "  size_bytes: {}",
+                journal_size_bytes.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+            );
+            println!("  replayed_transactions: {replayed_transactions}");
+            println!("  replayed_blocks: {replayed_blocks}");
+            println!("  scanned_blocks: {scanned_blocks}");
+            println!("  descriptor_blocks: {descriptor_blocks}");
+            println!("  commit_blocks: {commit_blocks}");
+            println!("  revoke_blocks: {revoke_blocks}");
+            println!("  skipped_revoked_blocks: {skipped_revoked_blocks}");
+            println!("  incomplete_transactions: {incomplete_transactions}");
+        }
+        JournalInfoOutput::Unsupported { reason } => {
+            println!("journal: unsupported ({reason})");
+        }
+    }
+}
+
+fn print_limitations(limitations: &[String]) {
+    println!();
+    println!("limitations:");
+    for limitation in limitations {
+        println!("  - {limitation}");
+    }
 }
 
 fn print_superblock_info(superblock: &SuperblockInfoOutput) {
@@ -4473,6 +4620,40 @@ fn probe_ext4_repair_staleness(
     path: &PathBuf,
     block_size: u32,
     specs: &[Ext4RepairGroupSpec],
+) -> Result<Vec<(u32, Ext4RepairStaleness)>> {
+    let cx = cli_cx();
+    let byte_dev = FileByteDevice::open(path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+    let block_dev = ByteBlockDevice::new(byte_dev, block_size)
+        .with_context(|| format!("failed to create block device (block_size={block_size})"))?;
+
+    let mut states = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let storage = RepairGroupStorage::new(&block_dev, spec.layout);
+        let state =
+            storage
+                .read_group_desc_ext(&cx)
+                .map_or(Ext4RepairStaleness::Untracked, |desc| {
+                    if desc.repair_generation == 0 {
+                        Ext4RepairStaleness::Stale
+                    } else {
+                        match storage.read_repair_symbols(&cx) {
+                            Ok(symbols) if symbols.is_empty() => Ext4RepairStaleness::Stale,
+                            Ok(_) => Ext4RepairStaleness::Fresh,
+                            Err(_) => Ext4RepairStaleness::Stale,
+                        }
+                    }
+                });
+        states.push((spec.group, state));
+    }
+
+    Ok(states)
+}
+
+fn probe_btrfs_repair_staleness(
+    path: &PathBuf,
+    block_size: u32,
+    specs: &[BtrfsRepairGroupSpec],
 ) -> Result<Vec<(u32, Ext4RepairStaleness)>> {
     let cx = cli_cx();
     let byte_dev = FileByteDevice::open(path)

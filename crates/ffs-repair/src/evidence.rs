@@ -222,6 +222,8 @@ pub enum TxnAbortReason {
     SsiCycle,
     /// Deadline or timeout budget exceeded.
     Timeout,
+    /// Durability layer failed while persisting a commit.
+    DurabilityFailure,
     /// Explicit user-requested abort.
     UserAbort,
 }

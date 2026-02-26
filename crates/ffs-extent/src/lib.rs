@@ -18,13 +18,15 @@ use ffs_alloc::{AllocHint, BlockAlloc, FsGeometry, GroupStats};
 use ffs_block::BlockDevice;
 use ffs_btree::{BlockAllocator, SearchResult};
 use ffs_error::{FfsError, Result};
-use ffs_ondisk::Ext4Extent;
+use ffs_ondisk::{Ext4Extent, ExtentTree, parse_extent_tree};
 use ffs_types::BlockNumber;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Bit 15 set in raw_len indicates unwritten extent.
 const UNWRITTEN_FLAG: u16 = 1_u16 << 15;
+/// ext4 kernel limit for extent tree depth.
+const MAX_EXTENT_TREE_DEPTH: u16 = 5;
 
 // ── Extent mapping ──────────────────────────────────────────────────────────
 
@@ -48,6 +50,11 @@ pub fn map_logical_to_physical(
     logical_start: u32,
     count: u32,
 ) -> Result<Vec<ExtentMapping>> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    validate_root_header("map_logical_to_physical", root_bytes)?;
+
     let mut mappings = Vec::new();
     let mut pos = logical_start;
     let end = logical_start.saturating_add(count);
@@ -63,6 +70,14 @@ pub fn map_logical_to_physical(
                 let actual_len = u32::from(extent.actual_len());
                 let remaining_in_extent = actual_len.saturating_sub(offset_in_extent);
                 let to_map = remaining_in_extent.min(end - pos);
+                if to_map == 0 {
+                    return Err(FfsError::Corruption {
+                        block: 0,
+                        detail: format!(
+                            "map_logical_to_physical: zero-length extent traversal at logical block {pos}"
+                        ),
+                    });
+                }
                 mappings.push(ExtentMapping {
                     logical_start: pos,
                     physical_start: extent.physical_start + u64::from(offset_in_extent),
@@ -73,6 +88,14 @@ pub fn map_logical_to_physical(
             }
             SearchResult::Hole { hole_len } => {
                 let to_map = hole_len.min(end - pos);
+                if to_map == 0 {
+                    return Err(FfsError::Corruption {
+                        block: 0,
+                        detail: format!(
+                            "map_logical_to_physical: zero-length hole traversal at logical block {pos}"
+                        ),
+                    });
+                }
                 mappings.push(ExtentMapping {
                     logical_start: pos,
                     physical_start: 0,
@@ -147,6 +170,7 @@ pub fn allocate_extent(
     if count == 0 || count > u32::from(u16::MAX >> 1) {
         return Err(FfsError::Format("extent count must be 1..=32767".into()));
     }
+    validate_root_header("allocate_extent", root_bytes)?;
 
     // Allocate physical blocks.
     let BlockAlloc {
@@ -206,6 +230,7 @@ pub fn allocate_unwritten_extent(
     if count == 0 || count > u32::from(u16::MAX >> 1) {
         return Err(FfsError::Format("extent count must be 1..=32767".into()));
     }
+    validate_root_header("allocate_unwritten_extent", root_bytes)?;
 
     let BlockAlloc {
         start,
@@ -256,6 +281,7 @@ pub fn truncate_extents(
     pctx: &ffs_alloc::PersistCtx,
 ) -> Result<u64> {
     cx_checkpoint(cx)?;
+    validate_root_header("truncate_extents", root_bytes)?;
 
     let mut total_freed = 0u64;
 
@@ -311,7 +337,11 @@ pub fn punch_hole(
     count: u32,
     pctx: &ffs_alloc::PersistCtx,
 ) -> Result<u64> {
+    if count == 0 {
+        return Ok(0);
+    }
     cx_checkpoint(cx)?;
+    validate_root_header("punch_hole", root_bytes)?;
 
     let freed_ranges = {
         let mut tree_alloc = GroupBlockAllocator {
@@ -361,7 +391,11 @@ pub fn mark_written(
     count: u32,
     pctx: &ffs_alloc::PersistCtx,
 ) -> Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
     cx_checkpoint(cx)?;
+    validate_root_header("mark_written", root_bytes)?;
 
     let range_end = logical_start.saturating_add(count);
 
@@ -488,6 +522,37 @@ fn split_for_mark_written(
 
 fn cx_checkpoint(cx: &Cx) -> Result<()> {
     cx.checkpoint().map_err(|_| FfsError::Cancelled)
+}
+
+fn validate_root_header(op: &str, root_bytes: &[u8; 60]) -> Result<()> {
+    let (header, tree) = parse_extent_tree(root_bytes).map_err(|err| FfsError::Corruption {
+        block: 0,
+        detail: format!("{op}: invalid root extent header: {err}"),
+    })?;
+    if header.depth > MAX_EXTENT_TREE_DEPTH {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!(
+                "{op}: extent root depth {} exceeds ext4 limit {MAX_EXTENT_TREE_DEPTH}",
+                header.depth
+            ),
+        });
+    }
+    if header.depth > 0 && header.entries == 0 {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("{op}: non-leaf extent root has zero entries"),
+        });
+    }
+    if let ExtentTree::Leaf(extents) = tree {
+        if extents.iter().any(|ext| ext.actual_len() == 0) {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!("{op}: leaf extent with zero length"),
+            });
+        }
+    }
+    Ok(())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -638,6 +703,45 @@ mod tests {
         assert_eq!(mappings[1].physical_start, 0);
     }
 
+    #[test]
+    fn map_rejects_root_depth_above_ext4_limit() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = empty_root();
+        root[2..4].copy_from_slice(&1_u16.to_le_bytes());
+        root[6..8].copy_from_slice(&6_u16.to_le_bytes());
+
+        let result = map_logical_to_physical(&cx, &dev, &root, 0, 1);
+        match result {
+            Err(FfsError::Corruption { detail, .. }) => {
+                assert!(detail.contains("exceeds ext4 limit"));
+            }
+            other => panic!("expected Corruption for excessive root depth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_rejects_zero_length_extent_entry() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = empty_root();
+        root[2..4].copy_from_slice(&1_u16.to_le_bytes()); // entries
+        root[6..8].copy_from_slice(&0_u16.to_le_bytes()); // depth
+        // first leaf extent at offset 12: logical=0, raw_len=0 (corrupt), physical=123
+        root[12..16].copy_from_slice(&0_u32.to_le_bytes());
+        root[16..18].copy_from_slice(&0_u16.to_le_bytes());
+        root[18..20].copy_from_slice(&0_u16.to_le_bytes());
+        root[20..24].copy_from_slice(&123_u32.to_le_bytes());
+
+        let result = map_logical_to_physical(&cx, &dev, &root, 0, 1);
+        match result {
+            Err(FfsError::Corruption { detail, .. }) => {
+                assert!(detail.contains("leaf extent with zero length"));
+            }
+            other => panic!("expected Corruption for zero-length extent, got {other:?}"),
+        }
+    }
+
     // ── Allocate tests ──────────────────────────────────────────────────
 
     #[test]
@@ -713,6 +817,38 @@ mod tests {
         })
         .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn allocate_extent_rejects_non_leaf_root_with_zero_entries() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // Non-leaf root must have at least one index entry.
+        root[2..4].copy_from_slice(&0_u16.to_le_bytes());
+        root[6..8].copy_from_slice(&1_u16.to_le_bytes());
+
+        let result = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            1,
+            &AllocHint::default(),
+            &pctx,
+        );
+        match result {
+            Err(FfsError::Corruption { detail, .. }) => {
+                assert!(detail.contains("non-leaf extent root has zero entries"));
+            }
+            other => panic!("expected Corruption for invalid non-leaf root, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1748,6 +1884,311 @@ mod tests {
         // All blocks should be freed.
         let final_free: u32 = groups.iter().map(|g| g.free_blocks).sum();
         assert_eq!(final_free, initial_free);
+    }
+
+    // ── Adversarial / hardening tests ─────────────────────────────────
+
+    #[test]
+    fn corrupted_root_magic_returns_error() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = [0u8; 60];
+        // Set invalid magic bytes (not 0xF30A).
+        root[0] = 0xDE;
+        root[1] = 0xAD;
+        root[2] = 0; // entries = 0
+        root[3] = 0;
+        root[4] = 4; // max_entries = 4
+        root[5] = 0;
+        root[6] = 0; // depth = 0
+        root[7] = 0;
+
+        let result = map_logical_to_physical(&cx, &dev, &root, 0, 10);
+        assert!(result.is_err(), "bad magic should fail");
+    }
+
+    #[test]
+    fn all_zeros_root_returns_error() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let root = [0u8; 60];
+
+        let result = map_logical_to_physical(&cx, &dev, &root, 0, 10);
+        assert!(result.is_err(), "all-zeros root should fail (bad magic)");
+    }
+
+    #[test]
+    fn allocate_max_valid_count() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // 32767 is max valid extent count (u16::MAX >> 1).
+        // This will fail with NoSpace since our test geometry doesn't have enough,
+        // but it should NOT fail with a Format error.
+        let result = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            32767,
+            &AllocHint::default(),
+            &pctx,
+        );
+        // Should be NoSpace (not enough blocks) or Ok, but NOT Format.
+        assert!(
+            !matches!(result, Err(FfsError::Format(_))),
+            "32767 is a valid count, should not get Format error"
+        );
+    }
+
+    #[test]
+    fn punch_hole_exact_extent_boundaries() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // Allocate [0-9].
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            10,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        // Punch exactly the full extent.
+        let freed = punch_hole(&cx, &dev, &mut root, &geo, &mut groups, 0, 10, &pctx).unwrap();
+        assert_eq!(freed, 10);
+
+        // Tree should be empty.
+        let mut count = 0;
+        ffs_btree::walk(&cx, &dev, &root, &mut |_: &Ext4Extent| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 0, "punching full extent should leave empty tree");
+    }
+
+    #[test]
+    fn truncate_is_idempotent() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            10,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        let freed1 = truncate_extents(&cx, &dev, &mut root, &geo, &mut groups, 0, &pctx).unwrap();
+        assert_eq!(freed1, 10);
+
+        // Second truncate at same point should free 0.
+        let freed2 = truncate_extents(&cx, &dev, &mut root, &geo, &mut groups, 0, &pctx).unwrap();
+        assert_eq!(freed2, 0, "second truncate should be a noop");
+    }
+
+    #[test]
+    fn map_beyond_any_extent_returns_pure_hole() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // Allocate blocks 0-4.
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            5,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        // Map far beyond any extent.
+        let mappings = map_logical_to_physical(&cx, &dev, &root, 1_000_000, 100).unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].physical_start, 0, "should be a hole");
+        assert_eq!(mappings[0].count, 100);
+    }
+
+    #[test]
+    fn map_zero_count_returns_empty() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let root = empty_root();
+
+        let mappings = map_logical_to_physical(&cx, &dev, &root, 0, 0).unwrap();
+        assert!(mappings.is_empty(), "map with count=0 should return empty");
+    }
+
+    #[test]
+    fn punch_hole_zero_count_is_noop() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            10,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        let freed = punch_hole(&cx, &dev, &mut root, &geo, &mut groups, 5, 0, &pctx).unwrap();
+        assert_eq!(freed, 0, "punch_hole with count=0 should free nothing");
+
+        // Extent should still be a single intact extent.
+        let mut count = 0;
+        ffs_btree::walk(&cx, &dev, &root, &mut |_: &Ext4Extent| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 1, "tree should still have exactly 1 extent");
+    }
+
+    #[test]
+    fn mark_written_zero_count_is_noop() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_unwritten_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            10,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        // mark_written with count=0 should be a noop.
+        mark_written(&cx, &dev, &mut root, &geo, &mut groups, 5, 0, &pctx).unwrap();
+
+        // Extent should still be unwritten and intact.
+        match ffs_btree::search(&cx, &dev, &root, 5).unwrap() {
+            SearchResult::Found { extent, .. } => {
+                assert!(extent.is_unwritten(), "extent should remain unwritten");
+                assert_eq!(extent.actual_len(), 10, "extent should remain full size");
+            }
+            _ => panic!("expected found"),
+        }
+    }
+
+    #[test]
+    fn allocate_at_high_logical_offset() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // Allocate at a very high logical offset (near u32::MAX).
+        let logical = u32::MAX - 100;
+        let mapping = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            logical,
+            5,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(mapping.logical_start, logical);
+        assert_eq!(mapping.count, 5);
+
+        // Verify it can be looked up.
+        let maps = map_logical_to_physical(&cx, &dev, &root, logical, 5).unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].logical_start, logical);
+        assert_eq!(maps[0].physical_start, mapping.physical_start);
+    }
+
+    #[test]
+    fn truncate_partial_extent_preserves_prefix() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // Allocate [0-19].
+        let alloc = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            20,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        // Truncate at block 10 — should trim the extent, keeping [0-9].
+        let freed = truncate_extents(&cx, &dev, &mut root, &geo, &mut groups, 10, &pctx).unwrap();
+        assert_eq!(freed, 10, "should free 10 trailing blocks");
+
+        // Blocks 0-9 should still be mapped.
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 10).unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].count, 10);
+        assert_eq!(maps[0].physical_start, alloc.physical_start);
     }
 
     // ── Proptest property-based tests ─────────────────────────────────
