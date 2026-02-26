@@ -7901,4 +7901,410 @@ mod tests {
                 .expect("re-stage by same txn");
         }
     }
+
+    // ── DirtyTracker unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn dirty_tracker_empty_has_no_entries() {
+        let tracker = DirtyTracker::default();
+        assert_eq!(tracker.dirty_count(), 0);
+        assert_eq!(tracker.dirty_bytes(), 0);
+        assert!(tracker.oldest_dirty_age_ticks().is_none());
+        assert!(tracker.dirty_blocks_oldest_first().is_empty());
+        assert!(!tracker.is_dirty(BlockNumber(0)));
+        assert!(tracker.entry(BlockNumber(0)).is_none());
+        assert_eq!(tracker.state_counts(), (0, 0));
+    }
+
+    #[test]
+    fn dirty_tracker_mark_and_clear() {
+        let mut tracker = DirtyTracker::default();
+        tracker.mark_dirty(BlockNumber(5), 4096, TxnId(1), None, DirtyState::InFlight);
+        assert!(tracker.is_dirty(BlockNumber(5)));
+        assert_eq!(tracker.dirty_count(), 1);
+        assert_eq!(tracker.dirty_bytes(), 4096);
+        assert_eq!(tracker.state_counts(), (1, 0));
+
+        tracker.clear_dirty(BlockNumber(5));
+        assert!(!tracker.is_dirty(BlockNumber(5)));
+        assert_eq!(tracker.dirty_count(), 0);
+        assert_eq!(tracker.dirty_bytes(), 0);
+    }
+
+    #[test]
+    fn dirty_tracker_clear_absent_block_is_noop() {
+        let mut tracker = DirtyTracker::default();
+        tracker.clear_dirty(BlockNumber(99));
+        assert_eq!(tracker.dirty_count(), 0);
+    }
+
+    #[test]
+    fn dirty_tracker_remark_updates_age_and_bytes() {
+        let mut tracker = DirtyTracker::default();
+        tracker.mark_dirty(BlockNumber(1), 1024, TxnId(1), None, DirtyState::InFlight);
+        tracker.mark_dirty(BlockNumber(2), 2048, TxnId(1), None, DirtyState::InFlight);
+        assert_eq!(
+            tracker.dirty_blocks_oldest_first(),
+            vec![BlockNumber(1), BlockNumber(2)]
+        );
+        assert_eq!(tracker.dirty_bytes(), 1024 + 2048);
+
+        // Re-mark block 1 with a larger size — moves to newest, updates bytes.
+        tracker.mark_dirty(BlockNumber(1), 4096, TxnId(2), None, DirtyState::Committed);
+        assert_eq!(
+            tracker.dirty_blocks_oldest_first(),
+            vec![BlockNumber(2), BlockNumber(1)]
+        );
+        assert_eq!(tracker.dirty_bytes(), 2048 + 4096);
+        assert_eq!(tracker.state_counts(), (1, 1));
+    }
+
+    #[test]
+    fn dirty_tracker_oldest_age_ticks_reflects_sequence_gap() {
+        let mut tracker = DirtyTracker::default();
+        tracker.mark_dirty(BlockNumber(0), 512, TxnId(1), None, DirtyState::Committed);
+        assert_eq!(tracker.oldest_dirty_age_ticks(), Some(1));
+
+        tracker.mark_dirty(BlockNumber(1), 512, TxnId(1), None, DirtyState::Committed);
+        assert_eq!(tracker.oldest_dirty_age_ticks(), Some(2));
+
+        // Clear oldest — age gap shrinks.
+        tracker.clear_dirty(BlockNumber(0));
+        assert_eq!(tracker.oldest_dirty_age_ticks(), Some(1));
+    }
+
+    #[test]
+    fn dirty_tracker_flushable_entry() {
+        let mut tracker = DirtyTracker::default();
+        tracker.mark_dirty(
+            BlockNumber(7),
+            4096,
+            TxnId(3),
+            Some(CommitSeq(42)),
+            DirtyState::Committed,
+        );
+        let entry = tracker.entry(BlockNumber(7)).expect("entry exists");
+        assert!(entry.is_flushable());
+        assert_eq!(entry.txn_id, TxnId(3));
+        assert_eq!(entry.commit_seq, Some(CommitSeq(42)));
+
+        tracker.mark_dirty(BlockNumber(8), 4096, TxnId(4), None, DirtyState::InFlight);
+        let entry = tracker.entry(BlockNumber(8)).expect("entry exists");
+        assert!(!entry.is_flushable());
+    }
+
+    // ── ARC pressure and capacity trim tests ─────────────────────────────
+
+    #[test]
+    fn memory_pressure_critical_reduces_capacity_to_20_percent() {
+        assert_eq!(MemoryPressure::Critical.target_capacity(100), 20);
+        assert_eq!(MemoryPressure::Critical.target_capacity(10), 2);
+        // Clamp to minimum of 1
+        assert_eq!(MemoryPressure::Critical.target_capacity(1), 1);
+    }
+
+    #[test]
+    fn memory_pressure_none_returns_full_capacity() {
+        assert_eq!(MemoryPressure::None.target_capacity(100), 100);
+        assert_eq!(MemoryPressure::None.target_capacity(1), 1);
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    #[test]
+    fn arc_state_pressure_level_shrinks_and_restores() {
+        let mut state = ArcState::new(10);
+        // Fill cache.
+        for i in 0..10_u64 {
+            arc_access(&mut state, BlockNumber(i));
+        }
+        assert_eq!(state.resident_len(), 10);
+
+        // Apply high pressure — target becomes 5.
+        state.set_pressure_level(MemoryPressure::High);
+        assert_eq!(state.capacity, 5);
+        let batch = state.trim_to_capacity();
+        assert_eq!(state.resident_len(), 5);
+        assert!(batch.evicted_blocks >= 5);
+
+        // Restore — target goes back to 10.
+        state.restore_target_capacity();
+        assert_eq!(state.capacity, 10);
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    #[test]
+    fn arc_state_trim_skips_dirty_blocks() {
+        let mut state = ArcState::new(3);
+        arc_access(&mut state, BlockNumber(1));
+        arc_access(&mut state, BlockNumber(2));
+        arc_access(&mut state, BlockNumber(3));
+        assert_eq!(state.resident_len(), 3);
+
+        // Mark all blocks dirty — trim cannot evict any.
+        for block in [BlockNumber(1), BlockNumber(2), BlockNumber(3)] {
+            state
+                .dirty
+                .mark_dirty(block, 4096, TxnId(1), None, DirtyState::InFlight);
+        }
+        state.set_target_capacity(1);
+        let batch = state.trim_to_capacity();
+        assert_eq!(batch.evicted_blocks, 0);
+        assert_eq!(state.resident_len(), 3); // All preserved due to dirty.
+    }
+
+    // ── Capacity-1 boundary tests ───────────────────────────────────────
+
+    #[cfg(not(feature = "s3fifo"))]
+    #[test]
+    fn arc_state_capacity_one_evicts_on_new_access() {
+        let mut state = ArcState::new(1);
+        arc_access(&mut state, BlockNumber(10));
+        assert_eq!(state.resident_len(), 1);
+        assert!(state.resident.contains_key(&BlockNumber(10)));
+
+        arc_access(&mut state, BlockNumber(20));
+        assert_eq!(state.resident_len(), 1);
+        assert!(state.resident.contains_key(&BlockNumber(20)));
+        assert!(!state.resident.contains_key(&BlockNumber(10)));
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    #[test]
+    fn arc_state_capacity_one_hit_promotes_to_t2() {
+        let mut state = ArcState::new(1);
+        arc_access(&mut state, BlockNumber(42));
+        assert_eq!(state.t1.len(), 1);
+        assert!(state.t2.is_empty());
+
+        // Second access promotes T1 -> T2.
+        arc_access(&mut state, BlockNumber(42));
+        assert!(state.t1.is_empty());
+        assert_eq!(state.t2.len(), 1);
+    }
+
+    // ── AlignedVec edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn aligned_vec_zero_len_produces_empty_slice() {
+        let v = AlignedVec::new(0, 4096);
+        assert_eq!(v.len(), 0);
+        assert!(v.is_empty());
+        assert!(v.as_slice().is_empty());
+    }
+
+    #[test]
+    fn aligned_vec_non_power_of_two_rounds_up() {
+        let v = AlignedVec::new(100, 3);
+        assert_eq!(v.alignment(), 4); // 3 rounds up to 4
+        assert_eq!(v.len(), 100);
+        assert_eq!((v.as_slice().as_ptr() as usize) % 4, 0);
+    }
+
+    #[test]
+    fn aligned_vec_from_vec_preserves_data() {
+        let data = vec![1_u8, 2, 3, 4, 5];
+        let aligned = AlignedVec::from_vec(data, 16);
+        assert_eq!(aligned.as_slice(), &[1, 2, 3, 4, 5]);
+        assert_eq!((aligned.as_slice().as_ptr() as usize) % 16, 0);
+    }
+
+    #[test]
+    fn aligned_vec_from_empty_vec() {
+        let aligned = AlignedVec::from_vec(Vec::new(), 4096);
+        assert!(aligned.is_empty());
+        assert_eq!(aligned.len(), 0);
+    }
+
+    #[test]
+    fn aligned_vec_alignment_one_has_no_padding() {
+        let v = AlignedVec::new(10, 1);
+        assert_eq!(v.alignment(), 1);
+        assert_eq!(v.len(), 10);
+    }
+
+    // ── Normalized alignment tests ──────────────────────────────────────
+
+    #[test]
+    fn normalized_alignment_zero_returns_one() {
+        assert_eq!(normalized_alignment(0), 1);
+    }
+
+    #[test]
+    fn normalized_alignment_one_returns_one() {
+        assert_eq!(normalized_alignment(1), 1);
+    }
+
+    #[test]
+    fn normalized_alignment_power_of_two_unchanged() {
+        assert_eq!(normalized_alignment(2), 2);
+        assert_eq!(normalized_alignment(4), 4);
+        assert_eq!(normalized_alignment(4096), 4096);
+    }
+
+    #[test]
+    fn normalized_alignment_non_power_rounds_up() {
+        assert_eq!(normalized_alignment(3), 4);
+        assert_eq!(normalized_alignment(5), 8);
+        assert_eq!(normalized_alignment(1000), 1024);
+    }
+
+    // ── BlockBuf edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn block_buf_empty() {
+        let buf = BlockBuf::new(Vec::new());
+        assert_eq!(buf.len(), 0);
+        assert!(buf.as_slice().is_empty());
+    }
+
+    #[test]
+    fn block_buf_make_mut_cow_semantics() {
+        let mut buf = BlockBuf::new(vec![10, 20, 30]);
+        let clone1 = buf.clone_ref();
+        let clone2 = buf.clone_ref();
+
+        // Mutate via make_mut (triggers COW).
+        buf.make_mut()[1] = 99;
+        assert_eq!(buf.as_slice(), &[10, 99, 30]);
+        assert_eq!(clone1.as_slice(), &[10, 20, 30]); // Unmodified.
+        assert_eq!(clone2.as_slice(), &[10, 20, 30]); // Unmodified.
+    }
+
+    // ── CacheMetrics computation tests ──────────────────────────────────
+
+    #[test]
+    fn cache_metrics_hit_rate_zero_accesses() {
+        let metrics = CacheMetrics {
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            dirty_flushes: 0,
+            t1_len: 0,
+            t2_len: 0,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 0,
+            dirty_blocks: 0,
+            dirty_bytes: 0,
+            oldest_dirty_age_ticks: None,
+            capacity: 10,
+            p: 0,
+        };
+        assert!(metrics.hit_ratio().abs() < f64::EPSILON);
+        assert!(metrics.dirty_ratio().abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cache_metrics_hit_rate_all_hits() {
+        let metrics = CacheMetrics {
+            hits: 100,
+            misses: 0,
+            evictions: 0,
+            dirty_flushes: 0,
+            t1_len: 5,
+            t2_len: 5,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 10,
+            dirty_blocks: 0,
+            dirty_bytes: 0,
+            oldest_dirty_age_ticks: None,
+            capacity: 10,
+            p: 0,
+        };
+        assert!((metrics.hit_ratio() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cache_metrics_dirty_ratio_full_dirty() {
+        let metrics = CacheMetrics {
+            hits: 10,
+            misses: 0,
+            evictions: 0,
+            dirty_flushes: 0,
+            t1_len: 5,
+            t2_len: 5,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 10,
+            dirty_blocks: 10,
+            dirty_bytes: 40960,
+            oldest_dirty_age_ticks: Some(5),
+            capacity: 10,
+            p: 0,
+        };
+        assert!((metrics.dirty_ratio() - 1.0).abs() < 1e-12);
+    }
+
+    // ── ARC state invariant stress test ────────────────────────────────
+
+    #[cfg(not(feature = "s3fifo"))]
+    #[test]
+    fn arc_state_scan_then_frequency_pattern_maintains_invariants() {
+        let mut state = ArcState::new(8);
+
+        // Sequential scan: access blocks 0..20 once each.
+        for i in 0..20_u64 {
+            arc_access(&mut state, BlockNumber(i));
+        }
+
+        // Now repeatedly access a small hot set.
+        for _ in 0..50 {
+            for i in 0..4_u64 {
+                arc_access(&mut state, BlockNumber(i));
+            }
+        }
+
+        // Hot blocks should be in T2 (frequency list).
+        for i in 0..4_u64 {
+            assert!(
+                state.t2.contains(&BlockNumber(i)),
+                "hot block {i} should be in T2"
+            );
+        }
+        assert!(state.resident_len() <= state.capacity);
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    #[test]
+    fn arc_state_ghost_list_bounded_at_capacity() {
+        let mut state = ArcState::new(4);
+        // Access 20 unique blocks to generate many ghost entries.
+        for i in 0..20_u64 {
+            arc_access(&mut state, BlockNumber(i));
+        }
+        // Ghost lists should never exceed capacity.
+        assert!(state.b1.len() <= state.capacity);
+        assert!(state.b2.len() <= state.capacity);
+    }
+
+    // ── CachePressureReport tests ───────────────────────────────────────
+
+    #[test]
+    fn cache_pressure_report_zero_state() {
+        let state = ArcState::new(10);
+        let report = state.pressure_report();
+        assert_eq!(report.current_size, 0);
+        assert_eq!(report.target_size, 10);
+        assert_eq!(report.dirty_count, 0);
+        assert!(report.eviction_rate.abs() < f64::EPSILON);
+    }
+
+    #[cfg(not(feature = "s3fifo"))]
+    #[test]
+    fn arc_state_p_target_stays_within_capacity() {
+        let mut state = ArcState::new(4);
+        // Drive p up by generating B1 ghost hits.
+        for round in 0..5_u64 {
+            for i in 0..8_u64 {
+                arc_access(&mut state, BlockNumber(round * 100 + i));
+            }
+        }
+        assert!(
+            state.p <= state.capacity,
+            "p={} > capacity={}",
+            state.p,
+            state.capacity
+        );
+    }
 }
