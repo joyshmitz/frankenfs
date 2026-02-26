@@ -2588,6 +2588,328 @@ mod tests {
         assert_eq!(mapped_total, 10);
     }
 
+    // ── Hardening edge-case tests ────────────────────────────────────
+
+    #[test]
+    fn unwritten_flag_is_bit_15() {
+        assert_eq!(UNWRITTEN_FLAG, 0x8000);
+        assert_eq!(UNWRITTEN_FLAG, 1_u16 << 15);
+    }
+
+    #[test]
+    fn max_extent_tree_depth_is_five() {
+        assert_eq!(MAX_EXTENT_TREE_DEPTH, 5);
+    }
+
+    #[test]
+    fn validate_root_header_accepts_depth_at_limit() {
+        // Depth = 5 (MAX_EXTENT_TREE_DEPTH), entries = 1 → should pass validation.
+        let mut root = [0u8; 60];
+        root[0] = 0x0A; // magic low
+        root[1] = 0xF3; // magic high
+        root[2] = 1; // entries = 1 (must be > 0 for depth > 0)
+        root[3] = 0;
+        root[4] = 4; // max_entries = 4
+        root[5] = 0;
+        root[6] = 5; // depth = 5 (at limit)
+        root[7] = 0;
+        assert!(validate_root_header("test", &root).is_ok());
+    }
+
+    #[test]
+    fn validate_root_header_rejects_depth_just_above_limit() {
+        let mut root = [0u8; 60];
+        root[0] = 0x0A;
+        root[1] = 0xF3;
+        root[2] = 1; // entries = 1
+        root[3] = 0;
+        root[4] = 4;
+        root[5] = 0;
+        root[6] = 6; // depth = 6, one above limit
+        root[7] = 0;
+        let err = validate_root_header("test", &root).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("depth"), "error should mention depth: {msg}");
+    }
+
+    #[test]
+    fn validate_root_header_rejects_non_leaf_zero_entries() {
+        let mut root = [0u8; 60];
+        root[0] = 0x0A;
+        root[1] = 0xF3;
+        root[2] = 0; // entries = 0
+        root[3] = 0;
+        root[4] = 4;
+        root[5] = 0;
+        root[6] = 1; // depth = 1 (non-leaf)
+        root[7] = 0;
+        let err = validate_root_header("test", &root).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("zero entries"),
+            "error should mention zero entries: {msg}"
+        );
+    }
+
+    #[test]
+    fn split_single_block_fully_within() {
+        // Single-block extent [10, 11), mark [10, 11) → 1 written extent.
+        let ext = Ext4Extent {
+            logical_block: 10,
+            raw_len: 1 | UNWRITTEN_FLAG,
+            physical_start: 500,
+        };
+        let out = split_for_mark_written(&ext, 10, 11, 11, 1);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].is_unwritten());
+        assert_eq!(out[0].actual_len(), 1);
+        assert_eq!(out[0].logical_block, 10);
+        assert_eq!(out[0].physical_start, 500);
+    }
+
+    #[test]
+    fn split_single_block_left_trim() {
+        // Extent [10, 11), mark [9, 11) → fully within (ext starts at mark_start boundary).
+        // ext.logical_block (10) >= mark_start (9) && ext_end (11) <= mark_end (11)
+        let ext = Ext4Extent {
+            logical_block: 10,
+            raw_len: 1 | UNWRITTEN_FLAG,
+            physical_start: 500,
+        };
+        let out = split_for_mark_written(&ext, 9, 11, 11, 2);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].is_unwritten());
+    }
+
+    #[test]
+    fn split_preserves_total_physical_span() {
+        // Extent [0, 20), mark [5, 15) → three-way split.
+        // Total physical blocks across all parts must equal original.
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 20 | UNWRITTEN_FLAG,
+            physical_start: 1000,
+        };
+        let parts = split_for_mark_written(&ext, 5, 15, 20, 10);
+        assert_eq!(parts.len(), 3);
+        let total_len: u16 = parts.iter().map(|p| p.actual_len()).sum();
+        assert_eq!(total_len, 20);
+        // Physical addresses are contiguous.
+        assert_eq!(parts[0].physical_start, 1000);
+        assert_eq!(parts[1].physical_start, 1005);
+        assert_eq!(parts[2].physical_start, 1015);
+    }
+
+    #[test]
+    fn split_two_block_extent_left_right() {
+        // Extent [0, 2), mark [0, 1) → [0,1) written + [1,2) unwritten.
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 2 | UNWRITTEN_FLAG,
+            physical_start: 300,
+        };
+        let out = split_for_mark_written(&ext, 0, 1, 2, 1);
+        assert_eq!(out.len(), 2);
+        assert!(!out[0].is_unwritten());
+        assert_eq!(out[0].actual_len(), 1);
+        assert_eq!(out[0].physical_start, 300);
+        assert!(out[1].is_unwritten());
+        assert_eq!(out[1].actual_len(), 1);
+        assert_eq!(out[1].physical_start, 301);
+    }
+
+    #[test]
+    fn extent_mapping_copy_semantics() {
+        let m = ExtentMapping {
+            logical_start: 42,
+            physical_start: 999,
+            count: 7,
+            unwritten: true,
+        };
+        let copy = m; // Copy
+        assert_eq!(m, copy);
+        // Modify through binding — original is unaffected (Copy, not move).
+        let mut modified = m;
+        modified.count = 0;
+        assert_ne!(m, modified);
+        assert_eq!(m.count, 7);
+    }
+
+    #[test]
+    fn extent_mapping_ne_on_each_field() {
+        let base = ExtentMapping {
+            logical_start: 0,
+            physical_start: 100,
+            count: 10,
+            unwritten: false,
+        };
+        assert_ne!(
+            base,
+            ExtentMapping {
+                logical_start: 1,
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            ExtentMapping {
+                physical_start: 101,
+                ..base
+            }
+        );
+        assert_ne!(base, ExtentMapping { count: 11, ..base });
+        assert_ne!(
+            base,
+            ExtentMapping {
+                unwritten: true,
+                ..base
+            }
+        );
+    }
+
+    #[test]
+    fn group_block_allocator_alloc_and_free() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+
+        let mut alloc = GroupBlockAllocator {
+            cx: &cx,
+            dev: &dev,
+            geo: &geo,
+            groups: &mut groups,
+            hint: AllocHint::default(),
+            pctx: &pctx,
+        };
+
+        let blk = alloc.alloc_block(&cx).unwrap();
+        assert!(blk.0 < geo.total_blocks, "allocated block within device");
+        // Free it — should not error.
+        alloc.free_block(&cx, blk).unwrap();
+    }
+
+    #[test]
+    fn group_block_allocator_hint_advances_after_alloc() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+
+        let mut alloc = GroupBlockAllocator {
+            cx: &cx,
+            dev: &dev,
+            geo: &geo,
+            groups: &mut groups,
+            hint: AllocHint::default(),
+            pctx: &pctx,
+        };
+
+        let blk1 = alloc.alloc_block(&cx).unwrap();
+        // After alloc, hint goal_block should be blk1 + 1.
+        assert_eq!(alloc.hint.goal_block, Some(BlockNumber(blk1.0 + 1)));
+    }
+
+    #[test]
+    fn allocate_extent_count_boundary_32767() {
+        // Maximum valid count is 32767 (u16::MAX >> 1).
+        // Cannot test actual allocation of 32767 blocks (insufficient space in test fixture)
+        // but can verify that 32768 is rejected.
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let err = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            32768,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("32767"), "error should mention limit: {msg}");
+    }
+
+    #[test]
+    fn allocate_unwritten_extent_count_boundary() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // 32768 should be rejected for unwritten too.
+        let err = allocate_unwritten_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            32768,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("32767"), "error should mention limit: {msg}");
+    }
+
+    #[test]
+    fn map_large_range_produces_single_hole() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let root = empty_root();
+        // Map 10000 blocks from empty tree → single contiguous hole.
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 10_000).unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].physical_start, 0);
+        assert_eq!(maps[0].count, 10_000);
+    }
+
+    #[test]
+    fn truncate_at_exact_extent_end_frees_nothing() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            10,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        // Truncate at logical 10 (extent covers [0, 10)) — nothing to free.
+        let freed = truncate_extents(&cx, &dev, &mut root, &geo, &mut groups, 10, &pctx).unwrap();
+        assert_eq!(freed, 0);
+
+        // All 10 blocks still mapped.
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 10).unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].count, 10);
+    }
+
     // ── Proptest property-based tests ─────────────────────────────────
 
     use proptest::prelude::*;

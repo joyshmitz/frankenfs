@@ -800,13 +800,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "local_group_size must be > 0")]
     fn lrc_config_rejects_zero_group_size() {
-        LrcConfig::new(4, 0, 1);
+        let _ = LrcConfig::new(4, 0, 1);
     }
 
     #[test]
     #[should_panic(expected = "must be divisible by")]
     fn lrc_config_rejects_indivisible() {
-        LrcConfig::new(7, 3, 1);
+        let _ = LrcConfig::new(7, 3, 1);
     }
 
     #[test]
@@ -829,7 +829,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "inverse of zero")]
     fn gf256_inv_zero_panics() {
-        gf256::inv(0);
+        let _ = gf256::inv(0);
     }
 
     #[test]

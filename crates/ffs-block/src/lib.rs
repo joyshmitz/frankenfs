@@ -7130,7 +7130,7 @@ mod tests {
 
         // Should be monotonically decreasing.
         for w in targets.windows(2) {
-            assert!(w[0] >= w[1], "targets should decrease: {:?}", targets);
+            assert!(w[0] >= w[1], "targets should decrease: {targets:?}");
         }
         assert_eq!(targets[0], 100); // None → full capacity
     }
@@ -7202,7 +7202,10 @@ mod tests {
         assert_eq!(cfg.read_latency, Duration::ZERO);
         assert_eq!(cfg.write_latency, Duration::ZERO);
         assert_eq!(cfg.bandwidth_bps, 0);
-        assert_eq!(cfg.stall_probability, 0.0);
+        assert!(
+            cfg.stall_probability.abs() < f64::EPSILON,
+            "stall_probability should be zero"
+        );
         assert!(cfg.respect_deadline);
     }
 

@@ -3930,6 +3930,7 @@ mod tests {
             let state = predictor.state.lock().unwrap();
             assert!(state.history.contains_key(&2));
             assert!(!state.history.contains_key(&1));
+            drop(state);
         }
     }
 

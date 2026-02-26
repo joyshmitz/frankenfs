@@ -979,6 +979,312 @@ mod tests {
         assert!(!access.has_cap_sys_admin);
     }
 
+    // ── Hardening edge-case tests ────────────────────────────────────
+
+    #[test]
+    fn constants_match_ext4_spec() {
+        assert_eq!(INLINE_HEADER_LEN, 4);
+        assert_eq!(EXTERNAL_HEADER_LEN, 32);
+        assert_eq!(XATTR_ENTRY_HEADER_LEN, 16);
+        assert_eq!(XATTR_NAME_MAX, 255);
+        assert_eq!(XATTR_VALUE_MAX, 65_536);
+    }
+
+    #[test]
+    fn align4_boundaries() {
+        assert_eq!(align4(0), 0);
+        assert_eq!(align4(1), 4);
+        assert_eq!(align4(2), 4);
+        assert_eq!(align4(3), 4);
+        assert_eq!(align4(4), 4);
+        assert_eq!(align4(5), 8);
+        assert_eq!(align4(16), 16);
+        assert_eq!(align4(17), 20);
+    }
+
+    #[test]
+    fn xattr_write_access_debug_clone_copy_eq() {
+        let a = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: true,
+        };
+        let b = a; // Copy
+        assert_eq!(a, b);
+        let c = a.clone();
+        assert_eq!(a, c);
+        let _ = format!("{a:?}");
+
+        let d = XattrWriteAccess {
+            is_owner: false,
+            ..a
+        };
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn xattr_storage_debug_clone_copy_eq() {
+        let s = XattrStorage::Inline;
+        let t = s; // Copy
+        assert_eq!(s, t);
+        assert_ne!(XattrStorage::Inline, XattrStorage::External);
+        let _ = format!("{s:?}");
+    }
+
+    #[test]
+    fn check_write_permissions_unknown_index_returns_unsupported() {
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: true,
+            has_cap_sys_admin: true,
+        };
+        let err = check_write_permissions(255, access).unwrap_err();
+        assert!(matches!(err, FfsError::UnsupportedFeature(_)));
+    }
+
+    #[test]
+    fn check_write_permissions_sys_admin_allows_all_known_indexes() {
+        let access = XattrWriteAccess {
+            is_owner: false,
+            has_cap_fowner: false,
+            has_cap_sys_admin: true,
+        };
+        for idx in [
+            EXT4_XATTR_INDEX_USER,
+            EXT4_XATTR_INDEX_TRUSTED,
+            EXT4_XATTR_INDEX_SECURITY,
+            EXT4_XATTR_INDEX_SYSTEM,
+            EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
+            EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
+        ] {
+            assert!(
+                check_write_permissions(idx, access).is_ok(),
+                "index {idx} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn build_inline_ibody_zero_len_empty_entries_returns_empty() {
+        let data = build_inline_ibody(0, &[]).unwrap();
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn build_inline_ibody_zero_len_with_entries_returns_no_space() {
+        let entry = Ext4Xattr {
+            name_index: EXT4_XATTR_INDEX_USER,
+            name: b"k".to_vec(),
+            value: b"v".to_vec(),
+        };
+        let err = build_inline_ibody(0, &[entry]).unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace));
+    }
+
+    #[test]
+    fn build_external_block_rejects_short_block() {
+        let err = build_external_block(EXTERNAL_HEADER_LEN - 1, &[]).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn parse_external_entries_all_zeros_allowed() {
+        let block = vec![0_u8; 1024];
+        let entries = parse_external_entries(&block, true).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_external_entries_all_zeros_rejected_without_flag() {
+        let block = vec![0_u8; 1024];
+        let err = parse_external_entries(&block, false).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn entry_index_finds_correct_position() {
+        let entries = vec![
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"alpha".to_vec(),
+                value: b"a".to_vec(),
+            },
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"beta".to_vec(),
+                value: b"b".to_vec(),
+            },
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_TRUSTED,
+                name: b"gamma".to_vec(),
+                value: b"c".to_vec(),
+            },
+        ];
+        assert_eq!(
+            entry_index(&entries, EXT4_XATTR_INDEX_USER, b"alpha"),
+            Some(0)
+        );
+        assert_eq!(
+            entry_index(&entries, EXT4_XATTR_INDEX_USER, b"beta"),
+            Some(1)
+        );
+        assert_eq!(
+            entry_index(&entries, EXT4_XATTR_INDEX_TRUSTED, b"gamma"),
+            Some(2)
+        );
+        assert_eq!(entry_index(&entries, EXT4_XATTR_INDEX_USER, b"gamma"), None);
+        assert_eq!(
+            entry_index(&entries, EXT4_XATTR_INDEX_TRUSTED, b"alpha"),
+            None
+        );
+    }
+
+    #[test]
+    fn update_existing_external_entry_stays_external() {
+        let mut inode = make_inode(20);
+        let mut external = vec![0_u8; 1024];
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+
+        // First set goes to external (inline too small).
+        let stored = set_xattr(
+            &mut inode,
+            Some(&mut external),
+            "user.key",
+            b"value1",
+            access,
+        )
+        .unwrap();
+        assert_eq!(stored, XattrStorage::External);
+
+        // Update the same key — should stay external.
+        let stored = set_xattr(
+            &mut inode,
+            Some(&mut external),
+            "user.key",
+            b"value2",
+            access,
+        )
+        .unwrap();
+        assert_eq!(stored, XattrStorage::External);
+
+        assert_eq!(
+            get_xattr(&inode, Some(&external), "user.key").unwrap(),
+            Some(b"value2".to_vec())
+        );
+    }
+
+    #[test]
+    fn list_xattrs_combines_inline_and_external() {
+        let mut inode = make_inode(80);
+        let mut external = vec![0_u8; 1024];
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+
+        // First xattr fits inline.
+        set_xattr(&mut inode, Some(&mut external), "user.a", b"v", access).unwrap();
+        // Fill up inline, force next to external.
+        let big = vec![b'X'; 60];
+        set_xattr(&mut inode, Some(&mut external), "user.big", &big, access).unwrap();
+
+        let mut names = list_xattrs(&inode, Some(&external)).unwrap();
+        names.sort();
+        assert!(names.contains(&"user.a".to_owned()));
+        assert!(names.contains(&"user.big".to_owned()));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn remove_external_xattr_does_not_affect_inline() {
+        let mut inode = make_inode(80);
+        let mut external = vec![0_u8; 1024];
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+
+        // Put one inline.
+        set_xattr(&mut inode, Some(&mut external), "user.inline", b"i", access).unwrap();
+        // Put one that spills to external.
+        let big = vec![b'Y'; 60];
+        set_xattr(&mut inode, Some(&mut external), "user.ext", &big, access).unwrap();
+
+        // Remove external entry.
+        let removed = remove_xattr(&mut inode, Some(&mut external), "user.ext", access).unwrap();
+        assert!(removed);
+
+        // Inline entry should still be present.
+        assert_eq!(
+            get_xattr(&inode, Some(&external), "user.inline").unwrap(),
+            Some(b"i".to_vec())
+        );
+    }
+
+    #[test]
+    fn set_xattr_empty_value_allowed() {
+        let mut inode = make_inode(128);
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+
+        let stored = set_xattr(&mut inode, None, "user.empty", b"", access).unwrap();
+        assert_eq!(stored, XattrStorage::Inline);
+        assert_eq!(
+            get_xattr(&inode, None, "user.empty").unwrap(),
+            Some(b"".to_vec())
+        );
+    }
+
+    #[test]
+    fn parse_xattr_name_system_generic() {
+        let (idx, name) = parse_xattr_name("system.data").unwrap();
+        assert_eq!(idx, EXT4_XATTR_INDEX_SYSTEM);
+        assert_eq!(name, b"data".to_vec());
+    }
+
+    #[test]
+    fn encode_entries_region_rejects_oversized_name() {
+        let entry = Ext4Xattr {
+            name_index: EXT4_XATTR_INDEX_USER,
+            name: vec![b'a'; XATTR_NAME_MAX + 1],
+            value: b"v".to_vec(),
+        };
+        let err = encode_entries_region(4096, &[entry]).unwrap_err();
+        assert!(matches!(err, FfsError::NameTooLong));
+    }
+
+    #[test]
+    fn encode_entries_region_rejects_oversized_value() {
+        let entry = Ext4Xattr {
+            name_index: EXT4_XATTR_INDEX_USER,
+            name: b"k".to_vec(),
+            value: vec![0_u8; XATTR_VALUE_MAX + 1],
+        };
+        let err = encode_entries_region(XATTR_VALUE_MAX + 100, &[entry]).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn encode_entries_region_no_space_when_too_small() {
+        let entry = Ext4Xattr {
+            name_index: EXT4_XATTR_INDEX_USER,
+            name: b"key".to_vec(),
+            value: b"value".to_vec(),
+        };
+        // Region too small to hold even one entry + value.
+        let err = encode_entries_region(10, &[entry]).unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace));
+    }
+
     // ── Proptest property-based tests ──────────────────────────────────
 
     use proptest::prelude::*;
