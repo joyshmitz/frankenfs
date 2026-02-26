@@ -1460,4 +1460,155 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn page_capacity_returns_configured_value() {
+        let table = MappingTable::with_capacity(42);
+        assert_eq!(table.page_capacity(), 42);
+    }
+
+    #[test]
+    fn split_delta_partitions_data_in_materialization() {
+        let table = MappingTable::with_capacity(4);
+        let page = table.allocate_page().expect("alloc");
+        let sibling = table.allocate_page().expect("alloc sibling");
+
+        // Insert keys 1..10 on the main page.
+        for i in 1..=10 {
+            table
+                .insert(page, BwKey(i), BwValue(i * 100))
+                .expect("insert");
+        }
+
+        // Split at key 6: keys >= 6 conceptually move to sibling.
+        table
+            .append_split_delta(page, BwKey(6), sibling)
+            .expect("split");
+
+        // The main page materializes only keys < separator.
+        let main_state = table.materialize_page(page).expect("materialize main");
+        for i in 1..6 {
+            assert_eq!(main_state.get(&BwKey(i)).copied(), Some(BwValue(i * 100)));
+        }
+        for i in 6..=10 {
+            assert!(
+                !main_state.contains_key(&BwKey(i)),
+                "key {i} should be split away from main page"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_delta_records_sibling_removal() {
+        let table = MappingTable::with_capacity(4);
+        let page = table.allocate_page().expect("alloc");
+        let sibling = table.allocate_page().expect("alloc sibling");
+
+        // Insert data, split, then merge.
+        for i in 1..=5 {
+            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+        }
+        table
+            .append_split_delta(page, BwKey(4), sibling)
+            .expect("split");
+        table.append_merge_delta(page, sibling).expect("merge");
+
+        // After merge, the split-away keys are removed (Bw-tree merge is
+        // a structural delta, the actual data reabsorption requires reading
+        // the sibling page). Only keys below the separator remain.
+        let state = table
+            .materialize_page(page)
+            .expect("materialize after merge");
+        // Keys 1..3 should still be present.
+        for i in 1..=3 {
+            assert_eq!(state.get(&BwKey(i)).copied(), Some(BwValue(i)));
+        }
+        // Merge delta appended successfully (chain length grew).
+        let snap = table.get_page(page).expect("get page");
+        // chain: merge -> split -> inserts(5) -> base = 8
+        assert!(chain_length(&snap.head) >= 7);
+    }
+
+    #[test]
+    fn lookup_returns_none_for_deleted_key() {
+        let table = MappingTable::with_capacity(2);
+        let page = table.allocate_page().expect("alloc");
+
+        table.insert(page, BwKey(42), BwValue(100)).expect("insert");
+        assert_eq!(
+            table.lookup(page, BwKey(42)).expect("lookup"),
+            Some(BwValue(100))
+        );
+
+        table.delete(page, BwKey(42)).expect("delete");
+        assert_eq!(
+            table.lookup(page, BwKey(42)).expect("lookup after delete"),
+            None
+        );
+    }
+
+    #[test]
+    fn lookup_returns_none_for_nonexistent_key() {
+        let table = MappingTable::with_capacity(2);
+        let page = table.allocate_page().expect("alloc");
+        assert_eq!(
+            table.lookup(page, BwKey(999)).expect("lookup nonexistent"),
+            None
+        );
+    }
+
+    #[test]
+    fn consolidation_config_custom_threshold() {
+        let table = Arc::new(MappingTable::with_capacity(2));
+        let page = table.allocate_page().expect("alloc");
+
+        // Insert enough to build a long chain.
+        for i in 0..20 {
+            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+        }
+
+        // With high threshold, no pages should need consolidation.
+        let to_consolidate = table.scan_for_consolidation(100);
+        assert!(to_consolidate.is_empty());
+
+        // With low threshold, the page should need consolidation.
+        let to_consolidate = table.scan_for_consolidation(5);
+        assert!(!to_consolidate.is_empty());
+        assert!(to_consolidate.contains(&page));
+    }
+
+    #[test]
+    fn chain_length_fn_counts_correctly() {
+        let base = PageDelta::empty_base();
+        assert_eq!(chain_length(&base), 1);
+
+        let with_insert = Arc::new(PageDelta::Insert {
+            key: BwKey(1),
+            value: BwValue(1),
+            next: base,
+        });
+        assert_eq!(chain_length(&with_insert), 2);
+
+        let with_delete = Arc::new(PageDelta::Delete {
+            key: BwKey(1),
+            next: with_insert,
+        });
+        assert_eq!(chain_length(&with_delete), 3);
+    }
+
+    #[test]
+    fn delete_nonexistent_key_is_harmless() {
+        let table = MappingTable::with_capacity(2);
+        let page = table.allocate_page().expect("alloc");
+
+        table.insert(page, BwKey(1), BwValue(1)).expect("insert");
+        // Deleting a key that doesn't exist should succeed (delta is appended).
+        table.delete(page, BwKey(999)).expect("delete nonexistent");
+
+        // Original key should still be there.
+        assert_eq!(
+            table.lookup(page, BwKey(1)).expect("lookup"),
+            Some(BwValue(1))
+        );
+    }
 }

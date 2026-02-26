@@ -5076,6 +5076,332 @@ mod tests {
         assert_eq!(aborted_read.as_slice(), &[0_u8; 4096]);
     }
 
+    // ── Transaction staging/commit/abort edge-case tests ────────────────
+
+    #[test]
+    fn stage_txn_write_rejects_wrong_data_size() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new_with_policy(dev, 4, ArcWritePolicy::WriteBack).expect("cache");
+
+        // Too short
+        let err = cache.stage_txn_write(&cx, TxnId(1), BlockNumber(0), &[0xAA; 100]);
+        assert!(err.is_err());
+        // Too long
+        let err = cache.stage_txn_write(&cx, TxnId(1), BlockNumber(0), &[0xAA; 8192]);
+        assert!(err.is_err());
+        // Exact size succeeds
+        cache
+            .stage_txn_write(&cx, TxnId(1), BlockNumber(0), &[0xAA; 4096])
+            .expect("exact size should succeed");
+    }
+
+    #[test]
+    fn commit_staged_txn_returns_zero_for_empty_staging() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new_with_policy(dev, 4, ArcWritePolicy::WriteBack).expect("cache");
+
+        // Commit a txn that was never staged
+        let committed = cache
+            .commit_staged_txn(&cx, TxnId(999), CommitSeq(1))
+            .expect("commit empty");
+        assert_eq!(committed, 0);
+    }
+
+    #[test]
+    fn abort_staged_txn_returns_zero_for_unknown_txn() {
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new_with_policy(dev, 4, ArcWritePolicy::WriteBack).expect("cache");
+
+        let discarded = cache.abort_staged_txn(TxnId(42));
+        assert_eq!(discarded, 0);
+    }
+
+    #[test]
+    fn commit_multiple_blocks_in_single_txn() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 16);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let counted = CountingBlockDevice::new(dev);
+        let cache =
+            ArcCache::new_with_policy(counted, 8, ArcWritePolicy::WriteBack).expect("cache");
+
+        let txn = TxnId(10);
+        for block in 0..5_u64 {
+            cache
+                .stage_txn_write(
+                    &cx,
+                    txn,
+                    BlockNumber(block),
+                    &[u8::try_from(block).unwrap(); 4096],
+                )
+                .expect("stage");
+        }
+        assert_eq!(cache.dirty_count(), 5);
+        // Staged but not committed — should not flush
+        cache.flush_dirty(&cx).expect("flush");
+        assert_eq!(cache.inner().write_count(), 0);
+
+        let committed = cache
+            .commit_staged_txn(&cx, txn, CommitSeq(1))
+            .expect("commit");
+        assert_eq!(committed, 5);
+
+        // All blocks should be readable from cache
+        for block in 0..5_u64 {
+            let buf = cache.read_block(&cx, BlockNumber(block)).expect("read");
+            assert_eq!(buf.as_slice()[0], u8::try_from(block).unwrap());
+        }
+
+        // Now flush should write all 5 blocks
+        cache.flush_dirty(&cx).expect("flush after commit");
+        assert_eq!(cache.inner().write_count(), 5);
+        assert_eq!(cache.dirty_count(), 0);
+    }
+
+    #[test]
+    fn commit_overwrites_existing_cached_block() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 8);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let counted = CountingBlockDevice::new(dev);
+        let cache =
+            ArcCache::new_with_policy(counted, 8, ArcWritePolicy::WriteBack).expect("cache");
+
+        // Pre-populate block 0 via direct write
+        cache
+            .write_block(&cx, BlockNumber(0), &[0x11; 4096])
+            .expect("initial write");
+
+        // Stage a txn write to the same block with different data
+        cache
+            .stage_txn_write(&cx, TxnId(50), BlockNumber(0), &[0x22; 4096])
+            .expect("stage overwrite");
+        cache
+            .commit_staged_txn(&cx, TxnId(50), CommitSeq(50))
+            .expect("commit overwrite");
+
+        // Read should return the txn-committed data, not the original
+        let buf = cache
+            .read_block(&cx, BlockNumber(0))
+            .expect("read after overwrite");
+        assert_eq!(buf.as_slice(), &[0x22; 4096]);
+    }
+
+    #[test]
+    fn stage_commit_abort_interleaved_txns() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 16);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let counted = CountingBlockDevice::new(dev);
+        let cache =
+            ArcCache::new_with_policy(counted, 8, ArcWritePolicy::WriteBack).expect("cache");
+
+        // Stage txn A on blocks 0,1
+        cache
+            .stage_txn_write(&cx, TxnId(1), BlockNumber(0), &[0xAA; 4096])
+            .expect("stage A-0");
+        cache
+            .stage_txn_write(&cx, TxnId(1), BlockNumber(1), &[0xAB; 4096])
+            .expect("stage A-1");
+
+        // Stage txn B on blocks 2,3
+        cache
+            .stage_txn_write(&cx, TxnId(2), BlockNumber(2), &[0xBB; 4096])
+            .expect("stage B-2");
+        cache
+            .stage_txn_write(&cx, TxnId(2), BlockNumber(3), &[0xBC; 4096])
+            .expect("stage B-3");
+
+        // Commit A, abort B
+        let committed_a = cache
+            .commit_staged_txn(&cx, TxnId(1), CommitSeq(1))
+            .expect("commit A");
+        assert_eq!(committed_a, 2);
+        let discarded_b = cache.abort_staged_txn(TxnId(2));
+        assert_eq!(discarded_b, 2);
+
+        // A's blocks should be readable
+        let buf0 = cache.read_block(&cx, BlockNumber(0)).expect("read 0");
+        assert_eq!(buf0.as_slice(), &[0xAA; 4096]);
+        let buf1 = cache.read_block(&cx, BlockNumber(1)).expect("read 1");
+        assert_eq!(buf1.as_slice(), &[0xAB; 4096]);
+
+        // B's blocks should read as zeros (never committed)
+        let buf2 = cache.read_block(&cx, BlockNumber(2)).expect("read 2");
+        assert_eq!(buf2.as_slice(), &[0_u8; 4096]);
+        let buf3 = cache.read_block(&cx, BlockNumber(3)).expect("read 3");
+        assert_eq!(buf3.as_slice(), &[0_u8; 4096]);
+
+        // Flush should only write A's blocks
+        cache.flush_dirty(&cx).expect("flush");
+        let writes = cache.inner().write_sequence();
+        assert!(writes.contains(&BlockNumber(0)));
+        assert!(writes.contains(&BlockNumber(1)));
+        assert!(!writes.contains(&BlockNumber(2)));
+        assert!(!writes.contains(&BlockNumber(3)));
+    }
+
+    #[test]
+    fn restage_same_block_in_txn_updates_data() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new_with_policy(dev, 4, ArcWritePolicy::WriteBack).expect("cache");
+
+        cache
+            .stage_txn_write(&cx, TxnId(1), BlockNumber(0), &[0x11; 4096])
+            .expect("stage first");
+        cache
+            .stage_txn_write(&cx, TxnId(1), BlockNumber(0), &[0x22; 4096])
+            .expect("stage second");
+
+        cache
+            .commit_staged_txn(&cx, TxnId(1), CommitSeq(1))
+            .expect("commit");
+
+        let buf = cache.read_block(&cx, BlockNumber(0)).expect("read");
+        assert_eq!(buf.as_slice(), &[0x22; 4096], "second staging should win");
+    }
+
+    #[test]
+    fn new_with_policy_and_both_lifecycles() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 8);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let counted = CountingBlockDevice::new(dev);
+        let mvcc_lifecycle = StdArc::new(RecordingFlushLifecycle::default());
+        let repair_lifecycle = StdArc::new(RecordingRepairFlushLifecycle::default());
+        let cache = ArcCache::new_with_policy_and_lifecycles(
+            counted,
+            8,
+            ArcWritePolicy::WriteBack,
+            mvcc_lifecycle.clone(),
+            repair_lifecycle.clone(),
+        )
+        .expect("cache with both lifecycles");
+
+        // Stage and commit a txn write
+        cache
+            .stage_txn_write(&cx, TxnId(7), BlockNumber(0), &[0x77; 4096])
+            .expect("stage");
+        cache
+            .commit_staged_txn(&cx, TxnId(7), CommitSeq(7))
+            .expect("commit");
+
+        // Also do a direct write
+        cache
+            .write_block(&cx, BlockNumber(1), &[0x88; 4096])
+            .expect("direct write");
+
+        cache.flush_dirty(&cx).expect("flush");
+
+        // Mvcc lifecycle should see the committed block
+        assert!(mvcc_lifecycle.pin_count() >= 1);
+        assert!(mvcc_lifecycle.persisted_count() >= 1);
+
+        // Repair lifecycle should see all flushed blocks
+        assert!(repair_lifecycle.call_count() >= 1);
+    }
+
+    #[test]
+    fn deferred_arc_cache_txn_operations() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 16);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let counted = CountingBlockDevice::new(dev);
+
+        let deferred = DeferredArcCache::new(
+            counted,
+            8,
+            FlushDaemonConfig {
+                interval: Duration::from_millis(5),
+                batch_size: 4,
+                ..FlushDaemonConfig::default()
+            },
+        )
+        .expect("deferred cache");
+
+        // Stage and commit through the deferred cache's inner Arc
+        deferred
+            .cache()
+            .stage_txn_write(&cx, TxnId(10), BlockNumber(0), &[0xDD; 4096])
+            .expect("stage via deferred");
+        deferred
+            .cache()
+            .commit_staged_txn(&cx, TxnId(10), CommitSeq(10))
+            .expect("commit via deferred");
+
+        // Read should be served from cache
+        let buf = deferred.read_block(&cx, BlockNumber(0)).expect("read");
+        assert_eq!(buf.as_slice(), &[0xDD; 4096]);
+
+        // Shutdown cleanly
+        let inner = deferred.shutdown();
+        // After shutdown, the cache should have flushed
+        assert_eq!(inner.dirty_count(), 0);
+    }
+
+    #[test]
+    fn memory_pressure_none_preserves_capacity() {
+        let mem = MemoryByteDevice::new(4096 * 16);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new(dev, 10).expect("cache");
+
+        let report = cache.memory_pressure_callback(MemoryPressure::None);
+        assert_eq!(report.target_size, 10);
+    }
+
+    #[test]
+    fn memory_pressure_levels_decrease_capacity_monotonically() {
+        let mem = MemoryByteDevice::new(4096 * 64);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new(dev, 32).expect("cache");
+
+        let none = cache.memory_pressure_callback(MemoryPressure::None);
+        let _ = cache.restore_target_size();
+        let low = cache.memory_pressure_callback(MemoryPressure::Low);
+        let _ = cache.restore_target_size();
+        let medium = cache.memory_pressure_callback(MemoryPressure::Medium);
+        let _ = cache.restore_target_size();
+        let high = cache.memory_pressure_callback(MemoryPressure::High);
+        let _ = cache.restore_target_size();
+        let critical = cache.memory_pressure_callback(MemoryPressure::Critical);
+
+        assert!(critical.target_size <= high.target_size);
+        assert!(high.target_size <= medium.target_size);
+        assert!(medium.target_size <= low.target_size);
+        assert!(low.target_size <= none.target_size);
+    }
+
+    #[test]
+    fn flush_daemon_config_default_is_valid() {
+        let config = FlushDaemonConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn flush_daemon_config_zero_interval_is_invalid() {
+        let config = FlushDaemonConfig {
+            interval: Duration::ZERO,
+            ..FlushDaemonConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn flush_daemon_config_zero_batch_size_is_invalid() {
+        let config = FlushDaemonConfig {
+            batch_size: 0,
+            ..FlushDaemonConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
     // ── CacheMetrics tests ──────────────────────────────────────────────
 
     #[test]

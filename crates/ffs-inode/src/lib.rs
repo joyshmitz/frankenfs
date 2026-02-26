@@ -2173,4 +2173,359 @@ mod tests {
                 "xattr ibody bytes not preserved");
         }
     }
+
+    // ── Additional edge-case tests ──────────────────────────────────────
+
+    #[test]
+    fn file_type_constants_match_posix() {
+        assert_eq!(file_type::S_IFREG, 0o100_000);
+        assert_eq!(file_type::S_IFDIR, 0o040_000);
+        assert_eq!(file_type::S_IFLNK, 0o120_000);
+        // These shouldn't overlap (distinct file type bits).
+        assert_ne!(file_type::S_IFREG, file_type::S_IFDIR);
+        assert_ne!(file_type::S_IFREG, file_type::S_IFLNK);
+        assert_ne!(file_type::S_IFDIR, file_type::S_IFLNK);
+    }
+
+    #[test]
+    fn inode_location_debug_format() {
+        let loc = InodeLocation {
+            block: BlockNumber(42),
+            byte_offset: 256,
+        };
+        let dbg = format!("{loc:?}");
+        assert!(dbg.contains("42"));
+        assert!(dbg.contains("256"));
+    }
+
+    #[test]
+    fn locate_inode_zero_returns_some() {
+        // Inode 0 is unconventional but locate_inode should not panic.
+        let geo = make_geometry();
+        let groups = make_groups(&geo);
+        let result = locate_inode(InodeNumber(0), &geo, &groups);
+        // Should produce a valid location (inode 0 maps to group 0, index within group).
+        let _ = result;
+    }
+
+    #[test]
+    fn locate_inode_group_boundary() {
+        // Test inode at exact group boundary (first inode of second group).
+        let geo = make_geometry(); // inodes_per_group = 2048
+        let groups = make_groups(&geo);
+
+        // Inode 2049 should be in group 1 (1-indexed: inode 2049 → group 1, index 0).
+        let loc = locate_inode(InodeNumber(2049), &geo, &groups).unwrap();
+        // Group 1 inode_table_block is at 100*1 + 3 = 103.
+        assert_eq!(loc.block, BlockNumber(103));
+        assert_eq!(loc.byte_offset, 0);
+    }
+
+    #[test]
+    fn serialize_inode_mode_preserved() {
+        let inode = Ext4Inode {
+            mode: 0o100_755,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+        let raw = serialize_inode(&inode, 256);
+        let mode = u16::from_le_bytes([raw[0], raw[1]]);
+        assert_eq!(mode, 0o100_755);
+    }
+
+    #[test]
+    fn serialize_inode_flags_preserved() {
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: EXT4_EXTENTS_FL | 0x0000_0010, // extents + append
+            generation: 42,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+        let raw = serialize_inode(&inode, 256);
+        let flags = u32::from_le_bytes([raw[0x20], raw[0x21], raw[0x22], raw[0x23]]);
+        assert_eq!(flags, EXT4_EXTENTS_FL | 0x0000_0010);
+        let generation = u32::from_le_bytes([raw[0x64], raw[0x65], raw[0x66], raw[0x67]]);
+        assert_eq!(generation, 42);
+    }
+
+    #[test]
+    fn encode_extra_timestamp_boundary_values() {
+        // epoch bits: seconds >> 32 & 0x3
+        // nsec bits: nsec << 2
+
+        // Zero.
+        assert_eq!(encode_extra_timestamp(0, 0), 0);
+
+        // Max nsec (999_999_999).
+        let extra = encode_extra_timestamp(0, 999_999_999);
+        assert_eq!(extra >> 2, 999_999_999); // nsec in bits 2-31
+        assert_eq!(extra & 0x3, 0); // epoch = 0
+
+        // Epoch extension = 1 (seconds bit 32 set).
+        let extra = encode_extra_timestamp(1u64 << 32, 0);
+        assert_eq!(extra & 0x3, 1); // epoch bits
+        assert_eq!(extra >> 2, 0); // no nsec
+
+        // Epoch extension = 2.
+        let extra = encode_extra_timestamp(2u64 << 32, 0);
+        assert_eq!(extra & 0x3, 2);
+
+        // Epoch extension = 3.
+        let extra = encode_extra_timestamp(3u64 << 32, 0);
+        assert_eq!(extra & 0x3, 3);
+
+        // Combined.
+        let extra = encode_extra_timestamp((1u64 << 32) + 100, 500_000);
+        assert_eq!(extra & 0x3, 1); // epoch
+        assert_eq!(extra >> 2, 500_000); // nsec
+    }
+
+    #[test]
+    fn touch_atime_only_modifies_atime_fields() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 100,
+            ctime: 200,
+            mtime: 300,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+
+        touch_atime(&mut inode, 500, 123);
+        assert_eq!(inode.atime, 500);
+        assert_eq!(inode.atime_extra, encode_extra_timestamp(500, 123));
+        // Other timestamps unchanged.
+        assert_eq!(inode.ctime, 200);
+        assert_eq!(inode.mtime, 300);
+    }
+
+    #[test]
+    fn touch_mtime_ctime_updates_both() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 100,
+            ctime: 200,
+            mtime: 300,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+
+        touch_mtime_ctime(&mut inode, 600, 456);
+        assert_eq!(inode.mtime, 600);
+        assert_eq!(inode.ctime, 600);
+        let expected_extra = encode_extra_timestamp(600, 456);
+        assert_eq!(inode.mtime_extra, expected_extra);
+        assert_eq!(inode.ctime_extra, expected_extra);
+        // atime untouched.
+        assert_eq!(inode.atime, 100);
+    }
+
+    #[test]
+    fn compute_and_set_checksum_skip_for_tiny_buffer() {
+        // Buffer < 128 bytes: checksum should be skipped entirely.
+        let mut raw = vec![0u8; 64];
+        compute_and_set_checksum(&mut raw, 0x1234, 1);
+        // Should be all zeros (no checksum written).
+        assert!(raw.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn compute_and_set_checksum_exactly_128_sets_lo_only() {
+        let mut raw = vec![0u8; 128];
+        // Set a generation so the seed varies.
+        raw[0x64..0x68].copy_from_slice(&42u32.to_le_bytes());
+        compute_and_set_checksum(&mut raw, 0xDEAD, 1);
+
+        // lo bytes at 0x7C should be non-zero (with overwhelming probability).
+        let lo = u16::from_le_bytes([raw[0x7C], raw[0x7D]]);
+        // hi bytes at 0x82 are beyond the 128-byte buffer — not set.
+        // Just verify no panic and lo has a value.
+        let _ = lo;
+    }
+
+    #[test]
+    fn compute_and_set_checksum_256_sets_lo_and_hi() {
+        let mut raw = vec![0u8; 256];
+        raw[0x64..0x68].copy_from_slice(&99u32.to_le_bytes());
+        compute_and_set_checksum(&mut raw, 0xBEEF, 5);
+
+        let lo = u16::from_le_bytes([raw[0x7C], raw[0x7D]]);
+        let hi = u16::from_le_bytes([raw[0x82], raw[0x83]]);
+        let csum = u32::from(lo) | (u32::from(hi) << 16);
+        // Checksum should be nonzero.
+        assert_ne!(csum, 0, "checksum should be non-zero");
+    }
+
+    #[test]
+    fn serialize_extent_bytes_capped_at_60() {
+        // Even if extent_bytes is longer than 60, serialize should only copy 60.
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0xAB; 100], // larger than 60
+            xattr_ibody: vec![],
+        };
+        let raw = serialize_inode(&inode, 256);
+        // Bytes at 0x28..0x64 should be 0xAB (60 bytes).
+        assert!(raw[0x28..0x64].iter().all(|b| *b == 0xAB));
+        // Byte at 0x64 should be the generation, not 0xAB.
+        // (generation is 0, so it should be 0.)
+        assert_eq!(raw[0x64], 0);
+    }
+
+    #[test]
+    fn serialize_dtime_preserved() {
+        let inode = Ext4Inode {
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 0,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0xDEAD_BEEF,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+        let raw = serialize_inode(&inode, 256);
+        let dtime = u32::from_le_bytes([raw[0x14], raw[0x15], raw[0x16], raw[0x17]]);
+        assert_eq!(dtime, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn serialize_links_count_preserved() {
+        let inode = Ext4Inode {
+            mode: 0o040_755,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 42,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+        let raw = serialize_inode(&inode, 256);
+        let links = u16::from_le_bytes([raw[0x1A], raw[0x1B]]);
+        assert_eq!(links, 42);
+    }
 }

@@ -6956,9 +6956,8 @@ mod tests {
     #[test]
     fn has_ro_compat_detects_set_flags() {
         let mut sb = make_valid_sb();
-        let ro_compat =
-            (Ext4RoCompatFeatures::SPARSE_SUPER.0 | Ext4RoCompatFeatures::LARGE_FILE.0)
-                .to_le_bytes();
+        let ro_compat = (Ext4RoCompatFeatures::SPARSE_SUPER.0 | Ext4RoCompatFeatures::LARGE_FILE.0)
+            .to_le_bytes();
         sb[0x64..0x68].copy_from_slice(&ro_compat);
         let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse");
         assert!(parsed.has_ro_compat(Ext4RoCompatFeatures::SPARSE_SUPER));
@@ -7153,8 +7152,7 @@ mod tests {
         let parsed = parse_valid_sb_with_incompat(
             Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0,
         );
-        let (group, index, byte_offset) =
-            parsed.inode_table_offset(ffs_types::InodeNumber::ROOT);
+        let (group, index, byte_offset) = parsed.inode_table_offset(ffs_types::InodeNumber::ROOT);
         assert_eq!(group, ffs_types::GroupNumber(0));
         // Root inode (2): index_in_group = (2-1) % 8192 = 1
         assert_eq!(index, 1);
@@ -7167,8 +7165,7 @@ mod tests {
         let parsed = parse_valid_sb_with_incompat(
             Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0,
         );
-        let (group, index, byte_offset) =
-            parsed.inode_table_offset(ffs_types::InodeNumber(1));
+        let (group, index, byte_offset) = parsed.inode_table_offset(ffs_types::InodeNumber(1));
         assert_eq!(group, ffs_types::GroupNumber(0));
         assert_eq!(index, 0);
         assert_eq!(byte_offset, 0);

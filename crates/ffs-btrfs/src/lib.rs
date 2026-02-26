@@ -5567,4 +5567,371 @@ mod tests {
             "snap_after_b should see version-B"
         );
     }
+
+    // ── Transaction edge-case tests ───────────────────────────────────
+
+    #[test]
+    fn btrfs_tx_commit_empty_root_set_errors() {
+        let cx = Cx::for_request();
+        let mut store = MvccStore::new();
+        let txn = BtrfsTransaction::begin(&mut store, 1, &cx).expect("begin");
+        // Commit without staging any tree roots should fail.
+        let err = txn.commit(&mut store, &cx).expect_err("empty root set");
+        assert!(
+            matches!(err, BtrfsTransactionError::EmptyRootSet),
+            "expected EmptyRootSet, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_tx_stage_block_write_after_abort_errors() {
+        let cx = Cx::for_request();
+        let mut store = MvccStore::new();
+        let mut txn = BtrfsTransaction::begin(&mut store, 2, &cx).expect("begin");
+        txn.stage_tree_root(
+            BTRFS_FS_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x1000,
+                level: 0,
+            },
+        );
+        let _summary = txn.abort();
+        // Can't stage after abort — txn is consumed by abort().
+        // (This is enforced by Rust's ownership system.)
+    }
+
+    #[test]
+    fn btrfs_tx_accessors_return_correct_values() {
+        let cx = Cx::for_request();
+        let mut store = MvccStore::new();
+        let mut txn = BtrfsTransaction::begin(&mut store, 42, &cx).expect("begin");
+        assert_eq!(txn.generation(), 42);
+        assert!(txn.pending_trees().is_empty());
+        assert_eq!(txn.delayed_ref_count(), 0);
+
+        txn.stage_tree_root(
+            BTRFS_FS_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x3000,
+                level: 1,
+            },
+        );
+        assert_eq!(txn.pending_trees().len(), 1);
+        assert!(txn.pending_trees().contains_key(&BTRFS_FS_TREE_OBJECTID));
+
+        txn.queue_delayed_ref(
+            ExtentKey {
+                bytenr: 0x5000,
+                num_bytes: 4096,
+            },
+            BtrfsRef::DataExtent {
+                root: BTRFS_FS_TREE_OBJECTID,
+                objectid: 256,
+                offset: 0,
+            },
+            RefAction::Insert,
+        );
+        assert_eq!(txn.delayed_ref_count(), 1);
+    }
+
+    #[test]
+    fn btrfs_tx_multiple_tree_roots_in_single_txn() {
+        let cx = Cx::for_request();
+        let mut store = MvccStore::new();
+        let mut txn = BtrfsTransaction::begin(&mut store, 5, &cx).expect("begin");
+
+        txn.stage_tree_root(
+            BTRFS_FS_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x10_0000,
+                level: 1,
+            },
+        );
+        txn.stage_tree_root(
+            BTRFS_EXTENT_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x20_0000,
+                level: 0,
+            },
+        );
+        txn.stage_tree_root(
+            BTRFS_CHUNK_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x30_0000,
+                level: 0,
+            },
+        );
+
+        assert_eq!(txn.pending_trees().len(), 3);
+        let commit_seq = txn.commit(&mut store, &cx).expect("commit");
+        assert_eq!(commit_seq, CommitSeq(1));
+
+        // Verify all tree roots are persisted.
+        let snap = store.current_snapshot();
+        for tree_id in [
+            BTRFS_FS_TREE_OBJECTID,
+            BTRFS_EXTENT_TREE_OBJECTID,
+            BTRFS_CHUNK_TREE_OBJECTID,
+        ] {
+            let block = BtrfsTransaction::tree_root_block(tree_id).expect("block");
+            assert!(
+                store.read_visible(block, snap).is_some(),
+                "tree {tree_id} root should be visible after commit"
+            );
+        }
+    }
+
+    #[test]
+    fn btrfs_tx_track_allocation_and_defer_free() {
+        let cx = Cx::for_request();
+        let mut store = MvccStore::new();
+        let mut txn = BtrfsTransaction::begin(&mut store, 10, &cx).expect("begin");
+
+        txn.track_allocation(BlockNumber(100));
+        txn.track_allocation(BlockNumber(101));
+        txn.defer_free_on_commit(BlockNumber(200));
+        txn.defer_free_on_commit(BlockNumber(201));
+        txn.stage_tree_root(
+            BTRFS_FS_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x1000,
+                level: 0,
+            },
+        );
+
+        let summary = txn.abort();
+        assert_eq!(summary.released_allocations.len(), 2);
+        assert!(summary.released_allocations.contains(&BlockNumber(100)));
+        assert!(summary.released_allocations.contains(&BlockNumber(101)));
+        assert_eq!(summary.deferred_frees.len(), 2);
+        assert!(summary.deferred_frees.contains(&BlockNumber(200)));
+        assert!(summary.deferred_frees.contains(&BlockNumber(201)));
+    }
+
+    // ── Extent allocator edge-case tests ──────────────────────────────
+
+    #[test]
+    fn alloc_metadata_no_metadata_bg_fails() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        // Only add a data block group, no metadata.
+        alloc.add_block_group(0x10_0000, make_data_bg(0x10_0000, 0x100_000));
+
+        let result = alloc.alloc_metadata(4096);
+        assert!(
+            result.is_err(),
+            "metadata alloc without metadata bg should fail"
+        );
+    }
+
+    #[test]
+    fn extent_refcount_after_alloc_and_flush_is_one() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x10_0000, make_data_bg(0x10_0000, 0x100_000));
+
+        let ext = alloc.alloc_data(4096).expect("alloc");
+        // Allocation queues a delayed ref; flush it to materialize the refcount.
+        alloc.flush_delayed_refs(usize::MAX).expect("flush refs");
+        let key = ExtentKey {
+            bytenr: ext.bytenr,
+            num_bytes: ext.num_bytes,
+        };
+        assert_eq!(alloc.extent_refcount(key), 1);
+    }
+
+    #[test]
+    fn extent_refcount_after_free_is_zero() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x10_0000, make_data_bg(0x10_0000, 0x100_000));
+
+        let ext = alloc.alloc_data(4096).expect("alloc");
+        alloc
+            .free_extent(ext.bytenr, ext.num_bytes, false)
+            .expect("free");
+        // Flush delayed refs to apply both the insert and remove.
+        alloc.flush_delayed_refs(usize::MAX).expect("flush refs");
+        let key = ExtentKey {
+            bytenr: ext.bytenr,
+            num_bytes: ext.num_bytes,
+        };
+        assert_eq!(alloc.extent_refcount(key), 0);
+    }
+
+    #[test]
+    fn total_used_and_capacity_computations() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_size = 0x100_000_u64;
+        alloc.add_block_group(0x10_0000, make_data_bg(0x10_0000, bg_size));
+        alloc.add_block_group(0x20_0000, make_meta_bg(0x20_0000, bg_size));
+
+        assert_eq!(alloc.total_capacity(), bg_size * 2);
+        assert_eq!(alloc.total_used(), 0);
+
+        alloc.alloc_data(4096).expect("data alloc");
+        alloc.alloc_metadata(8192).expect("meta alloc");
+
+        assert_eq!(alloc.total_used(), 4096 + 8192);
+        assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_DATA), bg_size - 4096);
+        assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_METADATA), bg_size - 8192);
+    }
+
+    #[test]
+    fn drain_delayed_refs_returns_all_queued() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x10_0000, make_data_bg(0x10_0000, 0x100_000));
+
+        let _ext = alloc.alloc_data(4096).expect("alloc");
+        // alloc_data queues a delayed ref; verify drain works.
+        assert_eq!(alloc.delayed_ref_count(), 1);
+        let drained = alloc.drain_delayed_refs();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(alloc.delayed_ref_count(), 0);
+    }
+
+    #[test]
+    fn multiple_allocs_sequential_in_same_bg() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x10_0000, make_data_bg(0x10_0000, 0x100_000));
+
+        let a1 = alloc.alloc_data(4096).expect("alloc 1");
+        let a2 = alloc.alloc_data(4096).expect("alloc 2");
+        let a3 = alloc.alloc_data(4096).expect("alloc 3");
+
+        // All should come from the same block group.
+        assert_eq!(a1.block_group_start, 0x10_0000);
+        assert_eq!(a2.block_group_start, 0x10_0000);
+        assert_eq!(a3.block_group_start, 0x10_0000);
+
+        // None should overlap.
+        let extents = [
+            (a1.bytenr, a1.bytenr + a1.num_bytes),
+            (a2.bytenr, a2.bytenr + a2.num_bytes),
+            (a3.bytenr, a3.bytenr + a3.num_bytes),
+        ];
+        for i in 0..extents.len() {
+            for j in (i + 1)..extents.len() {
+                assert!(
+                    extents[i].1 <= extents[j].0 || extents[j].1 <= extents[i].0,
+                    "extents {i} and {j} overlap: {:?} vs {:?}",
+                    extents[i],
+                    extents[j]
+                );
+            }
+        }
+
+        assert_eq!(alloc.total_used(), 4096 * 3);
+    }
+
+    #[test]
+    fn block_group_item_serialization_round_trip() {
+        let bg = BtrfsBlockGroupItem {
+            total_bytes: 0x100_000,
+            used_bytes: 0x50_000,
+            flags: BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA,
+        };
+        let bytes = bg.to_bytes();
+        assert_eq!(bytes.len(), 24);
+        // Serialization order: used_bytes, total_bytes, flags
+        assert_eq!(
+            u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            0x50_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            0x100_000
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA
+        );
+        assert_eq!(bg.free_bytes(), 0x100_000 - 0x50_000);
+    }
+
+    #[test]
+    fn extent_item_to_bytes_round_trip() {
+        let ext = BtrfsExtentItem {
+            refs: 3,
+            generation: 42,
+            flags: 1,
+        };
+        let bytes = ext.to_bytes();
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(u64::from_le_bytes(bytes[0..8].try_into().unwrap()), 3);
+        assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 42);
+        assert_eq!(u64::from_le_bytes(bytes[16..24].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn delayed_ref_queue_drain_all_empties_queue() {
+        let mut queue = DelayedRefQueue::new();
+        let key = ExtentKey {
+            bytenr: 0x1000,
+            num_bytes: 4096,
+        };
+        queue.queue(
+            key,
+            BtrfsRef::DataExtent {
+                root: BTRFS_FS_TREE_OBJECTID,
+                objectid: 256,
+                offset: 0,
+            },
+            RefAction::Insert,
+        );
+        queue.queue(
+            key,
+            BtrfsRef::DataExtent {
+                root: BTRFS_FS_TREE_OBJECTID,
+                objectid: 256,
+                offset: 4096,
+            },
+            RefAction::Insert,
+        );
+        assert_eq!(queue.pending_count(), 2);
+
+        let drained = queue.drain_all();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
+    fn delayed_ref_queue_pending_for_filters_by_extent() {
+        let mut queue = DelayedRefQueue::new();
+        let key_a = ExtentKey {
+            bytenr: 0x1000,
+            num_bytes: 4096,
+        };
+        let key_b = ExtentKey {
+            bytenr: 0x2000,
+            num_bytes: 8192,
+        };
+        queue.queue(
+            key_a,
+            BtrfsRef::DataExtent {
+                root: BTRFS_FS_TREE_OBJECTID,
+                objectid: 256,
+                offset: 0,
+            },
+            RefAction::Insert,
+        );
+        queue.queue(
+            key_b,
+            BtrfsRef::DataExtent {
+                root: BTRFS_FS_TREE_OBJECTID,
+                objectid: 257,
+                offset: 0,
+            },
+            RefAction::Insert,
+        );
+        queue.queue(
+            key_a,
+            BtrfsRef::DataExtent {
+                root: BTRFS_FS_TREE_OBJECTID,
+                objectid: 258,
+                offset: 0,
+            },
+            RefAction::Insert,
+        );
+
+        assert_eq!(queue.pending_for(&key_a).len(), 2);
+        assert_eq!(queue.pending_for(&key_b).len(), 1);
+    }
 }

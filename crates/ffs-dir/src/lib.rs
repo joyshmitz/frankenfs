@@ -1041,4 +1041,355 @@ mod tests {
             prop_assert_eq!(h1 & 1, 0, "dx_hash bit 0 not cleared for {:?}", name);
         }
     }
+
+    // ── Corruption detection tests ──────────────────────────────────────
+
+    #[test]
+    fn add_entry_detects_corrupt_rec_len_zero() {
+        // A rec_len of 0 creates an infinite loop scenario — add_entry must reject it.
+        let mut block = vec![0u8; 128];
+        // Write a valid header with rec_len = 0 (corrupt).
+        write_u32_le(&mut block, 0, 10).unwrap(); // inode
+        write_u16_le(&mut block, 4, 0).unwrap(); // rec_len = 0 (invalid)
+        block[6] = 1; // name_len
+        block[7] = 1; // file_type
+        block[8] = b'a'; // name
+
+        let err = add_entry(&mut block, 20, b"new", Ext4FileType::RegFile).unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected Corruption for zero rec_len, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_entry_detects_corrupt_rec_len_not_aligned() {
+        let mut block = vec![0u8; 128];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 13).unwrap(); // rec_len = 13 (not 4-aligned)
+        block[6] = 1;
+        block[7] = 1;
+        block[8] = b'a';
+
+        let err = add_entry(&mut block, 20, b"new", Ext4FileType::RegFile).unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected Corruption for unaligned rec_len, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_entry_detects_rec_len_exceeding_block() {
+        let mut block = vec![0u8; 32];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 64).unwrap(); // rec_len > block.len()
+        block[6] = 1;
+        block[7] = 1;
+        block[8] = b'a';
+
+        let err = add_entry(&mut block, 20, b"new", Ext4FileType::RegFile).unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected Corruption for oversized rec_len, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn add_entry_detects_name_len_exceeding_rec_len() {
+        // name_len > rec_len - header should be caught as corruption.
+        let mut block = vec![0u8; 128];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 12).unwrap(); // rec_len = 12 (min slot)
+        block[6] = 100; // name_len = 100 (far exceeds rec_len - 8 = 4)
+        block[7] = 1;
+        block[8] = b'a';
+        // Second entry occupies rest.
+        write_u32_le(&mut block, 12, 0).unwrap();
+        write_u16_le(&mut block, 16, 116).unwrap();
+
+        let err = add_entry(&mut block, 20, b"new", Ext4FileType::RegFile).unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected Corruption for name_len > rec_len, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn remove_entry_detects_corrupt_rec_len() {
+        let mut block = vec![0u8; 64];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 5).unwrap(); // rec_len = 5 (< header min 8, not aligned)
+        block[6] = 1;
+        block[8] = b'a';
+
+        let err = remove_entry(&mut block, b"a").unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected Corruption for invalid rec_len in remove_entry, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn remove_entry_detects_name_exceeding_rec_len() {
+        let mut block = vec![0u8; 128];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 12).unwrap(); // rec_len = 12
+        block[6] = 50; // name_len = 50 (exceeds rec_len - 8 = 4)
+        block[7] = 1;
+        block[8] = b'x';
+        // Need a second entry so we don't just run off the end.
+        write_u32_le(&mut block, 12, 0).unwrap();
+        write_u16_le(&mut block, 16, 116).unwrap();
+
+        let err = remove_entry(&mut block, b"x").unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected Corruption for name exceeding rec_len, got: {err:?}"
+        );
+    }
+
+    // ── Boundary condition tests ────────────────────────────────────────
+
+    #[test]
+    fn add_entry_name_exceeds_255_bytes() {
+        let mut block = vec![0u8; 4096];
+        write_entry(&mut block, 0, 1, 4096, Ext4FileType::Dir, b".").unwrap();
+
+        let too_long = vec![b'x'; 256];
+        let err = add_entry(&mut block, 42, &too_long, Ext4FileType::RegFile).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn write_entry_rec_len_smaller_than_minimum_errors() {
+        let mut block = vec![0u8; 64];
+        // name "hello" = 5 bytes, min rec_len = align4(8+5) = 16, but we pass 12.
+        let err = write_entry(&mut block, 0, 1, 8, Ext4FileType::RegFile, b"hello").unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn write_entry_offset_overflow_errors() {
+        let mut block = vec![0u8; 32];
+        // offset + rec_len overflows.
+        let err = write_entry(&mut block, usize::MAX - 2, 1, 16, Ext4FileType::RegFile, b"a")
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn write_entry_exceeds_block_boundary_errors() {
+        let mut block = vec![0u8; 16];
+        // Valid offset and rec_len, but exceeds block boundary.
+        let err = write_entry(&mut block, 4, 1, 20, Ext4FileType::RegFile, b"a").unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn validate_name_empty_errors() {
+        let err = validate_name(b"").unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn validate_name_too_long_errors() {
+        let long = vec![b'a'; 256];
+        let err = validate_name(&long).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn validate_name_max_length_ok() {
+        let max = vec![b'a'; 255];
+        validate_name(&max).unwrap();
+    }
+
+    #[test]
+    fn add_entry_need_exceeds_block_returns_nospc() {
+        // Block is exactly 8 bytes — too small for any entry.
+        let mut block = vec![0u8; 8];
+        write_u32_le(&mut block, 0, 0).unwrap(); // inode = 0
+        write_u16_le(&mut block, 4, 8).unwrap(); // rec_len = 8
+        let err = add_entry(&mut block, 1, b"x", Ext4FileType::RegFile).unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOSPC);
+    }
+
+    // ── Fill-and-exhaust tests ──────────────────────────────────────────
+
+    #[test]
+    fn fill_block_completely_then_no_space() {
+        let mut block = vec![0u8; 256];
+        init_dir_block(&mut block, 2, 2).unwrap();
+
+        // Keep adding entries until NoSpace.
+        let mut count = 0;
+        for i in 0..100 {
+            let name = format!("f{i:03}");
+            match add_entry(&mut block, i + 10, name.as_bytes(), Ext4FileType::RegFile) {
+                Ok(_) => count += 1,
+                Err(FfsError::NoSpace) => break,
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+        assert!(count >= 1, "should have added at least one entry");
+
+        // Verify all entries are parseable.
+        let (entries, _) = parse_dir_block(&block, 256).unwrap();
+        // . + .. + count live entries
+        assert_eq!(entries.len(), 2 + count);
+    }
+
+    #[test]
+    fn remove_all_entries_then_refill() {
+        let mut block = vec![0u8; 512];
+        init_dir_block(&mut block, 2, 2).unwrap();
+
+        // Add some entries.
+        let names: Vec<String> = (0..10).map(|i| format!("entry{i:02}")).collect();
+        for (i, name) in names.iter().enumerate() {
+            add_entry(
+                &mut block,
+                (i + 100) as u32,
+                name.as_bytes(),
+                Ext4FileType::RegFile,
+            )
+            .unwrap();
+        }
+
+        // Remove all non-dot entries.
+        for name in &names {
+            let removed = remove_entry(&mut block, name.as_bytes()).unwrap();
+            assert!(removed, "should have removed {name}");
+        }
+
+        // Only . and .. remain.
+        let (entries, _) = parse_dir_block(&block, 512).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, b".");
+        assert_eq!(entries[1].name, b"..");
+
+        // Should be able to add entries again.
+        add_entry(&mut block, 500, b"new_file", Ext4FileType::RegFile).unwrap();
+        let (entries, _) = parse_dir_block(&block, 512).unwrap();
+        assert_eq!(entries.len(), 3);
+    }
+
+    // ── read/write helper tests ─────────────────────────────────────────
+
+    #[test]
+    fn read_u16_le_out_of_bounds_returns_none() {
+        let buf = [0u8; 1];
+        assert!(read_u16_le(&buf, 0).is_none());
+        assert!(read_u16_le(&buf, 1).is_none());
+    }
+
+    #[test]
+    fn read_u32_le_out_of_bounds_returns_none() {
+        let buf = [0u8; 3];
+        assert!(read_u32_le(&buf, 0).is_none());
+        assert!(read_u32_le(&buf, 2).is_none());
+    }
+
+    #[test]
+    fn write_u16_le_out_of_bounds_errors() {
+        let mut buf = [0u8; 1];
+        let err = write_u16_le(&mut buf, 0, 42).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn write_u32_le_out_of_bounds_errors() {
+        let mut buf = [0u8; 3];
+        let err = write_u32_le(&mut buf, 0, 42).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn read_write_u16_roundtrip() {
+        let mut buf = [0u8; 4];
+        write_u16_le(&mut buf, 1, 0xBEEF).unwrap();
+        assert_eq!(read_u16_le(&buf, 1), Some(0xBEEF));
+    }
+
+    #[test]
+    fn read_write_u32_roundtrip() {
+        let mut buf = [0u8; 8];
+        write_u32_le(&mut buf, 2, 0xDEAD_BEEF).unwrap();
+        assert_eq!(read_u32_le(&buf, 2), Some(0xDEAD_BEEF));
+    }
+
+    // ── write_entry zeroing test ────────────────────────────────────────
+
+    #[test]
+    fn write_entry_zeroes_padding_bytes() {
+        let mut block = vec![0xFFu8; 64];
+        write_entry(&mut block, 0, 42, 20, Ext4FileType::RegFile, b"ab").unwrap();
+
+        // name occupies bytes 8..10, rec_len=20, so bytes 10..20 should be zeroed.
+        assert_eq!(&block[10..20], &[0u8; 10]);
+        // Bytes beyond rec_len should still be 0xFF (untouched).
+        assert_eq!(block[20], 0xFF);
+    }
+
+    // ── init_dir_block with various block sizes ─────────────────────────
+
+    #[test]
+    fn init_dir_block_various_sizes() {
+        for size in [64, 128, 256, 512, 1024, 2048, 4096] {
+            let mut block = vec![0u8; size];
+            init_dir_block(&mut block, 11, 2).unwrap();
+            let (entries, _) = parse_dir_block(&block, size as u32).unwrap();
+            assert_eq!(entries.len(), 2, "block size {size}");
+            assert_eq!(entries[0].name, b".");
+            assert_eq!(entries[0].inode, 11);
+            assert_eq!(entries[1].name, b"..");
+            assert_eq!(entries[1].inode, 2);
+        }
+    }
+
+    #[test]
+    fn init_dir_block_minimum_viable_size() {
+        // Minimum size: required_rec_len(1) + required_rec_len(2) = 12 + 12 = 24.
+        let mut block = vec![0u8; 24];
+        init_dir_block(&mut block, 1, 2).unwrap();
+        let (entries, _) = parse_dir_block(&block, 24).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // One byte smaller should fail.
+        let mut block = vec![0u8; 23];
+        let err = init_dir_block(&mut block, 1, 2).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    // ── Coalescing edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn remove_entry_no_coalesce_when_first_entry() {
+        // When the first entry is removed, there is no previous entry to coalesce with.
+        let mut block = vec![0u8; 128];
+        write_entry(&mut block, 0, 10, 64, Ext4FileType::RegFile, b"first").unwrap();
+        write_entry(&mut block, 64, 20, 64, Ext4FileType::RegFile, b"second").unwrap();
+
+        let removed = remove_entry(&mut block, b"first").unwrap();
+        assert!(removed);
+
+        // inode should be zeroed, but rec_len preserved.
+        assert_eq!(read_u32_le(&block, 0).unwrap(), 0);
+        assert_eq!(read_u16_le(&block, 4).unwrap(), 64);
+        // Second entry untouched.
+        assert_eq!(read_u32_le(&block, 64).unwrap(), 20);
+    }
+
+    #[test]
+    fn remove_last_entry_coalesces_with_previous() {
+        let mut block = vec![0u8; 128];
+        write_entry(&mut block, 0, 10, 64, Ext4FileType::RegFile, b"first").unwrap();
+        write_entry(&mut block, 64, 20, 64, Ext4FileType::RegFile, b"last").unwrap();
+
+        let removed = remove_entry(&mut block, b"last").unwrap();
+        assert!(removed);
+
+        // Previous entry's rec_len should be expanded to absorb the removed entry.
+        assert_eq!(read_u16_le(&block, 4).unwrap(), 128);
+    }
 }
