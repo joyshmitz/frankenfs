@@ -14701,8 +14701,11 @@ mod tests {
         assert_eq!(fs.getattr(&cx, ino).expect("ga1").size, 18);
 
         // Truncate to 0
-        fs.setattr(&cx, ino, Some(0o644), None, None, Some(0), None, None)
-            .expect("truncate");
+        let trunc = SetAttrRequest {
+            size: Some(0),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, ino, &trunc).expect("truncate");
         assert_eq!(fs.getattr(&cx, ino).expect("ga2").size, 0);
 
         // Write new data
@@ -14853,17 +14856,12 @@ mod tests {
 
         let epoch_plus_1000 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
 
-        fs.setattr(
-            &cx,
-            ino,
-            None,
-            None,
-            None,
-            None,
-            Some(epoch_plus_1000),
-            Some(epoch_plus_1000),
-        )
-        .expect("set times");
+        let time_attrs = SetAttrRequest {
+            atime: Some(epoch_plus_1000),
+            mtime: Some(epoch_plus_1000),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, ino, &time_attrs).expect("set times");
 
         let ga = fs.getattr(&cx, ino).expect("getattr");
         assert_eq!(ga.atime, epoch_plus_1000);
@@ -14883,36 +14881,36 @@ mod tests {
             .expect("create");
         let ino = attr.ino;
 
-        // Fill file with non-zero data
-        let fill = vec![0xAB_u8; 8192];
+        // Fill file with non-zero data (3 blocks = 12288 bytes)
+        let fill = vec![0xAB_u8; 12288];
         fs.write(&cx, ino, 0, &fill).expect("fill");
 
-        // Punch a hole in the middle (offset 2048, length 2048)
+        // Punch a hole in the middle block (offset 4096, length 4096 — block-aligned)
         fs.fallocate(
             &cx,
             ino,
+            4096,
+            4096,
             libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-            2048,
-            2048,
         )
         .expect("punch hole");
 
         // Size should be preserved
-        assert_eq!(fs.getattr(&cx, ino).expect("ga").size, 8192);
+        assert_eq!(fs.getattr(&cx, ino).expect("ga").size, 12288);
 
-        // Read the hole — should be zeros
-        let data = fs.read(&cx, ino, 0, 8192).expect("read");
+        // Read the punched region — should be zeros
+        let data = fs.read(&cx, ino, 0, 12288).expect("read");
         assert!(
-            data[2048..4096].iter().all(|&b| b == 0),
+            data[4096..8192].iter().all(|&b| b == 0),
             "punched region should be zeroed"
         );
         // Data outside the hole should be intact
         assert!(
-            data[..2048].iter().all(|&b| b == 0xAB),
+            data[..4096].iter().all(|&b| b == 0xAB),
             "data before hole should be intact"
         );
         assert!(
-            data[4096..8192].iter().all(|&b| b == 0xAB),
+            data[8192..12288].iter().all(|&b| b == 0xAB),
             "data after hole should be intact"
         );
     }
@@ -14935,13 +14933,12 @@ mod tests {
         }
 
         // Verify all files exist via readdir
-        let entries = fs.readdir(&cx, root).expect("readdir");
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
+        let entry_names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
         for name in &created_names {
             assert!(
-                entries
-                    .iter()
-                    .any(|e| e.name.to_string_lossy() == name.as_str()),
-                "expected {name} in readdir"
+                entry_names.contains(name),
+                "expected {name} in readdir; got: {entry_names:?}"
             );
         }
     }
@@ -14973,11 +14970,558 @@ mod tests {
 
         // Readlink should return the target path
         let readlink = fs.readlink(&cx, link.ino).expect("readlink");
-        assert_eq!(readlink, std::path::PathBuf::from("sym_target.txt"));
+        assert_eq!(readlink, b"sym_target.txt");
 
         // The symlink inode itself is not a regular file — writing to it should fail
         let err = fs.write(&cx, link.ino, 0, b"bad");
         assert!(err.is_err(), "writing to symlink inode should fail");
+    }
+
+    // ── Fallocate and write-path error edge cases ────────────────────
+
+    #[test]
+    fn write_fallocate_zero_length_is_noop() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_zero.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"AAAA").expect("write");
+        let before = fs.getattr(&cx, attr.ino).expect("ga before");
+
+        // Zero-length fallocate should be a no-op
+        fs.fallocate(&cx, attr.ino, 0, 0, 0)
+            .expect("fallocate 0 len");
+
+        let after = fs.getattr(&cx, attr.ino).expect("ga after");
+        assert_eq!(before.size, after.size);
+        assert_eq!(before.blocks, after.blocks);
+    }
+
+    #[test]
+    fn write_fallocate_on_directory_returns_eisdir() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("falloc_dir"), 0o755, 0, 0)
+            .expect("mkdir");
+        let err = fs
+            .fallocate(&cx, dir.ino, 0, 4096, 0)
+            .expect_err("fallocate on dir");
+        assert!(
+            matches!(err, FfsError::IsDirectory),
+            "expected IsDirectory, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_fallocate_unsupported_mode_bits_rejected() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_bad_mode.bin"), 0o644, 0, 0)
+            .expect("create");
+        // FALLOC_FL_COLLAPSE_RANGE = 0x08 is not supported
+        let err = fs
+            .fallocate(&cx, attr.ino, 0, 4096, 0x08)
+            .expect_err("unsupported mode");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "expected UnsupportedFeature, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_fallocate_punch_hole_without_keep_size_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_ph_noks.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xAB; 8192]).expect("write");
+        // PUNCH_HOLE (0x02) without KEEP_SIZE (0x01) is invalid per POSIX
+        let err = fs
+            .fallocate(&cx, attr.ino, 0, 4096, libc::FALLOC_FL_PUNCH_HOLE)
+            .expect_err("punch without keep_size");
+        assert!(
+            matches!(err, FfsError::Io(_)),
+            "expected Io(EINVAL), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_fallocate_non_block_aligned_punch_hole_rejected() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_unalign.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xAB; 8192]).expect("write");
+        // Non-block-aligned punch hole should be rejected
+        let err = fs
+            .fallocate(
+                &cx,
+                attr.ino,
+                100,
+                200,
+                libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+            )
+            .expect_err("unaligned punch");
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "expected UnsupportedFeature for unaligned punch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_fallocate_prealloc_without_keep_size_extends_file() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_extend.bin"), 0o644, 0, 0)
+            .expect("create");
+        // File starts empty (size 0)
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga0").size, 0);
+
+        // fallocate without KEEP_SIZE should extend the file size
+        fs.fallocate(&cx, attr.ino, 0, 16384, 0)
+            .expect("fallocate extend");
+        let after = fs.getattr(&cx, attr.ino).expect("ga1");
+        assert_eq!(after.size, 16384, "size should be extended to 16K");
+        assert!(after.blocks > 0, "should have allocated blocks");
+
+        // The preallocated region should read as zeros
+        let data = fs.read(&cx, attr.ino, 0, 16384).expect("read");
+        assert!(data.iter().all(|&b| b == 0), "prealloc should be zeroed");
+    }
+
+    #[test]
+    fn write_fallocate_keep_size_does_not_extend_size() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_ks.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"small").expect("write");
+        let before = fs.getattr(&cx, attr.ino).expect("ga before");
+
+        // KEEP_SIZE fallocate beyond EOF should not change reported size
+        fs.fallocate(&cx, attr.ino, 0, 16384, libc::FALLOC_FL_KEEP_SIZE)
+            .expect("fallocate keep_size");
+        let after = fs.getattr(&cx, attr.ino).expect("ga after");
+        assert_eq!(after.size, before.size, "size should be unchanged");
+        assert!(
+            after.blocks >= before.blocks,
+            "blocks should not decrease: {} >= {}",
+            after.blocks,
+            before.blocks
+        );
+    }
+
+    #[test]
+    fn write_fallocate_range_overflow_rejected() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_overflow.bin"), 0o644, 0, 0)
+            .expect("create");
+        // offset + length would overflow u64
+        let err = fs.fallocate(&cx, attr.ino, u64::MAX, 1, 0);
+        assert!(err.is_err(), "overflow should fail");
+    }
+
+    #[test]
+    fn write_statfs_returns_valid_values() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let stat = fs.statfs(&cx, root).expect("statfs");
+        assert!(stat.blocks > 0, "should have blocks");
+        assert!(stat.blocks_free <= stat.blocks, "free <= total");
+        assert!(stat.blocks_available <= stat.blocks_free, "avail <= free");
+        assert!(stat.files > 0, "should have inodes");
+        assert!(stat.files_free <= stat.files, "free inodes <= total");
+        assert!(stat.block_size > 0, "block size > 0");
+    }
+
+    #[test]
+    fn write_statfs_consistent_after_mutations() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Create a file and write data
+        let attr = fs
+            .create(&cx, root, OsStr::new("statfs_alloc.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xCC; 8192]).expect("write");
+
+        // statfs should still return internally consistent values after mutations.
+        // Note: ext4 statfs reads from the on-disk superblock snapshot, not the
+        // live allocator state, so free counts may not decrease immediately.
+        let stat = fs.statfs(&cx, root).expect("statfs after");
+        assert!(stat.blocks > 0, "should have blocks");
+        assert!(stat.blocks_free <= stat.blocks, "free <= total");
+        assert!(stat.blocks_available <= stat.blocks_free, "avail <= free");
+        assert!(stat.files > 0, "should have inodes");
+        assert!(stat.files_free <= stat.files, "free inodes <= total");
+    }
+
+    #[test]
+    fn write_fsyncdir_on_read_only_returns_erofs() {
+        let image = build_ext4_image(2);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let root = InodeNumber(2);
+        let err = fs
+            .fsyncdir(&cx, root, 0, false)
+            .expect_err("fsyncdir on ro");
+        assert!(
+            matches!(err, FfsError::ReadOnly),
+            "expected ReadOnly, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_flush_always_succeeds() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        // flush is a no-op that always succeeds
+        fs.flush(&cx, root, 0, 0).expect("flush");
+    }
+
+    #[test]
+    fn write_fsync_and_fsyncdir_on_writable_succeed() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsync_test.txt"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"data").expect("write");
+        // fsync on the file
+        fs.fsync(&cx, attr.ino, 0, false).expect("fsync");
+        // fsync with datasync
+        fs.fsync(&cx, attr.ino, 0, true).expect("fsync datasync");
+        // fsyncdir on the directory
+        fs.fsyncdir(&cx, root, 0, false).expect("fsyncdir");
+        fs.fsyncdir(&cx, root, 0, true).expect("fsyncdir datasync");
+    }
+
+    // ── Fallocate & write-path edge cases (bd-18md) ───────────────────
+
+    #[test]
+    fn write_empty_data_returns_zero() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("empty_wr.bin"), 0o644, 0, 0)
+            .expect("create");
+        let n = fs.write(&cx, attr.ino, 0, b"").expect("write empty");
+        assert_eq!(n, 0, "empty write should return 0 bytes written");
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga").size, 0);
+    }
+
+    #[test]
+    fn write_link_duplicate_name_returns_eexist() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let a = fs
+            .create(&cx, root, OsStr::new("link_dup_a.txt"), 0o644, 0, 0)
+            .expect("create a");
+        let b = fs
+            .create(&cx, root, OsStr::new("link_dup_b.txt"), 0o644, 0, 0)
+            .expect("create b");
+        // Try to hard-link b's inode into the name "link_dup_a.txt" that already exists
+        let err = fs
+            .link(&cx, b.ino, root, OsStr::new("link_dup_a.txt"))
+            .expect_err("link dup");
+        assert!(
+            matches!(err, FfsError::Exists),
+            "expected Exists, got {err:?}"
+        );
+        // Verify a is still intact
+        let _ = fs.getattr(&cx, a.ino).expect("a still ok");
+    }
+
+    #[test]
+    fn write_rmdir_on_file_returns_enotdir() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        fs.create(&cx, root, OsStr::new("not_a_dir.txt"), 0o644, 0, 0)
+            .expect("create");
+        let err = fs
+            .rmdir(&cx, root, OsStr::new("not_a_dir.txt"))
+            .expect_err("rmdir on file");
+        assert!(
+            matches!(err, FfsError::NotDirectory),
+            "expected NotDirectory, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_setattr_chmod_preserves_file_type_bits() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("chmod_type.bin"), 0o644, 0, 0)
+            .expect("create");
+        // Change permission to 0o777 — file type bits (S_IFREG = 0o100000) must be preserved
+        let req = SetAttrRequest {
+            mode: Some(0o777),
+            ..SetAttrRequest::default()
+        };
+        let after = fs.setattr(&cx, attr.ino, &req).expect("setattr");
+        // Permission bits should be 0o777
+        assert_eq!(after.perm & 0o7777, 0o777, "perm should be 0o777");
+        // File type must still be regular file (S_IFREG)
+        assert_eq!(
+            after.kind,
+            FileType::RegularFile,
+            "should still be regular file"
+        );
+    }
+
+    #[test]
+    fn write_unlink_last_link_makes_lookup_fail() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("will_die.txt"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"data").expect("write");
+        // Unlink the only link
+        fs.unlink(&cx, root, OsStr::new("will_die.txt"))
+            .expect("unlink");
+        // Lookup should fail now
+        let err = fs
+            .lookup(&cx, root, OsStr::new("will_die.txt"))
+            .expect_err("lookup after unlink");
+        assert!(
+            matches!(err, FfsError::NotFound(_)),
+            "expected NotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_create_unlink_readdir_lifecycle() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Create 3 files
+        for i in 0..3 {
+            let name = format!("life_{i}.txt");
+            fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
+                .expect("create");
+        }
+
+        // Verify all 3 appear in readdir
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
+        let names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
+        for i in 0..3 {
+            let name = format!("life_{i}.txt");
+            assert!(names.contains(&name), "should contain {name}");
+        }
+
+        // Unlink the middle one
+        fs.unlink(&cx, root, OsStr::new("life_1.txt"))
+            .expect("unlink");
+
+        // Verify only 2 remain
+        let entries = fs.readdir(&cx, root, 0).expect("readdir after");
+        let names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
+        assert!(names.contains(&"life_0.txt".to_owned()));
+        assert!(
+            !names.contains(&"life_1.txt".to_owned()),
+            "1 should be gone"
+        );
+        assert!(names.contains(&"life_2.txt".to_owned()));
+    }
+
+    #[test]
+    fn write_hard_link_nlink_accounting() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("nlink_src.txt"), 0o644, 0, 0)
+            .expect("create");
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga1").nlink, 1);
+
+        // Create a hard link — nlink should be 2
+        fs.link(&cx, attr.ino, root, OsStr::new("nlink_lnk.txt"))
+            .expect("link");
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga2").nlink, 2);
+
+        // Unlink the original — nlink should drop to 1
+        fs.unlink(&cx, root, OsStr::new("nlink_src.txt"))
+            .expect("unlink orig");
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga3").nlink, 1);
+
+        // Data should still be accessible via the hard link
+        fs.write(&cx, attr.ino, 0, b"alive").expect("write");
+        let data = fs.read(&cx, attr.ino, 0, 5).expect("read");
+        assert_eq!(&data, b"alive");
+    }
+
+    #[test]
+    fn write_setattr_extend_sparse_reads_zeros() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("extend_sparse.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"HEAD").expect("write head");
+
+        // Extend the file to 8192 bytes via setattr (creates a sparse hole)
+        let req = SetAttrRequest {
+            size: Some(8192),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, attr.ino, &req).expect("extend");
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga").size, 8192);
+
+        // The first 4 bytes should be "HEAD"
+        let head = fs.read(&cx, attr.ino, 0, 4).expect("read head");
+        assert_eq!(&head, b"HEAD");
+
+        // Bytes beyond original data should read as zeros
+        let tail = fs.read(&cx, attr.ino, 4, 100).expect("read tail");
+        assert!(
+            tail.iter().all(|&b| b == 0),
+            "sparse extension should be zero-filled"
+        );
+    }
+
+    #[test]
+    fn write_rename_source_gone_dest_exists() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("ren_src.txt"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"payload").expect("write");
+
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("ren_src.txt"),
+            root,
+            OsStr::new("ren_dst.txt"),
+        )
+        .expect("rename");
+
+        // Source name should be gone
+        let err = fs.lookup(&cx, root, OsStr::new("ren_src.txt"));
+        assert!(err.is_err(), "source should not exist");
+
+        // Destination should resolve to the same inode
+        let dst = fs
+            .lookup(&cx, root, OsStr::new("ren_dst.txt"))
+            .expect("lookup dst");
+        assert_eq!(dst.ino, attr.ino);
+
+        // Data should be intact
+        let data = fs.read(&cx, attr.ino, 0, 7).expect("read");
+        assert_eq!(&data, b"payload");
+    }
+
+    #[test]
+    fn write_mkdir_rmdir_decrements_parent_nlink() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let nlink_before = fs.getattr(&cx, root).expect("ga before").nlink;
+
+        fs.mkdir(&cx, root, OsStr::new("subdir_nlink"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        // Parent nlink should increase (child's ".." entry)
+        let nlink_after_mkdir = fs.getattr(&cx, root).expect("ga mid").nlink;
+        assert_eq!(
+            nlink_after_mkdir,
+            nlink_before + 1,
+            "parent nlink should increase by 1"
+        );
+
+        fs.rmdir(&cx, root, OsStr::new("subdir_nlink"))
+            .expect("rmdir");
+        let nlink_after_rmdir = fs.getattr(&cx, root).expect("ga after").nlink;
+        assert_eq!(
+            nlink_after_rmdir, nlink_before,
+            "parent nlink should return to original"
+        );
+
+        // Child should be gone from readdir
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
+        assert!(
+            !entries
+                .iter()
+                .map(DirEntry::name_str)
+                .any(|n| n == "subdir_nlink")
+        );
     }
 
     // ── Crash recovery tests ──────────────────────────────────────────

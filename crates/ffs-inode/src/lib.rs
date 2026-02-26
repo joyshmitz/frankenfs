@@ -2528,4 +2528,898 @@ mod tests {
         let links = u16::from_le_bytes([raw[0x1A], raw[0x1B]]);
         assert_eq!(links, 42);
     }
+
+    // ── Edge-case and boundary tests (bd-o6yp) ─────────────────────────
+
+    #[test]
+    fn create_inode_file_has_link_count_one() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let (_, inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644, // regular file
+            1000,
+            1000,
+            GroupNumber(0),
+            0,
+            1_700_000_000,
+            0,
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(inode.links_count, 1, "regular file starts with 1 link");
+        assert!(!inode.is_dir());
+    }
+
+    #[test]
+    fn create_inode_dir_has_link_count_two() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let (_, inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o040_755, // directory
+            1000,
+            1000,
+            GroupNumber(0),
+            0,
+            1_700_000_000,
+            0,
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(
+            inode.links_count, 2,
+            "directory starts with 2 links (. and parent)"
+        );
+        assert!(inode.is_dir());
+    }
+
+    #[test]
+    fn create_inode_has_extent_flag_and_valid_root() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let (_, inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            0,
+            0,
+            &pctx,
+        )
+        .unwrap();
+        assert_ne!(inode.flags & EXT4_EXTENTS_FL, 0, "should have EXTENTS flag");
+        // Verify extent root header magic.
+        let magic = u16::from_le_bytes([inode.extent_bytes[0], inode.extent_bytes[1]]);
+        assert_eq!(magic, EXT4_EXTENT_MAGIC);
+        // entries = 0
+        let entries = u16::from_le_bytes([inode.extent_bytes[2], inode.extent_bytes[3]]);
+        assert_eq!(entries, 0, "new inode should have 0 extents");
+        // max_entries = 4
+        let max = u16::from_le_bytes([inode.extent_bytes[4], inode.extent_bytes[5]]);
+        assert_eq!(max, 4, "root max should be 4");
+    }
+
+    #[test]
+    fn create_inode_timestamps_match_provided() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let now = 1_700_000_000_u64;
+        let nsec = 123_456_789_u32;
+        let (_, inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            now,
+            nsec,
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(inode.atime, now as u32);
+        assert_eq!(inode.ctime, now as u32);
+        assert_eq!(inode.mtime, now as u32);
+        assert_eq!(inode.crtime, now as u32);
+        // Extra timestamp should encode the nsec.
+        let expected_extra = encode_extra_timestamp(now, nsec);
+        assert_eq!(inode.atime_extra, expected_extra);
+        assert_eq!(inode.ctime_extra, expected_extra);
+        assert_eq!(inode.mtime_extra, expected_extra);
+        assert_eq!(inode.crtime_extra, expected_extra);
+    }
+
+    #[test]
+    fn delete_inode_without_extent_flag_does_not_truncate() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let (ino, mut inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_000,
+            0,
+            &pctx,
+        )
+        .unwrap();
+        // Clear the extents flag to simulate a non-extent inode.
+        inode.flags &= !EXT4_EXTENTS_FL;
+        write_inode(&cx, &dev, &geo, &groups, ino, &inode, 0).unwrap();
+
+        // Delete should succeed without trying to truncate extents.
+        delete_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            ino,
+            &mut inode,
+            0,
+            2_000,
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(inode.links_count, 0);
+        assert_eq!(inode.size, 0);
+        assert_eq!(inode.dtime, 2_000);
+    }
+
+    #[test]
+    fn locate_inode_very_large_number() {
+        let geo = make_geometry();
+        let groups = make_groups(&geo);
+        // Inode number far beyond all groups should return None.
+        let result = locate_inode(InodeNumber(999_999), &geo, &groups);
+        assert!(
+            result.is_none(),
+            "should return None for out-of-range inode"
+        );
+    }
+
+    #[test]
+    fn encode_extra_timestamp_high_epoch_bits() {
+        // Seconds > 2^32: the low 2 bits of the extra field store epoch extension.
+        let secs = (1_u64 << 33) + 42; // epoch bit 1 set
+        let nsec = 500_000_000; // 0.5s
+        let extra = encode_extra_timestamp(secs, nsec);
+        // epoch extension = (secs >> 32) & 0x3 = 2
+        let epoch_bits = extra & 0x3;
+        assert_eq!(epoch_bits, 2, "epoch extension should be 2");
+        // nsec bits 2..31
+        let decoded_nsec = extra >> 2;
+        assert_eq!(decoded_nsec, nsec);
+    }
+
+    #[test]
+    fn touch_atime_does_not_modify_ctime_mtime() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 100,
+            links_count: 1,
+            blocks: 8,
+            flags: 0,
+            generation: 1,
+            file_acl: 0,
+            atime: 1000,
+            ctime: 2000,
+            mtime: 3000,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 500,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+        let orig_ctime = inode.ctime;
+        let orig_mtime = inode.mtime;
+        touch_atime(&mut inode, 9999, 123);
+        assert_eq!(inode.atime, 9999);
+        assert_eq!(inode.ctime, orig_ctime, "ctime unchanged by touch_atime");
+        assert_eq!(inode.mtime, orig_mtime, "mtime unchanged by touch_atime");
+    }
+
+    #[test]
+    fn touch_ctime_does_not_modify_atime_mtime() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 100,
+            links_count: 1,
+            blocks: 8,
+            flags: 0,
+            generation: 1,
+            file_acl: 0,
+            atime: 1000,
+            ctime: 2000,
+            mtime: 3000,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 500,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+        let orig_atime = inode.atime;
+        let orig_mtime = inode.mtime;
+        touch_ctime(&mut inode, 8888, 456);
+        assert_eq!(inode.ctime, 8888);
+        assert_eq!(inode.atime, orig_atime, "atime unchanged by touch_ctime");
+        assert_eq!(inode.mtime, orig_mtime, "mtime unchanged by touch_ctime");
+    }
+
+    #[test]
+    fn create_and_delete_roundtrip_frees_inode() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let free_before = groups[0].free_inodes;
+
+        let (ino, mut inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_000,
+            0,
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(groups[0].free_inodes, free_before - 1);
+
+        delete_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            ino,
+            &mut inode,
+            0,
+            2_000,
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(groups[0].free_inodes, free_before, "inode should be freed");
+    }
+
+    #[test]
+    fn inode_location_fields() {
+        let loc = InodeLocation {
+            block: BlockNumber(42),
+            byte_offset: 256,
+        };
+        assert_eq!(loc.block, BlockNumber(42));
+        assert_eq!(loc.byte_offset, 256);
+        // Debug + Clone coverage.
+        let cloned = loc;
+        let _ = format!("{cloned:?}");
+    }
+
+    #[test]
+    fn create_dir_increments_used_dirs() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let total_used_before: u32 = groups.iter().map(|g| g.used_dirs).sum();
+
+        create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o040_755,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_000,
+            0,
+            &pctx,
+        )
+        .unwrap();
+        let total_used_after: u32 = groups.iter().map(|g| g.used_dirs).sum();
+        assert_eq!(
+            total_used_after,
+            total_used_before + 1,
+            "creating dir should increment used_dirs in some group"
+        );
+    }
+
+    // ── Deeper edge-case and boundary tests ─────────────────────────────
+
+    #[test]
+    fn serialize_short_extent_bytes_zero_padded() {
+        // When extent_bytes is shorter than 60, only available bytes are copied.
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0xCC; 10], // shorter than 60
+            xattr_ibody: vec![],
+        };
+        let raw = serialize_inode(&inode, 256);
+        // First 10 bytes at 0x28 should be 0xCC.
+        assert!(raw[0x28..0x28 + 10].iter().all(|b| *b == 0xCC));
+        // Remaining bytes from 0x32..0x64 should be zero.
+        assert!(raw[0x28 + 10..0x64].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn serialize_inode_size_0x88_includes_ctime_extra_only() {
+        // inode_size = 0x88 (136) includes ctime_extra but not mtime_extra.
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0xAAAA_BBBB,
+            mtime_extra: 0xCCCC_DDDD,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+        let raw = serialize_inode(&inode, 0x88);
+        assert_eq!(raw.len(), 0x88);
+        let ctime_extra = u32::from_le_bytes([raw[0x84], raw[0x85], raw[0x86], raw[0x87]]);
+        assert_eq!(ctime_extra, 0xAAAA_BBBB);
+        // mtime_extra at 0x88 is out of bounds — not serialized.
+    }
+
+    #[test]
+    fn serialize_inode_size_0x90_includes_through_atime_extra() {
+        // inode_size = 0x90 (144) includes ctime_extra, mtime_extra, atime_extra.
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0x1111_2222,
+            ctime_extra: 0x3333_4444,
+            mtime_extra: 0x5555_6666,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+        let raw = serialize_inode(&inode, 0x90);
+        assert_eq!(raw.len(), 0x90);
+        let ctime_extra = u32::from_le_bytes([raw[0x84], raw[0x85], raw[0x86], raw[0x87]]);
+        let mtime_extra = u32::from_le_bytes([raw[0x88], raw[0x89], raw[0x8A], raw[0x8B]]);
+        let atime_extra = u32::from_le_bytes([raw[0x8C], raw[0x8D], raw[0x8E], raw[0x8F]]);
+        assert_eq!(ctime_extra, 0x3333_4444);
+        assert_eq!(mtime_extra, 0x5555_6666);
+        assert_eq!(atime_extra, 0x1111_2222);
+    }
+
+    #[test]
+    fn delete_inode_short_extent_bytes_skips_truncate() {
+        // extent_bytes < 60 with EXT4_EXTENTS_FL set should skip truncation.
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+
+        let (ino, mut inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_000,
+            0,
+            &pctx,
+        )
+        .unwrap();
+
+        // Shrink extent_bytes below the 60-byte threshold while keeping the flag.
+        inode.extent_bytes.truncate(12);
+        assert_ne!(inode.flags & EXT4_EXTENTS_FL, 0);
+
+        delete_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            ino,
+            &mut inode,
+            0,
+            2_000,
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(inode.links_count, 0);
+        assert_eq!(inode.size, 0);
+    }
+
+    #[test]
+    fn create_inode_epoch_extended_timestamp() {
+        // Timestamps beyond 2038 (> u32::MAX) should use epoch extension bits.
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+
+        let future_secs: u64 = 0x1_0000_0001; // epoch bit = 1
+        let nsec: u32 = 500_000_000;
+        let (_, inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            future_secs,
+            nsec,
+            &pctx,
+        )
+        .unwrap();
+
+        assert_eq!(inode.atime, 1); // low 32 bits of 0x1_0000_0001
+        let expected_extra = encode_extra_timestamp(future_secs, nsec);
+        assert_eq!(inode.atime_extra, expected_extra);
+        assert_eq!(inode.ctime_extra, expected_extra);
+        assert_eq!(inode.mtime_extra, expected_extra);
+        assert_eq!(inode.crtime_extra, expected_extra);
+        assert_eq!(expected_extra & 0x3, 1, "epoch bit should be 1");
+        assert_eq!(expected_extra >> 2, nsec, "nsec should be preserved");
+    }
+
+    #[test]
+    fn touch_atime_epoch_extended() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 100,
+            mtime: 200,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+
+        let future_secs: u64 = 0x2_0000_0005; // epoch bits = 2
+        touch_atime(&mut inode, future_secs, 100_000_000);
+
+        assert_eq!(inode.atime, 5); // low 32 bits
+        let extra = inode.atime_extra;
+        assert_eq!(extra & 0x3, 2, "epoch extension should be 2");
+        assert_eq!(extra >> 2, 100_000_000, "nsec should be preserved");
+        assert_eq!(inode.ctime, 100, "ctime unchanged");
+        assert_eq!(inode.mtime, 200, "mtime unchanged");
+    }
+
+    #[test]
+    fn touch_mtime_ctime_epoch_max() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 42,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![],
+        };
+
+        let future_secs: u64 = 0x3_FFFF_FFFE; // epoch bits = 3 (max)
+        touch_mtime_ctime(&mut inode, future_secs, 999_999_999);
+
+        assert_eq!(inode.mtime, 0xFFFF_FFFE);
+        assert_eq!(inode.ctime, 0xFFFF_FFFE);
+        let extra = inode.mtime_extra;
+        assert_eq!(extra & 0x3, 3, "epoch extension should be 3 (max)");
+        assert_eq!(extra >> 2, 999_999_999, "max nsec preserved");
+        assert_eq!(inode.ctime_extra, extra, "ctime and mtime extra match");
+        assert_eq!(inode.atime, 42, "atime untouched");
+    }
+
+    #[test]
+    fn checksum_varies_with_seed() {
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 1000,
+            gid: 1000,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: EXT4_EXTENTS_FL,
+            generation: 1,
+            file_acl: 0,
+            atime: 1_700_000_000,
+            ctime: 1_700_000_000,
+            mtime: 1_700_000_000,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: Vec::new(),
+        };
+
+        let mut raw_a = serialize_inode(&inode, 256);
+        compute_and_set_checksum(&mut raw_a, 0x1111_1111, 42);
+        let csum_a = u16::from_le_bytes([
+            raw_a[INODE_CHECKSUM_LO_OFFSET],
+            raw_a[INODE_CHECKSUM_LO_OFFSET + 1],
+        ]);
+
+        let mut raw_b = serialize_inode(&inode, 256);
+        compute_and_set_checksum(&mut raw_b, 0x2222_2222, 42);
+        let csum_b = u16::from_le_bytes([
+            raw_b[INODE_CHECKSUM_LO_OFFSET],
+            raw_b[INODE_CHECKSUM_LO_OFFSET + 1],
+        ]);
+
+        assert_ne!(
+            csum_a, csum_b,
+            "different seeds should give different checksums"
+        );
+    }
+
+    #[test]
+    fn checksum_varies_with_inode_number() {
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: EXT4_EXTENTS_FL,
+            generation: 1,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: Vec::new(),
+        };
+
+        let mut raw_a = serialize_inode(&inode, 256);
+        compute_and_set_checksum(&mut raw_a, 0xDEAD, 1);
+
+        let mut raw_b = serialize_inode(&inode, 256);
+        compute_and_set_checksum(&mut raw_b, 0xDEAD, 2);
+
+        // Compare full 32-bit checksum (lo + hi).
+        let full_a = u16::from_le_bytes([
+            raw_a[INODE_CHECKSUM_LO_OFFSET],
+            raw_a[INODE_CHECKSUM_LO_OFFSET + 1],
+        ]) as u32
+            | (u16::from_le_bytes([
+                raw_a[INODE_CHECKSUM_HI_OFFSET],
+                raw_a[INODE_CHECKSUM_HI_OFFSET + 1],
+            ]) as u32)
+                << 16;
+        let full_b = u16::from_le_bytes([
+            raw_b[INODE_CHECKSUM_LO_OFFSET],
+            raw_b[INODE_CHECKSUM_LO_OFFSET + 1],
+        ]) as u32
+            | (u16::from_le_bytes([
+                raw_b[INODE_CHECKSUM_HI_OFFSET],
+                raw_b[INODE_CHECKSUM_HI_OFFSET + 1],
+            ]) as u32)
+                << 16;
+
+        assert_ne!(
+            full_a, full_b,
+            "different ino should give different checksums"
+        );
+    }
+
+    #[test]
+    fn create_regular_file_does_not_increment_used_dirs() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let used_dirs_before: u32 = groups.iter().map(|g| g.used_dirs).sum();
+
+        create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_000,
+            0,
+            &pctx,
+        )
+        .unwrap();
+
+        let used_dirs_after: u32 = groups.iter().map(|g| g.used_dirs).sum();
+        assert_eq!(
+            used_dirs_after, used_dirs_before,
+            "regular file should not increment used_dirs"
+        );
+    }
+
+    #[test]
+    fn serialize_xattr_ibody_with_zero_extra_isize() {
+        // extra_isize=0 means xattr_start=128, filling from 128 to inode_size.
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 0,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: vec![0xAA; 128],
+        };
+        let raw = serialize_inode(&inode, 256);
+        // With extra_isize=0, xattr_start = 128 + 0 = 128.
+        // Available space = 256 - 128 = 128 bytes.
+        assert!(raw[128..256].iter().all(|b| *b == 0xAA));
+    }
+
+    #[test]
+    fn read_inode_block_boundary_error() {
+        // Inode larger than block size should trigger boundary error.
+        let cx = test_cx();
+        let geo = FsGeometry {
+            blocks_per_group: 8192,
+            inodes_per_group: 2048,
+            block_size: 128, // Tiny block — inode (256 bytes) won't fit.
+            total_blocks: 32768,
+            total_inodes: 8192,
+            first_data_block: 0,
+            group_count: 4,
+            inode_size: 256,
+        };
+        let groups = make_groups(&geo);
+        let dev = MemBlockDevice::new(128);
+
+        let result = read_inode(&cx, &dev, &geo, &groups, InodeNumber(1));
+        assert!(result.is_err(), "inode crossing block boundary should fail");
+        let err = result.unwrap_err();
+        assert!(
+            format!("{err}").contains("beyond block boundary"),
+            "error should mention boundary: {err}"
+        );
+    }
+
+    #[test]
+    fn locate_inode_root_ext4() {
+        // InodeNumber(2) is the ext4 root inode — index = 1.
+        let geo = make_geometry();
+        let groups = make_groups(&geo);
+        let loc = locate_inode(InodeNumber(2), &geo, &groups).unwrap();
+        // index = (2 - 1) % 2048 = 1, byte = 256
+        assert_eq!(loc.block, BlockNumber(3));
+        assert_eq!(loc.byte_offset, 256);
+    }
+
+    #[test]
+    fn delete_inode_xattr_block_zeroed_data_frees_block() {
+        // An xattr block full of zeros (invalid magic) should still be freed.
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+
+        let (ino, mut inode) = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_000,
+            0,
+            &pctx,
+        )
+        .unwrap();
+
+        // Allocate a block and mark it as xattr.
+        let hint = ffs_alloc::AllocHint {
+            goal_group: Some(GroupNumber(0)),
+            ..Default::default()
+        };
+        let acl_blk =
+            ffs_alloc::alloc_blocks_persist(&cx, &dev, &geo, &mut groups, 1, &hint, &pctx).unwrap();
+        inode.file_acl = acl_blk.start.0;
+        // Write all zeros — invalid xattr magic.
+        dev.write_block(&cx, acl_blk.start, &[0u8; 4096]).unwrap();
+        write_inode(&cx, &dev, &geo, &groups, ino, &inode, 0).unwrap();
+
+        let free_before: u32 = groups.iter().map(|g| g.free_blocks).sum();
+        delete_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            ino,
+            &mut inode,
+            0,
+            2_000,
+            &pctx,
+        )
+        .unwrap();
+        let free_after: u32 = groups.iter().map(|g| g.free_blocks).sum();
+
+        assert_eq!(inode.file_acl, 0, "file_acl should be cleared");
+        assert!(
+            free_after > free_before,
+            "invalid xattr block should be freed"
+        );
+    }
 }

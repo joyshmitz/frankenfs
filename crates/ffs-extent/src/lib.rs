@@ -2191,6 +2191,403 @@ mod tests {
         assert_eq!(maps[0].physical_start, alloc.physical_start);
     }
 
+    // ── Edge-case and error-path tests (bd-27mi) ─────────────────────
+
+    #[test]
+    fn allocate_zero_count_rejected() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+        let err = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            0,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn allocate_count_exceeds_max_rejected() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+        let err = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            32768,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn allocate_unwritten_zero_count_rejected() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+        let err = allocate_unwritten_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            0,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn punch_entire_extent_frees_all() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let initial_free: u32 = groups.iter().map(|g| g.free_blocks).sum();
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            20,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        let freed = punch_hole(&cx, &dev, &mut root, &geo, &mut groups, 0, 20, &pctx).unwrap();
+        assert_eq!(freed, 20);
+
+        let final_free: u32 = groups.iter().map(|g| g.free_blocks).sum();
+        assert_eq!(final_free, initial_free);
+
+        // Tree should be empty; mapping should return a single hole.
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 20).unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].physical_start, 0, "should be a hole");
+    }
+
+    #[test]
+    fn map_gap_between_extents() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // Allocate blocks 0-4 and 10-14, leaving a gap at 5-9.
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            5,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            10,
+            5,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 15).unwrap();
+        // Should be: [0..5 mapped] [5..10 hole] [10..15 mapped]
+        assert_eq!(maps.len(), 3);
+        assert_ne!(maps[0].physical_start, 0); // mapped
+        assert_eq!(maps[0].count, 5);
+        assert_eq!(maps[1].physical_start, 0); // hole
+        assert_eq!(maps[1].logical_start, 5);
+        assert_eq!(maps[1].count, 5);
+        assert_ne!(maps[2].physical_start, 0); // mapped
+        assert_eq!(maps[2].count, 5);
+    }
+
+    #[test]
+    fn allocate_then_map_exact_range() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let alloc = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            7,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        // Map exactly the allocated range — should be a single mapping, no holes.
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 7).unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].logical_start, 0);
+        assert_eq!(maps[0].physical_start, alloc.physical_start);
+        assert_eq!(maps[0].count, 7);
+        assert!(!maps[0].unwritten);
+    }
+
+    #[test]
+    fn validate_root_bad_magic_returns_corruption() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = [0u8; 60]; // all zeros, bad magic
+
+        let result = map_logical_to_physical(&cx, &dev, &root, 0, 1);
+        assert!(matches!(result, Err(FfsError::Corruption { .. })));
+
+        // Also test via allocate path.
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = mock_pctx();
+        let result = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            1,
+            &AllocHint::default(),
+            &pctx,
+        );
+        assert!(matches!(result, Err(FfsError::Corruption { .. })));
+    }
+
+    #[test]
+    fn split_for_mark_written_left_trim() {
+        // Mark range starts after extent starts — unwritten prefix + written suffix.
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 0x0A | UNWRITTEN_FLAG,
+            physical_start: 100,
+        };
+        let parts = split_for_mark_written(&ext, 3, 10, 10, 7);
+        assert_eq!(parts.len(), 2);
+        // Prefix: unwritten [0..3)
+        assert!(parts[0].is_unwritten());
+        assert_eq!(parts[0].logical_block, 0);
+        assert_eq!(parts[0].actual_len(), 3);
+        assert_eq!(parts[0].physical_start, 100);
+        // Suffix: written [3..10)
+        assert!(!parts[1].is_unwritten());
+        assert_eq!(parts[1].logical_block, 3);
+        assert_eq!(parts[1].actual_len(), 7);
+        assert_eq!(parts[1].physical_start, 103);
+    }
+
+    #[test]
+    fn split_for_mark_written_right_trim() {
+        // Mark range ends before extent ends — written prefix + unwritten suffix.
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 0x0A | UNWRITTEN_FLAG,
+            physical_start: 100,
+        };
+        let parts = split_for_mark_written(&ext, 0, 6, 10, 6);
+        assert_eq!(parts.len(), 2);
+        // Prefix: written [0..6)
+        assert!(!parts[0].is_unwritten());
+        assert_eq!(parts[0].logical_block, 0);
+        assert_eq!(parts[0].actual_len(), 6);
+        assert_eq!(parts[0].physical_start, 100);
+        // Suffix: unwritten [6..10)
+        assert!(parts[1].is_unwritten());
+        assert_eq!(parts[1].logical_block, 6);
+        assert_eq!(parts[1].actual_len(), 4);
+        assert_eq!(parts[1].physical_start, 106);
+    }
+
+    #[test]
+    fn split_for_mark_written_middle_three_way() {
+        // Extent spans mark range — unwritten + written + unwritten.
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 0x14 | UNWRITTEN_FLAG,
+            physical_start: 200,
+        };
+        let parts = split_for_mark_written(&ext, 5, 15, 20, 10);
+        assert_eq!(parts.len(), 3);
+        // Left: unwritten [0..5)
+        assert!(parts[0].is_unwritten());
+        assert_eq!(parts[0].logical_block, 0);
+        assert_eq!(parts[0].actual_len(), 5);
+        assert_eq!(parts[0].physical_start, 200);
+        // Middle: written [5..15)
+        assert!(!parts[1].is_unwritten());
+        assert_eq!(parts[1].logical_block, 5);
+        assert_eq!(parts[1].actual_len(), 10);
+        assert_eq!(parts[1].physical_start, 205);
+        // Right: unwritten [15..20)
+        assert!(parts[2].is_unwritten());
+        assert_eq!(parts[2].logical_block, 15);
+        assert_eq!(parts[2].actual_len(), 5);
+        assert_eq!(parts[2].physical_start, 215);
+    }
+
+    #[test]
+    fn extent_mapping_debug_clone_eq() {
+        let m = ExtentMapping {
+            logical_start: 0,
+            physical_start: 100,
+            count: 10,
+            unwritten: false,
+        };
+        let m2 = m;
+        assert_eq!(m, m2);
+        let _ = format!("{m:?}");
+    }
+
+    #[test]
+    fn mark_written_on_already_written_extent_is_noop() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // Allocate a normal (written) extent.
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            10,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        // mark_written on a written extent should succeed without changing anything.
+        mark_written(&cx, &dev, &mut root, &geo, &mut groups, 0, 10, &pctx).unwrap();
+
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 10).unwrap();
+        assert_eq!(maps.len(), 1);
+        assert!(!maps[0].unwritten);
+        assert_eq!(maps[0].count, 10);
+    }
+
+    #[test]
+    fn allocate_at_nonzero_logical_offset() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let m = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            100,
+            5,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(m.logical_start, 100);
+        assert_eq!(m.count, 5);
+
+        // Map range [0,105): should have hole [0,100) + extent [100,105).
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 105).unwrap();
+        assert_eq!(maps.len(), 2);
+        assert_eq!(maps[0].physical_start, 0); // hole
+        assert_eq!(maps[0].count, 100);
+        assert_ne!(maps[1].physical_start, 0); // extent
+        assert_eq!(maps[1].logical_start, 100);
+        assert_eq!(maps[1].count, 5);
+    }
+
+    #[test]
+    fn truncate_partial_extent_midway() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            20,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        // Truncate at block 10 — should free the second half.
+        let freed = truncate_extents(&cx, &dev, &mut root, &geo, &mut groups, 10, &pctx).unwrap();
+        assert!(freed > 0);
+
+        // Only blocks 0-9 should remain mapped.
+        let maps = map_logical_to_physical(&cx, &dev, &root, 0, 20).unwrap();
+        let mapped_total: u32 = maps
+            .iter()
+            .filter(|m| m.physical_start != 0)
+            .map(|m| m.count)
+            .sum();
+        assert_eq!(mapped_total, 10);
+    }
+
     // ── Proptest property-based tests ─────────────────────────────────
 
     use proptest::prelude::*;

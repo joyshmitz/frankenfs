@@ -2684,6 +2684,352 @@ mod tests {
         assert_tree_invariants(&cx, &dev, &root).unwrap();
     }
 
+    // ── Edge-case and boundary tests (bd-36j1) ────────────────────────
+
+    #[test]
+    fn search_target_u32_max_returns_hole() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert an extent at block 0.
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 10,
+            physical_start: 500,
+        };
+        insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+
+        // Searching at u32::MAX should return a hole.
+        let result = search(&cx, &dev, &root, u32::MAX).unwrap();
+        assert!(matches!(result, SearchResult::Hole { .. }));
+    }
+
+    #[test]
+    fn search_block_zero_in_populated_tree() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert extents starting at block 5 and 20.
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 5,
+                raw_len: 3,
+                physical_start: 500,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 20,
+                raw_len: 2,
+                physical_start: 600,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+
+        // Block 0 should be a hole with length 5 (until the first extent).
+        let result = search(&cx, &dev, &root, 0).unwrap();
+        match result {
+            SearchResult::Hole { hole_len } => {
+                assert_eq!(hole_len, 5, "hole should extend to block 5");
+            }
+            _ => panic!("expected Hole, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_max_raw_len_extent() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert extent with max valid length (32767 blocks = 0x7FFF).
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 0x7FFF,
+            physical_start: 1000,
+        };
+        insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+
+        let result = search(&cx, &dev, &root, 0).unwrap();
+        match result {
+            SearchResult::Found {
+                extent,
+                offset_in_extent,
+            } => {
+                assert_eq!(offset_in_extent, 0);
+                assert_eq!(extent.actual_len(), 0x7FFF);
+            }
+            _ => panic!("expected Found"),
+        }
+
+        // Search at block 32766 (last block of extent) should hit.
+        let result = search(&cx, &dev, &root, 32766).unwrap();
+        assert!(matches!(result, SearchResult::Found { .. }));
+
+        // Block 32767 should be a hole.
+        let result = search(&cx, &dev, &root, 32767).unwrap();
+        assert!(matches!(result, SearchResult::Hole { .. }));
+    }
+
+    #[test]
+    fn delete_range_u32_max_boundary() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 10,
+            physical_start: 500,
+        };
+        insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+
+        // Delete with logical_start near u32::MAX — should not panic from overflow.
+        let freed = delete_range(&cx, &dev, &mut root, u32::MAX - 5, 10, &mut alloc).unwrap();
+        assert!(freed.is_empty(), "nothing to delete at u32::MAX region");
+
+        // Original extent should still be intact.
+        let result = search(&cx, &dev, &root, 0).unwrap();
+        assert!(matches!(result, SearchResult::Found { .. }));
+    }
+
+    #[test]
+    fn freed_range_debug_clone_eq() {
+        let a = FreedRange {
+            physical_start: 100,
+            count: 10,
+        };
+        let b = a;
+        assert_eq!(a, b);
+        let _ = format!("{a:?}");
+    }
+
+    #[test]
+    fn search_result_debug_clone_eq() {
+        let found = SearchResult::Found {
+            extent: Ext4Extent {
+                logical_block: 0,
+                raw_len: 1,
+                physical_start: 100,
+            },
+            offset_in_extent: 0,
+        };
+        let cloned = found.clone();
+        assert_eq!(found, cloned);
+        let _ = format!("{found:?}");
+
+        let hole = SearchResult::Hole { hole_len: 42 };
+        let _ = format!("{hole:?}");
+        assert_ne!(found, hole);
+    }
+
+    #[test]
+    fn walk_after_deleting_all_from_multi_level_tree() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert enough extents to force a multi-level tree.
+        for i in 0..10 {
+            let ext = Ext4Extent {
+                logical_block: i * 100,
+                raw_len: 1,
+                physical_start: (i as u64) * 1000 + 5000,
+            };
+            insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+        }
+
+        let (header, _) = parse_header(&root).unwrap();
+        assert!(header.depth >= 1, "should be multi-level");
+
+        // Delete everything.
+        delete_range(&cx, &dev, &mut root, 0, u32::MAX, &mut alloc).unwrap();
+
+        // Walk should visit 0 extents.
+        let mut count = 0;
+        walk(&cx, &dev, &root, &mut |_: &Ext4Extent| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 0, "tree should be empty after deleting all");
+
+        // Search anything should return Hole.
+        let result = search(&cx, &dev, &root, 0).unwrap();
+        assert!(matches!(result, SearchResult::Hole { .. }));
+    }
+
+    #[test]
+    fn insert_adjacent_extents_stay_separate() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert two adjacent extents at [0..5) and [5..10).
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 0,
+                raw_len: 5,
+                physical_start: 1000,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 5,
+                raw_len: 5,
+                physical_start: 2000,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+
+        // Both extents should exist as separate entries.
+        let mut walked = Vec::new();
+        walk(&cx, &dev, &root, &mut |ext| {
+            walked.push(*ext);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(walked.len(), 2);
+        assert_eq!(walked[0].logical_block, 0);
+        assert_eq!(walked[0].physical_start, 1000);
+        assert_eq!(walked[1].logical_block, 5);
+        assert_eq!(walked[1].physical_start, 2000);
+
+        // Search at block 4 hits first, block 5 hits second.
+        match search(&cx, &dev, &root, 4).unwrap() {
+            SearchResult::Found {
+                extent,
+                offset_in_extent,
+            } => {
+                assert_eq!(extent.physical_start, 1000);
+                assert_eq!(offset_in_extent, 4);
+            }
+            _ => panic!("expected Found for block 4"),
+        }
+        match search(&cx, &dev, &root, 5).unwrap() {
+            SearchResult::Found {
+                extent,
+                offset_in_extent,
+            } => {
+                assert_eq!(extent.physical_start, 2000);
+                assert_eq!(offset_in_extent, 0);
+            }
+            _ => panic!("expected Found for block 5"),
+        }
+    }
+
+    #[test]
+    fn delete_partial_from_multi_level_preserves_remainder() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert 8 single-block extents to force multi-level tree.
+        for i in 0..8 {
+            let ext = Ext4Extent {
+                logical_block: i * 10,
+                raw_len: 1,
+                physical_start: (i as u64) * 100 + 5000,
+            };
+            insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+        }
+
+        // Delete the middle range [20..50) — should remove blocks at 20, 30, 40.
+        let freed = delete_range(&cx, &dev, &mut root, 20, 30, &mut alloc).unwrap();
+        let freed_blocks: u16 = freed.iter().map(|f| f.count).sum();
+        assert_eq!(freed_blocks, 3, "should free blocks at logical 20, 30, 40");
+
+        // Remaining should be [0, 10, 50, 60, 70].
+        let mut remaining = Vec::new();
+        walk(&cx, &dev, &root, &mut |ext| {
+            remaining.push(ext.logical_block);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(remaining, vec![0, 10, 50, 60, 70]);
+        assert_tree_invariants(&cx, &dev, &root).unwrap();
+    }
+
+    #[test]
+    fn insert_unwritten_then_search_preserves_flag() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert an unwritten extent (bit 15 set in raw_len).
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: EXT_INIT_MAX_LEN | 10, // 0x8000 | 10 = unwritten, 10 blocks
+            physical_start: 500,
+        };
+        insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+
+        // Searching should find the extent with unwritten flag.
+        match search(&cx, &dev, &root, 5).unwrap() {
+            SearchResult::Found {
+                extent,
+                offset_in_extent,
+            } => {
+                assert_eq!(offset_in_extent, 5);
+                assert!(
+                    extent.raw_len & EXT_INIT_MAX_LEN != 0,
+                    "unwritten flag should be preserved"
+                );
+                assert_eq!(extent.actual_len(), 10);
+            }
+            _ => panic!("expected Found"),
+        }
+    }
+
+    #[test]
+    fn walk_count_matches_inserted_count() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        for i in 0..20 {
+            let ext = Ext4Extent {
+                logical_block: i * 50,
+                raw_len: 1,
+                physical_start: (i as u64) * 100 + 5000,
+            };
+            insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+        }
+
+        let count = walk(&cx, &dev, &root, &mut |_: &Ext4Extent| Ok(())).unwrap();
+        assert_eq!(count, 20, "walk should visit exactly 20 extents");
+        assert_tree_invariants(&cx, &dev, &root).unwrap();
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
 
