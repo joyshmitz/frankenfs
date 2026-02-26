@@ -3193,7 +3193,6 @@ fn parse_error_to_ffs(e: &ParseError) -> FfsError {
     }
 }
 
-
 // ── Ext4FsOps: bridge from Ext4ImageReader to FsOps ───────────────────────
 
 /// Read-only ext4 filesystem operations backed by an in-memory image.
