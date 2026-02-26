@@ -18238,6 +18238,348 @@ mod tests {
         assert!(result.is_err(), "should fail for nonexistent path");
     }
 
+    // ── Degradation / backpressure edge-case tests ──────────────────────
+
+    #[test]
+    fn degradation_level_u8_roundtrip_all_variants() {
+        for (variant, expected) in [
+            (DegradationLevel::Normal, 0u8),
+            (DegradationLevel::Warning, 1),
+            (DegradationLevel::Degraded, 2),
+            (DegradationLevel::Critical, 3),
+            (DegradationLevel::Emergency, 4),
+        ] {
+            assert_eq!(u8::from(variant), expected);
+            assert_eq!(DegradationLevel::from_raw(expected), variant);
+        }
+    }
+
+    #[test]
+    fn degradation_level_should_flags_boundary_table() {
+        // Each row: (level, pause_bg, reduce_cache, throttle_writes, read_only)
+        let table: &[(DegradationLevel, bool, bool, bool, bool)] = &[
+            (DegradationLevel::Normal, false, false, false, false),
+            (DegradationLevel::Warning, true, false, false, false),
+            (DegradationLevel::Degraded, true, true, false, false),
+            (DegradationLevel::Critical, true, true, true, false),
+            (DegradationLevel::Emergency, true, true, true, true),
+        ];
+        for &(level, bg, cache, throttle, ro) in table {
+            assert_eq!(
+                level.should_pause_background(),
+                bg,
+                "pause_background mismatch at {level:?}"
+            );
+            assert_eq!(
+                level.should_reduce_cache(),
+                cache,
+                "reduce_cache mismatch at {level:?}"
+            );
+            assert_eq!(
+                level.should_throttle_writes(),
+                throttle,
+                "throttle_writes mismatch at {level:?}"
+            );
+            assert_eq!(
+                level.should_read_only(),
+                ro,
+                "read_only mismatch at {level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn degradation_level_ordering_is_total() {
+        use DegradationLevel::*;
+        let levels = [Normal, Warning, Degraded, Critical, Emergency];
+        for (i, &a) in levels.iter().enumerate() {
+            for (j, &b) in levels.iter().enumerate() {
+                assert_eq!(a.cmp(&b), i.cmp(&j), "ordering mismatch: {a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn degradation_level_hash_consistent_with_eq() {
+        use std::collections::HashSet;
+        let set: HashSet<DegradationLevel> = [
+            DegradationLevel::Normal,
+            DegradationLevel::Normal,
+            DegradationLevel::Emergency,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn degradation_transition_clone_and_eq() {
+        let t = DegradationTransition {
+            from: DegradationLevel::Normal,
+            to: DegradationLevel::Critical,
+            headroom: 150,
+        };
+        let t2 = t.clone();
+        assert_eq!(t, t2);
+        assert_eq!(format!("{t:?}"), format!("{t2:?}"));
+    }
+
+    #[test]
+    fn degradation_fsm_escalates_immediately() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
+        assert_eq!(fsm.level(), DegradationLevel::Normal);
+
+        // Push headroom to 0.0 → Emergency
+        pressure.set_headroom(0.0);
+        let trans = fsm.tick();
+        assert!(trans.is_some(), "should escalate immediately");
+        let t = trans.unwrap();
+        assert_eq!(t.from, DegradationLevel::Normal);
+        assert_eq!(t.to, DegradationLevel::Emergency);
+        assert_eq!(fsm.level(), DegradationLevel::Emergency);
+    }
+
+    #[test]
+    fn degradation_fsm_deescalates_after_recovery_samples() {
+        let pressure = Arc::new(SystemPressure::new());
+        let recovery = 3;
+        let fsm = DegradationFsm::new(Arc::clone(&pressure), recovery);
+
+        // Escalate to Emergency
+        pressure.set_headroom(0.0);
+        fsm.tick();
+        assert_eq!(fsm.level(), DegradationLevel::Emergency);
+
+        // Now set headroom back to 1.0 (Normal)
+        pressure.set_headroom(1.0);
+
+        // First two ticks: still Emergency (hysteresis)
+        for i in 0..recovery - 1 {
+            let t = fsm.tick();
+            assert!(t.is_none(), "should NOT de-escalate on sample {i}");
+            assert_eq!(fsm.level(), DegradationLevel::Emergency);
+        }
+
+        // Third tick: de-escalation occurs
+        let t = fsm.tick();
+        assert!(t.is_some(), "should de-escalate after {recovery} samples");
+        assert_eq!(t.unwrap().to, DegradationLevel::Normal);
+        assert_eq!(fsm.level(), DegradationLevel::Normal);
+    }
+
+    #[test]
+    fn degradation_fsm_hysteresis_resets_on_equal_observed() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
+
+        // Escalate to Critical (headroom ~0.06)
+        pressure.set_headroom(0.06);
+        fsm.tick();
+        assert_eq!(fsm.level(), DegradationLevel::Critical);
+
+        // Start recovery (headroom 1.0 → observed Normal)
+        pressure.set_headroom(1.0);
+        fsm.tick(); // recovery_count = 1
+
+        // Now set headroom back to Critical range → observed == current
+        pressure.set_headroom(0.06);
+        fsm.tick(); // recovery_count resets to 0
+
+        // Recovery should now need full 3 samples again
+        pressure.set_headroom(1.0);
+        fsm.tick(); // 1
+        fsm.tick(); // 2
+        assert_eq!(
+            fsm.level(),
+            DegradationLevel::Critical,
+            "should still be Critical"
+        );
+        let t = fsm.tick(); // 3 → de-escalate
+        assert!(t.is_some());
+    }
+
+    #[test]
+    fn degradation_fsm_transition_count_tracks_changes() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = DegradationFsm::new(Arc::clone(&pressure), 1);
+        assert_eq!(fsm.transition_count(), 0);
+
+        pressure.set_headroom(0.0);
+        fsm.tick();
+        assert_eq!(fsm.transition_count(), 1);
+
+        pressure.set_headroom(1.0);
+        fsm.tick(); // de-escalate (recovery_samples=1)
+        assert_eq!(fsm.transition_count(), 2);
+    }
+
+    #[test]
+    fn degradation_fsm_tick_no_change_returns_none() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
+        pressure.set_headroom(1.0); // Normal
+        assert!(fsm.tick().is_none(), "no transition when level unchanged");
+    }
+
+    #[test]
+    fn backpressure_gate_critical_throttles_writes_passes_reads() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
+
+        pressure.set_headroom(0.06); // Critical
+        fsm.tick();
+
+        let gate = BackpressureGate::new(Arc::clone(&fsm));
+        assert_eq!(gate.check(RequestOp::Write), BackpressureDecision::Throttle);
+        assert_eq!(
+            gate.check(RequestOp::Create),
+            BackpressureDecision::Throttle
+        );
+        assert_eq!(gate.check(RequestOp::Read), BackpressureDecision::Proceed);
+        assert_eq!(gate.check(RequestOp::Lookup), BackpressureDecision::Proceed);
+    }
+
+    #[test]
+    fn backpressure_gate_warning_all_proceed() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
+
+        pressure.set_headroom(0.35); // Warning
+        fsm.tick();
+
+        let gate = BackpressureGate::new(Arc::clone(&fsm));
+        assert_eq!(gate.check(RequestOp::Write), BackpressureDecision::Proceed);
+        assert_eq!(gate.check(RequestOp::Read), BackpressureDecision::Proceed);
+        assert_eq!(gate.check(RequestOp::Mkdir), BackpressureDecision::Proceed);
+    }
+
+    #[test]
+    fn backpressure_gate_debug_shows_level() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
+        let gate = BackpressureGate::new(fsm);
+        let dbg = format!("{gate:?}");
+        assert!(
+            dbg.contains("BackpressureGate"),
+            "debug should contain type name"
+        );
+        assert!(dbg.contains("Normal"), "should show current level");
+    }
+
+    #[test]
+    fn backpressure_decision_debug_and_clone() {
+        let d = BackpressureDecision::Throttle;
+        let d2 = d;
+        assert_eq!(d, d2);
+        assert!(format!("{d:?}").contains("Throttle"));
+    }
+
+    #[test]
+    fn request_op_read_ops_are_not_write() {
+        let read_ops = [
+            RequestOp::Getattr,
+            RequestOp::Statfs,
+            RequestOp::Getxattr,
+            RequestOp::Lookup,
+            RequestOp::Listxattr,
+            RequestOp::Flush,
+            RequestOp::Open,
+            RequestOp::Opendir,
+            RequestOp::Read,
+            RequestOp::Readdir,
+            RequestOp::Readlink,
+        ];
+        for op in read_ops {
+            assert!(!op.is_write(), "{op:?} should NOT be a write op");
+        }
+    }
+
+    #[test]
+    fn request_op_write_ops_are_write() {
+        let write_ops = [
+            RequestOp::Create,
+            RequestOp::Mkdir,
+            RequestOp::Unlink,
+            RequestOp::Rmdir,
+            RequestOp::Rename,
+            RequestOp::Link,
+            RequestOp::Symlink,
+            RequestOp::Fallocate,
+            RequestOp::Setattr,
+            RequestOp::Setxattr,
+            RequestOp::Removexattr,
+            RequestOp::Write,
+            RequestOp::Fsync,
+            RequestOp::Fsyncdir,
+        ];
+        for op in write_ops {
+            assert!(op.is_write(), "{op:?} should be a write op");
+        }
+    }
+
+    #[test]
+    fn pressure_monitor_new_starts_normal() {
+        let pressure = Arc::new(SystemPressure::new());
+        let monitor = PressureMonitor::new(pressure, 3);
+        assert_eq!(monitor.level(), DegradationLevel::Normal);
+        assert_eq!(monitor.sample_count(), 0);
+    }
+
+    #[test]
+    fn pressure_monitor_sample_increments_count() {
+        let pressure = Arc::new(SystemPressure::new());
+        let monitor = PressureMonitor::new(pressure, 3);
+        monitor.sample();
+        monitor.sample();
+        assert_eq!(monitor.sample_count(), 2);
+    }
+
+    #[test]
+    fn pressure_monitor_gate_reflects_fsm_level() {
+        let pressure = Arc::new(SystemPressure::new());
+        let monitor = PressureMonitor::new(Arc::clone(&pressure), 3);
+
+        let gate = monitor.gate();
+        assert_eq!(gate.level(), DegradationLevel::Normal);
+
+        // Set headroom directly and tick the FSM (bypassing budget.sample()
+        // which would read /proc/loadavg and overwrite our value).
+        pressure.set_headroom(0.0);
+        monitor.fsm().tick();
+        assert_eq!(gate.level(), DegradationLevel::Emergency);
+    }
+
+    #[test]
+    fn pressure_monitor_debug_format() {
+        let pressure = Arc::new(SystemPressure::new());
+        let monitor = PressureMonitor::new(pressure, 3);
+        let dbg = format!("{monitor:?}");
+        assert!(dbg.contains("PressureMonitor"));
+        assert!(dbg.contains("samples"));
+    }
+
+    #[test]
+    fn compute_budget_sample_updates_pressure() {
+        let pressure = Arc::new(SystemPressure::new());
+        let budget = ComputeBudget::new(Arc::clone(&pressure));
+        let h = budget.sample();
+        // sample() should have updated pressure headroom
+        assert!(
+            (budget.current_headroom() - h).abs() < f32::EPSILON,
+            "current_headroom should match last sample"
+        );
+    }
+
+    #[test]
+    fn compute_budget_debug_format() {
+        let pressure = Arc::new(SystemPressure::new());
+        let budget = ComputeBudget::new(pressure);
+        let dbg = format!("{budget:?}");
+        assert!(dbg.contains("ComputeBudget"));
+        assert!(dbg.contains("headroom"));
+    }
+
     // ── Proptest property-based tests ────────────────────────────────────
 
     mod proptest_tests {

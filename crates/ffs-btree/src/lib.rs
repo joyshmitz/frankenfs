@@ -3030,6 +3030,393 @@ mod tests {
         assert_tree_invariants(&cx, &dev, &root).unwrap();
     }
 
+    // ── Edge-case tests (SilverWaterfall) ─────────────────────────────
+
+    #[test]
+    fn search_result_debug_and_clone() {
+        let sr = SearchResult::Found {
+            extent: Ext4Extent {
+                logical_block: 0,
+                raw_len: 1,
+                physical_start: 100,
+            },
+            offset_in_extent: 0,
+        };
+        let sr2 = sr.clone();
+        assert_eq!(sr, sr2);
+        let dbg = format!("{sr:?}");
+        assert!(dbg.contains("Found"));
+
+        let hole = SearchResult::Hole { hole_len: 42 };
+        let hole2 = hole.clone();
+        assert_eq!(hole, hole2);
+        let dbg2 = format!("{hole:?}");
+        assert!(dbg2.contains("Hole"));
+    }
+
+    #[test]
+    fn freed_range_debug_and_copy() {
+        let fr = FreedRange {
+            physical_start: 1000,
+            count: 5,
+        };
+        let fr2 = fr; // Copy
+        assert_eq!(fr, fr2);
+        let dbg = format!("{fr:?}");
+        assert!(dbg.contains("FreedRange"));
+    }
+
+    #[test]
+    fn actual_len_boundary_values() {
+        // Normal extent: raw_len below the unwritten threshold
+        assert_eq!(actual_len(0), 0);
+        assert_eq!(actual_len(1), 1);
+        assert_eq!(actual_len(EXT_INIT_MAX_LEN - 1), EXT_INIT_MAX_LEN - 1);
+        assert_eq!(actual_len(EXT_INIT_MAX_LEN), EXT_INIT_MAX_LEN); // exactly at boundary
+
+        // Unwritten extent: raw_len above the threshold
+        assert_eq!(actual_len(EXT_INIT_MAX_LEN + 1), 1);
+        assert_eq!(actual_len(EXT_INIT_MAX_LEN + 100), 100);
+        assert_eq!(actual_len(u16::MAX), u16::MAX - EXT_INIT_MAX_LEN);
+    }
+
+    #[test]
+    fn encode_len_roundtrip() {
+        for len in [1_u16, 10, 100, EXT_INIT_MAX_LEN - 1] {
+            let written = encode_len(len, false);
+            assert_eq!(actual_len(written), len);
+
+            let unwritten = encode_len(len, true);
+            assert_eq!(actual_len(unwritten), len);
+            assert!(unwritten >= EXT_INIT_MAX_LEN);
+        }
+    }
+
+    #[test]
+    fn max_entries_external_various_block_sizes() {
+        // 1K block: (1024 - 12 - 4) / 12 = 84
+        assert_eq!(max_entries_external(1024), 84);
+        // 2K block: (2048 - 12 - 4) / 12 = 169
+        assert_eq!(max_entries_external(2048), 169);
+        // 4K block: (4096 - 12 - 4) / 12 = 340
+        assert_eq!(max_entries_external(4096), 340);
+        // Minimum: if block_size = 0, should saturate to 0
+        assert_eq!(max_entries_external(0), 0);
+    }
+
+    #[test]
+    fn find_index_pos_single_entry() {
+        let indexes = vec![Ext4ExtentIndex {
+            logical_block: 100,
+            leaf_block: 1000,
+        }];
+        // Target before the single entry
+        assert_eq!(find_index_pos(&indexes, 50), 0);
+        // Target at the entry
+        assert_eq!(find_index_pos(&indexes, 100), 0);
+        // Target after the entry
+        assert_eq!(find_index_pos(&indexes, 200), 0);
+    }
+
+    #[test]
+    fn find_index_pos_multiple_entries() {
+        let indexes = vec![
+            Ext4ExtentIndex {
+                logical_block: 0,
+                leaf_block: 1000,
+            },
+            Ext4ExtentIndex {
+                logical_block: 100,
+                leaf_block: 2000,
+            },
+            Ext4ExtentIndex {
+                logical_block: 200,
+                leaf_block: 3000,
+            },
+        ];
+        assert_eq!(find_index_pos(&indexes, 0), 0);
+        assert_eq!(find_index_pos(&indexes, 50), 0);
+        assert_eq!(find_index_pos(&indexes, 100), 1);
+        assert_eq!(find_index_pos(&indexes, 150), 1);
+        assert_eq!(find_index_pos(&indexes, 200), 2);
+        assert_eq!(find_index_pos(&indexes, 999), 2);
+    }
+
+    #[test]
+    fn parse_header_too_small() {
+        let data = [0_u8; 11]; // HEADER_SIZE is 12
+        let err = parse_header(&data).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn parse_header_exact_size() {
+        let mut data = [0_u8; 12];
+        data[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+        let (header, consumed) = parse_header(&data).unwrap();
+        assert_eq!(header.magic, EXT4_EXTENT_MAGIC);
+        assert_eq!(consumed, HEADER_SIZE);
+    }
+
+    #[test]
+    fn validate_header_bad_magic() {
+        let header = Ext4ExtentHeader {
+            magic: 0xDEAD,
+            entries: 0,
+            max_entries: 4,
+            depth: 0,
+            generation: 0,
+        };
+        let err = validate_header(&header, 4).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn validate_header_entries_exceed_max() {
+        let header = Ext4ExtentHeader {
+            magic: EXT4_EXTENT_MAGIC,
+            entries: 5,
+            max_entries: 4,
+            depth: 0,
+            generation: 0,
+        };
+        let err = validate_header(&header, 10).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn validate_header_max_entries_exceed_allowed() {
+        let header = Ext4ExtentHeader {
+            magic: EXT4_EXTENT_MAGIC,
+            entries: 2,
+            max_entries: 10,
+            depth: 0,
+            generation: 0,
+        };
+        let err = validate_header(&header, 4).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn search_hole_between_extents() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert two extents with a gap: [0..10) and [20..30)
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 0,
+                raw_len: 10,
+                physical_start: 500,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 20,
+                raw_len: 10,
+                physical_start: 600,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+
+        // Block 15 is in the hole: hole_len should be 5 (15..20)
+        match search(&cx, &dev, &root, 15).unwrap() {
+            SearchResult::Hole { hole_len } => {
+                assert_eq!(hole_len, 5, "hole from block 15 to extent at 20");
+            }
+            other => panic!("expected Hole, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_range_in_middle_of_extent() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert [0..20)
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 0,
+                raw_len: 20,
+                physical_start: 500,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+
+        // Delete [5..15) — middle of the extent
+        let freed = delete_range(&cx, &dev, &mut root, 5, 10, &mut alloc).unwrap();
+        assert_eq!(freed.len(), 1);
+        assert_eq!(freed[0].physical_start, 505);
+        assert_eq!(freed[0].count, 10);
+
+        // Block 0 should still be found (left piece: [0..5))
+        match search(&cx, &dev, &root, 0).unwrap() {
+            SearchResult::Found { extent, .. } => {
+                assert_eq!(extent.logical_block, 0);
+                assert_eq!(actual_len(extent.raw_len), 5);
+            }
+            other => panic!("expected Found for block 0, got {other:?}"),
+        }
+
+        // Block 15 should still be found (right piece: [15..20))
+        match search(&cx, &dev, &root, 15).unwrap() {
+            SearchResult::Found { extent, .. } => {
+                assert_eq!(extent.logical_block, 15);
+                assert_eq!(actual_len(extent.raw_len), 5);
+                assert_eq!(extent.physical_start, 515);
+            }
+            other => panic!("expected Found for block 15, got {other:?}"),
+        }
+
+        // Block 5 should be in a hole
+        assert!(matches!(
+            search(&cx, &dev, &root, 5).unwrap(),
+            SearchResult::Hole { .. }
+        ));
+    }
+
+    #[test]
+    fn delete_range_no_overlap() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 100,
+                raw_len: 10,
+                physical_start: 500,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+
+        // Delete range [0..50) — no overlap with extent [100..110)
+        let freed = delete_range(&cx, &dev, &mut root, 0, 50, &mut alloc).unwrap();
+        assert!(freed.is_empty());
+
+        // Extent should still be there
+        assert!(matches!(
+            search(&cx, &dev, &root, 100).unwrap(),
+            SearchResult::Found { .. }
+        ));
+    }
+
+    #[test]
+    fn write_and_parse_leaf_entry_roundtrip() {
+        let ext = Ext4Extent {
+            logical_block: 0xDEAD_BEEF,
+            raw_len: 42,
+            physical_start: 0x1_ABCD_1234, // >32 bits to test hi/lo split
+        };
+        let mut buf = [0_u8; ENTRY_SIZE];
+        write_leaf_entry(&mut buf, &ext);
+
+        // Parse it back
+        let logical_block = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let raw_len = u16::from_le_bytes([buf[4], buf[5]]);
+        let start_hi = u16::from_le_bytes([buf[6], buf[7]]);
+        let start_lo = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+        let physical_start = u64::from(start_lo) | (u64::from(start_hi) << 32);
+
+        assert_eq!(logical_block, ext.logical_block);
+        assert_eq!(raw_len, ext.raw_len);
+        assert_eq!(physical_start, ext.physical_start);
+    }
+
+    #[test]
+    fn write_and_parse_index_entry_roundtrip() {
+        let idx = Ext4ExtentIndex {
+            logical_block: 0xCAFE_BABE,
+            leaf_block: 0x2_5678_9ABC, // >32 bits
+        };
+        let mut buf = [0_u8; ENTRY_SIZE];
+        write_index_entry(&mut buf, &idx);
+
+        let logical_block = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let leaf_lo = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        let leaf_hi = u16::from_le_bytes([buf[8], buf[9]]);
+        let leaf_block = u64::from(leaf_lo) | (u64::from(leaf_hi) << 32);
+
+        assert_eq!(logical_block, idx.logical_block);
+        assert_eq!(leaf_block, idx.leaf_block);
+    }
+
+    #[test]
+    fn find_index_child_empty_returns_error() {
+        let err = find_index_child(&[], 100).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn tree_invariants_after_many_inserts_and_deletes() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        // Insert 15 extents to get a multi-level tree
+        for i in 0..15 {
+            insert(
+                &cx,
+                &dev,
+                &mut root,
+                Ext4Extent {
+                    logical_block: i * 20,
+                    raw_len: 5,
+                    physical_start: 1000 + (i as u64) * 100,
+                },
+                &mut alloc,
+            )
+            .unwrap();
+        }
+        assert_tree_invariants(&cx, &dev, &root).unwrap();
+
+        // Delete some ranges
+        delete_range(&cx, &dev, &mut root, 40, 30, &mut alloc).unwrap();
+        assert_tree_invariants(&cx, &dev, &root).unwrap();
+
+        delete_range(&cx, &dev, &mut root, 200, 100, &mut alloc).unwrap();
+        assert_tree_invariants(&cx, &dev, &root).unwrap();
+    }
+
+    #[test]
+    fn search_at_u32_max_logical_block() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let root = make_root();
+
+        // Empty tree: search at u32::MAX should return a hole
+        match search(&cx, &dev, &root, u32::MAX).unwrap() {
+            SearchResult::Hole { hole_len } => {
+                // hole_len should be u32::MAX (saturating_sub behavior)
+                assert_eq!(hole_len, u32::MAX);
+            }
+            other => panic!("expected Hole, got {other:?}"),
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
 

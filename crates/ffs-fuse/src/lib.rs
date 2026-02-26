@@ -3926,9 +3926,11 @@ mod tests {
         assert_eq!(predictor.fetch_size(InodeNumber(1), 0, size), size);
 
         // Inode 2 is still known.
-        let state = predictor.state.lock().unwrap();
-        assert!(state.history.contains_key(&2));
-        assert!(!state.history.contains_key(&1));
+        {
+            let state = predictor.state.lock().unwrap();
+            assert!(state.history.contains_key(&2));
+            assert!(!state.history.contains_key(&1));
+        }
     }
 
     #[test]
@@ -3979,15 +3981,13 @@ mod tests {
         let invalid_mp = FuseError::InvalidMountpoint("bad path".into());
         assert!(
             invalid_mp.to_string().contains("bad path"),
-            "InvalidMountpoint should contain path: {}",
-            invalid_mp
+            "InvalidMountpoint should contain path: {invalid_mp}",
         );
 
         let io_err = FuseError::Io(std::io::Error::other("disk gone"));
         assert!(
             io_err.to_string().contains("disk gone"),
-            "Io variant should contain inner error: {}",
-            io_err
+            "Io variant should contain inner error: {io_err}",
         );
     }
 

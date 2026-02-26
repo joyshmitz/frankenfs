@@ -1278,7 +1278,7 @@ mod tests {
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
         // Set sys_chunk_array_size to max+1
-        let bad_size = (BTRFS_SYS_CHUNK_ARRAY_MAX as u32) + 1;
+        let bad_size = u32::try_from(BTRFS_SYS_CHUNK_ARRAY_MAX).expect("fits u32") + 1;
         sb[0xA0..0xA4].copy_from_slice(&bad_size.to_le_bytes());
         let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
         assert!(matches!(
