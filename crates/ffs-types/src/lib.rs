@@ -1136,6 +1136,346 @@ mod tests {
         }
     }
 
+    // ── Edge-case and boundary tests (bd-2s9u) ────────────────────────
+
+    #[test]
+    fn read_le_u64_basic() {
+        let bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        assert_eq!(read_le_u64(&bytes, 0).unwrap(), 0x0807_0605_0403_0201);
+    }
+
+    #[test]
+    fn read_le_u64_insufficient_data() {
+        let bytes = [0x01, 0x02, 0x03];
+        assert!(read_le_u64(&bytes, 0).is_err());
+    }
+
+    #[test]
+    fn read_fixed_basic() {
+        let data = [10, 20, 30, 40, 50];
+        let result: [u8; 3] = read_fixed(&data, 1).unwrap();
+        assert_eq!(result, [20, 30, 40]);
+    }
+
+    #[test]
+    fn read_fixed_out_of_bounds() {
+        let data = [1, 2, 3];
+        let result: Result<[u8; 4], _> = read_fixed(&data, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ensure_slice_offset_overflow() {
+        let data = [0u8; 10];
+        let result = ensure_slice(&data, usize::MAX, 1);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ParseError::InvalidField { field, .. } => assert_eq!(field, "offset"),
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trim_nul_padded_all_nul() {
+        let bytes = [0u8; 8];
+        assert_eq!(trim_nul_padded(&bytes), "");
+    }
+
+    #[test]
+    fn trim_nul_padded_empty() {
+        assert_eq!(trim_nul_padded(&[]), "");
+    }
+
+    #[test]
+    fn trim_nul_padded_no_nul() {
+        let bytes = b"hello";
+        assert_eq!(trim_nul_padded(bytes), "hello");
+    }
+
+    #[test]
+    fn trim_nul_padded_interior_nul() {
+        let bytes = b"ab\0cd";
+        assert_eq!(trim_nul_padded(bytes), "ab");
+    }
+
+    #[test]
+    fn ext4_block_size_from_log_overflow() {
+        // log = 22 → shift = 32 → overflow for u32
+        assert_eq!(ext4_block_size_from_log(22), None);
+        // log = u32::MAX → addition overflow
+        assert_eq!(ext4_block_size_from_log(u32::MAX), None);
+    }
+
+    #[test]
+    fn inode_to_group_inode_zero() {
+        // Inode 0 is not valid in ext4, but should not panic.
+        // saturating_sub(1) on 0 gives 0, so group = 0/8192 = 0.
+        assert_eq!(inode_to_group(InodeNumber(0), 8192), GroupNumber(0));
+        assert_eq!(inode_index_in_group(InodeNumber(0), 8192), 0);
+    }
+
+    #[test]
+    fn batch_checksum_empty_blocks() {
+        let blocks: [&[u8]; 0] = [];
+        let result = batch_checksum(&blocks, ChecksumAlgo::Crc32c { seed: 0 });
+        assert!(result.is_empty());
+        let result = batch_checksum(&blocks, ChecksumAlgo::Blake3Truncated32);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn group_first_block_add_overflow() {
+        // u32::MAX * u32::MAX fits in u64, but adding first_data_block=u32::MAX
+        // can push the result over the edge if the multiplication is already near u64::MAX.
+        // Use a case where multiplication just fits but adding overflows.
+        let result = group_first_block(GroupNumber(u32::MAX), u32::MAX, u32::MAX);
+        // u32::MAX * u32::MAX = 2^64 - 2^33 + 1, plus u32::MAX = 2^64 - 2^32.
+        // That's still < u64::MAX, so this succeeds. Let's verify it returns Some.
+        assert!(result.is_some(), "should not overflow for u32::MAX inputs");
+        // Verify the function handles zero correctly.
+        assert_eq!(
+            group_first_block(GroupNumber(0), 32768, 0),
+            Some(BlockNumber(0))
+        );
+    }
+
+    #[test]
+    fn display_and_debug_coverage() {
+        assert_eq!(Generation(7).to_string(), "7");
+        // TxnId and CommitSeq only have Debug, not Display.
+        let _ = format!("{:?}", TxnId(42));
+        let _ = format!("{:?}", CommitSeq(99));
+    }
+
+    #[test]
+    fn parse_error_display() {
+        let e = ParseError::InsufficientData {
+            needed: 8,
+            offset: 4,
+            actual: 2,
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains('8'), "should mention needed bytes");
+        assert!(msg.contains('4'), "should mention offset");
+
+        let e = ParseError::InvalidMagic {
+            expected: 0xEF53,
+            actual: 0xBEEF,
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("0xef53"), "should contain expected magic");
+
+        let e = ParseError::IntegerConversion {
+            field: "test_field",
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("test_field"));
+    }
+
+    #[test]
+    fn is_power_of_two_u32_edge_cases() {
+        assert!(!is_power_of_two_u32(0));
+        assert!(is_power_of_two_u32(1));
+        assert!(is_power_of_two_u32(2));
+        assert!(!is_power_of_two_u32(3));
+        assert!(is_power_of_two_u32(0x8000_0000)); // 2^31
+        assert!(!is_power_of_two_u32(u32::MAX));
+    }
+
+    #[test]
+    fn block_to_group_block_before_first_data() {
+        // Block 0 with first_data_block=1: saturating_sub gives 0.
+        assert_eq!(block_to_group(BlockNumber(0), 8192, 1), GroupNumber(0));
+    }
+
+    #[test]
+    fn snapshot_fields() {
+        let snap = Snapshot {
+            high: CommitSeq(100),
+        };
+        assert_eq!(snap.high, CommitSeq(100));
+        let _ = format!("{snap:?}");
+    }
+
+    #[test]
+    fn checksum_algo_debug_clone_eq() {
+        let a = ChecksumAlgo::Crc32c { seed: 42 };
+        let b = a;
+        assert_eq!(a, b);
+        let _ = format!("{a:?}");
+
+        let c = ChecksumAlgo::Blake3Truncated32;
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn simd_capabilities_default_is_empty() {
+        let caps = SimdCapabilities::default();
+        assert!(!caps.has_x86_sse42());
+        assert!(!caps.has_x86_avx2());
+        assert!(!caps.has_aarch64_crc());
+        assert!(!caps.has_aarch64_neon());
+    }
+
+    #[test]
+    fn posix_file_type_constants() {
+        // Verify file type constants don't overlap.
+        let types = [
+            S_IFIFO, S_IFCHR, S_IFDIR, S_IFBLK, S_IFREG, S_IFLNK, S_IFSOCK,
+        ];
+        for (i, a) in types.iter().enumerate() {
+            for b in &types[i + 1..] {
+                assert_ne!(a, b, "file type constants must not overlap");
+            }
+        }
+        // Verify mask extracts file type.
+        assert_eq!(0o100_644 & S_IFMT, S_IFREG);
+        assert_eq!(0o040_755 & S_IFMT, S_IFDIR);
+        assert_eq!(0o120_777 & S_IFMT, S_IFLNK);
+    }
+
+    #[test]
+    fn ext4_xattr_constants() {
+        // xattr indices should be distinct and sequential.
+        let indices = [
+            EXT4_XATTR_INDEX_USER,
+            EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
+            EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
+            EXT4_XATTR_INDEX_TRUSTED,
+            EXT4_XATTR_INDEX_LUSTRE,
+            EXT4_XATTR_INDEX_SECURITY,
+            EXT4_XATTR_INDEX_SYSTEM,
+            EXT4_XATTR_INDEX_RICHACL,
+            EXT4_XATTR_INDEX_ENCRYPTION,
+            EXT4_XATTR_INDEX_HURD,
+        ];
+        for (i, idx) in indices.iter().enumerate() {
+            assert_eq!(
+                *idx,
+                u8::try_from(i + 1).unwrap(),
+                "xattr index {i} mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn write_le_u16_u32_boundary() {
+        let mut buf = [0u8; 4];
+        write_le_u16(&mut buf, 2, 0xABCD);
+        assert_eq!(buf, [0, 0, 0xCD, 0xAB]);
+
+        let mut buf = [0u8; 8];
+        write_le_u32(&mut buf, 4, 0x1234_5678);
+        assert_eq!(buf[4..8], [0x78, 0x56, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn device_id_display_zero_padded() {
+        let id = DeviceId(0x1);
+        let display = id.to_string();
+        assert_eq!(display.len(), 32, "should be zero-padded to 32 hex chars");
+        assert!(display.ends_with('1'));
+    }
+
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn device_id_uuid_roundtrip_explicit() {
+        let bytes = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10,
+        ];
+        let id = DeviceId::from_uuid_bytes_be(bytes);
+        assert_eq!(id.to_uuid_bytes_be(), bytes);
+    }
+
+    #[test]
+    fn device_id_zero() {
+        let id = DeviceId(0);
+        assert_eq!(id.to_string(), "00000000000000000000000000000000");
+        assert_eq!(id.to_uuid_bytes_be(), [0u8; 16]);
+    }
+
+    #[test]
+    fn simd_capabilities_set_flag() {
+        let mut caps = SimdCapabilities::default();
+        caps.set(SimdCapabilities::X86_SSE42, true);
+        assert!(caps.has_x86_sse42());
+        assert!(!caps.has_x86_avx2());
+
+        caps.set(SimdCapabilities::X86_AVX2, true);
+        assert!(caps.has_x86_avx2());
+
+        // set(false) is a no-op (does not clear), so SSE4.2 remains set.
+        caps.set(SimdCapabilities::X86_SSE42, false);
+        assert!(caps.has_x86_sse42());
+    }
+
+    #[test]
+    fn display_newtypes() {
+        assert_eq!(BlockNumber(42).to_string(), "42");
+        assert_eq!(InodeNumber(100).to_string(), "100");
+        assert_eq!(BlockSize::new(4096).unwrap().to_string(), "4096");
+        assert_eq!(GroupNumber(3).to_string(), "3");
+        assert_eq!(ByteOffset(8192).to_string(), "8192");
+        assert_eq!(Generation(7).to_string(), "7");
+    }
+
+    #[test]
+    fn newtype_ordering() {
+        assert!(BlockNumber(1) < BlockNumber(2));
+        assert!(InodeNumber(10) > InodeNumber(5));
+        assert!(ByteOffset(100) >= ByteOffset(100));
+        assert!(GroupNumber(0) <= GroupNumber(1));
+        assert!(CommitSeq(3) < CommitSeq(4));
+        assert!(TxnId(1) < TxnId(2));
+        assert!(BlockSize::new(1024).unwrap() < BlockSize::new(4096).unwrap());
+    }
+
+    #[test]
+    fn byte_offset_zero_constant() {
+        assert_eq!(ByteOffset::ZERO, ByteOffset(0));
+        assert_eq!(ByteOffset::ZERO.0, 0);
+    }
+
+    #[test]
+    fn parse_error_equality() {
+        let a = ParseError::InsufficientData {
+            needed: 8,
+            offset: 0,
+            actual: 4,
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        let c = ParseError::InvalidMagic {
+            expected: 0xEF53,
+            actual: 0,
+        };
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn block_size_shift_values() {
+        assert_eq!(BlockSize::new(1024).unwrap().shift(), 10);
+        assert_eq!(BlockSize::new(2048).unwrap().shift(), 11);
+        assert_eq!(BlockSize::new(4096).unwrap().shift(), 12);
+        assert_eq!(BlockSize::new(8192).unwrap().shift(), 13);
+        assert_eq!(BlockSize::new(16384).unwrap().shift(), 14);
+        assert_eq!(BlockSize::new(32768).unwrap().shift(), 15);
+        assert_eq!(BlockSize::new(65536).unwrap().shift(), 16);
+    }
+
+    #[test]
+    fn block_to_byte_overflow() {
+        let bs = BlockSize::new(4096).unwrap();
+        // Very large block number should overflow when multiplied.
+        assert_eq!(bs.block_to_byte(BlockNumber(u64::MAX)), None);
+        // Just under overflow boundary should succeed.
+        let max_block = u64::MAX / 4096;
+        assert!(bs.block_to_byte(BlockNumber(max_block)).is_some());
+    }
+
     // ── Property-based tests (proptest) ────────────────────────────────
 
     use proptest::prelude::*;

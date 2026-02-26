@@ -7188,6 +7188,319 @@ mod tests {
         assert_eq!(parsed.block_size, 4096);
     }
 
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn ext4_chksum_empty_data() {
+        // Kernel: ext4_chksum(~0, &[], 0) = crc32c_le(~0, &[], 0) = ~0
+        // Ours: ext4_chksum(!0, &[]) = !crc32c_append(!!0, &[]) = !crc32c_append(0, &[])
+        let result = ext4_chksum(!0, &[]);
+        // crc32c of empty data with seed 0 is 0 → !0 = 0xFFFF_FFFF
+        assert_eq!(result, !0);
+    }
+
+    #[test]
+    fn ext4_chksum_known_value() {
+        // Verify that our ext4_chksum matches the kernel convention
+        // for a known input. CRC32C of b"hello" (standard) = 0xC9265082.
+        // Kernel crc32c_le(~0, "hello", 5) = !standard_crc32c("hello") = !0xC9265082
+        // Our ext4_chksum(~0, "hello") = !crc32c_append(0, "hello") = !0xC9265082
+        let result = ext4_chksum(!0, b"hello");
+        let standard = crc32c::crc32c_append(0, b"hello"); // 0xC9265082
+        assert_eq!(result, !standard);
+    }
+
+    #[test]
+    fn ext4_extent_is_unwritten_boundary() {
+        let written = Ext4Extent {
+            logical_block: 0,
+            raw_len: EXT_INIT_MAX_LEN, // 0x8000 — exactly at boundary
+            physical_start: 100,
+        };
+        // EXT_INIT_MAX_LEN is NOT > EXT_INIT_MAX_LEN, so not unwritten.
+        assert!(!written.is_unwritten());
+        assert_eq!(written.actual_len(), EXT_INIT_MAX_LEN);
+
+        let unwritten = Ext4Extent {
+            logical_block: 0,
+            raw_len: EXT_INIT_MAX_LEN | 1, // 0x8001 — just above
+            physical_start: 200,
+        };
+        assert!(unwritten.is_unwritten());
+        assert_eq!(unwritten.actual_len(), 1);
+    }
+
+    #[test]
+    fn ext4_extent_zero_length() {
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 0,
+            physical_start: 0,
+        };
+        assert!(!ext.is_unwritten());
+        assert_eq!(ext.actual_len(), 0);
+    }
+
+    #[test]
+    fn extra_nsec_and_epoch_extraction() {
+        // extra = 0b...nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnee
+        // nsec = extra >> 2, epoch = extra & 0x3
+        let extra = (500_000_000_u32 << 2) | 0x2; // 500ms nsec, epoch=2
+        assert_eq!(Ext4Inode::extra_nsec(extra), 500_000_000);
+        assert_eq!(Ext4Inode::extra_epoch(extra), 2);
+
+        // Zero extra.
+        assert_eq!(Ext4Inode::extra_nsec(0), 0);
+        assert_eq!(Ext4Inode::extra_epoch(0), 0);
+
+        // Max epoch (3).
+        assert_eq!(Ext4Inode::extra_epoch(0x3), 3);
+    }
+
+    #[test]
+    fn to_system_time_positive() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let st = Ext4Inode::to_system_time(1_000_000, 500).unwrap();
+        assert_eq!(st, UNIX_EPOCH + Duration::new(1_000_000, 500));
+    }
+
+    #[test]
+    fn to_system_time_negative() {
+        use std::time::{Duration, UNIX_EPOCH};
+        // 10 seconds before epoch.
+        let st = Ext4Inode::to_system_time(-10, 0).unwrap();
+        assert_eq!(st, UNIX_EPOCH - Duration::from_secs(10));
+    }
+
+    #[test]
+    fn to_system_time_zero() {
+        let st = Ext4Inode::to_system_time(0, 0).unwrap();
+        assert_eq!(st, std::time::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn permission_bits_extraction() {
+        // mode = S_IFREG | 0o755 = 0o100755
+        let inode = Ext4Inode {
+            mode: S_IFREG | 0o755,
+            ..Ext4Inode::parse_from_bytes(&[0_u8; 256]).unwrap()
+        };
+        assert_eq!(inode.permission_bits(), 0o755);
+        assert!(inode.is_regular());
+
+        let dir_inode = Ext4Inode {
+            mode: S_IFDIR | 0o700,
+            ..Ext4Inode::parse_from_bytes(&[0_u8; 256]).unwrap()
+        };
+        assert_eq!(dir_inode.permission_bits(), 0o700);
+        assert!(dir_inode.is_dir());
+    }
+
+    #[test]
+    fn dir_entry_actual_size_alignment() {
+        let entry = Ext4DirEntry {
+            inode: 2,
+            rec_len: 12,
+            name_len: 1,
+            file_type: Ext4FileType::Dir,
+            name: b".".to_vec(),
+        };
+        // 8 + 1 = 9, rounded up to 12 (4-byte boundary).
+        assert_eq!(entry.actual_size(), 12);
+
+        let long_name = Ext4DirEntry {
+            inode: 3,
+            rec_len: 20,
+            name_len: 10,
+            file_type: Ext4FileType::RegFile,
+            name: b"README.txt".to_vec(),
+        };
+        // 8 + 10 = 18, rounded up to 20.
+        assert_eq!(long_name.actual_size(), 20);
+    }
+
+    #[test]
+    fn dir_entry_dot_and_dotdot() {
+        let dot = Ext4DirEntry {
+            inode: 2,
+            rec_len: 12,
+            name_len: 1,
+            file_type: Ext4FileType::Dir,
+            name: b".".to_vec(),
+        };
+        assert!(dot.is_dot());
+        assert!(!dot.is_dotdot());
+
+        let dotdot = Ext4DirEntry {
+            inode: 2,
+            rec_len: 12,
+            name_len: 2,
+            file_type: Ext4FileType::Dir,
+            name: b"..".to_vec(),
+        };
+        assert!(!dotdot.is_dot());
+        assert!(dotdot.is_dotdot());
+    }
+
+    #[test]
+    fn dir_entry_name_str() {
+        let entry = Ext4DirEntry {
+            inode: 10,
+            rec_len: 16,
+            name_len: 4,
+            file_type: Ext4FileType::RegFile,
+            name: b"test".to_vec(),
+        };
+        assert_eq!(entry.name_str(), "test");
+    }
+
+    #[test]
+    fn file_type_from_raw_all_values() {
+        assert_eq!(Ext4FileType::from_raw(0), Ext4FileType::Unknown);
+        assert_eq!(Ext4FileType::from_raw(1), Ext4FileType::RegFile);
+        assert_eq!(Ext4FileType::from_raw(2), Ext4FileType::Dir);
+        assert_eq!(Ext4FileType::from_raw(3), Ext4FileType::Chrdev);
+        assert_eq!(Ext4FileType::from_raw(4), Ext4FileType::Blkdev);
+        assert_eq!(Ext4FileType::from_raw(5), Ext4FileType::Fifo);
+        assert_eq!(Ext4FileType::from_raw(6), Ext4FileType::Sock);
+        assert_eq!(Ext4FileType::from_raw(7), Ext4FileType::Symlink);
+        assert_eq!(Ext4FileType::from_raw(8), Ext4FileType::Unknown);
+        assert_eq!(Ext4FileType::from_raw(255), Ext4FileType::Unknown);
+    }
+
+    #[test]
+    fn compat_features_unknown_bits() {
+        let flags = Ext4CompatFeatures(0x0004 | 0x8000_0000);
+        assert!(flags.contains(Ext4CompatFeatures::HAS_JOURNAL));
+        assert_eq!(flags.unknown_bits(), 0x8000_0000);
+    }
+
+    #[test]
+    fn incompat_features_missing_required_v1() {
+        // Only EXTENTS, missing FILETYPE.
+        let flags = Ext4IncompatFeatures(Ext4IncompatFeatures::EXTENTS.0);
+        let missing = flags.describe_missing_required_v1();
+        assert_eq!(missing, vec!["FILETYPE"]);
+
+        // Both present.
+        let flags = Ext4IncompatFeatures(
+            Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0,
+        );
+        assert!(flags.describe_missing_required_v1().is_empty());
+    }
+
+    #[test]
+    fn feature_diagnostics_display_with_unknown_ro_compat() {
+        let diag = FeatureDiagnostics {
+            missing_required: vec![],
+            rejected_present: vec![],
+            unknown_incompat_bits: 0,
+            unknown_ro_compat_bits: 0x8000_0000,
+            incompat_display: "FILETYPE|EXTENTS".into(),
+            ro_compat_display: "SPARSE_SUPER|0x80000000".into(),
+            compat_display: "(none)".into(),
+        };
+        assert!(diag.is_ok());
+        let display = format!("{diag}");
+        assert!(
+            display.contains("unknown ro_compat: 0x80000000"),
+            "expected unknown ro_compat in display: {display}"
+        );
+    }
+
+    #[test]
+    fn feature_diagnostics_display_with_all_issues() {
+        let diag = FeatureDiagnostics {
+            missing_required: vec!["FILETYPE"],
+            rejected_present: vec!["ENCRYPT"],
+            unknown_incompat_bits: 0x4000_0000,
+            unknown_ro_compat_bits: 0,
+            incompat_display: "EXTENTS|ENCRYPT|0x40000000".into(),
+            ro_compat_display: "(none)".into(),
+            compat_display: "(none)".into(),
+        };
+        assert!(!diag.is_ok());
+        let display = format!("{diag}");
+        assert!(display.contains("missing required: FILETYPE"));
+        assert!(display.contains("rejected: ENCRYPT"));
+        assert!(display.contains("unknown incompat: 0x40000000"));
+    }
+
+    #[test]
+    fn rec_len_from_disk_special_values() {
+        // 0xFFFC encodes "entire block".
+        assert_eq!(rec_len_from_disk(0xFFFC, 4096), 4096);
+        // 0 also encodes "entire block".
+        assert_eq!(rec_len_from_disk(0, 4096), 4096);
+        // Normal value: 12 stays 12.
+        assert_eq!(rec_len_from_disk(12, 4096), 12);
+        // Large block (64K): 0xFFFC and 0 both map to block_size.
+        assert_eq!(rec_len_from_disk(0xFFFC, 65536), 65536);
+        assert_eq!(rec_len_from_disk(0, 65536), 65536);
+    }
+
+    #[test]
+    fn inode_file_type_flags() {
+        let base = Ext4Inode::parse_from_bytes(&[0_u8; 256]).unwrap();
+
+        let regular = Ext4Inode {
+            mode: S_IFREG | 0o644,
+            ..base.clone()
+        };
+        assert!(regular.is_regular());
+        assert!(!regular.is_dir());
+        assert!(!regular.is_symlink());
+
+        let symlink = Ext4Inode {
+            mode: S_IFLNK | 0o777,
+            ..base.clone()
+        };
+        assert!(symlink.is_symlink());
+        assert!(!symlink.is_regular());
+
+        let chrdev = Ext4Inode {
+            mode: S_IFCHR | 0o660,
+            ..base.clone()
+        };
+        assert!(chrdev.is_chrdev());
+
+        let blkdev = Ext4Inode {
+            mode: S_IFBLK | 0o660,
+            ..base.clone()
+        };
+        assert!(blkdev.is_blkdev());
+
+        let fifo = Ext4Inode {
+            mode: S_IFIFO | 0o644,
+            ..base.clone()
+        };
+        assert!(fifo.is_fifo());
+
+        let sock = Ext4Inode {
+            mode: S_IFSOCK | 0o755,
+            ..base
+        };
+        assert!(sock.is_socket());
+    }
+
+    #[test]
+    fn inode_huge_file_and_htree_flags() {
+        let mut inode = Ext4Inode::parse_from_bytes(&[0_u8; 256]).unwrap();
+        assert!(!inode.is_huge_file());
+        assert!(!inode.has_htree_index());
+        assert!(!inode.uses_extents());
+
+        inode.flags = EXT4_HUGE_FILE_FL;
+        assert!(inode.is_huge_file());
+        assert!(!inode.uses_extents());
+
+        inode.flags = EXT4_INDEX_FL;
+        assert!(inode.has_htree_index());
+
+        inode.flags = EXT4_EXTENTS_FL;
+        assert!(inode.uses_extents());
+    }
+
     // Reproduce any failing case with:
     // PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p ffs-ondisk <test_name> -- --nocapture
     proptest! {

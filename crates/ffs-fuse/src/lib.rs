@@ -3812,6 +3812,239 @@ mod tests {
         assert_eq!(manager.take(ino, 0, 4), None);
     }
 
+    // ── Edge-case hardening tests ──────────────────────────────────────
+
+    #[test]
+    fn build_mount_options_rw_allow_other_with_threads() {
+        let opts = MountOptions {
+            read_only: false,
+            allow_other: true,
+            auto_unmount: false,
+            worker_threads: 4,
+        };
+        let mount_opts = build_mount_options(&opts);
+        // Should contain FSName, Subtype, DefaultPermissions, NoAtime, AllowOther,
+        // max_background, congestion_threshold — but NOT RO or AutoUnmount.
+        let dbg = format!("{mount_opts:?}");
+        assert!(dbg.contains("AllowOther"), "missing AllowOther: {dbg}");
+        assert!(
+            dbg.contains("max_background"),
+            "missing max_background: {dbg}"
+        );
+        assert!(
+            dbg.contains("congestion_threshold"),
+            "missing congestion_threshold: {dbg}"
+        );
+        assert!(!dbg.contains("\"RO\""), "should not contain RO: {dbg}");
+    }
+
+    #[test]
+    fn build_mount_options_zero_threads_omits_custom_background() {
+        let opts = MountOptions {
+            worker_threads: 0,
+            ..MountOptions::default()
+        };
+        let mount_opts = build_mount_options(&opts);
+        let dbg = format!("{mount_opts:?}");
+        assert!(
+            !dbg.contains("max_background"),
+            "zero threads should not set max_background: {dbg}"
+        );
+    }
+
+    #[test]
+    fn metrics_snapshot_equality() {
+        let a = MetricsSnapshot {
+            requests_total: 10,
+            requests_ok: 7,
+            requests_err: 3,
+            bytes_read: 4096,
+        };
+        let b = a;
+        assert_eq!(a, b);
+
+        let c = MetricsSnapshot {
+            requests_total: 10,
+            requests_ok: 6,
+            requests_err: 4,
+            bytes_read: 4096,
+        };
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn atomic_metrics_debug_shows_fields() {
+        let m = AtomicMetrics::new();
+        m.record_ok();
+        m.record_bytes_read(512);
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("AtomicMetrics"), "missing struct name: {dbg}");
+        assert!(dbg.contains("requests_total"), "missing field: {dbg}");
+    }
+
+    #[test]
+    fn cache_line_padded_debug_delegates_to_inner() {
+        let padded = CacheLinePadded(42_u32);
+        let dbg = format!("{padded:?}");
+        assert!(
+            dbg.contains("42"),
+            "CacheLinePadded Debug should show inner: {dbg}"
+        );
+    }
+
+    #[test]
+    fn access_predictor_backward_sequence_not_coalesced() {
+        // Backward sequential reads should increment sequential_count
+        // but NOT trigger coalescing (only forward does).
+        let predictor = AccessPredictor::new(64);
+        let ino = InodeNumber(50);
+        let size = 4096_u32;
+
+        // Read offsets: 3*4096, 2*4096, 1*4096, 0 (backward).
+        for i in (0..4).rev() {
+            predictor.record_read(ino, u64::from(size) * i, size);
+        }
+        // Asking for the next backward read shouldn't coalesce.
+        // Since coalescing is only for forward, fetch_size should return `size`.
+        let fetch = predictor.fetch_size(ino, 0, size);
+        assert_eq!(
+            fetch, size,
+            "backward sequence should not trigger coalescing"
+        );
+    }
+
+    #[test]
+    fn access_predictor_capacity_one_evicts_oldest() {
+        let predictor = AccessPredictor::new(1);
+        let size = 4096_u32;
+
+        // Record inode 1, then inode 2 → inode 1 should be evicted.
+        predictor.record_read(InodeNumber(1), 0, size);
+        predictor.record_read(InodeNumber(2), 0, size);
+
+        // Inode 1 should be unknown now.
+        assert_eq!(predictor.fetch_size(InodeNumber(1), 0, size), size);
+
+        // Inode 2 is still known.
+        let state = predictor.state.lock().unwrap();
+        assert!(state.history.contains_key(&2));
+        assert!(!state.history.contains_key(&1));
+    }
+
+    #[test]
+    fn access_predictor_non_sequential_resets_count() {
+        let predictor = AccessPredictor::new(64);
+        let ino = InodeNumber(77);
+        let size = 4096_u32;
+
+        // Build forward sequential: 0, 4096, 8192.
+        predictor.record_read(ino, 0, size);
+        predictor.record_read(ino, 4096, size);
+        predictor.record_read(ino, 8192, size);
+
+        // Random jump to offset 999999 → resets sequential count.
+        predictor.record_read(ino, 999_999, size);
+
+        // Next forward read from expected position shouldn't coalesce
+        // because sequential_count was reset to 1.
+        let fetch = predictor.fetch_size(ino, 999_999 + u64::from(size), size);
+        assert_eq!(fetch, size, "jump should reset sequential count");
+    }
+
+    #[test]
+    fn readahead_manager_overwrite_same_key() {
+        let manager = ReadaheadManager::new(8);
+        let ino = InodeNumber(10);
+
+        // Insert at offset 0 with data [1,2,3].
+        manager.insert(ino, 0, vec![1, 2, 3]);
+        // Overwrite at same key with [4,5,6].
+        manager.insert(ino, 0, vec![4, 5, 6]);
+
+        // Should get the latest data.
+        assert_eq!(manager.take(ino, 0, 3), Some(vec![4, 5, 6]));
+    }
+
+    #[test]
+    fn readahead_manager_empty_insert_is_noop() {
+        let manager = ReadaheadManager::new(8);
+        let ino = InodeNumber(20);
+
+        manager.insert(ino, 0, vec![]);
+        assert_eq!(manager.take(ino, 0, 0), None);
+    }
+
+    #[test]
+    fn fuse_error_display_variants() {
+        let invalid_mp = FuseError::InvalidMountpoint("bad path".into());
+        assert!(
+            invalid_mp.to_string().contains("bad path"),
+            "InvalidMountpoint should contain path: {}",
+            invalid_mp
+        );
+
+        let io_err = FuseError::Io(std::io::Error::other("disk gone"));
+        assert!(
+            io_err.to_string().contains("disk gone"),
+            "Io variant should contain inner error: {}",
+            io_err
+        );
+    }
+
+    #[test]
+    fn fuse_inner_debug_shows_non_exhaustive() {
+        let inner = FuseInner {
+            ops: Arc::new(StubFs),
+            metrics: Arc::new(AtomicMetrics::new()),
+            thread_count: 2,
+            read_only: false,
+            backpressure: None,
+            access_predictor: AccessPredictor::default(),
+            readahead: ReadaheadManager::new(8),
+        };
+        let dbg = format!("{inner:?}");
+        assert!(dbg.contains("FuseInner"), "missing struct name: {dbg}");
+        assert!(
+            dbg.contains("thread_count: 2"),
+            "missing thread_count: {dbg}"
+        );
+        assert!(dbg.contains("read_only: false"), "missing read_only: {dbg}");
+    }
+
+    #[test]
+    fn mount_options_worker_threads_one_resolves_to_one() {
+        let opts = MountOptions {
+            worker_threads: 1,
+            ..MountOptions::default()
+        };
+        assert_eq!(opts.resolved_thread_count(), 1);
+    }
+
+    #[test]
+    fn classify_xattr_reply_data_exact_fit() {
+        // payload_len == size → Data.
+        assert_eq!(
+            FrankenFuse::classify_xattr_reply(32, 32),
+            XattrReplyPlan::Data
+        );
+    }
+
+    #[test]
+    fn classify_xattr_reply_size_zero_payload() {
+        // size=0, payload=0 → Size(0).
+        assert_eq!(
+            FrankenFuse::classify_xattr_reply(0, 0),
+            XattrReplyPlan::Size(0)
+        );
+    }
+
+    #[test]
+    fn access_direction_equality() {
+        assert_eq!(AccessDirection::Forward, AccessDirection::Forward);
+        assert_eq!(AccessDirection::Backward, AccessDirection::Backward);
+        assert_ne!(AccessDirection::Forward, AccessDirection::Backward);
+    }
+
     // ── Proptest property-based tests ─────────────────────────────────────
 
     #[expect(clippy::cast_possible_truncation)] // test-only: proptest ranges guarantee safe casts

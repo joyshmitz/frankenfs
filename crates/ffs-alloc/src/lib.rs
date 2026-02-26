@@ -2062,7 +2062,7 @@ mod tests {
             blocks_per_group: 32768,
             inodes_per_group: 8192,
             block_size: 4096,
-            total_blocks: 131072,
+            total_blocks: 131_072,
             total_inodes: 32768,
             first_data_block: 1,
             group_count: 4,
