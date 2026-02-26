@@ -142,11 +142,18 @@ pub struct PersistentMvccStore {
 struct WalFile {
     file: File,
     write_pos: u64,
+    #[cfg(test)]
+    fail_sync: bool,
 }
 
 impl WalFile {
     fn new(file: File, write_pos: u64) -> Self {
-        Self { file, write_pos }
+        Self {
+            file,
+            write_pos,
+            #[cfg(test)]
+            fail_sync: false,
+        }
     }
 
     fn append(&mut self, data: &[u8]) -> Result<()> {
@@ -158,6 +165,12 @@ impl WalFile {
     }
 
     fn sync(&self) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_sync {
+            return Err(FfsError::Io(std::io::Error::other(
+                "injected WAL sync failure",
+            )));
+        }
         self.file.sync_all()?;
         Ok(())
     }
@@ -1301,6 +1314,85 @@ mod tests {
         drop(guard);
     }
 
+    #[test]
+    fn wal_sync_failure_rolls_back_commit_state() {
+        let cx = test_cx();
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+
+        let store = PersistentMvccStore::open(&cx, &path).expect("open");
+        let before = store.current_snapshot();
+
+        // Force WAL sync failure after append succeeds.
+        {
+            let mut wal_guard = store.wal.write();
+            wal_guard.fail_sync = true;
+        }
+
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(88), vec![8; 8]);
+        let result = store.commit(txn);
+        let err = result.expect_err("commit must fail when WAL sync fails");
+        assert!(
+            matches!(err, CommitError::DurabilityFailure { .. }),
+            "expected durability failure, got {err:?}"
+        );
+
+        // In-memory state must be unchanged.
+        let after = store.current_snapshot();
+        assert_eq!(after.high, before.high);
+        assert_eq!(store.version_count(), 0);
+        assert_eq!(store.read_visible(BlockNumber(88), after), None);
+
+        let stats = store.wal_stats();
+        assert_eq!(stats.commits_written, 0);
+    }
+
+    #[test]
+    fn wal_sync_failure_rolls_back_ssi_log_and_commit_seq_primary_path() {
+        let cx = test_cx();
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+
+        let store = PersistentMvccStore::open(&cx, &path).expect("open");
+
+        // Force WAL sync failure after append succeeds on SSI path.
+        {
+            let mut wal_guard = store.wal.write();
+            wal_guard.fail_sync = true;
+        }
+
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(99), vec![9; 8]);
+        let result = store.commit_ssi(txn);
+        let err = result.expect_err("SSI commit must fail when WAL sync fails");
+        assert!(
+            matches!(err, CommitError::DurabilityFailure { .. }),
+            "expected durability failure, got {err:?}"
+        );
+
+        // No committed data, no residual SSI history side-effects.
+        assert_eq!(store.current_snapshot().high, CommitSeq(0));
+        assert_eq!(
+            store.read_visible(BlockNumber(99), store.current_snapshot()),
+            None
+        );
+
+        let guard = store.store.read();
+        assert!(
+            guard.ssi_log.is_empty(),
+            "failed SSI sync must not leave residual ssi_log entries"
+        );
+        assert_eq!(
+            guard.next_commit, 1,
+            "failed SSI sync must restore next_commit"
+        );
+        drop(guard);
+
+        let stats = store.wal_stats();
+        assert_eq!(stats.commits_written, 0);
+    }
+
     // ── Checkpoint tests ────────────────────────────────────────────────────
 
     #[test]
@@ -1799,6 +1891,125 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── WAL sync failure: extended rollback coverage ─────────────────────
+
+    #[test]
+    fn wal_sync_failure_multi_block_rollback() {
+        let cx = test_cx();
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+
+        let store = PersistentMvccStore::open(&cx, &path).expect("open");
+
+        // Force WAL sync failure.
+        {
+            let mut wal_guard = store.wal.write();
+            wal_guard.fail_sync = true;
+        }
+
+        // Stage writes to multiple blocks in a single transaction.
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(10), vec![0xAA; 32]);
+        txn.stage_write(BlockNumber(20), vec![0xBB; 32]);
+        txn.stage_write(BlockNumber(30), vec![0xCC; 32]);
+        let result = store.commit(txn);
+        assert!(
+            matches!(result, Err(CommitError::DurabilityFailure { .. })),
+            "multi-block commit must fail when WAL sync fails"
+        );
+
+        // All three blocks must be rolled back.
+        let snap = store.current_snapshot();
+        assert_eq!(snap.high, CommitSeq(0));
+        assert_eq!(store.version_count(), 0);
+        assert_eq!(store.read_visible(BlockNumber(10), snap), None);
+        assert_eq!(store.read_visible(BlockNumber(20), snap), None);
+        assert_eq!(store.read_visible(BlockNumber(30), snap), None);
+    }
+
+    #[test]
+    fn wal_sync_failure_recovery_allows_subsequent_commit() {
+        let cx = test_cx();
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+
+        let store = PersistentMvccStore::open(&cx, &path).expect("open");
+
+        // First: force a sync failure.
+        {
+            let mut wal_guard = store.wal.write();
+            wal_guard.fail_sync = true;
+        }
+
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(50), vec![5; 8]);
+        let result = store.commit(txn);
+        assert!(result.is_err(), "first commit must fail");
+
+        // Clear the failure flag.
+        {
+            let mut wal_guard = store.wal.write();
+            wal_guard.fail_sync = false;
+        }
+
+        // Second commit must succeed with the correct commit sequence.
+        let mut txn2 = store.begin();
+        txn2.stage_write(BlockNumber(60), vec![6; 8]);
+        let seq = store
+            .commit(txn2)
+            .expect("second commit must succeed after failure clears");
+        assert_eq!(seq, CommitSeq(1));
+
+        let snap = store.current_snapshot();
+        assert_eq!(snap.high, CommitSeq(1));
+        assert_eq!(store.read_visible(BlockNumber(60), snap), Some(vec![6; 8]));
+        // The failed block must still be absent.
+        assert_eq!(store.read_visible(BlockNumber(50), snap), None);
+
+        let stats = store.wal_stats();
+        assert_eq!(stats.commits_written, 1);
+    }
+
+    #[test]
+    fn wal_sync_failure_after_successful_commit_preserves_prior_data() {
+        let cx = test_cx();
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+
+        let store = PersistentMvccStore::open(&cx, &path).expect("open");
+
+        // First: successful commit.
+        let mut txn1 = store.begin();
+        txn1.stage_write(BlockNumber(100), vec![0xAA; 16]);
+        let seq1 = store.commit(txn1).expect("first commit must succeed");
+        assert_eq!(seq1, CommitSeq(1));
+
+        // Now force sync failure.
+        {
+            let mut wal_guard = store.wal.write();
+            wal_guard.fail_sync = true;
+        }
+
+        // Second commit fails.
+        let mut txn2 = store.begin();
+        txn2.stage_write(BlockNumber(200), vec![0xBB; 16]);
+        let result = store.commit(txn2);
+        assert!(
+            matches!(result, Err(CommitError::DurabilityFailure { .. })),
+            "second commit must fail"
+        );
+
+        // Prior commit data must still be visible.
+        let snap = store.current_snapshot();
+        assert_eq!(snap.high, CommitSeq(1));
+        assert_eq!(
+            store.read_visible(BlockNumber(100), snap),
+            Some(vec![0xAA; 16])
+        );
+        assert_eq!(store.read_visible(BlockNumber(200), snap), None);
+        assert_eq!(store.version_count(), 1);
     }
 
     /// Comprehensive: multiple truncation points across a 5-commit WAL.

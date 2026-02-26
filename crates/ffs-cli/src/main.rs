@@ -1571,6 +1571,18 @@ fn summarize_repair_staleness(states: &[(u32, Ext4RepairStaleness)]) -> RepairSt
     summary
 }
 
+fn unavailable_repair_info(note: &str) -> RepairInfoOutput {
+    RepairInfoOutput {
+        configured_overhead_ratio: DEFAULT_REPAIR_OVERHEAD_RATIO,
+        metrics_available: false,
+        note: note.to_owned(),
+        groups_total: None,
+        groups_fresh: None,
+        groups_stale: None,
+        groups_untracked: None,
+    }
+}
+
 fn build_repair_info(
     path: &PathBuf,
     open_fs: &OpenFs,
@@ -1595,15 +1607,9 @@ fn build_repair_info(
                     limitations.push(format!(
                         "repair metrics probe failed for ext4 image: {error:#}"
                     ));
-                    RepairInfoOutput {
-                        configured_overhead_ratio: DEFAULT_REPAIR_OVERHEAD_RATIO,
-                        metrics_available: false,
-                        note: "live ext4 repair metrics unavailable (see limitations)".to_owned(),
-                        groups_total: None,
-                        groups_fresh: None,
-                        groups_stale: None,
-                        groups_untracked: None,
-                    }
+                    unavailable_repair_info(
+                        "live ext4 repair metrics unavailable (see limitations)",
+                    )
                 }
             }
         }
@@ -1641,15 +1647,9 @@ fn build_repair_info(
                     limitations.push(format!(
                         "repair metrics probe failed for btrfs image: {error:#}"
                     ));
-                    RepairInfoOutput {
-                        configured_overhead_ratio: DEFAULT_REPAIR_OVERHEAD_RATIO,
-                        metrics_available: false,
-                        note: "live btrfs repair metrics unavailable (see limitations)".to_owned(),
-                        groups_total: None,
-                        groups_fresh: None,
-                        groups_stale: None,
-                        groups_untracked: None,
-                    }
+                    unavailable_repair_info(
+                        "live btrfs repair metrics unavailable (see limitations)",
+                    )
                 }
             }
         }
@@ -6314,12 +6314,15 @@ fn mkfs_cmd(
 mod tests {
     use super::{
         Cli, Command, DumpCommand, EvidenceEventType, Ext4JournalReplayMode, Ext4RepairStaleness,
-        FsckCommandOptions, FsckFlags, LogFormat, RepairCommandOptions, RepairFlags,
-        btrfs_super_mirror_offsets, build_btrfs_repair_group_spec, build_ext4_group_info,
-        build_fsck_output, build_repair_output, ext4_appears_clean_state, ext4_mount_replay_mode,
-        load_evidence_records, merge_scrub_reports, normalize_btrfs_superblock_as_primary,
-        partition_scrub_range, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
-        read_file_region, repair_worker_limit, select_ext4_repair_groups,
+        FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
+        RepairCommandOptions, RepairFlags, btrfs_super_mirror_offsets,
+        build_btrfs_repair_group_spec, build_ext4_group_info, build_fsck_output, build_info_output,
+        build_repair_output, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
+        ext4_mount_replay_mode, format_ratio_thousandths, load_evidence_records,
+        merge_scrub_reports, normalize_btrfs_superblock_as_primary, partition_scrub_range,
+        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
+        repair_worker_limit, select_ext4_repair_groups, summarize_repair_staleness,
+        unavailable_repair_info,
     };
     use clap::Parser;
     use serde_json::Value;
@@ -6744,6 +6747,34 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_inspect_with_json() {
+        let cli = Cli::try_parse_from(["ffs", "inspect", "--json", "/tmp/fs.img"])
+            .expect("inspect command should parse");
+
+        match cli.command {
+            Command::Inspect { image, json } => {
+                assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                assert!(json);
+            }
+            _ => panic!("expected inspect command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_mvcc_stats_minimal() {
+        let cli = Cli::try_parse_from(["ffs", "mvcc-stats", "/tmp/fs.img"])
+            .expect("mvcc-stats command should parse");
+
+        match cli.command {
+            Command::MvccStats { image, json } => {
+                assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                assert!(!json);
+            }
+            _ => panic!("expected mvcc-stats command"),
+        }
+    }
+
+    #[test]
     fn cli_parses_info_command_without_optional_flags() {
         let cli = Cli::try_parse_from(["ffs", "info", "/tmp/fs.img"])
             .expect("minimal info command should parse");
@@ -6811,6 +6842,93 @@ mod tests {
                     assert!(!hex);
                 }
                 _ => panic!("expected dump group command"),
+            },
+            _ => panic!("expected dump command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_dump_inode_command_with_flags() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "dump",
+            "inode",
+            "42",
+            "--json",
+            "--hex",
+            "/tmp/fs.img",
+        ])
+        .expect("dump inode command should parse");
+
+        match cli.command {
+            Command::Dump { command } => match command {
+                DumpCommand::Inode {
+                    inode,
+                    image,
+                    json,
+                    hex,
+                } => {
+                    assert_eq!(inode, 42);
+                    assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                    assert!(json);
+                    assert!(hex);
+                }
+                _ => panic!("expected dump inode command"),
+            },
+            _ => panic!("expected dump command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_dump_extents_command_minimal() {
+        let cli = Cli::try_parse_from(["ffs", "dump", "extents", "11", "/tmp/fs.img"])
+            .expect("dump extents command should parse");
+
+        match cli.command {
+            Command::Dump { command } => match command {
+                DumpCommand::Extents {
+                    inode,
+                    image,
+                    json,
+                    hex,
+                } => {
+                    assert_eq!(inode, 11);
+                    assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                    assert!(!json);
+                    assert!(!hex);
+                }
+                _ => panic!("expected dump extents command"),
+            },
+            _ => panic!("expected dump command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_dump_dir_command_with_hex() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "dump",
+            "dir",
+            "2",
+            "--hex",
+            "/tmp/fs.img",
+        ])
+        .expect("dump dir command should parse");
+
+        match cli.command {
+            Command::Dump { command } => match command {
+                DumpCommand::Dir {
+                    inode,
+                    image,
+                    json,
+                    hex,
+                } => {
+                    assert_eq!(inode, 2);
+                    assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                    assert!(!json);
+                    assert!(hex);
+                }
+                _ => panic!("expected dump dir command"),
             },
             _ => panic!("expected dump command"),
         }
@@ -6942,6 +7060,257 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_mount_with_all_flags() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "mount",
+            "--allow-other",
+            "--rw",
+            "/tmp/fs.img",
+            "/tmp/mnt",
+        ])
+        .expect("mount command should parse");
+
+        match cli.command {
+            Command::Mount {
+                image,
+                mountpoint,
+                allow_other,
+                rw,
+            } => {
+                assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                assert_eq!(mountpoint, PathBuf::from("/tmp/mnt"));
+                assert!(allow_other);
+                assert!(rw);
+            }
+            _ => panic!("expected mount command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_mount_minimal() {
+        let cli = Cli::try_parse_from(["ffs", "mount", "/tmp/fs.img", "/tmp/mnt"])
+            .expect("mount command should parse");
+
+        match cli.command {
+            Command::Mount {
+                image,
+                mountpoint,
+                allow_other,
+                rw,
+            } => {
+                assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                assert_eq!(mountpoint, PathBuf::from("/tmp/mnt"));
+                assert!(!allow_other);
+                assert!(!rw);
+            }
+            _ => panic!("expected mount command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_scrub_with_json() {
+        let cli = Cli::try_parse_from(["ffs", "scrub", "--json", "/tmp/fs.img"])
+            .expect("scrub command should parse");
+
+        match cli.command {
+            Command::Scrub { image, json } => {
+                assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                assert!(json);
+            }
+            _ => panic!("expected scrub command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_scrub_minimal() {
+        let cli = Cli::try_parse_from(["ffs", "scrub", "/tmp/fs.img"]).expect("scrub should parse");
+
+        match cli.command {
+            Command::Scrub { image, json } => {
+                assert_eq!(image, PathBuf::from("/tmp/fs.img"));
+                assert!(!json);
+            }
+            _ => panic!("expected scrub command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_parity_with_json() {
+        let cli =
+            Cli::try_parse_from(["ffs", "parity", "--json"]).expect("parity command should parse");
+
+        match cli.command {
+            Command::Parity { json } => {
+                assert!(json);
+            }
+            _ => panic!("expected parity command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_parity_minimal() {
+        let cli = Cli::try_parse_from(["ffs", "parity"]).expect("parity command should parse");
+
+        match cli.command {
+            Command::Parity { json } => {
+                assert!(!json);
+            }
+            _ => panic!("expected parity command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_with_all_flags() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--json",
+            "--event-type",
+            "repair_succeeded",
+            "--tail",
+            "25",
+            "/tmp/evidence.jsonl",
+        ])
+        .expect("evidence command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                ledger,
+                json,
+                event_type,
+                tail,
+            } => {
+                assert_eq!(ledger, PathBuf::from("/tmp/evidence.jsonl"));
+                assert!(json);
+                assert_eq!(event_type.as_deref(), Some("repair_succeeded"));
+                assert_eq!(tail, Some(25));
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_minimal() {
+        let cli = Cli::try_parse_from(["ffs", "evidence", "/tmp/evidence.jsonl"])
+            .expect("evidence command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                ledger,
+                json,
+                event_type,
+                tail,
+            } => {
+                assert_eq!(ledger, PathBuf::from("/tmp/evidence.jsonl"));
+                assert!(!json);
+                assert_eq!(event_type, None);
+                assert_eq!(tail, None);
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_mkfs_with_all_flags() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "mkfs",
+            "--size-mb",
+            "128",
+            "--block-size",
+            "2048",
+            "--label",
+            "testvol",
+            "--json",
+            "/tmp/new.img",
+        ])
+        .expect("mkfs command should parse");
+
+        match cli.command {
+            Command::Mkfs {
+                output,
+                size_mb,
+                block_size,
+                label,
+                json,
+            } => {
+                assert_eq!(output, PathBuf::from("/tmp/new.img"));
+                assert_eq!(size_mb, 128);
+                assert_eq!(block_size, 2048);
+                assert_eq!(label, "testvol");
+                assert!(json);
+            }
+            _ => panic!("expected mkfs command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_mkfs_minimal_uses_defaults() {
+        let cli = Cli::try_parse_from(["ffs", "mkfs", "/tmp/new.img"])
+            .expect("mkfs command should parse");
+
+        match cli.command {
+            Command::Mkfs {
+                output,
+                size_mb,
+                block_size,
+                label,
+                json,
+            } => {
+                assert_eq!(output, PathBuf::from("/tmp/new.img"));
+                assert_eq!(size_mb, 64);
+                assert_eq!(block_size, 4096);
+                assert_eq!(label, "frankenfs");
+                assert!(!json);
+            }
+            _ => panic!("expected mkfs command"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_mount_without_mountpoint() {
+        let result = Cli::try_parse_from(["ffs", "mount", "/tmp/fs.img"]);
+        assert!(result.is_err(), "mount requires an image and mountpoint");
+    }
+
+    #[test]
+    fn cli_rejects_scrub_without_image() {
+        let result = Cli::try_parse_from(["ffs", "scrub"]);
+        assert!(result.is_err(), "scrub requires an image path");
+    }
+
+    #[test]
+    fn cli_rejects_parity_with_unexpected_positional() {
+        let result = Cli::try_parse_from(["ffs", "parity", "/tmp/extra"]);
+        assert!(result.is_err(), "parity should not accept positional args");
+    }
+
+    #[test]
+    fn cli_rejects_evidence_non_numeric_tail() {
+        let result = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--tail",
+            "not-a-number",
+            "/tmp/evidence.jsonl",
+        ]);
+        assert!(result.is_err(), "evidence --tail must be numeric");
+    }
+
+    #[test]
+    fn cli_rejects_mkfs_non_numeric_size_mb() {
+        let result = Cli::try_parse_from([
+            "ffs",
+            "mkfs",
+            "--size-mb",
+            "sixty-four",
+            "/tmp/new.img",
+        ]);
+        assert!(result.is_err(), "mkfs --size-mb must be numeric");
+    }
+
+    #[test]
     fn repair_worker_limit_defaults_to_single() {
         let (workers, capped) = repair_worker_limit(None);
         assert_eq!(workers, 1);
@@ -6984,6 +7353,121 @@ mod tests {
         assert!(!ext4_appears_clean_state(0x0000));
         assert!(!ext4_appears_clean_state(0x0001 | 0x0002));
         assert!(!ext4_appears_clean_state(0x0001 | 0x0004));
+    }
+
+    #[test]
+    fn summarize_repair_staleness_reports_zero_for_empty_input() {
+        let summary = summarize_repair_staleness(&[]);
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.fresh, 0);
+        assert_eq!(summary.stale, 0);
+        assert_eq!(summary.untracked, 0);
+    }
+
+    #[test]
+    fn summarize_repair_staleness_counts_mixed_states() {
+        let staleness = vec![
+            (0, Ext4RepairStaleness::Fresh),
+            (1, Ext4RepairStaleness::Stale),
+            (2, Ext4RepairStaleness::Untracked),
+            (3, Ext4RepairStaleness::Fresh),
+            (4, Ext4RepairStaleness::Stale),
+        ];
+        let summary = summarize_repair_staleness(&staleness);
+        assert_eq!(summary.total, 5);
+        assert_eq!(summary.fresh, 2);
+        assert_eq!(summary.stale, 2);
+        assert_eq!(summary.untracked, 1);
+    }
+
+    #[test]
+    fn summarize_repair_staleness_counts_states_regardless_of_group_ids() {
+        let staleness = vec![
+            (42, Ext4RepairStaleness::Stale),
+            (7, Ext4RepairStaleness::Fresh),
+            (42, Ext4RepairStaleness::Fresh),
+            (999, Ext4RepairStaleness::Untracked),
+            (1, Ext4RepairStaleness::Stale),
+        ];
+        let summary = summarize_repair_staleness(&staleness);
+        assert_eq!(summary.total, 5);
+        assert_eq!(summary.fresh, 2);
+        assert_eq!(summary.stale, 2);
+        assert_eq!(summary.untracked, 1);
+    }
+
+    #[test]
+    fn build_info_output_ext4_repair_metrics_fallback_sets_limitation() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+
+        with_temp_image_path(&image, |path| {
+            let cx = super::cli_cx();
+            let open_opts = super::OpenOptions {
+                ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+                ..super::OpenOptions::default()
+            };
+            let open_fs = super::OpenFs::open_with_options(&cx, &path, &open_opts)
+                .expect("open ext4 image for info repair fallback test");
+
+            // Keep `open_fs` valid but force the probe path to fail.
+            let missing_path = path.with_extension("missing");
+            let output = build_info_output(
+                &missing_path,
+                &cx,
+                &open_fs,
+                InfoCommandOptions {
+                    sections: InfoSections::empty().with_repair(true),
+                    json: false,
+                },
+            )
+            .expect("build info output with repair section");
+
+            let repair = output.repair.expect("repair section should be present");
+            assert!(!repair.metrics_available);
+            assert_eq!(
+                repair.note,
+                "live ext4 repair metrics unavailable (see limitations)"
+            );
+            assert_eq!(repair.groups_total, None);
+            assert_eq!(repair.groups_fresh, None);
+            assert_eq!(repair.groups_stale, None);
+            assert_eq!(repair.groups_untracked, None);
+            assert!(output.limitations.iter().any(|limitation| {
+                limitation.contains("repair metrics probe failed for ext4 image")
+            }));
+        });
+    }
+
+    #[test]
+    fn unavailable_repair_info_clears_group_metrics() {
+        let info =
+            unavailable_repair_info("live ext4 repair metrics unavailable (see limitations)");
+        assert!(!info.metrics_available);
+        assert_eq!(
+            info.note,
+            "live ext4 repair metrics unavailable (see limitations)"
+        );
+        assert_eq!(info.groups_total, None);
+        assert_eq!(info.groups_fresh, None);
+        assert_eq!(info.groups_stale, None);
+        assert_eq!(info.groups_untracked, None);
+        assert!(
+            (info.configured_overhead_ratio - super::DEFAULT_REPAIR_OVERHEAD_RATIO).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn unavailable_repair_info_supports_btrfs_fallback_note() {
+        let info =
+            unavailable_repair_info("live btrfs repair metrics unavailable (see limitations)");
+        assert!(!info.metrics_available);
+        assert_eq!(
+            info.note,
+            "live btrfs repair metrics unavailable (see limitations)"
+        );
+        assert_eq!(info.groups_total, None);
     }
 
     #[test]
@@ -7587,5 +8071,182 @@ mod tests {
             .expect_err("discontiguous mapping should fail");
         let detail = format!("{err:#}");
         assert!(detail.contains("non-contiguous chunk mapping"));
+    }
+
+    // ── summarize_repair_staleness: additional edge cases ─────────────────
+
+    #[test]
+    fn summarize_repair_staleness_all_fresh() {
+        let staleness = vec![
+            (0, Ext4RepairStaleness::Fresh),
+            (1, Ext4RepairStaleness::Fresh),
+            (2, Ext4RepairStaleness::Fresh),
+        ];
+        let summary = summarize_repair_staleness(&staleness);
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.fresh, 3);
+        assert_eq!(summary.stale, 0);
+        assert_eq!(summary.untracked, 0);
+    }
+
+    #[test]
+    fn summarize_repair_staleness_all_stale() {
+        let staleness = vec![
+            (0, Ext4RepairStaleness::Stale),
+            (1, Ext4RepairStaleness::Stale),
+        ];
+        let summary = summarize_repair_staleness(&staleness);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.fresh, 0);
+        assert_eq!(summary.stale, 2);
+        assert_eq!(summary.untracked, 0);
+    }
+
+    #[test]
+    fn summarize_repair_staleness_all_untracked() {
+        let staleness = vec![
+            (0, Ext4RepairStaleness::Untracked),
+            (1, Ext4RepairStaleness::Untracked),
+            (2, Ext4RepairStaleness::Untracked),
+            (3, Ext4RepairStaleness::Untracked),
+        ];
+        let summary = summarize_repair_staleness(&staleness);
+        assert_eq!(summary.total, 4);
+        assert_eq!(summary.fresh, 0);
+        assert_eq!(summary.stale, 0);
+        assert_eq!(summary.untracked, 4);
+    }
+
+    #[test]
+    fn summarize_repair_staleness_single_entry() {
+        let summary = summarize_repair_staleness(&[(42, Ext4RepairStaleness::Stale)]);
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.fresh, 0);
+        assert_eq!(summary.stale, 1);
+        assert_eq!(summary.untracked, 0);
+    }
+
+    // ── format_ratio_thousandths: metrics display helper ──────────────────
+
+    #[test]
+    fn format_ratio_thousandths_zero_denominator_returns_zero() {
+        assert_eq!(format_ratio_thousandths(5, 0), "0.000");
+    }
+
+    #[test]
+    fn format_ratio_thousandths_zero_numerator() {
+        assert_eq!(format_ratio_thousandths(0, 100), "0.000");
+    }
+
+    #[test]
+    fn format_ratio_thousandths_exact_ratio() {
+        assert_eq!(format_ratio_thousandths(1, 1), "1.000");
+        assert_eq!(format_ratio_thousandths(3, 1), "3.000");
+    }
+
+    #[test]
+    fn format_ratio_thousandths_fractional() {
+        assert_eq!(format_ratio_thousandths(1, 3), "0.333");
+        assert_eq!(format_ratio_thousandths(2, 3), "0.666");
+        assert_eq!(format_ratio_thousandths(7, 2), "3.500");
+    }
+
+    #[test]
+    fn format_ratio_thousandths_large_values() {
+        let result = format_ratio_thousandths(usize::MAX, 1);
+        assert!(!result.is_empty());
+        assert!(result.contains('.'));
+    }
+
+    // ── choose_btrfs_scrub_block_size: geometry validation ───────────────
+
+    #[test]
+    fn choose_btrfs_scrub_block_size_aligned_to_nodesize() {
+        let block_size = choose_btrfs_scrub_block_size(16384 * 10, 16384, 4096)
+            .expect("aligned image should succeed");
+        assert_eq!(block_size, 16384);
+    }
+
+    #[test]
+    fn choose_btrfs_scrub_block_size_falls_back_to_smaller_alignment() {
+        // image length 40960 = 10 * 4096, not divisible by 16384
+        let block_size = choose_btrfs_scrub_block_size(40960, 16384, 4096)
+            .expect("should fall back to smaller aligned block size");
+        assert!(block_size <= 16384);
+        assert!(block_size >= 4096);
+        assert_eq!(40960 % u64::from(block_size), 0);
+    }
+
+    #[test]
+    fn choose_btrfs_scrub_block_size_rejects_zero_nodesize() {
+        let err = choose_btrfs_scrub_block_size(65536, 0, 4096);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn choose_btrfs_scrub_block_size_rejects_non_power_of_two_nodesize() {
+        let err = choose_btrfs_scrub_block_size(65536, 12288, 4096);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn choose_btrfs_scrub_block_size_rejects_unaligned_image() {
+        let err = choose_btrfs_scrub_block_size(4097, 4096, 4096);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn choose_btrfs_scrub_block_size_enforces_minimum_4096() {
+        // sectorsize < 4096 should still enforce 4096 floor
+        let block_size = choose_btrfs_scrub_block_size(4096 * 4, 4096, 512)
+            .expect("should succeed with 4096 floor");
+        assert!(block_size >= 4096);
+    }
+
+    // ── select_ext4_repair_groups: fresh-only path ───────────────────────
+
+    #[test]
+    fn repair_selection_returns_empty_when_all_fresh() {
+        let all = vec![0, 1, 2];
+        let staleness = vec![
+            (0, Ext4RepairStaleness::Fresh),
+            (1, Ext4RepairStaleness::Fresh),
+            (2, Ext4RepairStaleness::Fresh),
+        ];
+        let selected = select_ext4_repair_groups(RepairFlags::empty(), false, &all, &staleness);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn repair_selection_full_scrub_overrides_fresh_state() {
+        let all = vec![0, 1, 2];
+        let staleness = vec![
+            (0, Ext4RepairStaleness::Fresh),
+            (1, Ext4RepairStaleness::Fresh),
+            (2, Ext4RepairStaleness::Fresh),
+        ];
+        let selected = select_ext4_repair_groups(
+            RepairFlags::empty().with_full_scrub(true),
+            true,
+            &all,
+            &staleness,
+        );
+        assert_eq!(selected, all);
+    }
+
+    #[test]
+    fn repair_selection_empty_staleness_and_dirty_returns_all() {
+        let all = vec![0, 1, 2];
+        let staleness: Vec<(u32, Ext4RepairStaleness)> = vec![];
+        let selected = select_ext4_repair_groups(RepairFlags::empty(), false, &all, &staleness);
+        assert_eq!(selected, all);
+    }
+
+    #[test]
+    fn repair_selection_empty_staleness_and_clean_skips_repair() {
+        let all = vec![0, 1, 2];
+        let staleness: Vec<(u32, Ext4RepairStaleness)> = vec![];
+        let selected = select_ext4_repair_groups(RepairFlags::empty(), true, &all, &staleness);
+        assert!(selected.is_empty());
     }
 }

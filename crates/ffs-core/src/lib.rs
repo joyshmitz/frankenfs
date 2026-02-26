@@ -4544,6 +4544,11 @@ impl OpenFs {
             return Err(FfsError::NotDirectory);
         }
 
+        // Check for duplicate name — POSIX requires EEXIST.
+        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
+            return Err(FfsError::Exists);
+        }
+
         let mut alloc = alloc_mutex.lock();
         let Ext4AllocState {
             geo,
@@ -4626,6 +4631,11 @@ impl OpenFs {
         let parent_inode = self.read_inode(cx, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
+        }
+
+        // Check for duplicate name — POSIX requires EEXIST.
+        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
+            return Err(FfsError::Exists);
         }
 
         let mut alloc = alloc_mutex.lock();
@@ -5576,6 +5586,11 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &[u8],
     ) -> ffs_error::Result<()> {
+        // POSIX: rename(old, new) where old == new is a successful no-op.
+        if parent == new_parent && name == new_name {
+            return Ok(());
+        }
+
         let alloc_mutex = self.require_alloc_state()?;
         let block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
@@ -13175,6 +13190,104 @@ mod tests {
     }
 
     #[test]
+    fn write_rename_file_over_directory_returns_eisdir() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.create(&cx, root, OsStr::new("rename_file_src.txt"), 0o644, 0, 0)
+            .expect("create source file");
+        fs.mkdir(&cx, root, OsStr::new("rename_dir_dst"), 0o755, 0, 0)
+            .expect("create destination dir");
+
+        let err = fs
+            .rename(
+                &cx,
+                root,
+                OsStr::new("rename_file_src.txt"),
+                root,
+                OsStr::new("rename_dir_dst"),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EISDIR);
+    }
+
+    #[test]
+    fn write_rename_directory_over_file_returns_enotdir() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.mkdir(&cx, root, OsStr::new("rename_dir_src"), 0o755, 0, 0)
+            .expect("create source dir");
+        fs.create(&cx, root, OsStr::new("rename_file_dst.txt"), 0o644, 0, 0)
+            .expect("create destination file");
+
+        let err = fs
+            .rename(
+                &cx,
+                root,
+                OsStr::new("rename_dir_src"),
+                root,
+                OsStr::new("rename_file_dst.txt"),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    #[test]
+    fn write_rename_over_existing_file_replaces_target() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let src = fs
+            .create(&cx, root, OsStr::new("rename_src.txt"), 0o644, 0, 0)
+            .expect("create source");
+        let src_payload = b"source payload";
+        fs.write(&cx, src.ino, 0, src_payload)
+            .expect("write source");
+
+        let dst = fs
+            .create(&cx, root, OsStr::new("rename_dst.txt"), 0o644, 0, 0)
+            .expect("create destination");
+        fs.write(&cx, dst.ino, 0, b"destination payload")
+            .expect("write destination");
+
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("rename_src.txt"),
+            root,
+            OsStr::new("rename_dst.txt"),
+        )
+        .expect("rename over existing file");
+
+        let err = fs
+            .lookup(&cx, root, OsStr::new("rename_src.txt"))
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOENT);
+
+        let renamed = fs
+            .lookup(&cx, root, OsStr::new("rename_dst.txt"))
+            .expect("lookup renamed destination");
+        assert_eq!(renamed.ino, src.ino);
+        assert_ne!(renamed.ino, dst.ino);
+
+        let read_len = u32::try_from(src_payload.len()).expect("payload length fits in u32");
+        let readback = fs
+            .read(&cx, renamed.ino, 0, read_len)
+            .expect("read renamed file");
+        assert_eq!(&readback, src_payload);
+    }
+
+    #[test]
     fn write_link_creates_hardlink_and_increments_nlink() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -13983,6 +14096,519 @@ mod tests {
 
         let err = fs.lookup(&cx, root, OsStr::new("temp_dir")).unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    // ── Extended write-path edge-case hardening ──────────────────────
+
+    #[test]
+    fn write_setattr_chmod_changes_mode() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("chmod_me.txt"), 0o644, 0, 0)
+            .expect("create");
+        assert_eq!(attr.perm, 0o644);
+
+        let new_attr = fs
+            .setattr(
+                &cx,
+                attr.ino,
+                &SetAttrRequest {
+                    mode: Some(0o755),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("chmod");
+        assert_eq!(new_attr.perm, 0o755);
+
+        // Verify via getattr
+        let verified = fs.getattr(&cx, attr.ino).expect("getattr after chmod");
+        assert_eq!(verified.perm, 0o755);
+    }
+
+    #[test]
+    fn write_setattr_chown_changes_uid_gid() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("chown_me.txt"), 0o644, 1000, 1000)
+            .expect("create");
+        assert_eq!(attr.uid, 1000);
+        assert_eq!(attr.gid, 1000);
+
+        let new_attr = fs
+            .setattr(
+                &cx,
+                attr.ino,
+                &SetAttrRequest {
+                    uid: Some(2000),
+                    gid: Some(3000),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("chown");
+        assert_eq!(new_attr.uid, 2000);
+        assert_eq!(new_attr.gid, 3000);
+
+        let verified = fs.getattr(&cx, attr.ino).expect("getattr after chown");
+        assert_eq!(verified.uid, 2000);
+        assert_eq!(verified.gid, 3000);
+    }
+
+    #[test]
+    fn write_setattr_extend_file_via_size() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("extend_me.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        fs.write(&cx, ino, 0, b"hello").expect("write");
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 5);
+
+        // Extend to 100 bytes
+        let new_attr = fs
+            .setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(100),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("extend via setattr");
+        assert_eq!(new_attr.size, 100);
+
+        // Read back: first 5 bytes should be "hello", rest should be zeroed
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
+        assert_eq!(data.len(), 100);
+        assert_eq!(&data[..5], b"hello");
+        assert!(data[5..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn write_setattr_truncate_to_zero() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("zero_me.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+        fs.write(&cx, ino, 0, &[0xAA; 200]).expect("write");
+
+        let new_attr = fs
+            .setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    size: Some(0),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("truncate to zero");
+        assert_eq!(new_attr.size, 0);
+
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn write_create_duplicate_name_returns_eexist() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.create(&cx, root, OsStr::new("dup_file.txt"), 0o644, 0, 0)
+            .expect("first create");
+
+        let err = fs
+            .create(&cx, root, OsStr::new("dup_file.txt"), 0o644, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EEXIST);
+    }
+
+    #[test]
+    fn write_mkdir_duplicate_name_returns_eexist() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.mkdir(&cx, root, OsStr::new("dup_dir"), 0o755, 0, 0)
+            .expect("first mkdir");
+
+        let err = fs
+            .mkdir(&cx, root, OsStr::new("dup_dir"), 0o755, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EEXIST);
+    }
+
+    #[test]
+    fn write_zero_byte_write_returns_zero() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("zero_write.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        let written = fs.write(&cx, attr.ino, 0, b"").expect("zero-byte write");
+        assert_eq!(written, 0);
+
+        // File should remain empty
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("getattr").size, 0);
+    }
+
+    #[test]
+    fn write_at_block_boundary() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block_size = u64::from(fs.block_size());
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("boundary.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // Write exactly one block of data
+        let bs = usize::try_from(block_size).expect("block_size fits usize");
+        let block_data = vec![0xBB_u8; bs];
+        let written = fs.write(&cx, ino, 0, &block_data).expect("write one block");
+        assert_eq!(u64::from(written), block_size);
+
+        // Write at exactly the block boundary
+        let second_data = vec![0xCC_u8; 10];
+        let written2 = fs
+            .write(&cx, ino, block_size, &second_data)
+            .expect("write at boundary");
+        assert_eq!(written2, 10);
+
+        // Verify file size
+        let size = fs.getattr(&cx, ino).expect("getattr").size;
+        assert_eq!(size, block_size + 10);
+
+        // Read back and verify both regions
+        let readback = fs
+            .read(&cx, ino, 0, u32::try_from(block_size + 10).unwrap())
+            .expect("read");
+        assert!(readback[..bs].iter().all(|&b| b == 0xBB));
+        assert!(readback[bs..].iter().all(|&b| b == 0xCC));
+    }
+
+    #[test]
+    fn write_spanning_multiple_blocks() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let block_size = usize::try_from(fs.block_size()).expect("block_size fits usize");
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("multiblock.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // Write data spanning 3 blocks
+        let data_size = block_size * 2 + block_size / 2;
+        #[allow(clippy::cast_possible_truncation)]
+        let data: Vec<u8> = (0..data_size).map(|i| (i % 251) as u8).collect();
+        let written = fs.write(&cx, ino, 0, &data).expect("write multi-block");
+        assert_eq!(written as usize, data_size);
+
+        // Read back full data
+        let readback = fs
+            .read(&cx, ino, 0, u32::try_from(data_size).unwrap())
+            .expect("read");
+        assert_eq!(readback.len(), data_size);
+        assert_eq!(readback, data);
+    }
+
+    #[test]
+    fn write_fsync_on_read_only_returns_erofs() {
+        let cx = Cx::for_testing();
+        let path = std::path::Path::new("tests/fixtures/images/ext4_small.img");
+        let path = if path.exists() {
+            path.to_path_buf()
+        } else {
+            let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("tests/fixtures/images/ext4_small.img");
+            if !ws.exists() {
+                return;
+            }
+            ws
+        };
+        let data = std::fs::read(&path).expect("read fixture");
+        let dev = TestDevice::from_vec(data);
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open");
+        assert!(!fs.is_writable());
+
+        let err = fs.fsync(&cx, InodeNumber(2), 0, false).unwrap_err();
+        assert_eq!(err.to_errno(), libc::EROFS);
+
+        let err = fs.fsyncdir(&cx, InodeNumber(2), 0, false).unwrap_err();
+        assert_eq!(err.to_errno(), libc::EROFS);
+    }
+
+    #[test]
+    fn write_rename_to_same_name_is_noop() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("same_name.txt"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"content").expect("write");
+
+        // Rename to itself should succeed without error
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("same_name.txt"),
+            root,
+            OsStr::new("same_name.txt"),
+        )
+        .expect("rename to self");
+
+        // Verify file still exists and data is intact
+        let looked_up = fs
+            .lookup(&cx, root, OsStr::new("same_name.txt"))
+            .expect("lookup after self-rename");
+        assert_eq!(looked_up.ino, attr.ino);
+        let data = fs.read(&cx, attr.ino, 0, 4096).expect("read");
+        assert_eq!(&data[..7], b"content");
+    }
+
+    #[test]
+    fn write_rename_cross_directory() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let dir_a = fs
+            .mkdir(&cx, root, OsStr::new("dir_a"), 0o755, 0, 0)
+            .expect("mkdir a");
+        let dir_b = fs
+            .mkdir(&cx, root, OsStr::new("dir_b"), 0o755, 0, 0)
+            .expect("mkdir b");
+
+        let file = fs
+            .create(&cx, dir_a.ino, OsStr::new("moved.txt"), 0o644, 0, 0)
+            .expect("create in dir_a");
+        fs.write(&cx, file.ino, 0, b"cross-dir").expect("write");
+
+        // Rename from dir_a to dir_b
+        fs.rename(
+            &cx,
+            dir_a.ino,
+            OsStr::new("moved.txt"),
+            dir_b.ino,
+            OsStr::new("arrived.txt"),
+        )
+        .expect("cross-directory rename");
+
+        // Old location gone
+        let err = fs
+            .lookup(&cx, dir_a.ino, OsStr::new("moved.txt"))
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOENT);
+
+        // New location exists with same data
+        let arrived = fs
+            .lookup(&cx, dir_b.ino, OsStr::new("arrived.txt"))
+            .expect("lookup in dir_b");
+        assert_eq!(arrived.ino, file.ino);
+        let data = fs.read(&cx, file.ino, 0, 4096).expect("read");
+        assert_eq!(&data[..9], b"cross-dir");
+    }
+
+    #[test]
+    fn write_link_to_nonexistent_inode_fails() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Try to hardlink a non-existent inode
+        let bogus_ino = InodeNumber(999_999);
+        let err = fs
+            .link(&cx, bogus_ino, root, OsStr::new("bogus_link"))
+            .unwrap_err();
+        // Should fail — exact errno varies but must error
+        assert_ne!(err.to_errno(), 0);
+    }
+
+    #[test]
+    fn write_create_long_name_succeeds_or_rejects() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // 255 chars is the ext4 max name length — should succeed
+        let name_255 = "a".repeat(255);
+        let result = fs.create(&cx, root, OsStr::new(&name_255), 0o644, 0, 0);
+        // Might succeed or fail due to directory block space, but shouldn't panic
+        match result {
+            Ok(attr) => assert_eq!(attr.kind, FileType::RegularFile),
+            Err(e) => {
+                // ENOSPC or ENAMETOOLONG are acceptable
+                assert!(
+                    e.to_errno() == libc::ENOSPC || e.to_errno() == libc::ENAMETOOLONG,
+                    "unexpected error for 255-char name: {e}"
+                );
+            }
+        }
+
+        // 256 chars exceeds ext4 limit — should fail
+        let name_256 = "b".repeat(256);
+        let err = fs
+            .create(&cx, root, OsStr::new(&name_256), 0o644, 0, 0)
+            .unwrap_err();
+        assert!(
+            err.to_errno() == libc::ENAMETOOLONG
+                || err.to_errno() == libc::EINVAL
+                || err.to_errno() == libc::ENOSPC,
+            "expected name-too-long error for 256-char name, got errno {}",
+            err.to_errno()
+        );
+    }
+
+    #[test]
+    fn write_setattr_combined_chmod_and_truncate() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("combo.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+        fs.write(&cx, ino, 0, &[0x55; 80]).expect("write");
+
+        // Set both mode and size in a single setattr call
+        let new_attr = fs
+            .setattr(
+                &cx,
+                ino,
+                &SetAttrRequest {
+                    mode: Some(0o600),
+                    size: Some(40),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("combined setattr");
+        assert_eq!(new_attr.perm, 0o600);
+        assert_eq!(new_attr.size, 40);
+    }
+
+    #[test]
+    fn write_symlink_readlink_roundtrip_ext4() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Fast symlink (target fits inline)
+        let attr = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("fast_sym"),
+                Path::new("/etc/hosts"),
+                0,
+                0,
+            )
+            .expect("fast symlink");
+        assert_eq!(attr.kind, FileType::Symlink);
+        let target = fs.readlink(&cx, attr.ino).expect("readlink fast");
+        assert_eq!(target, b"/etc/hosts");
+
+        // Verify symlink shows in directory listing
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
+        assert!(
+            entries
+                .iter()
+                .map(DirEntry::name_str)
+                .any(|n| n == "fast_sym")
+        );
+    }
+
+    #[test]
+    fn write_unlink_decrements_nlink() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("nlink_test.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+        assert_eq!(attr.nlink, 1);
+
+        // Create a hard link
+        let link_attr = fs
+            .link(&cx, ino, root, OsStr::new("nlink_link"))
+            .expect("hard link");
+        assert_eq!(link_attr.nlink, 2);
+
+        // Unlink one — nlink should go back to 1
+        fs.unlink(&cx, root, OsStr::new("nlink_test.txt"))
+            .expect("unlink original");
+        let after = fs.getattr(&cx, ino).expect("getattr after unlink");
+        assert_eq!(after.nlink, 1);
+
+        // File should still be accessible via the link
+        let linked = fs
+            .lookup(&cx, root, OsStr::new("nlink_link"))
+            .expect("lookup link");
+        assert_eq!(linked.ino, ino);
     }
 
     // ── Crash recovery tests ──────────────────────────────────────────
@@ -15110,6 +15736,253 @@ mod tests {
         assert!(RequestOp::Write.is_write());
         assert!(RequestOp::Fsync.is_write());
         assert!(RequestOp::Fsyncdir.is_write());
+    }
+
+    // ── DegradationLevel Display + from_raw edge tests (bd-1k7g) ──────
+
+    #[test]
+    fn degradation_level_display_matches_label() {
+        let levels = [
+            (DegradationLevel::Normal, "normal"),
+            (DegradationLevel::Warning, "warning"),
+            (DegradationLevel::Degraded, "degraded"),
+            (DegradationLevel::Critical, "critical"),
+            (DegradationLevel::Emergency, "emergency"),
+        ];
+        for (level, expected) in &levels {
+            assert_eq!(format!("{level}"), *expected);
+        }
+    }
+
+    #[test]
+    fn degradation_level_from_raw_out_of_range_clamps_to_emergency() {
+        // Any raw value >= 5 should map to Emergency.
+        for raw in [5_u8, 10, 100, 255] {
+            let level = DegradationLevel::from_raw(raw);
+            assert_eq!(
+                level,
+                DegradationLevel::Emergency,
+                "from_raw({raw}) should be Emergency"
+            );
+        }
+    }
+
+    #[test]
+    fn degradation_fsm_debug_format() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = DegradationFsm::new(pressure, 2);
+        let debug = format!("{fsm:?}");
+        assert!(
+            debug.contains("DegradationFsm"),
+            "debug should contain type name: {debug}"
+        );
+    }
+
+    // ── PressureMonitor accessor tests (bd-1k7g) ────────────────────
+
+    #[test]
+    fn pressure_monitor_budget_returns_headroom() {
+        let pressure = Arc::new(SystemPressure::with_headroom(0.75));
+        let monitor = PressureMonitor::new(Arc::clone(&pressure), 1);
+        let headroom = monitor.budget().current_headroom();
+        assert!(
+            (headroom - 0.75).abs() < f32::EPSILON,
+            "budget().current_headroom() should reflect initial headroom, got {headroom}"
+        );
+    }
+
+    #[test]
+    fn pressure_monitor_add_policy_calls_apply_on_tick() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TestPolicy {
+            applied: AtomicBool,
+        }
+        impl DegradationPolicy for TestPolicy {
+            fn apply(&self, _headroom: f32) {
+                self.applied.store(true, Ordering::Relaxed);
+            }
+            #[expect(clippy::unnecessary_literal_bound)]
+            fn name(&self) -> &str {
+                "test-policy"
+            }
+        }
+
+        let pressure = Arc::new(SystemPressure::with_headroom(0.4));
+        let monitor = PressureMonitor::new(Arc::clone(&pressure), 1);
+
+        let policy = Arc::new(TestPolicy {
+            applied: AtomicBool::new(false),
+        });
+        monitor.add_policy(Arc::clone(&policy) as Arc<dyn DegradationPolicy>);
+
+        // Tick should call apply on the policy.
+        monitor.fsm().tick();
+        assert!(
+            policy.applied.load(Ordering::Relaxed),
+            "policy.apply() should have been called on tick"
+        );
+    }
+
+    // ── OpenFs MVCC wrapper method tests (bd-1k7g) ──────────────────
+
+    #[test]
+    fn open_fs_mvcc_stage_block_write_and_commit() {
+        let image = build_ext4_image(2); // 4K blocks
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = BlockNumber(5);
+        let bs = fs.block_size() as usize;
+
+        // Stage a write via the OpenFs wrapper method.
+        let mut txn = fs.begin_transaction();
+        fs.stage_block_write(&mut txn, block, vec![0xCC; bs]);
+
+        // Commit and verify.
+        let seq = fs.commit_transaction(txn).expect("commit");
+        assert!(seq.0 > 0);
+
+        // Read back via snapshot.
+        let data = fs
+            .read_block_at_snapshot(&cx, block, fs.current_snapshot())
+            .expect("read after commit");
+        assert_eq!(data, vec![0xCC; bs]);
+    }
+
+    #[test]
+    fn open_fs_mvcc_record_read_and_latest_version() {
+        let image = build_ext4_image(2);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = BlockNumber(3);
+
+        // Initially no committed version.
+        assert_eq!(fs.latest_block_version(block), CommitSeq(0));
+
+        // Commit a write.
+        let bs = fs.block_size() as usize;
+        let mut txn = fs.begin_transaction();
+        fs.stage_block_write(&mut txn, block, vec![0xAA; bs]);
+        let seq = fs.commit_transaction(txn).expect("commit");
+
+        // latest_block_version should now return the commit seq.
+        assert_eq!(fs.latest_block_version(block), seq);
+
+        // Use record_read in an SSI transaction.
+        let mut txn2 = fs.begin_transaction();
+        fs.record_read(&mut txn2, block, seq);
+        assert_eq!(txn2.read_set().len(), 1);
+    }
+
+    #[test]
+    fn open_fs_mvcc_prune_versions() {
+        let image = build_ext4_image(2);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = BlockNumber(4);
+        let bs = fs.block_size() as usize;
+
+        // Commit several versions.
+        for val in 0..5_u8 {
+            let mut txn = fs.begin_transaction();
+            fs.stage_block_write(&mut txn, block, vec![val; bs]);
+            fs.commit_transaction(txn).expect("commit");
+        }
+
+        // Prune should return a watermark (CommitSeq is always valid).
+        let watermark = fs.prune_mvcc_versions();
+        // After 5 commits with no active snapshots, watermark should advance.
+        // (The exact value depends on the MvccStore pruning strategy.)
+        let _ = watermark; // Verify it returns without panic.
+    }
+
+    #[test]
+    fn open_fs_commit_transaction_ssi_no_conflict() {
+        let image = build_ext4_image(2);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = BlockNumber(6);
+        let bs = fs.block_size() as usize;
+
+        // Write + read tracking with SSI commit (no conflict).
+        let version = fs.latest_block_version(block);
+        let mut txn = fs.begin_transaction();
+        fs.record_read(&mut txn, block, version);
+        fs.stage_block_write(&mut txn, block, vec![0xDD; bs]);
+
+        let seq = fs.commit_transaction_ssi(txn).expect("ssi commit");
+        assert!(seq.0 > 0);
+
+        // Verify data visible.
+        let data = fs
+            .read_block_at_snapshot(&cx, block, fs.current_snapshot())
+            .expect("read after ssi commit");
+        assert_eq!(data, vec![0xDD; bs]);
+    }
+
+    #[test]
+    fn open_fs_commit_transaction_ssi_detects_conflict() {
+        let image = build_ext4_image(2);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = BlockNumber(7);
+        let bs = fs.block_size() as usize;
+
+        // T1 and T2 both read block 7, then both try to write it.
+        let v0 = fs.latest_block_version(block);
+        let mut t1 = fs.begin_transaction();
+        let mut t2 = fs.begin_transaction();
+
+        fs.record_read(&mut t1, block, v0);
+        fs.stage_block_write(&mut t1, block, vec![0x11; bs]);
+
+        fs.record_read(&mut t2, block, v0);
+        fs.stage_block_write(&mut t2, block, vec![0x22; bs]);
+
+        // T1 commits first (succeeds).
+        fs.commit_transaction_ssi(t1).expect("t1 ssi commit");
+
+        // T2 should conflict (read-write dependency).
+        let err = fs
+            .commit_transaction_ssi(t2)
+            .expect_err("t2 should conflict");
+        assert!(
+            matches!(
+                err,
+                CommitError::Conflict { .. } | CommitError::SsiConflict { .. }
+            ),
+            "expected conflict error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn open_fs_has_jbd2_writer_and_writable_flags() {
+        let image = build_ext4_image(2);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        assert!(!fs.has_jbd2_writer());
+        assert!(!fs.is_writable());
+
+        fs.attach_jbd2_writer(Jbd2Writer::new(
+            ffs_journal::JournalRegion {
+                start: BlockNumber(16),
+                blocks: 8,
+            },
+            1,
+        ));
+        assert!(fs.has_jbd2_writer());
     }
 
     // ── Btrfs write-path integration tests ────────────────────────────
