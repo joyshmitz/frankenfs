@@ -6980,6 +6980,245 @@ mod tests {
         assert_eq!(normalized_alignment(4096), 4096);
     }
 
+    // ── Additional edge-case hardening tests ──────────────────────────
+
+    #[test]
+    fn aligned_vec_large_alignment() {
+        let v = AlignedVec::new(64, 1024);
+        assert_eq!(v.len(), 64);
+        assert_eq!(v.alignment(), 1024);
+        assert_eq!(v.as_slice().len(), 64);
+        let ptr = v.as_slice().as_ptr() as usize;
+        assert_eq!(ptr % 1024, 0, "should be 1024-byte aligned");
+    }
+
+    #[test]
+    fn aligned_vec_non_power_of_two_alignment_rounds_up() {
+        let v = AlignedVec::new(32, 7); // 7 → 8
+        assert_eq!(v.alignment(), 8);
+    }
+
+    #[test]
+    fn aligned_vec_mut_slice_writes_persist() {
+        let mut v = AlignedVec::new(8, 1);
+        v.as_mut_slice().fill(0xAB);
+        assert!(v.as_slice().iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn aligned_vec_into_vec_zero_offset_no_copy() {
+        let v = AlignedVec::new(16, 1);
+        let vec = v.into_vec();
+        assert_eq!(vec.len(), 16);
+    }
+
+    #[test]
+    fn aligned_vec_eq_ignores_alignment() {
+        let a = AlignedVec::from_vec(vec![1, 2, 3], 4);
+        let b = AlignedVec::from_vec(vec![1, 2, 3], 8);
+        assert_eq!(
+            a, b,
+            "equality should be content-based, not alignment-based"
+        );
+    }
+
+    #[test]
+    fn block_buf_len_matches_content() {
+        let buf = BlockBuf::new(vec![0; 512]);
+        assert_eq!(buf.len(), 512);
+        assert!(!buf.is_empty());
+
+        let empty = BlockBuf::new(Vec::new());
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn block_buf_eq_by_content() {
+        let a = BlockBuf::new(vec![0xAA; 128]);
+        let b = BlockBuf::new(vec![0xAA; 128]);
+        assert_eq!(a, b);
+
+        let c = BlockBuf::new(vec![0xBB; 128]);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn block_buf_alignment_is_page_aligned() {
+        let buf = BlockBuf::new(vec![0; 4096]);
+        assert_eq!(buf.alignment(), DEFAULT_BLOCK_ALIGNMENT);
+    }
+
+    #[test]
+    fn block_buf_clone_ref_shares_data() {
+        let buf = BlockBuf::new(vec![0xFF; 64]);
+        let cloned = buf.clone_ref();
+        assert_eq!(buf.as_slice(), cloned.as_slice());
+        // They share the same Arc, so modifying one doesn't affect the other
+        // (CoW on make_mut).
+    }
+
+    #[test]
+    fn block_buf_zeroed_is_all_zeros() {
+        let buf = BlockBuf::zeroed(4096);
+        assert!(buf.as_slice().iter().all(|&b| b == 0));
+        assert_eq!(buf.len(), 4096);
+    }
+
+    #[test]
+    fn cache_metrics_hit_ratio_all_hits() {
+        let m = CacheMetrics {
+            hits: 100,
+            misses: 0,
+            evictions: 0,
+            dirty_flushes: 0,
+            t1_len: 0,
+            t2_len: 0,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 0,
+            dirty_blocks: 0,
+            dirty_bytes: 0,
+            oldest_dirty_age_ticks: None,
+            capacity: 10,
+            p: 5,
+        };
+        assert!((m.hit_ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cache_metrics_dirty_ratio_at_capacity() {
+        let m = CacheMetrics {
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            dirty_flushes: 0,
+            t1_len: 0,
+            t2_len: 0,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 10,
+            dirty_blocks: 10,
+            dirty_bytes: 40960,
+            oldest_dirty_age_ticks: Some(0),
+            capacity: 10,
+            p: 5,
+        };
+        assert!((m.dirty_ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn arc_write_policy_debug_and_eq() {
+        assert_eq!(ArcWritePolicy::WriteThrough, ArcWritePolicy::WriteThrough);
+        assert_ne!(ArcWritePolicy::WriteThrough, ArcWritePolicy::WriteBack);
+        let _ = format!("{:?}", ArcWritePolicy::WriteBack);
+    }
+
+    #[test]
+    fn memory_pressure_all_variants_target_fractions() {
+        // Ensure all 5 variants produce distinct target capacities for capacity 100.
+        let cap = 100;
+        let targets: Vec<usize> = [
+            MemoryPressure::None,
+            MemoryPressure::Low,
+            MemoryPressure::Medium,
+            MemoryPressure::High,
+            MemoryPressure::Critical,
+        ]
+        .iter()
+        .map(|p| p.target_capacity(cap))
+        .collect();
+
+        // Should be monotonically decreasing.
+        for w in targets.windows(2) {
+            assert!(w[0] >= w[1], "targets should decrease: {:?}", targets);
+        }
+        assert_eq!(targets[0], 100); // None → full capacity
+    }
+
+    #[test]
+    fn memory_pressure_critical_clamps_to_one() {
+        // Even with a small capacity, target should be at least 1.
+        assert_eq!(MemoryPressure::Critical.target_capacity(1), 1);
+        assert_eq!(MemoryPressure::Critical.target_capacity(2), 1);
+    }
+
+    #[test]
+    fn flush_daemon_config_default_validates() {
+        let cfg = FlushDaemonConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn flush_daemon_config_valid_custom() {
+        let cfg = FlushDaemonConfig {
+            interval: Duration::from_millis(100),
+            batch_size: 64,
+            budget_poll_quota_threshold: 128,
+            reduced_batch_size: 16,
+            budget_yield_sleep: Duration::from_millis(5),
+            high_watermark: 0.7,
+            critical_watermark: 0.9,
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn flush_pin_token_debug_format() {
+        let noop = FlushPinToken::noop();
+        let dbg = format!("{noop:?}");
+        assert!(dbg.contains("FlushPinToken"));
+        assert!(dbg.contains("false")); // is_some() = false for noop
+
+        let real = FlushPinToken::new(42_u32);
+        let dbg = format!("{real:?}");
+        assert!(dbg.contains("true")); // is_some() = true
+    }
+
+    #[test]
+    fn flush_pin_token_default_is_noop() {
+        let token = FlushPinToken::default();
+        assert!(token.is_noop());
+    }
+
+    #[test]
+    fn fault_mode_debug_and_eq() {
+        assert_eq!(FaultMode::OneShot, FaultMode::OneShot);
+        assert_ne!(FaultMode::OneShot, FaultMode::Persistent);
+        let _ = format!("{:?}", FaultMode::Persistent);
+    }
+
+    #[test]
+    fn fault_target_debug_and_eq() {
+        let r = FaultTarget::Read(BlockNumber(5));
+        let w = FaultTarget::Write(BlockNumber(5));
+        assert_ne!(r, w);
+        assert_eq!(r, FaultTarget::Read(BlockNumber(5)));
+        let _ = format!("{r:?}");
+    }
+
+    #[test]
+    fn throttle_config_default_is_zero_latency() {
+        let cfg = ThrottleConfig::default();
+        assert_eq!(cfg.read_latency, Duration::ZERO);
+        assert_eq!(cfg.write_latency, Duration::ZERO);
+        assert_eq!(cfg.bandwidth_bps, 0);
+        assert_eq!(cfg.stall_probability, 0.0);
+        assert!(cfg.respect_deadline);
+    }
+
+    #[test]
+    fn cache_pressure_report_debug_and_clone() {
+        let report = CachePressureReport {
+            current_size: 100,
+            target_size: 80,
+            dirty_count: 10,
+            eviction_rate: 0.05,
+        };
+        let cloned = report;
+        assert_eq!(report.current_size, cloned.current_size);
+        let _ = format!("{report:?}");
+    }
+
     // ── Property-based tests (proptest) ────────────────────────────────
 
     use proptest::prelude::*;

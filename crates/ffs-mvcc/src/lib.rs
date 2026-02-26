@@ -6305,6 +6305,226 @@ mod tests {
         assert!(!cfg.throttle_sleep.is_zero());
     }
 
+    // ── Additional edge-case hardening tests ────────────────────────────
+
+    #[test]
+    fn commit_error_clone_and_eq() {
+        let e = CommitError::Conflict {
+            block: BlockNumber(1),
+            snapshot: CommitSeq(0),
+            observed: CommitSeq(2),
+        };
+        let e2 = e.clone();
+        assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn commit_error_chain_backpressure_display() {
+        let e = CommitError::ChainBackpressure {
+            block: BlockNumber(10),
+            chain_len: 100,
+            cap: 50,
+            critical_len: 80,
+            watermark: CommitSeq(5),
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("backpressure"));
+        assert!(msg.contains("10"));
+    }
+
+    #[test]
+    fn block_version_serde_round_trip() {
+        let v = BlockVersion {
+            block: BlockNumber(42),
+            commit_seq: CommitSeq(7),
+            writer: TxnId(3),
+            data: VersionData::Full(vec![0xBE; 16]),
+        };
+        let json = serde_json::to_string(&v).expect("serialize");
+        let parsed: BlockVersion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.block, v.block);
+        assert_eq!(parsed.commit_seq, v.commit_seq);
+        assert_eq!(parsed.writer, v.writer);
+        assert_eq!(parsed.bytes_inline().unwrap(), &[0xBE; 16]);
+    }
+
+    #[test]
+    fn block_version_clone_and_eq() {
+        let v = BlockVersion {
+            block: BlockNumber(0),
+            commit_seq: CommitSeq(1),
+            writer: TxnId(1),
+            data: VersionData::Full(vec![1, 2, 3]),
+        };
+        let v2 = v.clone();
+        assert_eq!(v, v2);
+    }
+
+    #[test]
+    fn physical_block_version_serde_round_trip() {
+        let pv = PhysicalBlockVersion {
+            logical: BlockNumber(10),
+            physical: BlockNumber(200),
+            commit_seq: CommitSeq(5),
+            writer: TxnId(2),
+        };
+        let json = serde_json::to_string(&pv).expect("serialize");
+        let parsed: PhysicalBlockVersion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, pv);
+    }
+
+    #[test]
+    fn physical_block_version_clone_and_copy() {
+        let pv = PhysicalBlockVersion {
+            logical: BlockNumber(0),
+            physical: BlockNumber(100),
+            commit_seq: CommitSeq(1),
+            writer: TxnId(1),
+        };
+        let pv2 = pv; // Copy
+        assert_eq!(pv, pv2);
+    }
+
+    #[test]
+    fn ebr_version_stats_serde_round_trip() {
+        let s = EbrVersionStats {
+            retired_versions: 42,
+            reclaimed_versions: 10,
+        };
+        let json = serde_json::to_string(&s).expect("serialize");
+        let parsed: EbrVersionStats = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn ebr_version_stats_default_is_zero() {
+        let s = EbrVersionStats::default();
+        assert_eq!(s.retired_versions, 0);
+        assert_eq!(s.reclaimed_versions, 0);
+        assert_eq!(s.pending_versions(), 0);
+    }
+
+    #[test]
+    fn block_version_stats_serde_round_trip() {
+        let s = BlockVersionStats {
+            tracked_blocks: 10,
+            max_chain_length: 5,
+            chains_over_cap: 1,
+            chains_over_critical: 0,
+            chain_cap: Some(100),
+            critical_chain_length: Some(80),
+        };
+        let json = serde_json::to_string(&s).expect("serialize");
+        let parsed: BlockVersionStats = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn block_version_stats_default_is_zero() {
+        let s = BlockVersionStats::default();
+        assert_eq!(s.tracked_blocks, 0);
+        assert_eq!(s.max_chain_length, 0);
+        assert_eq!(s.chains_over_cap, 0);
+        assert_eq!(s.chain_cap, None);
+    }
+
+    #[test]
+    fn gc_backpressure_config_clone_and_eq() {
+        let cfg = GcBackpressureConfig::default();
+        let cfg2 = cfg;
+        assert_eq!(cfg, cfg2);
+        let _ = format!("{cfg:?}");
+    }
+
+    #[test]
+    fn transaction_multiple_reads_different_blocks() {
+        let store = MvccStore::new();
+        let mut txn = Transaction::new(TxnId(1), store.current_snapshot());
+        txn.record_read(BlockNumber(0), CommitSeq(1));
+        txn.record_read(BlockNumber(1), CommitSeq(2));
+        txn.record_read(BlockNumber(2), CommitSeq(3));
+        assert_eq!(txn.read_set().len(), 3);
+    }
+
+    #[test]
+    fn transaction_serde_round_trip() {
+        let store = MvccStore::new();
+        let mut txn = Transaction::new(TxnId(42), store.current_snapshot());
+        txn.stage_write(BlockNumber(5), vec![0xAA; 8]);
+        let json = serde_json::to_string(&txn).expect("serialize");
+        let parsed: Transaction = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.id(), TxnId(42));
+        assert_eq!(parsed.pending_writes(), 1);
+    }
+
+    #[test]
+    fn mvcc_store_read_latest_version_after_overwrites() {
+        let mut store = MvccStore::new();
+        for i in 0..5_u8 {
+            let mut txn = store.begin();
+            txn.stage_write(BlockNumber(0), vec![i; 4]);
+            store.commit(txn).expect("commit");
+        }
+        let snap = store.current_snapshot();
+        let data = store.read_visible(BlockNumber(0), snap).expect("visible");
+        assert_eq!(&*data, &[4_u8; 4]);
+    }
+
+    #[test]
+    fn mvcc_store_read_at_old_snapshot() {
+        let mut store = MvccStore::new();
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(0), vec![1; 4]);
+        store.commit(txn).expect("commit");
+
+        let old_snap = store.current_snapshot();
+
+        let mut txn2 = store.begin();
+        txn2.stage_write(BlockNumber(0), vec![2; 4]);
+        store.commit(txn2).expect("commit");
+
+        // Old snapshot should see the first version.
+        let data = store
+            .read_visible(BlockNumber(0), old_snap)
+            .expect("visible");
+        assert_eq!(&*data, &[1_u8; 4]);
+    }
+
+    #[test]
+    fn mvcc_store_multiple_blocks_isolated() {
+        let mut store = MvccStore::new();
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(0), vec![0xAA; 4]);
+        txn.stage_write(BlockNumber(1), vec![0xBB; 4]);
+        store.commit(txn).expect("commit");
+
+        let snap = store.current_snapshot();
+        assert_eq!(
+            &*store.read_visible(BlockNumber(0), snap).unwrap(),
+            &[0xAA; 4]
+        );
+        assert_eq!(
+            &*store.read_visible(BlockNumber(1), snap).unwrap(),
+            &[0xBB; 4]
+        );
+        assert!(store.read_visible(BlockNumber(2), snap).is_none());
+    }
+
+    #[test]
+    fn mvcc_store_fcw_conflict_detected() {
+        let mut store = MvccStore::new();
+        let mut txn1 = store.begin();
+        txn1.stage_write(BlockNumber(0), vec![1; 4]);
+        store.commit(txn1).expect("commit txn1");
+
+        // txn2 started before txn1 committed, writing to same block.
+        let snap_before = Snapshot { high: CommitSeq(0) };
+        let mut txn2 = Transaction::new(TxnId(2), snap_before);
+        txn2.stage_write(BlockNumber(0), vec![2; 4]);
+        let result = store.commit(txn2);
+        assert!(result.is_err(), "should detect FCW conflict on block 0");
+    }
+
     // ── Property-based tests (proptest) ────────────────────────────────────
 
     use proptest::prelude::*;
