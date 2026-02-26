@@ -1826,7 +1826,7 @@ mod tests {
         let copy = loc; // Copy
         assert_eq!(copy.block, BlockNumber(42));
         assert_eq!(copy.byte_offset, 256);
-        let cloned = loc.clone();
+        let cloned = loc; // Copy (same as clone for Copy types)
         assert_eq!(cloned.block, loc.block);
         let _ = format!("{loc:?}");
     }

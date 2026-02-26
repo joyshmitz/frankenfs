@@ -2687,7 +2687,7 @@ mod tests {
         // Total physical blocks across all parts must equal original.
         let ext = Ext4Extent {
             logical_block: 0,
-            raw_len: 20 | UNWRITTEN_FLAG,
+            raw_len: 0x0014 | UNWRITTEN_FLAG,
             physical_start: 1000,
         };
         let parts = split_for_mark_written(&ext, 5, 15, 20, 10);

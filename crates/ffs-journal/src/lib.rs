@@ -3459,8 +3459,6 @@ mod tests {
         };
         let copy = seg; // Copy
         assert_eq!(seg, copy);
-        let cloned = seg.clone();
-        assert_eq!(seg, cloned);
         let _ = format!("{seg:?}");
 
         let different = JournalSegment {

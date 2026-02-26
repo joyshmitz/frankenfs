@@ -1011,7 +1011,7 @@ mod tests {
         };
         let b = a; // Copy
         assert_eq!(a, b);
-        let c = a.clone();
+        let c = a; // Copy (same as clone for Copy types)
         assert_eq!(a, c);
         let _ = format!("{a:?}");
 

@@ -859,7 +859,7 @@ mod tests {
         };
         let copy = e; // Copy
         assert_eq!(e, copy);
-        let cloned = e.clone();
+        let cloned = e; // Copy (same as clone for Copy types)
         assert_eq!(e, cloned);
         let _ = format!("{e:?}");
 
