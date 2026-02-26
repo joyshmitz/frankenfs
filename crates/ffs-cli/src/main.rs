@@ -6905,15 +6905,8 @@ mod tests {
 
     #[test]
     fn cli_parses_dump_dir_command_with_hex() {
-        let cli = Cli::try_parse_from([
-            "ffs",
-            "dump",
-            "dir",
-            "2",
-            "--hex",
-            "/tmp/fs.img",
-        ])
-        .expect("dump dir command should parse");
+        let cli = Cli::try_parse_from(["ffs", "dump", "dir", "2", "--hex", "/tmp/fs.img"])
+            .expect("dump dir command should parse");
 
         match cli.command {
             Command::Dump { command } => match command {
@@ -7300,13 +7293,8 @@ mod tests {
 
     #[test]
     fn cli_rejects_mkfs_non_numeric_size_mb() {
-        let result = Cli::try_parse_from([
-            "ffs",
-            "mkfs",
-            "--size-mb",
-            "sixty-four",
-            "/tmp/new.img",
-        ]);
+        let result =
+            Cli::try_parse_from(["ffs", "mkfs", "--size-mb", "sixty-four", "/tmp/new.img"]);
         assert!(result.is_err(), "mkfs --size-mb must be numeric");
     }
 

@@ -1172,8 +1172,15 @@ mod tests {
     fn write_entry_offset_overflow_errors() {
         let mut block = vec![0u8; 32];
         // offset + rec_len overflows.
-        let err = write_entry(&mut block, usize::MAX - 2, 1, 16, Ext4FileType::RegFile, b"a")
-            .unwrap_err();
+        let err = write_entry(
+            &mut block,
+            usize::MAX - 2,
+            1,
+            16,
+            Ext4FileType::RegFile,
+            b"a",
+        )
+        .unwrap_err();
         assert!(matches!(err, FfsError::Format(_)));
     }
 
@@ -1249,7 +1256,7 @@ mod tests {
         for (i, name) in names.iter().enumerate() {
             add_entry(
                 &mut block,
-                (i + 100) as u32,
+                u32::try_from(i + 100).expect("fits u32"),
                 name.as_bytes(),
                 Ext4FileType::RegFile,
             )
@@ -1338,7 +1345,8 @@ mod tests {
         for size in [64, 128, 256, 512, 1024, 2048, 4096] {
             let mut block = vec![0u8; size];
             init_dir_block(&mut block, 11, 2).unwrap();
-            let (entries, _) = parse_dir_block(&block, size as u32).unwrap();
+            let (entries, _) =
+                parse_dir_block(&block, u32::try_from(size).expect("fits u32")).unwrap();
             assert_eq!(entries.len(), 2, "block size {size}");
             assert_eq!(entries[0].name, b".");
             assert_eq!(entries[0].inode, 11);

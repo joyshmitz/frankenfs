@@ -14611,6 +14611,375 @@ mod tests {
         assert_eq!(linked.ino, ino);
     }
 
+    // ── Write-path edge-case tests (bd-43w8) ─────────────────────────
+
+    #[test]
+    fn write_sequential_appends_grow_file() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("append.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // Write three sequential chunks
+        fs.write(&cx, ino, 0, b"aaa").expect("write1");
+        fs.write(&cx, ino, 3, b"bbb").expect("write2");
+        fs.write(&cx, ino, 6, b"ccc").expect("write3");
+
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
+        assert_eq!(&data[..9], b"aaabbbccc");
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 9);
+    }
+
+    #[test]
+    fn write_partial_overwrite_middle() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("overwrite_mid.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        fs.write(&cx, ino, 0, b"AAAAABBBBBCCCCC")
+            .expect("initial write");
+        // Overwrite just the middle
+        fs.write(&cx, ino, 5, b"XXXXX").expect("overwrite middle");
+
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
+        assert_eq!(&data[..15], b"AAAAAXXXXXCCCCC");
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 15);
+    }
+
+    #[test]
+    fn write_sparse_hole_reads_as_zeros() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("sparse_hole.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // Write at offset 8192 (past the first block), leaving a hole
+        fs.write(&cx, ino, 8192, b"DATA").expect("write past hole");
+
+        let ga = fs.getattr(&cx, ino).expect("getattr");
+        assert_eq!(ga.size, 8196);
+
+        // Read the hole — should be zeros
+        let data = fs.read(&cx, ino, 0, 8192).expect("read hole");
+        assert!(data.iter().all(|&b| b == 0), "hole should be zero-filled");
+
+        // Read the written data
+        let tail = fs.read(&cx, ino, 8192, 10).expect("read past hole");
+        assert_eq!(&tail[..4], b"DATA");
+    }
+
+    #[test]
+    fn write_truncate_then_rewrite() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("trunc_rewrite.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        fs.write(&cx, ino, 0, b"original data here")
+            .expect("first write");
+        assert_eq!(fs.getattr(&cx, ino).expect("ga1").size, 18);
+
+        // Truncate to 0
+        fs.setattr(&cx, ino, Some(0o644), None, None, Some(0), None, None)
+            .expect("truncate");
+        assert_eq!(fs.getattr(&cx, ino).expect("ga2").size, 0);
+
+        // Write new data
+        fs.write(&cx, ino, 0, b"new").expect("rewrite");
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
+        assert_eq!(&data[..3], b"new");
+        assert_eq!(fs.getattr(&cx, ino).expect("ga3").size, 3);
+    }
+
+    #[test]
+    fn write_rename_over_existing_replaces_and_preserves_data() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let old = fs
+            .create(&cx, root, OsStr::new("winner.txt"), 0o644, 0, 0)
+            .expect("create winner");
+        fs.write(&cx, old.ino, 0, b"winner_data")
+            .expect("write winner");
+
+        let _target = fs
+            .create(&cx, root, OsStr::new("loser.txt"), 0o644, 0, 0)
+            .expect("create loser");
+
+        // Rename winner over loser
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("winner.txt"),
+            root,
+            OsStr::new("loser.txt"),
+        )
+        .expect("rename over");
+
+        // Old name should be gone
+        let gone = fs.lookup(&cx, root, OsStr::new("winner.txt"));
+        assert!(gone.is_err(), "old name should not exist");
+
+        // New name should have old data
+        let found = fs
+            .lookup(&cx, root, OsStr::new("loser.txt"))
+            .expect("lookup new name");
+        assert_eq!(found.ino, old.ino);
+        let data = fs.read(&cx, found.ino, 0, 4096).expect("read");
+        assert_eq!(&data[..11], b"winner_data");
+    }
+
+    #[test]
+    fn write_rmdir_empty_succeeds() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.mkdir(&cx, root, OsStr::new("empty_rm"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        fs.rmdir(&cx, root, OsStr::new("empty_rm"))
+            .expect("rmdir empty");
+
+        let gone = fs.lookup(&cx, root, OsStr::new("empty_rm"));
+        assert!(gone.is_err(), "directory should be gone");
+    }
+
+    #[test]
+    fn write_link_shares_data() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("link_src.txt"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, b"shared_data").expect("write");
+
+        fs.link(&cx, attr.ino, root, OsStr::new("link_dst.txt"))
+            .expect("hard link");
+
+        // Write via original name
+        fs.write(&cx, attr.ino, 0, b"UPDATED_DAT")
+            .expect("overwrite via original");
+
+        // Read via the link — should see updated data
+        let linked = fs
+            .lookup(&cx, root, OsStr::new("link_dst.txt"))
+            .expect("lookup link");
+        let data = fs.read(&cx, linked.ino, 0, 4096).expect("read via link");
+        assert_eq!(&data[..11], b"UPDATED_DAT");
+    }
+
+    #[test]
+    fn write_rename_directory_across_parents() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let dir_a = fs
+            .mkdir(&cx, root, OsStr::new("src_parent"), 0o755, 0, 0)
+            .expect("mkdir src_parent");
+        let dir_b = fs
+            .mkdir(&cx, root, OsStr::new("dst_parent"), 0o755, 0, 0)
+            .expect("mkdir dst_parent");
+        let child = fs
+            .mkdir(&cx, dir_a.ino, OsStr::new("child"), 0o755, 0, 0)
+            .expect("mkdir child");
+
+        // Rename child directory from src_parent to dst_parent
+        fs.rename(
+            &cx,
+            dir_a.ino,
+            OsStr::new("child"),
+            dir_b.ino,
+            OsStr::new("child"),
+        )
+        .expect("rename dir across parents");
+
+        // Verify child is gone from old parent
+        let gone = fs.lookup(&cx, dir_a.ino, OsStr::new("child"));
+        assert!(gone.is_err(), "child should be gone from src");
+
+        // Verify child exists in new parent
+        let found = fs
+            .lookup(&cx, dir_b.ino, OsStr::new("child"))
+            .expect("lookup in dst");
+        assert_eq!(found.ino, child.ino);
+    }
+
+    #[test]
+    fn write_setattr_utimes_updates_timestamps() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("utimes.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        let epoch_plus_1000 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+
+        fs.setattr(
+            &cx,
+            ino,
+            None,
+            None,
+            None,
+            None,
+            Some(epoch_plus_1000),
+            Some(epoch_plus_1000),
+        )
+        .expect("set times");
+
+        let ga = fs.getattr(&cx, ino).expect("getattr");
+        assert_eq!(ga.atime, epoch_plus_1000);
+        assert_eq!(ga.mtime, epoch_plus_1000);
+    }
+
+    #[test]
+    fn write_fallocate_punch_hole_zeroes_data() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("punch.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // Fill file with non-zero data
+        let fill = vec![0xAB_u8; 8192];
+        fs.write(&cx, ino, 0, &fill).expect("fill");
+
+        // Punch a hole in the middle (offset 2048, length 2048)
+        fs.fallocate(
+            &cx,
+            ino,
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+            2048,
+            2048,
+        )
+        .expect("punch hole");
+
+        // Size should be preserved
+        assert_eq!(fs.getattr(&cx, ino).expect("ga").size, 8192);
+
+        // Read the hole — should be zeros
+        let data = fs.read(&cx, ino, 0, 8192).expect("read");
+        assert!(
+            data[2048..4096].iter().all(|&b| b == 0),
+            "punched region should be zeroed"
+        );
+        // Data outside the hole should be intact
+        assert!(
+            data[..2048].iter().all(|&b| b == 0xAB),
+            "data before hole should be intact"
+        );
+        assert!(
+            data[4096..8192].iter().all(|&b| b == 0xAB),
+            "data after hole should be intact"
+        );
+    }
+
+    #[test]
+    fn write_create_many_files_dir_expansion() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Create enough files to potentially require directory block expansion
+        let mut created_names = Vec::new();
+        for i in 0..50 {
+            let name = format!("file_{i:03}.txt");
+            fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
+                .unwrap_or_else(|e| panic!("create {name}: {e}"));
+            created_names.push(name);
+        }
+
+        // Verify all files exist via readdir
+        let entries = fs.readdir(&cx, root).expect("readdir");
+        for name in &created_names {
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.name.to_string_lossy() == name.as_str()),
+                "expected {name} in readdir"
+            );
+        }
+    }
+
+    #[test]
+    fn write_to_symlink_target_through_inode() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let target = fs
+            .create(&cx, root, OsStr::new("sym_target.txt"), 0o644, 0, 0)
+            .expect("create target");
+        fs.write(&cx, target.ino, 0, b"target_content")
+            .expect("write target");
+
+        let link = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("sym_link"),
+                std::path::Path::new("sym_target.txt"),
+                0,
+                0,
+            )
+            .expect("symlink");
+
+        // Readlink should return the target path
+        let readlink = fs.readlink(&cx, link.ino).expect("readlink");
+        assert_eq!(readlink, std::path::PathBuf::from("sym_target.txt"));
+
+        // The symlink inode itself is not a regular file — writing to it should fail
+        let err = fs.write(&cx, link.ino, 0, b"bad");
+        assert!(err.is_err(), "writing to symlink inode should fail");
+    }
+
     // ── Crash recovery tests ──────────────────────────────────────────
 
     /// Build an ext4 image with a specific superblock `state` value.

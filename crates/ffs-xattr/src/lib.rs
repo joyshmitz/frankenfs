@@ -1247,8 +1247,14 @@ mod tests {
                 value: b"v3".to_vec(),
             },
         ];
-        assert_eq!(entry_index(&entries, EXT4_XATTR_INDEX_USER, b"foo"), Some(0));
-        assert_eq!(entry_index(&entries, EXT4_XATTR_INDEX_USER, b"bar"), Some(1));
+        assert_eq!(
+            entry_index(&entries, EXT4_XATTR_INDEX_USER, b"foo"),
+            Some(0)
+        );
+        assert_eq!(
+            entry_index(&entries, EXT4_XATTR_INDEX_USER, b"bar"),
+            Some(1)
+        );
         assert_eq!(
             entry_index(&entries, EXT4_XATTR_INDEX_TRUSTED, b"foo"),
             Some(2)
@@ -1308,14 +1314,7 @@ mod tests {
             ..Default::default()
         };
 
-        set_xattr(
-            &mut inode,
-            Some(&mut external),
-            "user.keep",
-            b"v1",
-            access,
-        )
-        .unwrap();
+        set_xattr(&mut inode, Some(&mut external), "user.keep", b"v1", access).unwrap();
         set_xattr(
             &mut inode,
             Some(&mut external),
@@ -1352,14 +1351,7 @@ mod tests {
             has_cap_sys_admin: true,
         };
 
-        set_xattr(
-            &mut inode,
-            Some(&mut external),
-            "user.tag",
-            b"u",
-            admin,
-        )
-        .unwrap();
+        set_xattr(&mut inode, Some(&mut external), "user.tag", b"u", admin).unwrap();
         set_xattr(
             &mut inode,
             Some(&mut external),
@@ -1368,21 +1360,11 @@ mod tests {
             admin,
         )
         .unwrap();
-        set_xattr(
-            &mut inode,
-            Some(&mut external),
-            "trusted.meta",
-            b"t",
-            admin,
-        )
-        .unwrap();
+        set_xattr(&mut inode, Some(&mut external), "trusted.meta", b"t", admin).unwrap();
 
         let mut names = list_xattrs(&inode, Some(&external)).unwrap();
         names.sort();
-        assert_eq!(
-            names,
-            vec!["security.selinux", "trusted.meta", "user.tag"]
-        );
+        assert_eq!(names, vec!["security.selinux", "trusted.meta", "user.tag"]);
 
         assert_eq!(
             get_xattr(&inode, Some(&external), "user.tag").unwrap(),
