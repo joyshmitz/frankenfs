@@ -321,12 +321,20 @@ pub fn insert(
     let indexes = parse_index_entries(root_bytes, &header)?;
     let child_pos = find_index_pos(&indexes, extent.logical_block);
     let child_block = indexes[child_pos].leaf_block;
+    let old_separator = indexes[child_pos].logical_block;
 
     let split = insert_descend(cx, dev, child_block, header.depth - 1, extent, alloc)?;
+
+    // If the new extent became the first key in the child subtree,
+    // the parent separator must be updated to match.
+    let separator_changed = extent.logical_block < old_separator;
 
     if let Some(new_entry) = split {
         // Child was split, need to insert new index entry in root.
         let mut indexes = parse_index_entries(root_bytes, &header)?;
+        if separator_changed {
+            indexes[child_pos].logical_block = extent.logical_block;
+        }
 
         if usize::from(header.entries) < usize::from(header.max_entries) {
             // Space in root for new index entry.
@@ -342,6 +350,11 @@ pub fn insert(
             );
             grow_root_index(cx, dev, root_bytes, &header, &indexes, alloc)
         }
+    } else if separator_changed {
+        let mut indexes = parse_index_entries(root_bytes, &header)?;
+        indexes[child_pos].logical_block = extent.logical_block;
+        write_index_root(root_bytes, &header, &indexes);
+        Ok(())
     } else {
         Ok(())
     }
@@ -415,11 +428,19 @@ fn insert_descend(
         let indexes = parse_index_entries(data, &header)?;
         let child_pos = find_index_pos(&indexes, extent.logical_block);
         let child_block = indexes[child_pos].leaf_block;
+        let old_separator = indexes[child_pos].logical_block;
 
         let split = insert_descend(cx, dev, child_block, depth - 1, extent, alloc)?;
 
+        // If the new extent became the first key in the child subtree,
+        // the parent separator must be updated to match.
+        let separator_changed = extent.logical_block < old_separator;
+
         if let Some(new_entry) = split {
             let mut indexes = parse_index_entries(data, &header)?;
+            if separator_changed {
+                indexes[child_pos].logical_block = extent.logical_block;
+            }
 
             if usize::from(header.entries) < usize::from(max) {
                 // Space in this node.
@@ -459,6 +480,12 @@ fn insert_descend(
                     leaf_block: new_block.0,
                 }))
             }
+        } else if separator_changed {
+            let mut indexes = parse_index_entries(data, &header)?;
+            indexes[child_pos].logical_block = extent.logical_block;
+            let new_data = serialize_index_block(block_size, depth, &indexes);
+            dev.write_block(cx, BlockNumber(block), &new_data)?;
+            Ok(None)
         } else {
             Ok(None)
         }
@@ -3401,6 +3428,62 @@ mod tests {
         assert_tree_invariants(&cx, &dev, &root).unwrap();
     }
 
+    /// Regression: inserting a key smaller than the existing separator must
+    /// update the parent's separator key.  Minimal repro from proptest.
+    #[test]
+    fn insert_smaller_key_updates_parent_separator() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(10_000);
+
+        // Fill root leaf to capacity (4 entries), then insert one more to
+        // trigger grow_root_leaf and create a depth-1 tree.
+        for logical in [88, 90, 92, 94, 86] {
+            insert(
+                &cx,
+                &dev,
+                &mut root,
+                Ext4Extent {
+                    logical_block: logical,
+                    raw_len: 1,
+                    physical_start: 500_000 + u64::from(logical),
+                },
+                &mut alloc,
+            )
+            .unwrap();
+        }
+
+        // Now insert key 0, which is smaller than any existing separator.
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 0,
+                raw_len: 1,
+                physical_start: 500_000,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+
+        // The separator key must be updated — invariants must hold.
+        assert_tree_invariants(&cx, &dev, &root).unwrap();
+
+        // Key 0 must be searchable.
+        match search(&cx, &dev, &root, 0).unwrap() {
+            SearchResult::Found {
+                extent,
+                offset_in_extent,
+            } => {
+                assert_eq!(extent.logical_block, 0);
+                assert_eq!(offset_in_extent, 0);
+            }
+            SearchResult::Hole { .. } => panic!("expected Found for key 0, got Hole"),
+        }
+    }
+
     #[test]
     fn search_at_u32_max_logical_block() {
         let cx = test_cx();
@@ -3419,6 +3502,310 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
+
+        /// Insert then search: every inserted extent is found with correct physical address.
+        #[test]
+        fn proptest_insert_search_roundtrip(
+            keys in proptest::collection::vec(0_u16..500_u16, 1..40),
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let mut root = make_root();
+            let mut alloc = SeqAllocator::new(10_000);
+            let mut inserted = BTreeMap::<u32, u64>::new();
+
+            for key in keys {
+                let logical = u32::from(key) * 3;
+                if inserted.contains_key(&logical) {
+                    continue;
+                }
+                let physical = 500_000 + u64::from(logical);
+                let ext = Ext4Extent {
+                    logical_block: logical,
+                    raw_len: 1,
+                    physical_start: physical,
+                };
+                insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+                inserted.insert(logical, physical);
+            }
+
+            // Every inserted key must be searchable.
+            for (&logical, &physical) in &inserted {
+                match search(&cx, &dev, &root, logical).unwrap() {
+                    SearchResult::Found { extent, offset_in_extent } => {
+                        prop_assert_eq!(offset_in_extent, 0);
+                        prop_assert_eq!(extent.physical_start, physical);
+                    }
+                    SearchResult::Hole { .. } => {
+                        prop_assert!(false, "expected found at logical {}, got hole", logical);
+                    }
+                }
+            }
+        }
+
+        /// Walk returns exactly the same set of extents that were inserted.
+        #[test]
+        fn proptest_walk_completeness(
+            keys in proptest::collection::vec(0_u16..400_u16, 1..60),
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let mut root = make_root();
+            let mut alloc = SeqAllocator::new(10_000);
+            let mut model = BTreeMap::<u32, u64>::new();
+
+            for key in keys {
+                let logical = u32::from(key) * 2;
+                if model.contains_key(&logical) {
+                    continue;
+                }
+                let physical = 2_000_000 + u64::from(logical);
+                let ext = Ext4Extent {
+                    logical_block: logical,
+                    raw_len: 1,
+                    physical_start: physical,
+                };
+                insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+                model.insert(logical, physical);
+            }
+
+            let mut walked = Vec::new();
+            walk(&cx, &dev, &root, &mut |ext| {
+                walked.push((ext.logical_block, ext.physical_start));
+                Ok(())
+            }).unwrap();
+
+            prop_assert_eq!(walked.len(), model.len(), "walk count mismatch");
+            for (logical, physical) in &walked {
+                prop_assert_eq!(
+                    model.get(logical).copied(),
+                    Some(*physical),
+                    "walk returned extent not in model: logical={}", logical
+                );
+            }
+            // Walk must be sorted.
+            for pair in walked.windows(2) {
+                prop_assert!(pair[0].0 < pair[1].0, "walk not sorted");
+            }
+        }
+
+        /// Delete range removes exactly the expected keys and leaves others intact.
+        #[test]
+        fn proptest_delete_range_precise(
+            keys in proptest::collection::vec(0_u16..200_u16, 5..40),
+            del_start in 0_u16..400_u16,
+            del_count in 1_u16..30_u16,
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let mut root = make_root();
+            let mut alloc = SeqAllocator::new(10_000);
+            let mut model = BTreeMap::<u32, u64>::new();
+
+            for key in keys {
+                let logical = u32::from(key) * 2;
+                if model.contains_key(&logical) {
+                    continue;
+                }
+                let physical = 3_000_000 + u64::from(logical);
+                let ext = Ext4Extent {
+                    logical_block: logical,
+                    raw_len: 1,
+                    physical_start: physical,
+                };
+                insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+                model.insert(logical, physical);
+            }
+
+            let ds = u32::from(del_start);
+            let dc = u32::from(del_count);
+            delete_range(&cx, &dev, &mut root, ds, dc, &mut alloc).unwrap();
+            model.retain(|logical, _| *logical < ds || *logical >= ds.saturating_add(dc));
+
+            // Verify remaining keys are intact.
+            for (&logical, &physical) in &model {
+                match search(&cx, &dev, &root, logical).unwrap() {
+                    SearchResult::Found { extent, .. } => {
+                        prop_assert_eq!(extent.physical_start, physical);
+                    }
+                    SearchResult::Hole { .. } => {
+                        prop_assert!(false, "expected key {} after delete, got hole", logical);
+                    }
+                }
+            }
+
+            // Verify deleted keys are gone.
+            for probe in ds..ds.saturating_add(dc) {
+                if !model.contains_key(&probe) {
+                    match search(&cx, &dev, &root, probe).unwrap() {
+                        SearchResult::Hole { .. } => {}
+                        SearchResult::Found { extent, offset_in_extent } => {
+                            // It's OK if a multi-block extent covers this probe from a
+                            // lower key — we only inserted 1-block extents, so this
+                            // should not happen.
+                            prop_assert!(false,
+                                "expected hole at {} after delete, found extent at logical {} offset {}",
+                                probe, extent.logical_block, offset_in_extent
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Interleaved inserts and deletes: tree invariants and walk match model.
+        #[test]
+        fn proptest_interleaved_insert_delete_invariants(
+            ops in proptest::collection::vec(
+                prop_oneof![
+                    (0_u16..300_u16).prop_map(|k| (true, k, 0_u16)),
+                    (0_u16..600_u16, 1_u16..20_u16).prop_map(|(s, c)| (false, s, c)),
+                ],
+                1..60,
+            ),
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let mut root = make_root();
+            let mut alloc = SeqAllocator::new(10_000);
+            let mut model = BTreeMap::<u32, u64>::new();
+
+            for (is_insert, key_or_start, count) in ops {
+                if is_insert {
+                    let logical = u32::from(key_or_start) * 2;
+                    if model.contains_key(&logical) {
+                        continue;
+                    }
+                    let physical = 4_000_000 + u64::from(logical);
+                    let ext = Ext4Extent {
+                        logical_block: logical,
+                        raw_len: 1,
+                        physical_start: physical,
+                    };
+                    insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+                    model.insert(logical, physical);
+                } else {
+                    let ds = u32::from(key_or_start);
+                    let dc = u32::from(count);
+                    delete_range(&cx, &dev, &mut root, ds, dc, &mut alloc).unwrap();
+                    model.retain(|logical, _| *logical < ds || *logical >= ds.saturating_add(dc));
+                }
+
+                assert_tree_invariants(&cx, &dev, &root).unwrap();
+            }
+
+            // Final walk must match model.
+            let mut walked = Vec::new();
+            walk(&cx, &dev, &root, &mut |ext| {
+                walked.push(ext.logical_block);
+                Ok(())
+            }).unwrap();
+            let model_keys: Vec<u32> = model.keys().copied().collect();
+            prop_assert_eq!(walked, model_keys);
+        }
+
+        /// Search for non-existent keys returns holes.
+        #[test]
+        fn proptest_search_missing_returns_hole(
+            keys in proptest::collection::vec(0_u16..100_u16, 1..20),
+            probe in 201_u32..400_u32,
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let mut root = make_root();
+            let mut alloc = SeqAllocator::new(10_000);
+
+            // Insert only in 0..200 range (even numbers).
+            for key in keys {
+                let logical = u32::from(key) * 2;
+                let ext = Ext4Extent {
+                    logical_block: logical,
+                    raw_len: 1,
+                    physical_start: 5_000_000 + u64::from(logical),
+                };
+                // Ignore duplicates.
+                let _ = insert(&cx, &dev, &mut root, ext, &mut alloc);
+            }
+
+            // Probe is above all inserted keys; must be a hole.
+            match search(&cx, &dev, &root, probe).unwrap() {
+                SearchResult::Hole { hole_len } => {
+                    prop_assert!(hole_len > 0, "hole_len must be positive");
+                }
+                SearchResult::Found { extent, .. } => {
+                    prop_assert!(false, "expected hole at {}, found extent at {}", probe, extent.logical_block);
+                }
+            }
+        }
+
+        /// Multi-block extents: inserting wider extents and searching within them.
+        #[test]
+        fn proptest_multi_block_extent_search(
+            logical_start in 0_u32..100,
+            extent_len in 2_u16..50,
+            offset_frac in 0.0_f64..1.0,
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let mut root = make_root();
+            let mut alloc = SeqAllocator::new(10_000);
+
+            let physical = 6_000_000_u64;
+            let ext = Ext4Extent {
+                logical_block: logical_start,
+                raw_len: extent_len,
+                physical_start: physical,
+            };
+            insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+
+            let actual_len = u32::from(ext.actual_len());
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let offset = ((actual_len as f64) * offset_frac) as u32;
+            let probe = logical_start + offset.min(actual_len - 1);
+
+            match search(&cx, &dev, &root, probe).unwrap() {
+                SearchResult::Found { extent, offset_in_extent } => {
+                    prop_assert_eq!(extent.logical_block, logical_start);
+                    prop_assert_eq!(extent.physical_start, physical);
+                    prop_assert_eq!(offset_in_extent, probe - logical_start);
+                }
+                SearchResult::Hole { .. } => {
+                    prop_assert!(false, "expected found at probe {} within extent [{}, {})",
+                        probe, logical_start, logical_start + actual_len);
+                }
+            }
+        }
+
+        /// Insert + delete_all + walk yields empty tree.
+        #[test]
+        fn proptest_insert_delete_all_yields_empty(
+            keys in proptest::collection::vec(0_u16..200_u16, 1..30),
+        ) {
+            let cx = test_cx();
+            let dev = MemBlockDevice::new(4096);
+            let mut root = make_root();
+            let mut alloc = SeqAllocator::new(10_000);
+
+            for key in &keys {
+                let logical = u32::from(*key) * 2;
+                let ext = Ext4Extent {
+                    logical_block: logical,
+                    raw_len: 1,
+                    physical_start: 7_000_000 + u64::from(logical),
+                };
+                let _ = insert(&cx, &dev, &mut root, ext, &mut alloc);
+            }
+
+            // Delete the entire possible range.
+            delete_range(&cx, &dev, &mut root, 0, u32::MAX, &mut alloc).unwrap();
+
+            let mut walked = Vec::new();
+            walk(&cx, &dev, &root, &mut |ext| {
+                walked.push(*ext);
+                Ok(())
+            }).unwrap();
+            prop_assert!(walked.is_empty(), "tree should be empty after deleting all");
+        }
 
         #[test]
         fn mutation_sequences_preserve_sorted_non_overlapping_tree(
