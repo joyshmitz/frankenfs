@@ -18,7 +18,7 @@ use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
 use ffs_fuse::{MountOptions, mount_background};
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
 use std::thread;

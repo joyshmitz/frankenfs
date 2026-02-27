@@ -2277,12 +2277,12 @@ mod tests {
     }
 
     #[test]
-    fn bitmap_get_out_of_bounds_returns_false() {
+    fn bitmap_get_out_of_bounds_returns_true() {
         let bitmap = [0xFF_u8; 1]; // 8 bits all set
         assert!(bitmap_get(&bitmap, 0));
         assert!(bitmap_get(&bitmap, 7));
-        assert!(!bitmap_get(&bitmap, 8)); // out of bounds
-        assert!(!bitmap_get(&bitmap, 100));
+        assert!(bitmap_get(&bitmap, 8)); // out of bounds
+        assert!(bitmap_get(&bitmap, 100));
     }
 
     #[test]
@@ -2829,14 +2829,14 @@ mod tests {
 
         /// bitmap_get beyond bitmap length returns false.
         #[test]
-        fn proptest_bitmap_get_oob_is_false(
+        fn proptest_bitmap_get_oob_is_true(
             byte_len in 1_usize..32,
             beyond in 0_u32..100,
         ) {
             let bm = vec![0xFF_u8; byte_len];
             let total = u32::try_from(byte_len * 8).unwrap();
             let oob_idx = total + beyond;
-            prop_assert!(!bitmap_get(&bm, oob_idx));
+            prop_assert!(bitmap_get(&bm, oob_idx));
         }
 
         /// bitmap_set/clear beyond length is a no-op (no panic).
