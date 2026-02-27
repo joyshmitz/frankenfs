@@ -1180,11 +1180,22 @@ impl MvccStore {
                 }
                 checks_performed += 1;
                 if record.write_set.contains(&block) {
-                    found_conflict = Some((record.commit_seq, record.txn_id));
+                    found_conflict = Some((
+                        record.commit_seq,
+                        record.txn_id,
+                        record.snapshot.high,
+                        record.read_set.len(),
+                    ));
                     break;
                 }
             }
-            if let Some((write_version, concurrent_txn)) = found_conflict {
+            if let Some((
+                write_version,
+                concurrent_txn,
+                writer_snapshot_high,
+                writer_read_set_size,
+            )) = found_conflict
+            {
                 debug!(
                     target: "ffs::ssi",
                     txn_id = txn.id.0,
@@ -1192,6 +1203,8 @@ impl MvccStore {
                     pivot_block = block.0,
                     read_version = read_version.0,
                     write_version = write_version.0,
+                    writer_snapshot_high = writer_snapshot_high.0,
+                    writer_read_set_size,
                     cycle = %format_args!(
                         "T{} -rw[block {}]-> T{}: T{} read block {} at seq {}, T{} committed write at seq {}",
                         txn.id.0, block.0, concurrent_txn.0,

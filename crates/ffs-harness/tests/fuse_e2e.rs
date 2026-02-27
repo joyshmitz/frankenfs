@@ -7,8 +7,8 @@
 //! - `mkfs.ext4` and `debugfs` on `$PATH`
 //! - `fusermount3` permission to mount (may fail in containers)
 //!
-//! A small read-only smoke subset runs by default and returns early when
-//! prerequisites are unavailable.
+//! A small smoke subset (read-only + lightweight rw ext4/btrfs) runs by
+//! default and returns early when prerequisites are unavailable.
 //! Heavier write-path and btrfs coverage remains gated with
 //! `#[ignore = "requires /dev/fuse"]` and can be run explicitly via
 //! `cargo test -- --ignored` or `cargo test -- --include-ignored`.
@@ -349,7 +349,6 @@ fn with_rw_mount(f: impl FnOnce(&Path)) {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_create_and_read_file() {
     with_rw_mount(|mnt| {
         let path = mnt.join("newfile.txt");
@@ -420,7 +419,6 @@ fn fuse_write_with_offset_extends_file_and_zero_fills_gap() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_mkdir_and_nested_create() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("newdir");
@@ -451,7 +449,6 @@ fn fuse_mkdir_existing_directory_fails() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_unlink_removes_file() {
     with_rw_mount(|mnt| {
         // hello.txt exists from create_test_image.
@@ -721,7 +718,6 @@ fn with_btrfs_rw_mount(f: impl FnOnce(&Path)) {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_readdir_root() {
     with_btrfs_rw_mount(|mnt| {
         // Empty btrfs should at least have . and ..
@@ -737,7 +733,6 @@ fn btrfs_fuse_readdir_root() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_create_and_read_file() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");

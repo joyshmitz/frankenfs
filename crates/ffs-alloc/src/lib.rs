@@ -36,7 +36,7 @@ pub fn bitmap_get(bitmap: &[u8], idx: u32) -> bool {
     let byte_idx = (idx / 8) as usize;
     let bit_idx = idx % 8;
     if byte_idx >= bitmap.len() {
-        return false;
+        return true;
     }
     (bitmap[byte_idx] >> bit_idx) & 1 == 1
 }
