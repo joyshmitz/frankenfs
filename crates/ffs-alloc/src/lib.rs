@@ -2011,6 +2011,25 @@ mod tests {
     }
 
     #[test]
+    fn absolute_to_group_block_caps_at_u32_max_on_overflow() {
+        let geo = FsGeometry {
+            block_size: 4096,
+            blocks_per_group: 8192,
+            inodes_per_group: 2048,
+            inode_size: 256,
+            first_data_block: 1,
+            total_blocks: u64::MAX,
+            total_inodes: 0,
+            group_count: u32::MAX,
+        };
+        // Block number large enough that group index exceeds u32.
+        let huge_block = BlockNumber(u64::from(u32::MAX) * 8192 + 8193);
+        let (g, _off) = geo.absolute_to_group_block(huge_block);
+        // Group should be capped at u32::MAX instead of silently truncating.
+        assert_eq!(g, GroupNumber(u32::MAX));
+    }
+
+    #[test]
     fn orlov_all_groups_exhausted_returns_nospace() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);

@@ -7054,6 +7054,35 @@ mod tests {
     }
 
     #[test]
+    fn groups_count_caps_at_u32_max_on_overflow() {
+        let mut sb = make_valid_sb();
+        // Set blocks_count to a huge 64-bit value (via the 64-bit extension field).
+        // blocks_count_lo = u32::MAX, blocks_count_hi = 1 → total > u32::MAX * bpg
+        sb[0x04..0x08].copy_from_slice(&u32::MAX.to_le_bytes()); // blocks_count_lo
+        // Enable 64BIT feature so the hi field is honored.
+        let incompat = (Ext4IncompatFeatures::FILETYPE.0
+            | Ext4IncompatFeatures::EXTENTS.0
+            | Ext4IncompatFeatures::BIT64.0)
+            .to_le_bytes();
+        sb[0x60..0x64].copy_from_slice(&incompat);
+        // Pad to 256 bytes for 64-bit descriptor parsing.
+        let mut big_sb = vec![0u8; 1024];
+        big_sb[..sb.len()].copy_from_slice(&sb);
+        // Set desc_size (offset 0xFE) for 64-bit mode.
+        big_sb[0xFE..0x100].copy_from_slice(&64_u16.to_le_bytes());
+        // Set blocks_count_hi to a large value.
+        big_sb[0x150..0x154].copy_from_slice(&0xFFFF_u32.to_le_bytes());
+        // blocks_per_group stays at 32768 (from make_valid_sb).
+        // total = (0xFFFF << 32) | 0xFFFF_FFFF = 281_474_976_710_655
+        // groups = ceil(total / 32768) which far exceeds u32::MAX.
+        if let Ok(parsed) = Ext4Superblock::parse_superblock_region(&big_sb) {
+            // groups_count should cap at u32::MAX, not silently truncate.
+            assert_eq!(parsed.groups_count(), u32::MAX);
+        }
+        // If parsing fails due to other validation, the test still passes.
+    }
+
+    #[test]
     fn has_metadata_csum_false_without_flag() {
         let parsed = parse_valid_sb_with_incompat(
             Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0,

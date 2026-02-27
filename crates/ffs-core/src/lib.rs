@@ -4301,7 +4301,7 @@ impl OpenFs {
         const PUNCH_HOLE: i32 = 0x02;
         const EINVAL_ERRNO: i32 = 22;
         #[allow(clippy::cast_possible_truncation)] // 32767 always fits u32
-        const MAX_EXTENT_COUNT: u32 = (u16::MAX >> 1) as u32;
+        const MAX_EXTENT_COUNT: u32 = 32_767;
 
         let alloc_mutex = self.require_alloc_state()?;
         let block_dev = self.block_device_adapter();
