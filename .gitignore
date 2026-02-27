@@ -70,5 +70,15 @@ crates/*/target/
 # Beads history snapshots
 .beads/.br_history/
 
+# Ephemeral VFS operation test output (empty files from debug runs)
+/FsOps
+/OpenFs
+
+# Beads recovery artifacts
+.beads/*.orphan_*
+.beads/*.corrupt_*
+.beads/*.pre_recovery_*
+.beads/*.recover*.sql
+
 # Claude local settings
 .claude/settings.local.json
