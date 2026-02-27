@@ -5641,6 +5641,15 @@ impl OpenFs {
         let (secs, nanos) = Self::btrfs_now_timestamp();
 
         let mut alloc = alloc_mutex.lock();
+
+        // Check for duplicate name — POSIX requires EEXIST.
+        if self
+            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
+            .is_ok()
+        {
+            return Err(FfsError::Exists);
+        }
+
         let new_oid = alloc.next_objectid;
         alloc.next_objectid = alloc.next_objectid.saturating_add(1);
 
@@ -5707,6 +5716,15 @@ impl OpenFs {
         let (secs, nanos) = Self::btrfs_now_timestamp();
 
         let mut alloc = alloc_mutex.lock();
+
+        // Check for duplicate name — POSIX requires EEXIST.
+        if self
+            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
+            .is_ok()
+        {
+            return Err(FfsError::Exists);
+        }
+
         let new_oid = alloc.next_objectid;
         alloc.next_objectid = alloc.next_objectid.saturating_add(1);
 
@@ -5944,6 +5962,15 @@ impl OpenFs {
         let target_bytes = target.as_os_str().as_encoded_bytes();
 
         let mut alloc = alloc_mutex.lock();
+
+        // Check for duplicate name — POSIX requires EEXIST.
+        if self
+            .btrfs_lookup_dir_entry(&alloc, parent_oid, name)
+            .is_ok()
+        {
+            return Err(FfsError::Exists);
+        }
+
         let new_oid = alloc.next_objectid;
         alloc.next_objectid = alloc.next_objectid.saturating_add(1);
 
@@ -16123,8 +16150,45 @@ mod tests {
         assert_eq!(found.kind, FileType::RegularFile);
     }
 
-    // NOTE: btrfs_write_create_duplicate_name_returns_eexist removed —
-    // btrfs create does not yet enforce name uniqueness at this layer.
+    #[test]
+    fn btrfs_write_create_duplicate_name_returns_eexist() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        // Create a file.
+        ops.create(&cx, root, OsStr::new("dup.txt"), 0o644, 0, 0)
+            .expect("first create");
+
+        // Attempt to create with the same name — must return EEXIST.
+        let err = ops
+            .create(&cx, root, OsStr::new("dup.txt"), 0o644, 0, 0)
+            .expect_err("duplicate create should fail");
+        assert!(
+            matches!(err, FfsError::Exists),
+            "expected Exists, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_mkdir_duplicate_name_returns_eexist() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+
+        // Create a directory.
+        ops.mkdir(&cx, root, OsStr::new("subdir"), 0o755, 0, 0)
+            .expect("first mkdir");
+
+        // Attempt to create with the same name — must return EEXIST.
+        let err = ops
+            .mkdir(&cx, root, OsStr::new("subdir"), 0o755, 0, 0)
+            .expect_err("duplicate mkdir should fail");
+        assert!(
+            matches!(err, FfsError::Exists),
+            "expected Exists, got {err:?}"
+        );
+    }
 
     #[test]
     fn btrfs_write_on_directory_returns_eisdir() {

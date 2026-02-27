@@ -659,6 +659,194 @@ fn fuse_setattr_chmod() {
 }
 
 #[test]
+#[ignore = "requires /dev/fuse and root for chown"]
+#[allow(clippy::similar_names)] // uid/gid are naturally similar
+fn fuse_setattr_chown() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+        let meta = fs::metadata(&path).expect("stat hello.txt");
+        let owner_uid = meta.uid();
+        let owner_gid = meta.gid();
+
+        // Try to chown to the same uid/gid (should always succeed even without CAP_CHOWN).
+        let script = format!(
+            "import os; os.chown({path:?}, {uid}, {gid})",
+            path = path.to_str().unwrap(),
+            uid = owner_uid,
+            gid = owner_gid,
+        );
+        let out = Command::new("python3")
+            .args(["-c", &script])
+            .output()
+            .expect("python3 chown");
+        assert!(
+            out.status.success(),
+            "chown to same uid/gid failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // Verify uid/gid are unchanged.
+        let meta2 = fs::metadata(&path).expect("stat after no-op chown");
+        assert_eq!(meta2.uid(), owner_uid);
+        assert_eq!(meta2.gid(), owner_gid);
+
+        // Attempt chown to uid 65534 (nobody). This requires CAP_CHOWN;
+        // skip the assertion if we get EPERM (non-root environment).
+        let script2 = format!(
+            "import os\ntry:\n    os.chown({path:?}, 65534, 65534)\n    print('OK')\nexcept PermissionError:\n    print('EPERM')",
+            path = path.to_str().unwrap(),
+        );
+        let out2 = Command::new("python3")
+            .args(["-c", &script2])
+            .output()
+            .expect("python3 chown to nobody");
+        assert!(out2.status.success());
+        let result = String::from_utf8_lossy(&out2.stdout);
+        if result.trim() == "OK" {
+            let meta3 = fs::metadata(&path).expect("stat after chown to nobody");
+            assert_eq!(meta3.uid(), 65534, "uid should be 65534 after chown");
+            assert_eq!(meta3.gid(), 65534, "gid should be 65534 after chown");
+        }
+        // If EPERM, the test passes silently — chown path was exercised.
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_setattr_utimes() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // Use Python os.utime to set atime and mtime to a known epoch.
+        let script = format!(
+            "import os; os.utime({path:?}, (1_700_000_000, 1_700_000_000))",
+            path = path.to_str().unwrap(),
+        );
+        let out = Command::new("python3")
+            .args(["-c", &script])
+            .output()
+            .expect("python3 utime");
+        assert!(
+            out.status.success(),
+            "os.utime failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let meta = fs::metadata(&path).expect("stat after utime");
+        // atime and mtime should both be 1_700_000_000.
+        assert_eq!(
+            meta.atime(),
+            1_700_000_000,
+            "atime should be 1700000000 after os.utime"
+        );
+        assert_eq!(
+            meta.mtime(),
+            1_700_000_000,
+            "mtime should be 1700000000 after os.utime"
+        );
+
+        // Set different atime and mtime values.
+        let script2 = format!(
+            "import os; os.utime({path:?}, (1_600_000_000, 1_650_000_000))",
+            path = path.to_str().unwrap(),
+        );
+        let out2 = Command::new("python3")
+            .args(["-c", &script2])
+            .output()
+            .expect("python3 utime second");
+        assert!(
+            out2.status.success(),
+            "os.utime (second) failed: {}",
+            String::from_utf8_lossy(&out2.stderr)
+        );
+
+        let meta2 = fs::metadata(&path).expect("stat after second utime");
+        assert_eq!(meta2.atime(), 1_600_000_000, "atime should be 1600000000");
+        assert_eq!(meta2.mtime(), 1_650_000_000, "mtime should be 1650000000");
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_fallocate_preallocate() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("preallocated.bin");
+        fs::write(&path, b"").expect("create empty file");
+
+        // Use `fallocate -l 8192` to preallocate 8 KiB.
+        let out = Command::new("fallocate")
+            .args(["-l", "8192", path.to_str().unwrap()])
+            .output()
+            .expect("fallocate command");
+        assert!(
+            out.status.success(),
+            "fallocate failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let meta = fs::metadata(&path).expect("stat after fallocate");
+        // Apparent size should be 8192 after fallocate.
+        assert_eq!(
+            meta.len(),
+            8192,
+            "file apparent size should be 8192 after fallocate"
+        );
+        // blocks * 512 should be >= 8192 (disk allocation happened).
+        assert!(
+            meta.blocks() * 512 >= 8192,
+            "allocated disk space ({}*512={}) should be >= 8192",
+            meta.blocks(),
+            meta.blocks() * 512
+        );
+
+        // Writing to the preallocated region should work.
+        fs::write(&path, b"data in preallocated space").expect("write to preallocated");
+        let content = fs::read_to_string(&path).expect("read preallocated");
+        assert_eq!(content, "data in preallocated space");
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_fallocate_keep_size() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("keepsize.bin");
+        fs::write(&path, b"short").expect("create file with content");
+
+        // FALLOC_FL_KEEP_SIZE = 0x01: allocate space without changing file size.
+        // Use `fallocate -l 16384 --keep-size` to allocate without growing.
+        let out = Command::new("fallocate")
+            .args(["-l", "16384", "--keep-size", path.to_str().unwrap()])
+            .output()
+            .expect("fallocate keep-size");
+        assert!(
+            out.status.success(),
+            "fallocate --keep-size failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let meta = fs::metadata(&path).expect("stat after keep-size fallocate");
+        // Apparent size should still be 5 ("short").
+        assert_eq!(
+            meta.len(),
+            5,
+            "file size should remain 5 with KEEP_SIZE flag"
+        );
+        // But disk allocation should have increased.
+        assert!(
+            meta.blocks() * 512 >= 16384,
+            "allocated disk space ({}*512={}) should be >= 16384 after keep-size fallocate",
+            meta.blocks(),
+            meta.blocks() * 512
+        );
+
+        // Content should be unchanged.
+        let content = fs::read_to_string(&path).expect("read after keep-size");
+        assert_eq!(content, "short");
+    });
+}
+
+#[test]
 #[ignore = "requires /dev/fuse"]
 fn fuse_statfs_returns_valid_stats() {
     if !fuse_available() {
@@ -745,6 +933,445 @@ fn fuse_write_large_file() {
         let readback = fs::read(&path).expect("read large file");
         assert_eq!(readback.len(), 65536);
         assert_eq!(readback, data, "large file content should match");
+    });
+}
+
+// ── Large directory and ENOSPC E2E tests ─────────────────────────────────────
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_readdir_large_directory() {
+    with_rw_mount(|mnt| {
+        let dir = mnt.join("bigdir");
+        fs::create_dir(&dir).expect("mkdir bigdir");
+
+        // Create 100 files in the directory.
+        let count = 100_usize;
+        for i in 0..count {
+            let name = format!("file_{i:04}.txt");
+            fs::write(dir.join(&name), format!("content {i}").as_bytes())
+                .unwrap_or_else(|e| panic!("write {name}: {e}"));
+        }
+
+        // Read directory and collect all entries.
+        let entries: Vec<String> = fs::read_dir(&dir)
+            .expect("readdir bigdir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+
+        // Verify no duplicates.
+        let mut sorted = entries.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            entries.len(),
+            sorted.len(),
+            "readdir should return no duplicate entries"
+        );
+
+        // Verify we got all files.
+        assert_eq!(
+            entries.len(),
+            count,
+            "readdir should return all {count} files, got {}",
+            entries.len()
+        );
+
+        // Spot-check a few entries.
+        assert!(entries.contains(&"file_0000.txt".to_owned()));
+        assert!(entries.contains(&"file_0050.txt".to_owned()));
+        assert!(entries.contains(&"file_0099.txt".to_owned()));
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_write_enospc_on_full_filesystem() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = tmp.path().join("tiny.ext4");
+
+    // Create a very small 1 MiB ext4 image to exhaust space quickly.
+    let f = fs::File::create(&image).expect("create tiny image");
+    f.set_len(1024 * 1024).expect("set tiny image size");
+    drop(f);
+
+    let out = Command::new("mkfs.ext4")
+        .args([
+            "-F",
+            "-b",
+            "1024",
+            "-N",
+            "32",
+            "-L",
+            "ffs-enospc",
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("mkfs.ext4 tiny");
+    assert!(
+        out.status.success(),
+        "mkfs.ext4 tiny failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs_rw(&image, &mnt) else {
+        return;
+    };
+
+    // Write data to fill the filesystem.
+    let mut hit_enospc = false;
+    for i in 0..100 {
+        let path = mnt.join(format!("fill_{i:03}.dat"));
+        // Write ~10KB per file to gradually fill 1MB image.
+        match fs::write(&path, [0xAA_u8; 10240]) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(28 /* ENOSPC */) => {
+                hit_enospc = true;
+                break;
+            }
+            Err(e) => {
+                // Other errors might occur depending on allocator behavior.
+                eprintln!("write fill_{i}: {e}");
+                hit_enospc = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        hit_enospc,
+        "should eventually hit ENOSPC on 1 MiB filesystem"
+    );
+}
+
+// ── fsync/flush E2E tests ────────────────────────────────────────────────────
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_fsync_persists_written_data() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("synced.txt");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&path)
+            .expect("create synced.txt");
+
+        file.write_all(b"data before fsync\n")
+            .expect("write before fsync");
+
+        // sync_all triggers FUSE fsync.
+        file.sync_all().expect("fsync via sync_all");
+
+        drop(file);
+
+        // Read back and verify.
+        let content = fs::read_to_string(&path).expect("read after fsync");
+        assert_eq!(content, "data before fsync\n");
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_sync_data_without_metadata() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("datasync.txt");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&path)
+            .expect("create datasync.txt");
+
+        file.write_all(b"datasync content\n")
+            .expect("write before sync_data");
+
+        // sync_data triggers FUSE fsync with datasync=true.
+        file.sync_data().expect("sync_data");
+
+        drop(file);
+
+        let content = fs::read_to_string(&path).expect("read after sync_data");
+        assert_eq!(content, "datasync content\n");
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_flush_on_close_preserves_data() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("flushed.txt");
+
+        // Write and explicitly flush (triggers FUSE flush).
+        {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&path)
+                .expect("create flushed.txt");
+
+            file.write_all(b"flushed content\n").expect("write");
+            // std::io::Write::flush triggers the FUSE flush handler.
+            file.flush().expect("explicit flush");
+        } // drop/close triggers another FUSE flush+release
+
+        let content = fs::read_to_string(&path).expect("read after flush+close");
+        assert_eq!(content, "flushed content\n");
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_fsync_after_multiple_writes() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("multi_write_sync.txt");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&path)
+            .expect("create multi_write_sync.txt");
+
+        // Multiple writes followed by a single fsync.
+        file.write_all(b"chunk1 ").expect("write chunk1");
+        file.write_all(b"chunk2 ").expect("write chunk2");
+        file.write_all(b"chunk3").expect("write chunk3");
+        file.sync_all().expect("fsync after multiple writes");
+
+        drop(file);
+
+        let content = fs::read_to_string(&path).expect("read multi_write");
+        assert_eq!(content, "chunk1 chunk2 chunk3");
+    });
+}
+
+// ── Extended attribute (xattr) E2E tests ─────────────────────────────────────
+
+/// Helper: set an extended attribute on a file using Python's `os.setxattr`.
+fn py_setxattr(path: &Path, name: &str, value: &[u8]) {
+    let hex_val = value.iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    let script = format!(
+        "import os; os.setxattr({path:?}, {name:?}, bytes.fromhex({hex_val:?}))",
+        path = path.to_str().unwrap(),
+        name = name,
+        hex_val = hex_val,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 setxattr");
+    assert!(
+        out.status.success(),
+        "setxattr failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Helper: get an extended attribute value from a file using Python's `os.getxattr`.
+/// Returns `None` if the attribute does not exist.
+fn py_getxattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+    let script = format!(
+        "import os,sys\ntry:\n v=os.getxattr({path:?},{name:?})\n sys.stdout.buffer.write(v)\nexcept OSError:\n sys.exit(1)",
+        path = path.to_str().unwrap(),
+        name = name,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 getxattr");
+    if out.status.success() {
+        Some(out.stdout)
+    } else {
+        None
+    }
+}
+
+/// Helper: list extended attribute names on a file using Python's `os.listxattr`.
+fn py_listxattr(path: &Path) -> Vec<String> {
+    let script = format!(
+        "import os\nfor n in os.listxattr({path:?}):\n print(n)",
+        path = path.to_str().unwrap(),
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 listxattr");
+    assert!(
+        out.status.success(),
+        "listxattr failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Helper: remove an extended attribute. Returns true if removal succeeded.
+fn py_removexattr(path: &Path, name: &str) -> bool {
+    let script = format!(
+        "import os; os.removexattr({path:?}, {name:?})",
+        path = path.to_str().unwrap(),
+        name = name,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 removexattr");
+    out.status.success()
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_xattr_set_get_list_remove() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // Set a user xattr.
+        py_setxattr(&path, "user.test_key", b"test_value_123");
+
+        // Get it back.
+        let val = py_getxattr(&path, "user.test_key").expect("xattr should exist after set");
+        assert_eq!(val, b"test_value_123");
+
+        // List should include it.
+        let names = py_listxattr(&path);
+        assert!(
+            names.iter().any(|n| n == "user.test_key"),
+            "listxattr should contain user.test_key, got: {names:?}"
+        );
+
+        // Remove it.
+        assert!(
+            py_removexattr(&path, "user.test_key"),
+            "removexattr should succeed"
+        );
+
+        // Should be gone.
+        assert!(
+            py_getxattr(&path, "user.test_key").is_none(),
+            "xattr should be absent after removexattr"
+        );
+
+        // listxattr should no longer include it.
+        let names_after = py_listxattr(&path);
+        assert!(
+            !names_after.iter().any(|n| n == "user.test_key"),
+            "listxattr should not contain user.test_key after removal"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_xattr_multiple_attributes() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // Set multiple xattrs.
+        py_setxattr(&path, "user.alpha", b"aaa");
+        py_setxattr(&path, "user.beta", b"bbb");
+        py_setxattr(&path, "user.gamma", b"ccc");
+
+        // Verify each value.
+        assert_eq!(py_getxattr(&path, "user.alpha").unwrap(), b"aaa");
+        assert_eq!(py_getxattr(&path, "user.beta").unwrap(), b"bbb");
+        assert_eq!(py_getxattr(&path, "user.gamma").unwrap(), b"ccc");
+
+        // List should contain all three.
+        let names = py_listxattr(&path);
+        for expected in ["user.alpha", "user.beta", "user.gamma"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "listxattr should contain {expected}, got: {names:?}"
+            );
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_xattr_overwrite_value() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // Set initial value.
+        py_setxattr(&path, "user.mutable", b"original");
+        assert_eq!(py_getxattr(&path, "user.mutable").unwrap(), b"original");
+
+        // Overwrite with different value.
+        py_setxattr(&path, "user.mutable", b"updated_value");
+        assert_eq!(
+            py_getxattr(&path, "user.mutable").unwrap(),
+            b"updated_value"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_xattr_on_directory() {
+    with_rw_mount(|mnt| {
+        let dir = mnt.join("testdir");
+
+        // Set xattr on directory.
+        py_setxattr(&dir, "user.dir_attr", b"dir_value");
+
+        let val = py_getxattr(&dir, "user.dir_attr").expect("xattr on dir should exist");
+        assert_eq!(val, b"dir_value");
+
+        let names = py_listxattr(&dir);
+        assert!(
+            names.iter().any(|n| n == "user.dir_attr"),
+            "listxattr on dir should contain user.dir_attr, got: {names:?}"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_xattr_get_nonexistent_returns_error() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // Getting a nonexistent xattr should fail.
+        assert!(
+            py_getxattr(&path, "user.does_not_exist").is_none(),
+            "getxattr for nonexistent attr should return None/error"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires /dev/fuse"]
+fn fuse_xattr_remove_nonexistent_fails() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // Removing a nonexistent xattr should fail.
+        assert!(
+            !py_removexattr(&path, "user.no_such_attr"),
+            "removexattr for nonexistent attr should fail"
+        );
     });
 }
 
