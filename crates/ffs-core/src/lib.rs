@@ -11102,19 +11102,6 @@ mod tests {
         extent
     }
 
-    #[allow(dead_code)]
-    fn encode_btrfs_extent_prealloc(num_bytes: u64) -> [u8; 53] {
-        let mut extent = [0_u8; 53];
-        extent[0..8].copy_from_slice(&1_u64.to_le_bytes()); // generation
-        extent[8..16].copy_from_slice(&num_bytes.to_le_bytes()); // ram_bytes
-        extent[20] = BTRFS_FILE_EXTENT_PREALLOC;
-        extent[21..29].copy_from_slice(&0_u64.to_le_bytes()); // disk_bytenr (unused for prealloc)
-        extent[29..37].copy_from_slice(&num_bytes.to_le_bytes()); // disk_num_bytes
-        extent[37..45].copy_from_slice(&0_u64.to_le_bytes()); // extent_offset
-        extent[45..53].copy_from_slice(&num_bytes.to_le_bytes()); // num_bytes
-        extent
-    }
-
     /// Build a btrfs image with a single file containing an inline extent.
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::too_many_lines)]

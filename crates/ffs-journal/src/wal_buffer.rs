@@ -616,25 +616,6 @@ impl EpochManager {
     pub fn stamp(&self) -> u64 {
         self.epoch.current()
     }
-
-    #[allow(dead_code)]
-    fn advance(&self) -> u64 {
-        self.commits_in_epoch.store(0, Ordering::Release);
-        let new_epoch = self.epoch.advance();
-        {
-            let mut guard = self
-                .last_advance
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *guard = std::time::Instant::now();
-        }
-        tracing::debug!(
-            target: "ffs::wal_buffer",
-            new_epoch,
-            "epoch_advanced"
-        );
-        new_epoch
-    }
 }
 
 // ---------------------------------------------------------------------------

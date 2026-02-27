@@ -14,7 +14,7 @@ use cmd_repair::{
 };
 
 use anyhow::{Context, Result, bail};
-use asupersync::{Budget, Cx};
+use asupersync::Cx;
 use clap::{Parser, Subcommand, ValueEnum};
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
 use ffs_core::{
@@ -52,11 +52,6 @@ use tracing_subscriber::EnvFilter;
 #[must_use]
 pub fn cli_cx() -> Cx {
     Cx::for_request()
-}
-
-#[allow(dead_code)]
-fn cli_cx_with_timeout_secs(secs: u64) -> Cx {
-    Cx::for_request_with_budget(Budget::with_deadline_secs(secs))
 }
 
 // ── CLI definition ──────────────────────────────────────────────────────────
