@@ -149,6 +149,24 @@ impl RequestOp {
                 | Self::Fsyncdir
         )
     }
+
+    /// Whether this operation is a metadata-only write.
+    #[must_use]
+    pub const fn is_metadata_write(self) -> bool {
+        matches!(
+            self,
+            Self::Create
+                | Self::Mkdir
+                | Self::Unlink
+                | Self::Rmdir
+                | Self::Rename
+                | Self::Link
+                | Self::Symlink
+                | Self::Setattr
+                | Self::Setxattr
+                | Self::Removexattr
+        )
+    }
 }
 
 /// MVCC scope acquired for a single VFS request.

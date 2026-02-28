@@ -384,7 +384,9 @@ impl BackpressureGate {
             }
             DegradationLevel::Critical => {
                 // Writes throttled, metadata writes shed.
-                if op.is_write() {
+                if op.is_metadata_write() {
+                    BackpressureDecision::Shed
+                } else if op.is_write() {
                     BackpressureDecision::Throttle
                 } else {
                     BackpressureDecision::Proceed

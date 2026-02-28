@@ -290,6 +290,9 @@ cargo run -p ffs-harness -- parity
 # Inspect ext4 or btrfs image metadata (JSON output)
 cargo run -p ffs-cli -- inspect <image-path> --json
 
+# Show MVCC/EBR version-chain statistics
+cargo run -p ffs-cli -- mvcc-stats <image-path> --json
+
 # Show filesystem information (superblock + optional sections)
 cargo run -p ffs-cli -- info <image-path> --groups --mvcc --repair --journal --json
 
@@ -316,6 +319,12 @@ cargo run -p ffs-cli -- repair <image-path> --json
 
 # Show current feature parity report
 cargo run -p ffs-cli -- parity --json
+
+# Inspect repair evidence ledger (JSONL)
+cargo run -p ffs-cli -- evidence <ledger-path> --json --tail 50
+
+# Create a new ext4 image (wraps mkfs.ext4 + validation)
+cargo run -p ffs-cli -- mkfs <output-image> --size-mb 64 --block-size 4096 --label frankenfs --json
 ```
 
 ### `ffs-harness`
@@ -384,7 +393,7 @@ FrankenFS is in **early development**. The tracked V1 parity matrix is complete 
 - btrfs superblock, B-tree header, leaf item metadata decoding, and geometry validation
 - MVCC snapshot visibility, commit sequencing, first-committer-wins conflict detection
 - Bayesian durability policy model and RaptorQ config mapping
-- CLI `inspect`, `info`, `dump`, `fsck` (ext4 mount-time recovery + btrfs primary-superblock restoration via `--repair`, including bootstrap from backup mirrors when primary is unreadable), `repair` (ext4 mount-time recovery + btrfs primary-superblock restoration from validated backup mirrors + scrub verification), `mount` (ext4 + btrfs, default read-only with optional `--rw`), `scrub`, and `parity` commands
+- CLI `inspect`, `mvcc-stats`, `info`, `dump`, `fsck` (ext4 mount-time recovery + btrfs primary-superblock restoration via `--repair`, including bootstrap from backup mirrors when primary is unreadable), `repair` (ext4 mount-time recovery + btrfs primary-superblock restoration from validated backup mirrors + scrub verification), `mount` (ext4 + btrfs, default read-only with optional `--rw`), `scrub`, `parity`, `evidence`, and `mkfs` commands
 - Conformance fixture harness and Criterion benchmark scaffolding
 
 ### What's Next
@@ -411,6 +420,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 - **Linux only.** FUSE is the sole mount target. No macOS or Windows support planned.
 - **Nightly Rust required.** Edition 2024 features require the nightly toolchain.
 - **Runtime is still early-stage.** Even with full tracked parity, mount/write paths should still be treated as experimental in operational environments.
+- **Default CLI mount path does not enable optional backpressure/per-core scheduling hooks.** `ffs-cli mount` currently uses the standard `ffs-fuse` mount path without wiring `BackpressureGate` controls.
 - **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.
 - **Legacy reference corpus is checked in.** The Linux kernel ext4/btrfs source used for behavioral extraction is available under `legacy_ext4_and_btrfs_code/linux-fs/`. The extracted behavior is fully captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md).
 

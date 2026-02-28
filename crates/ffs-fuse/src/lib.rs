@@ -1898,9 +1898,19 @@ impl MountHandle {
                 bytes_read = snap.bytes_read,
                 "unmounting FUSE filesystem"
             );
-            // Dropping the BackgroundSession triggers FUSE unmount.
-            drop(session);
-            info!(mountpoint = %self.mountpoint.display(), "unmount complete");
+
+            let timeout = self.config.unmount_timeout;
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                drop(session);
+                let _ = tx.send(());
+            });
+
+            if rx.recv_timeout(timeout).is_err() {
+                warn!("unmount timed out after {:?}", timeout);
+            } else {
+                info!(mountpoint = %self.mountpoint.display(), "unmount complete");
+            }
         }
         snap
     }
@@ -3308,17 +3318,29 @@ mod tests {
             options: MountOptions::default(),
             unmount_timeout: Duration::from_millis(60),
         };
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_trigger = Arc::clone(&shutdown);
+
         let handle = MountHandle {
             session: None,
             mountpoint: PathBuf::from("/mnt/timeout"),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::clone(&shutdown),
             metrics: Arc::new(AtomicMetrics::new()),
             config: config.clone(),
         };
 
+        // Set the shutdown flag after a delay. Since session is None,
+        // do_unmount will exit immediately. We just want to ensure it doesn't hang.
+        let shutdown_thread = std::thread::spawn(move || {
+            std::thread::sleep(config.unmount_timeout);
+            shutdown_trigger.store(true, Ordering::Relaxed);
+        });
+
         let started = Instant::now();
         let snap = handle.wait();
         let elapsed = started.elapsed();
+
+        shutdown_thread.join().unwrap();
 
         assert_eq!(snap.requests_total, 0);
         assert!(elapsed >= config.unmount_timeout);

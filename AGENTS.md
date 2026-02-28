@@ -279,7 +279,7 @@ frankenfs/
 │   ├── ffs-block/                 # Block I/O layer, block cache
 │   ├── ffs-journal/               # Journal/transaction commit, replay, recovery
 │   ├── ffs-mvcc/                  # MVCC snapshot isolation, COW engine
-│   ├── ffs-btree/                 # B-tree operations (btrfs-style)
+│   ├── ffs-btree/                 # Extent-tree/B-tree operations (ext4-focused, plus Bw-tree experiments)
 │   ├── ffs-alloc/                 # Block/inode allocation, free space management
 │   ├── ffs-inode/                 # Inode lifecycle and metadata
 │   ├── ffs-dir/                   # Directory entry management
@@ -310,7 +310,7 @@ frankenfs/
 | `ffs-block` | Storage | Block device I/O abstraction, block cache, read/write paths |
 | `ffs-journal` | Durability | Journal transaction commit/abort, log replay, crash recovery |
 | `ffs-mvcc` | Concurrency | MVCC snapshot isolation, copy-on-write engine, conflict detection |
-| `ffs-btree` | Indexing | B-tree insert/delete/lookup/iterate, node splitting/merging |
+| `ffs-btree` | Indexing | Extent-tree/B-tree insert/delete/lookup/iterate, node splitting/merging |
 | `ffs-alloc` | Allocation | Block and inode allocators, free space bitmaps, group management |
 | `ffs-inode` | Metadata | Inode create/read/update/delete, permission and timestamp management |
 | `ffs-dir` | Directories | Directory entry CRUD, hash-tree directories, name lookup |

@@ -15655,8 +15655,8 @@ mod tests {
         assert_eq!(fsm.level(), DegradationLevel::Critical);
         let gate = BackpressureGate::new(fsm);
 
-        // All write variants → Throttle.
-        let write_ops = [
+        // Metadata write variants → Shed.
+        let meta_ops = [
             RequestOp::Create,
             RequestOp::Mkdir,
             RequestOp::Unlink,
@@ -15664,19 +15664,30 @@ mod tests {
             RequestOp::Rename,
             RequestOp::Link,
             RequestOp::Symlink,
-            RequestOp::Fallocate,
             RequestOp::Setattr,
             RequestOp::Setxattr,
             RequestOp::Removexattr,
+        ];
+        for op in meta_ops {
+            assert_eq!(
+                gate.check(op),
+                BackpressureDecision::Shed,
+                "metadata write op {op:?} should be shed at Critical"
+            );
+        }
+
+        // Data write variants → Throttle.
+        let data_ops = [
             RequestOp::Write,
+            RequestOp::Fallocate,
             RequestOp::Fsync,
             RequestOp::Fsyncdir,
         ];
-        for op in write_ops {
+        for op in data_ops {
             assert_eq!(
                 gate.check(op),
                 BackpressureDecision::Throttle,
-                "write op {op:?} should be throttled at Critical"
+                "data write op {op:?} should be throttled at Critical"
             );
         }
 
@@ -15833,6 +15844,35 @@ mod tests {
         assert!(RequestOp::Write.is_write());
         assert!(RequestOp::Fsync.is_write());
         assert!(RequestOp::Fsyncdir.is_write());
+    }
+
+    #[test]
+    fn request_op_is_metadata_write() {
+        // Metadata writes: structural changes to directory tree / inode attrs.
+        assert!(RequestOp::Create.is_metadata_write());
+        assert!(RequestOp::Mkdir.is_metadata_write());
+        assert!(RequestOp::Unlink.is_metadata_write());
+        assert!(RequestOp::Rmdir.is_metadata_write());
+        assert!(RequestOp::Rename.is_metadata_write());
+        assert!(RequestOp::Link.is_metadata_write());
+        assert!(RequestOp::Symlink.is_metadata_write());
+        assert!(RequestOp::Setattr.is_metadata_write());
+        assert!(RequestOp::Setxattr.is_metadata_write());
+        assert!(RequestOp::Removexattr.is_metadata_write());
+
+        // Data writes: NOT metadata writes.
+        assert!(!RequestOp::Write.is_metadata_write());
+        assert!(!RequestOp::Fallocate.is_metadata_write());
+        assert!(!RequestOp::Fsync.is_metadata_write());
+        assert!(!RequestOp::Fsyncdir.is_metadata_write());
+
+        // Read ops: NOT metadata writes.
+        assert!(!RequestOp::Getattr.is_metadata_write());
+        assert!(!RequestOp::Read.is_metadata_write());
+        assert!(!RequestOp::Readdir.is_metadata_write());
+        assert!(!RequestOp::Lookup.is_metadata_write());
+        assert!(!RequestOp::Readlink.is_metadata_write());
+        assert!(!RequestOp::Statfs.is_metadata_write());
     }
 
     // ── DegradationLevel Display + from_raw edge tests (bd-1k7g) ──────
@@ -17653,10 +17693,7 @@ mod tests {
 
         let gate = BackpressureGate::new(Arc::clone(&fsm));
         assert_eq!(gate.check(RequestOp::Write), BackpressureDecision::Throttle);
-        assert_eq!(
-            gate.check(RequestOp::Create),
-            BackpressureDecision::Throttle
-        );
+        assert_eq!(gate.check(RequestOp::Create), BackpressureDecision::Shed);
         assert_eq!(gate.check(RequestOp::Read), BackpressureDecision::Proceed);
         assert_eq!(gate.check(RequestOp::Lookup), BackpressureDecision::Proceed);
     }

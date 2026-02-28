@@ -691,11 +691,28 @@ pub fn command_available(cmd: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+#[must_use]
+fn env_flag_is_truthy(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[must_use]
+fn fail_on_skip_in_ci() -> bool {
+    if let Ok(raw) = std::env::var("FFS_E2E_FAIL_ON_SKIP") {
+        return env_flag_is_truthy(&raw);
+    }
+    std::env::var_os("CI").is_some()
+}
+
 /// E2E test result summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct E2eTestResult {
     pub test_name: String,
     pub passed: bool,
+    pub inconclusive: bool,
     pub steps_total: usize,
     pub steps_ok: usize,
     pub steps_error: usize,
@@ -716,10 +733,13 @@ impl E2eTestResult {
         let steps_ok = log.entries().iter().filter(|e| e.status == "ok").count();
         let steps_error = log.entries().iter().filter(|e| e.status == "error").count();
         let steps_skip = log.entries().iter().filter(|e| e.status == "skip").count();
+        let inconclusive = steps_error == 0 && steps_skip > 0;
+        let fail_on_skip = fail_on_skip_in_ci();
 
         Self {
             test_name: test_name.to_owned(),
-            passed: steps_error == 0,
+            passed: steps_error == 0 && (!fail_on_skip || steps_skip == 0),
+            inconclusive,
             steps_total: log.entries().len(),
             steps_ok,
             steps_error,
@@ -2491,7 +2511,8 @@ mod tests {
         log.push(E2eLogEntry::skip("t", "s3", "skipped"));
 
         let result = E2eTestResult::from_log("test1", &log, Duration::from_secs(1), None);
-        assert!(result.passed);
+        assert_eq!(result.passed, !fail_on_skip_in_ci());
+        assert!(result.inconclusive);
         assert_eq!(result.steps_total, 3);
         assert_eq!(result.steps_ok, 2);
         assert_eq!(result.steps_skip, 1);
@@ -2700,5 +2721,15 @@ mod tests {
         assert!(command_available("ls"));
         // Nonexistent command.
         assert!(!command_available("definitely_not_a_real_command_12345"));
+    }
+
+    #[test]
+    fn env_flag_truthy_values() {
+        for val in ["1", "true", "yes", "on", "TRUE", "Yes", " 1 ", " ON "] {
+            assert!(env_flag_is_truthy(val), "{val:?} should be truthy");
+        }
+        for val in ["0", "false", "no", "off", "", "maybe", "2"] {
+            assert!(!env_flag_is_truthy(val), "{val:?} should not be truthy");
+        }
     }
 }

@@ -90,6 +90,7 @@ pub fn bitmap_count_free(bitmap: &[u8], count: u32) -> u32 {
 /// starting from `start`.
 #[must_use]
 pub fn bitmap_find_free(bitmap: &[u8], count: u32, start: u32) -> Option<u32> {
+    let start = start.min(count);
     for idx in start..count {
         if !bitmap_get(bitmap, idx) {
             return Some(idx);

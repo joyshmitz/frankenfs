@@ -3240,6 +3240,8 @@ pub enum FaultMode {
     OneShot,
     /// Fire on every matching access.
     Persistent,
+    /// Fire exactly N times, then clear.
+    CountLimited(u32),
 }
 
 /// What kind of operation a fault targets.
@@ -3260,6 +3262,7 @@ struct FaultRule {
     target: FaultTarget,
     mode: FaultMode,
     fired: bool,
+    fire_count: u32,
 }
 
 /// A `BlockDevice` wrapper that injects configurable faults for testing.
@@ -3295,6 +3298,7 @@ impl<D: BlockDevice> FaultInjector<D> {
             target: FaultTarget::Read(block),
             mode,
             fired: false,
+            fire_count: 0,
         });
     }
 
@@ -3304,6 +3308,7 @@ impl<D: BlockDevice> FaultInjector<D> {
             target: FaultTarget::Write(block),
             mode,
             fired: false,
+            fire_count: 0,
         });
     }
 
@@ -3343,6 +3348,16 @@ impl<D: BlockDevice> FaultInjector<D> {
                         FaultMode::Persistent => {
                             found = true;
                             break;
+                        }
+                        FaultMode::CountLimited(n) => {
+                            if rule.fire_count < n {
+                                rule.fire_count += 1;
+                                if rule.fire_count >= n {
+                                    rule.fired = true;
+                                }
+                                found = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -6962,6 +6977,104 @@ mod tests {
     }
 
     #[test]
+    fn fault_count_limited_fires_n_times_then_clears() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096, 16);
+        let fi = FaultInjector::new(dev, 50);
+
+        fi.fail_on_read(BlockNumber(3), FaultMode::CountLimited(3));
+
+        // First 3 reads should fail.
+        for i in 0..3 {
+            assert!(
+                fi.read_block(&cx, BlockNumber(3)).is_err(),
+                "read {i} should fail"
+            );
+        }
+        // Fourth read should succeed (count exhausted).
+        fi.read_block(&cx, BlockNumber(3))
+            .expect("read after count exhausted");
+        // Fifth read also succeeds.
+        fi.read_block(&cx, BlockNumber(3)).expect("subsequent read");
+
+        assert_eq!(fi.fault_log().len(), 3);
+    }
+
+    #[test]
+    fn fault_count_limited_write_fires_n_times() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096, 16);
+        let fi = FaultInjector::new(dev, 51);
+        let data = vec![0_u8; 4096];
+
+        fi.fail_on_write(BlockNumber(1), FaultMode::CountLimited(2));
+
+        // First 2 writes fail.
+        assert!(fi.write_block(&cx, BlockNumber(1), &data).is_err());
+        assert!(fi.write_block(&cx, BlockNumber(1), &data).is_err());
+        // Third write succeeds.
+        fi.write_block(&cx, BlockNumber(1), &data)
+            .expect("write after count exhausted");
+
+        assert_eq!(fi.fault_log().len(), 2);
+    }
+
+    #[test]
+    fn fault_count_limited_one_is_equivalent_to_oneshot() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096, 16);
+        let fi = FaultInjector::new(dev, 52);
+
+        fi.fail_on_read(BlockNumber(0), FaultMode::CountLimited(1));
+
+        // Single read fails.
+        assert!(fi.read_block(&cx, BlockNumber(0)).is_err());
+        // Next read succeeds, same as OneShot.
+        fi.read_block(&cx, BlockNumber(0))
+            .expect("read after single count");
+
+        assert_eq!(fi.fault_log().len(), 1);
+    }
+
+    #[test]
+    fn fault_count_limited_zero_never_fires() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096, 16);
+        let fi = FaultInjector::new(dev, 53);
+
+        fi.fail_on_read(BlockNumber(0), FaultMode::CountLimited(0));
+
+        // Should never fire — count is zero.
+        fi.read_block(&cx, BlockNumber(0))
+            .expect("read with zero count");
+        fi.read_block(&cx, BlockNumber(0))
+            .expect("second read with zero count");
+
+        assert!(fi.fault_log().is_empty());
+    }
+
+    #[test]
+    fn fault_count_limited_reset_clears_count() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096, 16);
+        let fi = FaultInjector::new(dev, 54);
+
+        fi.fail_on_read(BlockNumber(0), FaultMode::CountLimited(2));
+
+        // Fire once.
+        assert!(fi.read_block(&cx, BlockNumber(0)).is_err());
+        assert_eq!(fi.fault_log().len(), 1);
+
+        // Reset clears everything.
+        fi.reset();
+        assert!(fi.fault_log().is_empty());
+
+        // After reset, reads succeed (rule removed).
+        fi.read_block(&cx, BlockNumber(0))
+            .expect("read after reset");
+    }
+
+    #[test]
     fn flush_pin_token_noop_is_noop() {
         let token = FlushPinToken::noop();
         assert!(token.is_noop());
@@ -7184,7 +7297,11 @@ mod tests {
     fn fault_mode_debug_and_eq() {
         assert_eq!(FaultMode::OneShot, FaultMode::OneShot);
         assert_ne!(FaultMode::OneShot, FaultMode::Persistent);
+        assert_eq!(FaultMode::CountLimited(3), FaultMode::CountLimited(3));
+        assert_ne!(FaultMode::CountLimited(3), FaultMode::CountLimited(5));
+        assert_ne!(FaultMode::CountLimited(1), FaultMode::OneShot);
         let _ = format!("{:?}", FaultMode::Persistent);
+        let _ = format!("{:?}", FaultMode::CountLimited(10));
     }
 
     #[test]

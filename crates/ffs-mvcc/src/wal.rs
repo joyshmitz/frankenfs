@@ -274,7 +274,11 @@ pub fn decode_commit(bytes: &[u8]) -> DecodeResult {
         ));
     }
 
-    let total_size = 4 + record_len;
+    let Some(total_size) = 4_usize.checked_add(record_len) else {
+        return DecodeResult::Corrupted(format!(
+            "record_len overflows total size: {record_len}"
+        ));
+    };
     if bytes.len() < total_size {
         return DecodeResult::NeedMore(total_size);
     }
@@ -333,6 +337,17 @@ pub fn decode_commit(bytes: &[u8]) -> DecodeResult {
     };
     offset += 4;
 
+    // Sanity-check: each write needs at least 12 bytes (8 block + 4 len).
+    // If claimed count exceeds what fits in the remaining body, reject early
+    // to avoid spinning in a tight loop on malformed input.
+    let remaining_body = crc_offset.saturating_sub(offset);
+    let max_possible_writes = remaining_body / 12;
+    if num_writes > max_possible_writes {
+        return DecodeResult::Corrupted(format!(
+            "num_writes ({num_writes}) exceeds body capacity ({max_possible_writes} max)"
+        ));
+    }
+
     // Parse writes
     let mut writes = Vec::with_capacity(num_writes.min(1024));
     for i in 0..num_writes {
@@ -355,13 +370,16 @@ pub fn decode_commit(bytes: &[u8]) -> DecodeResult {
         offset += 4;
 
         // Data
-        if offset + data_len > crc_offset {
+        let Some(data_end) = offset.checked_add(data_len) else {
+            return DecodeResult::Corrupted(format!("write {i} data length overflow"));
+        };
+        if data_end > crc_offset {
             return DecodeResult::Corrupted(format!(
                 "write {i} data extends past CRC: offset={offset}, len={data_len}, crc_offset={crc_offset}"
             ));
         }
-        let data = body_bytes[offset..offset + data_len].to_vec();
-        offset += data_len;
+        let data = body_bytes[offset..data_end].to_vec();
+        offset = data_end;
 
         writes.push(WalWrite { block, data });
     }
@@ -695,6 +713,36 @@ mod tests {
         match result {
             DecodeResult::Corrupted(msg) => {
                 assert!(msg.contains("too small"), "expected 'too small' in: {msg}");
+            }
+            other => panic!("expected Corrupted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_commit_rejects_inflated_num_writes() {
+        // Build a valid-looking record with num_writes claiming 1 million writes,
+        // but only enough body for 0 actual writes. The decoder should reject this
+        // instantly rather than spinning in a loop.
+        let body_size: usize = 1 + 8 + 8 + 4 + 4; // type + seq + txn + num_writes + crc
+        let record_len = u32::try_from(body_size).unwrap();
+        let mut buf = vec![0_u8; 4 + body_size];
+        buf[0..4].copy_from_slice(&record_len.to_le_bytes());
+        buf[4] = RECORD_TYPE_COMMIT; // record_type
+        buf[5..13].copy_from_slice(&1_u64.to_le_bytes()); // commit_seq
+        buf[13..21].copy_from_slice(&1_u64.to_le_bytes()); // txn_id
+        buf[21..25].copy_from_slice(&1_000_000_u32.to_le_bytes()); // num_writes = 1M
+
+        // Stamp CRC over body (excluding record_len and CRC field)
+        let crc = crc32c::crc32c(&buf[4..4 + body_size - 4]);
+        buf[4 + body_size - 4..].copy_from_slice(&crc.to_le_bytes());
+
+        let result = decode_commit(&buf);
+        match result {
+            DecodeResult::Corrupted(msg) => {
+                assert!(
+                    msg.contains("exceeds body capacity"),
+                    "expected 'exceeds body capacity' in: {msg}"
+                );
             }
             other => panic!("expected Corrupted, got {other:?}"),
         }
