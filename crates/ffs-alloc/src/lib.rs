@@ -988,7 +988,9 @@ pub fn alloc_inode_persist(
             #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             if g >= 0 && (g as u32) < geo.group_count {
                 let group = GroupNumber(g as u32);
-                if let Some(alloc) = try_alloc_inode_in_group_persist(cx, dev, geo, groups, group, pctx)? {
+                if let Some(alloc) =
+                    try_alloc_inode_in_group_persist(cx, dev, geo, groups, group, pctx)?
+                {
                     return Ok(alloc);
                 }
             }

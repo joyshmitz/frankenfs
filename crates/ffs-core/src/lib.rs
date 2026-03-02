@@ -6978,7 +6978,8 @@ impl FsOps for OpenFs {
                 }
                 // PATH_MAX is 4096 on Linux; symlinks cannot exceed this.
                 let capped = attr.size.min(LINUX_PATH_MAX);
-                let read_size = u32::try_from(capped).unwrap_or(4096);
+                let read_size =
+                    u32::try_from(capped).expect("PATH_MAX-capped symlink size must fit in u32");
                 let mut target = self.btrfs_read_file(cx, ino, 0, read_size)?;
                 if let Some(nul) = target.iter().position(|b| *b == 0) {
                     target.truncate(nul);
@@ -7585,42 +7586,56 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
 
     for g in 0..groups_count {
         let group = ffs_types::GroupNumber(g);
-        let gd_result = reader.read_group_desc(image, group);
-        match gd_result {
-            Ok(_gd) => {
-                // Read raw GD bytes for checksum verification
-                if let Some(gd_off) = sb.group_desc_offset(group) {
-                    let ds = usize::from(desc_size);
-                    let Ok(offset) = usize::try_from(gd_off) else {
-                        verdicts.push(CheckVerdict {
-                            component: format!("group_desc[{g}]"),
-                            passed: false,
-                            detail: format!(
-                                "group descriptor offset {gd_off} exceeds addressable range"
-                            ),
-                        });
-                        failed += 1;
-                        continue;
-                    };
-                    if offset.saturating_add(ds) <= image.len() {
-                        let raw_gd = &image[offset..offset + ds];
-                        match ffs_ondisk::verify_group_desc_checksum(
-                            raw_gd, csum_seed, g, desc_size,
-                        ) {
-                            Ok(()) => {
-                                passed += 1;
-                            }
-                            Err(e) => {
-                                verdicts.push(CheckVerdict {
-                                    component: format!("group_desc[{g}]"),
-                                    passed: false,
-                                    detail: e.to_string(),
-                                });
-                                failed += 1;
-                            }
-                        }
-                    }
-                }
+        let Some(gd_off) = sb.group_desc_offset(group) else {
+            verdicts.push(CheckVerdict {
+                component: format!("group_desc[{g}]"),
+                passed: false,
+                detail: "overflow computing group descriptor offset".into(),
+            });
+            failed += 1;
+            continue;
+        };
+
+        let ds = usize::from(desc_size);
+        let Ok(offset) = usize::try_from(gd_off) else {
+            verdicts.push(CheckVerdict {
+                component: format!("group_desc[{g}]"),
+                passed: false,
+                detail: format!("group descriptor offset {gd_off} exceeds addressable range"),
+            });
+            failed += 1;
+            continue;
+        };
+        let end = match offset.checked_add(ds) {
+            Some(end) if end <= image.len() => end,
+            _ => {
+                verdicts.push(CheckVerdict {
+                    component: format!("group_desc[{g}]"),
+                    passed: false,
+                    detail: format!(
+                        "group descriptor range [{offset}, {}) exceeds image length {}",
+                        offset.saturating_add(ds),
+                        image.len()
+                    ),
+                });
+                failed += 1;
+                continue;
+            }
+        };
+        let raw_gd = &image[offset..end];
+        if let Err(e) = Ext4GroupDesc::parse_from_bytes(raw_gd, desc_size) {
+            verdicts.push(CheckVerdict {
+                component: format!("group_desc[{g}]"),
+                passed: false,
+                detail: e.to_string(),
+            });
+            failed += 1;
+            continue;
+        }
+
+        match ffs_ondisk::verify_group_desc_checksum(raw_gd, csum_seed, g, desc_size) {
+            Ok(()) => {
+                passed += 1;
             }
             Err(e) => {
                 verdicts.push(CheckVerdict {
@@ -16473,6 +16488,29 @@ mod tests {
 
         let target = ops.readlink(&cx, attr.ino).unwrap();
         assert_eq!(&target, b"/tmp/target");
+    }
+
+    #[test]
+    fn btrfs_readlink_caps_target_at_path_max() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let path_max = usize::try_from(LINUX_PATH_MAX).expect("LINUX_PATH_MAX fits usize");
+        let long_target = format!("/{}", "x".repeat(path_max + 256));
+        let attr = ops
+            .symlink(
+                &cx,
+                InodeNumber(1),
+                OsStr::new("long-link"),
+                Path::new(&long_target),
+                0,
+                0,
+            )
+            .expect("create long symlink");
+
+        let target = ops.readlink(&cx, attr.ino).expect("readlink long symlink");
+        assert_eq!(target.len(), path_max);
+        assert_eq!(target, long_target.as_bytes()[..path_max]);
     }
 
     #[test]
