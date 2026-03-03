@@ -35,8 +35,12 @@ cargo_command_enabled_for_rch() {
     [[ "${FFS_USE_RCH:-1}" == "1" ]] && command -v rch >/dev/null 2>&1
 }
 
+cargo_command_requires_local_execution() {
+    [[ "${1:-}" == "run" ]]
+}
+
 run_cargo_assert() {
-    if cargo_command_enabled_for_rch; then
+    if cargo_command_enabled_for_rch && ! cargo_command_requires_local_execution "$@"; then
         e2e_assert rch exec -- cargo "$@"
     else
         e2e_assert cargo "$@"
@@ -44,7 +48,7 @@ run_cargo_assert() {
 }
 
 run_cargo() {
-    if cargo_command_enabled_for_rch; then
+    if cargo_command_enabled_for_rch && ! cargo_command_requires_local_execution "$@"; then
         e2e_run rch exec -- cargo "$@"
     else
         e2e_run cargo "$@"
@@ -54,7 +58,7 @@ run_cargo() {
 capture_cargo_output() {
     local output_file="$1"
     shift
-    if cargo_command_enabled_for_rch; then
+    if cargo_command_enabled_for_rch && ! cargo_command_requires_local_execution "$@"; then
         rch exec -- cargo "$@" >"$output_file" 2>&1
     else
         cargo "$@" >"$output_file" 2>&1
