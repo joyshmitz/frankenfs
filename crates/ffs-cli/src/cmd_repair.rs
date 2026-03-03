@@ -919,6 +919,71 @@ pub fn select_ext4_repair_groups(
     all_groups.to_vec()
 }
 
+pub fn select_btrfs_repair_groups(
+    flags: RepairFlags,
+    all_groups: &[u32],
+    staleness: &[(u32, Ext4RepairStaleness)],
+    limitations: &mut Vec<String>,
+) -> Vec<u32> {
+    let selected = select_ext4_repair_groups(flags, false, all_groups, staleness);
+    if selected.is_empty() {
+        let stale_count = staleness
+            .iter()
+            .filter(|(_, state)| *state == Ext4RepairStaleness::Stale)
+            .count();
+        let fresh_count = staleness
+            .iter()
+            .filter(|(_, state)| *state == Ext4RepairStaleness::Fresh)
+            .count();
+        let untracked_count = staleness
+            .iter()
+            .filter(|(_, state)| *state == Ext4RepairStaleness::Untracked)
+            .count();
+
+        if stale_count == 0 && fresh_count > 0 {
+            limitations.push(
+                "stale-only scope found no stale btrfs groups; running full scrub".to_owned(),
+            );
+        } else if stale_count == 0 && fresh_count == 0 && untracked_count > 0 {
+            limitations.push(
+                "stale-only scope could not infer btrfs group staleness from on-image repair metadata; running full scrub"
+                    .to_owned(),
+            );
+        } else {
+            limitations.push(
+                "stale-only scope yielded no explicit btrfs candidates; running full scrub"
+                    .to_owned(),
+            );
+        }
+        return all_groups.to_vec();
+    }
+
+    if selected.len() < all_groups.len() {
+        let stale_count = staleness
+            .iter()
+            .filter(|(_, state)| *state == Ext4RepairStaleness::Stale)
+            .count();
+        let fresh_count = staleness
+            .iter()
+            .filter(|(_, state)| *state == Ext4RepairStaleness::Fresh)
+            .count();
+        let untracked_count = staleness
+            .iter()
+            .filter(|(_, state)| *state == Ext4RepairStaleness::Untracked)
+            .count();
+        limitations.push(format!(
+            "stale-only scope selected {}/{} btrfs groups (stale={}, fresh={}, untracked={})",
+            selected.len(),
+            all_groups.len(),
+            stale_count,
+            fresh_count,
+            untracked_count
+        ));
+    }
+
+    selected
+}
+
 pub fn scrub_ext4_groups_for_repair(
     path: &PathBuf,
     flavor: &FsFlavor,
@@ -957,6 +1022,50 @@ pub fn scrub_ext4_groups_for_repair(
             limitations,
         )
         .with_context(|| format!("failed to scrub ext4 group {group}"))?;
+        reports.push(report);
+    }
+
+    Ok(merge_scrub_reports(reports))
+}
+
+pub fn scrub_btrfs_groups_for_repair(
+    path: &PathBuf,
+    flavor: &FsFlavor,
+    block_size: u32,
+    specs: &[BtrfsRepairGroupSpec],
+    groups: &[u32],
+    max_threads: Option<u32>,
+    limitations: &mut Vec<String>,
+) -> Result<ScrubReport> {
+    if groups.is_empty() {
+        return Ok(ScrubReport {
+            findings: Vec::new(),
+            blocks_scanned: 0,
+            blocks_corrupt: 0,
+            blocks_io_error: 0,
+        });
+    }
+
+    let spec_by_group: BTreeMap<u32, BtrfsRepairGroupSpec> = specs
+        .iter()
+        .copied()
+        .map(|spec| (spec.group, spec))
+        .collect();
+    let mut reports = Vec::with_capacity(groups.len());
+    for group in groups {
+        let spec = spec_by_group.get(group).ok_or_else(|| {
+            anyhow::anyhow!("btrfs repair group {group} is not available in the computed layout")
+        })?;
+        let report = scrub_range_for_repair(
+            path,
+            flavor,
+            block_size,
+            spec.physical_start_block,
+            spec.physical_block_count,
+            max_threads,
+            limitations,
+        )
+        .with_context(|| format!("failed to scrub btrfs block group {group}"))?;
         reports.push(report);
     }
 
@@ -1692,13 +1801,6 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
             (scope, report, stats)
         }
         FsFlavor::Btrfs(sb) => {
-            if !flags.full_scrub() && !rebuild_symbols_requested && options.block_group.is_none() {
-                limitations.push(
-                    "stale-only mode currently maps to full btrfs scrub because btrfs group-level staleness tracking is not exposed"
-                        .to_owned(),
-                );
-            }
-
             let block_size = choose_btrfs_scrub_block_size(image_len, sb.nodesize, sb.sectorsize)
                 .with_context(|| {
                     format!(
@@ -1706,6 +1808,8 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                         sb.nodesize, sb.sectorsize
                     )
                 })?;
+            let mut scoped_btrfs_groups = Vec::new();
+            let mut scoped_btrfs_specs = Vec::new();
             let (scope, scrub_start, scrub_count) = if let Some(group) = options.block_group {
                 let specs = discover_btrfs_repair_group_specs(path, block_size)
                     .context("failed to discover btrfs block groups for scoped repair")?;
@@ -1730,19 +1834,80 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                     spec.physical_block_count,
                 )
             } else {
+                if !flags.full_scrub() && !rebuild_symbols_requested {
+                    match discover_btrfs_repair_group_specs(path, block_size) {
+                        Ok(specs) if !specs.is_empty() => {
+                            let all_groups: Vec<u32> =
+                                specs.iter().map(|spec| spec.group).collect();
+                            match probe_btrfs_repair_staleness(path, block_size, &specs) {
+                                Ok(staleness) => {
+                                    let selected = select_btrfs_repair_groups(
+                                        RepairFlags::empty(),
+                                        &all_groups,
+                                        &staleness,
+                                        &mut limitations,
+                                    );
+                                    if selected.len() < all_groups.len() {
+                                        let selected_set: BTreeSet<u32> =
+                                            selected.iter().copied().collect();
+                                        scoped_btrfs_specs = specs
+                                            .iter()
+                                            .copied()
+                                            .filter(|spec| selected_set.contains(&spec.group))
+                                            .collect();
+                                        if scoped_btrfs_specs.len() == selected.len() {
+                                            scoped_btrfs_groups = selected;
+                                        } else {
+                                            scoped_btrfs_specs.clear();
+                                            limitations.push(
+                                                "stale-only btrfs group selection could not be mapped to discovered group layouts; running full scrub"
+                                                    .to_owned(),
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    limitations.push(format!(
+                                        "failed to inspect btrfs repair symbol staleness: {error:#}; running full scrub"
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(_) => limitations.push(
+                            "no btrfs block groups discovered for stale-only selection; running full scrub"
+                                .to_owned(),
+                        ),
+                        Err(error) => limitations.push(format!(
+                            "failed to discover btrfs block groups for stale-only selection: {error:#}; running full scrub"
+                        )),
+                    }
+                }
                 (RepairScopeOutput::Full, BlockNumber(0), u64::MAX)
             };
 
-            let mut report = scrub_range_for_repair(
-                path,
-                &flavor,
-                block_size,
-                scrub_start,
-                scrub_count,
-                options.max_threads,
-                &mut limitations,
-            )
-            .context("failed to scrub btrfs image")?;
+            let mut report = if scoped_btrfs_groups.is_empty() {
+                scrub_range_for_repair(
+                    path,
+                    &flavor,
+                    block_size,
+                    scrub_start,
+                    scrub_count,
+                    options.max_threads,
+                    &mut limitations,
+                )
+                .context("failed to scrub btrfs image")?
+            } else {
+                scrub_btrfs_groups_for_repair(
+                    path,
+                    &flavor,
+                    block_size,
+                    &scoped_btrfs_specs,
+                    &scoped_btrfs_groups,
+                    options.max_threads,
+                    &mut limitations,
+                )
+                .context("failed to scrub selected btrfs block groups")?
+            };
 
             let mut stats = RepairExecutionStats {
                 recovery_attempted: bootstrap_recovery_source.is_some(),
@@ -1750,8 +1915,17 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
             };
             let mut verify_after_repair_writes = false;
             let primary_superblock = primary_btrfs_superblock_block(block_size);
-            let superblock_in_scope =
-                block_range_contains(scrub_start, scrub_count, primary_superblock);
+            let superblock_in_scope = if scoped_btrfs_specs.is_empty() {
+                block_range_contains(scrub_start, scrub_count, primary_superblock)
+            } else {
+                scoped_btrfs_specs.iter().any(|spec| {
+                    block_range_contains(
+                        spec.physical_start_block,
+                        spec.physical_block_count,
+                        primary_superblock,
+                    )
+                })
+            };
             if !flags.verify_only()
                 && superblock_in_scope
                 && report_has_error_or_higher_for_block(&report, primary_superblock)
@@ -1779,12 +1953,17 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                 }
             }
 
-            if !flags.verify_only() {
+            if !flags.verify_only() && superblock_in_scope {
+                let (mirror_scope_start, mirror_scope_count) = if scoped_btrfs_specs.is_empty() {
+                    (scrub_start, scrub_count)
+                } else {
+                    (primary_superblock, 1)
+                };
                 match repair_corrupt_btrfs_superblock_mirrors_from_primary(
                     path,
                     block_size,
-                    scrub_start,
-                    scrub_count,
+                    mirror_scope_start,
+                    mirror_scope_count,
                     &mut limitations,
                 ) {
                     Ok(mirror_outcome) => {
@@ -1892,16 +2071,29 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
             }
 
             if !flags.verify_only() && verify_after_repair_writes {
-                report = scrub_range_for_repair(
-                    path,
-                    &flavor,
-                    block_size,
-                    scrub_start,
-                    scrub_count,
-                    options.max_threads,
-                    &mut limitations,
-                )
-                .context("failed to verify btrfs image after repairs")?;
+                report = if scoped_btrfs_groups.is_empty() {
+                    scrub_range_for_repair(
+                        path,
+                        &flavor,
+                        block_size,
+                        scrub_start,
+                        scrub_count,
+                        options.max_threads,
+                        &mut limitations,
+                    )
+                    .context("failed to verify btrfs image after repairs")?
+                } else {
+                    scrub_btrfs_groups_for_repair(
+                        path,
+                        &flavor,
+                        block_size,
+                        &scoped_btrfs_specs,
+                        &scoped_btrfs_groups,
+                        options.max_threads,
+                        &mut limitations,
+                    )
+                    .context("failed to verify selected btrfs block groups after repairs")?
+                };
             }
 
             (scope, report, stats)

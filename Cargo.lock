@@ -599,6 +599,7 @@ dependencies = [
  "clap",
  "crc32c",
  "ffs-block",
+ "ffs-btrfs",
  "ffs-core",
  "ffs-fuse",
  "ffs-harness",

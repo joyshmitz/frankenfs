@@ -17,6 +17,10 @@ use anyhow::{Context, Result, bail};
 use asupersync::Cx;
 use clap::{Parser, Subcommand, ValueEnum};
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
+use ffs_btrfs::{
+    BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
+    parse_inode_item, parse_root_item,
+};
 use ffs_core::{
     CrashRecoveryOutcome, Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions,
     detect_filesystem_at_path,
@@ -336,7 +340,7 @@ enum DumpCommand {
         #[arg(long)]
         hex: bool,
     },
-    /// Dump one ext4 inode.
+    /// Dump one ext4 or btrfs inode.
     Inode {
         /// Inode number.
         inode: u64,
@@ -704,9 +708,55 @@ struct DumpGroupOutput {
 struct DumpInodeOutput {
     filesystem: String,
     inode: u64,
-    parsed: Ext4Inode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ext4_parsed: Option<Ext4Inode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    btrfs_parsed: Option<DumpBtrfsInodeParsedOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     raw_hex: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    limitations: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DumpBtrfsInodeParsedOutput {
+    size: u64,
+    nbytes: u64,
+    nlink: u32,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    rdev: u64,
+    atime_sec: u64,
+    atime_nsec: u32,
+    ctime_sec: u64,
+    ctime_nsec: u32,
+    mtime_sec: u64,
+    mtime_nsec: u32,
+    otime_sec: u64,
+    otime_nsec: u32,
+}
+
+impl From<BtrfsInodeItem> for DumpBtrfsInodeParsedOutput {
+    fn from(value: BtrfsInodeItem) -> Self {
+        Self {
+            size: value.size,
+            nbytes: value.nbytes,
+            nlink: value.nlink,
+            uid: value.uid,
+            gid: value.gid,
+            mode: value.mode,
+            rdev: value.rdev,
+            atime_sec: value.atime_sec,
+            atime_nsec: value.atime_nsec,
+            ctime_sec: value.ctime_sec,
+            ctime_nsec: value.ctime_nsec,
+            mtime_sec: value.mtime_sec,
+            mtime_nsec: value.mtime_nsec,
+            otime_sec: value.otime_sec,
+            otime_nsec: value.otime_nsec,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2426,16 +2476,6 @@ fn build_dump_group_output(path: &PathBuf, group: u32, hex: bool) -> Result<Dump
     }
 }
 
-fn ext4_superblock_for_action(path: &PathBuf, action: &str) -> Result<Ext4Superblock> {
-    let cx = cli_cx();
-    let flavor = detect_filesystem_at_path(&cx, path)
-        .with_context(|| format!("failed to detect ext4/btrfs metadata in {}", path.display()))?;
-    match flavor {
-        FsFlavor::Ext4(sb) => Ok(sb),
-        FsFlavor::Btrfs(_) => bail!("{action} currently supports ext4 images only"),
-    }
-}
-
 fn dump_inode_cmd(inode: u64, path: &PathBuf, json: bool, hex: bool) -> Result<()> {
     let command_span = info_span!(
         target: "ffs::cli::dump::inode",
@@ -2449,23 +2489,7 @@ fn dump_inode_cmd(inode: u64, path: &PathBuf, json: bool, hex: bool) -> Result<(
     let started = Instant::now();
     info!(target: "ffs::cli::dump::inode", "dump_inode_start");
 
-    let sb = ext4_superblock_for_action(path, "dump inode")?;
-    let inode_number = InodeNumber(inode);
-    let (parsed, raw_inode) = read_ext4_inode_from_path(path, &sb, inode_number)
-        .with_context(|| format!("failed to read inode {inode}"))?;
-
-    let raw_hex = if hex {
-        Some(bytes_to_hex_dump(&raw_inode))
-    } else {
-        None
-    };
-
-    let output = DumpInodeOutput {
-        filesystem: "ext4".to_owned(),
-        inode,
-        parsed,
-        raw_hex,
-    };
+    let output = build_dump_inode_output(path, inode, hex)?;
 
     if json {
         println!(
@@ -2476,22 +2500,46 @@ fn dump_inode_cmd(inode: u64, path: &PathBuf, json: bool, hex: bool) -> Result<(
         println!("FrankenFS Dump: inode");
         println!("filesystem: {}", output.filesystem);
         println!("inode: {}", output.inode);
-        println!("mode: 0x{:04X}", output.parsed.mode);
-        println!("uid: {}", output.parsed.uid);
-        println!("gid: {}", output.parsed.gid);
-        println!("size: {}", output.parsed.size);
-        println!("links_count: {}", output.parsed.links_count);
-        println!("blocks: {}", output.parsed.blocks);
-        println!("flags: 0x{:08X}", output.parsed.flags);
-        println!("generation: {}", output.parsed.generation);
-        println!("file_acl: {}", output.parsed.file_acl);
-        println!("atime: {}", output.parsed.atime);
-        println!("ctime: {}", output.parsed.ctime);
-        println!("mtime: {}", output.parsed.mtime);
-        println!("dtime: {}", output.parsed.dtime);
-        println!("extra_isize: {}", output.parsed.extra_isize);
-        println!("checksum: 0x{:08X}", output.parsed.checksum);
-        println!("projid: {}", output.parsed.projid);
+
+        if let Some(parsed) = &output.ext4_parsed {
+            println!("mode: 0x{:04X}", parsed.mode);
+            println!("uid: {}", parsed.uid);
+            println!("gid: {}", parsed.gid);
+            println!("size: {}", parsed.size);
+            println!("links_count: {}", parsed.links_count);
+            println!("blocks: {}", parsed.blocks);
+            println!("flags: 0x{:08X}", parsed.flags);
+            println!("generation: {}", parsed.generation);
+            println!("file_acl: {}", parsed.file_acl);
+            println!("atime: {}", parsed.atime);
+            println!("ctime: {}", parsed.ctime);
+            println!("mtime: {}", parsed.mtime);
+            println!("dtime: {}", parsed.dtime);
+            println!("extra_isize: {}", parsed.extra_isize);
+            println!("checksum: 0x{:08X}", parsed.checksum);
+            println!("projid: {}", parsed.projid);
+        }
+
+        if let Some(parsed) = &output.btrfs_parsed {
+            println!("mode: 0o{:o}", parsed.mode);
+            println!("uid: {}", parsed.uid);
+            println!("gid: {}", parsed.gid);
+            println!("size: {}", parsed.size);
+            println!("nbytes: {}", parsed.nbytes);
+            println!("nlink: {}", parsed.nlink);
+            println!("rdev: {}", parsed.rdev);
+            println!("atime: {}.{:09}", parsed.atime_sec, parsed.atime_nsec);
+            println!("ctime: {}.{:09}", parsed.ctime_sec, parsed.ctime_nsec);
+            println!("mtime: {}.{:09}", parsed.mtime_sec, parsed.mtime_nsec);
+            println!("otime: {}.{:09}", parsed.otime_sec, parsed.otime_nsec);
+        }
+
+        if !output.limitations.is_empty() {
+            println!("limitations:");
+            for limitation in &output.limitations {
+                println!("  - {limitation}");
+            }
+        }
 
         if let Some(raw_hex) = &output.raw_hex {
             println!();
@@ -2508,6 +2556,96 @@ fn dump_inode_cmd(inode: u64, path: &PathBuf, json: bool, hex: bool) -> Result<(
     );
 
     Ok(())
+}
+
+fn build_dump_inode_output(path: &PathBuf, inode: u64, hex: bool) -> Result<DumpInodeOutput> {
+    let cx = cli_cx();
+    let flavor = detect_filesystem_at_path(&cx, path)
+        .with_context(|| format!("failed to detect ext4/btrfs metadata in {}", path.display()))?;
+    match flavor {
+        FsFlavor::Ext4(sb) => {
+            let inode_number = InodeNumber(inode);
+            let (parsed, raw_inode) = read_ext4_inode_from_path(path, &sb, inode_number)
+                .with_context(|| format!("failed to read inode {inode}"))?;
+            let raw_hex = if hex {
+                Some(bytes_to_hex_dump(&raw_inode))
+            } else {
+                None
+            };
+            Ok(DumpInodeOutput {
+                filesystem: "ext4".to_owned(),
+                inode,
+                ext4_parsed: Some(parsed),
+                btrfs_parsed: None,
+                raw_hex,
+                limitations: Vec::new(),
+            })
+        }
+        FsFlavor::Btrfs(sb) => {
+            let open_fs = OpenFs::open(&cx, path)
+                .with_context(|| format!("failed to open image: {}", path.display()))?;
+            let root_items = open_fs
+                .walk_btrfs_root_tree(&cx)
+                .context("failed to walk btrfs root tree")?;
+            let fs_tree_root_item = root_items
+                .iter()
+                .find(|item| {
+                    item.key.objectid == BTRFS_FS_TREE_OBJECTID
+                        && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to locate btrfs FS tree root item (objectid={BTRFS_FS_TREE_OBJECTID})"
+                    )
+                })?;
+            let fs_tree_root = parse_root_item(&fs_tree_root_item.data)
+                .context("failed to parse btrfs FS tree root item")?;
+            let fs_tree_entries = open_fs
+                .walk_btrfs_tree(&cx, fs_tree_root.bytenr)
+                .with_context(|| {
+                    format!("failed to walk btrfs FS tree at {}", fs_tree_root.bytenr)
+                })?;
+            let canonical_inode = if inode == 1 {
+                sb.root_dir_objectid
+            } else {
+                inode
+            };
+            let inode_item = fs_tree_entries
+                .iter()
+                .find(|item| {
+                    item.key.objectid == canonical_inode
+                        && item.key.item_type == BTRFS_ITEM_INODE_ITEM
+                        && item.key.offset == 0
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to locate btrfs inode item for objectid {canonical_inode}"
+                    )
+                })?;
+            let parsed = parse_inode_item(&inode_item.data).with_context(|| {
+                format!("failed to parse btrfs inode item for objectid {canonical_inode}")
+            })?;
+            let mut limitations = Vec::new();
+            if inode == 1 && canonical_inode != 1 {
+                limitations.push(format!(
+                    "inode 1 maps to btrfs root objectid {canonical_inode}"
+                ));
+            }
+            let raw_hex = if hex {
+                Some(bytes_to_hex_dump(&inode_item.data))
+            } else {
+                None
+            };
+            Ok(DumpInodeOutput {
+                filesystem: "btrfs".to_owned(),
+                inode,
+                ext4_parsed: None,
+                btrfs_parsed: Some(parsed.into()),
+                raw_hex,
+                limitations,
+            })
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4204,7 +4342,8 @@ fn mkfs_cmd(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, DumpCommand, Ext4JournalReplayMode, FsckCommandOptions, FsckFlags,
+        BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem, Cli,
+        Command, DumpCommand, Ext4JournalReplayMode, FsckCommandOptions, FsckFlags,
         InfoCommandOptions, InfoSections, LogFormat, RepairCommandOptions, RepairFlags,
         btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
         choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
@@ -4215,7 +4354,8 @@ mod tests {
     use crate::cmd_repair::{
         Ext4RepairStaleness, btrfs_super_mirror_offsets, build_btrfs_repair_group_spec,
         build_repair_output, merge_scrub_reports, normalize_btrfs_superblock_as_primary,
-        partition_scrub_range, repair_worker_limit, select_ext4_repair_groups,
+        partition_scrub_range, repair_worker_limit, select_btrfs_repair_groups,
+        select_ext4_repair_groups,
     };
     use clap::Parser;
     use ffs_repair::evidence::EvidenceEventType;
@@ -4371,6 +4511,134 @@ mod tests {
         let checksum = crc32c::crc32c(&sb[0x20..super::BTRFS_SUPER_INFO_SIZE]);
         sb[0..4].copy_from_slice(&checksum.to_le_bytes());
         sb
+    }
+
+    fn write_btrfs_leaf_header(
+        image: &mut [u8],
+        leaf_offset: usize,
+        logical_bytenr: u64,
+        owner: u64,
+        item_count: u32,
+    ) {
+        image[leaf_offset + 0x30..leaf_offset + 0x38]
+            .copy_from_slice(&logical_bytenr.to_le_bytes());
+        image[leaf_offset + 0x50..leaf_offset + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+        image[leaf_offset + 0x58..leaf_offset + 0x60].copy_from_slice(&owner.to_le_bytes());
+        image[leaf_offset + 0x60..leaf_offset + 0x64].copy_from_slice(&item_count.to_le_bytes());
+        image[leaf_offset + 0x64] = 0;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_btrfs_leaf_item(
+        image: &mut [u8],
+        leaf_offset: usize,
+        item_index: usize,
+        objectid: u64,
+        item_type: u8,
+        key_offset: u64,
+        data_offset: u32,
+        data_size: u32,
+    ) {
+        const BTRFS_LEAF_HEADER_SIZE: usize = 101;
+        const BTRFS_LEAF_ITEM_SIZE: usize = 25;
+        let item_offset = leaf_offset + BTRFS_LEAF_HEADER_SIZE + item_index * BTRFS_LEAF_ITEM_SIZE;
+        image[item_offset..item_offset + 8].copy_from_slice(&objectid.to_le_bytes());
+        image[item_offset + 8] = item_type;
+        image[item_offset + 9..item_offset + 17].copy_from_slice(&key_offset.to_le_bytes());
+        image[item_offset + 17..item_offset + 21].copy_from_slice(&data_offset.to_le_bytes());
+        image[item_offset + 21..item_offset + 25].copy_from_slice(&data_size.to_le_bytes());
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_test_btrfs_image_with_root_inode_item() -> Vec<u8> {
+        let image_size: usize = 512 * 1024;
+        let mut image = vec![0_u8; image_size];
+        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
+        let root_tree_logical = 0x4_000_u64;
+        let fs_tree_logical = 0x8_000_u64;
+        let root_dir_objectid = 256_u64;
+
+        let mut sb = build_test_btrfs_superblock_with_single_chunk(
+            primary_offset as u64,
+            11,
+            0,
+            image_size as u64,
+            0,
+            2,
+        );
+        sb[0x50..0x58].copy_from_slice(&root_tree_logical.to_le_bytes());
+        sb[0x80..0x88].copy_from_slice(&root_dir_objectid.to_le_bytes());
+        sb[0x88..0x90].copy_from_slice(&1_u64.to_le_bytes());
+        sb[0xC6] = 0;
+        let checksum = crc32c::crc32c(&sb[0x20..super::BTRFS_SUPER_INFO_SIZE]);
+        sb[0..4].copy_from_slice(&checksum.to_le_bytes());
+        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
+
+        let root_leaf_offset = usize::try_from(root_tree_logical).expect("root tree offset fits");
+        write_btrfs_leaf_header(&mut image, root_leaf_offset, root_tree_logical, 1, 1);
+        let root_item_offset = 3000_u32;
+        let root_item_size = 239_u32;
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf_offset,
+            0,
+            BTRFS_FS_TREE_OBJECTID,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            root_item_offset,
+            root_item_size,
+        );
+        let mut root_item =
+            vec![0_u8; usize::try_from(root_item_size).expect("root item size fits")];
+        root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
+        let root_item_last = root_item.len() - 1;
+        root_item[root_item_last] = 0;
+        let root_data_start =
+            root_leaf_offset + usize::try_from(root_item_offset).expect("root item offset fits");
+        image[root_data_start..root_data_start + root_item.len()].copy_from_slice(&root_item);
+
+        let fs_leaf_offset = usize::try_from(fs_tree_logical).expect("fs tree offset fits");
+        write_btrfs_leaf_header(
+            &mut image,
+            fs_leaf_offset,
+            fs_tree_logical,
+            BTRFS_FS_TREE_OBJECTID,
+            1,
+        );
+        let inode_item = BtrfsInodeItem {
+            size: 4096,
+            nbytes: 4096,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            mode: 0o040_755,
+            rdev: 0,
+            atime_sec: 10,
+            atime_nsec: 0,
+            ctime_sec: 10,
+            ctime_nsec: 0,
+            mtime_sec: 10,
+            mtime_nsec: 0,
+            otime_sec: 10,
+            otime_nsec: 0,
+        };
+        let inode_bytes = inode_item.to_bytes();
+        let inode_data_offset = 3200_u32;
+        write_btrfs_leaf_item(
+            &mut image,
+            fs_leaf_offset,
+            0,
+            root_dir_objectid,
+            BTRFS_ITEM_INODE_ITEM,
+            0,
+            inode_data_offset,
+            u32::try_from(inode_bytes.len()).expect("inode size fits"),
+        );
+        let inode_data_start =
+            fs_leaf_offset + usize::try_from(inode_data_offset).expect("inode offset fits");
+        image[inode_data_start..inode_data_start + inode_bytes.len()].copy_from_slice(&inode_bytes);
+
+        image
     }
 
     fn test_btrfs_chunk_entry(
@@ -5473,6 +5741,32 @@ mod tests {
     }
 
     #[test]
+    fn build_dump_inode_output_btrfs_reads_root_inode_alias() {
+        let image = build_test_btrfs_image_with_root_inode_item();
+        with_temp_image_path(&image, |path| {
+            let output = super::build_dump_inode_output(&path, 1, true)
+                .expect("build dump inode output for btrfs image");
+
+            assert_eq!(output.filesystem, "btrfs");
+            assert!(output.ext4_parsed.is_none());
+            let parsed = output
+                .btrfs_parsed
+                .as_ref()
+                .expect("btrfs parsed inode should be present");
+            assert_eq!(parsed.mode, 0o040_755);
+            assert_eq!(parsed.uid, 1000);
+            assert_eq!(parsed.gid, 1000);
+            assert_eq!(parsed.nlink, 2);
+            assert!(output.raw_hex.as_ref().is_some_and(|raw| !raw.is_empty()));
+            assert!(
+                output.limitations.iter().any(|limitation| {
+                    limitation.contains("inode 1 maps to btrfs root objectid")
+                })
+            );
+        });
+    }
+
+    #[test]
     fn build_info_output_mvcc_includes_transaction_counters_without_placeholder_limitation() {
         const EXT4_VALID_FS: u16 = 0x0001;
         let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
@@ -5665,6 +5959,47 @@ mod tests {
             &staleness,
         );
         assert_eq!(selected, all);
+    }
+
+    #[test]
+    fn btrfs_repair_selection_prefers_stale_groups() {
+        let all = vec![0, 1, 2, 3];
+        let staleness = vec![
+            (0, Ext4RepairStaleness::Fresh),
+            (1, Ext4RepairStaleness::Stale),
+            (2, Ext4RepairStaleness::Untracked),
+            (3, Ext4RepairStaleness::Stale),
+        ];
+        let mut limitations = Vec::new();
+
+        let selected =
+            select_btrfs_repair_groups(RepairFlags::empty(), &all, &staleness, &mut limitations);
+
+        assert_eq!(selected, vec![1, 3]);
+        assert!(
+            limitations
+                .iter()
+                .any(|limitation| limitation.contains("selected 2/4 btrfs groups"))
+        );
+    }
+
+    #[test]
+    fn btrfs_repair_selection_falls_back_to_full_when_all_fresh() {
+        let all = vec![0, 1, 2];
+        let staleness = vec![
+            (0, Ext4RepairStaleness::Fresh),
+            (1, Ext4RepairStaleness::Fresh),
+            (2, Ext4RepairStaleness::Fresh),
+        ];
+        let mut limitations = Vec::new();
+
+        let selected =
+            select_btrfs_repair_groups(RepairFlags::empty(), &all, &staleness, &mut limitations);
+
+        assert_eq!(selected, all);
+        assert!(limitations.iter().any(|limitation| {
+            limitation.contains("found no stale btrfs groups; running full scrub")
+        }));
     }
 
     #[test]
