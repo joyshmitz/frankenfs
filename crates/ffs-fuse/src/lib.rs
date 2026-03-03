@@ -2023,10 +2023,9 @@ pub fn mount_managed(
 mod tests {
     use super::*;
     use ffs_core::{DirEntry as FfsDirEntry, RequestScope};
-    use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime};
 
     /// Minimal FsOps stub for tests that don't need real filesystem behavior.
     struct StubFs;
@@ -2064,18 +2063,8 @@ mod tests {
         }
     }
 
-    fn create_temp_mountpoint_file() -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be monotonic from UNIX_EPOCH")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "frankenfs_mountpoint_file_{}_{}",
-            std::process::id(),
-            unique
-        ));
-        fs::write(&path, b"x").expect("write temp mountpoint file");
-        path
+    fn existing_file_mountpoint() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")
     }
 
     #[test]
@@ -2217,11 +2206,10 @@ mod tests {
 
     #[test]
     fn mount_rejects_file_mountpoint() {
-        let file_path = create_temp_mountpoint_file();
+        let file_path = existing_file_mountpoint();
         let ops: Box<dyn FsOps> = Box::new(StubFs);
         let err = mount(ops, &file_path, &MountOptions::default()).unwrap_err();
         let err_text = err.to_string();
-        let _ = fs::remove_file(&file_path);
         assert!(
             err_text.contains("not a directory"),
             "expected 'not a directory' in error: {err_text}"
@@ -2230,11 +2218,10 @@ mod tests {
 
     #[test]
     fn mount_background_rejects_file_mountpoint() {
-        let file_path = create_temp_mountpoint_file();
+        let file_path = existing_file_mountpoint();
         let ops: Box<dyn FsOps> = Box::new(StubFs);
         let err = mount_background(ops, &file_path, &MountOptions::default()).unwrap_err();
         let err_text = err.to_string();
-        let _ = fs::remove_file(&file_path);
         assert!(
             err_text.contains("not a directory"),
             "expected 'not a directory' in error: {err_text}"
@@ -3362,11 +3349,10 @@ mod tests {
 
     #[test]
     fn mount_managed_rejects_file_mountpoint() {
-        let file_path = create_temp_mountpoint_file();
+        let file_path = existing_file_mountpoint();
         let ops: Box<dyn FsOps> = Box::new(StubFs);
         let err = mount_managed(ops, &file_path, &MountConfig::default()).unwrap_err();
         let err_text = err.to_string();
-        let _ = fs::remove_file(&file_path);
         assert!(
             err_text.contains("not a directory"),
             "expected 'not a directory' in error: {err_text}"
