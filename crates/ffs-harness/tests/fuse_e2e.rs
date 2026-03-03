@@ -70,6 +70,22 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // Make root writable so ext4 write-path tests work on unprivileged runners.
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            "set_inode_field / mode 040777",
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("debugfs chmod /");
+    assert!(
+        out.status.success(),
+        "debugfs chmod / failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     // Populate with test files via debugfs.
     let hello_path = dir.join("hello_src.txt");
     let nested_path = dir.join("nested_src.txt");
@@ -84,6 +100,21 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
     assert!(
         out.status.success(),
         "debugfs mkdir failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            "set_inode_field testdir mode 040777",
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("debugfs chmod testdir");
+    assert!(
+        out.status.success(),
+        "debugfs chmod testdir failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
