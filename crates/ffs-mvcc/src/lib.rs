@@ -280,6 +280,12 @@ pub struct BlockVersionStats {
     pub critical_chain_length: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionOutcomeStats {
+    pub aborted_transactions: u64,
+    pub ssi_conflicts: u64,
+}
+
 /// Budget-driven controls for MVCC version GC batches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcBackpressureConfig {
@@ -452,6 +458,10 @@ pub struct MvccStore {
     evidence_sink: Option<MvccEvidenceSink>,
     /// Whether the most recent GC batch was throttled by budget pressure.
     gc_throttled: bool,
+    /// Total number of aborted transactions since store creation.
+    aborted_transactions: u64,
+    /// Total number of SSI conflicts observed since store creation.
+    ssi_conflicts: u64,
 }
 
 impl Default for MvccStore {
@@ -474,6 +484,8 @@ impl MvccStore {
             ebr_reclaimer: EbrVersionReclaimer::default(),
             evidence_sink: None,
             gc_throttled: false,
+            aborted_transactions: 0,
+            ssi_conflicts: 0,
         }
     }
 
@@ -627,6 +639,15 @@ impl MvccStore {
             chains_over_critical,
             chain_cap,
             critical_chain_length,
+        }
+    }
+
+    /// Monotonic transaction outcome counters since store creation.
+    #[must_use]
+    pub fn transaction_outcome_stats(&self) -> TransactionOutcomeStats {
+        TransactionOutcomeStats {
+            aborted_transactions: self.aborted_transactions,
+            ssi_conflicts: self.ssi_conflicts,
         }
     }
 
@@ -831,7 +852,7 @@ impl MvccStore {
     }
 
     fn record_commit_abort(
-        &self,
+        &mut self,
         txn_id: u64,
         read_set_size: usize,
         write_set_size: usize,
@@ -898,7 +919,8 @@ impl MvccStore {
         );
     }
 
-    fn emit_txn_aborted(&self, detail: TxnAbortedDetail) {
+    fn emit_txn_aborted(&mut self, detail: TxnAbortedDetail) {
+        self.aborted_transactions = self.aborted_transactions.saturating_add(1);
         let Some(sink) = &self.evidence_sink else {
             return;
         };
@@ -907,11 +929,12 @@ impl MvccStore {
     }
 
     fn emit_serialization_conflict(
-        &self,
+        &mut self,
         txn_id: u64,
         conflicting_txn: Option<u64>,
         conflict_type: &str,
     ) {
+        self.ssi_conflicts = self.ssi_conflicts.saturating_add(1);
         let Some(sink) = &self.evidence_sink else {
             return;
         };
@@ -4372,6 +4395,51 @@ mod tests {
             matches!(result, Err(CommitError::SsiConflict { .. })),
             "SSI should reject T2 due to rw-antidependency on block B, got {result:?}"
         );
+    }
+
+    #[test]
+    fn transaction_outcome_stats_track_aborts_and_ssi_conflicts() {
+        let mut store = MvccStore::new();
+        assert_eq!(
+            store.transaction_outcome_stats(),
+            TransactionOutcomeStats::default()
+        );
+
+        let block_a = BlockNumber(100);
+        let block_b = BlockNumber(200);
+
+        let mut seed_txn = store.begin();
+        seed_txn.stage_write(block_a, vec![1]);
+        seed_txn.stage_write(block_b, vec![1]);
+        store.commit_ssi(seed_txn).expect("seed");
+
+        let mut t1 = store.begin();
+        let a_version = store.latest_commit_seq(block_a);
+        t1.record_read(block_a, a_version);
+        t1.stage_write(block_b, vec![2]);
+
+        let mut t2 = store.begin();
+        let b_version = store.latest_commit_seq(block_b);
+        t2.record_read(block_b, b_version);
+        t2.stage_write(block_a, vec![2]);
+
+        store.commit_ssi(t1).expect("T1 should succeed");
+        let ssi_conflict = store.commit_ssi(t2);
+        assert!(
+            matches!(ssi_conflict, Err(CommitError::SsiConflict { .. })),
+            "expected SSI conflict, got {ssi_conflict:?}"
+        );
+
+        let after_ssi = store.transaction_outcome_stats();
+        assert_eq!(after_ssi.aborted_transactions, 1);
+        assert_eq!(after_ssi.ssi_conflicts, 1);
+
+        let user_abort = store.begin();
+        store.abort(user_abort, TxnAbortReason::UserAbort, None);
+
+        let after_user_abort = store.transaction_outcome_stats();
+        assert_eq!(after_user_abort.aborted_transactions, 2);
+        assert_eq!(after_user_abort.ssi_conflicts, 1);
     }
 
     /// SSI does not reject read-only transactions.

@@ -540,7 +540,7 @@ struct Ext4GroupInfoOutput {
     flags: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct BtrfsGroupInfoOutput {
     chunk_index: u32,
     logical_start: u64,
@@ -555,7 +555,7 @@ struct BtrfsGroupInfoOutput {
     stripes: Vec<BtrfsStripeInfoOutput>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct BtrfsStripeInfoOutput {
     stripe_index: u16,
     devid: u64,
@@ -690,9 +690,14 @@ struct DumpSuperblockOutput {
 struct DumpGroupOutput {
     filesystem: String,
     group: u32,
-    descriptor: Ext4GroupDesc,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    descriptor: Option<Ext4GroupDesc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    btrfs_chunk: Option<BtrfsGroupInfoOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     raw_hex: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    limitations: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1414,10 +1419,6 @@ fn build_info_output(
     };
 
     let mvcc_output = if options.sections.mvcc() {
-        limitations.push(
-            "MVCC status currently exposes snapshot/version-chain metrics; transaction/SSI counters are not yet wired into this command"
-                .to_owned(),
-        );
         Some(build_mvcc_info(open_fs))
     } else {
         None
@@ -1608,6 +1609,7 @@ fn build_mvcc_info(open_fs: &OpenFs) -> MvccInfoOutput {
     let block_stats = mvcc_guard.block_version_stats();
     let total_versioned_entries = mvcc_guard.version_count();
     let ebr_stats = mvcc_guard.ebr_stats();
+    let txn_outcomes = mvcc_guard.transaction_outcome_stats();
     drop(mvcc_guard);
 
     MvccInfoOutput {
@@ -1621,8 +1623,8 @@ fn build_mvcc_info(open_fs: &OpenFs) -> MvccInfoOutput {
             block_stats.tracked_blocks,
         ),
         blocks_pending_gc: ebr_stats.pending_versions(),
-        ssi_conflict_count: None,
-        abort_count: None,
+        ssi_conflict_count: Some(txn_outcomes.ssi_conflicts),
+        abort_count: Some(txn_outcomes.aborted_transactions),
     }
 }
 
@@ -1890,6 +1892,12 @@ fn print_mvcc_info(mvcc: &MvccInfoOutput) {
     println!("  max_chain_depth: {}", mvcc.max_chain_depth);
     println!("  average_chain_depth: {}", mvcc.average_chain_depth);
     println!("  blocks_pending_gc: {}", mvcc.blocks_pending_gc);
+    if let Some(ssi_conflict_count) = mvcc.ssi_conflict_count {
+        println!("  ssi_conflict_count: {ssi_conflict_count}");
+    }
+    if let Some(abort_count) = mvcc.abort_count {
+        println!("  abort_count: {abort_count}");
+    }
 }
 
 fn print_repair_info(repair: &RepairInfoOutput) {
@@ -2293,21 +2301,7 @@ fn dump_group_cmd(group: u32, path: &PathBuf, json: bool, hex: bool) -> Result<(
     let started = Instant::now();
     info!(target: "ffs::cli::dump::group", "dump_group_start");
 
-    let sb = ext4_superblock_for_action(path, "dump group")?;
-    let (desc, raw_desc) = read_ext4_group_desc_from_path(path, &sb, group)?;
-
-    let raw_hex = if hex {
-        Some(bytes_to_hex_dump(&raw_desc))
-    } else {
-        None
-    };
-
-    let output = DumpGroupOutput {
-        filesystem: "ext4".to_owned(),
-        group,
-        descriptor: desc,
-        raw_hex,
-    };
+    let output = build_dump_group_output(path, group, hex)?;
 
     if json {
         println!(
@@ -2318,27 +2312,55 @@ fn dump_group_cmd(group: u32, path: &PathBuf, json: bool, hex: bool) -> Result<(
         println!("FrankenFS Dump: group");
         println!("filesystem: {}", output.filesystem);
         println!("group: {}", output.group);
-        println!("descriptor:");
-        println!("  block_bitmap: {}", output.descriptor.block_bitmap);
-        println!("  inode_bitmap: {}", output.descriptor.inode_bitmap);
-        println!("  inode_table: {}", output.descriptor.inode_table);
-        println!(
-            "  free_blocks_count: {}",
-            output.descriptor.free_blocks_count
-        );
-        println!(
-            "  free_inodes_count: {}",
-            output.descriptor.free_inodes_count
-        );
-        println!("  used_dirs_count: {}", output.descriptor.used_dirs_count);
-        println!("  itable_unused: {}", output.descriptor.itable_unused);
-        println!("  flags: 0x{:04X}", output.descriptor.flags);
-        println!("  checksum: 0x{:04X}", output.descriptor.checksum);
+        if let Some(descriptor) = &output.descriptor {
+            println!("descriptor:");
+            println!("  block_bitmap: {}", descriptor.block_bitmap);
+            println!("  inode_bitmap: {}", descriptor.inode_bitmap);
+            println!("  inode_table: {}", descriptor.inode_table);
+            println!("  free_blocks_count: {}", descriptor.free_blocks_count);
+            println!("  free_inodes_count: {}", descriptor.free_inodes_count);
+            println!("  used_dirs_count: {}", descriptor.used_dirs_count);
+            println!("  itable_unused: {}", descriptor.itable_unused);
+            println!("  flags: 0x{:04X}", descriptor.flags);
+            println!("  checksum: 0x{:04X}", descriptor.checksum);
+        }
+        if let Some(chunk) = &output.btrfs_chunk {
+            println!("chunk:");
+            println!(
+                "  logical: {}..{} (bytes={})",
+                chunk.logical_start, chunk.logical_end_inclusive, chunk.logical_bytes
+            );
+            println!(
+                "  type: {} ({})",
+                chunk.chunk_type_raw,
+                chunk.chunk_type_flags.join("|")
+            );
+            println!("  owner: {}", chunk.owner);
+            println!("  stripe_len: {}", chunk.stripe_len);
+            println!("  sector_size: {}", chunk.sector_size);
+            println!("  stripes: {}", chunk.stripe_count);
+            for stripe in &chunk.stripes {
+                println!(
+                    "    stripe={} devid={} physical={}..{}",
+                    stripe.stripe_index,
+                    stripe.devid,
+                    stripe.physical_start,
+                    stripe.physical_end_inclusive
+                );
+            }
+        }
 
         if let Some(raw_hex) = &output.raw_hex {
             println!();
             println!("raw_hex:");
             println!("{raw_hex}");
+        }
+        if !output.limitations.is_empty() {
+            println!();
+            println!("limitations:");
+            for limitation in &output.limitations {
+                println!("  - {limitation}");
+            }
         }
     }
 
@@ -2350,6 +2372,58 @@ fn dump_group_cmd(group: u32, path: &PathBuf, json: bool, hex: bool) -> Result<(
     );
 
     Ok(())
+}
+
+fn build_dump_group_output(path: &PathBuf, group: u32, hex: bool) -> Result<DumpGroupOutput> {
+    let cx = cli_cx();
+    let flavor = detect_filesystem_at_path(&cx, path)
+        .with_context(|| format!("failed to detect ext4/btrfs metadata in {}", path.display()))?;
+
+    match flavor {
+        FsFlavor::Ext4(sb) => {
+            let (desc, raw_desc) = read_ext4_group_desc_from_path(path, &sb, group)?;
+            let raw_hex = if hex {
+                Some(bytes_to_hex_dump(&raw_desc))
+            } else {
+                None
+            };
+            Ok(DumpGroupOutput {
+                filesystem: "ext4".to_owned(),
+                group,
+                descriptor: Some(desc),
+                btrfs_chunk: None,
+                raw_hex,
+                limitations: Vec::new(),
+            })
+        }
+        FsFlavor::Btrfs(sb) => {
+            let open_fs = OpenFs::open_with_options(&cx, path, &OpenOptions::default())
+                .with_context(|| format!("failed to open image: {}", path.display()))?;
+            let mut limitations = Vec::new();
+            let entries = build_btrfs_group_info(&open_fs, &sb, &mut limitations);
+            let index = usize::try_from(group)
+                .with_context(|| format!("group index {group} does not fit usize"))?;
+            let chunk = entries.get(index).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "btrfs chunk index {} is out of range (available chunks: {})",
+                    group,
+                    entries.len()
+                )
+            })?;
+            if hex {
+                limitations
+                    .push("raw hex for btrfs chunk dump is not currently available".to_owned());
+            }
+            Ok(DumpGroupOutput {
+                filesystem: "btrfs".to_owned(),
+                group,
+                descriptor: None,
+                btrfs_chunk: Some(chunk),
+                raw_hex: None,
+                limitations,
+            })
+        }
+    }
 }
 
 fn ext4_superblock_for_action(path: &PathBuf, action: &str) -> Result<Ext4Superblock> {
@@ -5351,6 +5425,83 @@ mod tests {
 
             assert!(!output.limitations.iter().any(|limitation| {
                 limitation.contains("--groups is currently implemented for ext4 images only")
+            }));
+        });
+    }
+
+    #[test]
+    fn build_dump_group_output_btrfs_returns_chunk_mapping() {
+        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
+        let mut image = vec![0_u8; 2 * 1024 * 1024];
+        let sb = build_test_btrfs_superblock_with_single_chunk(
+            primary_offset as u64,
+            11,
+            0x0,
+            0x10000,
+            0x20000,
+            1 | 2, // DATA|SYSTEM
+        );
+        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
+
+        with_temp_image_path(&image, |path| {
+            let output = super::build_dump_group_output(&path, 0, true)
+                .expect("build dump group output for btrfs image");
+            assert_eq!(output.filesystem, "btrfs");
+            assert_eq!(output.group, 0);
+            assert!(output.descriptor.is_none());
+            assert!(output.raw_hex.is_none());
+            assert!(
+                output
+                    .limitations
+                    .iter()
+                    .any(|limitation| limitation.contains("raw hex for btrfs chunk dump"))
+            );
+
+            let chunk = output
+                .btrfs_chunk
+                .expect("btrfs chunk should be present in dump output");
+            assert_eq!(chunk.chunk_index, 0);
+            assert_eq!(chunk.logical_start, 0);
+            assert_eq!(chunk.logical_end_inclusive, 0x0_FFFF);
+            assert_eq!(chunk.logical_bytes, 0x10000);
+            assert_eq!(chunk.chunk_type_flags, vec!["DATA", "SYSTEM"]);
+            assert_eq!(chunk.stripe_count, 1);
+            assert_eq!(chunk.stripes.len(), 1);
+            assert_eq!(chunk.stripes[0].physical_start, 0x20000);
+            assert_eq!(chunk.stripes[0].physical_end_inclusive, 0x2_FFFF);
+        });
+    }
+
+    #[test]
+    fn build_info_output_mvcc_includes_transaction_counters_without_placeholder_limitation() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+
+        with_temp_image_path(&image, |path| {
+            let cx = super::cli_cx();
+            let open_opts = super::OpenOptions {
+                ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+                ..super::OpenOptions::default()
+            };
+            let open_fs = super::OpenFs::open_with_options(&cx, &path, &open_opts)
+                .expect("open ext4 image for info mvcc test");
+
+            let output = build_info_output(
+                &path,
+                &cx,
+                &open_fs,
+                InfoCommandOptions {
+                    sections: InfoSections::empty().with_mvcc(true),
+                    json: false,
+                },
+            )
+            .expect("build info output with mvcc section");
+
+            let mvcc = output.mvcc.expect("mvcc section should be present");
+            assert_eq!(mvcc.ssi_conflict_count, Some(0));
+            assert_eq!(mvcc.abort_count, Some(0));
+            assert!(!output.limitations.iter().any(|limitation| {
+                limitation.contains("transaction/SSI counters are not yet wired")
             }));
         });
     }
