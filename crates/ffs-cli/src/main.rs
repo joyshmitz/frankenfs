@@ -24,8 +24,8 @@ use ffs_core::{
 use ffs_fuse::MountOptions;
 use ffs_harness::ParityReport;
 use ffs_ondisk::{
-    Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex, Ext4GroupDesc, Ext4ImageReader,
-    Ext4Inode, Ext4Superblock, ExtentTree, parse_dx_root, parse_extent_tree,
+    BtrfsSuperblock, Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex, Ext4GroupDesc,
+    Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree, parse_dx_root, parse_extent_tree,
     parse_inode_extent_tree,
 };
 use ffs_repair::scrub::{
@@ -464,7 +464,7 @@ struct InfoOutput {
     filesystem: String,
     superblock: SuperblockInfoOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
-    groups: Option<Vec<Ext4GroupInfoOutput>>,
+    groups: Option<GroupsInfoOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mvcc: Option<MvccInfoOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -473,6 +473,13 @@ struct InfoOutput {
     journal: Option<JournalInfoOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     limitations: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum GroupsInfoOutput {
+    Ext4 { entries: Vec<Ext4GroupInfoOutput> },
+    Btrfs { entries: Vec<BtrfsGroupInfoOutput> },
 }
 
 #[derive(Debug, Serialize)]
@@ -531,6 +538,30 @@ struct Ext4GroupInfoOutput {
     free_inodes: u32,
     flags_raw: u16,
     flags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BtrfsGroupInfoOutput {
+    chunk_index: u32,
+    logical_start: u64,
+    logical_end_inclusive: u64,
+    logical_bytes: u64,
+    chunk_type_raw: u64,
+    chunk_type_flags: Vec<String>,
+    owner: u64,
+    stripe_len: u64,
+    sector_size: u32,
+    stripe_count: u16,
+    stripes: Vec<BtrfsStripeInfoOutput>,
+}
+
+#[derive(Debug, Serialize)]
+struct BtrfsStripeInfoOutput {
+    stripe_index: u16,
+    devid: u64,
+    physical_start: u64,
+    physical_end_inclusive: u64,
+    device_uuid: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1371,12 +1402,12 @@ fn build_info_output(
 
     let groups_output = if options.sections.groups() {
         match &open_fs.flavor {
-            FsFlavor::Ext4(sb) => Some(build_ext4_group_info(path, sb)?),
-            FsFlavor::Btrfs(_) => {
-                limitations
-                    .push("--groups is currently implemented for ext4 images only".to_owned());
-                None
-            }
+            FsFlavor::Ext4(sb) => Some(GroupsInfoOutput::Ext4 {
+                entries: build_ext4_group_info(path, sb)?,
+            }),
+            FsFlavor::Btrfs(sb) => Some(GroupsInfoOutput::Btrfs {
+                entries: build_btrfs_group_info(open_fs, sb, &mut limitations),
+            }),
         }
     } else {
         None
@@ -1517,6 +1548,56 @@ fn build_ext4_group_info(path: &PathBuf, sb: &Ext4Superblock) -> Result<Vec<Ext4
     }
 
     Ok(groups)
+}
+
+fn build_btrfs_group_info(
+    open_fs: &OpenFs,
+    _sb: &BtrfsSuperblock,
+    limitations: &mut Vec<String>,
+) -> Vec<BtrfsGroupInfoOutput> {
+    let Some(ctx) = open_fs.btrfs_context() else {
+        limitations.push("btrfs chunk mapping context is unavailable".to_owned());
+        return Vec::new();
+    };
+
+    let mut entries = Vec::with_capacity(ctx.chunks.len());
+    for (chunk_index, chunk) in ctx.chunks.iter().enumerate() {
+        let logical_end_inclusive = chunk
+            .key
+            .offset
+            .saturating_add(chunk.length.saturating_sub(1));
+
+        let stripes = chunk
+            .stripes
+            .iter()
+            .enumerate()
+            .map(|(stripe_index, stripe)| BtrfsStripeInfoOutput {
+                stripe_index: u16::try_from(stripe_index).unwrap_or(u16::MAX),
+                devid: stripe.devid,
+                physical_start: stripe.offset,
+                physical_end_inclusive: stripe
+                    .offset
+                    .saturating_add(chunk.length.saturating_sub(1)),
+                device_uuid: format_uuid(&stripe.dev_uuid),
+            })
+            .collect();
+
+        entries.push(BtrfsGroupInfoOutput {
+            chunk_index: u32::try_from(chunk_index).unwrap_or(u32::MAX),
+            logical_start: chunk.key.offset,
+            logical_end_inclusive,
+            logical_bytes: chunk.length,
+            chunk_type_raw: chunk.chunk_type,
+            chunk_type_flags: btrfs_chunk_type_flag_names(chunk.chunk_type),
+            owner: chunk.owner,
+            stripe_len: chunk.stripe_len,
+            sector_size: chunk.sector_size,
+            stripe_count: chunk.num_stripes,
+            stripes,
+        });
+    }
+
+    entries
 }
 
 fn build_mvcc_info(open_fs: &OpenFs) -> MvccInfoOutput {
@@ -1748,21 +1829,50 @@ fn print_info_output(json: bool, output: &InfoOutput) -> Result<()> {
     Ok(())
 }
 
-fn print_groups_info(groups: &[Ext4GroupInfoOutput]) {
-    println!();
-    println!("groups: {}", groups.len());
-    for group in groups {
-        println!(
-            "  group={} blocks={}..{} free_blocks={} inodes={}..{} free_inodes={} flags={}",
-            group.group,
-            group.block_start,
-            group.block_end_inclusive,
-            group.free_blocks,
-            group.inode_start,
-            group.inode_end_inclusive,
-            group.free_inodes,
-            group.flags.join("|")
-        );
+fn print_groups_info(groups: &GroupsInfoOutput) {
+    match groups {
+        GroupsInfoOutput::Ext4 { entries } => {
+            println!();
+            println!("groups: {}", entries.len());
+            for group in entries {
+                println!(
+                    "  group={} blocks={}..{} free_blocks={} inodes={}..{} free_inodes={} flags={}",
+                    group.group,
+                    group.block_start,
+                    group.block_end_inclusive,
+                    group.free_blocks,
+                    group.inode_start,
+                    group.inode_end_inclusive,
+                    group.free_inodes,
+                    group.flags.join("|")
+                );
+            }
+        }
+        GroupsInfoOutput::Btrfs { entries } => {
+            println!();
+            println!("chunks: {}", entries.len());
+            for chunk in entries {
+                println!(
+                    "  chunk={} logical={}..{} bytes={} type={} stripes={} flags={}",
+                    chunk.chunk_index,
+                    chunk.logical_start,
+                    chunk.logical_end_inclusive,
+                    chunk.logical_bytes,
+                    chunk.chunk_type_raw,
+                    chunk.stripe_count,
+                    chunk.chunk_type_flags.join("|")
+                );
+                for stripe in &chunk.stripes {
+                    println!(
+                        "    stripe={} devid={} physical={}..{}",
+                        stripe.stripe_index,
+                        stripe.devid,
+                        stripe.physical_start,
+                        stripe.physical_end_inclusive
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1999,6 +2109,33 @@ fn ext4_group_flag_names(flags: u16) -> Vec<String> {
         names.push("NONE".to_owned());
     }
     names
+}
+
+fn btrfs_chunk_type_flag_names(chunk_type: u64) -> Vec<String> {
+    const BTRFS_BLOCK_GROUP_DATA: u64 = 1;
+    const BTRFS_BLOCK_GROUP_SYSTEM: u64 = 2;
+    const BTRFS_BLOCK_GROUP_METADATA: u64 = 4;
+
+    let mut flags = Vec::new();
+    if (chunk_type & BTRFS_BLOCK_GROUP_DATA) != 0 {
+        flags.push("DATA".to_owned());
+    }
+    if (chunk_type & BTRFS_BLOCK_GROUP_SYSTEM) != 0 {
+        flags.push("SYSTEM".to_owned());
+    }
+    if (chunk_type & BTRFS_BLOCK_GROUP_METADATA) != 0 {
+        flags.push("METADATA".to_owned());
+    }
+
+    let known = BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_SYSTEM | BTRFS_BLOCK_GROUP_METADATA;
+    let unknown = chunk_type & !known;
+    if unknown != 0 {
+        flags.push(format!("UNKNOWN(0x{unknown:016x})"));
+    }
+    if flags.is_empty() {
+        flags.push("NONE".to_owned());
+    }
+    flags
 }
 
 fn btrfs_checksum_type_name(csum_type: u16) -> String {
@@ -3995,10 +4132,10 @@ mod tests {
     use super::{
         Cli, Command, DumpCommand, Ext4JournalReplayMode, FsckCommandOptions, FsckFlags,
         InfoCommandOptions, InfoSections, LogFormat, RepairCommandOptions, RepairFlags,
-        build_ext4_group_info, build_fsck_output, build_info_output, choose_btrfs_scrub_block_size,
-        ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
-        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
-        summarize_repair_staleness, unavailable_repair_info,
+        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
+        choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
+        format_ratio_thousandths, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
+        read_file_region, summarize_repair_staleness, unavailable_repair_info,
     };
     use crate::cmd_evidence::load_evidence_records;
     use crate::cmd_repair::{
@@ -4108,6 +4245,55 @@ mod tests {
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes()); // nodesize
         sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes()); // stripesize
         sb[0xC4..0xC6].copy_from_slice(&ffs_types::BTRFS_CSUM_TYPE_CRC32C.to_le_bytes());
+        let checksum = crc32c::crc32c(&sb[0x20..super::BTRFS_SUPER_INFO_SIZE]);
+        sb[0..4].copy_from_slice(&checksum.to_le_bytes());
+        sb
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_test_btrfs_superblock_with_single_chunk(
+        bytenr: u64,
+        generation: u64,
+        logical_start: u64,
+        logical_length: u64,
+        physical_start: u64,
+        chunk_type: u64,
+    ) -> Vec<u8> {
+        const BTRFS_SYS_CHUNK_ARRAY_OFFSET_TEST: usize = 0x32B;
+        let mut sb = build_test_btrfs_superblock(bytenr, generation);
+
+        // One sys_chunk_array entry:
+        // disk_key (17) + chunk_fixed (48) + 1 stripe (32) = 97 bytes.
+        let mut entry = Vec::with_capacity(97);
+
+        // disk_key
+        entry.extend_from_slice(&256_u64.to_le_bytes()); // objectid
+        entry.push(228_u8); // CHUNK_ITEM_KEY
+        entry.extend_from_slice(&logical_start.to_le_bytes());
+
+        // chunk fixed fields
+        entry.extend_from_slice(&logical_length.to_le_bytes()); // length
+        entry.extend_from_slice(&2_u64.to_le_bytes()); // owner (chunk tree)
+        entry.extend_from_slice(&(64 * 1024_u64).to_le_bytes()); // stripe_len
+        entry.extend_from_slice(&chunk_type.to_le_bytes()); // type flags
+        entry.extend_from_slice(&4096_u32.to_le_bytes()); // io_align
+        entry.extend_from_slice(&4096_u32.to_le_bytes()); // io_width
+        entry.extend_from_slice(&4096_u32.to_le_bytes()); // sector_size
+        entry.extend_from_slice(&1_u16.to_le_bytes()); // num_stripes
+        entry.extend_from_slice(&0_u16.to_le_bytes()); // sub_stripes
+
+        // one stripe
+        entry.extend_from_slice(&1_u64.to_le_bytes()); // devid
+        entry.extend_from_slice(&physical_start.to_le_bytes()); // physical offset
+        entry.extend_from_slice(&[0_u8; 16]); // dev_uuid
+
+        let array_size = u32::try_from(entry.len()).expect("chunk entry length fits in u32");
+        sb[0xA0..0xA4].copy_from_slice(&array_size.to_le_bytes());
+        let array_start = BTRFS_SYS_CHUNK_ARRAY_OFFSET_TEST;
+        let array_end = array_start + entry.len();
+        sb[array_start..array_end].copy_from_slice(&entry);
+
+        // Recompute checksum after mutating sys_chunk_array.
         let checksum = crc32c::crc32c(&sb[0x20..super::BTRFS_SUPER_INFO_SIZE]);
         sb[0..4].copy_from_slice(&checksum.to_le_bytes());
         sb
@@ -5108,6 +5294,79 @@ mod tests {
                 limitation.contains("repair metrics probe failed for ext4 image")
             }));
         });
+    }
+
+    #[test]
+    fn build_info_output_btrfs_groups_reports_chunk_layout() {
+        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
+        let mut image = vec![0_u8; 2 * 1024 * 1024];
+        let sb = build_test_btrfs_superblock_with_single_chunk(
+            primary_offset as u64,
+            11,
+            0x0,
+            0x10000,
+            0x20000,
+            1 | 4, // DATA|METADATA
+        );
+        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
+
+        with_temp_image_path(&image, |path| {
+            let cx = super::cli_cx();
+            let open_fs =
+                super::OpenFs::open_with_options(&cx, &path, &super::OpenOptions::default())
+                    .expect("open btrfs image for info groups test");
+
+            let output = build_info_output(
+                &path,
+                &cx,
+                &open_fs,
+                InfoCommandOptions {
+                    sections: InfoSections::empty().with_groups(true),
+                    json: false,
+                },
+            )
+            .expect("build info output with btrfs groups");
+
+            let groups = output.groups.expect("groups section should be present");
+            match groups {
+                super::GroupsInfoOutput::Btrfs { entries } => {
+                    assert_eq!(entries.len(), 1);
+                    let chunk = &entries[0];
+                    assert_eq!(chunk.chunk_index, 0);
+                    assert_eq!(chunk.logical_start, 0);
+                    assert_eq!(chunk.logical_end_inclusive, 0x0_FFFF);
+                    assert_eq!(chunk.logical_bytes, 0x10000);
+                    assert_eq!(chunk.chunk_type_raw, 5);
+                    assert_eq!(chunk.chunk_type_flags, vec!["DATA", "METADATA"]);
+                    assert_eq!(chunk.stripe_count, 1);
+                    assert_eq!(chunk.stripes.len(), 1);
+                    assert_eq!(chunk.stripes[0].devid, 1);
+                    assert_eq!(chunk.stripes[0].physical_start, 0x20000);
+                    assert_eq!(chunk.stripes[0].physical_end_inclusive, 0x2_FFFF);
+                }
+                super::GroupsInfoOutput::Ext4 { .. } => {
+                    panic!("expected btrfs groups output")
+                }
+            }
+
+            assert!(!output.limitations.iter().any(|limitation| {
+                limitation.contains("--groups is currently implemented for ext4 images only")
+            }));
+        });
+    }
+
+    #[test]
+    fn btrfs_chunk_type_flag_names_reports_known_and_unknown_bits() {
+        assert_eq!(btrfs_chunk_type_flag_names(0), vec!["NONE"]);
+        assert_eq!(btrfs_chunk_type_flag_names(3), vec!["DATA", "SYSTEM"]);
+
+        let flags = btrfs_chunk_type_flag_names(1 | (1_u64 << 9));
+        assert!(flags.iter().any(|flag| flag == "DATA"));
+        assert!(
+            flags
+                .iter()
+                .any(|flag| flag.starts_with("UNKNOWN(0x0000000000000200)"))
+        );
     }
 
     #[test]
