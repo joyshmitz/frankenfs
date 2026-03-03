@@ -812,7 +812,7 @@ struct DumpDirOutput {
 #[derive(Debug, Serialize)]
 struct DumpDirEntryOutput {
     index: usize,
-    inode: u32,
+    inode: u64,
     rec_len: u32,
     file_type: String,
     name: String,
@@ -2775,73 +2775,7 @@ fn dump_dir_cmd(inode: u64, path: &PathBuf, json: bool, hex: bool) -> Result<()>
     let started = Instant::now();
     info!(target: "ffs::cli::dump::dir", "dump_dir_start");
 
-    let (image, reader) = load_ext4_reader(path, "dump dir")?;
-    let inode_number = InodeNumber(inode);
-    let parsed_inode = reader
-        .read_inode(&image, inode_number)
-        .with_context(|| format!("failed to read inode {inode}"))?;
-    let entries = reader
-        .read_dir(&image, &parsed_inode)
-        .with_context(|| format!("failed to read directory entries for inode {inode}"))?;
-
-    let htree = match reader
-        .resolve_extent(&image, &parsed_inode, 0)
-        .with_context(|| format!("failed to resolve first directory block for inode {inode}"))?
-    {
-        Some(physical_block) => {
-            let block = reader
-                .read_block(&image, BlockNumber(physical_block))
-                .with_context(|| format!("failed to read directory block {physical_block}"))?;
-            parse_dx_root(block).ok().map(|root| DumpDxRootOutput {
-                hash_version: root.hash_version,
-                indirect_levels: root.indirect_levels,
-                entries: root
-                    .entries
-                    .iter()
-                    .map(|entry| DumpDxEntryOutput {
-                        hash: entry.hash,
-                        block: entry.block,
-                    })
-                    .collect(),
-            })
-        }
-        None => None,
-    };
-
-    let raw_hex_blocks = if hex {
-        Some(read_ext4_directory_hex_blocks(
-            &image,
-            &reader,
-            &parsed_inode,
-        )?)
-    } else {
-        None
-    };
-
-    let mut limitations = Vec::new();
-    limitations.push(
-        "directory entry byte offsets are not exposed by parser APIs; `index` preserves on-disk iteration order"
-            .to_owned(),
-    );
-    if htree.is_none() {
-        limitations.push(
-            "htree metadata is only shown for indexed directories with a parseable dx root"
-                .to_owned(),
-        );
-    }
-
-    let output = DumpDirOutput {
-        filesystem: "ext4".to_owned(),
-        inode,
-        entries: entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| dump_dir_entry(index, entry))
-            .collect(),
-        htree,
-        raw_hex_blocks,
-        limitations,
-    };
+    let output = build_dump_dir_output(path, inode, hex)?;
 
     if json {
         println!(
@@ -2901,6 +2835,122 @@ fn dump_dir_cmd(inode: u64, path: &PathBuf, json: bool, hex: bool) -> Result<()>
     );
 
     Ok(())
+}
+
+fn build_dump_dir_output(path: &PathBuf, inode: u64, hex: bool) -> Result<DumpDirOutput> {
+    let cx = cli_cx();
+    let flavor = detect_filesystem_at_path(&cx, path)
+        .with_context(|| format!("failed to detect ext4/btrfs metadata in {}", path.display()))?;
+    match flavor {
+        FsFlavor::Ext4(_) => build_ext4_dump_dir_output(path, inode, hex),
+        FsFlavor::Btrfs(_) => build_btrfs_dump_dir_output(path, inode, hex),
+    }
+}
+
+fn build_ext4_dump_dir_output(path: &PathBuf, inode: u64, hex: bool) -> Result<DumpDirOutput> {
+    let (image, reader) = load_ext4_reader(path, "dump dir")?;
+    let inode_number = InodeNumber(inode);
+    let parsed_inode = reader
+        .read_inode(&image, inode_number)
+        .with_context(|| format!("failed to read inode {inode}"))?;
+    let entries = reader
+        .read_dir(&image, &parsed_inode)
+        .with_context(|| format!("failed to read directory entries for inode {inode}"))?;
+
+    let htree = match reader
+        .resolve_extent(&image, &parsed_inode, 0)
+        .with_context(|| format!("failed to resolve first directory block for inode {inode}"))?
+    {
+        Some(physical_block) => {
+            let block = reader
+                .read_block(&image, BlockNumber(physical_block))
+                .with_context(|| format!("failed to read directory block {physical_block}"))?;
+            parse_dx_root(block).ok().map(|root| DumpDxRootOutput {
+                hash_version: root.hash_version,
+                indirect_levels: root.indirect_levels,
+                entries: root
+                    .entries
+                    .iter()
+                    .map(|entry| DumpDxEntryOutput {
+                        hash: entry.hash,
+                        block: entry.block,
+                    })
+                    .collect(),
+            })
+        }
+        None => None,
+    };
+
+    let raw_hex_blocks = if hex {
+        Some(read_ext4_directory_hex_blocks(
+            &image,
+            &reader,
+            &parsed_inode,
+        )?)
+    } else {
+        None
+    };
+
+    let mut limitations = Vec::new();
+    limitations.push(
+        "directory entry byte offsets are not exposed by parser APIs; `index` preserves on-disk iteration order"
+            .to_owned(),
+    );
+    if htree.is_none() {
+        limitations.push(
+            "htree metadata is only shown for indexed directories with a parseable dx root"
+                .to_owned(),
+        );
+    }
+
+    Ok(DumpDirOutput {
+        filesystem: "ext4".to_owned(),
+        inode,
+        entries: entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| dump_dir_entry(index, entry))
+            .collect(),
+        htree,
+        raw_hex_blocks,
+        limitations,
+    })
+}
+
+fn build_btrfs_dump_dir_output(path: &PathBuf, inode: u64, hex: bool) -> Result<DumpDirOutput> {
+    let cx = cli_cx();
+    let open_fs = OpenFs::open(&cx, path)
+        .with_context(|| format!("failed to open image: {}", path.display()))?;
+    let entries = open_fs
+        .readdir(&cx, InodeNumber(inode), 0)
+        .with_context(|| format!("failed to read btrfs directory entries for inode {inode}"))?;
+    let mut limitations = vec![
+        "btrfs directory dump uses VFS readdir projection; on-disk rec_len offsets are not available"
+            .to_owned(),
+        "htree metadata is ext4-specific and not available for btrfs directories".to_owned(),
+    ];
+    if hex {
+        limitations
+            .push("raw hex directory block dump is not yet implemented for btrfs".to_owned());
+    }
+    Ok(DumpDirOutput {
+        filesystem: "btrfs".to_owned(),
+        inode,
+        entries: entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| DumpDirEntryOutput {
+                index,
+                inode: entry.ino.0,
+                rec_len: 0,
+                file_type: format!("{:?}", entry.kind).to_ascii_lowercase(),
+                name: entry.name_str(),
+            })
+            .collect(),
+        htree: None,
+        raw_hex_blocks: None,
+        limitations,
+    })
 }
 
 fn load_ext4_reader(path: &PathBuf, action: &str) -> Result<(Vec<u8>, Ext4ImageReader)> {
@@ -3090,7 +3140,7 @@ fn collect_extent_nodes(
 fn dump_dir_entry(index: usize, entry: &Ext4DirEntry) -> DumpDirEntryOutput {
     DumpDirEntryOutput {
         index,
-        inode: entry.inode,
+        inode: u64::from(entry.inode),
         rec_len: entry.rec_len,
         file_type: format!("{:?}", entry.file_type).to_ascii_lowercase(),
         name: entry.name_str(),
@@ -5763,6 +5813,26 @@ mod tests {
                     limitation.contains("inode 1 maps to btrfs root objectid")
                 })
             );
+        });
+    }
+
+    #[test]
+    fn build_dump_dir_output_btrfs_returns_vfs_directory_projection() {
+        let image = build_test_btrfs_image_with_root_inode_item();
+        with_temp_image_path(&image, |path| {
+            let output = super::build_dump_dir_output(&path, 1, true)
+                .expect("build dump dir output for btrfs image");
+
+            assert_eq!(output.filesystem, "btrfs");
+            assert_eq!(output.inode, 1);
+            assert!(output.htree.is_none());
+            assert!(output.raw_hex_blocks.is_none());
+            assert!(output.entries.iter().all(|entry| entry.rec_len == 0));
+            assert!(output.entries.iter().any(|entry| entry.name == "."));
+            assert!(output.entries.iter().any(|entry| entry.name == ".."));
+            assert!(output.limitations.iter().any(|limitation| {
+                limitation.contains("raw hex directory block dump is not yet implemented for btrfs")
+            }));
         });
     }
 
