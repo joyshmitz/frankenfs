@@ -7371,6 +7371,49 @@ impl FsOps for OpenFs {
             }
         }
     }
+
+    fn begin_request_scope(&self, _cx: &Cx, op: RequestOp) -> ffs_error::Result<RequestScope> {
+        let snapshot = self.current_snapshot();
+        self.mvcc_store.write().register_snapshot(snapshot);
+        trace!(
+            target: "ffs::mvcc",
+            op = ?op,
+            snapshot_high = snapshot.high.0,
+            "mvcc_request_scope_begin"
+        );
+        Ok(RequestScope {
+            snapshot: Some(snapshot),
+            tx: None,
+        })
+    }
+
+    fn end_request_scope(
+        &self,
+        _cx: &Cx,
+        op: RequestOp,
+        scope: RequestScope,
+    ) -> ffs_error::Result<()> {
+        let Some(snapshot) = scope.snapshot else {
+            return Ok(());
+        };
+        let released = self.mvcc_store.write().release_snapshot(snapshot);
+        if released {
+            trace!(
+                target: "ffs::mvcc",
+                op = ?op,
+                snapshot_high = snapshot.high.0,
+                "mvcc_request_scope_end"
+            );
+        } else {
+            warn!(
+                target: "ffs::mvcc",
+                op = ?op,
+                snapshot_high = snapshot.high.0,
+                "mvcc_request_scope_release_missed"
+            );
+        }
+        Ok(())
+    }
 }
 
 // ── Bayesian Filesystem Integrity Scanner ──────────────────────────────────
@@ -14755,6 +14798,48 @@ mod tests {
         // state field is at superblock offset 0x3A
         image[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&state.to_le_bytes());
         image
+    }
+
+    #[test]
+    fn request_scope_registers_and_releases_snapshot() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+
+        let scope = fs
+            .begin_request_scope(&cx, RequestOp::Read)
+            .expect("begin request scope");
+        let pinned = scope
+            .snapshot
+            .expect("request scope should carry pinned snapshot");
+        assert!(scope.tx.is_none(), "request scope should not allocate txn");
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 1);
+
+        fs.end_request_scope(
+            &cx,
+            RequestOp::Read,
+            RequestScope {
+                snapshot: Some(pinned),
+                tx: None,
+            },
+        )
+        .expect("end request scope");
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn end_request_scope_accepts_empty_scope() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        fs.end_request_scope(&cx, RequestOp::Read, RequestScope::empty())
+            .expect("empty request scope should be a no-op");
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
     }
 
     #[test]
