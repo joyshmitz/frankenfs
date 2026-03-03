@@ -471,6 +471,19 @@ impl ReadaheadManager {
         drop(guard);
         Some(cached)
     }
+
+    fn invalidate_inode(&self, ino: InodeNumber) {
+        let mut guard = match self.pending.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("ReadaheadCache pending lock poisoned in invalidate, recovering");
+                poisoned.into_inner()
+            }
+        };
+        guard.map.retain(|(cached_ino, _), _| *cached_ino != ino.0);
+        guard.fifo.retain(|(cached_ino, _)| *cached_ino != ino.0);
+        drop(guard);
+    }
 }
 
 // ── Shared FUSE inner state ─────────────────────────────────────────────────
@@ -837,15 +850,18 @@ impl FrankenFuse {
         let byte_offset =
             u64::try_from(offset).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
         let cx = Self::cx_for_request();
-        self.with_request_scope(&cx, RequestOp::Write, |cx| {
-            self.inner
-                .ops
-                .write(cx, InodeNumber(ino), byte_offset, data)
-        })
-        .map_err(|error| MutationDispatchError::Operation {
-            error,
-            offset: Some(byte_offset),
-        })
+        let written = self
+            .with_request_scope(&cx, RequestOp::Write, |cx| {
+                self.inner
+                    .ops
+                    .write(cx, InodeNumber(ino), byte_offset, data)
+            })
+            .map_err(|error| MutationDispatchError::Operation {
+                error,
+                offset: Some(byte_offset),
+            })?;
+        self.inner.readahead.invalidate_inode(InodeNumber(ino));
+        Ok(written)
     }
 
     fn read_with_readahead(
@@ -1764,6 +1780,27 @@ fn build_mount_options(options: &MountOptions) -> Vec<MountOption> {
     opts
 }
 
+fn validate_mountpoint(mountpoint: &Path) -> Result<(), FuseError> {
+    if mountpoint.as_os_str().is_empty() {
+        return Err(FuseError::InvalidMountpoint(
+            "mountpoint cannot be empty".to_owned(),
+        ));
+    }
+    if !mountpoint.exists() {
+        return Err(FuseError::InvalidMountpoint(format!(
+            "mountpoint does not exist: {}",
+            mountpoint.display()
+        )));
+    }
+    if !mountpoint.is_dir() {
+        return Err(FuseError::InvalidMountpoint(format!(
+            "mountpoint is not a directory: {}",
+            mountpoint.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Mount a FrankenFS filesystem at the given mountpoint (blocking).
 ///
 /// This function blocks until the filesystem is unmounted.
@@ -1773,11 +1810,7 @@ pub fn mount(
     options: &MountOptions,
 ) -> Result<(), FuseError> {
     let mountpoint = mountpoint.as_ref();
-    if mountpoint.as_os_str().is_empty() {
-        return Err(FuseError::InvalidMountpoint(
-            "mountpoint cannot be empty".to_owned(),
-        ));
-    }
+    validate_mountpoint(mountpoint)?;
     let fuse_opts = build_mount_options(options);
     let fs = FrankenFuse::with_options(ops, options);
     fuser::mount2(fs, mountpoint, &fuse_opts)?;
@@ -1793,11 +1826,7 @@ pub fn mount_background(
     options: &MountOptions,
 ) -> Result<fuser::BackgroundSession, FuseError> {
     let mountpoint = mountpoint.as_ref();
-    if mountpoint.as_os_str().is_empty() {
-        return Err(FuseError::InvalidMountpoint(
-            "mountpoint cannot be empty".to_owned(),
-        ));
-    }
+    validate_mountpoint(mountpoint)?;
     let fuse_opts = build_mount_options(options);
     let fs = FrankenFuse::with_options(ops, options);
     let session = fuser::spawn_mount2(fs, mountpoint, &fuse_opts)?;
@@ -1962,17 +1991,7 @@ pub fn mount_managed(
     config: &MountConfig,
 ) -> Result<MountHandle, FuseError> {
     let mountpoint = mountpoint.as_ref();
-    if mountpoint.as_os_str().is_empty() {
-        return Err(FuseError::InvalidMountpoint(
-            "mountpoint cannot be empty".to_owned(),
-        ));
-    }
-    if !mountpoint.exists() {
-        return Err(FuseError::InvalidMountpoint(format!(
-            "mountpoint does not exist: {}",
-            mountpoint.display()
-        )));
-    }
+    validate_mountpoint(mountpoint)?;
 
     let thread_count = config.options.resolved_thread_count();
     info!(
@@ -2004,9 +2023,10 @@ pub fn mount_managed(
 mod tests {
     use super::*;
     use ffs_core::{DirEntry as FfsDirEntry, RequestScope};
+    use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Instant, SystemTime};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     /// Minimal FsOps stub for tests that don't need real filesystem behavior.
     struct StubFs;
@@ -2042,6 +2062,20 @@ mod tests {
         fn readlink(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
             Ok(vec![])
         }
+    }
+
+    fn create_temp_mountpoint_file() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic from UNIX_EPOCH")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "frankenfs_mountpoint_file_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::write(&path, b"x").expect("write temp mountpoint file");
+        path
     }
 
     #[test]
@@ -2149,6 +2183,62 @@ mod tests {
         }
         let err = mount(Box::new(NeverCalledFs), "", &MountOptions::default()).unwrap_err();
         assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn mount_rejects_nonexistent_mountpoint() {
+        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let err = mount(
+            ops,
+            "/tmp/frankenfs_no_such_dir_xyzzy",
+            &MountOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "expected 'does not exist' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn mount_background_rejects_nonexistent_mountpoint() {
+        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let err = mount_background(
+            ops,
+            "/tmp/frankenfs_no_such_dir_xyzzy",
+            &MountOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "expected 'does not exist' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn mount_rejects_file_mountpoint() {
+        let file_path = create_temp_mountpoint_file();
+        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let err = mount(ops, &file_path, &MountOptions::default()).unwrap_err();
+        let err_text = err.to_string();
+        let _ = fs::remove_file(&file_path);
+        assert!(
+            err_text.contains("not a directory"),
+            "expected 'not a directory' in error: {err_text}"
+        );
+    }
+
+    #[test]
+    fn mount_background_rejects_file_mountpoint() {
+        let file_path = create_temp_mountpoint_file();
+        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let err = mount_background(ops, &file_path, &MountOptions::default()).unwrap_err();
+        let err_text = err.to_string();
+        let _ = fs::remove_file(&file_path);
+        assert!(
+            err_text.contains("not a directory"),
+            "expected 'not a directory' in error: {err_text}"
+        );
     }
 
     #[test]
@@ -2291,6 +2381,23 @@ mod tests {
         assert_eq!(manager.take(ino, 0, 1), None);
         assert_eq!(manager.take(ino, 8, 1), Some(vec![1]));
         assert_eq!(manager.take(ino, 16, 1), Some(vec![2]));
+    }
+
+    #[test]
+    fn readahead_manager_invalidate_inode_removes_only_matching_entries() {
+        let manager = ReadaheadManager::new(8);
+        let ino = InodeNumber(9);
+        let other = InodeNumber(10);
+
+        manager.insert(ino, 0, vec![1, 2, 3]);
+        manager.insert(ino, 16, vec![4, 5, 6]);
+        manager.insert(other, 0, vec![7, 8, 9]);
+
+        manager.invalidate_inode(ino);
+
+        assert_eq!(manager.take(ino, 0, 3), None);
+        assert_eq!(manager.take(ino, 16, 3), None);
+        assert_eq!(manager.take(other, 0, 3), Some(vec![7, 8, 9]));
     }
 
     struct CountingReadFs {
@@ -2806,6 +2913,35 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_write_invalidates_readahead_for_inode() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        let cached_ino = InodeNumber(42);
+        let other_ino = InodeNumber(77);
+        fuse.inner.readahead.insert(cached_ino, 100, vec![1, 2, 3]);
+        fuse.inner.readahead.insert(other_ino, 100, vec![9, 9, 9]);
+
+        let written = fuse
+            .dispatch_write(cached_ino.0, 0, b"abc")
+            .expect("dispatch write");
+        assert_eq!(written, 3);
+
+        assert_eq!(fuse.inner.readahead.take(cached_ino, 100, 3), None);
+        assert_eq!(
+            fuse.inner.readahead.take(other_ino, 100, 3),
+            Some(vec![9, 9, 9])
+        );
+    }
+
+    #[test]
     fn dispatch_mkdir_routes_to_fsops() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
@@ -3221,6 +3357,19 @@ mod tests {
         assert!(
             err.to_string().contains("does not exist"),
             "expected 'does not exist' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn mount_managed_rejects_file_mountpoint() {
+        let file_path = create_temp_mountpoint_file();
+        let ops: Box<dyn FsOps> = Box::new(StubFs);
+        let err = mount_managed(ops, &file_path, &MountConfig::default()).unwrap_err();
+        let err_text = err.to_string();
+        let _ = fs::remove_file(&file_path);
+        assert!(
+            err_text.contains("not a directory"),
+            "expected 'not a directory' in error: {err_text}"
         );
     }
 
