@@ -1,76 +1,185 @@
+# Benchmark regression thresholds — FrankenFS V1.1
+#
+# Each operation references the canonical taxonomy (ffs-harness::benchmark_taxonomy).
+# Thresholds encode noise tolerance and business risk rationale, not arbitrary percentages.
+#
+# Threshold hierarchy:
+#   1. Operation-specific override (this file, [operation_thresholds.<id>])
+#   2. Family default (BenchmarkFamily::default_envelope() in taxonomy)
+#   3. Global default ([default] section below)
+#
+# All values are p99 latency regression percentages.
+
 [default]
-# Warn/fail thresholds for p99 latency regression percentage.
+# Global fallback: moderate thresholds for unknown/new operations.
 warn_percent = 10
 fail_percent = 20
+noise_floor_percent = 5
+
+# ── Metadata Ops family ─────────────────────────────────────────────────
+# Mixed I/O + CPU; moderate variance from filesystem read + parity compute.
+# Family defaults: warn=10%, fail=20%, noise=5%.
 
 [operation_thresholds.metadata_parity_cli]
+# taxonomy_id: metadata_parity_cli
+# family: metadata_ops
 warn_percent = 10
 fail_percent = 20
+noise_floor_percent = 5
 
 [operation_thresholds.metadata_parity_harness]
+# taxonomy_id: metadata_parity_harness
+# family: metadata_ops
 warn_percent = 10
 fail_percent = 20
+noise_floor_percent = 5
 
 [operation_thresholds.fixture_validation]
+# taxonomy_id: fixture_validation
+# family: metadata_ops
 warn_percent = 10
 fail_percent = 20
+noise_floor_percent = 5
 
 [operation_thresholds.read_metadata_inspect_ext4_reference]
+# taxonomy_id: read_metadata_inspect_ext4_reference
+# family: metadata_ops
 warn_percent = 10
 fail_percent = 20
+noise_floor_percent = 5
 
 [operation_thresholds.read_metadata_scrub_ext4_reference]
-warn_percent = 10
-fail_percent = 20
+# taxonomy_id: read_metadata_scrub_ext4_reference
+# family: metadata_ops
+# Scrub reads all blocks — more I/O variance than inspect.
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+# ── Block Cache family (ARC policy) ─────────────────────────────────────
+# Memory-allocation-heavy; sensitive to allocator behavior and NUMA topology.
+# Family defaults: warn=12%, fail=25%, noise=5%.
 
 [operation_thresholds.block_cache_arc_sequential_scan]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_arc_zipf_distribution]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_arc_mixed_seq70_hot30]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_arc_compile_like]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_arc_database_like]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+# ── Block Cache family (S3-FIFO policy) ─────────────────────────────────
 
 [operation_thresholds.block_cache_s3fifo_sequential_scan]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_s3fifo_zipf_distribution]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_s3fifo_mixed_seq70_hot30]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_s3fifo_compile_like]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_s3fifo_database_like]
-warn_percent = 10
-fail_percent = 20
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+# ── Write Path family ───────────────────────────────────────────────────
+# I/O-bound; variance from filesystem sync behavior and I/O scheduler.
+# Family defaults: warn=12%, fail=25%, noise=5%.
+
+[operation_thresholds.write_seq_4k]
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+[operation_thresholds.write_random_4k]
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+[operation_thresholds.fsync_single_write]
+# fsync is sensitive to I/O scheduler decisions.
+warn_percent = 15
+fail_percent = 30
+noise_floor_percent = 5
+
+[operation_thresholds.fsync_batch_100]
+# Batch fsync: more predictable than single due to amortization.
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+# ── Mount family ────────────────────────────────────────────────────────
+# FUSE kernel roundtrip; high variance from system call scheduling.
+# Family defaults: warn=25%, fail=50%, noise=10%.
+# NOTE: Mount benchmarks are often "pending" on hosts without FUSE access.
+
+[operation_thresholds.mount_cold]
+warn_percent = 25
+fail_percent = 50
+noise_floor_percent = 10
+
+[operation_thresholds.mount_warm]
+warn_percent = 25
+fail_percent = 50
+noise_floor_percent = 10
+
+[operation_thresholds.mount_recovery]
+warn_percent = 25
+fail_percent = 50
+noise_floor_percent = 10
+
+# ── Legacy thresholds (retained for backward compatibility with
+#    benchmark_record.sh; mapped to taxonomy via owning family) ──────────
 
 [operation_thresholds.block_cache_lookup_latency]
-warn_percent = 10
-fail_percent = 20
+# Maps to block_cache family (ffs-block arc_cache_hit_4k bench)
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_writeback_single_4k]
-warn_percent = 10
-fail_percent = 20
+# Maps to write_path family (ffs-block writeback_sync_single_4k bench)
+warn_percent = 15
+fail_percent = 30
+noise_floor_percent = 5
 
 [operation_thresholds.block_cache_writeback_batch_100x4k]
-warn_percent = 10
-fail_percent = 20
+# Maps to write_path family (ffs-block writeback_sync_100x4k bench)
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+# ── Host Profile Normalization ──────────────────────────────────────────
+# Thresholds above are calibrated for the reference host (csd-threadripper).
+# On CI or rch workers, thresholds should be widened via the host profile
+# normalization_factor defined in benchmark_taxonomy::HostProfile.

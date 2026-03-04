@@ -282,6 +282,117 @@ fn stress_fcw_conflicts() {
 }
 
 #[test]
+fn stress_fcw_hotspot_retry_fairness() {
+    const WRITER_COUNT: u64 = 6;
+    const COMMITS_PER_WRITER: u64 = 64;
+    const MAX_ATTEMPTS_PER_COMMIT: u64 = 512;
+    let hot_block = BlockNumber(11);
+
+    for seed in 0_u64..12 {
+        let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(4_000_000));
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let store = Arc::new(ShardedMvccStore::new(1));
+
+        let mut seed_txn = store.begin();
+        seed_txn.stage_write(hot_block, vec![0; 8]);
+        store.commit(seed_txn).expect("seed commit should succeed");
+
+        let writer_slots = usize::try_from(WRITER_COUNT).expect("writer count fits in usize");
+        let per_writer_commits = Arc::new(
+            (0..writer_slots)
+                .map(|_| AtomicU64::new(0))
+                .collect::<Vec<_>>(),
+        );
+        let per_writer_conflicts = Arc::new(
+            (0..writer_slots)
+                .map(|_| AtomicU64::new(0))
+                .collect::<Vec<_>>(),
+        );
+
+        for writer_id in 0_u64..WRITER_COUNT {
+            let store = Arc::clone(&store);
+            let per_writer_commits = Arc::clone(&per_writer_commits);
+            let per_writer_conflicts = Arc::clone(&per_writer_conflicts);
+            let writer_idx = usize::try_from(writer_id).expect("writer id fits in usize");
+            let (task_id, _handle) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async move {
+                    let mut rng_state = seed
+                        ^ writer_id
+                            .wrapping_add(11)
+                            .wrapping_mul(0xA24B_1C62_44E3_0AA9);
+
+                    for op in 0_u64..COMMITS_PER_WRITER {
+                        let mut committed = false;
+                        for attempt in 0_u64..MAX_ATTEMPTS_PER_COMMIT {
+                            yield_now().await;
+                            let mut txn = store.begin();
+                            let token = lcg_next(&mut rng_state);
+                            let byte = u8::try_from((token + writer_id + op + attempt) % 251)
+                                .expect("fits in u8");
+                            txn.stage_write(hot_block, vec![byte; 8]);
+                            match store.commit(txn) {
+                                Ok(_) => {
+                                    per_writer_commits[writer_idx].fetch_add(1, Ordering::Relaxed);
+                                    committed = true;
+                                    break;
+                                }
+                                Err((CommitError::Conflict { .. }, _)) => {
+                                    per_writer_conflicts[writer_idx]
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err((err, _)) => {
+                                    panic!(
+                                        "seed {seed}: writer {writer_id} op {op} unexpected {err:?}"
+                                    )
+                                }
+                            }
+                        }
+
+                        assert!(
+                            committed,
+                            "seed {seed}: writer {writer_id} op {op} exceeded retry bound {MAX_ATTEMPTS_PER_COMMIT}"
+                        );
+                    }
+                })
+                .expect("create writer task");
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
+
+        runtime.run_until_quiescent();
+
+        let mut total_commits = 0_u64;
+        let mut total_conflicts = 0_u64;
+        for writer_idx in 0..writer_slots {
+            let commits = per_writer_commits[writer_idx].load(Ordering::Relaxed);
+            let conflicts = per_writer_conflicts[writer_idx].load(Ordering::Relaxed);
+            total_commits = total_commits.saturating_add(commits);
+            total_conflicts = total_conflicts.saturating_add(conflicts);
+            assert_eq!(
+                commits, COMMITS_PER_WRITER,
+                "seed {seed}: writer {writer_idx} did not make bounded progress under hotspot contention"
+            );
+        }
+
+        assert_eq!(
+            total_commits,
+            WRITER_COUNT * COMMITS_PER_WRITER,
+            "seed {seed}: aggregate commit accounting mismatch"
+        );
+        assert!(
+            total_conflicts > 0,
+            "seed {seed}: expected FCW conflicts in hotspot fairness scenario"
+        );
+
+        let latest = store.current_snapshot();
+        let data = store
+            .read_visible(hot_block, latest)
+            .expect("hot block must remain readable");
+        assert_eq!(data.len(), 8, "seed {seed}: payload width should remain 8");
+    }
+}
+
+#[test]
 fn stress_ssi_write_skew() {
     let block_a = BlockNumber(100);
     let block_b = BlockNumber(200);

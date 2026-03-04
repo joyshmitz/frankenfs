@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod benchmark_taxonomy;
 pub mod e2e;
 pub mod perf_regression;
 

@@ -5935,12 +5935,52 @@ transactions writing the same block. But what about "safe merge" scenarios
 where both transactions' changes could be applied? For example, two
 transactions each setting different bits in a bitmap block.
 
-**Tentative Resolution:** V1 uses strict FCW only. "Safe merge" (also called
-"write-write conflict resolution") requires semantic knowledge of block
-contents (bitmap, directory block, etc.) and dramatically increases
-complexity. Safe merge MAY be added in a post-V1 release.
+**Status:** Resolved (2026-03-04, `bd-h6nz.6.2`).
 
-**Must Resolve By:** Phase 6 (MVCC implementation).
+**Decision (Accepted):** FrankenFS V1.x keeps strict FCW + SSI only.
+- FCW remains the write-write arbitration rule.
+- SSI remains the serializability guard for rw-antidependency cycles.
+- No semantic "safe merge" and no adaptive conflict policy in V1.x.
+
+**Expected-Loss Matrix (lower is better):**
+
+| Option | Correctness Loss | Starvation/Progress Loss | Complexity/Operability Loss | Composite |
+|--------|------------------|--------------------------|-----------------------------|-----------|
+| A. Strict FCW + SSI (current) | 1 | 2 | 1 | **4** |
+| B. Semantic safe-merge in V1.x | 5 | 1 | 8 | 14 |
+| C. Adaptive arbitration policy in V1.x | 4 | 2 | 6 | 12 |
+
+Option A is selected because it minimizes correctness and implementation risk
+while preserving deterministic behavior under contention.
+
+**Measured Contention Evidence (deterministic):**
+
+1. `crates/ffs-mvcc/tests/mvcc_stress_suite.rs::stress_fcw_conflicts`
+   - Hot-key FCW contention produces conflicts deterministically.
+   - Exactly one writer in each pair commits; second writer conflicts.
+2. `crates/ffs-mvcc/tests/mvcc_stress_suite.rs::stress_fcw_hotspot_retry_fairness`
+   - Multi-writer hotspot workload with bounded retries demonstrates per-writer
+     forward progress (no starvation within configured retry bound).
+3. `crates/ffs-mvcc/tests/mvcc_stress_suite.rs::stress_ssi_write_skew`
+   - SSI aborts one side of write-skew pattern deterministically.
+4. `crates/ffs-mvcc/src/lib.rs::e2e_hot_key_counter_with_retries`
+   - End-to-end retry behavior converges to expected final value under FCW
+     conflicts.
+
+**Executable Validation Matrix:**
+
+| Policy Clause | Validation Path | Pass Condition | Decision-Sensitive Failure Class |
+|---------------|-----------------|----------------|----------------------------------|
+| FCW rejects overlapping writers | `stress_fcw_conflicts` + FCW unit/property tests in `ffs-mvcc` | Second writer is rejected with `CommitError::Conflict` | `fcw_conflict` |
+| SSI prevents write skew | `stress_ssi_write_skew` + SSI tests in `ffs-mvcc` | Exactly one conflicting txn commits; invariant preserved | `ssi_cycle` |
+| Contention remains progress-safe with retries | `stress_fcw_hotspot_retry_fairness` + `e2e_hot_key_counter_with_retries` | Every writer completes bounded commits; no infinite retry loop | `timeout` / retry-bound breach |
+| Abort-path observability remains explicit | `ffs-mvcc` evidence/log assertions | Abort records include deterministic reason class and conflict context | `fcw_conflict`, `ssi_cycle`, `timeout` |
+
+**Follow-on Scope (deferred):**
+- Safe-merge remains a post-V1 item requiring per-block semantic merge proof
+  obligations and corruption-risk analysis.
+- Adaptive conflict policy remains a post-V1 item and must show lower expected
+  loss than strict FCW+SSI before adoption.
 
 #### OQ3: Repair Symbol Invalidation During Heavy Writes
 

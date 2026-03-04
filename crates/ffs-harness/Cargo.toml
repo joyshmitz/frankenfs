@@ -14,6 +14,8 @@ ffs-types = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true }
