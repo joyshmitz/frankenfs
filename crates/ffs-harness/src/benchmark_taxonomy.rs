@@ -1187,4 +1187,95 @@ mod tests {
         assert_eq!(parsed.operations.len(), taxonomy.operations.len());
         assert_eq!(parsed.host_profiles.len(), taxonomy.host_profiles.len());
     }
+
+    #[test]
+    fn triage_module_covers_all_taxonomy_families() {
+        use crate::perf_comparison::{ComparisonVerdict, SampleStats, TTestResult};
+        use crate::perf_triage::{TriageAction, TriageCause, classify_triage};
+
+        // Every family in the taxonomy must produce a valid triage decision
+        // for both pass and fail scenarios.
+        let families = [
+            BenchmarkFamily::Parser,
+            BenchmarkFamily::Mount,
+            BenchmarkFamily::MetadataOps,
+            BenchmarkFamily::BlockCache,
+            BenchmarkFamily::WritePath,
+            BenchmarkFamily::Concurrency,
+            BenchmarkFamily::Repair,
+            BenchmarkFamily::DegradedMode,
+        ];
+
+        let make_fail = |op: &str| crate::perf_comparison::ComparisonResult {
+            operation_id: op.to_owned(),
+            baseline: SampleStats {
+                n: 10,
+                mean: 100.0,
+                std_dev: 3.0,
+                cv_percent: 3.0,
+                min: 97.0,
+                max: 103.0,
+                median: 100.0,
+            },
+            current: SampleStats {
+                n: 10,
+                mean: 130.0,
+                std_dev: 3.0,
+                cv_percent: 2.3,
+                min: 127.0,
+                max: 133.0,
+                median: 130.0,
+            },
+            delta_percent: 30.0,
+            effect_size: 1.2,
+            effect_label: "large",
+            t_test: Some(TTestResult {
+                t_stat: 4.5,
+                df: 18.0,
+                p_value: 0.0003,
+            }),
+            significant: true,
+            envelope_verdict: EnvelopeVerdict::Fail,
+            final_verdict: ComparisonVerdict::Fail,
+            explanation: "confirmed regression".to_owned(),
+        };
+
+        for family in families {
+            let result = make_fail(&format!("test_{}", family.label()));
+            let decision = classify_triage(&result, family, None);
+
+            // Every family must map to a recognized cause and action
+            assert!(
+                matches!(
+                    decision.cause,
+                    TriageCause::CodeRegression
+                        | TriageCause::EnvironmentChange
+                        | TriageCause::ThresholdCalibration
+                ),
+                "family {:?} produced unexpected cause {:?}",
+                family,
+                decision.cause,
+            );
+            assert!(
+                matches!(
+                    decision.action,
+                    TriageAction::BisectCommits
+                        | TriageAction::CheckEnvironment
+                        | TriageAction::RecalibrateThresholds
+                        | TriageAction::RerunOnReference
+                ),
+                "family {:?} produced unexpected action {:?}",
+                family,
+                decision.action,
+            );
+        }
+    }
+
+    #[test]
+    fn triage_runbook_file_path_matches_module_constant() {
+        assert_eq!(
+            crate::perf_triage::runbook_path(),
+            "docs/runbooks/perf-regression-triage.md",
+        );
+    }
 }

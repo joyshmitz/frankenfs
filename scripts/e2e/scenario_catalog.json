@@ -49,6 +49,18 @@
           "category": "happy",
           "status": "active",
           "evidence": "cli_degraded_throughput_benchmarks_taxonomy_coverage"
+        },
+        {
+          "id": "cli_triage_module_covers_all_families",
+          "category": "happy",
+          "status": "active",
+          "evidence": "cli_triage_module_covers_all_families"
+        },
+        {
+          "id": "cli_triage_runbook_exists",
+          "category": "happy",
+          "status": "active",
+          "evidence": "cli_triage_runbook_exists"
         }
       ]
     },

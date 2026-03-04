@@ -227,6 +227,33 @@ else
     e2e_fail "degraded throughput benchmark taxonomy coverage test failed"
 fi
 
+# Scenario 6: triage module covers all taxonomy families
+e2e_log ""
+e2e_log "Testing: triage module family coverage"
+TRIAGE_FAMILIES_OUT="$E2E_LOG_DIR/triage_module_family_coverage.txt"
+set +e
+capture_cargo_output \
+    "$TRIAGE_FAMILIES_OUT" \
+    test -p ffs-harness --lib -- triage_module_covers_all_taxonomy_families --exact
+triage_families_rc=$?
+set -e
+if [[ $triage_families_rc -eq 0 ]]; then
+    scenario_result "cli_triage_module_covers_all_families" "PASS" "triage module covers all taxonomy families"
+else
+    scenario_result "cli_triage_module_covers_all_families" "FAIL" "triage module family coverage test failed"
+    e2e_fail "triage module family coverage test failed"
+fi
+
+# Scenario 7: triage runbook file exists
+e2e_log ""
+e2e_log "Testing: triage runbook file exists"
+if [[ -f "$REPO_ROOT/docs/runbooks/perf-regression-triage.md" ]]; then
+    scenario_result "cli_triage_runbook_exists" "PASS" "triage runbook exists at expected path"
+else
+    scenario_result "cli_triage_runbook_exists" "FAIL" "triage runbook missing"
+    e2e_fail "triage runbook missing at docs/runbooks/perf-regression-triage.md"
+fi
+
 #######################################
 # Phase 4: FUSE Mount (optional)
 #######################################
