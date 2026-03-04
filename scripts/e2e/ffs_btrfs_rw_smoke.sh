@@ -50,6 +50,13 @@ xml_escape() {
     printf '%s' "$raw"
 }
 
+scenario_id_for_test_name() {
+    local test_name="$1"
+    local normalized
+    normalized="$(printf '%s' "$test_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//')"
+    printf 'btrfs_rw_%s' "$normalized"
+}
+
 log_test() {
     local name="$1"
     local status="$2"
@@ -62,6 +69,8 @@ record_test() {
     local status="$2"
     local duration_ms="$3"
     local message="${4:-}"
+    local scenario_id
+    scenario_id="$(scenario_id_for_test_name "$name")"
 
     TEST_NAMES+=("$name")
     TEST_STATUSES+=("$status")
@@ -69,6 +78,7 @@ record_test() {
     TEST_MESSAGES+=("$message")
 
     log_test "$name" "$status" "$duration_ms"
+    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|status=${status}|duration_ms=${duration_ms}"
     if [[ -n "$message" ]]; then
         e2e_log "  detail: $message"
     fi
@@ -366,6 +376,32 @@ prepare_btrfs_images() {
     run_case "image_copy_work" cp "$base_image" "$work_image"
 }
 
+check_punch_hole_eopnotsupp() {
+    local path="$1"
+    python3 - "$path" <<'PY'
+import errno
+import fcntl
+import os
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDWR)
+try:
+    if not hasattr(fcntl, "fallocate"):
+        raise SystemExit("python fcntl.fallocate is unavailable")
+    mode = fcntl.FALLOC_FL_KEEP_SIZE | fcntl.FALLOC_FL_PUNCH_HOLE
+    try:
+        fcntl.fallocate(fd, mode, 0, 4096)
+    except OSError as exc:  # expected path
+        if exc.errno == errno.EOPNOTSUPP:
+            raise SystemExit(0)
+        raise SystemExit(f"expected errno {errno.EOPNOTSUPP}, got {exc.errno}: {exc}")
+    raise SystemExit("expected punch-hole fallocate to fail with EOPNOTSUPP, but it succeeded")
+finally:
+    os.close(fd)
+PY
+}
+
 e2e_step "Phase 1: Build ffs-cli"
 run_case_cargo "build_ffs_cli" build -p ffs-cli --release
 run_case "build_ffs_cli_binary_exists" test -x "$FFS_CLI_BIN"
@@ -398,6 +434,7 @@ run_case_shell "file_append" "printf 'append-line\\n' >> '$MOUNT_RW/small.txt' &
 
 run_case_shell "file_truncate_extend_2mb" "truncate -s 2097152 '$MOUNT_RW/large.bin'"
 run_case_shell "file_truncate_shrink_256b" "truncate -s 256 '$MOUNT_RW/large.bin' && test \"$(stat -c '%s' '$MOUNT_RW/large.bin')\" -eq 256"
+run_case "unsupported_fallocate_punch_hole_errno_eopnotsupp" check_punch_hole_eopnotsupp "$MOUNT_RW/medium.bin"
 
 run_case "dir_mkdir_single" mkdir "$MOUNT_RW/single_dir"
 run_case "dir_mkdir_nested" mkdir -p "$MOUNT_RW/nested/a/b"

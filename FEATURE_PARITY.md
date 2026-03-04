@@ -46,6 +46,27 @@
 | btrfs transaction parity | `fs/btrfs/transaction.c` | ✅ | Transaction begin/commit/abort semantics and integration paths are implemented with coverage in unit + E2E suites. |
 | btrfs delayed refs parity | `fs/btrfs/delayed-ref.c` | ✅ | `DelayedRefQueue` + `BtrfsRef` model + bounded flush/refcount tracking in `ffs-btrfs::BtrfsExtentAllocator`, with queue/refcount/stress tests |
 | btrfs scrub parity | `fs/btrfs/scrub.c` | ✅ | Scrub validation and repair-path coverage are implemented in the current test matrix. |
+
+### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
+
+The table below is the authoritative btrfs experimental RW contract for `bd-h6nz.3.1`.
+Each row maps directly to deterministic unit/E2E coverage by stable test/scenario ID.
+
+| Contract ID | Operation / Edge Case | Class | Expected Result |
+|-------------|------------------------|-------|-----------------|
+| `unit::btrfs_write_create_file` | `create` regular file | supported | success |
+| `unit::btrfs_write_mkdir` | `mkdir` | supported | success |
+| `unit::btrfs_write_rename` | `rename` (same/cross parent) | supported | success |
+| `unit::btrfs_write_setattr_truncate` | `setattr(size)` truncate path | supported | success |
+| `unit::btrfs_write_xattr_set_get_list` | `setxattr/getxattr/listxattr` | supported | success |
+| `unit::btrfs_write_fallocate_basic` | `fallocate` preallocation (`mode=0`) | supported | success |
+| `unit::btrfs_write_fallocate_keep_size_does_not_extend_file` | `fallocate` with `FALLOC_FL_KEEP_SIZE` | partially supported | success, file size unchanged |
+| `unit::btrfs_write_fallocate_punch_hole_rejected` | `fallocate` with `FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE` | unsupported | `FfsError::UnsupportedFeature` -> `EOPNOTSUPP` |
+| `unit::btrfs_write_fallocate_unsupported_mode_bits_rejected` | `fallocate` with unsupported mode bits | unsupported | `FfsError::UnsupportedFeature` -> `EOPNOTSUPP` |
+| `unit::btrfs_write_fallocate_success_log_contract` | supported fallocate log contract | observability | structured log includes `operation_id`, `scenario_id`, `outcome=applied` |
+| `unit::btrfs_write_fallocate_rejection_log_contract` | unsupported fallocate log contract | observability | structured log includes `operation_id`, `scenario_id`, `outcome=rejected`, `error_class` |
+| `e2e::btrfs_rw_unsupported_fallocate_punch_hole_errno_eopnotsupp` | FUSE path punch-hole rejection | unsupported | shell-visible `EOPNOTSUPP`, emitted `SCENARIO_RESULT` marker |
+
 | MVCC snapshot visibility | FrankenFS spec §3 | ✅ | Implemented in `ffs-mvcc` |
 | MVCC commit sequencing | FrankenFS spec §3 | ✅ | Implemented in `ffs-mvcc` |
 | FCW conflict detection | FrankenFS spec §3 | ✅ | Implemented in `ffs-mvcc` |

@@ -5362,7 +5362,12 @@ impl OpenFs {
         }
     }
 
-    fn btrfs_fallocate_operation_id(ino: InodeNumber, offset: u64, length: u64, mode: i32) -> String {
+    fn btrfs_fallocate_operation_id(
+        ino: InodeNumber,
+        offset: u64,
+        length: u64,
+        mode: i32,
+    ) -> String {
         format!("btrfs-fallocate-{}-{offset}-{length}-{mode}", ino.0)
     }
 
@@ -17111,7 +17116,14 @@ mod tests {
         let ops: &dyn FsOps = &fs;
 
         let attr = ops
-            .create(&cx, InodeNumber(1), OsStr::new("mode_bits.bin"), 0o644, 0, 0)
+            .create(
+                &cx,
+                InodeNumber(1),
+                OsStr::new("mode_bits.bin"),
+                0o644,
+                0,
+                0,
+            )
             .unwrap();
         let err = ops
             .fallocate(&cx, attr.ino, 0, 4096, 0x40)
@@ -17145,7 +17157,14 @@ mod tests {
             let ops: &dyn FsOps = &fs;
 
             let attr = ops
-                .create(&cx, InodeNumber(1), OsStr::new("log_success.bin"), 0o644, 0, 0)
+                .create(
+                    &cx,
+                    InodeNumber(1),
+                    OsStr::new("log_success.bin"),
+                    0o644,
+                    0,
+                    0,
+                )
                 .expect("create file for fallocate success log test");
             ops.fallocate(&cx, attr.ino, 0, 4096, 0)
                 .expect("fallocate should succeed");
@@ -17163,7 +17182,10 @@ mod tests {
             applied.get("scenario_id").and_then(Value::as_str),
             Some("btrfs_rw_fallocate_prealloc")
         );
-        assert_eq!(applied.get("outcome").and_then(Value::as_str), Some("applied"));
+        assert_eq!(
+            applied.get("outcome").and_then(Value::as_str),
+            Some("applied")
+        );
         assert!(
             applied
                 .get("operation_id")
@@ -17190,7 +17212,14 @@ mod tests {
             let ops: &dyn FsOps = &fs;
 
             let attr = ops
-                .create(&cx, InodeNumber(1), OsStr::new("log_reject.bin"), 0o644, 0, 0)
+                .create(
+                    &cx,
+                    InodeNumber(1),
+                    OsStr::new("log_reject.bin"),
+                    0o644,
+                    0,
+                    0,
+                )
                 .expect("create file for fallocate rejection log test");
             ops.fallocate(
                 &cx,
@@ -17215,7 +17244,10 @@ mod tests {
             rejected.get("scenario_id").and_then(Value::as_str),
             Some("btrfs_rw_fallocate_punch_hole_unsupported")
         );
-        assert_eq!(rejected.get("outcome").and_then(Value::as_str), Some("rejected"));
+        assert_eq!(
+            rejected.get("outcome").and_then(Value::as_str),
+            Some("rejected")
+        );
         assert_eq!(
             rejected.get("error_class").and_then(Value::as_str),
             Some("unsupported_punch_hole_mode")

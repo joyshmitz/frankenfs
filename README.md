@@ -413,6 +413,18 @@ See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [P
 
 **btrfs:** Single-device images only. Metadata parsing + validation (superblock, leaf items, sys_chunk_array). FUSE mount path is available in experimental mode (default read-only, optional `--rw`) with limited feature coverage. Multi-device, RAID profiles, transparent compression, and send/receive are out of scope for V1.
 
+### btrfs Experimental RW Contract (Current)
+
+| Operation class | Status | Contract |
+|-----------------|--------|----------|
+| Core mutations (`create`, `mkdir`, `unlink`, `rmdir`, `rename`, `write`, `setattr`, `link`, `symlink`, xattrs) | Supported (experimental) | Deterministic success/error behavior under `ffs-core` + FUSE tests |
+| `fallocate` (`mode=0`, `FALLOC_FL_KEEP_SIZE`) | Partially supported | Preallocation paths are supported and validated |
+| `fallocate` (`FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE`) | Unsupported | Must return `EOPNOTSUPP` (`FfsError::UnsupportedFeature`) |
+| `fallocate` (unknown/extra mode bits) | Unsupported | Must return `EOPNOTSUPP` (`FfsError::UnsupportedFeature`) |
+| Unsupported-path observability | Required | Structured logs include `operation_id`, `scenario_id`, `outcome`, and `error_class` |
+
+The machine-checkable capability matrix and stable scenario/test IDs live in [FEATURE_PARITY.md](FEATURE_PARITY.md) (Section 2.1), with matching E2E `SCENARIO_RESULT` markers in `scripts/e2e/ffs_btrfs_rw_smoke.sh`.
+
 See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md) for the full normative scope.
 
 ## Limitations
