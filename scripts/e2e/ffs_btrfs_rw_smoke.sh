@@ -29,6 +29,7 @@ CURRENT_MOUNT_POINT=""
 WORK_IMAGE=""
 MOUNT_RW=""
 MOUNT_RO=""
+CRASH_MATRIX_POINTS="${CRASH_MATRIX_POINTS:-10}"
 
 JUNIT_FILE="$E2E_LOG_DIR/junit.xml"
 declare -a TEST_NAMES=()
@@ -221,6 +222,342 @@ expect_case_failure() {
         duration_ms=$(( $(timestamp_ms) - start_ms ))
         record_test "$test_name" "pass" "$duration_ms" "expected failure observed (exit=${E2E_LAST_EXIT_CODE})"
     fi
+}
+
+wait_for_pid_exit() {
+    local pid="$1"
+    local timeout_seconds="${2:-10}"
+    local label="${3:-process}"
+    local elapsed_ticks=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.2
+        elapsed_ticks=$((elapsed_ticks + 1))
+        if [[ $elapsed_ticks -ge $((timeout_seconds * 5)) ]]; then
+            e2e_log "$label did not exit after ${timeout_seconds}s; sending SIGKILL"
+            kill -9 "$pid" 2>/dev/null || true
+            break
+        fi
+    done
+
+    wait "$pid" 2>/dev/null || true
+}
+
+crash_matrix_label_for_point() {
+    local point="$1"
+    case "$point" in
+        1) printf 'create_alpha_no_fsync' ;;
+        2) printf 'append_alpha_no_fsync' ;;
+        3) printf 'fsync_alpha_and_parent' ;;
+        4) printf 'rename_alpha_to_beta_no_fsync' ;;
+        5) printf 'fsync_rename_parent' ;;
+        6) printf 'create_gamma_no_fsync' ;;
+        7) printf 'fsync_gamma_and_parent' ;;
+        8) printf 'unlink_beta_no_fsync' ;;
+        9) printf 'unlink_gamma_no_fsync' ;;
+        10) printf 'fsync_unlink_parent' ;;
+        *) return 1 ;;
+    esac
+}
+
+crash_matrix_event_log() {
+    local operation_id="$1"
+    local scenario_id="$2"
+    local outcome="$3"
+    local error_class="${4:-none}"
+    e2e_log "CRASH_MATRIX_EVENT|operation_id=${operation_id}|scenario_id=${scenario_id}|outcome=${outcome}|error_class=${error_class}"
+}
+
+run_crash_matrix_rw_steps() {
+    local mount_point="$1"
+    local point="$2"
+    python3 - "$mount_point" "$point" <<'PY'
+import os
+import pathlib
+import sys
+
+mount = pathlib.Path(sys.argv[1])
+point = int(sys.argv[2])
+if point < 1 or point > 10:
+    raise SystemExit(f"unsupported crash matrix point: {point}")
+
+matrix = mount / "crash_matrix"
+alpha = matrix / "alpha.txt"
+beta = matrix / "beta.txt"
+gamma = matrix / "gamma.txt"
+alpha_v1 = b"alpha-v1\n"
+alpha_v2 = b"alpha-v2\n"
+gamma_seed = b"gamma-seed\n"
+
+matrix.mkdir(parents=True, exist_ok=True)
+
+def fsync_file(path: pathlib.Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def fsync_dir(path: pathlib.Path) -> None:
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def step_1_create_alpha_no_fsync() -> None:
+    alpha.write_bytes(alpha_v1)
+
+def step_2_append_alpha_no_fsync() -> None:
+    with alpha.open("ab") as handle:
+        handle.write(alpha_v2)
+
+def step_3_fsync_alpha_and_parent() -> None:
+    fsync_file(alpha)
+    fsync_dir(matrix)
+
+def step_4_rename_alpha_to_beta_no_fsync() -> None:
+    alpha.rename(beta)
+
+def step_5_fsync_rename_parent() -> None:
+    fsync_dir(matrix)
+
+def step_6_create_gamma_no_fsync() -> None:
+    gamma.write_bytes(gamma_seed)
+
+def step_7_fsync_gamma_and_parent() -> None:
+    fsync_file(gamma)
+    fsync_dir(matrix)
+
+def step_8_unlink_beta_no_fsync() -> None:
+    if beta.exists():
+        beta.unlink()
+
+def step_9_unlink_gamma_no_fsync() -> None:
+    if gamma.exists():
+        gamma.unlink()
+
+def step_10_fsync_unlink_parent() -> None:
+    fsync_dir(matrix)
+
+steps = [
+    step_1_create_alpha_no_fsync,
+    step_2_append_alpha_no_fsync,
+    step_3_fsync_alpha_and_parent,
+    step_4_rename_alpha_to_beta_no_fsync,
+    step_5_fsync_rename_parent,
+    step_6_create_gamma_no_fsync,
+    step_7_fsync_gamma_and_parent,
+    step_8_unlink_beta_no_fsync,
+    step_9_unlink_gamma_no_fsync,
+    step_10_fsync_unlink_parent,
+]
+
+for idx, step in enumerate(steps, start=1):
+    step()
+    if idx == point:
+        break
+PY
+}
+
+verify_crash_matrix_ro_state() {
+    local mount_point="$1"
+    local point="$2"
+    local report_path="$3"
+    python3 - "$mount_point" "$point" "$report_path" <<'PY'
+import json
+import pathlib
+import sys
+
+mount = pathlib.Path(sys.argv[1])
+point = int(sys.argv[2])
+report_path = pathlib.Path(sys.argv[3])
+
+matrix = mount / "crash_matrix"
+alpha = matrix / "alpha.txt"
+beta = matrix / "beta.txt"
+gamma = matrix / "gamma.txt"
+alpha_full = b"alpha-v1\nalpha-v2\n"
+gamma_full = b"gamma-seed\n"
+errors = []
+
+def read_bytes(path: pathlib.Path):
+    if path.exists():
+        return path.read_bytes()
+    return None
+
+def prefix_ok(value, expected):
+    if value is None:
+        return True
+    return expected.startswith(value)
+
+alpha_data = read_bytes(alpha)
+beta_data = read_bytes(beta)
+gamma_data = read_bytes(gamma)
+
+if point in (1, 2):
+    if beta_data is not None:
+        errors.append("beta.txt must not exist before rename points")
+    if gamma_data is not None:
+        errors.append("gamma.txt must not exist before gamma-create points")
+    if alpha_data is not None and not prefix_ok(alpha_data, alpha_full):
+        errors.append("alpha.txt contains unexpected bytes before fsync boundary")
+elif point == 3:
+    if alpha_data != alpha_full:
+        errors.append("alpha.txt must persist full payload after fsync boundary")
+    if beta_data is not None:
+        errors.append("beta.txt must not exist at crash point 3")
+    if gamma_data is not None:
+        errors.append("gamma.txt must not exist at crash point 3")
+elif point == 4:
+    if gamma_data is not None:
+        errors.append("gamma.txt must not exist at crash point 4")
+    if alpha_data is None and beta_data is None:
+        errors.append("expected alpha.txt or beta.txt after rename without fsync")
+    if alpha_data is not None and alpha_data != alpha_full:
+        errors.append("alpha.txt (if present) must match full payload at crash point 4")
+    if beta_data is not None and beta_data != alpha_full:
+        errors.append("beta.txt (if present) must match full payload at crash point 4")
+elif point == 5:
+    if alpha_data is not None:
+        errors.append("alpha.txt must be absent after fsync rename boundary")
+    if beta_data != alpha_full:
+        errors.append("beta.txt must persist full payload after fsync rename boundary")
+    if gamma_data is not None:
+        errors.append("gamma.txt must not exist at crash point 5")
+elif point == 6:
+    if alpha_data is not None:
+        errors.append("alpha.txt must be absent at crash point 6")
+    if beta_data != alpha_full:
+        errors.append("beta.txt must persist full payload at crash point 6")
+    if gamma_data is not None and not prefix_ok(gamma_data, gamma_full):
+        errors.append("gamma.txt contains unexpected bytes before fsync boundary")
+elif point == 7:
+    if alpha_data is not None:
+        errors.append("alpha.txt must be absent at crash point 7")
+    if beta_data != alpha_full:
+        errors.append("beta.txt must persist full payload at crash point 7")
+    if gamma_data != gamma_full:
+        errors.append("gamma.txt must persist full payload after fsync boundary")
+elif point == 8:
+    if alpha_data is not None:
+        errors.append("alpha.txt must be absent at crash point 8")
+    if beta_data is not None and beta_data != alpha_full:
+        errors.append("beta.txt (if present) must match full payload at crash point 8")
+    if gamma_data != gamma_full:
+        errors.append("gamma.txt must persist full payload at crash point 8")
+elif point == 9:
+    if alpha_data is not None:
+        errors.append("alpha.txt must be absent at crash point 9")
+    if beta_data is not None and beta_data != alpha_full:
+        errors.append("beta.txt (if present) must match full payload at crash point 9")
+    if gamma_data is not None and gamma_data != gamma_full:
+        errors.append("gamma.txt (if present) must match full payload at crash point 9")
+elif point == 10:
+    if alpha_data is not None:
+        errors.append("alpha.txt must be absent after unlink fsync boundary")
+    if beta_data is not None:
+        errors.append("beta.txt must be absent after unlink fsync boundary")
+    if gamma_data is not None:
+        errors.append("gamma.txt must be absent after unlink fsync boundary")
+else:
+    errors.append(f"unsupported crash matrix point: {point}")
+
+if matrix.exists():
+    for child in matrix.iterdir():
+        if child.is_file():
+            try:
+                _ = child.read_bytes()
+            except OSError as exc:
+                errors.append(f"failed to read file during consistency walk: {child.name}: {exc}")
+
+report = {
+    "crash_point": point,
+    "alpha_present": alpha_data is not None,
+    "beta_present": beta_data is not None,
+    "gamma_present": gamma_data is not None,
+    "alpha_size": None if alpha_data is None else len(alpha_data),
+    "beta_size": None if beta_data is None else len(beta_data),
+    "gamma_size": None if gamma_data is None else len(gamma_data),
+    "errors": errors,
+}
+report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+if errors:
+    for entry in errors:
+        print(entry)
+    raise SystemExit(1)
+PY
+}
+
+run_crash_matrix_point() {
+    local point="$1"
+    local label="$2"
+    local point_id
+    point_id="$(printf '%02d' "$point")"
+
+    local operation_id="btrfs-crash-matrix-point-${point_id}"
+    local scenario_id="btrfs_rw_crash_matrix_${point_id}_${label}"
+    local scenario_image="$E2E_TEMP_DIR/crash_matrix_${point_id}.btrfs"
+    local mount_rw_point="$E2E_TEMP_DIR/mnt_crash_rw_${point_id}"
+    local mount_ro_point="$E2E_TEMP_DIR/mnt_crash_ro_${point_id}"
+    local artifact_dir="$E2E_LOG_DIR/crash_matrix/${point_id}_${label}"
+    local report_path="$artifact_dir/recovery_verify_report.json"
+    mkdir -p "$artifact_dir"
+
+    cp "$BASE_IMAGE" "$scenario_image"
+    crash_matrix_event_log "$operation_id" "$scenario_id" "start" "none"
+
+    start_mount rw "$scenario_image" "$mount_rw_point" 20
+    local rw_mount_log="$CURRENT_MOUNT_LOG"
+
+    if ! run_crash_matrix_rw_steps "$mount_rw_point" "$point"; then
+        crash_matrix_event_log "$operation_id" "$scenario_id" "rejected" "rw_step_execution_failed"
+        return 1
+    fi
+
+    if [[ "$point" == "3" || "$point" == "5" || "$point" == "7" || "$point" == "10" ]]; then
+        if ! grep -q "btrfs_sync_applied" "$rw_mount_log"; then
+            crash_matrix_event_log "$operation_id" "$scenario_id" "rejected" "missing_sync_applied_log"
+            return 1
+        fi
+        if ! grep -q "operation_id=btrfs-fsync" "$rw_mount_log" && ! grep -q "operation_id=btrfs-fsyncdir" "$rw_mount_log"; then
+            crash_matrix_event_log "$operation_id" "$scenario_id" "rejected" "missing_sync_operation_id_log"
+            return 1
+        fi
+        if ! grep -q 'scenario_id="btrfs_rw_fsync' "$rw_mount_log"; then
+            crash_matrix_event_log "$operation_id" "$scenario_id" "rejected" "missing_sync_scenario_id_log"
+            return 1
+        fi
+    fi
+
+    crash_matrix_event_log "$operation_id" "$scenario_id" "crash_injected" "none"
+    if [[ -n "$CURRENT_MOUNT_PID" ]] && kill -0 "$CURRENT_MOUNT_PID" 2>/dev/null; then
+        kill -9 "$CURRENT_MOUNT_PID" 2>/dev/null || true
+        wait_for_pid_exit "$CURRENT_MOUNT_PID" 10 "crash-matrix mount daemon"
+    fi
+    CURRENT_MOUNT_PID=""
+    e2e_unmount "$mount_rw_point" || true
+    cp "$rw_mount_log" "$artifact_dir/mount_rw.log" || true
+
+    if ! "$FFS_CLI_BIN" inspect "$scenario_image" --json >"$artifact_dir/inspect_after_crash.json" 2>"$artifact_dir/inspect_after_crash.stderr"; then
+        crash_matrix_event_log "$operation_id" "$scenario_id" "rejected" "post_crash_inspect_failed"
+        return 1
+    fi
+
+    start_mount ro "$scenario_image" "$mount_ro_point" 20
+    local ro_mount_log="$CURRENT_MOUNT_LOG"
+
+    if ! verify_crash_matrix_ro_state "$mount_ro_point" "$point" "$report_path"; then
+        crash_matrix_event_log "$operation_id" "$scenario_id" "rejected" "recovery_verification_failed"
+        cp "$ro_mount_log" "$artifact_dir/mount_ro.log" || true
+        stop_mount "$mount_ro_point"
+        return 1
+    fi
+
+    cp "$ro_mount_log" "$artifact_dir/mount_ro.log" || true
+    stop_mount "$mount_ro_point"
+    crash_matrix_event_log "$operation_id" "$scenario_id" "applied" "none"
+    return 0
 }
 
 wait_for_mount_ready() {
@@ -553,6 +890,16 @@ run_case "ro_stop_mount" stop_mount "$MOUNT_RO"
 if mountpoint -q "$MOUNT_RO" 2>/dev/null; then
     fail_suite "ro_unmount_verify" 0 "RO mount point still mounted: $MOUNT_RO"
 fi
+
+e2e_step "Phase 5: Deterministic crash-consistency matrix (10 crash points)"
+if [[ "$CRASH_MATRIX_POINTS" != "10" ]]; then
+    fail_suite "crash_matrix_points_config" 0 "CRASH_MATRIX_POINTS must be 10 (got $CRASH_MATRIX_POINTS)"
+fi
+for point in $(seq 1 10); do
+    point_id="$(printf '%02d' "$point")"
+    label="$(crash_matrix_label_for_point "$point")"
+    run_case "crash_matrix_${point_id}_${label}" run_crash_matrix_point "$point" "$label"
+done
 
 e2e_log "Cleanup is managed by scripts/e2e/lib.sh trap (EXIT)."
 emit_junit

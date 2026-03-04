@@ -5342,6 +5342,8 @@ impl OpenFs {
         "btrfs_rw_fallocate_unsupported_mode_bits";
     const BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE_UNSUPPORTED: &str =
         "btrfs_rw_fallocate_punch_hole_unsupported";
+    const BTRFS_RW_SCENARIO_FSYNC: &str = "btrfs_rw_fsync";
+    const BTRFS_RW_SCENARIO_FSYNCDIR: &str = "btrfs_rw_fsyncdir";
     const BTRFS_FALLOC_FL_KEEP_SIZE: i32 = 0x01;
     const BTRFS_FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
 
@@ -5411,6 +5413,11 @@ impl OpenFs {
         mode: i32,
     ) -> String {
         format!("btrfs-fallocate-{}-{offset}-{length}-{mode}", ino.0)
+    }
+
+    fn btrfs_sync_operation_id(op: &str, ino: InodeNumber, datasync: bool) -> String {
+        let datasync_flag = u8::from(datasync);
+        format!("btrfs-{op}-{}-{datasync_flag}", ino.0)
     }
 
     // ── Btrfs write path ─────────────────────────────────────────────────
@@ -7420,10 +7427,58 @@ impl FsOps for OpenFs {
                 Ok(())
             }
             FsFlavor::Btrfs(_) => {
+                let scenario_id = Self::BTRFS_RW_SCENARIO_FSYNC;
+                let operation_id = Self::btrfs_sync_operation_id("fsync", ino, datasync);
+                info!(
+                    target: "ffs::btrfs::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "start",
+                    ino = ino.0,
+                    datasync,
+                    "btrfs_sync_start"
+                );
                 if !self.is_writable() {
+                    warn!(
+                        target: "ffs::btrfs::rw",
+                        operation_id = %operation_id,
+                        scenario_id,
+                        outcome = "rejected",
+                        error_class = "read_only",
+                        ino = ino.0,
+                        datasync,
+                        "btrfs_sync_rejected"
+                    );
                     return Err(FfsError::ReadOnly);
                 }
-                self.dev.sync(cx)
+                match self.dev.sync(cx) {
+                    Ok(()) => {
+                        info!(
+                            target: "ffs::btrfs::rw",
+                            operation_id = %operation_id,
+                            scenario_id,
+                            outcome = "applied",
+                            ino = ino.0,
+                            datasync,
+                            "btrfs_sync_applied"
+                        );
+                        Ok(())
+                    }
+                    Err(err) => {
+                        warn!(
+                            target: "ffs::btrfs::rw",
+                            operation_id = %operation_id,
+                            scenario_id,
+                            outcome = "rejected",
+                            error_class = "device_sync_failed",
+                            ino = ino.0,
+                            datasync,
+                            error = %err,
+                            "btrfs_sync_rejected"
+                        );
+                        Err(err)
+                    }
+                }
             }
         }
     }
@@ -7460,10 +7515,58 @@ impl FsOps for OpenFs {
                 Ok(())
             }
             FsFlavor::Btrfs(_) => {
+                let scenario_id = Self::BTRFS_RW_SCENARIO_FSYNCDIR;
+                let operation_id = Self::btrfs_sync_operation_id("fsyncdir", ino, datasync);
+                info!(
+                    target: "ffs::btrfs::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "start",
+                    ino = ino.0,
+                    datasync,
+                    "btrfs_sync_start"
+                );
                 if !self.is_writable() {
+                    warn!(
+                        target: "ffs::btrfs::rw",
+                        operation_id = %operation_id,
+                        scenario_id,
+                        outcome = "rejected",
+                        error_class = "read_only",
+                        ino = ino.0,
+                        datasync,
+                        "btrfs_sync_rejected"
+                    );
                     return Err(FfsError::ReadOnly);
                 }
-                self.dev.sync(cx)
+                match self.dev.sync(cx) {
+                    Ok(()) => {
+                        info!(
+                            target: "ffs::btrfs::rw",
+                            operation_id = %operation_id,
+                            scenario_id,
+                            outcome = "applied",
+                            ino = ino.0,
+                            datasync,
+                            "btrfs_sync_applied"
+                        );
+                        Ok(())
+                    }
+                    Err(err) => {
+                        warn!(
+                            target: "ffs::btrfs::rw",
+                            operation_id = %operation_id,
+                            scenario_id,
+                            outcome = "rejected",
+                            error_class = "device_sync_failed",
+                            ino = ino.0,
+                            datasync,
+                            error = %err,
+                            "btrfs_sync_rejected"
+                        );
+                        Err(err)
+                    }
+                }
             }
         }
     }
@@ -17421,6 +17524,148 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|value| value.starts_with("btrfs-fallocate-")),
             "missing or malformed operation_id in unsupported-mode-bits log: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fsync_log_contract_success() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let (fs, cx) = open_writable_btrfs();
+            let ops: &dyn FsOps = &fs;
+
+            let attr = ops
+                .create(
+                    &cx,
+                    InodeNumber(1),
+                    OsStr::new("fsync_log_success.bin"),
+                    0o644,
+                    0,
+                    0,
+                )
+                .expect("create file for fsync log success test");
+            ops.write(&cx, attr.ino, 0, b"sync-me")
+                .expect("seed file before fsync");
+            ops.fsync(&cx, attr.ino, 0, false)
+                .expect("fsync should succeed");
+        });
+
+        let logs = parse_json_logs(&buffer);
+        let applied = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("btrfs_sync_applied")
+                    && entry.get("scenario_id").and_then(Value::as_str) == Some("btrfs_rw_fsync")
+            })
+            .expect("expected btrfs_sync_applied fsync log");
+
+        assert_eq!(
+            applied.get("outcome").and_then(Value::as_str),
+            Some("applied")
+        );
+        assert!(
+            applied
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("btrfs-fsync-")),
+            "missing or malformed fsync operation_id: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fsync_rejection_log_contract_read_only() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        let err = tracing::subscriber::with_default(subscriber, || {
+            let image = build_btrfs_fsops_image();
+            let dev = TestDevice::from_vec(image);
+            let cx = Cx::for_testing();
+            let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+                .expect("open read-only btrfs filesystem");
+            let ops: &dyn FsOps = &fs;
+            ops.fsync(&cx, InodeNumber(1), 0, false)
+                .expect_err("fsync should be rejected on read-only mount")
+        });
+        assert_eq!(err.to_errno(), libc::EROFS);
+
+        let logs = parse_json_logs(&buffer);
+        let rejected = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("btrfs_sync_rejected")
+                    && entry.get("error_class").and_then(Value::as_str) == Some("read_only")
+                    && entry.get("scenario_id").and_then(Value::as_str) == Some("btrfs_rw_fsync")
+            })
+            .expect("expected btrfs_sync_rejected read-only fsync log");
+
+        assert_eq!(
+            rejected.get("outcome").and_then(Value::as_str),
+            Some("rejected")
+        );
+        assert!(
+            rejected
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("btrfs-fsync-")),
+            "missing or malformed fsync rejection operation_id: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fsyncdir_log_contract_success() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let (fs, cx) = open_writable_btrfs();
+            let ops: &dyn FsOps = &fs;
+            ops.fsyncdir(&cx, InodeNumber(1), 0, false)
+                .expect("fsyncdir should succeed");
+        });
+
+        let logs = parse_json_logs(&buffer);
+        let applied = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("btrfs_sync_applied")
+                    && entry.get("scenario_id").and_then(Value::as_str) == Some("btrfs_rw_fsyncdir")
+            })
+            .expect("expected btrfs_sync_applied fsyncdir log");
+
+        assert_eq!(
+            applied.get("outcome").and_then(Value::as_str),
+            Some("applied")
+        );
+        assert!(
+            applied
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("btrfs-fsyncdir-")),
+            "missing or malformed fsyncdir operation_id: {applied:?}"
         );
     }
 

@@ -14,7 +14,7 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run ext4 read-only round-trip (debugfs reference vs FUSE view)
 ./scripts/e2e/ffs_ext4_ro_roundtrip.sh
 
-# Run btrfs read-write smoke + persistence checks
+# Run btrfs read-write smoke + crash matrix + persistence checks
 ./scripts/e2e/ffs_btrfs_rw_smoke.sh
 
 # Run btrfs read-only FUSE smoke
@@ -103,7 +103,9 @@ The btrfs read-write smoke suite exercises:
 4. Directory/name/link operations: mkdir/rmdir, rename within/across dir, rename-overwrite, unlink, symlink, hardlink, and inode-sharing checks
 5. COW-oriented checks: repeated rewrites of a hot file with superblock generation/root snapshots before/after write bursts
 6. Persistence checks: clean unmount, read-only remount, and post-remount data/metadata validation
-7. CI artifacts: structured per-test timing logs, machine-parseable `SCENARIO_RESULT|scenario_id=...` markers, and a `junit.xml` report under the suite artifact directory
+7. Deterministic crash matrix: 10 SIGKILL crash points across create/write/rename/unlink with per-scenario image artifacts, post-crash inspect output, and read-only remount invariants
+8. Structured sync observability checks at fsync boundaries (`btrfs_sync_applied` with `operation_id` + `scenario_id` in mount logs)
+9. CI artifacts: structured per-test timing logs, machine-parseable `SCENARIO_RESULT|scenario_id=...` markers, and a `junit.xml` report under the suite artifact directory
 
 The btrfs read-only smoke suite exercises:
 
@@ -156,6 +158,7 @@ artifacts/e2e/20260212_161500_ffs_smoke/
 | `BASELINE_FILE_COUNT` | `500` | Number of fsync-backed baseline files written before SIGKILL phase |
 | `CRASH_WRITER_RUNTIME_SECS` | `2` | Duration to run background in-flight writer before sending SIGKILL |
 | `CRASH_WRITER_SLEEP_SECS` | `0.01` | Per-write pacing interval for crash in-flight writer |
+| `CRASH_MATRIX_POINTS` | `10` | For `ffs_btrfs_rw_smoke.sh`: fixed deterministic crash-point matrix cardinality (must remain 10) |
 | `FFS_REPAIR_LOCAL_ARTIFACT_FALLBACK` | `0` | For `ffs_repair_recovery_smoke.sh`: if `1`, re-run repair test locally when rch offload does not materialize artifact files |
 | `FFS_USE_RCH` | `1` | For `ffs_degradation_stress.sh`, `ffs_fuse_production.sh`, `ffs_btrfs_rw_smoke.sh`, `ffs_ext4_ro_roundtrip.sh`, and `ffs_ext4_rw_smoke.sh`: offload cargo commands via `rch exec -- cargo ...` when available |
 | `FFS_RUN_MOUNT_STRESS` | `0` | For `ffs_degradation_stress.sh`: if `1`, attempt optional live FUSE mount pressure probe |
