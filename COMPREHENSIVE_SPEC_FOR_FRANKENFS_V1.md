@@ -1710,143 +1710,140 @@ Phase A MVCC (`MvccStore`) is currently in-memory only. This section defines the
 
 #### 5.9.2 High-Level Model
 
-The durable MVCC store is an **append-only log** stored separately from the underlying filesystem image (an “overlay”):
+The durable MVCC store is an **append-only commit log** in a byte-addressed durable region:
 
 - Reads consult the in-memory MVCC index first; when no version exists, fall back to the base `BlockDevice`.
-- Commits append new block versions to the overlay log and then append a **commit marker** that makes the commit durable/visible on replay.
+- Commits are serialized into a single checksummed `COMMIT` record containing all block writes for that transaction.
+- Replay applies only valid, monotonically increasing commit records.
 
-This is WAL-like: `VERSION*` records then a `COMMIT` record. A commit exists iff its `COMMIT` record is present and valid.
+The byte-region location is intentionally decoupled from the wire format:
+
+- It MAY be a sidecar WAL file, a hidden inode, or another `ByteDevice` implementation.
+- The record format and replay rules below are normative regardless of placement.
 
 #### 5.9.3 Storage Interface (informative)
 
-The durable store is byte-addressed and uses the canonical `ByteDevice` (Section 9.1).
+The durable store is byte-addressed and uses the canonical `ByteDevice` (Section 9.1). A reference implementation shape:
 
 ```rust
-/// Durable append-only store for MVCC block versions.
-///
-/// This trait is informative (planned) until implemented.
+/// Durable append-only store for MVCC commit records.
 pub trait VersionStore: Send + Sync {
-    /// Append a single block version record.
-    fn append_version(
-        &self,
-        cx: &Cx,
-        commit_seq: CommitSeq,
-        writer: TxnId,
-        block: BlockNumber,
-        bytes: &[u8],
-    ) -> Result<()>;
+    /// Append a single commit record (all writes for one commit_seq).
+    fn append_commit(&self, cx: &Cx, commit: &DurableCommitRecord) -> Result<()>;
 
-    /// Append a commit marker record (atomicity boundary).
-    fn append_commit_marker(
-        &self,
-        cx: &Cx,
-        commit_seq: CommitSeq,
-        writer: TxnId,
-        write_count: u32,
-    ) -> Result<()>;
-
-    /// Flush appended records to stable storage (fsync).
+    /// Flush appended records to stable storage (fsync/fdatasync).
     fn sync(&self, cx: &Cx) -> Result<()>;
 
-    /// Replay the log and invoke callbacks for committed versions.
-    fn replay(&self, cx: &Cx, apply: &mut dyn FnMut(BlockVersion)) -> Result<CommitSeq>;
+    /// Replay valid records in-order and apply committed versions.
+    fn replay(
+        &self,
+        cx: &Cx,
+        skip_up_to: CommitSeq,
+        apply: &mut dyn FnMut(&DurableCommitRecord),
+    ) -> Result<CommitSeq>;
 }
 ```
 
-The MVCC engine MAY bundle this behind a higher-level `MvccBlockManager` implementation; the key requirement is that the version store can be replayed deterministically.
+The MVCC engine MAY bundle this behind a higher-level `MvccBlockManager`; the hard requirement is deterministic replay with explicit corruption boundaries.
 
 #### 5.9.4 On-Disk Log Format (v1)
 
-The overlay file is a linear sequence of records:
+The durable log is a linear byte stream:
 
-1. **Header** (single record, must be first)
-2. Repeated `{ VERSION* , COMMIT }` groups
+1. **File header** (exactly once, first 16 bytes).
+2. Repeated **commit records**.
 
-Each record is:
-
-- A fixed-size header with a **magic**, a **type**, a **payload length**, and a **checksum**
-- Followed by the payload bytes
-
-Record header (conceptual):
+File header (`16` bytes):
 
 | Field | Size | Notes |
 |------|------|------|
-| magic | 4 B | `"FFSV"` |
-| kind | 1 B | `1=HEADER`, `2=VERSION`, `3=COMMIT` |
-| reserved | 3 B | must be 0 |
-| payload_len | 4 B | little-endian |
-| payload_crc32c | 4 B | CRC32C of payload bytes |
+| magic | 4 B | `0x4D56_4357` (`WAL_MAGIC`) |
+| version | 2 B | `1` (`WAL_VERSION`) |
+| checksum_type | 2 B | `0` = CRC32C |
+| reserved | 8 B | writer sets to zero |
 
-`HEADER` payload (must include enough to prevent accidental reuse against the wrong base device):
+Commit record framing:
 
-- `format_version: u32` (currently `1`)
-- `block_size: u32`
-- `base_fingerprint: [u8; 32]` (BLAKE3 of the base device identity; exact definition is implementation-chosen but MUST be stable)
+| Field | Size | Notes |
+|------|------|------|
+| record_len | 4 B | LE length of bytes after this field |
+| record_type | 1 B | `1` = COMMIT |
+| commit_seq | 8 B | LE u64, strictly increasing in file order |
+| txn_id | 8 B | LE u64 writer transaction identifier |
+| num_writes | 4 B | LE u32 |
+| writes | variable | repeated write entries (below) |
+| record_crc32c | 4 B | CRC32C over `record_type..writes` (excludes `record_len` and CRC field) |
 
-`VERSION` payload:
+Write entry (`num_writes` times):
 
-- `commit_seq: u64`
-- `writer_txn: u64`
-- `block_number: u64`
-- `bytes_len: u32` (must equal `block_size`)
-- `bytes: [u8; bytes_len]`
+| Field | Size | Notes |
+|------|------|------|
+| block_number | 8 B | LE u64 |
+| data_len | 4 B | LE u32 |
+| data | `data_len` B | block payload bytes |
 
-`COMMIT` payload:
+Normative ordering/dedup rules before serialization:
 
-- `commit_seq: u64`
-- `writer_txn: u64`
-- `write_count: u32` (sanity only; replay does not require it for correctness)
-
-**Checksum choice:** CRC32C is sufficient to detect torn/incomplete writes and random corruption. The durability layer MAY additionally store a BLAKE3 hash per block version for stronger integrity checks, but CRC32C is the required minimum.
+1. A transaction MUST serialize writes in ascending `block_number` order.
+2. At most one write per `block_number` may appear in one commit record.
+3. If a transaction stages the same block multiple times, only the last staged bytes are serialized.
+4. `commit_seq == u64::MAX` and `txn_id == u64::MAX` are reserved and invalid on replay.
 
 #### 5.9.5 Commit Protocol and Crash Consistency
 
-To make a commit crash-safe, the system MUST enforce:
+Crash-safe mode (`sync_on_commit=true`) MUST enforce:
 
-1. All `VERSION` records for a commit are durable before the `COMMIT` record is appended.
-2. The `COMMIT` record is durable before the commit is considered durable/visible after restart.
+1. In-memory FCW/SSI validation succeeds.
+2. Commit sequence allocation is monotonic and unique.
+3. The commit record append succeeds.
+4. The appended bytes are synced before returning success.
 
-Concrete protocol:
+Reference protocol:
 
 ```
 PROCEDURE durable_commit(T):
-  validate_fcw(T)                         // in-memory check (Phase A)
-  seq = allocate_commit_seq()             // monotonically increasing
-
-  // Deterministic ordering for reproducible logs.
-  writes = sort_by_block_number(T.staged_writes)
-
-  FOR EACH (block, bytes) in writes:
-    append VERSION(seq, T.txn_id, block, bytes)
-  sync()                                  // ensures all VERSION records are durable
-
-  append COMMIT(seq, T.txn_id, len(writes))
-  sync()                                  // ensures COMMIT marker is durable
-
-  publish_to_in_memory_index(seq, writes) // versions become visible immediately after commit returns
+  validate_fcw_ssi(T)
+  seq = allocate_commit_seq()
+  writes = canonicalize(T.staged_writes)      // dedup + block_number sort
+  rec = encode_commit(seq, T.txn_id, writes)  // includes CRC32C
+  append(rec)
+  sync()                                      // required in crash-safe mode
+  publish_to_in_memory_index(seq, writes)
   RETURN seq
 ```
 
-If the process crashes:
+Crash outcome matrix:
 
-- After writing some `VERSION` records but before the `COMMIT` marker: the commit is treated as **absent** on replay.
-- After writing the `COMMIT` marker: the commit is treated as **present** and its versions are applied on replay.
+| Crash Point | Replay Result |
+|-------------|---------------|
+| Before append starts | Commit absent |
+| Mid-record append (truncated tail) | Commit absent; tail discarded |
+| After full append but before sync (crash-safe mode) | Commit absent or present (depends on device flush behavior); never partially applied |
+| After sync returns success | Commit present |
+
+If `sync_on_commit=false`, the system is in throughput mode, not strict crash-safe mode.
 
 #### 5.9.6 Recovery Procedure (Replay)
 
-Recovery scans the overlay log sequentially:
+Replay algorithm:
 
-1. Validate `HEADER` (magic/version/block_size/base_fingerprint).
-2. Accumulate `VERSION` records for a given `commit_seq` into a temporary buffer.
-3. When a matching `COMMIT` record is encountered, apply the buffered versions in deterministic order.
-4. Stop at the first invalid record (bad magic, impossible length, checksum failure) and treat the remainder of the file as truncated tail.
+1. Validate file header (`magic`, `version`, `checksum_type`).
+2. Scan commit records sequentially from byte offset `HEADER_SIZE`.
+3. For each decodable commit record:
+   - reject and stop if `commit_seq` is non-monotonic (`<= last_replayed_seq`),
+   - reject and stop on reserved sequence/id values,
+   - optionally skip `commit_seq <= checkpoint_seq` when replaying after checkpoint load,
+   - apply writes atomically to in-memory MVCC structures.
+4. On first `NeedMore` (truncated record), checksum failure, malformed length/type, or monotonicity violation: stop replay and treat that record plus suffix as discarded tail.
+5. Truncate the durable stream to the last valid byte offset.
 
-This yields:
+Replay outputs:
 
-- `last_commit_seq` = highest committed `commit_seq` applied
-- `next_commit_seq` = `last_commit_seq + 1`
+- `last_commit_seq`: highest commit sequence successfully applied.
+- `next_commit_seq`: `last_commit_seq + 1`.
+- `records_discarded`: count of invalid/tail records ignored.
 
-**Replay MUST NOT publish versions for any `commit_seq` lacking a valid `COMMIT` marker.**
+Replay MUST be idempotent: re-running replay against unchanged bytes produces the same in-memory state.
 
 #### 5.9.7 GC / Watermarks / Compaction (strategy)
 
@@ -1855,13 +1852,53 @@ This yields:
 - `watermark = min(active snapshots).high`
 - per block, keep the **newest** version with `commit_seq <= watermark` (the keeper) plus all newer versions
 
-**Physical compaction (recommended):** the overlay file is append-only, so disk usage grows. When the overlay exceeds a size threshold, a background compactor MAY:
+**Physical compaction (recommended):** append-only logs grow. A compactor MAY:
 
-1. Take an MVCC barrier (exclusive) to obtain a stable view of which versions are live at the watermark.
-2. Write a new overlay file containing only live `VERSION` records (preserving original `commit_seq` values) plus `COMMIT` markers.
-3. `sync()` the new file, then atomically replace the old overlay via `rename()`.
+1. Take an MVCC barrier (exclusive) for a stable live-set at watermark.
+2. Emit a new log with only live versions and valid commit framing.
+3. `sync()` the new stream and atomically replace the old one.
 
-The compactor MUST preserve snapshot semantics: it may only discard versions that are provably invisible to all active snapshots (the same GC-SAFE rule).
+Compaction MUST preserve snapshot semantics (same GC-SAFE rule).
+
+#### 5.9.8 Compatibility / Versioning Rules
+
+1. `WAL_VERSION` controls incompatible wire changes.
+2. Reserved header bytes MUST be written as zero; readers MAY ignore non-zero values for forward compatibility diagnostics.
+3. Unknown `record_type` is a hard replay boundary (discard tail from that record onward).
+4. Any future checksum algorithm requires a versioned compatibility path (new `checksum_type` with explicit reader support).
+5. Schema evolution MUST preserve deterministic replay and explicit corruption boundaries.
+
+#### 5.9.9 Durable Invariants (bd-h6nz.1.1)
+
+| ID | Invariant | Enforcement Point |
+|----|-----------|-------------------|
+| **D1** | Commit sequence in durable stream is strictly increasing | replay scanner + commit allocator |
+| **D2** | A replayed commit is all-or-nothing (never partial writes) | record framing + CRC + atomic apply |
+| **D3** | Truncated/corrupt tail cannot mutate previously replayed state | replay stop-at-first-invalid rule |
+| **D4** | One block appears at most once in a commit record | canonicalize-before-encode |
+| **D5** | `commit()` success in crash-safe mode implies synced durable bytes | commit protocol (`sync_on_commit=true`) |
+| **D6** | Replay is deterministic for identical byte input | monotonic scan + deterministic apply order |
+| **D7** | `next_commit_seq` after replay is `last_commit_seq + 1` | replay finalization |
+| **D8** | Reserved sentinel IDs (`u64::MAX`) are never accepted | replay validation |
+
+#### 5.9.10 Validation Matrix and Logging Contract
+
+Stable scenario IDs for deterministic validation:
+
+| Scenario ID | Contract | Surface |
+|-------------|----------|---------|
+| `MVCC_DURABLE_WAL_001` | Round-trip commit encode/decode + replay determinism (`D1`, `D6`) | unit (`ffs-mvcc::wal` + `persist`) |
+| `MVCC_DURABLE_WAL_002` | Truncated tail ignored; prior commits preserved (`D2`, `D3`) | unit + e2e crash harness |
+| `MVCC_DURABLE_WAL_003` | Corrupt CRC discarded and tail truncated (`D2`, `D3`) | unit + e2e fault injection |
+| `MVCC_DURABLE_WAL_004` | Non-monotonic `commit_seq` rejected (`D1`) | unit replay tests |
+| `MVCC_DURABLE_WAL_005` | Commit success requires sync in crash-safe mode (`D5`) | unit with injected sync failures |
+| `MVCC_DURABLE_WAL_006` | Checkpoint + replay skip-up-to is deterministic (`D6`, `D7`) | integration/e2e |
+
+Structured logging requirements (all durable path critical events):
+
+- Required fields: `operation_id`, `scenario_id`, `commit_seq`, `txn_id`, `outcome`, `error_class`.
+- Required transitions: `wal_append_start`, `wal_append_ok`, `wal_sync_ok|wal_sync_err`, `wal_replay_start`, `wal_replay_record_discarded`, `wal_replay_complete`.
+- Tests MUST assert at least one success path and one failure path emit the required fields.
 
 ---
 

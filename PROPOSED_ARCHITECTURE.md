@@ -173,13 +173,14 @@ pub trait MvccBlockManager: Send + Sync {
 
 #### 3.2.1 MVCC Persistence (VersionStore overlay; planned — bd-1u7)
 
-MVCC durability is provided by an **append-only version store overlay**:
+MVCC durability is provided by an **append-only commit log**:
 
-- Each commit appends `VERSION` records (block, commit_seq, bytes) and then appends a `COMMIT` marker record.
-- Recovery replays only commits with a valid `COMMIT` marker.
-- The version store is byte-addressed and built on the canonical `ByteDevice` trait (Section 3.1).
+- One durable record per commit (`record_len`, `record_type`, `commit_seq`, `txn_id`, `num_writes`, write entries, trailing CRC32C).
+- Commit records are canonicalized before encode (single write per block, ascending block order).
+- Replay is strictly monotonic on `commit_seq`; malformed/truncated tail is discarded and truncated at last valid byte.
+- Crash-safe durability requires append + sync before returning commit success.
 
-Canonical design details (record format, crash-consistency protocol, replay procedure, and compaction strategy) live in `COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md` §5.9.
+The durable region is `ByteDevice`-backed and placement-agnostic (sidecar file, hidden inode, or equivalent). Canonical wire format and replay invariants live in `COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md` §5.9, including scenario IDs `MVCC_DURABLE_WAL_001..006` and required durable-path log fields (`operation_id`, `scenario_id`, `commit_seq`, `txn_id`, `outcome`, `error_class`).
 
 ### 3.3 Filesystem Operations Trait (planned — lives in `ffs-core`)
 
