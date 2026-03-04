@@ -476,8 +476,6 @@ impl Taxonomy {
         );
 
         // Mount runtime mode comparison benchmarks (bd-h6nz.2.5).
-        // These measure dispatch infrastructure overhead without actual FUSE.
-        let before = ops.len();
         Self::insert_ops(
             ops,
             &[
@@ -506,43 +504,39 @@ impl Taxonomy {
             "ffs-fuse",
         );
 
-        // Backpressure decision under degraded/emergency modes
-        ops.insert(
-            "mount_runtime_backpressure_normal".to_owned(),
-            BenchmarkEntry {
-                operation_id: "mount_runtime_backpressure_normal".to_owned(),
-                family: BenchmarkFamily::DegradedMode,
-                metric: MetricType::Latency,
-                owning_crate: "ffs-fuse".to_owned(),
-                description: "Backpressure decision latency under normal load".to_owned(),
-                envelope_override: None,
-            },
-        );
-        ops.insert(
-            "mount_runtime_backpressure_degraded".to_owned(),
-            BenchmarkEntry {
-                operation_id: "mount_runtime_backpressure_degraded".to_owned(),
-                family: BenchmarkFamily::DegradedMode,
-                metric: MetricType::Latency,
-                owning_crate: "ffs-fuse".to_owned(),
-                description: "Backpressure decision latency under degraded state".to_owned(),
-                envelope_override: None,
-            },
-        );
-        ops.insert(
-            "mount_runtime_backpressure_emergency".to_owned(),
-            BenchmarkEntry {
-                operation_id: "mount_runtime_backpressure_emergency".to_owned(),
-                family: BenchmarkFamily::DegradedMode,
-                metric: MetricType::Latency,
-                owning_crate: "ffs-fuse".to_owned(),
-                description: "Backpressure shed decision latency under emergency state".to_owned(),
-                envelope_override: None,
-            },
-        );
+        Self::register_degraded_mode_ops(ops);
+    }
 
-        // Degraded-mode throughput benchmarks (bd-h6nz.5.4).
-        // Measure impact of backpressure on foreground workload throughput.
+    fn register_degraded_mode_ops(ops: &mut BTreeMap<String, BenchmarkEntry>) {
+        let before = ops.len();
+
+        // Backpressure decision latency at each pressure level (bd-h6nz.2.5)
+        for (suffix, desc) in [
+            ("normal", "Backpressure decision latency under normal load"),
+            (
+                "degraded",
+                "Backpressure decision latency under degraded state",
+            ),
+            (
+                "emergency",
+                "Backpressure shed decision latency under emergency state",
+            ),
+        ] {
+            let id = format!("mount_runtime_backpressure_{suffix}");
+            ops.insert(
+                id.clone(),
+                BenchmarkEntry {
+                    operation_id: id,
+                    family: BenchmarkFamily::DegradedMode,
+                    metric: MetricType::Latency,
+                    owning_crate: "ffs-fuse".to_owned(),
+                    description: desc.to_owned(),
+                    envelope_override: None,
+                },
+            );
+        }
+
+        // Degraded-mode throughput benchmarks (bd-h6nz.5.4)
         for (level, desc) in [
             (
                 "warning",
@@ -598,10 +592,10 @@ impl Taxonomy {
         let added = ops.len() - before;
         debug!(
             target: "ffs::benchmark_taxonomy",
-            mount_runtime_ops = added,
-            scenario_id = "mount_runtime_benchmark_registration",
-            operation_id = "register_mount_ops",
-            "mount_runtime_benchmark_ops_registered"
+            degraded_mode_ops = added,
+            scenario_id = "degraded_mode_benchmark_registration",
+            operation_id = "register_degraded_mode_ops",
+            "degraded_mode_benchmark_ops_registered"
         );
     }
 
