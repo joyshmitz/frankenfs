@@ -5,6 +5,7 @@ pub mod e2e;
 pub mod log_contract;
 pub mod perf_comparison;
 pub mod perf_regression;
+pub mod perf_triage;
 
 use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
