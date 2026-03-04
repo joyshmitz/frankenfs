@@ -56,7 +56,7 @@ pub enum TriageAction {
 }
 
 /// Complete triage classification for a single operation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriageDecision {
     /// Operation that triggered the guard.
     pub operation_id: String,
@@ -83,102 +83,17 @@ pub fn classify_triage(
     family: BenchmarkFamily,
     hysteresis: Option<HystereticVerdict>,
 ) -> TriageDecision {
-    let op = &result.operation_id;
-
-    // Branch 1: noise floor
-    if result.final_verdict == ComparisonVerdict::Pass
-        && result.delta_percent.abs() <= noise_floor_for(family)
-    {
-        let decision = TriageDecision {
-            operation_id: op.clone(),
-            family,
-            cause: TriageCause::Noise,
-            action: TriageAction::NoAction,
-            rationale: format!(
-                "{op}: delta {:.1}% within noise floor ({:.0}%) — no action",
-                result.delta_percent,
-                noise_floor_for(family),
-            ),
-            should_block: false,
-            runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
-        };
-        emit_triage_log(&decision, result);
-        return decision;
-    }
-
-    // Branch 2: insufficient data
-    if result.final_verdict == ComparisonVerdict::Inconclusive {
-        let decision = TriageDecision {
-            operation_id: op.clone(),
-            family,
-            cause: TriageCause::InsufficientData,
-            action: TriageAction::CollectMoreSamples,
-            rationale: format!(
-                "{op}: insufficient samples (baseline={}, current={}) — collect more runs",
-                result.baseline.n, result.current.n,
-            ),
-            should_block: false,
-            runbook_ref: "docs/runbooks/perf-regression-triage.md#step-2".to_owned(),
-        };
-        emit_triage_log(&decision, result);
-        return decision;
-    }
-
-    // Branch 3: not significant (Pass verdict from significance downgrade)
-    if result.final_verdict == ComparisonVerdict::Pass && !result.significant {
-        let decision = TriageDecision {
-            operation_id: op.clone(),
-            family,
-            cause: TriageCause::NotSignificant,
-            action: TriageAction::RerunOnReference,
-            rationale: format!(
-                "{op}: delta {:.1}% not statistically significant (p={}) — re-run to confirm",
-                result.delta_percent,
-                result
-                    .t_test
-                    .map_or("N/A".to_owned(), |t| format!("{:.3}", t.p_value)),
-            ),
-            should_block: false,
-            runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
-        };
-        emit_triage_log(&decision, result);
-        return decision;
-    }
-
-    // Branch 4: negligible effect size
-    if result.final_verdict == ComparisonVerdict::Pass && result.effect_size.abs() < 0.2 {
-        let decision = TriageDecision {
-            operation_id: op.clone(),
-            family,
-            cause: TriageCause::NegligibleEffect,
-            action: TriageAction::NoAction,
-            rationale: format!(
-                "{op}: effect size {:.2} ({}) — negligible practical impact",
-                result.effect_size, result.effect_label,
-            ),
-            should_block: false,
-            runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
-        };
+    // Try early-exit branches (noise, inconclusive, not significant, negligible)
+    if let Some(decision) = try_early_exit(result, family) {
         emit_triage_log(&decision, result);
         return decision;
     }
 
     // Branch 5: Warn or Fail — classify by family characteristics
     let (cause, action) = classify_by_family(family, result);
-
-    // Hysteresis gate: only block if confirmed by repeated runs
-    let should_block = match hysteresis {
-        Some(HystereticVerdict::ConfirmedFail) => true,
-        Some(HystereticVerdict::ConfirmedWarn) => result.final_verdict == ComparisonVerdict::Fail,
-        _ => false,
-    };
-
-    let hysteresis_note = match hysteresis {
-        Some(HystereticVerdict::ConfirmedFail) => " [hysteresis: CONFIRMED]",
-        Some(HystereticVerdict::ConfirmedWarn) => " [hysteresis: warn-confirmed]",
-        Some(HystereticVerdict::EarlyWarning) => " [hysteresis: early-warning, monitor next run]",
-        Some(HystereticVerdict::NoSignal) | None => "",
-    };
+    let should_block = resolve_hysteresis_block(hysteresis, result.final_verdict);
+    let hysteresis_note = hysteresis_label(hysteresis);
+    let op = &result.operation_id;
 
     let decision = TriageDecision {
         operation_id: op.clone(),
@@ -191,15 +106,117 @@ pub fn classify_triage(
             result.delta_percent,
             result.effect_size,
             result.effect_label,
-            result
-                .t_test
-                .map_or("N/A".to_owned(), |t| format!("{:.3}", t.p_value)),
+            format_p_value(result),
         ),
         should_block,
         runbook_ref: "docs/runbooks/perf-regression-triage.md#step-5".to_owned(),
     };
     emit_triage_log(&decision, result);
     decision
+}
+
+/// Try early-exit branches that short-circuit before family classification.
+fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<TriageDecision> {
+    let op = &result.operation_id;
+
+    // Branch 1: noise floor
+    if result.final_verdict == ComparisonVerdict::Pass
+        && result.delta_percent.abs() <= noise_floor_for(family)
+    {
+        return Some(TriageDecision {
+            operation_id: op.clone(),
+            family,
+            cause: TriageCause::Noise,
+            action: TriageAction::NoAction,
+            rationale: format!(
+                "{op}: delta {:.1}% within noise floor ({:.0}%) — no action",
+                result.delta_percent,
+                noise_floor_for(family),
+            ),
+            should_block: false,
+            runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
+        });
+    }
+
+    // Branch 2: insufficient data
+    if result.final_verdict == ComparisonVerdict::Inconclusive {
+        return Some(TriageDecision {
+            operation_id: op.clone(),
+            family,
+            cause: TriageCause::InsufficientData,
+            action: TriageAction::CollectMoreSamples,
+            rationale: format!(
+                "{op}: insufficient samples (baseline={}, current={}) — collect more runs",
+                result.baseline.n, result.current.n,
+            ),
+            should_block: false,
+            runbook_ref: "docs/runbooks/perf-regression-triage.md#step-2".to_owned(),
+        });
+    }
+
+    // Branch 3: not significant (Pass verdict from significance downgrade)
+    if result.final_verdict == ComparisonVerdict::Pass && !result.significant {
+        return Some(TriageDecision {
+            operation_id: op.clone(),
+            family,
+            cause: TriageCause::NotSignificant,
+            action: TriageAction::RerunOnReference,
+            rationale: format!(
+                "{op}: delta {:.1}% not statistically significant (p={}) — re-run to confirm",
+                result.delta_percent,
+                format_p_value(result),
+            ),
+            should_block: false,
+            runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
+        });
+    }
+
+    // Branch 4: negligible effect size
+    if result.final_verdict == ComparisonVerdict::Pass && result.effect_size.abs() < 0.2 {
+        return Some(TriageDecision {
+            operation_id: op.clone(),
+            family,
+            cause: TriageCause::NegligibleEffect,
+            action: TriageAction::NoAction,
+            rationale: format!(
+                "{op}: effect size {:.2} ({}) — negligible practical impact",
+                result.effect_size, result.effect_label,
+            ),
+            should_block: false,
+            runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
+        });
+    }
+
+    None
+}
+
+/// Format p-value from a comparison result.
+fn format_p_value(result: &ComparisonResult) -> String {
+    result
+        .t_test
+        .map_or_else(|| "N/A".to_owned(), |t| format!("{:.3}", t.p_value))
+}
+
+/// Determine whether hysteresis state warrants blocking the pipeline.
+fn resolve_hysteresis_block(
+    hysteresis: Option<HystereticVerdict>,
+    verdict: ComparisonVerdict,
+) -> bool {
+    match hysteresis {
+        Some(HystereticVerdict::ConfirmedFail) => true,
+        Some(HystereticVerdict::ConfirmedWarn) => verdict == ComparisonVerdict::Fail,
+        _ => false,
+    }
+}
+
+/// Human-readable hysteresis state label for rationale strings.
+fn hysteresis_label(hysteresis: Option<HystereticVerdict>) -> &'static str {
+    match hysteresis {
+        Some(HystereticVerdict::ConfirmedFail) => " [hysteresis: CONFIRMED]",
+        Some(HystereticVerdict::ConfirmedWarn) => " [hysteresis: warn-confirmed]",
+        Some(HystereticVerdict::EarlyWarning) => " [hysteresis: early-warning, monitor next run]",
+        Some(HystereticVerdict::NoSignal) | None => "",
+    }
 }
 
 /// Classify root cause and action based on benchmark family characteristics.
@@ -281,6 +298,7 @@ fn emit_triage_log(decision: &TriageDecision, result: &ComparisonResult) {
 /// Validate that the triage runbook file exists at the expected path.
 ///
 /// This is used by E2E tests to verify the runbook is deployed.
+#[must_use]
 pub fn runbook_path() -> &'static str {
     "docs/runbooks/perf-regression-triage.md"
 }
