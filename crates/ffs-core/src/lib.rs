@@ -5336,6 +5336,36 @@ impl OpenFs {
         (dur.as_secs(), dur.subsec_nanos())
     }
 
+    const BTRFS_RW_SCENARIO_FALLOCATE_PREALLOC: &str = "btrfs_rw_fallocate_prealloc";
+    const BTRFS_RW_SCENARIO_FALLOCATE_KEEP_SIZE: &str = "btrfs_rw_fallocate_keep_size";
+    const BTRFS_RW_SCENARIO_FALLOCATE_UNSUPPORTED_MODE_BITS: &str =
+        "btrfs_rw_fallocate_unsupported_mode_bits";
+    const BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE_UNSUPPORTED: &str =
+        "btrfs_rw_fallocate_punch_hole_unsupported";
+
+    fn btrfs_fallocate_scenario_id(mode: i32) -> &'static str {
+        const KEEP_SIZE: i32 = 0x01;
+        const PUNCH_HOLE: i32 = 0x02;
+
+        let keep_size = (mode & KEEP_SIZE) != 0;
+        let punch_hole = (mode & PUNCH_HOLE) != 0;
+        let unsupported_bits = mode & !(KEEP_SIZE | PUNCH_HOLE);
+
+        if unsupported_bits != 0 {
+            Self::BTRFS_RW_SCENARIO_FALLOCATE_UNSUPPORTED_MODE_BITS
+        } else if punch_hole {
+            Self::BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE_UNSUPPORTED
+        } else if keep_size {
+            Self::BTRFS_RW_SCENARIO_FALLOCATE_KEEP_SIZE
+        } else {
+            Self::BTRFS_RW_SCENARIO_FALLOCATE_PREALLOC
+        }
+    }
+
+    fn btrfs_fallocate_operation_id(ino: InodeNumber, offset: u64, length: u64, mode: i32) -> String {
+        format!("btrfs-fallocate-{}-{offset}-{length}-{mode}", ino.0)
+    }
+
     // ── Btrfs write path ─────────────────────────────────────────────────
 
     /// Write file data on a btrfs filesystem.
@@ -6159,15 +6189,47 @@ impl OpenFs {
         const KEEP_SIZE: i32 = 0x01;
         const PUNCH_HOLE: i32 = 0x02;
 
+        let scenario_id = Self::btrfs_fallocate_scenario_id(mode);
+        let operation_id = Self::btrfs_fallocate_operation_id(ino, offset, length, mode);
+        info!(
+            target: "ffs::btrfs::rw",
+            operation_id = %operation_id,
+            scenario_id,
+            outcome = "start",
+            ino = ino.0,
+            offset,
+            length,
+            mode,
+            "btrfs_fallocate_start"
+        );
+
         let keep_size = (mode & KEEP_SIZE) != 0;
         let punch_hole = (mode & PUNCH_HOLE) != 0;
         let unsupported_bits = mode & !(KEEP_SIZE | PUNCH_HOLE);
         if unsupported_bits != 0 {
+            let unsupported_bits_hex = format!("0x{unsupported_bits:08x}");
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id = %operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "unsupported_mode_bits",
+                unsupported_bits = unsupported_bits_hex.as_str(),
+                "btrfs_fallocate_rejected"
+            );
             return Err(FfsError::UnsupportedFeature(format!(
                 "btrfs fallocate unsupported mode bits: 0x{unsupported_bits:08x}"
             )));
         }
         if punch_hole {
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id = %operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "unsupported_punch_hole_mode",
+                "btrfs_fallocate_rejected"
+            );
             return Err(FfsError::UnsupportedFeature(
                 "btrfs fallocate punch-hole mode is not yet supported".into(),
             ));
@@ -6304,6 +6366,17 @@ impl OpenFs {
                 .update(&inode_key, &inode.to_bytes())
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
+        info!(
+            target: "ffs::btrfs::rw",
+            operation_id = %operation_id,
+            scenario_id,
+            outcome = "applied",
+            ino = canonical,
+            offset,
+            length,
+            keep_size,
+            "btrfs_fallocate_applied"
+        );
         drop(alloc);
 
         Ok(())
@@ -8269,7 +8342,10 @@ mod tests {
         BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, ByteOffset, EXT4_SUPER_MAGIC,
         EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE,
     };
-    use std::sync::Mutex;
+    use serde_json::Value;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 
     /// In-memory ByteDevice for testing (no file I/O).
     #[derive(Debug)]
@@ -8330,6 +8406,48 @@ mod tests {
         fn sync(&self, _cx: &Cx) -> ffs_error::Result<()> {
             Ok(())
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    #[derive(Clone)]
+    struct SharedLogWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.inner
+                .lock()
+                .expect("log buffer lock poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter {
+                inner: Arc::clone(&self.inner),
+            }
+        }
+    }
+
+    fn parse_json_logs(buffer: &SharedLogBuffer) -> Vec<Value> {
+        let bytes = buffer.inner.lock().expect("log buffer lock poisoned");
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect()
     }
 
     #[test]
@@ -16975,9 +17093,139 @@ mod tests {
                 libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
             )
             .expect_err("punch-hole mode should be rejected for btrfs");
+        assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
         assert!(
             matches!(err, FfsError::UnsupportedFeature(_)),
             "unexpected error: {err:?}"
+        );
+        let detail = err.to_string();
+        assert!(
+            detail.contains("punch-hole"),
+            "unexpected error detail for punch-hole rejection: {detail}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_unsupported_mode_bits_rejected() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(&cx, InodeNumber(1), OsStr::new("mode_bits.bin"), 0o644, 0, 0)
+            .unwrap();
+        let err = ops
+            .fallocate(&cx, attr.ino, 0, 4096, 0x40)
+            .expect_err("unsupported mode bits should be rejected for btrfs");
+        assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
+        assert!(
+            matches!(err, FfsError::UnsupportedFeature(_)),
+            "unexpected error: {err:?}"
+        );
+        let detail = err.to_string();
+        assert!(
+            detail.contains("unsupported mode bits"),
+            "unexpected error detail for unsupported mode bits: {detail}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_success_log_contract() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let (fs, cx) = open_writable_btrfs();
+            let ops: &dyn FsOps = &fs;
+
+            let attr = ops
+                .create(&cx, InodeNumber(1), OsStr::new("log_success.bin"), 0o644, 0, 0)
+                .expect("create file for fallocate success log test");
+            ops.fallocate(&cx, attr.ino, 0, 4096, 0)
+                .expect("fallocate should succeed");
+        });
+
+        let logs = parse_json_logs(&buffer);
+        let applied = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("btrfs_fallocate_applied")
+            })
+            .expect("expected btrfs_fallocate_applied log event");
+
+        assert_eq!(
+            applied.get("scenario_id").and_then(Value::as_str),
+            Some("btrfs_rw_fallocate_prealloc")
+        );
+        assert_eq!(applied.get("outcome").and_then(Value::as_str), Some("applied"));
+        assert!(
+            applied
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("btrfs-fallocate-")),
+            "missing or malformed operation_id in success log: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_rejection_log_contract() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        let err = tracing::subscriber::with_default(subscriber, || {
+            let (fs, cx) = open_writable_btrfs();
+            let ops: &dyn FsOps = &fs;
+
+            let attr = ops
+                .create(&cx, InodeNumber(1), OsStr::new("log_reject.bin"), 0o644, 0, 0)
+                .expect("create file for fallocate rejection log test");
+            ops.fallocate(
+                &cx,
+                attr.ino,
+                0,
+                4096,
+                libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+            )
+            .expect_err("punch-hole mode should be rejected for btrfs")
+        });
+        assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
+
+        let logs = parse_json_logs(&buffer);
+        let rejected = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("btrfs_fallocate_rejected")
+            })
+            .expect("expected btrfs_fallocate_rejected log event");
+
+        assert_eq!(
+            rejected.get("scenario_id").and_then(Value::as_str),
+            Some("btrfs_rw_fallocate_punch_hole_unsupported")
+        );
+        assert_eq!(rejected.get("outcome").and_then(Value::as_str), Some("rejected"));
+        assert_eq!(
+            rejected.get("error_class").and_then(Value::as_str),
+            Some("unsupported_punch_hole_mode")
+        );
+        assert!(
+            rejected
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("btrfs-fallocate-")),
+            "missing or malformed operation_id in rejection log: {rejected:?}"
         );
     }
 
