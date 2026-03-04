@@ -11,6 +11,7 @@ use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
 use ffs_ondisk::Ext4Inode;
 use ffs_types::{BlockNumber, GroupNumber, InodeNumber};
+use tracing::debug;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -324,7 +325,17 @@ pub fn create_inode(
         links_count: if is_dir { 2 } else { 1 },
         blocks: 0,
         flags: EXT4_EXTENTS_FL,
-        generation: old_generation.wrapping_add(1),
+        generation: {
+            let new_gen = old_generation.wrapping_add(1);
+            debug!(
+                target: "ffs::inode::generation",
+                ino = alloc.ino.0,
+                old_generation,
+                new_generation = new_gen,
+                "inode_generation_bump"
+            );
+            new_gen
+        },
         file_acl: 0,
         atime: now_lo,
         ctime: now_lo,
@@ -363,6 +374,13 @@ pub fn delete_inode(
     pctx: &ffs_alloc::PersistCtx,
 ) -> Result<()> {
     cx_checkpoint(cx)?;
+
+    debug!(
+        target: "ffs::inode::generation",
+        ino = ino.0,
+        current_generation = inode.generation,
+        "inode_delete_preserving_generation"
+    );
 
     // Truncate all extents if the inode uses extents.
     if inode.flags & EXT4_EXTENTS_FL != 0 && inode.extent_bytes.len() >= 60 {

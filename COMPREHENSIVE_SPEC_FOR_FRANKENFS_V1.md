@@ -6063,12 +6063,70 @@ coalesce and reorder writes before sending them to the FUSE daemon. This
 means the FUSE daemon sees writes in a different order than the application
 issued them. How does this interact with MVCC transaction boundaries?
 
-**Tentative Resolution:** FrankenFS uses `direct_io` mode for data writes in
-MVCC mode, bypassing kernel writeback caching. This ensures each write
-creates a deterministic MVCC version. For metadata operations (which are
-always synchronous in FUSE), this is not an issue.
+**Status:** Resolved (2026-03-04, `bd-h6nz.6.4`).
 
-**Must Resolve By:** Phase 7 (FUSE integration).
+**Decision (Accepted):** FrankenFS V1.x rejects kernel writeback-cache mode
+for mounted operation and uses explicit sync boundaries.
+- `ffs-fuse` mount options intentionally exclude `writeback_cache`.
+- `flush` is modeled as a lifecycle/close boundary only (non-durable by
+  contract; no `ByteDevice::sync` call).
+- `fsync` and `fsyncdir` are the durability boundaries; they must call
+  `ByteDevice::sync`.
+- Write visibility and request ordering are bounded by per-request
+  `begin_request_scope` / `end_request_scope`; no additional daemon-side
+  deferred writeback queue is treated as a commit boundary in V1.x.
+- Crash semantics are explicit: mutations not covered by a successful
+  `fsync`/`fsyncdir` prior to crash are outside the durability SLA.
+
+**Expected-Loss Matrix (lower is better):**
+
+| Option | Correctness/Ambiguity Loss | Performance Overhead Loss | Operability/Complexity Loss | Composite |
+|--------|-----------------------------|----------------------------|-----------------------------|-----------|
+| A. Disable writeback cache + explicit sync boundaries (current) | 1 | 3 | 2 | **6** |
+| B. Enable writeback cache without new MVCC boundary model | 8 | 1 | 6 | 15 |
+| C. Enable writeback cache with new multi-stage MVCC dirty protocol in V1.x | 3 | 4 | 7 | 14 |
+
+Option A is selected because it minimizes semantic ambiguity and keeps crash
+behavior auditable while preserving a tractable V1.x implementation surface.
+
+**Measured Evidence (deterministic):**
+
+1. `crates/ffs-fuse/src/lib.rs::build_mount_options_excludes_kernel_writeback_cache_mode`
+   - Proves mount-option construction does not enable `writeback_cache`.
+2. `crates/ffs-core/src/lib.rs::ext4_write_flush_log_contract_records_non_durable_boundary`
+   - Proves `flush` emits explicit non-durable boundary telemetry.
+3. `crates/ffs-core/src/lib.rs::ext4_write_fsync_log_contract_success`
+   and `ext4_write_fsync_rejection_log_contract_read_only`
+   - Prove ext4 sync boundary logs include accepted/rejected outcomes.
+4. `crates/ffs-core/src/lib.rs::btrfs_write_flush_log_contract_records_non_durable_boundary`
+   plus btrfs fsync/fsyncdir log-contract tests
+   - Prove parallel boundary semantics and observability in btrfs path.
+5. `scripts/e2e/ffs_log_contract_e2e.sh`
+   - Contract-level deterministic checks for writeback-disabled policy and
+     sync/flush field coverage with machine-parseable scenario markers.
+
+**Executable Validation Matrix:**
+
+| Policy Clause | Validation Path | Pass Condition | Decision-Sensitive Failure Class |
+|---------------|-----------------|----------------|----------------------------------|
+| Mount path does not enable kernel writeback cache | `build_mount_options_excludes_kernel_writeback_cache_mode`; `scripts/e2e/ffs_log_contract_e2e.sh` (`log_contract_writeback_cache_disabled`) | No mount option equivalent to `writeback_cache` is emitted | `writeback_cache_enabled` |
+| `flush` is non-durable lifecycle hook | `ext4_write_flush_log_contract_records_non_durable_boundary`; `btrfs_write_flush_log_contract_records_non_durable_boundary` | `flush` emits `durability_boundary=none` and does not require writable mount | `flush_semantics_regressed` |
+| `fsync`/`fsyncdir` are durability boundaries | ext4/btrfs fsync log-contract tests; `log_contract_sync_flush_fields` E2E scenario | Sync logs emit structured start/applied/rejected records with scenario IDs | `sync_boundary_missing` |
+| Rejected sync paths remain explicit | ext4/btrfs read-only rejection log-contract tests | Rejections include `error_class=read_only` and deterministic operation IDs | `sync_rejection_opaque` |
+| Operator docs declare runtime restriction | README + CLI mount help checks via `log_contract_writeback_policy_documented` | Docs/help explicitly state writeback-cache unsupported and boundary semantics | `policy_docs_missing` |
+
+**Decision-Sensitive Logging Contract:**
+- `ext4_sync_*` and `btrfs_sync_*` events MUST include `operation_id`,
+  `scenario_id`, and `outcome`.
+- Rejection events MUST include `error_class`.
+- `flush` events MUST include `durability_boundary=none`.
+- Successful `fsync`/`fsyncdir` events SHOULD include `duration_us`.
+
+**Follow-on Scope (deferred):**
+- Optional writeback-cache support is post-V1 and requires a dedicated design
+  bead proving MVCC boundary correctness under reordered daemon delivery.
+- Any future enablement must include a separate expected-loss re-evaluation,
+  deterministic crash matrix expansion, and explicit CLI opt-in guardrails.
 
 #### OQ5: Multi-Host Repair Scope
 

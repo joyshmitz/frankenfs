@@ -83,6 +83,12 @@ pub struct BtrfsRootItem {
 /// Parsed subset of `btrfs_inode_item` needed for read-only VFS operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BtrfsInodeItem {
+    /// Transaction generation when this inode was created.
+    ///
+    /// Used as the FUSE/NFS generation number for stale-handle detection.
+    /// Since btrfs objectids are never reused, the creation-time transaction
+    /// generation uniquely identifies this inode incarnation.
+    pub generation: u64,
     pub size: u64,
     pub nbytes: u64,
     pub nlink: u32,
@@ -104,11 +110,11 @@ impl BtrfsInodeItem {
     /// Serialize to the 160-byte on-disk representation.
     ///
     /// Layout matches the kernel `btrfs_inode_item` struct. Fields we do not
-    /// track (generation, block_group, sequence, flags, reserved) are zeroed.
+    /// track (block_group, sequence, flags, reserved) are zeroed.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; 160];
-        // generation at 0..8 (zero)
+        buf[0..8].copy_from_slice(&self.generation.to_le_bytes());
         // transid at 8..16 (zero)
         buf[16..24].copy_from_slice(&self.size.to_le_bytes());
         buf[24..32].copy_from_slice(&self.nbytes.to_le_bytes());
@@ -380,6 +386,7 @@ pub fn parse_inode_item(data: &[u8]) -> Result<BtrfsInodeItem, ParseError> {
     }
 
     Ok(BtrfsInodeItem {
+        generation: read_u64(data, 0, "inode_item.generation")?,
         size: read_u64(data, 16, "inode_item.size")?,
         nbytes: read_u64(data, 24, "inode_item.nbytes")?,
         nlink: read_u32(data, 40, "inode_item.nlink")?,
@@ -3916,6 +3923,7 @@ mod tests {
     #[test]
     fn inode_item_round_trip() {
         let original = BtrfsInodeItem {
+            generation: 42,
             size: 65536,
             nbytes: 65536,
             nlink: 3,
@@ -4058,6 +4066,7 @@ mod tests {
     #[test]
     fn inode_item_zero_fields_round_trip() {
         let original = BtrfsInodeItem {
+            generation: 0,
             size: 0,
             nbytes: 0,
             nlink: 1,
@@ -4084,6 +4093,7 @@ mod tests {
     #[test]
     fn inode_item_max_values_round_trip() {
         let original = BtrfsInodeItem {
+            generation: u64::MAX,
             size: u64::MAX,
             nbytes: u64::MAX,
             nlink: u32::MAX,

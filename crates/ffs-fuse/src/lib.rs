@@ -201,6 +201,10 @@ pub struct AtomicMetrics {
     pub requests_ok: CacheLinePadded<AtomicU64>,
     pub requests_err: CacheLinePadded<AtomicU64>,
     pub bytes_read: CacheLinePadded<AtomicU64>,
+    /// Requests delayed by backpressure throttling.
+    pub requests_throttled: CacheLinePadded<AtomicU64>,
+    /// Requests rejected (shed) by backpressure.
+    pub requests_shed: CacheLinePadded<AtomicU64>,
 }
 
 impl AtomicMetrics {
@@ -211,6 +215,8 @@ impl AtomicMetrics {
             requests_ok: CacheLinePadded(AtomicU64::new(0)),
             requests_err: CacheLinePadded(AtomicU64::new(0)),
             bytes_read: CacheLinePadded(AtomicU64::new(0)),
+            requests_throttled: CacheLinePadded(AtomicU64::new(0)),
+            requests_shed: CacheLinePadded(AtomicU64::new(0)),
         }
     }
 
@@ -228,6 +234,14 @@ impl AtomicMetrics {
         self.bytes_read.0.fetch_add(n, Ordering::Relaxed);
     }
 
+    fn record_throttled(&self) {
+        self.requests_throttled.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_shed(&self) {
+        self.requests_shed.0.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Snapshot of all counters (for diagnostics / reporting).
     #[must_use]
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -236,6 +250,8 @@ impl AtomicMetrics {
             requests_ok: self.requests_ok.0.load(Ordering::Relaxed),
             requests_err: self.requests_err.0.load(Ordering::Relaxed),
             bytes_read: self.bytes_read.0.load(Ordering::Relaxed),
+            requests_throttled: self.requests_throttled.0.load(Ordering::Relaxed),
+            requests_shed: self.requests_shed.0.load(Ordering::Relaxed),
         }
     }
 }
@@ -254,6 +270,8 @@ impl std::fmt::Debug for AtomicMetrics {
             .field("requests_ok", &s.requests_ok)
             .field("requests_err", &s.requests_err)
             .field("bytes_read", &s.bytes_read)
+            .field("requests_throttled", &s.requests_throttled)
+            .field("requests_shed", &s.requests_shed)
             .finish()
     }
 }
@@ -265,6 +283,10 @@ pub struct MetricsSnapshot {
     pub requests_ok: u64,
     pub requests_err: u64,
     pub bytes_read: u64,
+    /// Requests delayed by backpressure throttling.
+    pub requests_throttled: u64,
+    /// Requests rejected (shed) by backpressure.
+    pub requests_shed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -621,6 +643,7 @@ impl FrankenFuse {
         match gate.check(op) {
             BackpressureDecision::Proceed => false,
             BackpressureDecision::Throttle => {
+                self.inner.metrics.record_throttled();
                 trace!(
                     ?op,
                     delay_ms = BACKPRESSURE_THROTTLE_DELAY.as_millis(),
@@ -629,7 +652,10 @@ impl FrankenFuse {
                 std::thread::sleep(BACKPRESSURE_THROTTLE_DELAY);
                 false
             }
-            BackpressureDecision::Shed => true,
+            BackpressureDecision::Shed => {
+                self.inner.metrics.record_shed();
+                true
+            }
         }
     }
 
@@ -989,7 +1015,7 @@ impl Filesystem for FrankenFuse {
         match self.with_request_scope(&cx, RequestOp::Lookup, |cx| {
             self.inner.ops.lookup(cx, InodeNumber(parent), name)
         }) {
-            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), 0),
+            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
             Err(e) => {
                 Self::reply_error_entry(
                     &FuseErrorContext {
@@ -1170,7 +1196,7 @@ impl Filesystem for FrankenFuse {
                 .ops
                 .symlink(cx, InodeNumber(parent), name, link, req.uid(), req.gid())
         }) {
-            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), 0),
+            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
             Err(e) => {
                 Self::reply_error_entry(
                     &FuseErrorContext {
@@ -1405,7 +1431,7 @@ impl Filesystem for FrankenFuse {
         reply: ReplyEntry,
     ) {
         match self.dispatch_mkdir(parent, name, mode as u16, req.uid(), req.gid()) {
-            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), 0),
+            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
             Err(MutationDispatchError::Operation { error, offset }) => {
                 Self::reply_error_entry(
@@ -1518,7 +1544,7 @@ impl Filesystem for FrankenFuse {
                 .ops
                 .link(cx, InodeNumber(ino), InodeNumber(newparent), newname)
         }) {
-            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), 0),
+            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
             Err(e) => {
                 Self::reply_error_entry(
                     &FuseErrorContext {
@@ -1729,7 +1755,7 @@ impl Filesystem for FrankenFuse {
             )
         }) {
             Ok(attr) => {
-                reply.created(&ATTR_TTL, &to_file_attr(&attr), 0, 0, 0);
+                reply.created(&ATTR_TTL, &to_file_attr(&attr), attr.generation, 0, 0);
             }
             Err(e) => {
                 Self::reply_error_create(
@@ -1925,6 +1951,8 @@ impl MountHandle {
                 requests_ok = snap.requests_ok,
                 requests_err = snap.requests_err,
                 bytes_read = snap.bytes_read,
+                requests_throttled = snap.requests_throttled,
+                requests_shed = snap.requests_shed,
                 "unmounting FUSE filesystem"
             );
 
@@ -2100,6 +2128,7 @@ mod tests {
             gid: 1000,
             rdev: 0,
             blksize: 4096,
+            generation: 7,
         };
         let fattr = to_file_attr(&iattr);
         assert_eq!(fattr.ino, 42);
@@ -2725,6 +2754,7 @@ mod tests {
             gid: 1000,
             rdev: 0,
             blksize: 4096,
+            generation: 1,
         }
     }
 
@@ -3662,6 +3692,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn build_mount_options_excludes_kernel_writeback_cache_mode() {
+        let opts = MountOptions::default();
+        let mount_opts = build_mount_options(&opts);
+        assert!(
+            !mount_opts.iter().any(
+                |option| matches!(option, MountOption::CUSTOM(v) if v.contains("writeback_cache"))
+            ),
+            "writeback_cache should remain disabled in V1 mount options: {mount_opts:?}"
+        );
+        let debug_dump = format!("{mount_opts:?}").to_ascii_lowercase();
+        assert!(
+            !debug_dump.contains("writebackcache"),
+            "unexpected WritebackCache-like option in mount options: {mount_opts:?}"
+        );
+    }
+
     // ── should_shed backpressure tests ───────────────────────────────────
 
     #[test]
@@ -4010,6 +4057,8 @@ mod tests {
             requests_ok: 7,
             requests_err: 3,
             bytes_read: 4096,
+            requests_throttled: 0,
+            requests_shed: 0,
         };
         let b = a;
         assert_eq!(a, b);
@@ -4019,8 +4068,21 @@ mod tests {
             requests_ok: 6,
             requests_err: 4,
             bytes_read: 4096,
+            requests_throttled: 0,
+            requests_shed: 0,
         };
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn atomic_metrics_tracks_pressure_counters() {
+        let m = AtomicMetrics::new();
+        m.record_throttled();
+        m.record_throttled();
+        m.record_shed();
+        let snap = m.snapshot();
+        assert_eq!(snap.requests_throttled, 2);
+        assert_eq!(snap.requests_shed, 1);
     }
 
     #[test]
@@ -4028,9 +4090,14 @@ mod tests {
         let m = AtomicMetrics::new();
         m.record_ok();
         m.record_bytes_read(512);
+        m.record_throttled();
         let dbg = format!("{m:?}");
         assert!(dbg.contains("AtomicMetrics"), "missing struct name: {dbg}");
         assert!(dbg.contains("requests_total"), "missing field: {dbg}");
+        assert!(
+            dbg.contains("requests_throttled"),
+            "missing pressure field: {dbg}"
+        );
     }
 
     #[test]
@@ -4195,6 +4262,206 @@ mod tests {
         assert_eq!(AccessDirection::Forward, AccessDirection::Forward);
         assert_eq!(AccessDirection::Backward, AccessDirection::Backward);
         assert_ne!(AccessDirection::Forward, AccessDirection::Backward);
+    }
+
+    // ── Mount runtime benchmark scenario tests (bd-h6nz.2.5) ──────────
+
+    #[test]
+    fn benchmark_per_core_dispatch_routing_is_deterministic() {
+        use crate::per_core::{PerCoreConfig, PerCoreDispatcher};
+
+        let config = PerCoreConfig {
+            num_cores: 8,
+            ..PerCoreConfig::default()
+        };
+        let d = PerCoreDispatcher::new(config);
+
+        // Same inode always routes to same core.
+        let core_a = d.route_inode(42);
+        let core_b = d.route_inode(42);
+        assert_eq!(core_a, core_b);
+        assert!(core_a < 8);
+
+        // Same parent always routes to same core for lookup.
+        let lk_a = d.route_lookup(42);
+        let lk_b = d.route_lookup(42);
+        assert_eq!(lk_a, lk_b);
+        assert!(lk_a < 8);
+    }
+
+    #[test]
+    fn benchmark_per_core_aggregate_metrics_zero_when_idle() {
+        use crate::per_core::{PerCoreConfig, PerCoreDispatcher};
+
+        let d = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 4,
+            ..PerCoreConfig::default()
+        });
+        let agg = d.aggregate_metrics();
+        assert_eq!(agg.total_requests, 0);
+        assert_eq!(agg.total_cache_hits, 0);
+        assert_eq!(agg.total_cache_misses, 0);
+        assert!((agg.aggregate_hit_rate - 0.0).abs() < f64::EPSILON);
+        assert_eq!(agg.per_core.len(), 4);
+    }
+
+    #[test]
+    fn benchmark_per_core_should_steal_false_when_balanced() {
+        use crate::per_core::{PerCoreConfig, PerCoreDispatcher};
+
+        let d = PerCoreDispatcher::new(PerCoreConfig {
+            num_cores: 4,
+            ..PerCoreConfig::default()
+        });
+        // Equal load on all cores.
+        for core_id in 0..4_u32 {
+            if let Some(m) = d.core_metrics(core_id) {
+                for _ in 0..100 {
+                    m.record_request();
+                }
+            }
+        }
+        // No core should want to steal when balanced.
+        for core_id in 0..4_u32 {
+            assert!(
+                !d.should_steal(core_id),
+                "core {core_id} should not steal when balanced"
+            );
+        }
+    }
+
+    #[test]
+    fn benchmark_backpressure_decision_normal_never_sheds() {
+        use asupersync::SystemPressure;
+        use ffs_core::{BackpressureGate, DegradationFsm, RequestOp};
+
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+        let gate = BackpressureGate::new(fsm);
+
+        // Normal pressure: neither reads nor writes are shed.
+        assert_eq!(gate.check(RequestOp::Read), BackpressureDecision::Proceed);
+        assert_eq!(gate.check(RequestOp::Write), BackpressureDecision::Proceed);
+    }
+
+    #[test]
+    fn benchmark_backpressure_decision_emergency_sheds_writes() {
+        use asupersync::SystemPressure;
+        use ffs_core::{BackpressureGate, DegradationFsm, RequestOp};
+
+        let pressure = Arc::new(SystemPressure::with_headroom(0.02));
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+        fsm.tick();
+        let gate = BackpressureGate::new(fsm);
+
+        // Emergency: reads proceed, writes shed.
+        assert_eq!(gate.check(RequestOp::Read), BackpressureDecision::Proceed);
+        assert_eq!(gate.check(RequestOp::Write), BackpressureDecision::Shed);
+    }
+
+    #[test]
+    fn benchmark_metrics_snapshot_isolation() {
+        // Snapshot must be a frozen copy — further writes don't affect it.
+        let m = AtomicMetrics::new();
+        m.record_ok();
+        m.record_ok();
+        let snap = m.snapshot();
+        assert_eq!(snap.requests_total, 2);
+
+        m.record_ok();
+        // Original snapshot unchanged.
+        assert_eq!(snap.requests_total, 2);
+        // New snapshot reflects the third write.
+        assert_eq!(m.snapshot().requests_total, 3);
+    }
+
+    // ── Degraded-mode pressure behavior tests (bd-h6nz.5.4) ──────────
+
+    #[test]
+    fn degraded_pressure_warning_does_not_affect_foreground() {
+        use asupersync::SystemPressure;
+        use ffs_core::{BackpressureGate, DegradationFsm, RequestOp};
+
+        // Warning level: headroom 0.35 → no impact on foreground
+        let pressure = Arc::new(SystemPressure::with_headroom(0.35));
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+        fsm.tick();
+        let gate = BackpressureGate::new(fsm);
+
+        // Both reads and writes should proceed at warning level.
+        assert_eq!(gate.check(RequestOp::Read), BackpressureDecision::Proceed);
+        assert_eq!(gate.check(RequestOp::Write), BackpressureDecision::Proceed);
+        assert_eq!(gate.check(RequestOp::Create), BackpressureDecision::Proceed);
+    }
+
+    #[test]
+    fn degraded_pressure_critical_throttles_writes_sheds_metadata() {
+        use asupersync::SystemPressure;
+        use ffs_core::{BackpressureGate, DegradationFsm, RequestOp};
+
+        // Critical level: headroom 0.08
+        let pressure = Arc::new(SystemPressure::with_headroom(0.08));
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+        fsm.tick();
+        let gate = BackpressureGate::new(fsm);
+
+        // Reads proceed.
+        assert_eq!(gate.check(RequestOp::Read), BackpressureDecision::Proceed);
+        // Writes throttled.
+        assert_eq!(gate.check(RequestOp::Write), BackpressureDecision::Throttle);
+        // Metadata writes (mkdir, unlink, etc.) are shed.
+        assert_eq!(gate.check(RequestOp::Mkdir), BackpressureDecision::Shed);
+        assert_eq!(gate.check(RequestOp::Unlink), BackpressureDecision::Shed);
+    }
+
+    #[test]
+    fn degraded_pressure_fsm_tick_drives_transitions() {
+        use asupersync::SystemPressure;
+        use ffs_core::{DegradationFsm, DegradationLevel};
+
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+
+        // Starts at Normal.
+        assert_eq!(fsm.level(), DegradationLevel::Normal);
+
+        // Tick at normal headroom stays Normal.
+        fsm.tick();
+        assert_eq!(fsm.level(), DegradationLevel::Normal);
+    }
+
+    #[test]
+    fn degraded_pressure_concurrent_checks_are_safe() {
+        use asupersync::SystemPressure;
+        use ffs_core::{BackpressureGate, DegradationFsm, RequestOp};
+
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
+        let gate = Arc::new(BackpressureGate::new(fsm));
+
+        // Run 4 threads hammering check() concurrently.
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                let g = Arc::clone(&gate);
+                s.spawn(move || {
+                    for _ in 0..1000 {
+                        let decision = g.check(RequestOp::Read);
+                        assert_eq!(decision, BackpressureDecision::Proceed);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn degraded_pressure_escalation_order_is_monotonic() {
+        use ffs_core::DegradationLevel;
+
+        // Levels must be ordered Normal < Warning < Degraded < Critical < Emergency.
+        assert!(DegradationLevel::Normal < DegradationLevel::Warning);
+        assert!(DegradationLevel::Warning < DegradationLevel::Degraded);
+        assert!(DegradationLevel::Degraded < DegradationLevel::Critical);
+        assert!(DegradationLevel::Critical < DegradationLevel::Emergency);
     }
 
     // ── Proptest property-based tests ─────────────────────────────────────

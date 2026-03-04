@@ -35,6 +35,24 @@ pub enum FileType {
 /// This is the semantics-level stat structure, analogous to POSIX `struct stat`.
 /// Format-specific crates (ffs-ext4, ffs-btrfs) convert their on-disk inode
 /// representations into `InodeAttr` at the crate boundary.
+///
+/// # Generation Number Lifecycle
+///
+/// The `generation` field implements NFS-style stale-handle detection:
+///
+/// - **ext4:** Per-inode counter stored at on-disk offset `0x64`. Bumped by
+///   `wrapping_add(1)` each time an inode number is reused after deletion.
+///   This lets FUSE/NFS clients detect that a previously-held file handle now
+///   refers to a different file occupying the same inode slot.
+///
+/// - **btrfs:** Uses the inode-item's `generation` field (transaction generation
+///   at inode creation time). Since btrfs inode numbers (objectids) are never
+///   reused within a filesystem, the creation-time transaction generation
+///   suffices as a unique discriminator. For in-memory-only mutations (COW
+///   write path), `BtrfsAllocState.generation` is used.
+///
+/// The FUSE layer passes this value as the `generation` parameter in
+/// `reply.entry()` and `reply.created()`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InodeAttr {
     /// Inode number.
@@ -65,6 +83,10 @@ pub struct InodeAttr {
     pub rdev: u32,
     /// Preferred I/O block size.
     pub blksize: u32,
+    /// NFS-style generation number for stale-handle detection.
+    ///
+    /// See struct-level docs for the per-filesystem lifecycle contract.
+    pub generation: u64,
 }
 
 /// A directory entry returned by [`FsOps::readdir`].

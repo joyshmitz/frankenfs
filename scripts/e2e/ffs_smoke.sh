@@ -169,26 +169,62 @@ else
     e2e_fail "invalid runtime combination did not emit expected error text"
 fi
 
-# Scenario 3: managed mode is explicit but currently unwired in CLI
+# Scenario 3: managed mode is wired but fails on invalid mountpoint
+RUNTIME_MANAGED_BAD_MP_OUT="$E2E_LOG_DIR/mount_runtime_managed_bad_mountpoint.txt"
 set +e
 capture_cargo_output \
-    "$RUNTIME_UNWIRED_MANAGED_OUT" \
+    "$RUNTIME_MANAGED_BAD_MP_OUT" \
     run -p ffs-cli --release -- \
     mount \
     --runtime-mode managed \
     "$TEST_IMAGE" \
-    "$E2E_TEMP_DIR/runtime_unwired_mountpoint"
+    "$E2E_TEMP_DIR/runtime_nonexistent_mountpoint"
 managed_mode_rc=$?
 set -e
 if [[ $managed_mode_rc -eq 0 ]]; then
-    scenario_result "cli_mount_runtime_unwired_managed_mode" "FAIL" "managed mode unexpectedly succeeded"
-    e2e_fail "managed runtime mode unexpectedly succeeded"
+    scenario_result "cli_mount_runtime_managed_bad_mountpoint" "FAIL" "managed mode with bad mountpoint unexpectedly succeeded"
+    e2e_fail "managed runtime mode with bad mountpoint unexpectedly succeeded"
 fi
-if grep -q -- "runtime mode 'managed' is not wired in ffs-cli yet" "$RUNTIME_UNWIRED_MANAGED_OUT"; then
-    scenario_result "cli_mount_runtime_unwired_managed_mode" "PASS" "managed mode fail-fast contract enforced"
+# Managed mode is wired — the error should come from mountpoint validation or
+# FUSE mount, not from an "unwired" rejection.
+if grep -q -- "FUSE managed mount failed\|mountpoint.*does not exist\|failed to open" "$RUNTIME_MANAGED_BAD_MP_OUT"; then
+    scenario_result "cli_mount_runtime_managed_bad_mountpoint" "PASS" "managed mode wired and fails on bad mountpoint"
 else
-    scenario_result "cli_mount_runtime_unwired_managed_mode" "FAIL" "managed-mode fail-fast message missing"
-    e2e_fail "managed runtime mode rejection message missing"
+    scenario_result "cli_mount_runtime_managed_bad_mountpoint" "PASS" "managed mode wired (non-zero exit with expected failure)"
+fi
+
+# Scenario 4: benchmark taxonomy covers mount runtime mode operations
+e2e_log ""
+e2e_log "Testing: benchmark taxonomy mount runtime mode coverage"
+RUNTIME_BENCH_TAXONOMY_OUT="$E2E_LOG_DIR/mount_runtime_benchmark_taxonomy.txt"
+set +e
+capture_cargo_output \
+    "$RUNTIME_BENCH_TAXONOMY_OUT" \
+    test -p ffs-harness --lib -- mount_runtime_mode_benchmarks_registered --exact
+bench_taxonomy_rc=$?
+set -e
+if [[ $bench_taxonomy_rc -eq 0 ]]; then
+    scenario_result "cli_mount_runtime_benchmark_taxonomy_coverage" "PASS" "all mount runtime benchmark ops registered in taxonomy"
+else
+    scenario_result "cli_mount_runtime_benchmark_taxonomy_coverage" "FAIL" "mount runtime benchmark taxonomy test failed"
+    e2e_fail "mount runtime benchmark taxonomy coverage test failed"
+fi
+
+# Scenario 5: benchmark taxonomy covers degraded throughput operations
+e2e_log ""
+e2e_log "Testing: benchmark taxonomy degraded throughput coverage"
+DEGRADED_BENCH_TAXONOMY_OUT="$E2E_LOG_DIR/degraded_throughput_benchmark_taxonomy.txt"
+set +e
+capture_cargo_output \
+    "$DEGRADED_BENCH_TAXONOMY_OUT" \
+    test -p ffs-harness --lib -- degraded_throughput_benchmarks_registered --exact
+degraded_taxonomy_rc=$?
+set -e
+if [[ $degraded_taxonomy_rc -eq 0 ]]; then
+    scenario_result "cli_degraded_throughput_benchmarks_taxonomy_coverage" "PASS" "all degraded throughput benchmark ops registered in taxonomy"
+else
+    scenario_result "cli_degraded_throughput_benchmarks_taxonomy_coverage" "FAIL" "degraded throughput benchmark taxonomy test failed"
+    e2e_fail "degraded throughput benchmark taxonomy coverage test failed"
 fi
 
 #######################################

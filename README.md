@@ -432,6 +432,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 - **Linux only.** FUSE is the sole mount target. No macOS or Windows support planned.
 - **Nightly Rust required.** Edition 2024 features require the nightly toolchain.
 - **Runtime is still early-stage.** Even with full tracked parity, mount/write paths should still be treated as experimental in operational environments.
+- **Kernel FUSE writeback-cache mode is intentionally unsupported in V1.x.** FrankenFS does not mount with `writeback_cache`; `flush` is a non-durability lifecycle hook, while `fsync` / `fsyncdir` are the explicit durability boundaries.
 - **Default CLI mount path does not enable optional backpressure/per-core scheduling hooks.** `ffs-cli mount` currently uses the standard `ffs-fuse` mount path without wiring `BackpressureGate` controls.
 - **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.
 - **Legacy reference corpus is checked in.** The Linux kernel ext4/btrfs source used for behavioral extraction is available under `legacy_ext4_and_btrfs_code/linux-fs/`. The extracted behavior is fully captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md).

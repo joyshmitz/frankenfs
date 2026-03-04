@@ -37,6 +37,18 @@
           "category": "unsupported_op",
           "status": "active",
           "evidence": "cli_mount_runtime_unwired_managed_mode"
+        },
+        {
+          "id": "cli_mount_runtime_benchmark_taxonomy_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "cli_mount_runtime_benchmark_taxonomy_coverage"
+        },
+        {
+          "id": "cli_degraded_throughput_benchmarks_taxonomy_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "cli_degraded_throughput_benchmarks_taxonomy_coverage"
         }
       ]
     },
@@ -186,6 +198,24 @@
           "category": "edge",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=log_contract_duration_convention|outcome=PASS"
+        },
+        {
+          "id": "log_contract_writeback_cache_disabled",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_writeback_cache_disabled|outcome=PASS"
+        },
+        {
+          "id": "log_contract_sync_flush_fields",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_sync_flush_fields|outcome=PASS"
+        },
+        {
+          "id": "log_contract_writeback_policy_documented",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_writeback_policy_documented|outcome=PASS"
         }
       ]
     },

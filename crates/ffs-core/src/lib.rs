@@ -1918,6 +1918,7 @@ impl OpenFs {
             gid: inode.gid,
             rdev,
             blksize: sb.sectorsize,
+            generation: inode.generation,
         })
     }
 
@@ -3339,6 +3340,7 @@ fn inode_to_attr(sb: &Ext4Superblock, ino: InodeNumber, inode: &Ext4Inode) -> In
         gid: inode.gid,
         rdev: inode.device_number(),
         blksize: sb.block_size,
+        generation: u64::from(inode.generation),
     }
 }
 
@@ -5336,12 +5338,16 @@ impl OpenFs {
         (dur.as_secs(), dur.subsec_nanos())
     }
 
+    const EXT4_RW_SCENARIO_FLUSH: &str = "ext4_rw_flush";
+    const EXT4_RW_SCENARIO_FSYNC: &str = "ext4_rw_fsync";
+    const EXT4_RW_SCENARIO_FSYNCDIR: &str = "ext4_rw_fsyncdir";
     const BTRFS_RW_SCENARIO_FALLOCATE_PREALLOC: &str = "btrfs_rw_fallocate_prealloc";
     const BTRFS_RW_SCENARIO_FALLOCATE_KEEP_SIZE: &str = "btrfs_rw_fallocate_keep_size";
     const BTRFS_RW_SCENARIO_FALLOCATE_UNSUPPORTED_MODE_BITS: &str =
         "btrfs_rw_fallocate_unsupported_mode_bits";
     const BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE_UNSUPPORTED: &str =
         "btrfs_rw_fallocate_punch_hole_unsupported";
+    const BTRFS_RW_SCENARIO_FLUSH: &str = "btrfs_rw_flush";
     const BTRFS_RW_SCENARIO_FSYNC: &str = "btrfs_rw_fsync";
     const BTRFS_RW_SCENARIO_FSYNCDIR: &str = "btrfs_rw_fsyncdir";
     const BTRFS_FALLOC_FL_KEEP_SIZE: i32 = 0x01;
@@ -5418,6 +5424,149 @@ impl OpenFs {
     fn btrfs_sync_operation_id(op: &str, ino: InodeNumber, datasync: bool) -> String {
         let datasync_flag = u8::from(datasync);
         format!("btrfs-{op}-{}-{datasync_flag}", ino.0)
+    }
+
+    fn ext4_flush_operation_id(ino: InodeNumber, fh: u64, lock_owner: u64) -> String {
+        format!("ext4-flush-{}-{fh}-{lock_owner}", ino.0)
+    }
+
+    fn ext4_sync_operation_id(op: &str, ino: InodeNumber, datasync: bool) -> String {
+        let datasync_flag = u8::from(datasync);
+        format!("ext4-{op}-{}-{datasync_flag}", ino.0)
+    }
+
+    fn btrfs_flush_operation_id(ino: InodeNumber, fh: u64, lock_owner: u64) -> String {
+        format!("btrfs-flush-{}-{fh}-{lock_owner}", ino.0)
+    }
+
+    fn ext4_sync_with_logging(
+        &self,
+        cx: &Cx,
+        op: &str,
+        scenario_id: &'static str,
+        ino: InodeNumber,
+        datasync: bool,
+    ) -> ffs_error::Result<()> {
+        let operation_id = Self::ext4_sync_operation_id(op, ino, datasync);
+        let started = Instant::now();
+        info!(
+            target: "ffs::ext4::rw",
+            operation_id = %operation_id,
+            scenario_id,
+            outcome = "start",
+            ino = ino.0,
+            datasync,
+            "ext4_sync_start"
+        );
+
+        if !self.is_writable() {
+            warn!(
+                target: "ffs::ext4::rw",
+                operation_id = %operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "read_only",
+                ino = ino.0,
+                datasync,
+                "ext4_sync_rejected"
+            );
+            return Err(FfsError::ReadOnly);
+        }
+
+        let duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        match self.dev.sync(cx) {
+            Ok(()) => {
+                info!(
+                    target: "ffs::ext4::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "applied",
+                    ino = ino.0,
+                    datasync,
+                    duration_us,
+                    "ext4_sync_applied"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                warn!(
+                    target: "ffs::ext4::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "rejected",
+                    error_class = "device_sync_failed",
+                    ino = ino.0,
+                    datasync,
+                    duration_us,
+                    error = %err,
+                    "ext4_sync_rejected"
+                );
+                Err(err)
+            }
+        }
+    }
+
+    fn btrfs_sync_with_logging(
+        &self,
+        cx: &Cx,
+        op: &str,
+        scenario_id: &'static str,
+        ino: InodeNumber,
+        datasync: bool,
+    ) -> ffs_error::Result<()> {
+        let operation_id = Self::btrfs_sync_operation_id(op, ino, datasync);
+        info!(
+            target: "ffs::btrfs::rw",
+            operation_id = %operation_id,
+            scenario_id,
+            outcome = "start",
+            ino = ino.0,
+            datasync,
+            "btrfs_sync_start"
+        );
+
+        if !self.is_writable() {
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id = %operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "read_only",
+                ino = ino.0,
+                datasync,
+                "btrfs_sync_rejected"
+            );
+            return Err(FfsError::ReadOnly);
+        }
+
+        match self.dev.sync(cx) {
+            Ok(()) => {
+                info!(
+                    target: "ffs::btrfs::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "applied",
+                    ino = ino.0,
+                    datasync,
+                    "btrfs_sync_applied"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                warn!(
+                    target: "ffs::btrfs::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "rejected",
+                    error_class = "device_sync_failed",
+                    ino = ino.0,
+                    datasync,
+                    error = %err,
+                    "btrfs_sync_rejected"
+                );
+                Err(err)
+            }
+        }
     }
 
     // ── Btrfs write path ─────────────────────────────────────────────────
@@ -5740,6 +5889,7 @@ impl OpenFs {
 
         // Create the INODE_ITEM.
         let inode = BtrfsInodeItem {
+            generation: alloc.generation,
             size: 0,
             nbytes: 0,
             nlink: 1,
@@ -5814,6 +5964,7 @@ impl OpenFs {
         alloc.next_objectid = alloc.next_objectid.saturating_add(1);
 
         let inode = BtrfsInodeItem {
+            generation: alloc.generation,
             size: 0,
             nbytes: 0,
             nlink: 2, // . and parent's reference
@@ -6064,6 +6215,7 @@ impl OpenFs {
         })?;
 
         let inode = BtrfsInodeItem {
+            generation: alloc.generation,
             size: target_len,
             nbytes: target_len,
             nlink: 1,
@@ -6628,6 +6780,7 @@ impl OpenFs {
             gid: inode.gid,
             rdev: inode.rdev as u32,
             blksize: self.block_size(),
+            generation: inode.generation,
         }
     }
 
@@ -7391,95 +7544,80 @@ impl FsOps for OpenFs {
         }
     }
 
-    fn flush(
-        &self,
-        _cx: &Cx,
-        _ino: InodeNumber,
-        _fh: u64,
-        _lock_owner: u64,
-    ) -> ffs_error::Result<()> {
-        Ok(())
-    }
-
-    fn fsync(&self, cx: &Cx, ino: InodeNumber, _fh: u64, datasync: bool) -> ffs_error::Result<()> {
+    fn flush(&self, _cx: &Cx, ino: InodeNumber, fh: u64, lock_owner: u64) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                if !self.is_writable() {
-                    return Err(FfsError::ReadOnly);
-                }
-                let started = Instant::now();
-                debug!(
-                    target: "ffs::durability",
-                    op = "fsync",
+                let scenario_id = Self::EXT4_RW_SCENARIO_FLUSH;
+                let operation_id = Self::ext4_flush_operation_id(ino, fh, lock_owner);
+                info!(
+                    target: "ffs::ext4::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "start",
                     ino = ino.0,
-                    datasync,
-                    "fsync_start"
+                    fh,
+                    lock_owner,
+                    durability_boundary = "none",
+                    "ext4_sync_start"
                 );
-                self.dev.sync(cx)?;
-                debug!(
-                    target: "ffs::durability",
-                    op = "fsync",
+                info!(
+                    target: "ffs::ext4::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "applied",
                     ino = ino.0,
-                    datasync,
-                    duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-                    "fsync_complete"
+                    fh,
+                    lock_owner,
+                    durability_boundary = "none",
+                    "ext4_sync_applied"
                 );
-                Ok(())
             }
             FsFlavor::Btrfs(_) => {
-                let scenario_id = Self::BTRFS_RW_SCENARIO_FSYNC;
-                let operation_id = Self::btrfs_sync_operation_id("fsync", ino, datasync);
+                let scenario_id = Self::BTRFS_RW_SCENARIO_FLUSH;
+                let operation_id = Self::btrfs_flush_operation_id(ino, fh, lock_owner);
                 info!(
                     target: "ffs::btrfs::rw",
                     operation_id = %operation_id,
                     scenario_id,
                     outcome = "start",
                     ino = ino.0,
-                    datasync,
+                    fh,
+                    lock_owner,
+                    durability_boundary = "none",
                     "btrfs_sync_start"
                 );
-                if !self.is_writable() {
-                    warn!(
-                        target: "ffs::btrfs::rw",
-                        operation_id = %operation_id,
-                        scenario_id,
-                        outcome = "rejected",
-                        error_class = "read_only",
-                        ino = ino.0,
-                        datasync,
-                        "btrfs_sync_rejected"
-                    );
-                    return Err(FfsError::ReadOnly);
-                }
-                match self.dev.sync(cx) {
-                    Ok(()) => {
-                        info!(
-                            target: "ffs::btrfs::rw",
-                            operation_id = %operation_id,
-                            scenario_id,
-                            outcome = "applied",
-                            ino = ino.0,
-                            datasync,
-                            "btrfs_sync_applied"
-                        );
-                        Ok(())
-                    }
-                    Err(err) => {
-                        warn!(
-                            target: "ffs::btrfs::rw",
-                            operation_id = %operation_id,
-                            scenario_id,
-                            outcome = "rejected",
-                            error_class = "device_sync_failed",
-                            ino = ino.0,
-                            datasync,
-                            error = %err,
-                            "btrfs_sync_rejected"
-                        );
-                        Err(err)
-                    }
-                }
+                info!(
+                    target: "ffs::btrfs::rw",
+                    operation_id = %operation_id,
+                    scenario_id,
+                    outcome = "applied",
+                    ino = ino.0,
+                    fh,
+                    lock_owner,
+                    durability_boundary = "none",
+                    "btrfs_sync_applied"
+                );
             }
+        }
+        Ok(())
+    }
+
+    fn fsync(&self, cx: &Cx, ino: InodeNumber, _fh: u64, datasync: bool) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => self.ext4_sync_with_logging(
+                cx,
+                "fsync",
+                Self::EXT4_RW_SCENARIO_FSYNC,
+                ino,
+                datasync,
+            ),
+            FsFlavor::Btrfs(_) => self.btrfs_sync_with_logging(
+                cx,
+                "fsync",
+                Self::BTRFS_RW_SCENARIO_FSYNC,
+                ino,
+                datasync,
+            ),
         }
     }
 
@@ -7491,83 +7629,20 @@ impl FsOps for OpenFs {
         datasync: bool,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => {
-                if !self.is_writable() {
-                    return Err(FfsError::ReadOnly);
-                }
-                let started = Instant::now();
-                debug!(
-                    target: "ffs::durability",
-                    op = "fsyncdir",
-                    ino = ino.0,
-                    datasync,
-                    "fsyncdir_start"
-                );
-                self.dev.sync(cx)?;
-                debug!(
-                    target: "ffs::durability",
-                    op = "fsyncdir",
-                    ino = ino.0,
-                    datasync,
-                    duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-                    "fsyncdir_complete"
-                );
-                Ok(())
-            }
-            FsFlavor::Btrfs(_) => {
-                let scenario_id = Self::BTRFS_RW_SCENARIO_FSYNCDIR;
-                let operation_id = Self::btrfs_sync_operation_id("fsyncdir", ino, datasync);
-                info!(
-                    target: "ffs::btrfs::rw",
-                    operation_id = %operation_id,
-                    scenario_id,
-                    outcome = "start",
-                    ino = ino.0,
-                    datasync,
-                    "btrfs_sync_start"
-                );
-                if !self.is_writable() {
-                    warn!(
-                        target: "ffs::btrfs::rw",
-                        operation_id = %operation_id,
-                        scenario_id,
-                        outcome = "rejected",
-                        error_class = "read_only",
-                        ino = ino.0,
-                        datasync,
-                        "btrfs_sync_rejected"
-                    );
-                    return Err(FfsError::ReadOnly);
-                }
-                match self.dev.sync(cx) {
-                    Ok(()) => {
-                        info!(
-                            target: "ffs::btrfs::rw",
-                            operation_id = %operation_id,
-                            scenario_id,
-                            outcome = "applied",
-                            ino = ino.0,
-                            datasync,
-                            "btrfs_sync_applied"
-                        );
-                        Ok(())
-                    }
-                    Err(err) => {
-                        warn!(
-                            target: "ffs::btrfs::rw",
-                            operation_id = %operation_id,
-                            scenario_id,
-                            outcome = "rejected",
-                            error_class = "device_sync_failed",
-                            ino = ino.0,
-                            datasync,
-                            error = %err,
-                            "btrfs_sync_rejected"
-                        );
-                        Err(err)
-                    }
-                }
-            }
+            FsFlavor::Ext4(_) => self.ext4_sync_with_logging(
+                cx,
+                "fsyncdir",
+                Self::EXT4_RW_SCENARIO_FSYNCDIR,
+                ino,
+                datasync,
+            ),
+            FsFlavor::Btrfs(_) => self.btrfs_sync_with_logging(
+                cx,
+                "fsyncdir",
+                Self::BTRFS_RW_SCENARIO_FSYNCDIR,
+                ino,
+                datasync,
+            ),
         }
     }
 
@@ -8618,6 +8693,7 @@ mod tests {
                     gid: 0,
                     rdev: 0,
                     blksize: 4096,
+                    generation: 1,
                 })
             } else {
                 Err(FfsError::NotFound(format!("inode {ino}")))
@@ -8646,6 +8722,7 @@ mod tests {
                     gid: 1000,
                     rdev: 0,
                     blksize: 4096,
+                    generation: 1,
                 })
             } else {
                 Err(FfsError::NotFound(name.to_string_lossy().into_owned()))
@@ -8891,6 +8968,75 @@ mod tests {
         assert_eq!(attr.perm, 0o644);
         assert_eq!(attr.uid, 0);
         assert_eq!(attr.gid, 0);
+    }
+
+    // ── Generation lifecycle tests ─────────────────────────────────────
+
+    #[test]
+    fn inode_to_attr_propagates_ext4_generation() {
+        use ffs_types::S_IFREG;
+
+        let sb = make_test_superblock();
+        // Build a 256-byte inode buffer so generation at 0x64 is reachable.
+        let mut buf = [0_u8; 256];
+        let mode: u16 = S_IFREG | 0o644;
+        buf[0x00..0x02].copy_from_slice(&mode.to_le_bytes());
+        // links_count = 1
+        buf[0x1A..0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        // extra_isize = 32 (standard extended inode)
+        buf[0x80..0x82].copy_from_slice(&32_u16.to_le_bytes());
+        // Set generation to 42 at offset 0x64
+        buf[0x64..0x68].copy_from_slice(&42_u32.to_le_bytes());
+        let inode = Ext4Inode::parse_from_bytes(&buf).expect("test inode");
+        let attr = inode_to_attr(&sb, InodeNumber(11), &inode);
+        assert_eq!(
+            attr.generation, 42,
+            "ext4 generation must propagate to InodeAttr"
+        );
+    }
+
+    #[test]
+    fn inode_to_attr_zero_generation_when_not_set() {
+        use ffs_types::S_IFREG;
+
+        let sb = make_test_superblock();
+        let inode = make_test_inode(S_IFREG | 0o644, 0, 0);
+        let attr = inode_to_attr(&sb, InodeNumber(11), &inode);
+        // 128-byte test inodes don't reach offset 0x64, so generation is 0.
+        assert_eq!(
+            attr.generation, 0,
+            "generation defaults to 0 for minimal inodes"
+        );
+    }
+
+    #[test]
+    fn btrfs_inode_item_generation_round_trip() {
+        use ffs_btrfs::parse_inode_item;
+
+        let original = BtrfsInodeItem {
+            generation: 99,
+            size: 1024,
+            nbytes: 1024,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            mode: 0o100_644,
+            rdev: 0,
+            atime_sec: 0,
+            atime_nsec: 0,
+            ctime_sec: 0,
+            ctime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            otime_sec: 0,
+            otime_nsec: 0,
+        };
+        let bytes = original.to_bytes();
+        let parsed = parse_inode_item(&bytes).expect("round-trip parse");
+        assert_eq!(
+            parsed.generation, 99,
+            "btrfs generation must survive serialization round-trip"
+        );
     }
 
     // ── listxattr/getxattr via FsOps defaults ────────────────────────────
@@ -17666,6 +17812,198 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|value| value.starts_with("btrfs-fsyncdir-")),
             "missing or malformed fsyncdir operation_id: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn ext4_write_fsync_log_contract_success() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let image = build_ext4_image(2);
+            let dev = TestDevice::from_vec(image);
+            let cx = Cx::for_testing();
+            let open_options = OpenOptions {
+                ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+                ..OpenOptions::default()
+            };
+            let mut fs = OpenFs::from_device(&cx, Box::new(dev), &open_options)
+                .expect("open writable ext4 for fsync log contract");
+            fs.enable_writes(&cx).expect("enable writes");
+            let fs_ops: &dyn FsOps = &fs;
+            fs_ops
+                .fsync(&cx, InodeNumber(2), 0, false)
+                .expect("ext4 fsync should succeed");
+        });
+
+        let logs = parse_json_logs(&buffer);
+        let applied = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("ext4_sync_applied")
+                    && entry.get("scenario_id").and_then(Value::as_str) == Some("ext4_rw_fsync")
+            })
+            .expect("expected ext4_sync_applied fsync log");
+
+        assert_eq!(
+            applied.get("outcome").and_then(Value::as_str),
+            Some("applied")
+        );
+        assert!(
+            applied
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("ext4-fsync-")),
+            "missing or malformed ext4 fsync operation_id: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn ext4_write_fsync_rejection_log_contract_read_only() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        let err = tracing::subscriber::with_default(subscriber, || {
+            let image = build_ext4_image(2);
+            let dev = TestDevice::from_vec(image);
+            let cx = Cx::for_testing();
+            let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+                .expect("open read-only ext4 for fsync rejection contract");
+            let ops: &dyn FsOps = &fs;
+            ops.fsync(&cx, InodeNumber(2), 0, false)
+                .expect_err("ext4 fsync should be rejected on read-only mount")
+        });
+        assert_eq!(err.to_errno(), libc::EROFS);
+
+        let logs = parse_json_logs(&buffer);
+        let rejected = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("ext4_sync_rejected")
+                    && entry.get("scenario_id").and_then(Value::as_str) == Some("ext4_rw_fsync")
+                    && entry.get("error_class").and_then(Value::as_str) == Some("read_only")
+            })
+            .expect("expected ext4_sync_rejected read-only fsync log");
+
+        assert_eq!(
+            rejected.get("outcome").and_then(Value::as_str),
+            Some("rejected")
+        );
+        assert!(
+            rejected
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("ext4-fsync-")),
+            "missing or malformed ext4 fsync rejection operation_id: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn ext4_write_flush_log_contract_records_non_durable_boundary() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let image = build_ext4_image(2);
+            let dev = TestDevice::from_vec(image);
+            let cx = Cx::for_testing();
+            let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+                .expect("open read-only ext4 for flush contract");
+            let ops: &dyn FsOps = &fs;
+            ops.flush(&cx, InodeNumber(2), 7, 13)
+                .expect("flush should succeed");
+        });
+
+        let logs = parse_json_logs(&buffer);
+        let applied = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("ext4_sync_applied")
+                    && entry.get("scenario_id").and_then(Value::as_str) == Some("ext4_rw_flush")
+            })
+            .expect("expected ext4 flush applied log");
+
+        assert_eq!(
+            applied.get("outcome").and_then(Value::as_str),
+            Some("applied")
+        );
+        assert_eq!(
+            applied.get("durability_boundary").and_then(Value::as_str),
+            Some("none")
+        );
+        assert!(
+            applied
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("ext4-flush-")),
+            "missing or malformed ext4 flush operation_id: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_flush_log_contract_records_non_durable_boundary() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let (fs, cx) = open_writable_btrfs();
+            let ops: &dyn FsOps = &fs;
+            ops.flush(&cx, InodeNumber(1), 5, 11)
+                .expect("btrfs flush should succeed");
+        });
+
+        let logs = parse_json_logs(&buffer);
+        let applied = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("btrfs_sync_applied")
+                    && entry.get("scenario_id").and_then(Value::as_str) == Some("btrfs_rw_flush")
+            })
+            .expect("expected btrfs flush applied log");
+
+        assert_eq!(
+            applied.get("outcome").and_then(Value::as_str),
+            Some("applied")
+        );
+        assert_eq!(
+            applied.get("durability_boundary").and_then(Value::as_str),
+            Some("none")
+        );
+        assert!(
+            applied
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("btrfs-flush-")),
+            "missing or malformed btrfs flush operation_id: {applied:?}"
         );
     }
 

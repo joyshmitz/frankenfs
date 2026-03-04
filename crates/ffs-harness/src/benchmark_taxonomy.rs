@@ -474,6 +474,135 @@ impl Taxonomy {
             BenchmarkFamily::Mount,
             "ffs-fuse",
         );
+
+        // Mount runtime mode comparison benchmarks (bd-h6nz.2.5).
+        // These measure dispatch infrastructure overhead without actual FUSE.
+        let before = ops.len();
+        Self::insert_ops(
+            ops,
+            &[
+                (
+                    "mount_runtime_per_core_route_inode",
+                    "Per-core dispatcher inode routing latency",
+                ),
+                (
+                    "mount_runtime_per_core_route_lookup",
+                    "Per-core dispatcher lookup routing latency",
+                ),
+                (
+                    "mount_runtime_per_core_should_steal",
+                    "Per-core work-stealing decision latency",
+                ),
+                (
+                    "mount_runtime_per_core_aggregate_metrics",
+                    "Per-core aggregate metrics collection latency",
+                ),
+                (
+                    "mount_runtime_metrics_record_throughput",
+                    "AtomicMetrics record_ok throughput (ops/sec)",
+                ),
+            ],
+            BenchmarkFamily::Mount,
+            "ffs-fuse",
+        );
+
+        // Backpressure decision under degraded/emergency modes
+        ops.insert(
+            "mount_runtime_backpressure_normal".to_owned(),
+            BenchmarkEntry {
+                operation_id: "mount_runtime_backpressure_normal".to_owned(),
+                family: BenchmarkFamily::DegradedMode,
+                metric: MetricType::Latency,
+                owning_crate: "ffs-fuse".to_owned(),
+                description: "Backpressure decision latency under normal load".to_owned(),
+                envelope_override: None,
+            },
+        );
+        ops.insert(
+            "mount_runtime_backpressure_degraded".to_owned(),
+            BenchmarkEntry {
+                operation_id: "mount_runtime_backpressure_degraded".to_owned(),
+                family: BenchmarkFamily::DegradedMode,
+                metric: MetricType::Latency,
+                owning_crate: "ffs-fuse".to_owned(),
+                description: "Backpressure decision latency under degraded state".to_owned(),
+                envelope_override: None,
+            },
+        );
+        ops.insert(
+            "mount_runtime_backpressure_emergency".to_owned(),
+            BenchmarkEntry {
+                operation_id: "mount_runtime_backpressure_emergency".to_owned(),
+                family: BenchmarkFamily::DegradedMode,
+                metric: MetricType::Latency,
+                owning_crate: "ffs-fuse".to_owned(),
+                description: "Backpressure shed decision latency under emergency state".to_owned(),
+                envelope_override: None,
+            },
+        );
+
+        // Degraded-mode throughput benchmarks (bd-h6nz.5.4).
+        // Measure impact of backpressure on foreground workload throughput.
+        for (level, desc) in [
+            (
+                "warning",
+                "Warning-level (background paused, foreground unaffected)",
+            ),
+            (
+                "critical",
+                "Critical-level (writes throttled, metadata writes shed)",
+            ),
+        ] {
+            for op_type in ["read", "write", "mixed"] {
+                let id = format!("degraded_throughput_{level}_{op_type}");
+                ops.insert(
+                    id.clone(),
+                    BenchmarkEntry {
+                        operation_id: id,
+                        family: BenchmarkFamily::DegradedMode,
+                        metric: MetricType::Throughput,
+                        owning_crate: "ffs-fuse".to_owned(),
+                        description: format!("{desc}: {op_type} throughput under pressure"),
+                        envelope_override: None,
+                    },
+                );
+            }
+        }
+
+        // FSM tick overhead
+        ops.insert(
+            "degraded_fsm_tick_latency".to_owned(),
+            BenchmarkEntry {
+                operation_id: "degraded_fsm_tick_latency".to_owned(),
+                family: BenchmarkFamily::DegradedMode,
+                metric: MetricType::Latency,
+                owning_crate: "ffs-core".to_owned(),
+                description: "DegradationFsm tick latency (pressure sample processing)".to_owned(),
+                envelope_override: None,
+            },
+        );
+
+        // Multi-threaded backpressure contention
+        ops.insert(
+            "degraded_backpressure_contention_4threads".to_owned(),
+            BenchmarkEntry {
+                operation_id: "degraded_backpressure_contention_4threads".to_owned(),
+                family: BenchmarkFamily::DegradedMode,
+                metric: MetricType::Throughput,
+                owning_crate: "ffs-fuse".to_owned(),
+                description: "4-thread concurrent BackpressureGate.check() throughput".to_owned(),
+                envelope_override: None,
+            },
+        );
+
+        let added = ops.len() - before;
+        debug!(
+            target: "ffs::benchmark_taxonomy",
+            mount_runtime_ops = added,
+            scenario_id = "mount_runtime_benchmark_registration",
+            operation_id = "register_mount_ops",
+            "mount_runtime_benchmark_ops_registered"
+        );
     }
 
     fn register_concurrency_ops(ops: &mut BTreeMap<String, BenchmarkEntry>) {
@@ -701,6 +830,14 @@ mod tests {
             "mount_cold",
             "mount_warm",
             "mount_recovery",
+            "mount_runtime_per_core_route_inode",
+            "mount_runtime_per_core_route_lookup",
+            "mount_runtime_per_core_should_steal",
+            "mount_runtime_per_core_aggregate_metrics",
+            "mount_runtime_metrics_record_throughput",
+            "mount_runtime_backpressure_normal",
+            "mount_runtime_backpressure_degraded",
+            "mount_runtime_backpressure_emergency",
         ];
         for op in &expected_ops {
             assert!(
@@ -753,8 +890,7 @@ mod tests {
         let families_with_ops: std::collections::BTreeSet<BenchmarkFamily> =
             taxonomy.operations.values().map(|e| e.family).collect();
 
-        // Families that must have operations (DegradedMode may not have
-        // benchmarks yet — that's a known gap, not a test failure).
+        // All families with registered operations must be present.
         for family in [
             BenchmarkFamily::MetadataOps,
             BenchmarkFamily::BlockCache,
@@ -762,6 +898,7 @@ mod tests {
             BenchmarkFamily::Mount,
             BenchmarkFamily::Concurrency,
             BenchmarkFamily::Repair,
+            BenchmarkFamily::DegradedMode,
         ] {
             assert!(
                 families_with_ops.contains(&family),
@@ -907,6 +1044,144 @@ mod tests {
                 "missing expanded operation: {op}"
             );
         }
+    }
+
+    #[test]
+    fn mount_runtime_mode_benchmarks_registered() {
+        let taxonomy = Taxonomy::canonical();
+
+        // Mount family entries for dispatch infrastructure
+        let mount_runtime_ops = [
+            "mount_runtime_per_core_route_inode",
+            "mount_runtime_per_core_route_lookup",
+            "mount_runtime_per_core_should_steal",
+            "mount_runtime_per_core_aggregate_metrics",
+            "mount_runtime_metrics_record_throughput",
+        ];
+        for op in &mount_runtime_ops {
+            let entry = taxonomy.operations.get(*op).unwrap_or_else(|| {
+                panic!("missing mount runtime op: {op}");
+            });
+            assert_eq!(entry.family, BenchmarkFamily::Mount);
+            assert_eq!(entry.owning_crate, "ffs-fuse");
+        }
+
+        // DegradedMode family entries for backpressure decision
+        let backpressure_ops = [
+            "mount_runtime_backpressure_normal",
+            "mount_runtime_backpressure_degraded",
+            "mount_runtime_backpressure_emergency",
+        ];
+        for op in &backpressure_ops {
+            let entry = taxonomy.operations.get(*op).unwrap_or_else(|| {
+                panic!("missing backpressure op: {op}");
+            });
+            assert_eq!(entry.family, BenchmarkFamily::DegradedMode);
+            assert_eq!(entry.owning_crate, "ffs-fuse");
+        }
+    }
+
+    #[test]
+    fn mount_runtime_benchmark_envelopes_match_family() {
+        let taxonomy = Taxonomy::canonical();
+
+        // Mount family ops should use Mount envelope (wide: 25%/50%/10%)
+        let mount_env = BenchmarkFamily::Mount.default_envelope();
+        for op in [
+            "mount_runtime_per_core_route_inode",
+            "mount_runtime_per_core_route_lookup",
+            "mount_runtime_per_core_should_steal",
+            "mount_runtime_per_core_aggregate_metrics",
+            "mount_runtime_metrics_record_throughput",
+        ] {
+            let env = taxonomy.envelope_for(op);
+            assert_eq!(
+                env.warn_percent, mount_env.warn_percent,
+                "op {op}: warn mismatch"
+            );
+            assert_eq!(
+                env.fail_percent, mount_env.fail_percent,
+                "op {op}: fail mismatch"
+            );
+        }
+
+        // DegradedMode ops should use DegradedMode envelope (widest: 30%/60%/15%)
+        let deg_env = BenchmarkFamily::DegradedMode.default_envelope();
+        for op in [
+            "mount_runtime_backpressure_normal",
+            "mount_runtime_backpressure_degraded",
+            "mount_runtime_backpressure_emergency",
+        ] {
+            let env = taxonomy.envelope_for(op);
+            assert_eq!(
+                env.warn_percent, deg_env.warn_percent,
+                "op {op}: warn mismatch"
+            );
+            assert_eq!(
+                env.fail_percent, deg_env.fail_percent,
+                "op {op}: fail mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn degraded_throughput_benchmarks_registered() {
+        let taxonomy = Taxonomy::canonical();
+
+        // All degraded throughput scenarios must exist
+        let degraded_throughput_ops = [
+            "degraded_throughput_warning_read",
+            "degraded_throughput_warning_write",
+            "degraded_throughput_warning_mixed",
+            "degraded_throughput_critical_read",
+            "degraded_throughput_critical_write",
+            "degraded_throughput_critical_mixed",
+            "degraded_fsm_tick_latency",
+            "degraded_backpressure_contention_4threads",
+        ];
+        for op in &degraded_throughput_ops {
+            let entry = taxonomy.operations.get(*op).unwrap_or_else(|| {
+                panic!("missing degraded throughput op: {op}");
+            });
+            assert_eq!(
+                entry.family,
+                BenchmarkFamily::DegradedMode,
+                "op {op}: wrong family"
+            );
+        }
+
+        // Throughput ops must have Throughput metric
+        for op in [
+            "degraded_throughput_warning_read",
+            "degraded_throughput_critical_write",
+            "degraded_backpressure_contention_4threads",
+        ] {
+            let entry = &taxonomy.operations[op];
+            assert_eq!(
+                entry.metric,
+                MetricType::Throughput,
+                "op {op}: should be Throughput metric"
+            );
+        }
+
+        // FSM tick is latency
+        assert_eq!(
+            taxonomy.operations["degraded_fsm_tick_latency"].metric,
+            MetricType::Latency,
+        );
+    }
+
+    #[test]
+    fn mount_runtime_benchmark_ops_not_in_baseline_flagged() {
+        // Negative test: unknown benchmark operations should be detected as uncovered.
+        let taxonomy = Taxonomy::canonical();
+        let ops = vec![
+            "mount_runtime_per_core_route_inode".to_owned(),
+            "mount_runtime_nonexistent_scenario".to_owned(),
+        ];
+        let uncovered = taxonomy.uncovered_operations(&ops);
+        assert_eq!(uncovered.len(), 1);
+        assert_eq!(uncovered[0], "mount_runtime_nonexistent_scenario");
     }
 
     #[test]

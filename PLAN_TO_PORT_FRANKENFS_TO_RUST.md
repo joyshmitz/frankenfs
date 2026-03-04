@@ -40,6 +40,7 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` complete.
 - [x] Doc fix: `PROPOSED_ARCHITECTURE.md` crate dependency descriptions must match actual `Cargo.toml` (e.g., `ffs-block` does not currently depend on `ffs-ondisk`)
 - [x] OQ2 closure (`bd-h6nz.6.2`): keep strict FCW+SSI for V1.x, document expected-loss rationale, and bind the decision to deterministic contention evidence/tests
 - [x] OQ3 closure (`bd-h6nz.6.3`): accept bounded staleness policy (lazy default + timeout escalation + adaptive/eager override), align spec contract to implemented refresh state machine, and bind to deterministic repair refresh tests/E2E evidence
+- [x] OQ4 closure (`bd-h6nz.6.4`): reject kernel FUSE `writeback_cache` mode for V1.x, define flush-vs-fsync durability boundaries explicitly, and bind the decision to structured sync log contracts plus deterministic E2E contract checks
 
 ### 0.2 `ffs-types` (Canonical Newtypes + Shared Parsing Primitives)
 

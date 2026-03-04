@@ -189,8 +189,7 @@ pub fn welch_t_test(baseline: &SampleStats, current: &SampleStats) -> Option<TTe
 
     // Welch-Satterthwaite degrees of freedom.
     let df_num = se_total.powi(2);
-    let df_den = se_b.powi(2) / (baseline.n - 1) as f64
-        + se_c.powi(2) / (current.n - 1) as f64;
+    let df_den = se_b.powi(2) / (baseline.n - 1) as f64 + se_c.powi(2) / (current.n - 1) as f64;
 
     let df = if df_den > f64::EPSILON {
         df_num / df_den
@@ -533,9 +532,7 @@ impl RegressionComparator {
         if envelope_verdict == EnvelopeVerdict::Noise {
             return (
                 ComparisonVerdict::Pass,
-                format!(
-                    "{operation_id}: delta {delta_percent:.1}% within noise floor — pass"
-                ),
+                format!("{operation_id}: delta {delta_percent:.1}% within noise floor — pass"),
             );
         }
 
@@ -603,9 +600,7 @@ impl RegressionComparator {
             ),
             EnvelopeVerdict::Ok => (
                 ComparisonVerdict::Pass,
-                format!(
-                    "{operation_id}: delta {delta_percent:.1}% within threshold — pass"
-                ),
+                format!("{operation_id}: delta {delta_percent:.1}% within threshold — pass"),
             ),
             EnvelopeVerdict::Noise => unreachable!("handled above"),
         }
@@ -998,8 +993,12 @@ mod tests {
     #[test]
     fn comparator_significant_large_regression_fails() {
         let comparator = RegressionComparator::new(ComparatorConfig::default());
-        let baseline = &[100.0, 101.0, 99.0, 100.5, 99.5, 100.2, 99.8, 100.3, 99.7, 100.1];
-        let current = &[130.0, 131.0, 129.0, 130.5, 129.5, 130.2, 129.8, 130.3, 129.7, 130.1];
+        let baseline = &[
+            100.0, 101.0, 99.0, 100.5, 99.5, 100.2, 99.8, 100.3, 99.7, 100.1,
+        ];
+        let current = &[
+            130.0, 131.0, 129.0, 130.5, 129.5, 130.2, 129.8, 130.3, 129.7, 130.1,
+        ];
 
         let result = comparator.compare("test_op", baseline, current, &test_envelope());
         assert_eq!(result.final_verdict, ComparisonVerdict::Fail);
@@ -1040,9 +1039,13 @@ mod tests {
     #[test]
     fn comparator_warn_zone_with_significance() {
         let comparator = RegressionComparator::new(ComparatorConfig::default());
-        let baseline = &[100.0, 100.5, 99.5, 100.2, 99.8, 100.1, 99.9, 100.3, 99.7, 100.0];
+        let baseline = &[
+            100.0, 100.5, 99.5, 100.2, 99.8, 100.1, 99.9, 100.3, 99.7, 100.0,
+        ];
         // ~15% higher mean — warn zone (10-20%)
-        let current = &[115.0, 115.5, 114.5, 115.2, 114.8, 115.1, 114.9, 115.3, 114.7, 115.0];
+        let current = &[
+            115.0, 115.5, 114.5, 115.2, 114.8, 115.1, 114.9, 115.3, 114.7, 115.0,
+        ];
 
         let result = comparator.compare("test_op", baseline, current, &test_envelope());
         assert_eq!(result.final_verdict, ComparisonVerdict::Warn);
@@ -1161,14 +1164,12 @@ mod tests {
     #[test]
     fn full_report_has_summary() {
         let comparator = RegressionComparator::new(ComparatorConfig::default());
-        let results = vec![
-            comparator.compare(
-                "op_a",
-                &[100.0, 100.0, 100.0, 100.0, 100.0],
-                &[100.0, 100.0, 100.0, 100.0, 100.0],
-                &test_envelope(),
-            ),
-        ];
+        let results = vec![comparator.compare(
+            "op_a",
+            &[100.0, 100.0, 100.0, 100.0, 100.0],
+            &[100.0, 100.0, 100.0, 100.0, 100.0],
+            &test_envelope(),
+        )];
         let report = format_full_report(&results);
         assert!(report.contains("Performance Regression Report"));
         assert!(report.contains("1 pass"));
@@ -1184,7 +1185,10 @@ mod tests {
 
         let result = comparator.compare("test_op", baseline, current, &test_envelope());
         assert_eq!(result.final_verdict, ComparisonVerdict::Pass);
-        assert!(result.delta_percent < 0.0, "improvement should be negative delta");
+        assert!(
+            result.delta_percent < 0.0,
+            "improvement should be negative delta"
+        );
     }
 
     #[test]

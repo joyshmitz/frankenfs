@@ -15,6 +15,7 @@ ffs-alloc = { workspace = true }
 ffs-extent = { workspace = true }
 asupersync = { workspace = true }
 crc32c = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

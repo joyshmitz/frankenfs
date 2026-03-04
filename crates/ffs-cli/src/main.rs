@@ -25,7 +25,7 @@ use ffs_core::{
     CrashRecoveryOutcome, Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions,
     detect_filesystem_at_path,
 };
-use ffs_fuse::MountOptions;
+use ffs_fuse::{MountConfig, MountOptions, mount_managed};
 use ffs_harness::ParityReport;
 use ffs_ondisk::{
     BtrfsSuperblock, Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex, Ext4GroupDesc,
@@ -48,7 +48,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tracing::{error, info, info_span};
+use tracing::{debug, error, info, info_span};
 use tracing_subscriber::EnvFilter;
 
 // ── Production Cx acquisition ───────────────────────────────────────────────
@@ -311,12 +311,14 @@ enum Command {
         /// Runtime execution mode.
         ///
         /// Active controls by mode:
-        /// - `standard` (default): active today, uses the conservative blocking
-        ///   `ffs_fuse::mount` path.
-        /// - `managed`: configuration is validated but runtime wiring is not yet
-        ///   active in `ffs-cli` (tracked by `bd-h6nz.2.2`).
-        /// - `per-core`: configuration is validated but runtime wiring is not yet
-        ///   active in `ffs-cli` (tracked by `bd-h6nz.2.2`).
+        /// - `standard` (default): blocking `ffs_fuse::mount` path. Process exits
+        ///   on unmount or signal.
+        /// - `managed`: background mount with lifecycle control, graceful Ctrl+C
+        ///   shutdown, and final metrics logging.
+        /// - `per-core`: managed mount with thread-per-core dispatch. Sets worker
+        ///   threads to match detected cores and logs per-core metrics on shutdown.
+        /// - Kernel FUSE `writeback_cache` mode is intentionally unsupported in
+        ///   V1.x; durability boundaries are explicit `fsync` / `fsyncdir`.
         #[arg(long = "runtime-mode", value_enum, default_value_t = MountRuntimeMode::Standard)]
         runtime_mode: MountRuntimeMode,
         /// Graceful unmount timeout for managed/per-core modes (seconds).
@@ -3372,12 +3374,18 @@ fn log_mount_runtime_rejected(
     );
 }
 
-fn emit_mount_banner(open_fs: &OpenFs, mountpoint: &Path, read_write: bool) {
+fn emit_mount_banner(
+    open_fs: &OpenFs,
+    mountpoint: &Path,
+    read_write: bool,
+    runtime_mode: MountRuntimeMode,
+) {
     let mode_str = if read_write { "rw" } else { "ro" };
+    let runtime = runtime_mode.as_str();
     match &open_fs.flavor {
         FsFlavor::Ext4(sb) => {
             eprintln!(
-                "Mounting ext4 image (block_size={}, blocks={}, {mode_str}) at {}",
+                "Mounting ext4 image (block_size={}, blocks={}, {mode_str}, runtime={runtime}) at {}",
                 sb.block_size,
                 sb.blocks_count,
                 mountpoint.display()
@@ -3385,7 +3393,7 @@ fn emit_mount_banner(open_fs: &OpenFs, mountpoint: &Path, read_write: bool) {
         }
         FsFlavor::Btrfs(sb) => {
             eprintln!(
-                "Mounting btrfs image (sectorsize={}, nodesize={}, label={:?}, {mode_str}) at {}",
+                "Mounting btrfs image (sectorsize={}, nodesize={}, label={:?}, {mode_str}, runtime={runtime}) at {}",
                 sb.sectorsize,
                 sb.nodesize,
                 sb.label,
@@ -3438,6 +3446,167 @@ fn mount_with_fuse(
     let fs_ops: Box<dyn FsOps> = Box::new(open_fs);
     ffs_fuse::mount(fs_ops, mountpoint, &opts)
         .with_context(|| format!("FUSE mount failed at {}", mountpoint.display()))
+}
+
+/// Parameters shared by managed and per-core mount paths.
+struct ManagedMountParams<'a> {
+    mountpoint: &'a Path,
+    read_write: bool,
+    allow_other: bool,
+    auto_unmount: bool,
+    unmount_timeout_secs: u64,
+    operation_id: &'a str,
+    scenario_id: &'a str,
+}
+
+fn mount_with_managed_fuse(open_fs: OpenFs, params: &ManagedMountParams<'_>) -> Result<()> {
+    let config = MountConfig {
+        options: MountOptions {
+            read_only: !params.read_write,
+            allow_other: params.allow_other,
+            auto_unmount: params.auto_unmount,
+            worker_threads: 0,
+        },
+        unmount_timeout: std::time::Duration::from_secs(params.unmount_timeout_secs),
+    };
+
+    info!(
+        target: "ffs::cli::mount",
+        operation_id = params.operation_id,
+        scenario_id = params.scenario_id,
+        outcome = "managed_mount_starting",
+        unmount_timeout_secs = params.unmount_timeout_secs,
+        thread_count = config.options.resolved_thread_count(),
+        "managed_mount_start"
+    );
+
+    let fs_ops: Box<dyn FsOps> = Box::new(open_fs);
+    let handle = mount_managed(fs_ops, params.mountpoint, &config).with_context(|| {
+        format!(
+            "FUSE managed mount failed at {}",
+            params.mountpoint.display()
+        )
+    })?;
+
+    wire_ctrlc_shutdown(&handle)?;
+
+    info!(
+        target: "ffs::cli::mount",
+        operation_id = params.operation_id,
+        scenario_id = params.scenario_id,
+        outcome = "managed_mount_active",
+        "managed_mount_waiting_for_shutdown"
+    );
+
+    let metrics = handle.wait();
+    log_mount_shutdown_metrics(params.operation_id, params.scenario_id, &metrics);
+    Ok(())
+}
+
+fn mount_with_per_core_fuse(open_fs: OpenFs, params: &ManagedMountParams<'_>) -> Result<()> {
+    use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher};
+
+    let per_core_config = PerCoreConfig::default();
+    let dispatcher = PerCoreDispatcher::new(per_core_config.clone());
+
+    info!(
+        target: "ffs::cli::mount",
+        operation_id = params.operation_id,
+        scenario_id = params.scenario_id,
+        outcome = "per_core_mount_starting",
+        num_cores = dispatcher.num_cores(),
+        cache_blocks_per_core = per_core_config.cache_blocks_per_core,
+        total_cache_blocks = per_core_config.total_cache_blocks(),
+        steal_threshold = per_core_config.steal_threshold,
+        advisory_affinity = per_core_config.advisory_affinity,
+        "per_core_mount_start"
+    );
+
+    let config = MountConfig {
+        options: MountOptions {
+            read_only: !params.read_write,
+            allow_other: params.allow_other,
+            auto_unmount: params.auto_unmount,
+            worker_threads: dispatcher.num_cores() as usize,
+        },
+        unmount_timeout: std::time::Duration::from_secs(params.unmount_timeout_secs),
+    };
+
+    let fs_ops: Box<dyn FsOps> = Box::new(open_fs);
+    let handle = mount_managed(fs_ops, params.mountpoint, &config).with_context(|| {
+        format!(
+            "FUSE per-core mount failed at {}",
+            params.mountpoint.display()
+        )
+    })?;
+
+    wire_ctrlc_shutdown(&handle)?;
+
+    info!(
+        target: "ffs::cli::mount",
+        operation_id = params.operation_id,
+        scenario_id = params.scenario_id,
+        outcome = "per_core_mount_active",
+        "per_core_mount_waiting_for_shutdown"
+    );
+
+    let metrics = handle.wait();
+
+    let aggregate = dispatcher.aggregate_metrics();
+    debug!(
+        target: "ffs::cli::mount",
+        operation_id = params.operation_id,
+        scenario_id = params.scenario_id,
+        imbalance_ratio = aggregate.imbalance_ratio(),
+        total_requests = aggregate.total_requests,
+        total_cache_hits = aggregate.total_cache_hits,
+        total_cache_misses = aggregate.total_cache_misses,
+        "per_core_aggregate_metrics"
+    );
+
+    info!(
+        target: "ffs::cli::mount",
+        operation_id = params.operation_id,
+        scenario_id = params.scenario_id,
+        outcome = "per_core_mount_shutdown",
+        requests_total = metrics.requests_total,
+        requests_ok = metrics.requests_ok,
+        requests_err = metrics.requests_err,
+        bytes_read = metrics.bytes_read,
+        num_cores = dispatcher.num_cores(),
+        imbalance_ratio = aggregate.imbalance_ratio(),
+        "per_core_mount_shutdown_complete"
+    );
+
+    Ok(())
+}
+
+fn wire_ctrlc_shutdown(handle: &ffs_fuse::MountHandle) -> Result<()> {
+    let shutdown = handle.shutdown_flag().clone();
+    ctrlc::set_handler(move || {
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    })
+    .context("failed to set Ctrl+C handler")
+}
+
+fn log_mount_shutdown_metrics(
+    operation_id: &str,
+    scenario_id: &str,
+    metrics: &ffs_fuse::MetricsSnapshot,
+) {
+    info!(
+        target: "ffs::cli::mount",
+        operation_id,
+        scenario_id,
+        outcome = "managed_mount_shutdown",
+        requests_total = metrics.requests_total,
+        requests_ok = metrics.requests_ok,
+        requests_err = metrics.requests_err,
+        bytes_read = metrics.bytes_read,
+        requests_throttled = metrics.requests_throttled,
+        requests_shed = metrics.requests_shed,
+        "managed_mount_shutdown_complete"
+    );
 }
 
 fn mount_cmd(
@@ -3493,22 +3662,6 @@ fn mount_cmd(
         }
     };
 
-    if runtime.mode != MountRuntimeMode::Standard {
-        let reason = format!(
-            "runtime mode '{}' is not wired in ffs-cli yet; use --runtime-mode standard (tracked by bd-h6nz.2.2)",
-            runtime.mode.as_str()
-        );
-        log_mount_runtime_rejected(
-            &operation_id,
-            scenario_id,
-            runtime,
-            rw,
-            "runtime_mode_unavailable",
-            &reason,
-        );
-        bail!("{reason}");
-    }
-
     log_mount_runtime_selected(
         &operation_id,
         scenario_id,
@@ -3525,7 +3678,7 @@ fn mount_cmd(
     };
     let mut open_fs = OpenFs::open_with_options(&cx, image_path, &open_opts)
         .with_context(|| format!("failed to open filesystem image: {}", image_path.display()))?;
-    emit_mount_banner(&open_fs, mountpoint, rw);
+    emit_mount_banner(&open_fs, mountpoint, rw, runtime.mode);
     emit_optional_recovery_banner(&open_fs);
 
     if rw {
@@ -3533,7 +3686,28 @@ fn mount_cmd(
             .enable_writes(&cx)
             .context("failed to enable write support")?;
     }
-    mount_with_fuse(open_fs, mountpoint, rw, allow_other, auto_unmount)?;
+
+    match runtime.mode {
+        MountRuntimeMode::Standard => {
+            mount_with_fuse(open_fs, mountpoint, rw, allow_other, auto_unmount)?;
+        }
+        MountRuntimeMode::Managed | MountRuntimeMode::PerCore => {
+            let params = ManagedMountParams {
+                mountpoint,
+                read_write: rw,
+                allow_other,
+                auto_unmount,
+                unmount_timeout_secs: runtime.managed_unmount_timeout_secs(),
+                operation_id: &operation_id,
+                scenario_id,
+            };
+            if runtime.mode == MountRuntimeMode::PerCore {
+                mount_with_per_core_fuse(open_fs, &params)?;
+            } else {
+                mount_with_managed_fuse(open_fs, &params)?;
+            }
+        }
+    }
 
     info!(
         target: "ffs::cli::mount",
@@ -4879,6 +5053,7 @@ mod tests {
             1,
         );
         let inode_item = BtrfsInodeItem {
+            generation: 1,
             size: 4096,
             nbytes: 4096,
             nlink: 2,
@@ -5328,7 +5503,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_cmd_rejects_unwired_mode_before_image_open() {
+    fn mount_cmd_managed_mode_fails_at_image_open_not_validation() {
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
             &PathBuf::from("/definitely/missing-mountpoint"),
@@ -5337,11 +5512,149 @@ mod tests {
             MountRuntimeMode::Managed,
             Some(30),
         )
-        .expect_err("managed runtime should fail fast before image open");
+        .expect_err("managed mode with missing image should fail at open");
+        let message = format!("{err:#}");
+        // Managed mode is wired — the error should come from image open, not
+        // from a "not wired" rejection.
+        assert!(
+            message.contains("failed to open filesystem image"),
+            "expected image-open failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_cmd_per_core_mode_fails_at_image_open_not_validation() {
+        let err = mount_cmd(
+            &PathBuf::from("/definitely/missing.img"),
+            &PathBuf::from("/definitely/missing-mountpoint"),
+            false,
+            false,
+            MountRuntimeMode::PerCore,
+            None,
+        )
+        .expect_err("per-core mode with missing image should fail at open");
         let message = format!("{err:#}");
         assert!(
-            message.contains("not wired in ffs-cli yet"),
-            "expected unwired runtime message, got: {message}"
+            message.contains("failed to open filesystem image"),
+            "expected image-open failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn cli_parses_mount_per_core_runtime() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "mount",
+            "--runtime-mode",
+            "per-core",
+            "/tmp/fs.img",
+            "/tmp/mnt",
+        ])
+        .expect("mount command with per-core runtime should parse");
+
+        match cli.command {
+            Command::Mount {
+                runtime_mode,
+                managed_unmount_timeout_secs,
+                ..
+            } => {
+                assert_eq!(runtime_mode, MountRuntimeMode::PerCore);
+                assert_eq!(managed_unmount_timeout_secs, None);
+            }
+            _ => panic!("expected mount command"),
+        }
+    }
+
+    #[test]
+    fn mount_default_mode_is_standard_and_stable() {
+        // Verify that the default runtime mode for mount is Standard.
+        // This is a stability contract: changing the default is a breaking change.
+        let cli = Cli::try_parse_from(["ffs", "mount", "/img", "/mnt"])
+            .expect("mount should parse with defaults");
+        match cli.command {
+            Command::Mount { runtime_mode, .. } => {
+                assert_eq!(
+                    runtime_mode,
+                    MountRuntimeMode::Standard,
+                    "default mount runtime mode must remain standard"
+                );
+            }
+            _ => panic!("expected mount command"),
+        }
+    }
+
+    #[test]
+    fn mount_runtime_config_default_timeout_is_30s() {
+        let cfg = MountRuntimeConfig {
+            mode: MountRuntimeMode::Managed,
+            managed_unmount_timeout_secs: None,
+        }
+        .validate()
+        .expect("managed without explicit timeout should validate");
+        assert_eq!(
+            cfg.managed_unmount_timeout_secs(),
+            30,
+            "default managed unmount timeout must be 30s"
+        );
+    }
+
+    #[test]
+    fn mount_per_core_config_rejects_timeout_with_standard() {
+        // Per-core timeout is also rejected in standard mode (same validation path).
+        let err = MountRuntimeConfig {
+            mode: MountRuntimeMode::Standard,
+            managed_unmount_timeout_secs: Some(42),
+        }
+        .validate()
+        .expect_err("standard mode with timeout should be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--managed-unmount-timeout-secs requires"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn mount_per_core_config_accepts_timeout() {
+        let cfg = MountRuntimeConfig {
+            mode: MountRuntimeMode::PerCore,
+            managed_unmount_timeout_secs: Some(60),
+        }
+        .validate()
+        .expect("per-core mode with timeout should validate");
+        assert_eq!(cfg.managed_unmount_timeout_secs(), 60);
+    }
+
+    #[test]
+    fn mount_scenario_ids_cover_all_mode_rw_combinations() {
+        // Exhaustive check that all (mode, rw) pairs produce distinct scenario IDs.
+        let mut ids = std::collections::HashSet::new();
+        for mode in [
+            MountRuntimeMode::Standard,
+            MountRuntimeMode::Managed,
+            MountRuntimeMode::PerCore,
+        ] {
+            for rw in [false, true] {
+                let id = mode.scenario_id(rw);
+                assert!(
+                    ids.insert(id),
+                    "duplicate scenario_id: {id} for mode={:?} rw={rw}",
+                    mode
+                );
+            }
+        }
+        assert_eq!(ids.len(), 6, "expected 6 distinct scenario IDs");
+    }
+
+    #[test]
+    fn mount_operation_ids_differ_by_rw() {
+        let image = PathBuf::from("/tmp/fs.img");
+        let mountpoint = PathBuf::from("/tmp/mnt");
+        let ro = mount_operation_id(&image, &mountpoint, MountRuntimeMode::Standard, false);
+        let rw = mount_operation_id(&image, &mountpoint, MountRuntimeMode::Standard, true);
+        assert_ne!(
+            ro, rw,
+            "operation ids should differ when read_write differs"
         );
     }
 

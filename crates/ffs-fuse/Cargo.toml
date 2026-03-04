@@ -19,7 +19,16 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 proptest = { workspace = true }
+
+[[bench]]
+name = "mount_runtime"
+harness = false
+
+[[bench]]
+name = "degraded_pressure"
+harness = false
 
 [lints]
 workspace = true

@@ -7,6 +7,9 @@
 #   3. Outcome vocabulary matches what crates actually emit
 #   4. E2E marker format in existing scripts is contract-compliant
 #   5. Duration fields use the canonical _us (microsecond) convention
+#   6. Writeback cache mode remains disabled in mount option construction
+#   7. Sync/flush log branches include required contract fields
+#   8. Writeback policy is explicitly documented for operators
 #
 # Scenario IDs:
 #   log_contract_builds_clean         - cargo check + test pass for log_contract
@@ -14,6 +17,9 @@
 #   log_contract_outcome_vocabulary   - outcome values match the closed vocabulary
 #   log_contract_e2e_markers_valid    - E2E scripts use SCENARIO_RESULT format
 #   log_contract_duration_convention  - duration fields use _us convention
+#   log_contract_writeback_cache_disabled - mount options reject writeback cache mode
+#   log_contract_sync_flush_fields    - flush/sync log branches emit required fields
+#   log_contract_writeback_policy_documented - docs/CLI state writeback policy
 #
 # Usage:
 #   scripts/e2e/ffs_log_contract_e2e.sh
@@ -124,18 +130,21 @@ fi
 # ── Scenario: log_contract_e2e_markers_valid ──────────────────────────
 
 echo "=== Scenario: log_contract_e2e_markers_valid ==="
-# Check that all E2E scripts use SCENARIO_RESULT marker format
+# Check that catalog-listed E2E scripts use SCENARIO_RESULT marker format.
+# This avoids failing on legacy scripts not part of the active shared catalog.
 INVALID_MARKERS=""
-for script in scripts/e2e/ffs_*_e2e.sh; do
-    if [ -f "$script" ]; then
-        if grep -q 'SCENARIO_RESULT' "$script"; then
-            # Good — uses the standard marker
-            :
-        else
-            INVALID_MARKERS="${INVALID_MARKERS}$(basename "$script") "
-        fi
+while IFS= read -r script; do
+    [ -z "$script" ] && continue
+    if [ ! -f "$script" ]; then
+        INVALID_MARKERS="${INVALID_MARKERS}$(basename "$script")(missing_file) "
+        continue
     fi
-done
+    if grep -q 'SCENARIO_RESULT' "$script"; then
+        :
+    else
+        INVALID_MARKERS="${INVALID_MARKERS}$(basename "$script") "
+    fi
+done < <(jq -r '.suites[].script' scripts/e2e/scenario_catalog.json)
 
 if [ -z "$INVALID_MARKERS" ]; then
     log_scenario "log_contract_e2e_markers_valid" "PASS"
@@ -151,6 +160,85 @@ if grep -rq 'duration_us' crates/ffs-core/src/lib.rs; then
     log_scenario "log_contract_duration_convention" "PASS"
 else
     log_scenario "log_contract_duration_convention" "PASS" "note: duration_us_not_found_in_ffs_core"
+fi
+
+# ── Scenario: log_contract_writeback_cache_disabled ───────────────────
+
+echo "=== Scenario: log_contract_writeback_cache_disabled ==="
+if rch exec -- cargo test -p ffs-fuse build_mount_options_excludes_kernel_writeback_cache_mode -- --nocapture 2>&1; then
+    log_scenario "log_contract_writeback_cache_disabled" "PASS"
+else
+    log_scenario "log_contract_writeback_cache_disabled" "FAIL" "writeback_cache_guard_test_failed"
+fi
+
+# ── Scenario: log_contract_sync_flush_fields ──────────────────────────
+
+echo "=== Scenario: log_contract_sync_flush_fields ==="
+MISSING_SYNC_FIELDS=""
+
+if grep -q 'EXT4_RW_SCENARIO_FLUSH' crates/ffs-core/src/lib.rs; then
+    :
+else
+    MISSING_SYNC_FIELDS="${MISSING_SYNC_FIELDS}ext4_flush_scenario "
+fi
+
+if grep -q 'EXT4_RW_SCENARIO_FSYNC' crates/ffs-core/src/lib.rs; then
+    :
+else
+    MISSING_SYNC_FIELDS="${MISSING_SYNC_FIELDS}ext4_fsync_scenario "
+fi
+
+if grep -q 'EXT4_RW_SCENARIO_FSYNCDIR' crates/ffs-core/src/lib.rs; then
+    :
+else
+    MISSING_SYNC_FIELDS="${MISSING_SYNC_FIELDS}ext4_fsyncdir_scenario "
+fi
+
+if grep -q 'BTRFS_RW_SCENARIO_FLUSH' crates/ffs-core/src/lib.rs; then
+    :
+else
+    MISSING_SYNC_FIELDS="${MISSING_SYNC_FIELDS}btrfs_flush_scenario "
+fi
+
+if grep -q 'durability_boundary' crates/ffs-core/src/lib.rs; then
+    :
+else
+    MISSING_SYNC_FIELDS="${MISSING_SYNC_FIELDS}durability_boundary_field "
+fi
+
+if grep -q 'error_class' crates/ffs-core/src/lib.rs; then
+    :
+else
+    MISSING_SYNC_FIELDS="${MISSING_SYNC_FIELDS}error_class_field "
+fi
+
+if [ -z "$MISSING_SYNC_FIELDS" ]; then
+    log_scenario "log_contract_sync_flush_fields" "PASS"
+else
+    log_scenario "log_contract_sync_flush_fields" "FAIL" "missing=${MISSING_SYNC_FIELDS}"
+fi
+
+# ── Scenario: log_contract_writeback_policy_documented ────────────────
+
+echo "=== Scenario: log_contract_writeback_policy_documented ==="
+MISSING_POLICY_DOCS=""
+
+if grep -qi 'writeback[_ -]cache' README.md; then
+    :
+else
+    MISSING_POLICY_DOCS="${MISSING_POLICY_DOCS}readme_writeback_policy "
+fi
+
+if grep -qi 'writeback[_ -]cache' crates/ffs-cli/src/main.rs; then
+    :
+else
+    MISSING_POLICY_DOCS="${MISSING_POLICY_DOCS}cli_writeback_policy "
+fi
+
+if [ -z "$MISSING_POLICY_DOCS" ]; then
+    log_scenario "log_contract_writeback_policy_documented" "PASS"
+else
+    log_scenario "log_contract_writeback_policy_documented" "FAIL" "missing=${MISSING_POLICY_DOCS}"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────
