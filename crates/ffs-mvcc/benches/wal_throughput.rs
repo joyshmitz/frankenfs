@@ -937,11 +937,105 @@ fn bench_rcu_read_throughput(c: &mut Criterion) {
     }
 }
 
+/// Measure WAL write amplification: ratio of total bytes written to WAL
+/// vs. user data bytes committed.
+fn bench_write_amplification(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let block_data = vec![0xAB_u8; 4096];
+
+    // Single-block transaction write amplification.
+    c.bench_function("wal_write_amplification_1block", |b| {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+
+        let store = PersistentMvccStore::open_with_options(&cx, &path, PersistOptions::default())
+            .expect("open");
+
+        let mut block_id = 0_u64;
+
+        b.iter(|| {
+            let mut txn = store.begin();
+            txn.stage_write(BlockNumber(block_id % 1024), block_data.clone());
+            store.commit(txn).expect("commit");
+            block_id += 1;
+        });
+    });
+
+    // 16-block transaction write amplification (amortized overhead).
+    c.bench_function("wal_write_amplification_16block", |b| {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+
+        let store = PersistentMvccStore::open_with_options(&cx, &path, PersistOptions::default())
+            .expect("open");
+
+        let mut block_id = 0_u64;
+
+        b.iter(|| {
+            let mut txn = store.begin();
+            for j in 0..16_u64 {
+                txn.stage_write(BlockNumber((block_id + j) % 4096), block_data.clone());
+            }
+            store.commit(txn).expect("commit");
+            block_id += 16;
+        });
+    });
+}
+
+/// Measure MVCC commit throughput under multi-writer contention.
+fn bench_mvcc_contention(c: &mut Criterion) {
+    let block_data = vec![0xAB_u8; 4096];
+
+    for &writers in &[2_usize, 4, 8] {
+        let bench_name = format!("mvcc_contention_{writers}writers");
+
+        c.bench_function(&bench_name, |b| {
+            b.iter_custom(|iters| {
+                let store = Arc::new(Mutex::new(MvccStore::new()));
+                let ops_per_writer = iters / u64::try_from(writers).expect("fits");
+                let barrier = Arc::new(std::sync::Barrier::new(writers));
+
+                let mut handles = Vec::with_capacity(writers);
+                for writer_id in 0..writers {
+                    let store = Arc::clone(&store);
+                    let barrier = Arc::clone(&barrier);
+                    let data = block_data.clone();
+                    handles.push(thread::spawn(move || {
+                        barrier.wait();
+                        let start = Instant::now();
+                        for i in 0..ops_per_writer {
+                            let block = BlockNumber(
+                                (u64::try_from(writer_id).expect("fits") * 1024 + i) % 4096,
+                            );
+                            let mut guard = store.lock();
+                            let mut txn = guard.begin();
+                            txn.stage_write(block, data.clone());
+                            let _ = guard.commit(txn);
+                            drop(guard);
+                        }
+                        start.elapsed()
+                    }));
+                }
+
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("writer thread"))
+                    .max()
+                    .unwrap_or_default()
+            });
+        });
+    }
+}
+
 criterion_group!(
     wal_benches,
     bench_wal_commit_throughput,
     bench_ssi_overhead,
     bench_ebr_memory_report,
-    bench_rcu_read_throughput
+    bench_rcu_read_throughput,
+    bench_write_amplification,
+    bench_mvcc_contention
 );
 criterion_main!(wal_benches);

@@ -789,6 +789,7 @@ dependencies = [
  "asupersync",
  "blake3",
  "crc32c",
+ "criterion",
  "ffs-block",
  "ffs-error",
  "ffs-ondisk",

@@ -158,6 +158,82 @@ warn_percent = 25
 fail_percent = 50
 noise_floor_percent = 10
 
+# ── Concurrency family (expanded) ──────────────────────────────────────
+# Write amplification and multi-writer contention benchmarks.
+# Thread-scheduling-sensitive; wide thresholds justified.
+
+[operation_thresholds.wal_write_amplification_1block]
+# taxonomy_id: wal_write_amplification_1block
+# family: concurrency
+# WAL overhead ratio for single-block transactions (higher overhead expected).
+warn_percent = 15
+fail_percent = 30
+noise_floor_percent = 5
+
+[operation_thresholds.wal_write_amplification_16block]
+# taxonomy_id: wal_write_amplification_16block
+# family: concurrency
+# WAL overhead ratio for 16-block transactions (amortized, tighter).
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+[operation_thresholds.mvcc_contention_2writers]
+# taxonomy_id: mvcc_contention_2writers
+# family: concurrency
+warn_percent = 15
+fail_percent = 30
+noise_floor_percent = 5
+
+[operation_thresholds.mvcc_contention_4writers]
+# taxonomy_id: mvcc_contention_4writers
+# family: concurrency
+warn_percent = 18
+fail_percent = 35
+noise_floor_percent = 8
+
+[operation_thresholds.mvcc_contention_8writers]
+# taxonomy_id: mvcc_contention_8writers
+# family: concurrency
+# 8 concurrent writers: scheduling variance dominates.
+warn_percent = 20
+fail_percent = 40
+noise_floor_percent = 10
+
+# ── Repair family ─────────────────────────────────────────────────────
+# Scrub and RaptorQ erasure coding benchmarks.
+# CPU-heavy (checksums + erasure math); moderate variance.
+# Family defaults: warn=12%, fail=25%, noise=5%.
+
+[operation_thresholds.scrub_clean_256blocks]
+# taxonomy_id: scrub_clean_256blocks
+# family: repair
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+[operation_thresholds.scrub_corrupted_256blocks]
+# taxonomy_id: scrub_corrupted_256blocks
+# family: repair
+# Corruption path exercises recovery logic — slightly wider.
+warn_percent = 15
+fail_percent = 30
+noise_floor_percent = 5
+
+[operation_thresholds.raptorq_encode_group_16blocks]
+# taxonomy_id: raptorq_encode_group_16blocks
+# family: repair
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+[operation_thresholds.raptorq_decode_group_16blocks]
+# taxonomy_id: raptorq_decode_group_16blocks
+# family: repair
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
 # ── Legacy thresholds (retained for backward compatibility with
 #    benchmark_record.sh; mapped to taxonomy via owning family) ──────────
 

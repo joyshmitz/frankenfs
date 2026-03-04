@@ -5989,13 +5989,72 @@ immediately after each write. If the scrub daemon cannot keep up with
 re-encoding, there is a window where corrupted blocks cannot be repaired.
 How large is this window acceptable to be?
 
-**Tentative Resolution:** The staleness window is acceptable as long as it is
-bounded. The scrub daemon processes stale groups in priority order (groups
-with the most stale symbols first). A configurable "max staleness" threshold
-(default: 30 seconds or 1000 stale blocks, whichever is reached first)
-triggers synchronous re-encoding on the next `fsync`.
+**Status:** Resolved (2026-03-04, `bd-h6nz.6.3`).
 
-**Must Resolve By:** Phase 8 (repair implementation).
+**Decision (Accepted):** FrankenFS V1.x uses bounded staleness with lazy
+default refresh, timeout escalation, and adaptive/eager overrides.
+- Default per-group refresh policy is `Lazy { max_staleness = 30s }`.
+- Every write marks the group dirty immediately.
+- Lazy groups refresh on scrub; they do not refresh on every write.
+- If a write/flush boundary observes `dirty_age >= max_staleness`, refresh is
+  forced synchronously (`staleness_timeout` mode).
+- Eager policy refreshes immediately on write/flush boundaries.
+- Adaptive policy switches to eager when posterior risk exceeds threshold,
+  otherwise behaves as lazy with the same staleness timeout guard.
+- V1.x does not add a stale-block-count trigger; age-bound enforcement is the
+  canonical invalidation budget in this release.
+
+**Expected-Loss Matrix (lower is better):**
+
+| Option | Data-Loss Window Risk | Write-Path Overhead Risk | Operational Complexity Risk | Composite |
+|--------|------------------------|--------------------------|-----------------------------|-----------|
+| A. Lazy + timeout + adaptive/eager override (current) | 2 | 2 | 2 | **6** |
+| B. Always eager refresh | 1 | 7 | 2 | 10 |
+| C. Pure lazy without timeout escalation | 7 | 1 | 1 | 9 |
+
+Option A is selected because it keeps the stale-symbol window explicitly
+bounded while avoiding always-eager write amplification.
+
+**Measured Evidence (deterministic):**
+
+1. `crates/ffs-repair/src/pipeline.rs::eager_policy_refreshes_symbols_on_write`
+   - Eager policy increments generation immediately on write-triggered refresh.
+2. `crates/ffs-repair/src/pipeline.rs::lazy_policy_refreshes_on_next_scrub_cycle`
+   - Lazy policy keeps group dirty until scrub-triggered refresh.
+3. `crates/ffs-repair/src/pipeline.rs::staleness_timeout_forces_refresh`
+   - Timeout path forces refresh when dirty age exceeds staleness budget.
+4. `crates/ffs-repair/src/pipeline.rs::adaptive_policy_switches_eager_based_on_posterior`
+   - Adaptive mode transitions between lazy and eager based on risk posterior.
+5. `crates/ffs-repair/src/pipeline.rs::writeback_flush_queue_triggers_symbol_refresh`
+   - Flush lifecycle integration propagates queued dirty groups into refresh.
+6. `scripts/e2e/ffs_repair_recovery_smoke.sh`
+   - End-to-end repair path emits deterministic scenario markers and evidence
+     artifacts, validating refresh workflow in scripted execution.
+
+**Executable Validation Matrix:**
+
+| Policy Clause | Validation Path | Pass Condition | Decision-Sensitive Failure Class |
+|---------------|-----------------|----------------|----------------------------------|
+| Writes invalidate symbols immediately | `mark_group_dirty`, `dirty_group_tracking_api_reports_state` | Group enters dirty set after write notification | `stale_tracking_missing` |
+| Lazy policy defers refresh until scrub | `lazy_policy_refreshes_on_next_scrub_cycle`, `group_flush_keeps_fresh_lazy_group_dirty` | Group remains dirty until scrub-triggered refresh | `stale_window_unbounded` |
+| Staleness timeout forces bounded refresh | `staleness_timeout_forces_refresh` | Generation increments once timeout threshold is exceeded | `timeout_refresh_missed` |
+| Adaptive mode escalates to eager under risk | `adaptive_policy_switches_eager_based_on_posterior` | High-risk branch refreshes eagerly; low-risk branch stays lazy | `adaptive_policy_misroute` |
+| Flush/writeback path can trigger refresh | `writeback_flush_queue_triggers_symbol_refresh`, `group_flush_refreshes_eager_policy` | Flush boundary produces refresh or deterministic defer outcome | `flush_refresh_gap` |
+| Refresh observability is structured and machine-parseable | `pipeline.rs` log assertions + `ffs_repair_recovery_smoke.sh` artifacts | Logs include refresh decision/outcome markers and scenario evidence lines | `refresh_observability_gap` |
+
+**Decision-Sensitive Logging Contract:**
+- `refresh_policy_evaluated` MUST include group/policy/dirty-age context.
+- `refresh_staleness_timeout_triggered` MUST include dirty-age and threshold.
+- `refresh_symbols_applied` / `symbol refresh complete` MUST include
+  `refresh_mode` and symbol generation counters.
+- Flush integration MUST emit either `symbol_refresh_complete` or
+  `symbol_refresh_deferred` with group identity.
+
+**Follow-on Scope (deferred):**
+- Optional block-count staleness trigger remains post-V1 and requires explicit
+  expected-loss improvement over age-only timeout.
+- Additional SLO instrumentation for stale-window percentile tracking remains a
+  follow-on implementation item.
 
 #### OQ4: FUSE Writeback Mode Interaction with MVCC Dirty Tracking
 

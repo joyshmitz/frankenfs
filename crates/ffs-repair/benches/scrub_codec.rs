@@ -1,0 +1,208 @@
+#![forbid(unsafe_code)]
+#![allow(clippy::cast_possible_truncation)]
+
+//! Scrub and RaptorQ codec benchmarks for ffs-repair.
+//!
+//! Measures:
+//! - Scrub latency over clean vs. corrupted block ranges.
+//! - RaptorQ encode/decode throughput for 16-block repair groups.
+
+use asupersync::Cx;
+use criterion::{Criterion, criterion_group, criterion_main};
+use ffs_block::{BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice};
+use ffs_error::Result;
+use ffs_repair::codec::{decode_group, encode_group};
+use ffs_repair::scrub::{BlockValidator, BlockVerdict, Scrubber, ZeroCheckValidator};
+use ffs_types::{BlockNumber, ByteOffset, GroupNumber};
+use parking_lot::Mutex;
+
+const BLOCK_SIZE: u32 = 4096;
+const SCRUB_BLOCK_COUNT: u64 = 256;
+const RAPTORQ_SOURCE_BLOCKS: u32 = 16;
+const RAPTORQ_REPAIR_COUNT: u32 = 4;
+
+// ── In-memory ByteDevice ──────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct MemByteDevice {
+    bytes: Mutex<Vec<u8>>,
+}
+
+impl MemByteDevice {
+    fn new(size: usize) -> Self {
+        Self {
+            bytes: Mutex::new(vec![0u8; size]),
+        }
+    }
+}
+
+impl ByteDevice for MemByteDevice {
+    fn len_bytes(&self) -> u64 {
+        self.bytes.lock().len() as u64
+    }
+
+    fn read_exact_at(&self, _cx: &Cx, offset: ByteOffset, buf: &mut [u8]) -> Result<()> {
+        let off = offset.0 as usize;
+        let guard = self.bytes.lock();
+        buf.copy_from_slice(&guard[off..off + buf.len()]);
+        drop(guard);
+        Ok(())
+    }
+
+    fn write_all_at(&self, _cx: &Cx, offset: ByteOffset, buf: &[u8]) -> Result<()> {
+        let off = offset.0 as usize;
+        let mut guard = self.bytes.lock();
+        guard[off..off + buf.len()].copy_from_slice(buf);
+        drop(guard);
+        Ok(())
+    }
+
+    fn sync(&self, _cx: &Cx) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn make_device(block_count: usize) -> ByteBlockDevice<MemByteDevice> {
+    let mem = MemByteDevice::new(BLOCK_SIZE as usize * block_count);
+    ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device")
+}
+
+/// Fill device blocks with deterministic non-zero data.
+fn fill_device(cx: &Cx, device: &impl BlockDevice, count: u64) {
+    for i in 0..count {
+        let mut data = vec![0u8; BLOCK_SIZE as usize];
+        // Fill with block-number-derived pattern so blocks are distinct.
+        let seed = (i as u32).to_le_bytes();
+        for chunk in data.chunks_mut(4) {
+            chunk.copy_from_slice(&seed);
+        }
+        device
+            .write_block(cx, BlockNumber(i), &data)
+            .expect("write");
+    }
+}
+
+// ── Scrub benchmarks ──────────────────────────────────────────────────────
+
+/// Validator that marks specific blocks as corrupt (for benchmarking the
+/// corruption detection path).
+struct CorruptEveryNthValidator {
+    every_n: u64,
+}
+
+impl BlockValidator for CorruptEveryNthValidator {
+    fn validate(&self, block: BlockNumber, _data: &BlockBuf) -> BlockVerdict {
+        if block.0 % self.every_n == 0 && block.0 > 0 {
+            BlockVerdict::Corrupt(vec![(
+                ffs_repair::scrub::CorruptionKind::ChecksumMismatch,
+                ffs_repair::scrub::Severity::Error,
+                format!("synthetic corruption at block {}", block.0),
+            )])
+        } else {
+            BlockVerdict::Clean
+        }
+    }
+}
+
+fn bench_scrub(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let device = make_device(SCRUB_BLOCK_COUNT as usize);
+    fill_device(&cx, &device, SCRUB_BLOCK_COUNT);
+
+    // Scrub 256 clean blocks (zero-check validator on non-zero data = all clean).
+    let clean_validator = ZeroCheckValidator;
+    c.bench_function("scrub_clean_256blocks", |b| {
+        b.iter(|| {
+            let scrubber = Scrubber::new(&device, &clean_validator);
+            let report = scrubber
+                .scrub_range(&cx, BlockNumber(0), SCRUB_BLOCK_COUNT)
+                .expect("scrub");
+            assert_eq!(report.blocks_scanned, SCRUB_BLOCK_COUNT);
+        });
+    });
+
+    // Scrub 256 blocks with ~10% corruption (every 10th block).
+    let corrupt_validator = CorruptEveryNthValidator { every_n: 10 };
+    c.bench_function("scrub_corrupted_256blocks", |b| {
+        b.iter(|| {
+            let scrubber = Scrubber::new(&device, &corrupt_validator);
+            let report = scrubber
+                .scrub_range(&cx, BlockNumber(0), SCRUB_BLOCK_COUNT)
+                .expect("scrub");
+            assert!(report.blocks_corrupt > 0);
+        });
+    });
+}
+
+// ── RaptorQ codec benchmarks ──────────────────────────────────────────────
+
+fn bench_raptorq_codec(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let device = make_device(RAPTORQ_SOURCE_BLOCKS as usize);
+    fill_device(&cx, &device, u64::from(RAPTORQ_SOURCE_BLOCKS));
+
+    let fs_uuid: [u8; 16] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10,
+    ];
+    let group = GroupNumber(0);
+
+    // Encode benchmark.
+    c.bench_function("raptorq_encode_group_16blocks", |b| {
+        b.iter(|| {
+            let encoded = encode_group(
+                &cx,
+                &device,
+                &fs_uuid,
+                group,
+                BlockNumber(0),
+                RAPTORQ_SOURCE_BLOCKS,
+                RAPTORQ_REPAIR_COUNT,
+            )
+            .expect("encode");
+            assert_eq!(encoded.repair_symbols.len(), RAPTORQ_REPAIR_COUNT as usize);
+        });
+    });
+
+    // Pre-encode for decode benchmark.
+    let encoded = encode_group(
+        &cx,
+        &device,
+        &fs_uuid,
+        group,
+        BlockNumber(0),
+        RAPTORQ_SOURCE_BLOCKS,
+        RAPTORQ_REPAIR_COUNT,
+    )
+    .expect("encode for decode");
+
+    let repair_symbols: Vec<(u32, Vec<u8>)> = encoded
+        .repair_symbols
+        .iter()
+        .map(|s| (s.esi, s.data.clone()))
+        .collect();
+
+    // Corrupt indices: blocks 0 and 1 (2 blocks to recover).
+    let corrupt_indices = [0_u32, 1];
+
+    // Decode benchmark.
+    c.bench_function("raptorq_decode_group_16blocks", |b| {
+        b.iter(|| {
+            let outcome = decode_group(
+                &cx,
+                &device,
+                &fs_uuid,
+                group,
+                BlockNumber(0),
+                RAPTORQ_SOURCE_BLOCKS,
+                &corrupt_indices,
+                &repair_symbols,
+            )
+            .expect("decode");
+            assert!(outcome.complete);
+        });
+    });
+}
+
+criterion_group!(repair_benches, bench_scrub, bench_raptorq_codec);
+criterion_main!(repair_benches);

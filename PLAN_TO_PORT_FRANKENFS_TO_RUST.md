@@ -39,6 +39,7 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` complete.
 - [x] Doc fix: `COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md` Section 23.8.2 references `zerocopy` and “panic on OOB” behavior — align with current `ffs-types` parsing helpers (`ensure_slice`, `read_le_u*`) and “return Err, never panic” fuzz doctrine
 - [x] Doc fix: `PROPOSED_ARCHITECTURE.md` crate dependency descriptions must match actual `Cargo.toml` (e.g., `ffs-block` does not currently depend on `ffs-ondisk`)
 - [x] OQ2 closure (`bd-h6nz.6.2`): keep strict FCW+SSI for V1.x, document expected-loss rationale, and bind the decision to deterministic contention evidence/tests
+- [x] OQ3 closure (`bd-h6nz.6.3`): accept bounded staleness policy (lazy default + timeout escalation + adaptive/eager override), align spec contract to implemented refresh state machine, and bind to deterministic repair refresh tests/E2E evidence
 
 ### 0.2 `ffs-types` (Canonical Newtypes + Shared Parsing Primitives)
 

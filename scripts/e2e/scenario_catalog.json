@@ -68,6 +68,166 @@
           "evidence": "CRASH_MATRIX_EVENT|operation_id=${operation_id}|scenario_id=${scenario_id}|outcome=${outcome}|error_class=${error_class}"
         }
       ]
+    },
+    {
+      "suite_id": "ffs_benchmark_taxonomy",
+      "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "taxonomy_builds_clean",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_builds_clean|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_covers_baseline",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_covers_baseline|outcome=PASS"
+        },
+        {
+          "id": "thresholds_toml_valid",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=thresholds_toml_valid|outcome=PASS"
+        },
+        {
+          "id": "envelope_ordering_sane",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=envelope_ordering_sane|outcome=PASS"
+        },
+        {
+          "id": "taxonomy_json_export",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=taxonomy_json_export|outcome=PASS"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_benchmark_expansion",
+      "script": "scripts/e2e/ffs_benchmark_expansion_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "bench_mvcc_expansion_compiles",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=bench_mvcc_expansion_compiles|outcome=PASS"
+        },
+        {
+          "id": "bench_repair_compiles",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=bench_repair_compiles|outcome=PASS"
+        },
+        {
+          "id": "expanded_taxonomy_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=expanded_taxonomy_coverage|outcome=PASS"
+        },
+        {
+          "id": "expanded_thresholds_valid",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=expanded_thresholds_valid|outcome=PASS"
+        },
+        {
+          "id": "record_script_covers_expansion",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=record_script_covers_expansion|outcome=PASS"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_log_contract",
+      "script": "scripts/e2e/ffs_log_contract_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "log_contract_builds_clean",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_builds_clean|outcome=PASS"
+        },
+        {
+          "id": "log_contract_field_coverage",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_field_coverage|outcome=PASS"
+        },
+        {
+          "id": "log_contract_outcome_vocabulary",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_outcome_vocabulary|outcome=PASS"
+        },
+        {
+          "id": "log_contract_e2e_markers_valid",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_e2e_markers_valid|outcome=PASS"
+        },
+        {
+          "id": "log_contract_duration_convention",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_duration_convention|outcome=PASS"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_perf_comparison",
+      "script": "scripts/e2e/ffs_perf_comparison_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id": "perf_comparison_builds_clean",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=perf_comparison_builds_clean|outcome=PASS"
+        },
+        {
+          "id": "perf_comparison_stats_accuracy",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=perf_comparison_stats_accuracy|outcome=PASS"
+        },
+        {
+          "id": "perf_comparison_ttest_accuracy",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=perf_comparison_ttest_accuracy|outcome=PASS"
+        },
+        {
+          "id": "perf_comparison_hysteresis_gates",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=perf_comparison_hysteresis_gates|outcome=PASS"
+        },
+        {
+          "id": "perf_comparison_envelope_integration",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=perf_comparison_envelope_integration|outcome=PASS"
+        }
+      ]
     }
   ],
   "gate_minimums": [

@@ -2,6 +2,8 @@
 
 pub mod benchmark_taxonomy;
 pub mod e2e;
+pub mod log_contract;
+pub mod perf_comparison;
 pub mod perf_regression;
 
 use anyhow::{Context, Result, bail};

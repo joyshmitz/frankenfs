@@ -662,6 +662,64 @@ add_bench "ffs-block writeback fsync batch 100x4k (criterion)" \
     "fsync_batch_100" \
     "0.390625"
 
+# ── WAL / MVCC expanded (criterion, ffs-mvcc) ─────────────────────────
+
+add_bench "ffs-mvcc WAL write amplification 1-block (criterion)" \
+    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- wal_write_amplification_1block" \
+    "ffs_mvcc_wal_write_amplification_1block.json" \
+    "wal_write_amplification_1block" \
+    "0.00390625"
+
+add_bench "ffs-mvcc WAL write amplification 16-block (criterion)" \
+    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- wal_write_amplification_16block" \
+    "ffs_mvcc_wal_write_amplification_16block.json" \
+    "wal_write_amplification_16block" \
+    "0.0625"
+
+add_bench "ffs-mvcc contention 2 writers (criterion)" \
+    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- mvcc_contention_2writers" \
+    "ffs_mvcc_contention_2writers.json" \
+    "mvcc_contention_2writers" \
+    "0"
+
+add_bench "ffs-mvcc contention 4 writers (criterion)" \
+    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- mvcc_contention_4writers" \
+    "ffs_mvcc_contention_4writers.json" \
+    "mvcc_contention_4writers" \
+    "0"
+
+add_bench "ffs-mvcc contention 8 writers (criterion)" \
+    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- mvcc_contention_8writers" \
+    "ffs_mvcc_contention_8writers.json" \
+    "mvcc_contention_8writers" \
+    "0"
+
+# ── Scrub / RaptorQ codec (criterion, ffs-repair) ─────────────────────
+
+add_bench "ffs-repair scrub clean 256 blocks (criterion)" \
+    "rch exec -- cargo bench -p ffs-repair --bench scrub_codec -- scrub_clean_256blocks" \
+    "ffs_repair_scrub_clean_256blocks.json" \
+    "scrub_clean_256blocks" \
+    "0"
+
+add_bench "ffs-repair scrub corrupted 256 blocks (criterion)" \
+    "rch exec -- cargo bench -p ffs-repair --bench scrub_codec -- scrub_corrupted_256blocks" \
+    "ffs_repair_scrub_corrupted_256blocks.json" \
+    "scrub_corrupted_256blocks" \
+    "0"
+
+add_bench "ffs-repair raptorq encode 16-block group (criterion)" \
+    "rch exec -- cargo bench -p ffs-repair --bench scrub_codec -- raptorq_encode_group_16blocks" \
+    "ffs_repair_raptorq_encode_group_16blocks.json" \
+    "raptorq_encode_group_16blocks" \
+    "0"
+
+add_bench "ffs-repair raptorq decode 16-block group (criterion)" \
+    "rch exec -- cargo bench -p ffs-repair --bench scrub_codec -- raptorq_decode_group_16blocks" \
+    "ffs_repair_raptorq_decode_group_16blocks.json" \
+    "raptorq_decode_group_16blocks" \
+    "0"
+
 configure_mount_benchmarks
 record_mount_pending_labels
 
