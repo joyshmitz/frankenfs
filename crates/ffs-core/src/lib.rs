@@ -5342,14 +5342,56 @@ impl OpenFs {
         "btrfs_rw_fallocate_unsupported_mode_bits";
     const BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE_UNSUPPORTED: &str =
         "btrfs_rw_fallocate_punch_hole_unsupported";
+    const BTRFS_FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+    const BTRFS_FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+
+    fn btrfs_fallocate_flags(mode: i32) -> (bool, bool, i32) {
+        let keep_size = (mode & Self::BTRFS_FALLOC_FL_KEEP_SIZE) != 0;
+        let punch_hole = (mode & Self::BTRFS_FALLOC_FL_PUNCH_HOLE) != 0;
+        let unsupported_bits =
+            mode & !(Self::BTRFS_FALLOC_FL_KEEP_SIZE | Self::BTRFS_FALLOC_FL_PUNCH_HOLE);
+        (keep_size, punch_hole, unsupported_bits)
+    }
+
+    fn btrfs_validate_fallocate_mode(
+        mode: i32,
+        operation_id: &str,
+        scenario_id: &str,
+    ) -> ffs_error::Result<bool> {
+        let (keep_size, punch_hole, unsupported_bits) = Self::btrfs_fallocate_flags(mode);
+        if unsupported_bits != 0 {
+            let unsupported_bits_hex = format!("0x{unsupported_bits:08x}");
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "unsupported_mode_bits",
+                unsupported_bits = unsupported_bits_hex.as_str(),
+                "btrfs_fallocate_rejected"
+            );
+            return Err(FfsError::UnsupportedFeature(format!(
+                "btrfs fallocate unsupported mode bits: 0x{unsupported_bits:08x}"
+            )));
+        }
+        if punch_hole {
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "unsupported_punch_hole_mode",
+                "btrfs_fallocate_rejected"
+            );
+            return Err(FfsError::UnsupportedFeature(
+                "btrfs fallocate punch-hole mode is not yet supported".into(),
+            ));
+        }
+        Ok(keep_size)
+    }
 
     fn btrfs_fallocate_scenario_id(mode: i32) -> &'static str {
-        const KEEP_SIZE: i32 = 0x01;
-        const PUNCH_HOLE: i32 = 0x02;
-
-        let keep_size = (mode & KEEP_SIZE) != 0;
-        let punch_hole = (mode & PUNCH_HOLE) != 0;
-        let unsupported_bits = mode & !(KEEP_SIZE | PUNCH_HOLE);
+        let (keep_size, punch_hole, unsupported_bits) = Self::btrfs_fallocate_flags(mode);
 
         if unsupported_bits != 0 {
             Self::BTRFS_RW_SCENARIO_FALLOCATE_UNSUPPORTED_MODE_BITS
@@ -6191,9 +6233,6 @@ impl OpenFs {
         length: u64,
         mode: i32,
     ) -> ffs_error::Result<()> {
-        const KEEP_SIZE: i32 = 0x01;
-        const PUNCH_HOLE: i32 = 0x02;
-
         let scenario_id = Self::btrfs_fallocate_scenario_id(mode);
         let operation_id = Self::btrfs_fallocate_operation_id(ino, offset, length, mode);
         info!(
@@ -6208,37 +6247,7 @@ impl OpenFs {
             "btrfs_fallocate_start"
         );
 
-        let keep_size = (mode & KEEP_SIZE) != 0;
-        let punch_hole = (mode & PUNCH_HOLE) != 0;
-        let unsupported_bits = mode & !(KEEP_SIZE | PUNCH_HOLE);
-        if unsupported_bits != 0 {
-            let unsupported_bits_hex = format!("0x{unsupported_bits:08x}");
-            warn!(
-                target: "ffs::btrfs::rw",
-                operation_id = %operation_id,
-                scenario_id,
-                outcome = "rejected",
-                error_class = "unsupported_mode_bits",
-                unsupported_bits = unsupported_bits_hex.as_str(),
-                "btrfs_fallocate_rejected"
-            );
-            return Err(FfsError::UnsupportedFeature(format!(
-                "btrfs fallocate unsupported mode bits: 0x{unsupported_bits:08x}"
-            )));
-        }
-        if punch_hole {
-            warn!(
-                target: "ffs::btrfs::rw",
-                operation_id = %operation_id,
-                scenario_id,
-                outcome = "rejected",
-                error_class = "unsupported_punch_hole_mode",
-                "btrfs_fallocate_rejected"
-            );
-            return Err(FfsError::UnsupportedFeature(
-                "btrfs fallocate punch-hole mode is not yet supported".into(),
-            ));
-        }
+        let keep_size = Self::btrfs_validate_fallocate_mode(mode, &operation_id, scenario_id)?;
 
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
@@ -6495,14 +6504,23 @@ impl OpenFs {
     /// Set an extended attribute on a btrfs inode.
     fn btrfs_setxattr(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         ino: InodeNumber,
         name: &str,
         value: &[u8],
-        _mode: XattrSetMode,
+        mode: XattrSetMode,
     ) -> ffs_error::Result<()> {
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
+        let existing = self.btrfs_getxattr(cx, ino, name)?;
+
+        match mode {
+            XattrSetMode::Create if existing.is_some() => return Err(FfsError::Exists),
+            XattrSetMode::Replace if existing.is_none() => {
+                return Err(FfsError::NotFound(name.to_owned()));
+            }
+            XattrSetMode::Set | XattrSetMode::Create | XattrSetMode::Replace => {}
+        }
 
         let mut alloc = alloc_mutex.lock();
 
@@ -17012,6 +17030,42 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_xattr_respects_create_and_replace_modes() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                InodeNumber(1),
+                OsStr::new("xattr_modes.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        ops.setxattr(&cx, attr.ino, "user.color", b"blue", XattrSetMode::Create)
+            .expect("initial create");
+
+        let err = ops
+            .setxattr(&cx, attr.ino, "user.color", b"green", XattrSetMode::Create)
+            .expect_err("create on existing xattr should fail");
+        assert_eq!(err.to_errno(), libc::EEXIST);
+        assert_eq!(
+            ops.getxattr(&cx, attr.ino, "user.color").unwrap(),
+            Some(b"blue".to_vec()),
+            "failed create path must not mutate existing xattr value"
+        );
+
+        let err = ops
+            .setxattr(&cx, attr.ino, "user.missing", b"x", XattrSetMode::Replace)
+            .expect_err("replace on missing xattr should fail");
+        assert_eq!(err.to_errno(), libc::ENOENT);
+        assert_eq!(ops.getxattr(&cx, attr.ino, "user.missing").unwrap(), None);
+    }
+
+    #[test]
     fn btrfs_write_fallocate_basic() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -17089,6 +17143,15 @@ mod tests {
         let attr = ops
             .create(&cx, InodeNumber(1), OsStr::new("hole.bin"), 0o644, 0, 0)
             .unwrap();
+        ops.write(&cx, attr.ino, 0, b"preserve-me")
+            .expect("seed file before unsupported fallocate");
+        let before_attr = ops
+            .getattr(&cx, attr.ino)
+            .expect("getattr before rejection");
+        let before_data = ops
+            .read(&cx, attr.ino, 0, 4096)
+            .expect("read before rejection");
+
         let err = ops
             .fallocate(
                 &cx,
@@ -17108,6 +17171,18 @@ mod tests {
             detail.contains("punch-hole"),
             "unexpected error detail for punch-hole rejection: {detail}"
         );
+        let after_attr = ops.getattr(&cx, attr.ino).expect("getattr after rejection");
+        let after_data = ops
+            .read(&cx, attr.ino, 0, 4096)
+            .expect("read after rejection");
+        assert_eq!(
+            after_attr.size, before_attr.size,
+            "unsupported punch-hole mode must not change file size"
+        );
+        assert_eq!(
+            after_data, before_data,
+            "unsupported punch-hole mode must not mutate file data"
+        );
     }
 
     #[test]
@@ -17125,6 +17200,15 @@ mod tests {
                 0,
             )
             .unwrap();
+        ops.write(&cx, attr.ino, 0, b"keep-intact")
+            .expect("seed file before mode-bit rejection");
+        let before_attr = ops
+            .getattr(&cx, attr.ino)
+            .expect("getattr before rejection");
+        let before_data = ops
+            .read(&cx, attr.ino, 0, 4096)
+            .expect("read before rejection");
+
         let err = ops
             .fallocate(&cx, attr.ino, 0, 4096, 0x40)
             .expect_err("unsupported mode bits should be rejected for btrfs");
@@ -17137,6 +17221,18 @@ mod tests {
         assert!(
             detail.contains("unsupported mode bits"),
             "unexpected error detail for unsupported mode bits: {detail}"
+        );
+        let after_attr = ops.getattr(&cx, attr.ino).expect("getattr after rejection");
+        let after_data = ops
+            .read(&cx, attr.ino, 0, 4096)
+            .expect("read after rejection");
+        assert_eq!(
+            after_attr.size, before_attr.size,
+            "unsupported mode bits must not change file size"
+        );
+        assert_eq!(
+            after_data, before_data,
+            "unsupported mode bits must not mutate file data"
         );
     }
 
@@ -17236,9 +17332,10 @@ mod tests {
         let rejected = logs
             .iter()
             .find(|entry| {
-                entry.get("message").and_then(Value::as_str) == Some("btrfs_fallocate_rejected")
+                entry.get("error_class").and_then(Value::as_str)
+                    == Some("unsupported_punch_hole_mode")
             })
-            .expect("expected btrfs_fallocate_rejected log event");
+            .unwrap_or_else(|| panic!("expected punch-hole rejection log event, logs={logs:?}"));
 
         assert_eq!(
             rejected.get("scenario_id").and_then(Value::as_str),
@@ -17252,12 +17349,78 @@ mod tests {
             rejected.get("error_class").and_then(Value::as_str),
             Some("unsupported_punch_hole_mode")
         );
+        assert_eq!(
+            rejected.get("message").and_then(Value::as_str),
+            Some("btrfs_fallocate_rejected")
+        );
         assert!(
             rejected
                 .get("operation_id")
                 .and_then(Value::as_str)
                 .is_some_and(|value| value.starts_with("btrfs-fallocate-")),
             "missing or malformed operation_id in rejection log: {rejected:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_unsupported_mode_bits_log_contract() {
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        let err = tracing::subscriber::with_default(subscriber, || {
+            let (fs, cx) = open_writable_btrfs();
+            let ops: &dyn FsOps = &fs;
+
+            let attr = ops
+                .create(
+                    &cx,
+                    InodeNumber(1),
+                    OsStr::new("log_reject_mode_bits.bin"),
+                    0o644,
+                    0,
+                    0,
+                )
+                .expect("create file for unsupported-mode-bits log test");
+            ops.fallocate(&cx, attr.ino, 0, 4096, 0x40)
+                .expect_err("unsupported mode bits should be rejected")
+        });
+        assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
+
+        let logs = parse_json_logs(&buffer);
+        let rejected = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("btrfs_fallocate_rejected")
+                    && entry.get("error_class").and_then(Value::as_str)
+                        == Some("unsupported_mode_bits")
+            })
+            .expect("expected btrfs_fallocate_rejected log for unsupported mode bits");
+
+        assert_eq!(
+            rejected.get("scenario_id").and_then(Value::as_str),
+            Some("btrfs_rw_fallocate_unsupported_mode_bits")
+        );
+        assert_eq!(
+            rejected.get("outcome").and_then(Value::as_str),
+            Some("rejected")
+        );
+        assert_eq!(
+            rejected.get("unsupported_bits").and_then(Value::as_str),
+            Some("0x00000040")
+        );
+        assert!(
+            rejected
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("btrfs-fallocate-")),
+            "missing or malformed operation_id in unsupported-mode-bits log: {rejected:?}"
         );
     }
 

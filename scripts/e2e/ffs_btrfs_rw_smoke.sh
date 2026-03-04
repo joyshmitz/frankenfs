@@ -392,14 +392,60 @@ fd = os.open(path, os.O_RDWR)
 try:
     if not hasattr(fcntl, "fallocate"):
         raise SystemExit("python fcntl.fallocate is unavailable")
+    before_size = os.fstat(fd).st_size
+    before_data = os.pread(fd, min(before_size, 8192), 0)
     mode = fcntl.FALLOC_FL_KEEP_SIZE | fcntl.FALLOC_FL_PUNCH_HOLE
     try:
         fcntl.fallocate(fd, mode, 0, 4096)
     except OSError as exc:  # expected path
         if exc.errno == errno.EOPNOTSUPP:
+            after_size = os.fstat(fd).st_size
+            after_data = os.pread(fd, min(after_size, 8192), 0)
+            if after_size != before_size:
+                raise SystemExit(
+                    f"unsupported punch-hole changed file size: before={before_size} after={after_size}"
+                )
+            if after_data != before_data:
+                raise SystemExit("unsupported punch-hole mutated file bytes before rejection")
             raise SystemExit(0)
         raise SystemExit(f"expected errno {errno.EOPNOTSUPP}, got {exc.errno}: {exc}")
     raise SystemExit("expected punch-hole fallocate to fail with EOPNOTSUPP, but it succeeded")
+finally:
+    os.close(fd)
+PY
+}
+
+check_unsupported_mode_bits_eopnotsupp() {
+    local path="$1"
+    python3 - "$path" <<'PY'
+import errno
+import fcntl
+import os
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDWR)
+try:
+    if not hasattr(fcntl, "fallocate"):
+        raise SystemExit("python fcntl.fallocate is unavailable")
+    before_size = os.fstat(fd).st_size
+    before_data = os.pread(fd, min(before_size, 8192), 0)
+    unsupported_mode = 0x40
+    try:
+        fcntl.fallocate(fd, unsupported_mode, 0, 4096)
+    except OSError as exc:  # expected path
+        if exc.errno == errno.EOPNOTSUPP:
+            after_size = os.fstat(fd).st_size
+            after_data = os.pread(fd, min(after_size, 8192), 0)
+            if after_size != before_size:
+                raise SystemExit(
+                    f"unsupported mode bits changed file size: before={before_size} after={after_size}"
+                )
+            if after_data != before_data:
+                raise SystemExit("unsupported mode bits mutated file bytes before rejection")
+            raise SystemExit(0)
+        raise SystemExit(f"expected errno {errno.EOPNOTSUPP}, got {exc.errno}: {exc}")
+    raise SystemExit("expected unsupported-mode-bits fallocate to fail with EOPNOTSUPP, but it succeeded")
 finally:
     os.close(fd)
 PY
@@ -438,6 +484,7 @@ run_case_shell "file_append" "printf 'append-line\\n' >> '$MOUNT_RW/small.txt' &
 run_case_shell "file_truncate_extend_2mb" "truncate -s 2097152 '$MOUNT_RW/large.bin'"
 run_case_shell "file_truncate_shrink_256b" "truncate -s 256 '$MOUNT_RW/large.bin' && test \"$(stat -c '%s' '$MOUNT_RW/large.bin')\" -eq 256"
 run_case "unsupported_fallocate_punch_hole_errno_eopnotsupp" check_punch_hole_eopnotsupp "$MOUNT_RW/medium.bin"
+run_case "unsupported_fallocate_mode_bits_errno_eopnotsupp" check_unsupported_mode_bits_eopnotsupp "$MOUNT_RW/medium.bin"
 
 run_case "dir_mkdir_single" mkdir "$MOUNT_RW/single_dir"
 run_case "dir_mkdir_nested" mkdir -p "$MOUNT_RW/nested/a/b"

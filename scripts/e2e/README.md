@@ -99,7 +99,7 @@ The btrfs read-write smoke suite exercises:
 
 1. Fixture lifecycle: create a fresh 256MiB mkfs.btrfs image, then fallback to a known-good btrfs fixture if current parser support is incomplete
 2. RW operations: create/write/overwrite (small/4KB/1MB), append, truncate extend/shrink
-3. Unsupported-operation contract: punch-hole `fallocate` rejection with expected `EOPNOTSUPP`
+3. Unsupported-operation contract: punch-hole and unsupported-mode-bit `fallocate` rejections with expected `EOPNOTSUPP`, including no-side-effect checks
 4. Directory/name/link operations: mkdir/rmdir, rename within/across dir, rename-overwrite, unlink, symlink, hardlink, and inode-sharing checks
 5. COW-oriented checks: repeated rewrites of a hot file with superblock generation/root snapshots before/after write bursts
 6. Persistence checks: clean unmount, read-only remount, and post-remount data/metadata validation

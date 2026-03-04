@@ -59,13 +59,16 @@ Each row maps directly to deterministic unit/E2E coverage by stable test/scenari
 | `unit::btrfs_write_rename` | `rename` (same/cross parent) | supported | success |
 | `unit::btrfs_write_setattr_truncate` | `setattr(size)` truncate path | supported | success |
 | `unit::btrfs_write_xattr_set_get_list` | `setxattr/getxattr/listxattr` | supported | success |
+| `unit::btrfs_write_xattr_respects_create_and_replace_modes` | `setxattr` mode semantics (`Create`/`Replace`) | supported | existing key rejects `Create` with `EEXIST`; missing key rejects `Replace` with `ENOENT`; no side effects |
 | `unit::btrfs_write_fallocate_basic` | `fallocate` preallocation (`mode=0`) | supported | success |
 | `unit::btrfs_write_fallocate_keep_size_does_not_extend_file` | `fallocate` with `FALLOC_FL_KEEP_SIZE` | partially supported | success, file size unchanged |
 | `unit::btrfs_write_fallocate_punch_hole_rejected` | `fallocate` with `FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE` | unsupported | `FfsError::UnsupportedFeature` -> `EOPNOTSUPP` |
 | `unit::btrfs_write_fallocate_unsupported_mode_bits_rejected` | `fallocate` with unsupported mode bits | unsupported | `FfsError::UnsupportedFeature` -> `EOPNOTSUPP` |
 | `unit::btrfs_write_fallocate_success_log_contract` | supported fallocate log contract | observability | structured log includes `operation_id`, `scenario_id`, `outcome=applied` |
 | `unit::btrfs_write_fallocate_rejection_log_contract` | unsupported fallocate log contract | observability | structured log includes `operation_id`, `scenario_id`, `outcome=rejected`, `error_class` |
+| `unit::btrfs_write_fallocate_unsupported_mode_bits_log_contract` | unsupported mode-bits fallocate log contract | observability | structured log includes `operation_id`, `scenario_id=btrfs_rw_fallocate_unsupported_mode_bits`, `outcome=rejected`, `error_class=unsupported_mode_bits` |
 | `e2e::btrfs_rw_unsupported_fallocate_punch_hole_errno_eopnotsupp` | FUSE path punch-hole rejection | unsupported | shell-visible `EOPNOTSUPP`, emitted `SCENARIO_RESULT` marker |
+| `e2e::btrfs_rw_unsupported_fallocate_mode_bits_errno_eopnotsupp` | FUSE path unsupported mode-bit rejection | unsupported | shell-visible `EOPNOTSUPP`, emitted `SCENARIO_RESULT` marker |
 
 | MVCC snapshot visibility | FrankenFS spec §3 | ✅ | Implemented in `ffs-mvcc` |
 | MVCC commit sequencing | FrankenFS spec §3 | ✅ | Implemented in `ffs-mvcc` |
