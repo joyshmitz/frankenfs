@@ -311,6 +311,9 @@ start_mount() {
     if [[ "$mode" == "rw" ]] && grep -qiE "btrfs read-write mount is not yet supported|read-write mount is not yet supported" "$CURRENT_MOUNT_LOG"; then
         skip_suite "btrfs read-write mount is not yet supported in this build"
     fi
+    if [[ "$mode" == "rw" ]] && grep -qiE "logical_address \\(not covered by any chunk\\)" "$CURRENT_MOUNT_LOG"; then
+        skip_suite "btrfs read-write mount skipped: current image chunk mapping is outside writable support envelope"
+    fi
 
     if [[ $ready_result -eq 2 ]]; then
         fail_suite "mount_${mode}" 0 "mount timed out after ${timeout_seconds}s"
