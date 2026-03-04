@@ -36,6 +36,49 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 ./scripts/e2e/ffs_xfstests_e2e.sh
 ```
 
+## Scenario Catalog Contract
+
+Deterministic scenario IDs are centrally defined in:
+
+- `scripts/e2e/scenario_catalog.json`
+
+The catalog is machine-validated by `e2e_validate_scenario_catalog` (in `scripts/e2e/lib.sh`) and runs automatically in CI via `./scripts/e2e/ffs_smoke.sh` Phase 0.
+
+### `scenario_id` Format
+
+All explicit IDs in the catalog must match:
+
+```regex
+^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$
+```
+
+That enforces lowercase snake-case with at least three segments (domain + behavior + qualifier).
+
+### Taxonomy
+
+| Category | Meaning |
+|----------|---------|
+| `happy` | Expected success path |
+| `edge` | Boundary/limit condition |
+| `error` | Explicit failure-path validation |
+| `corruption` | Injected corruption/torn/truncated state |
+| `recovery` | Post-failure restoration contract |
+| `degradation` | Pressure/fallback behavior |
+| `unsupported_op` | Deterministic unsupported-path rejection |
+
+### Gate Minimum Coverage
+
+The catalog encodes minimum category coverage per hardening epic (`gate_minimums`) so each track can be validated against a shared baseline:
+
+- `bd-h6nz.1` durable MVCC replay
+- `bd-h6nz.2` mount runtime wiring
+- `bd-h6nz.3` btrfs RW hardening
+- `bd-h6nz.4` fuzzing/adversarial expansion
+- `bd-h6nz.5` benchmark governance
+- `bd-h6nz.6` open-question closures
+- `bd-h6nz.7` operator tooling
+- `bd-h6nz.9` cross-epic verification contract
+
 ## What It Tests
 
 The smoke test exercises:

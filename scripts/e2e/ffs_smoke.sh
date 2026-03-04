@@ -79,6 +79,11 @@ e2e_init "ffs_smoke"
 e2e_print_env
 
 #######################################
+# Phase 0: Scenario catalog contract validation
+#######################################
+e2e_validate_scenario_catalog "$REPO_ROOT/scripts/e2e/scenario_catalog.json"
+
+#######################################
 # Phase 1: Build
 #######################################
 e2e_step "Phase 1: Build"

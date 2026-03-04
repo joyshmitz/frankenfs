@@ -86,6 +86,144 @@ e2e_step() {
 }
 
 #######################################
+# Validate E2E scenario catalog contract
+# Arguments:
+#   $1 - Catalog path (default: $REPO_ROOT/scripts/e2e/scenario_catalog.json)
+#######################################
+e2e_validate_scenario_catalog() {
+    local repo_root catalog_path
+    repo_root="${REPO_ROOT:-$(pwd)}"
+    catalog_path="${1:-$repo_root/scripts/e2e/scenario_catalog.json}"
+
+    e2e_step "Scenario Catalog Validation"
+
+    if [[ ! -f "$catalog_path" ]]; then
+        e2e_fail "Scenario catalog missing: $catalog_path"
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        e2e_fail "jq is required for scenario catalog validation"
+    fi
+
+    local id_regex
+    id_regex="$(jq -r '.scenario_id_regex // empty' "$catalog_path")"
+    if [[ -z "$id_regex" ]]; then
+        e2e_fail "scenario_id_regex missing from $catalog_path"
+    fi
+
+    local duplicate_taxonomy
+    duplicate_taxonomy="$(jq -r '.taxonomy[]' "$catalog_path" | sort | uniq -d || true)"
+    if [[ -n "$duplicate_taxonomy" ]]; then
+        e2e_fail "Duplicate taxonomy categories in scenario catalog: $duplicate_taxonomy"
+    fi
+
+    local duplicate_ids
+    duplicate_ids="$(
+        jq -r '
+            .suites[].scenarios[]
+            | select((.status // "active") == "active" and has("id"))
+            | .id
+        ' "$catalog_path" | sort | uniq -d || true
+    )"
+    if [[ -n "$duplicate_ids" ]]; then
+        e2e_fail "Duplicate active scenario IDs in scenario catalog: $duplicate_ids"
+    fi
+
+    while IFS=$'\t' read -r suite_id script_rel; do
+        [[ -n "$suite_id" ]] || continue
+        local script_path
+        script_path="$repo_root/$script_rel"
+        if [[ ! -f "$script_path" ]]; then
+            e2e_fail "Scenario catalog suite '$suite_id' references missing script: $script_rel"
+        fi
+
+        local -A seen_categories=()
+        local active_count=0
+
+        while IFS= read -r scenario_b64; do
+            [[ -n "$scenario_b64" ]] || continue
+            local scenario_json
+            scenario_json="$(printf '%s' "$scenario_b64" | base64 --decode)"
+
+            local status category evidence scenario_id scenario_pattern
+            status="$(jq -r '.status // "active"' <<<"$scenario_json")"
+            category="$(jq -r '.category // empty' <<<"$scenario_json")"
+            evidence="$(jq -r '.evidence // empty' <<<"$scenario_json")"
+            scenario_id="$(jq -r '.id // empty' <<<"$scenario_json")"
+            scenario_pattern="$(jq -r '.id_pattern // empty' <<<"$scenario_json")"
+
+            if [[ -z "$category" ]]; then
+                e2e_fail "Suite '$suite_id' has scenario without category"
+            fi
+            if ! jq -e --arg category "$category" '.taxonomy | index($category)' "$catalog_path" >/dev/null; then
+                e2e_fail "Suite '$suite_id' uses unknown category '$category'"
+            fi
+
+            if [[ "$status" != "active" ]]; then
+                continue
+            fi
+
+            active_count=$((active_count + 1))
+            seen_categories["$category"]=1
+
+            if [[ -z "$scenario_id" && -z "$scenario_pattern" ]]; then
+                e2e_fail "Suite '$suite_id' active scenario must define id or id_pattern"
+            fi
+            if [[ -n "$scenario_id" && ! "$scenario_id" =~ $id_regex ]]; then
+                e2e_fail "Suite '$suite_id' scenario ID does not match regex: $scenario_id"
+            fi
+            if [[ -z "$evidence" ]]; then
+                e2e_fail "Suite '$suite_id' active scenario is missing evidence marker"
+            fi
+            if ! grep -Fq "$evidence" "$script_path"; then
+                e2e_fail "Suite '$suite_id' evidence marker not found in $script_rel: $evidence"
+            fi
+        done < <(
+            jq -r --arg suite_id "$suite_id" '
+                .suites[]
+                | select(.suite_id == $suite_id)
+                | .scenarios[]
+                | @base64
+            ' "$catalog_path"
+        )
+
+        if (( active_count == 0 )); then
+            e2e_fail "Suite '$suite_id' has no active scenarios in catalog"
+        fi
+
+        while IFS= read -r required_category; do
+            [[ -n "$required_category" ]] || continue
+            if [[ -z "${seen_categories[$required_category]:-}" ]]; then
+                e2e_fail "Suite '$suite_id' missing required active category '$required_category'"
+            fi
+        done < <(
+            jq -r --arg suite_id "$suite_id" '
+                .suites[]
+                | select(.suite_id == $suite_id)
+                | .required_categories[]?
+            ' "$catalog_path"
+        )
+
+        e2e_log "Scenario catalog suite validated: $suite_id (active_scenarios=$active_count)"
+    done < <(jq -r '.suites[] | [.suite_id, .script] | @tsv' "$catalog_path")
+
+    while IFS=$'\t' read -r gate_id category; do
+        [[ -n "$gate_id" && -n "$category" ]] || continue
+        if ! jq -e --arg category "$category" '.taxonomy | index($category)' "$catalog_path" >/dev/null; then
+            e2e_fail "Gate '$gate_id' uses unknown required category '$category'"
+        fi
+    done < <(
+        jq -r '
+            .gate_minimums[]? as $gate
+            | $gate.required_categories[]?
+            | [$gate.gate_id, .]
+            | @tsv
+        ' "$catalog_path"
+    )
+
+    e2e_log "Scenario catalog validation passed: $catalog_path"
+}
+
+#######################################
 # Run a command and log output
 # Arguments:
 #   $* - Command to run
