@@ -1,0 +1,153 @@
+{
+  "catalog_version": "1.0.0",
+  "scenario_id_regex": "^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$",
+  "taxonomy": [
+    "happy",
+    "edge",
+    "error",
+    "corruption",
+    "recovery",
+    "degradation",
+    "unsupported_op"
+  ],
+  "suites": [
+    {
+      "suite_id": "ffs_smoke",
+      "script": "scripts/e2e/ffs_smoke.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "unsupported_op"
+      ],
+      "scenarios": [
+        {
+          "id": "cli_mount_runtime_help_contract",
+          "category": "happy",
+          "status": "active",
+          "evidence": "cli_mount_runtime_help_contract"
+        },
+        {
+          "id": "cli_mount_runtime_invalid_standard_timeout",
+          "category": "error",
+          "status": "active",
+          "evidence": "cli_mount_runtime_invalid_standard_timeout"
+        },
+        {
+          "id": "cli_mount_runtime_unwired_managed_mode",
+          "category": "unsupported_op",
+          "status": "active",
+          "evidence": "cli_mount_runtime_unwired_managed_mode"
+        }
+      ]
+    },
+    {
+      "suite_id": "ffs_btrfs_rw_smoke",
+      "script": "scripts/e2e/ffs_btrfs_rw_smoke.sh",
+      "required_categories": [
+        "happy",
+        "corruption",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id_pattern": "^btrfs_rw_[a-z0-9_]+$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "printf 'btrfs_rw_%s'"
+        },
+        {
+          "id_pattern": "^btrfs_rw_crash_matrix_[0-9]{2}_[a-z0-9_]+$",
+          "category": "corruption",
+          "status": "active",
+          "evidence": "btrfs_rw_crash_matrix_${point_id}_${label}"
+        },
+        {
+          "id_pattern": "^btrfs_rw_crash_matrix_[0-9]{2}_[a-z0-9_]+$",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "CRASH_MATRIX_EVENT|operation_id=${operation_id}|scenario_id=${scenario_id}|outcome=${outcome}|error_class=${error_class}"
+        }
+      ]
+    }
+  ],
+  "gate_minimums": [
+    {
+      "gate_id": "bd-h6nz.1",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "corruption",
+        "recovery"
+      ]
+    },
+    {
+      "gate_id": "bd-h6nz.2",
+      "required_categories": [
+        "happy",
+        "error",
+        "unsupported_op"
+      ]
+    },
+    {
+      "gate_id": "bd-h6nz.3",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "corruption",
+        "recovery",
+        "unsupported_op"
+      ]
+    },
+    {
+      "gate_id": "bd-h6nz.4",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "corruption",
+        "recovery",
+        "degradation"
+      ]
+    },
+    {
+      "gate_id": "bd-h6nz.5",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "degradation"
+      ]
+    },
+    {
+      "gate_id": "bd-h6nz.6",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ]
+    },
+    {
+      "gate_id": "bd-h6nz.7",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "recovery"
+      ]
+    },
+    {
+      "gate_id": "bd-h6nz.9",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error",
+        "corruption",
+        "recovery",
+        "degradation",
+        "unsupported_op"
+      ]
+    }
+  ]
+}
