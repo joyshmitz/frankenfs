@@ -317,6 +317,10 @@ cargo run -p ffs-cli -- fsck <image-path> --repair --json
 # Run manual repair workflow (ext4 mount-time recovery + btrfs superblock mirror restore + scrub verification)
 cargo run -p ffs-cli -- repair <image-path> --json
 
+# V1.x write-side repair is single-host only; the CLI persists
+# `.<image>.ffs-repair-owner.json` next to the image and rejects foreign-host
+# ownership instead of mutating on-disk state.
+
 # Show current feature parity report
 cargo run -p ffs-cli -- parity --json
 
@@ -393,7 +397,7 @@ FrankenFS is in **early development**. The tracked V1 parity matrix is complete 
 - btrfs superblock, B-tree header, leaf item metadata decoding, and geometry validation
 - MVCC snapshot visibility, commit sequencing, first-committer-wins conflict detection
 - Bayesian durability policy model and RaptorQ config mapping
-- CLI `inspect`, `mvcc-stats`, `info`, `dump`, `fsck` (ext4 mount-time recovery + btrfs primary-superblock restoration via `--repair`, including bootstrap from backup mirrors when primary is unreadable), `repair` (ext4 mount-time recovery + btrfs primary-superblock restoration from validated backup mirrors + scrub verification), `mount` (ext4 + btrfs, default read-only with optional `--rw`), `scrub`, `parity`, `evidence`, and `mkfs` commands
+- CLI `inspect`, `mvcc-stats`, `info`, `dump`, `fsck` (ext4 mount-time recovery + btrfs primary-superblock restoration via `--repair`, including bootstrap from backup mirrors when primary is unreadable), `repair` (ext4 mount-time recovery + btrfs primary-superblock restoration from validated backup mirrors + scrub verification), `mount` (ext4 + btrfs, default read-only with optional `--rw`), `scrub`, `parity`, `evidence`, and `mkfs` commands; V1.x write-side repair is explicitly single-host only via a persistent `.<image>.ffs-repair-owner.json` coordination record
 - Conformance fixture harness and Criterion benchmark scaffolding
 
 ### What's Next

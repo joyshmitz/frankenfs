@@ -224,10 +224,40 @@
           "evidence": "SCENARIO_RESULT|scenario_id=log_contract_sync_flush_fields|outcome=PASS"
         },
         {
+          "id": "log_contract_repair_coordination_fields",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_repair_coordination_fields|outcome=PASS"
+        },
+        {
+          "id": "log_contract_artifact_manifest_validation_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_artifact_manifest_validation_tests|outcome=PASS"
+        },
+        {
+          "id": "log_contract_artifact_manifest_schema_surface",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_artifact_manifest_schema_surface|outcome=PASS"
+        },
+        {
           "id": "log_contract_writeback_policy_documented",
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=log_contract_writeback_policy_documented|outcome=PASS"
+        },
+        {
+          "id": "log_contract_repair_policy_documented",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_repair_policy_documented|outcome=PASS"
+        },
+        {
+          "id": "log_contract_artifact_manifest_policy_documented",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=log_contract_artifact_manifest_policy_documented|outcome=PASS"
         }
       ]
     },

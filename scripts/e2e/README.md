@@ -79,6 +79,41 @@ The catalog encodes minimum category coverage per hardening epic (`gate_minimums
 - `bd-h6nz.7` operator tooling
 - `bd-h6nz.9` cross-epic verification contract
 
+## Artifact Manifest Contract
+
+The canonical verification artifact manifest schema lives in:
+
+- `crates/ffs-harness/src/artifact_manifest.rs`
+
+It defines the shared representation for verification outputs across E2E, benchmark, fuzz, proof, and repro-pack workflows. The top-level contract includes:
+
+- `schema_version`, `run_id`, `created_at`, `gate_id`, and optional `bead_id`
+- `git_context` and `environment` fingerprints for reproducibility
+- `scenarios` keyed by `scenario_id`
+- `artifacts` with category, content type, size, checksum, redaction flag, and metadata
+- `verdict`, `duration_secs`, and optional retention metadata
+
+### Retention Policy
+
+The default retention policy is explicit and testable:
+
+- retain manifests for 90 days by default
+- keep at most 50 manifests per gate
+- prune when total artifact storage exceeds 500 MiB
+- preserve failing manifests for twice the normal max-age window
+- allow per-category overrides for longer-lived artifact families such as fuzz crash packs
+
+### Redaction Policy
+
+The default redaction policy is designed for shareable audit packs:
+
+- redact hostnames from environment fingerprints
+- scrub sensitive metadata keys such as `token`, `password`, `secret`, and `api_key`
+- strip absolute paths down to relative paths
+- mark affected artifact entries as `redacted: true`
+
+Validation for this contract is enforced by the `artifact_manifest` unit tests in `ffs-harness` and by the shared `ffs_log_contract_e2e.sh` smoke checks.
+
 ## What It Tests
 
 The smoke test exercises:
@@ -184,6 +219,8 @@ Test artifacts are stored in `artifacts/e2e/<timestamp>/`:
 artifacts/e2e/20260212_161500_ffs_smoke/
 └── run.log    # Complete test log with timestamps
 ```
+
+The current suites still emit their native logs/reports directly. The shared artifact-manifest schema above is the canonical representation those outputs must conform to as the verification runner contract is adopted across suites.
 
 ## Environment Variables
 

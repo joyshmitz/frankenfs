@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod artifact_manifest;
 pub mod benchmark_taxonomy;
 pub mod e2e;
 pub mod log_contract;

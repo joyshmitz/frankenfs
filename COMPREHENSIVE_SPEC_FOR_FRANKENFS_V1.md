@@ -4393,7 +4393,10 @@ pub struct FsckReport {
 }
 ```
 
-**Exit codes:** 0 = filesystem clean, 1 = errors found (not repaired), 2 = errors found and repaired, 4 = operational error (cannot open device, etc.). Exit codes can be combined (e.g., 3 = some repaired + some remaining).
+**Exit codes (current CLI contract):** 0 = filesystem clean after the selected
+checks/verification pass, 1 = corruption or verification errors remain,
+2 = write-side repair was blocked by the single-host coordination policy, 4 =
+operational error (cannot open device, etc.).
 
 ### 14.2 ffs info (Filesystem Information)
 
@@ -6134,11 +6137,31 @@ behavior auditable while preserving a tractable V1.x implementation surface.
 coordination across multiple hosts (e.g., a network-attached storage scenario
 where multiple hosts have partial copies of the filesystem)?
 
-**Tentative Resolution:** V1 is single-host only. Repair symbols are stored
-on the same device as the data they protect. Multi-host repair would require
-a distributed protocol for symbol exchange and is out of scope for V1.
+**Resolution (closed for V1.x via `bd-h6nz.6.5` on March 10, 2026):** Write-side
+repair is single-host only. `ffs repair` and `ffs fsck --repair` MUST persist a
+per-image coordination record adjacent to the image
+(`.<image>.ffs-repair-owner.json`) before performing any write-side repair
+workflow. The runtime contract is:
 
-**Must Resolve By:** Not required for V1. Documented as future work.
+1. If the coordination record does not exist, create it atomically and claim
+   ownership for the local host.
+2. If the record exists and already belongs to the same host under the same
+   policy version, refresh it and continue.
+3. If the record belongs to a different host, or the record is unreadable or
+   invalid, write-side repair MUST be rejected.
+4. Rejected write-side repair MUST remain explicit in structured CLI/log output
+   (`operation_id`, `scenario_id`, `outcome`, `error_class`) and MUST return
+   exit code `2`.
+5. Read-only diagnostics remain allowed when write-side repair is blocked.
+
+Repair symbols remain stored on the same device as the data they protect.
+Multi-host symbol exchange and distributed repair ownership are post-V1 work
+and require a separate protocol/spec bead.
+
+**Validation Path:** `repair_coordination_*` unit tests in `crates/ffs-cli`,
+`scripts/e2e/ffs_log_contract_e2e.sh`
+(`log_contract_repair_coordination_fields`,
+`log_contract_repair_policy_documented`).
 
 #### OQ6: Inode Generation Number Handling
 

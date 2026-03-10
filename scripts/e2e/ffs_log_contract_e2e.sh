@@ -10,6 +10,11 @@
 #   6. Writeback cache mode remains disabled in mount option construction
 #   7. Sync/flush log branches include required contract fields
 #   8. Writeback policy is explicitly documented for operators
+#   9. Repair-coordination logs include required contract fields
+#  10. Repair-coordination policy is explicitly documented for operators
+#  11. Artifact-manifest unit tests run and stay wired into ffs-harness
+#  12. Artifact-manifest schema/retention/redaction API surface stays exposed
+#  13. Artifact-manifest policy is explicitly documented for operators
 #
 # Scenario IDs:
 #   log_contract_builds_clean         - cargo check + test pass for log_contract
@@ -20,6 +25,11 @@
 #   log_contract_writeback_cache_disabled - mount options reject writeback cache mode
 #   log_contract_sync_flush_fields    - flush/sync log branches emit required fields
 #   log_contract_writeback_policy_documented - docs/CLI state writeback policy
+#   log_contract_repair_coordination_fields - repair/fsck coordination logs emit required fields
+#   log_contract_repair_policy_documented - docs/specs declare single-host repair policy
+#   log_contract_artifact_manifest_validation_tests - artifact manifest unit tests run
+#   log_contract_artifact_manifest_schema_surface - manifest schema API remains exported
+#   log_contract_artifact_manifest_policy_documented - docs state manifest retention/redaction policy
 #
 # Usage:
 #   scripts/e2e/ffs_log_contract_e2e.sh
@@ -218,6 +228,121 @@ else
     log_scenario "log_contract_sync_flush_fields" "FAIL" "missing=${MISSING_SYNC_FIELDS}"
 fi
 
+# ── Scenario: log_contract_repair_coordination_fields ────────────────
+
+echo "=== Scenario: log_contract_repair_coordination_fields ==="
+MISSING_REPAIR_FIELDS=""
+
+if grep -q 'REPAIR_COORDINATION_SCENARIO_REPAIR' crates/ffs-cli/src/cmd_repair.rs; then
+    :
+else
+    MISSING_REPAIR_FIELDS="${MISSING_REPAIR_FIELDS}repair_scenario_id "
+fi
+
+if grep -q 'REPAIR_COORDINATION_SCENARIO_FSCK' crates/ffs-cli/src/cmd_repair.rs crates/ffs-cli/src/main.rs; then
+    :
+else
+    MISSING_REPAIR_FIELDS="${MISSING_REPAIR_FIELDS}fsck_scenario_id "
+fi
+
+if grep -q 'operation_id' crates/ffs-cli/src/cmd_repair.rs; then
+    :
+else
+    MISSING_REPAIR_FIELDS="${MISSING_REPAIR_FIELDS}operation_id "
+fi
+
+if grep -q 'scenario_id' crates/ffs-cli/src/cmd_repair.rs; then
+    :
+else
+    MISSING_REPAIR_FIELDS="${MISSING_REPAIR_FIELDS}scenario_id "
+fi
+
+if grep -q 'error_class' crates/ffs-cli/src/cmd_repair.rs; then
+    :
+else
+    MISSING_REPAIR_FIELDS="${MISSING_REPAIR_FIELDS}error_class "
+fi
+
+if grep -q 'repair_coordination' crates/ffs-cli/src/main.rs; then
+    :
+else
+    MISSING_REPAIR_FIELDS="${MISSING_REPAIR_FIELDS}cli_output_surface "
+fi
+
+if [ -z "$MISSING_REPAIR_FIELDS" ]; then
+    log_scenario "log_contract_repair_coordination_fields" "PASS"
+else
+    log_scenario "log_contract_repair_coordination_fields" "FAIL" "missing=${MISSING_REPAIR_FIELDS}"
+fi
+
+# ── Scenario: log_contract_artifact_manifest_validation_tests ────────
+
+echo "=== Scenario: log_contract_artifact_manifest_validation_tests ==="
+if rch exec -- cargo test -p ffs-harness artifact_manifest -- --nocapture 2>&1; then
+    log_scenario "log_contract_artifact_manifest_validation_tests" "PASS"
+else
+    log_scenario "log_contract_artifact_manifest_validation_tests" "FAIL" "artifact_manifest_unit_tests_failed"
+fi
+
+# ── Scenario: log_contract_artifact_manifest_schema_surface ──────────
+
+echo "=== Scenario: log_contract_artifact_manifest_schema_surface ==="
+MISSING_MANIFEST_FIELDS=""
+
+if grep -q '^pub mod artifact_manifest;' crates/ffs-harness/src/lib.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}module_export "
+fi
+
+if grep -q 'pub struct ArtifactManifest' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}artifact_manifest_struct "
+fi
+
+if grep -q 'pub struct RetentionPolicy' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}retention_policy "
+fi
+
+if grep -q 'pub struct RedactionPolicy' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}redaction_policy "
+fi
+
+if grep -q 'pub fn validate_manifest' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}validate_manifest "
+fi
+
+if grep -q 'pub fn evaluate_retention' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}evaluate_retention "
+fi
+
+if grep -q 'pub fn redact_manifest' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}redact_manifest "
+fi
+
+if grep -q 'pub const SCENARIO_ID_PATTERN' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}scenario_id_pattern "
+fi
+
+if [ -z "$MISSING_MANIFEST_FIELDS" ]; then
+    log_scenario "log_contract_artifact_manifest_schema_surface" "PASS"
+else
+    log_scenario "log_contract_artifact_manifest_schema_surface" "FAIL" "missing=${MISSING_MANIFEST_FIELDS}"
+fi
+
 # ── Scenario: log_contract_writeback_policy_documented ────────────────
 
 echo "=== Scenario: log_contract_writeback_policy_documented ==="
@@ -239,6 +364,82 @@ if [ -z "$MISSING_POLICY_DOCS" ]; then
     log_scenario "log_contract_writeback_policy_documented" "PASS"
 else
     log_scenario "log_contract_writeback_policy_documented" "FAIL" "missing=${MISSING_POLICY_DOCS}"
+fi
+
+# ── Scenario: log_contract_repair_policy_documented ──────────────────
+
+echo "=== Scenario: log_contract_repair_policy_documented ==="
+MISSING_REPAIR_POLICY_DOCS=""
+
+if grep -q 'single-host only' README.md; then
+    :
+else
+    MISSING_REPAIR_POLICY_DOCS="${MISSING_REPAIR_POLICY_DOCS}readme_single_host_policy "
+fi
+
+if grep -Fq '.ffs-repair-owner.json' README.md; then
+    :
+else
+    MISSING_REPAIR_POLICY_DOCS="${MISSING_REPAIR_POLICY_DOCS}readme_coordination_record "
+fi
+
+if grep -Fq '.ffs-repair-owner.json' COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md; then
+    :
+else
+    MISSING_REPAIR_POLICY_DOCS="${MISSING_REPAIR_POLICY_DOCS}spec_coordination_record "
+fi
+
+if grep -q 'single-host only' FEATURE_PARITY.md; then
+    :
+else
+    MISSING_REPAIR_POLICY_DOCS="${MISSING_REPAIR_POLICY_DOCS}parity_single_host_policy "
+fi
+
+if [ -z "$MISSING_REPAIR_POLICY_DOCS" ]; then
+    log_scenario "log_contract_repair_policy_documented" "PASS"
+else
+    log_scenario "log_contract_repair_policy_documented" "FAIL" "missing=${MISSING_REPAIR_POLICY_DOCS}"
+fi
+
+# ── Scenario: log_contract_artifact_manifest_policy_documented ───────
+
+echo "=== Scenario: log_contract_artifact_manifest_policy_documented ==="
+MISSING_MANIFEST_POLICY_DOCS=""
+
+if grep -q 'Artifact Manifest Contract' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}manifest_heading "
+fi
+
+if grep -q '90 days' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}retention_days "
+fi
+
+if grep -q '50 manifests' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}retention_count "
+fi
+
+if grep -q '500 MiB' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}retention_size "
+fi
+
+if grep -qi 'redaction' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}redaction_policy "
+fi
+
+if [ -z "$MISSING_MANIFEST_POLICY_DOCS" ]; then
+    log_scenario "log_contract_artifact_manifest_policy_documented" "PASS"
+else
+    log_scenario "log_contract_artifact_manifest_policy_documented" "FAIL" "missing=${MISSING_MANIFEST_POLICY_DOCS}"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────

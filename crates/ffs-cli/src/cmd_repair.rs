@@ -14,10 +14,12 @@ use ffs_repair::symbol::RepairGroupDescExt;
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, GroupNumber,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::fs::OpenOptions as StdOpenOptions;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::{info, info_span, warn};
 
 use crate::{
     RepairActionOutput, RepairCommandOptions, RepairFlags, RepairOutput, RepairScopeOutput,
@@ -147,6 +149,459 @@ const BTRFS_SUPER_BYTENR_OFFSET: usize = 0x30;
 const BTRFS_SUPER_CSUM_OFFSET: usize = 0;
 const BTRFS_SUPER_CSUM_LEN: usize = 4;
 const BTRFS_SUPER_CSUM_DATA_OFFSET: usize = 0x20;
+const REPAIR_COORDINATION_POLICY: &str = "single_host_only_v1";
+pub const REPAIR_COORDINATION_SCENARIO_REPAIR: &str = "cli_repair_multi_host_guard";
+pub const REPAIR_COORDINATION_SCENARIO_FSCK: &str = "cli_fsck_repair_multi_host_guard";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairCoordinationStatus {
+    NotRequired,
+    Claimed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepairCoordinationOutput {
+    pub policy: String,
+    pub status: RepairCoordinationStatus,
+    pub operation_id: String,
+    pub scenario_id: String,
+    pub coordination_file: String,
+    pub local_host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_process_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    pub detail: String,
+}
+
+impl RepairCoordinationOutput {
+    #[must_use]
+    pub const fn is_blocked(&self) -> bool {
+        matches!(self.status, RepairCoordinationStatus::Blocked)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RepairCoordinationDecision {
+    pub output: RepairCoordinationOutput,
+    pub writes_allowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairCoordinationRecord {
+    pub policy: String,
+    pub image_path: String,
+    pub owner_host: String,
+    pub owner_process_id: u32,
+    pub last_command: String,
+    pub last_operation_id: String,
+    pub recorded_at_ns: u64,
+}
+
+fn coordination_now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+        })
+}
+
+fn local_host_name() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "unknown-host".to_owned())
+}
+
+fn sanitize_token(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "unknown".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+pub fn repair_coordination_record_path(image: &Path) -> PathBuf {
+    let parent = image.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = image
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("image");
+    parent.join(format!(".{file_name}.ffs-repair-owner.json"))
+}
+
+fn repair_coordination_operation_id(command: &str, image: &Path, host: &str) -> String {
+    let image_token = image
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map_or_else(|| "image".to_owned(), sanitize_token);
+    format!(
+        "{command}-coordination-{}-{image_token}",
+        sanitize_token(host)
+    )
+}
+
+fn build_coordination_record(
+    path: &Path,
+    local_host: &str,
+    command: &str,
+    operation_id: &str,
+) -> RepairCoordinationRecord {
+    RepairCoordinationRecord {
+        policy: REPAIR_COORDINATION_POLICY.to_owned(),
+        image_path: path.display().to_string(),
+        owner_host: local_host.to_owned(),
+        owner_process_id: std::process::id(),
+        last_command: command.to_owned(),
+        last_operation_id: operation_id.to_owned(),
+        recorded_at_ns: coordination_now_ns(),
+    }
+}
+
+fn write_coordination_record(
+    record_path: &Path,
+    record: &RepairCoordinationRecord,
+    create_new: bool,
+) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(record).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to serialize repair coordination record: {error}"),
+        )
+    })?;
+    bytes.push(b'\n');
+    if create_new {
+        let mut file = StdOpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(record_path)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        std::io::Write::flush(&mut file)
+    } else {
+        std::fs::write(record_path, bytes)
+    }
+}
+
+#[derive(Debug)]
+struct RepairCoordinationContext {
+    target: &'static str,
+    scenario_id: &'static str,
+    command: &'static str,
+    local_host: String,
+    operation_id: String,
+    coordination_file: PathBuf,
+    coordination_file_display: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RepairCoordinationLogRecord<'a> {
+    outcome: &'static str,
+    error_class: &'static str,
+    owner_host: Option<&'a str>,
+    event_name: &'static str,
+}
+
+impl RepairCoordinationContext {
+    fn new(
+        target: &'static str,
+        scenario_id: &'static str,
+        command: &'static str,
+        path: &Path,
+    ) -> Self {
+        let local_host = local_host_name();
+        let coordination_file = repair_coordination_record_path(path);
+        let operation_id = repair_coordination_operation_id(command, path, &local_host);
+        let coordination_file_display = coordination_file.display().to_string();
+        Self {
+            target,
+            scenario_id,
+            command,
+            local_host,
+            operation_id,
+            coordination_file,
+            coordination_file_display,
+        }
+    }
+
+    fn log_info(&self, record: RepairCoordinationLogRecord<'_>) {
+        macro_rules! emit {
+            ($log_target:literal) => {
+                if let Some(owner_host) = record.owner_host {
+                    info!(
+                        target: $log_target,
+                        operation_id = %self.operation_id,
+                        scenario_id = self.scenario_id,
+                        outcome = record.outcome,
+                        error_class = record.error_class,
+                        coordination_file = %self.coordination_file_display,
+                        local_host = %self.local_host,
+                        owner_host = %owner_host,
+                        command = self.command,
+                        event_name = record.event_name
+                    );
+                } else {
+                    info!(
+                        target: $log_target,
+                        operation_id = %self.operation_id,
+                        scenario_id = self.scenario_id,
+                        outcome = record.outcome,
+                        error_class = record.error_class,
+                        coordination_file = %self.coordination_file_display,
+                        local_host = %self.local_host,
+                        command = self.command,
+                        event_name = record.event_name
+                    );
+                }
+            };
+        }
+
+        match self.target {
+            "ffs::cli::repair" => emit!("ffs::cli::repair"),
+            "ffs::cli::fsck" => emit!("ffs::cli::fsck"),
+            "ffs::test" => emit!("ffs::test"),
+            _ => emit!("ffs::cli::repair"),
+        }
+    }
+
+    fn log_warn(&self, error_class: &'static str, owner_host: Option<&str>) {
+        macro_rules! emit {
+            ($log_target:literal) => {
+                if let Some(owner_host) = owner_host {
+                    warn!(
+                        target: $log_target,
+                        operation_id = %self.operation_id,
+                        scenario_id = self.scenario_id,
+                        outcome = "rejected",
+                        error_class,
+                        coordination_file = %self.coordination_file_display,
+                        local_host = %self.local_host,
+                        owner_host = %owner_host,
+                        command = self.command,
+                        event_name = "repair_coordination_rejected"
+                    );
+                } else {
+                    warn!(
+                        target: $log_target,
+                        operation_id = %self.operation_id,
+                        scenario_id = self.scenario_id,
+                        outcome = "rejected",
+                        error_class,
+                        coordination_file = %self.coordination_file_display,
+                        local_host = %self.local_host,
+                        command = self.command,
+                        event_name = "repair_coordination_rejected"
+                    );
+                }
+            };
+        }
+
+        match self.target {
+            "ffs::cli::repair" => emit!("ffs::cli::repair"),
+            "ffs::cli::fsck" => emit!("ffs::cli::fsck"),
+            "ffs::test" => emit!("ffs::test"),
+            _ => emit!("ffs::cli::repair"),
+        }
+    }
+
+    fn decision(
+        &self,
+        status: RepairCoordinationStatus,
+        writes_allowed: bool,
+        owner_host: Option<String>,
+        owner_process_id: Option<u32>,
+        error_class: Option<&str>,
+        detail: String,
+    ) -> RepairCoordinationDecision {
+        RepairCoordinationDecision {
+            output: RepairCoordinationOutput {
+                policy: REPAIR_COORDINATION_POLICY.to_owned(),
+                status,
+                operation_id: self.operation_id.clone(),
+                scenario_id: self.scenario_id.to_owned(),
+                coordination_file: self.coordination_file_display.clone(),
+                local_host: self.local_host.clone(),
+                owner_host,
+                owner_process_id,
+                error_class: error_class.map(str::to_owned),
+                detail,
+            },
+            writes_allowed,
+        }
+    }
+}
+
+fn not_required_decision(ctx: &RepairCoordinationContext) -> RepairCoordinationDecision {
+    let detail =
+        "write-side repair was not requested; single-host coordination is not required".to_owned();
+    ctx.log_info(RepairCoordinationLogRecord {
+        outcome: "not_required",
+        error_class: "none",
+        owner_host: None,
+        event_name: "repair_coordination_not_required",
+    });
+    ctx.decision(
+        RepairCoordinationStatus::NotRequired,
+        false,
+        None,
+        None,
+        None,
+        detail,
+    )
+}
+
+fn claimed_decision(
+    ctx: &RepairCoordinationContext,
+    owner_host: &str,
+    owner_process_id: u32,
+    detail: String,
+) -> RepairCoordinationDecision {
+    ctx.log_info(RepairCoordinationLogRecord {
+        outcome: "applied",
+        error_class: "none",
+        owner_host: Some(owner_host),
+        event_name: "repair_coordination_applied",
+    });
+    ctx.decision(
+        RepairCoordinationStatus::Claimed,
+        true,
+        Some(owner_host.to_owned()),
+        Some(owner_process_id),
+        None,
+        detail,
+    )
+}
+
+fn blocked_decision(
+    ctx: &RepairCoordinationContext,
+    owner_host: Option<&str>,
+    owner_process_id: Option<u32>,
+    error_class: &'static str,
+    detail: String,
+) -> RepairCoordinationDecision {
+    ctx.log_warn(error_class, owner_host);
+    ctx.decision(
+        RepairCoordinationStatus::Blocked,
+        false,
+        owner_host.map(str::to_owned),
+        owner_process_id,
+        Some(error_class),
+        detail,
+    )
+}
+
+pub fn coordinate_repair_write_access(
+    target: &'static str,
+    scenario_id: &'static str,
+    command: &'static str,
+    path: &Path,
+    require_write_guard: bool,
+) -> RepairCoordinationDecision {
+    let ctx = RepairCoordinationContext::new(target, scenario_id, command, path);
+
+    if !require_write_guard {
+        return not_required_decision(&ctx);
+    }
+
+    let new_record = build_coordination_record(path, &ctx.local_host, command, &ctx.operation_id);
+    match write_coordination_record(&ctx.coordination_file, &new_record, true) {
+        Ok(()) => {
+            let detail = format!(
+                "FrankenFS V1.x write-side repair is single-host only; claimed coordination record {} for host {}",
+                ctx.coordination_file.display(),
+                ctx.local_host
+            );
+            claimed_decision(&ctx, &ctx.local_host, new_record.owner_process_id, detail)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing_record = std::fs::read(&ctx.coordination_file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<RepairCoordinationRecord>(&bytes).ok());
+
+            match existing_record {
+                Some(existing_record)
+                    if existing_record.owner_host == ctx.local_host
+                        && existing_record.policy == REPAIR_COORDINATION_POLICY =>
+                {
+                    if let Err(refresh_error) =
+                        write_coordination_record(&ctx.coordination_file, &new_record, false)
+                    {
+                        let detail = format!(
+                            "FrankenFS V1.x blocks write-side repair because the coordination record {} could not be refreshed for host {}: {}",
+                            ctx.coordination_file.display(),
+                            ctx.local_host,
+                            refresh_error
+                        );
+                        return blocked_decision(
+                            &ctx,
+                            Some(&existing_record.owner_host),
+                            Some(existing_record.owner_process_id),
+                            "coordination_io",
+                            detail,
+                        );
+                    }
+
+                    let detail = format!(
+                        "FrankenFS V1.x write-side repair remains pinned to host {}; refreshed coordination record {}",
+                        ctx.local_host,
+                        ctx.coordination_file.display()
+                    );
+                    claimed_decision(&ctx, &ctx.local_host, new_record.owner_process_id, detail)
+                }
+                Some(existing_record) => {
+                    let detail = format!(
+                        "FrankenFS V1.x blocks write-side repair on host {} because coordination record {} belongs to host {}. Multi-host repair is out of scope; use read-only diagnostics or hand off ownership explicitly.",
+                        ctx.local_host,
+                        ctx.coordination_file.display(),
+                        existing_record.owner_host
+                    );
+                    blocked_decision(
+                        &ctx,
+                        Some(&existing_record.owner_host),
+                        Some(existing_record.owner_process_id),
+                        "multi_host_unsupported",
+                        detail,
+                    )
+                }
+                None => {
+                    let detail = format!(
+                        "FrankenFS V1.x blocks write-side repair because coordination record {} is unreadable or invalid. Review the record before retrying.",
+                        ctx.coordination_file.display()
+                    );
+                    blocked_decision(&ctx, None, None, "coordination_metadata_invalid", detail)
+                }
+            }
+        }
+        Err(error) => {
+            let detail = format!(
+                "FrankenFS V1.x blocks write-side repair because coordination record {} could not be created: {}",
+                ctx.coordination_file.display(),
+                error
+            );
+            blocked_decision(&ctx, None, None, "coordination_io", detail)
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct BtrfsRepairGroupSpec {
@@ -1597,18 +2052,38 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
     let flags = options.flags;
     let cx = cli_cx();
     let mut limitations = Vec::new();
+    let repair_coordination = coordinate_repair_write_access(
+        "ffs::cli::repair",
+        REPAIR_COORDINATION_SCENARIO_REPAIR,
+        "repair",
+        path,
+        !flags.verify_only(),
+    );
+    if repair_coordination.output.is_blocked() {
+        limitations.push(repair_coordination.output.detail.clone());
+    }
     let (flavor, bootstrap_recovery_source) = detect_flavor_with_optional_btrfs_bootstrap(
         &cx,
         path,
-        !flags.verify_only(),
+        !flags.verify_only() && repair_coordination.writes_allowed,
         &mut limitations,
-    )?;
+    )
+    .with_context(|| {
+        if repair_coordination.output.is_blocked() {
+            format!(
+                "repair coordination blocked any write-side bootstrap path: {}",
+                repair_coordination.output.detail
+            )
+        } else {
+            format!("failed to detect ext4/btrfs metadata in {}", path.display())
+        }
+    })?;
     let rebuild_symbols_requested = flags.rebuild_symbols() && !flags.verify_only();
     if flags.rebuild_symbols() && flags.verify_only() {
         limitations.push("--rebuild-symbols is ignored when --verify-only is set".to_owned());
     }
 
-    let ext4_recovery = if flags.verify_only() {
+    let ext4_recovery = if flags.verify_only() || !repair_coordination.writes_allowed {
         None
     } else {
         match &flavor {
@@ -1728,7 +2203,7 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
             .context("failed to scrub ext4 image")?;
 
             let mut stats = RepairExecutionStats::default();
-            if !flags.verify_only()
+            if repair_coordination.writes_allowed
                 && !selected_specs.is_empty()
                 && count_blocks_at_severity_or_higher(&report, Severity::Error) > 0
             {
@@ -1762,7 +2237,10 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                 }
             }
 
-            if rebuild_symbols_requested && !selected_specs.is_empty() {
+            if repair_coordination.writes_allowed
+                && rebuild_symbols_requested
+                && !selected_specs.is_empty()
+            {
                 let (rebuilt, failed) = rebuild_ext4_repair_symbols(
                     path,
                     sb.block_size,
@@ -1778,7 +2256,8 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                     stats.symbol_rebuild_failed_groups.saturating_add(failed);
             }
 
-            if !flags.verify_only() && (stats.recovery_attempted || stats.symbol_rebuild_attempted)
+            if repair_coordination.writes_allowed
+                && (stats.recovery_attempted || stats.symbol_rebuild_attempted)
             {
                 report = scrub_ext4_groups_for_repair(
                     path,
@@ -1926,7 +2405,7 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                     )
                 })
             };
-            if !flags.verify_only()
+            if repair_coordination.writes_allowed
                 && superblock_in_scope
                 && report_has_error_or_higher_for_block(&report, primary_superblock)
             {
@@ -1953,7 +2432,7 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                 }
             }
 
-            if !flags.verify_only() && superblock_in_scope {
+            if repair_coordination.writes_allowed && superblock_in_scope {
                 let (mirror_scope_start, mirror_scope_count) = if scoped_btrfs_specs.is_empty() {
                     (scrub_start, scrub_count)
                 } else {
@@ -1986,7 +2465,7 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
             // Attempt RaptorQ block-symbol recovery for non-superblock corruption.
             let mut btrfs_repaired_groups: Vec<u32> = Vec::new();
             let mut btrfs_specs_for_rebuild: Vec<BtrfsRepairGroupSpec> = Vec::new();
-            if !flags.verify_only()
+            if repair_coordination.writes_allowed
                 && count_blocks_at_severity_or_higher(&report, Severity::Error) > 0
             {
                 match discover_btrfs_repair_group_specs(path, block_size) {
@@ -2031,7 +2510,7 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
             }
 
             // Rebuild repair symbols for repaired groups or on explicit request.
-            if !flags.verify_only() {
+            if repair_coordination.writes_allowed {
                 let rebuild_groups = if rebuild_symbols_requested {
                     // --rebuild-symbols: discover all groups and rebuild.
                     if btrfs_specs_for_rebuild.is_empty() {
@@ -2070,7 +2549,7 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                 }
             }
 
-            if !flags.verify_only() && verify_after_repair_writes {
+            if repair_coordination.writes_allowed && verify_after_repair_writes {
                 report = if scoped_btrfs_groups.is_empty() {
                     scrub_range_for_repair(
                         path,
@@ -2102,6 +2581,8 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
     let scrub = repair_scrub_from_report(&report);
     let action = if flags.verify_only() {
         RepairActionOutput::VerifyOnly
+    } else if repair_coordination.output.is_blocked() {
+        RepairActionOutput::RepairBlocked
     } else if ext4_recovery.is_some()
         || execution_stats.recovery_attempted
         || execution_stats.symbol_rebuild_attempted
@@ -2124,17 +2605,22 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
         ));
     }
 
-    let exit_code = i32::from(
-        scrub.error_or_higher > 0
-            || execution_stats.recovery_unrecovered_blocks > 0
-            || execution_stats.symbol_rebuild_failed_groups > 0,
-    );
+    let exit_code = if repair_coordination.output.is_blocked() {
+        2
+    } else {
+        i32::from(
+            scrub.error_or_higher > 0
+                || execution_stats.recovery_unrecovered_blocks > 0
+                || execution_stats.symbol_rebuild_failed_groups > 0,
+        )
+    };
 
     Ok(RepairOutput {
         filesystem: filesystem_name(&flavor).to_owned(),
         scope,
         action,
         scrub,
+        repair_coordination: repair_coordination.output,
         ext4_recovery,
         exit_code,
         limitations,
@@ -2204,6 +2690,28 @@ pub fn print_repair_output(json: bool, output: &RepairOutput) -> Result<()> {
     );
     if let Some(recovery) = &output.ext4_recovery {
         println!("ext4_recovery: {}", ext4_recovery_detail(recovery));
+    }
+    println!(
+        "repair_coordination: status={:?} policy={} operation_id={} scenario_id={}",
+        output.repair_coordination.status,
+        output.repair_coordination.policy,
+        output.repair_coordination.operation_id,
+        output.repair_coordination.scenario_id
+    );
+    println!(
+        "repair_coordination_detail: {} (coordination_file={}, local_host={})",
+        output.repair_coordination.detail,
+        output.repair_coordination.coordination_file,
+        output.repair_coordination.local_host
+    );
+    if let Some(owner_host) = &output.repair_coordination.owner_host {
+        println!("repair_coordination_owner_host: {owner_host}");
+    }
+    if let Some(owner_process_id) = output.repair_coordination.owner_process_id {
+        println!("repair_coordination_owner_process_id: {owner_process_id}");
+    }
+    if let Some(error_class) = &output.repair_coordination.error_class {
+        println!("repair_coordination_error_class: {error_class}");
     }
     println!("exit_code: {}", output.exit_code);
     if !output.limitations.is_empty() {

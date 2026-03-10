@@ -69,7 +69,7 @@ pub struct ArtifactManifest {
 }
 
 /// Git context captured at manifest creation time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitContext {
     /// Current commit SHA (short or full).
     pub commit: String,
@@ -80,7 +80,7 @@ pub struct GitContext {
 }
 
 /// Host environment fingerprint for reproducibility.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentFingerprint {
     /// Hostname or machine identifier.
     pub hostname: String,
@@ -124,7 +124,7 @@ pub enum ScenarioResult {
 }
 
 /// A single artifact entry in the manifest.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactEntry {
     /// Relative path from the repository root.
     pub path: String,
@@ -216,7 +216,7 @@ pub enum GateVerdict {
 // ── Retention policy ─────────────────────────────────────────────────────
 
 /// Retention policy for artifact manifests and their referenced files.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionPolicy {
     /// Maximum age in days before a manifest is eligible for pruning.
     pub max_age_days: u32,
@@ -246,11 +246,7 @@ impl Default for RetentionPolicy {
 impl RetentionPolicy {
     /// Determine the effective max age for a given category and verdict.
     #[must_use]
-    pub fn effective_max_age_days(
-        &self,
-        category: ArtifactCategory,
-        verdict: GateVerdict,
-    ) -> u32 {
+    pub fn effective_max_age_days(&self, category: ArtifactCategory, verdict: GateVerdict) -> u32 {
         let base = self
             .category_overrides
             .get(&category)
@@ -266,7 +262,7 @@ impl RetentionPolicy {
 }
 
 /// Metadata about when retention was last evaluated.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionMetadata {
     /// ISO 8601 timestamp of last retention evaluation.
     pub last_evaluated_at: String,
@@ -300,9 +296,8 @@ pub fn evaluate_retention(
 
     // Age-based pruning.
     for (idx, manifest) in manifests.iter().enumerate() {
-        let age_days = current_epoch_days.saturating_sub(
-            manifest_epoch_days(manifest).unwrap_or(current_epoch_days),
-        );
+        let age_days = current_epoch_days
+            .saturating_sub(manifest_epoch_days(manifest).unwrap_or(current_epoch_days));
 
         // Use the most permissive category age for the manifest.
         let max_age = manifest
@@ -354,8 +349,7 @@ pub fn evaluate_retention(
                 break;
             }
             if !prune_indices.contains(&idx) {
-                let manifest_bytes: u64 =
-                    manifest.artifacts.iter().map(|a| a.size_bytes).sum();
+                let manifest_bytes: u64 = manifest.artifacts.iter().map(|a| a.size_bytes).sum();
                 running_total = running_total.saturating_sub(manifest_bytes);
                 info!(
                     run_id = %manifest.run_id,
@@ -412,7 +406,7 @@ pub const REDACTABLE_FIELDS: &[&str] = &[
 pub const REDACTED_SENTINEL: &str = "[REDACTED]";
 
 /// Redaction policy configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactionPolicy {
     /// Fields to redact (matched case-insensitively against metadata keys).
     pub redact_fields: Vec<String>,
@@ -425,10 +419,7 @@ pub struct RedactionPolicy {
 impl Default for RedactionPolicy {
     fn default() -> Self {
         Self {
-            redact_fields: REDACTABLE_FIELDS
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+            redact_fields: REDACTABLE_FIELDS.iter().map(|s| (*s).to_owned()).collect(),
             redact_hostname: true,
             redact_absolute_paths: true,
         }
@@ -446,21 +437,19 @@ pub fn redact_manifest(manifest: &ArtifactManifest, policy: &RedactionPolicy) ->
 
     // Redact hostname.
     if policy.redact_hostname {
-        redacted.environment.hostname = REDACTED_SENTINEL.to_owned();
+        REDACTED_SENTINEL.clone_into(&mut redacted.environment.hostname);
     }
 
     // Redact artifact metadata fields.
     for artifact in &mut redacted.artifacts {
         let mut was_redacted = false;
-        for key in artifact.metadata.keys().cloned().collect::<Vec<_>>() {
+        for (key, value) in &mut artifact.metadata {
             if policy
                 .redact_fields
                 .iter()
                 .any(|f| key.eq_ignore_ascii_case(f))
             {
-                artifact
-                    .metadata
-                    .insert(key, REDACTED_SENTINEL.to_owned());
+                REDACTED_SENTINEL.clone_into(value);
                 was_redacted = true;
             }
         }
@@ -489,7 +478,7 @@ pub fn redact_manifest(manifest: &ArtifactManifest, policy: &RedactionPolicy) ->
 // ── Manifest validation ──────────────────────────────────────────────────
 
 /// Validation errors for artifact manifests.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestValidationError {
     /// Schema version is unsupported.
     UnsupportedVersion(u32),
@@ -515,7 +504,10 @@ impl std::fmt::Display for ManifestValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedVersion(v) => {
-                write!(f, "unsupported schema version: {v} (expected {SCHEMA_VERSION})")
+                write!(
+                    f,
+                    "unsupported schema version: {v} (expected {SCHEMA_VERSION})"
+                )
             }
             Self::EmptyRunId => write!(f, "run_id is empty"),
             Self::EmptyGateId => write!(f, "gate_id is empty"),
@@ -532,7 +524,7 @@ impl std::fmt::Display for ManifestValidationError {
 }
 
 /// Scenario ID regex pattern (at least 3 underscore-separated lowercase segments).
-const SCENARIO_ID_PATTERN: &str = r"^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$";
+pub const SCENARIO_ID_PATTERN: &str = r"^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$";
 
 /// Validate an artifact manifest for schema conformance.
 ///
@@ -566,7 +558,7 @@ pub fn validate_manifest(manifest: &ArtifactManifest) -> Vec<ManifestValidationE
 
     // Scenario ID validation.
     let mut seen_ids = std::collections::HashSet::new();
-    for (scenario_id, _outcome) in &manifest.scenarios {
+    for scenario_id in manifest.scenarios.keys() {
         if !is_valid_scenario_id(scenario_id) {
             errors.push(ManifestValidationError::InvalidScenarioId(
                 scenario_id.clone(),
@@ -809,7 +801,8 @@ mod tests {
 
     #[test]
     fn schema_version_is_set() {
-        assert!(SCHEMA_VERSION >= 1);
+        let manifest = sample_manifest();
+        assert_eq!(manifest.schema_version, SCHEMA_VERSION);
     }
 
     // ── Validation tests ─────────────────────────────────────────────
@@ -826,7 +819,11 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.run_id = String::new();
         let errors = validate_manifest(&manifest);
-        assert!(errors.iter().any(|e| matches!(e, ManifestValidationError::EmptyRunId)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::EmptyRunId))
+        );
     }
 
     #[test]
@@ -834,7 +831,11 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.gate_id = String::new();
         let errors = validate_manifest(&manifest);
-        assert!(errors.iter().any(|e| matches!(e, ManifestValidationError::EmptyGateId)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::EmptyGateId))
+        );
     }
 
     #[test]
@@ -842,9 +843,11 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.git_context.commit = String::new();
         let errors = validate_manifest(&manifest);
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ManifestValidationError::EmptyGitCommit)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::EmptyGitCommit))
+        );
     }
 
     #[test]
@@ -852,9 +855,11 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.created_at = "bad".to_owned();
         let errors = validate_manifest(&manifest);
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ManifestValidationError::InvalidTimestamp(_))));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::InvalidTimestamp(_)))
+        );
     }
 
     #[test]
@@ -862,9 +867,11 @@ mod tests {
         let mut manifest = sample_manifest();
         manifest.schema_version = 999;
         let errors = validate_manifest(&manifest);
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ManifestValidationError::UnsupportedVersion(999))));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::UnsupportedVersion(999)))
+        );
     }
 
     #[test]
@@ -880,9 +887,9 @@ mod tests {
             },
         );
         let errors = validate_manifest(&manifest);
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ManifestValidationError::InvalidScenarioId(id) if id == "bad-id")));
+        assert!(errors.iter().any(
+            |e| matches!(e, ManifestValidationError::InvalidScenarioId(id) if id == "bad-id")
+        ));
     }
 
     #[test]
@@ -899,9 +906,11 @@ mod tests {
         );
         manifest.verdict = GateVerdict::Pass; // Inconsistent!
         let errors = validate_manifest(&manifest);
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ManifestValidationError::InconsistentVerdict)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::InconsistentVerdict))
+        );
     }
 
     #[test]
@@ -917,9 +926,11 @@ mod tests {
             metadata: BTreeMap::new(),
         });
         let errors = validate_manifest(&manifest);
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ManifestValidationError::EmptyArtifactPath)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::EmptyArtifactPath))
+        );
     }
 
     // ── Scenario ID validation ───────────────────────────────────────
@@ -967,11 +978,27 @@ mod tests {
 
     #[test]
     fn scenario_result_json_round_trip() {
-        for result in [ScenarioResult::Pass, ScenarioResult::Fail, ScenarioResult::Skip] {
+        for result in [
+            ScenarioResult::Pass,
+            ScenarioResult::Fail,
+            ScenarioResult::Skip,
+        ] {
             let json = serde_json::to_string(&result).expect("serialize");
             let parsed: ScenarioResult = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(parsed, result);
         }
+    }
+
+    #[test]
+    fn scenario_id_pattern_matches_shared_catalog_contract() {
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../../scripts/e2e/scenario_catalog.json"))
+                .expect("scenario catalog json should parse");
+        let catalog_pattern = catalog
+            .get("scenario_id_regex")
+            .and_then(serde_json::Value::as_str)
+            .expect("scenario catalog should define scenario_id_regex");
+        assert_eq!(SCENARIO_ID_PATTERN, catalog_pattern);
     }
 
     // ── Retention policy tests ───────────────────────────────────────
@@ -1004,8 +1031,7 @@ mod tests {
         policy
             .category_overrides
             .insert(ArtifactCategory::FuzzCrash, 365);
-        let age =
-            policy.effective_max_age_days(ArtifactCategory::FuzzCrash, GateVerdict::Pass);
+        let age = policy.effective_max_age_days(ArtifactCategory::FuzzCrash, GateVerdict::Pass);
         assert_eq!(age, 365);
     }
 
@@ -1040,7 +1066,10 @@ mod tests {
         ];
         let current_days = 2026 * 365 + 3 * 30 + 4;
         let prune = evaluate_retention(&manifests, &policy, current_days);
-        assert!(prune.contains(&0), "oldest manifest should be pruned for count");
+        assert!(
+            prune.contains(&0),
+            "oldest manifest should be pruned for count"
+        );
         assert_eq!(prune.len(), 1);
     }
 
@@ -1106,10 +1135,7 @@ mod tests {
             redact_fields: vec![],
         };
         let redacted = redact_manifest(&manifest, &policy);
-        assert_eq!(
-            redacted.environment.hostname,
-            manifest.environment.hostname,
-        );
+        assert_eq!(redacted.environment.hostname, manifest.environment.hostname,);
     }
 
     // ── Builder tests ────────────────────────────────────────────────
@@ -1161,6 +1187,59 @@ mod tests {
     fn artifact_category_all_is_exhaustive() {
         // Ensure ALL contains every variant.
         assert_eq!(ArtifactCategory::ALL.len(), 9);
+    }
+
+    #[test]
+    fn all_artifact_categories_can_be_represented_in_one_manifest() {
+        let manifest = ArtifactCategory::ALL
+            .iter()
+            .enumerate()
+            .fold(
+                ManifestBuilder::new("run-categories", "bd-h6nz.9", "2026-03-10T00:00:00Z")
+                    .bead_id("bd-h6nz.9.3")
+                    .git_context("abc123", "main", true)
+                    .environment(EnvironmentFingerprint {
+                        hostname: "build-host-01".to_owned(),
+                        cpu_model: "AMD Ryzen 9 5950X".to_owned(),
+                        cpu_count: 32,
+                        memory_gib: 64,
+                        kernel: "Linux 6.17.0".to_owned(),
+                        rustc_version: "1.85.0".to_owned(),
+                        cargo_version: Some("1.85.0".to_owned()),
+                    })
+                    .scenario(
+                        "verification_artifact_manifest_schema",
+                        ScenarioResult::Pass,
+                        None,
+                        0.5,
+                    ),
+                |builder, (idx, &category)| {
+                    builder.artifact(ArtifactEntry {
+                        path: format!("artifacts/e2e/run/artifact_{idx}.json"),
+                        category,
+                        content_type: Some("application/json".to_owned()),
+                        size_bytes: 1024 + idx as u64,
+                        sha256: Some(format!("artifact-checksum-{idx:02}")),
+                        redacted: false,
+                        metadata: BTreeMap::from([
+                            ("category".to_owned(), category.label().to_owned()),
+                            (
+                                "scenario_id".to_owned(),
+                                "verification_artifact_manifest_schema".to_owned(),
+                            ),
+                        ]),
+                    })
+                },
+            )
+            .duration_secs(1.0)
+            .build();
+
+        let errors = validate_manifest(&manifest);
+        assert!(
+            errors.is_empty(),
+            "expected every artifact category to remain representable, got: {errors:?}"
+        );
+        assert_eq!(manifest.artifacts.len(), ArtifactCategory::ALL.len());
     }
 
     // ── Negative / invariant tests ───────────────────────────────────

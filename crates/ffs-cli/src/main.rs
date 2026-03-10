@@ -4,8 +4,9 @@ mod cmd_evidence;
 mod cmd_repair;
 
 use cmd_repair::{
-    DEFAULT_REPAIR_OVERHEAD_RATIO, Ext4RepairStaleness, append_btrfs_repair_detail,
-    block_range_contains, build_ext4_repair_group_specs,
+    DEFAULT_REPAIR_OVERHEAD_RATIO, Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_FSCK,
+    RepairCoordinationOutput, append_btrfs_repair_detail, block_range_contains,
+    build_ext4_repair_group_specs, coordinate_repair_write_access,
     detect_flavor_with_optional_btrfs_bootstrap, discover_btrfs_repair_group_specs,
     primary_btrfs_superblock_block, probe_btrfs_repair_staleness, probe_ext4_repair_staleness,
     recover_btrfs_corrupt_blocks, recover_primary_btrfs_superblock_from_backup,
@@ -979,6 +980,8 @@ struct FsckOutput {
     scrub: FsckScrubOutput,
     repair_status: FsckRepairStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
+    repair_coordination: Option<RepairCoordinationOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ext4_recovery: Option<Ext4RecoveryOutput>,
     outcome: FsckOutcome,
     exit_code: i32,
@@ -1112,6 +1115,7 @@ pub struct RepairOutput {
     pub scope: RepairScopeOutput,
     pub action: RepairActionOutput,
     pub scrub: RepairScrubOutput,
+    pub repair_coordination: RepairCoordinationOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ext4_recovery: Option<Ext4RecoveryOutput>,
     pub exit_code: i32,
@@ -1141,6 +1145,7 @@ pub enum RepairScopeOutput {
 #[serde(rename_all = "snake_case")]
 pub enum RepairActionOutput {
     VerifyOnly,
+    RepairBlocked,
     RepairRequested,
     NoCorruptionDetected,
 }
@@ -3993,8 +3998,22 @@ fn build_fsck_output(path: &PathBuf, options: FsckCommandOptions) -> Result<Fsck
     let cx = cli_cx();
     let mut phases = Vec::new();
     let mut limitations = Vec::new();
-    let (flavor, bootstrap_recovery_source) =
-        detect_flavor_with_optional_btrfs_bootstrap(&cx, path, flags.repair(), &mut limitations)?;
+    let repair_coordination = coordinate_repair_write_access(
+        "ffs::cli::fsck",
+        REPAIR_COORDINATION_SCENARIO_FSCK,
+        "fsck",
+        path,
+        flags.repair(),
+    );
+    if repair_coordination.output.is_blocked() {
+        limitations.push(repair_coordination.output.detail.clone());
+    }
+    let (flavor, bootstrap_recovery_source) = detect_flavor_with_optional_btrfs_bootstrap(
+        &cx,
+        path,
+        flags.repair() && repair_coordination.writes_allowed,
+        &mut limitations,
+    )?;
     let mut ext4_recovery = None;
     let mut btrfs_repair_attempted = bootstrap_recovery_source.is_some();
     let mut btrfs_repair_performed = bootstrap_recovery_source.is_some();
@@ -4005,7 +4024,7 @@ fn build_fsck_output(path: &PathBuf, options: FsckCommandOptions) -> Result<Fsck
             source.offset, source.generation
         )
     });
-    if flags.repair() {
+    if flags.repair() && repair_coordination.writes_allowed {
         if let FsFlavor::Ext4(_) = &flavor {
             ext4_recovery = Some(run_ext4_mount_recovery(path)?);
         }
@@ -4188,7 +4207,7 @@ fn build_fsck_output(path: &PathBuf, options: FsckCommandOptions) -> Result<Fsck
                 (FsckScopeOutput::Full, BlockNumber(0), u64::MAX, report)
             };
 
-            if flags.repair() {
+            if flags.repair() && repair_coordination.writes_allowed {
                 let mut verify_after_repair_writes = false;
                 let primary_superblock = primary_btrfs_superblock_block(block_size);
                 let superblock_in_scope =
@@ -4365,7 +4384,14 @@ fn build_fsck_output(path: &PathBuf, options: FsckCommandOptions) -> Result<Fsck
     });
 
     let repair_status = if flags.repair() {
-        if let Some(recovery) = &ext4_recovery {
+        if repair_coordination.output.is_blocked() {
+            phases.push(FsckPhaseOutput {
+                phase: "repair".to_owned(),
+                status: "error".to_owned(),
+                detail: repair_coordination.output.detail.clone(),
+            });
+            FsckRepairStatus::RequestedNotPerformed
+        } else if let Some(recovery) = &ext4_recovery {
             phases.push(FsckPhaseOutput {
                 phase: "repair".to_owned(),
                 status: "ok".to_owned(),
@@ -4433,9 +4459,13 @@ fn build_fsck_output(path: &PathBuf, options: FsckCommandOptions) -> Result<Fsck
     } else {
         FsckOutcome::Clean
     };
-    let exit_code = match outcome {
-        FsckOutcome::Clean => 0,
-        FsckOutcome::ErrorsFound => 1,
+    let exit_code = if repair_coordination.output.is_blocked() {
+        2
+    } else {
+        match outcome {
+            FsckOutcome::Clean => 0,
+            FsckOutcome::ErrorsFound => 1,
+        }
     };
 
     Ok(FsckOutput {
@@ -4444,6 +4474,7 @@ fn build_fsck_output(path: &PathBuf, options: FsckCommandOptions) -> Result<Fsck
         phases,
         scrub,
         repair_status,
+        repair_coordination: flags.repair().then_some(repair_coordination.output),
         ext4_recovery,
         outcome,
         exit_code,
@@ -4617,6 +4648,28 @@ fn print_fsck_output(json: bool, output: &FsckOutput) -> Result<()> {
         println!("ext4_recovery: {}", ext4_recovery_detail(recovery));
     }
     println!("repair_status: {:?}", output.repair_status);
+    if let Some(coordination) = &output.repair_coordination {
+        println!(
+            "repair_coordination: status={:?} policy={} operation_id={} scenario_id={}",
+            coordination.status,
+            coordination.policy,
+            coordination.operation_id,
+            coordination.scenario_id
+        );
+        println!(
+            "repair_coordination_detail: {} (coordination_file={}, local_host={})",
+            coordination.detail, coordination.coordination_file, coordination.local_host
+        );
+        if let Some(owner_host) = &coordination.owner_host {
+            println!("repair_coordination_owner_host: {owner_host}");
+        }
+        if let Some(owner_process_id) = coordination.owner_process_id {
+            println!("repair_coordination_owner_process_id: {owner_process_id}");
+        }
+        if let Some(error_class) = &coordination.error_class {
+            println!("repair_coordination_error_class: {error_class}");
+        }
+    }
     println!("outcome: {:?}", output.outcome);
     println!("exit_code: {}", output.exit_code);
     if !output.limitations.is_empty() {
@@ -4799,9 +4852,11 @@ mod tests {
     };
     use crate::cmd_evidence::load_evidence_records;
     use crate::cmd_repair::{
-        Ext4RepairStaleness, btrfs_super_mirror_offsets, build_btrfs_repair_group_spec,
-        build_repair_output, merge_scrub_reports, normalize_btrfs_superblock_as_primary,
-        partition_scrub_range, repair_worker_limit, select_btrfs_repair_groups,
+        Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_REPAIR, RepairCoordinationRecord,
+        RepairCoordinationStatus, btrfs_super_mirror_offsets, build_btrfs_repair_group_spec,
+        build_repair_output, coordinate_repair_write_access, merge_scrub_reports,
+        normalize_btrfs_superblock_as_primary, partition_scrub_range,
+        repair_coordination_record_path, repair_worker_limit, select_btrfs_repair_groups,
         select_ext4_repair_groups,
     };
     use clap::Parser;
@@ -5161,6 +5216,38 @@ mod tests {
         result
     }
 
+    fn test_local_host_name() -> String {
+        std::env::var("HOSTNAME")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                std::fs::read_to_string("/etc/hostname")
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "unknown-host".to_owned())
+    }
+
+    fn write_test_coordination_record(image: &std::path::Path, owner_host: &str) -> PathBuf {
+        let record_path = repair_coordination_record_path(image);
+        let record = RepairCoordinationRecord {
+            policy: "single_host_only_v1".to_owned(),
+            image_path: image.display().to_string(),
+            owner_host: owner_host.to_owned(),
+            owner_process_id: 4242,
+            last_command: "repair".to_owned(),
+            last_operation_id: "repair-coordination-test".to_owned(),
+            recorded_at_ns: 7,
+        };
+        let mut bytes =
+            serde_json::to_vec_pretty(&record).expect("coordination record should serialize");
+        bytes.push(b'\n');
+        std::fs::write(&record_path, bytes).expect("write coordination record");
+        record_path
+    }
+
     #[test]
     fn read_file_region_reads_exact_window() {
         let image: Vec<u8> = (0_u8..64).collect();
@@ -5503,6 +5590,96 @@ mod tests {
     }
 
     #[test]
+    fn repair_coordination_claim_log_contains_required_fields() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        with_temp_image_path(&image, |path| {
+            tracing::subscriber::with_default(subscriber, || {
+                let decision = coordinate_repair_write_access(
+                    "ffs::test",
+                    REPAIR_COORDINATION_SCENARIO_REPAIR,
+                    "repair",
+                    &path,
+                    true,
+                );
+                assert!(decision.writes_allowed);
+            });
+        });
+
+        let json = parse_first_json_line(&buffer);
+        assert_eq!(json["scenario_id"], REPAIR_COORDINATION_SCENARIO_REPAIR);
+        assert_eq!(json["outcome"], "applied");
+        assert_eq!(json["error_class"], "none");
+        assert_eq!(json["command"], "repair");
+        assert_eq!(json["level"], "INFO");
+        assert_eq!(json["target"], "ffs::test");
+        assert!(
+            json["operation_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert!(
+            json["coordination_file"]
+                .as_str()
+                .is_some_and(|value| { value.ends_with(".ffs-repair-owner.json") })
+        );
+        assert_eq!(json["local_host"], json["owner_host"]);
+    }
+
+    #[test]
+    fn repair_coordination_rejection_log_contains_error_class_fields() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("warn"))
+            .with_writer(buffer.clone())
+            .finish();
+
+        with_temp_image_path(&image, |path| {
+            write_test_coordination_record(&path, "remote-host");
+            tracing::subscriber::with_default(subscriber, || {
+                let decision = coordinate_repair_write_access(
+                    "ffs::test",
+                    REPAIR_COORDINATION_SCENARIO_REPAIR,
+                    "repair",
+                    &path,
+                    true,
+                );
+                assert!(!decision.writes_allowed);
+            });
+        });
+
+        let json = parse_first_json_line(&buffer);
+        assert_eq!(json["scenario_id"], REPAIR_COORDINATION_SCENARIO_REPAIR);
+        assert_eq!(json["outcome"], "rejected");
+        assert_eq!(json["error_class"], "multi_host_unsupported");
+        assert_eq!(json["command"], "repair");
+        assert_eq!(json["level"], "WARN");
+        assert_eq!(json["target"], "ffs::test");
+        assert_eq!(json["owner_host"], "remote-host");
+        assert!(
+            json["operation_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+    }
+
+    #[test]
     fn mount_cmd_managed_mode_fails_at_image_open_not_validation() {
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
@@ -5638,8 +5815,7 @@ mod tests {
                 let id = mode.scenario_id(rw);
                 assert!(
                     ids.insert(id),
-                    "duplicate scenario_id: {id} for mode={:?} rw={rw}",
-                    mode
+                    "duplicate scenario_id: {id} for mode={mode:?} rw={rw}"
                 );
             }
         }
@@ -6832,6 +7008,81 @@ mod tests {
     }
 
     #[test]
+    fn repair_coordination_allows_same_host_refresh() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+
+        with_temp_image_path(&image, |path| {
+            let local_host = test_local_host_name();
+            let first = coordinate_repair_write_access(
+                "ffs::test",
+                REPAIR_COORDINATION_SCENARIO_REPAIR,
+                "repair",
+                &path,
+                true,
+            );
+            assert!(first.writes_allowed);
+            assert!(matches!(
+                first.output.status,
+                RepairCoordinationStatus::Claimed
+            ));
+
+            let second = coordinate_repair_write_access(
+                "ffs::test",
+                REPAIR_COORDINATION_SCENARIO_REPAIR,
+                "repair",
+                &path,
+                true,
+            );
+            assert!(second.writes_allowed);
+            assert!(matches!(
+                second.output.status,
+                RepairCoordinationStatus::Claimed
+            ));
+            assert!(
+                second.output.detail.contains("remains pinned to host"),
+                "unexpected same-host refresh detail: {}",
+                second.output.detail
+            );
+
+            let record_bytes = std::fs::read(repair_coordination_record_path(&path))
+                .expect("read persisted coordination record");
+            let record: RepairCoordinationRecord =
+                serde_json::from_slice(&record_bytes).expect("parse persisted coordination record");
+            assert_eq!(record.owner_host, local_host);
+            assert_eq!(record.last_command, "repair");
+        });
+    }
+
+    #[test]
+    fn repair_coordination_blocks_foreign_host_owner() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+
+        with_temp_image_path(&image, |path| {
+            write_test_coordination_record(&path, "remote-host");
+            let decision = coordinate_repair_write_access(
+                "ffs::test",
+                REPAIR_COORDINATION_SCENARIO_REPAIR,
+                "repair",
+                &path,
+                true,
+            );
+
+            assert!(!decision.writes_allowed);
+            assert!(matches!(
+                decision.output.status,
+                RepairCoordinationStatus::Blocked
+            ));
+            assert_eq!(decision.output.owner_host.as_deref(), Some("remote-host"));
+            assert_eq!(
+                decision.output.error_class.as_deref(),
+                Some("multi_host_unsupported")
+            );
+        });
+    }
+
+    #[test]
     fn btrfs_super_mirror_offsets_follow_kernel_layout() {
         let image_len =
             ((16 * 1024_u64) << 24) + u64::try_from(super::BTRFS_SUPER_INFO_SIZE).unwrap_or(0);
@@ -6901,6 +7152,64 @@ mod tests {
                 .limitations
                 .iter()
                 .any(|limitation| limitation.contains("restored primary btrfs superblock"))
+        );
+    }
+
+    #[test]
+    fn repair_blocked_preserves_corrupt_btrfs_backup_superblock() {
+        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
+        let backup_offset = 64 * 1024 * 1024_usize;
+        let image_len = backup_offset + super::BTRFS_SUPER_INFO_SIZE + 4096;
+        let mut image = vec![0_u8; image_len];
+
+        let primary = build_test_btrfs_superblock(primary_offset as u64, 21);
+        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE]
+            .copy_from_slice(&primary);
+
+        let mut backup = build_test_btrfs_superblock(backup_offset as u64, 17);
+        backup[0] ^= 0x7E; // Corrupt checksum but keep structure parseable.
+        image[backup_offset..backup_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&backup);
+
+        let (output, backup_still_corrupt) = with_temp_image_path(&image, |path| {
+            write_test_coordination_record(&path, "remote-host");
+            build_repair_output(
+                &path,
+                RepairCommandOptions {
+                    flags: RepairFlags::empty(),
+                    block_group: None,
+                    max_threads: Some(1),
+                },
+            )
+            .map(|output| {
+                let repaired = std::fs::read(&path).expect("read image after blocked repair");
+                let sb_region =
+                    &repaired[backup_offset..backup_offset + super::BTRFS_SUPER_INFO_SIZE];
+                let backup_still_corrupt =
+                    ffs_ondisk::verify_btrfs_superblock_checksum(sb_region).is_err();
+                (output, backup_still_corrupt)
+            })
+            .expect("repair output for blocked multi-host repair")
+        });
+
+        assert!(matches!(
+            output.action,
+            super::RepairActionOutput::RepairBlocked
+        ));
+        assert!(matches!(
+            output.repair_coordination.status,
+            RepairCoordinationStatus::Blocked
+        ));
+        assert_eq!(
+            output.repair_coordination.owner_host.as_deref(),
+            Some("remote-host")
+        );
+        assert_eq!(output.exit_code, 2);
+        assert!(backup_still_corrupt);
+        assert!(
+            output
+                .limitations
+                .iter()
+                .any(|limitation| { limitation.contains("Multi-host repair is out of scope") })
         );
     }
 
@@ -7089,6 +7398,70 @@ mod tests {
         );
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
         assert!(output.scrub.scanned > 0);
+    }
+
+    #[test]
+    fn fsck_repair_blocked_preserves_corrupt_btrfs_backup_superblock() {
+        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
+        let backup_offset = 64 * 1024 * 1024_usize;
+        let image_len = backup_offset + super::BTRFS_SUPER_INFO_SIZE + 4096;
+        let mut image = vec![0_u8; image_len];
+
+        let primary = build_test_btrfs_superblock(primary_offset as u64, 29);
+        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE]
+            .copy_from_slice(&primary);
+
+        let mut backup = build_test_btrfs_superblock(backup_offset as u64, 26);
+        backup[0] ^= 0x19; // Corrupt checksum but keep structure parseable.
+        image[backup_offset..backup_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&backup);
+
+        let (output, backup_still_corrupt) = with_temp_image_path(&image, |path| {
+            write_test_coordination_record(&path, "remote-host");
+            build_fsck_output(
+                &path,
+                FsckCommandOptions {
+                    flags: FsckFlags::empty().with_repair(true),
+                    block_group: None,
+                },
+            )
+            .map(|output| {
+                let repaired = std::fs::read(&path).expect("read image after blocked fsck repair");
+                let sb_region =
+                    &repaired[backup_offset..backup_offset + super::BTRFS_SUPER_INFO_SIZE];
+                let backup_still_corrupt =
+                    ffs_ondisk::verify_btrfs_superblock_checksum(sb_region).is_err();
+                (output, backup_still_corrupt)
+            })
+            .expect("fsck output for blocked multi-host repair")
+        });
+
+        assert!(matches!(
+            output.repair_status,
+            super::FsckRepairStatus::RequestedNotPerformed
+        ));
+        assert!(matches!(
+            output
+                .repair_coordination
+                .as_ref()
+                .expect("repair coordination should be reported")
+                .status,
+            RepairCoordinationStatus::Blocked
+        ));
+        let repair_phase = output
+            .phases
+            .iter()
+            .find(|phase| phase.phase == "repair")
+            .expect("repair phase should be present");
+        assert_eq!(repair_phase.status, "error");
+        assert!(
+            repair_phase
+                .detail
+                .contains("Multi-host repair is out of scope"),
+            "unexpected blocked repair detail: {}",
+            repair_phase.detail
+        );
+        assert_eq!(output.exit_code, 2);
+        assert!(backup_still_corrupt);
     }
 
     #[test]
