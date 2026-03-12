@@ -78,6 +78,7 @@
 //! | `NameTooLong` | `ENAMETOOLONG` | 36 |
 //! | `Exists` | `EEXIST` | 17 |
 //! | `RepairFailed` | `EIO` | 5 |
+//! | `ModeViolation` | `EPERM` | 1 |
 //!
 //! ## Design Constraints
 //!
@@ -201,6 +202,15 @@ pub enum FfsError {
     /// RaptorQ repair or self-healing workflow could not recover data.
     #[error("repair failed: {0}")]
     RepairFailed(String),
+
+    /// A native-mode-only operation was attempted in compatibility mode.
+    ///
+    /// Returned when code tries to write repair symbols, version-store
+    /// entries, or BLAKE3 checksums while mounted in compat mode. Maps to
+    /// `EPERM` because the operation is valid but not authorized by the
+    /// current mount configuration.
+    #[error("mount-mode violation: {0}")]
+    ModeViolation(String),
 }
 
 impl FfsError {
@@ -261,6 +271,7 @@ impl FfsError {
             Self::NotEmpty => libc::ENOTEMPTY,
             Self::NameTooLong => libc::ENAMETOOLONG,
             Self::Exists => libc::EEXIST,
+            Self::ModeViolation(_) => libc::EPERM,
         }
     }
 }
@@ -314,6 +325,10 @@ mod tests {
             (FfsError::NameTooLong, libc::ENAMETOOLONG),
             (FfsError::Exists, libc::EEXIST),
             (FfsError::RepairFailed("test".into()), libc::EIO),
+            (
+                FfsError::ModeViolation("test operation".into()),
+                libc::EPERM,
+            ),
         ];
 
         for (error, expected_errno) in &cases {

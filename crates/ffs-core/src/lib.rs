@@ -43,7 +43,7 @@ use ffs_ondisk::{
 };
 use ffs_types::{
     BlockNumber, ByteOffset, CommitSeq, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET, EXT4_SECTOR_SIZE,
-    GroupNumber, InodeNumber, ParseError, Snapshot,
+    GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
 };
 use ffs_xattr::XattrWriteAccess;
 use parking_lot::{Mutex, RwLock};
@@ -214,6 +214,12 @@ pub struct OpenOptions {
     /// Controls whether mount-time JBD2 replay writes through to the underlying
     /// image, writes into an in-memory overlay, or is skipped entirely.
     pub ext4_journal_replay_mode: Ext4JournalReplayMode,
+    /// Filesystem mount mode (compat or native).
+    ///
+    /// In `Compat` mode (default), only standard ext4/btrfs on-disk mutations
+    /// are permitted. In `Native` mode, MVCC version chains, repair symbols,
+    /// and BLAKE3 checksums are additionally allowed.
+    pub mount_mode: MountMode,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -222,6 +228,7 @@ impl Default for OpenOptions {
         Self {
             skip_validation: false,
             ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+            mount_mode: MountMode::Compat,
         }
     }
 }
@@ -368,6 +375,8 @@ pub struct OpenFs {
     pub ext4_journal_replay: Option<ReplayOutcome>,
     /// Crash recovery outcome, if the filesystem required recovery on mount.
     pub crash_recovery: Option<CrashRecoveryOutcome>,
+    /// Active mount mode (compat or native).
+    pub mount_mode: MountMode,
     /// Block device for I/O operations.
     dev: Box<dyn ByteDevice>,
     /// MVCC version store for snapshot-isolated block access.
@@ -669,12 +678,19 @@ impl OpenFs {
             "mvcc_store_init"
         );
 
+        info!(
+            mount_mode = %options.mount_mode,
+            operation_id = "open_fs",
+            "mount_mode_selected"
+        );
+
         let mut fs = Self {
             flavor,
             ext4_geometry,
             btrfs_context,
             ext4_journal_replay: None,
             crash_recovery: None,
+            mount_mode: options.mount_mode,
             dev,
             mvcc_store,
             jbd2_writer: None,
@@ -780,6 +796,44 @@ impl OpenFs {
     #[must_use]
     pub fn crash_recovery(&self) -> Option<&CrashRecoveryOutcome> {
         self.crash_recovery.as_ref()
+    }
+
+    // ── Mount-mode boundary enforcement ─────────────────────────────────
+
+    /// Check that the current mount mode permits native-only operations.
+    ///
+    /// Returns `Ok(())` in native mode. Returns `Err` in compat mode with a
+    /// structured log emission describing the rejected operation.
+    pub fn require_native_mode(&self, operation: &str) -> Result<(), FfsError> {
+        if self.mount_mode.is_native() {
+            return Ok(());
+        }
+        warn!(
+            mount_mode = %self.mount_mode,
+            rejected_operation = operation,
+            operation_id = "mode_boundary_check",
+            scenario_id = "native_mode_required",
+            outcome = "rejected",
+            "native_mode_boundary_violation"
+        );
+        Err(FfsError::ModeViolation(format!(
+            "operation '{operation}' requires native mode, but filesystem is mounted in compat mode"
+        )))
+    }
+
+    /// Check that the current mount mode permits repair symbol writes.
+    pub fn require_repair_write_access(&self) -> Result<(), FfsError> {
+        self.require_native_mode("write_repair_symbols")
+    }
+
+    /// Check that the current mount mode permits version store writes.
+    pub fn require_version_store_access(&self) -> Result<(), FfsError> {
+        self.require_native_mode("write_version_store")
+    }
+
+    /// Check that the current mount mode permits BLAKE3 checksum writes.
+    pub fn require_blake3_write_access(&self) -> Result<(), FfsError> {
+        self.require_native_mode("write_blake3_checksum")
     }
 
     /// Detect unclean shutdown state from the ext4 superblock and record
@@ -19397,5 +19451,165 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Mount-mode boundary enforcement tests ───────────────────────────
+
+    #[test]
+    fn mount_mode_default_is_compat() {
+        let opts = OpenOptions::default();
+        assert_eq!(opts.mount_mode, MountMode::Compat);
+        assert!(opts.mount_mode.is_compat());
+        assert!(!opts.mount_mode.is_native());
+    }
+
+    #[test]
+    fn mount_mode_native_opt_in() {
+        let opts = OpenOptions {
+            mount_mode: MountMode::Native,
+            ..OpenOptions::default()
+        };
+        assert!(opts.mount_mode.is_native());
+        assert!(!opts.mount_mode.is_compat());
+    }
+
+    #[test]
+    fn mount_mode_display_compat() {
+        assert_eq!(MountMode::Compat.to_string(), "compat");
+    }
+
+    #[test]
+    fn mount_mode_display_native() {
+        assert_eq!(MountMode::Native.to_string(), "native");
+    }
+
+    #[test]
+    fn require_native_mode_rejects_in_compat() {
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            mount_mode: MountMode::Compat,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
+        assert!(fs.mount_mode.is_compat());
+
+        let err = fs.require_native_mode("write_repair_symbols").unwrap_err();
+        assert!(
+            matches!(err, FfsError::ModeViolation(_)),
+            "expected ModeViolation, got: {err:?}"
+        );
+        assert_eq!(err.to_errno(), libc::EPERM);
+        assert!(
+            err.to_string().contains("compat mode"),
+            "error should mention compat mode: {err}"
+        );
+    }
+
+    #[test]
+    fn require_native_mode_allows_in_native() {
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            mount_mode: MountMode::Native,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
+        assert!(fs.mount_mode.is_native());
+
+        fs.require_native_mode("write_repair_symbols")
+            .expect("native mode should allow native operations");
+        fs.require_repair_write_access()
+            .expect("repair writes should be allowed in native mode");
+        fs.require_version_store_access()
+            .expect("version store should be allowed in native mode");
+        fs.require_blake3_write_access()
+            .expect("blake3 writes should be allowed in native mode");
+    }
+
+    #[test]
+    fn compat_mode_blocks_all_native_operations() {
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            mount_mode: MountMode::Compat,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
+
+        // Each native-only operation must fail with ModeViolation
+        let ops = [
+            fs.require_repair_write_access(),
+            fs.require_version_store_access(),
+            fs.require_blake3_write_access(),
+        ];
+        for result in &ops {
+            assert!(
+                result.is_err(),
+                "expected error for native operation in compat mode"
+            );
+            let err = result.as_ref().unwrap_err();
+            assert!(
+                matches!(err, FfsError::ModeViolation(_)),
+                "expected ModeViolation, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_fs_stores_mount_mode_from_options() {
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        // Compat mode
+        let opts_compat = OpenOptions {
+            skip_validation: true,
+            mount_mode: MountMode::Compat,
+            ..OpenOptions::default()
+        };
+        let fs_compat = OpenFs::from_device(&cx, Box::new(dev), &opts_compat).expect("open compat");
+        assert_eq!(fs_compat.mount_mode, MountMode::Compat);
+
+        // Native mode
+        let image2 = build_ext4_image(1);
+        let dev2 = TestDevice::from_vec(image2);
+        let opts_native = OpenOptions {
+            skip_validation: true,
+            mount_mode: MountMode::Native,
+            ..OpenOptions::default()
+        };
+        let fs_native =
+            OpenFs::from_device(&cx, Box::new(dev2), &opts_native).expect("open native");
+        assert_eq!(fs_native.mount_mode, MountMode::Native);
+    }
+
+    #[test]
+    fn mode_violation_error_includes_operation_name() {
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
+
+        let err = fs.require_native_mode("my_custom_op").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("my_custom_op"),
+            "error should include operation name: {msg}"
+        );
+        assert!(
+            msg.contains("compat mode"),
+            "error should mention compat mode: {msg}"
+        );
     }
 }

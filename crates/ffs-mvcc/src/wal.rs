@@ -943,4 +943,92 @@ mod tests {
             prop_assert_eq!(decoded, commits);
         }
     }
+
+    // ── OQ7 decision-binding format stability tests ─────────────────────
+
+    /// OQ7 validation: WAL magic is stable at 0x4D56_4357 ("MVCW" LE).
+    #[test]
+    fn oq7_wal_magic_is_stable() {
+        assert_eq!(WAL_MAGIC, 0x4D56_4357);
+    }
+
+    /// OQ7 validation: WAL version is 1.
+    #[test]
+    fn oq7_wal_version_is_one() {
+        assert_eq!(WAL_VERSION, 1);
+    }
+
+    /// OQ7 validation: checksum type 0 is CRC32C.
+    #[test]
+    fn oq7_checksum_type_crc32c() {
+        assert_eq!(CHECKSUM_TYPE_CRC32C, 0);
+    }
+
+    /// OQ7 validation: header size is exactly 16 bytes.
+    #[test]
+    fn oq7_header_size_is_16() {
+        assert_eq!(HEADER_SIZE, 16);
+        let encoded = encode_header(&WalHeader::default());
+        assert_eq!(encoded.len(), 16);
+    }
+
+    /// OQ7 validation: minimum commit record is 29 bytes (D4 canonical minimum).
+    #[test]
+    fn oq7_min_commit_record_size() {
+        assert_eq!(MIN_COMMIT_RECORD_SIZE, 29);
+    }
+
+    /// OQ7 validation: record type for COMMIT is 1.
+    #[test]
+    fn oq7_record_type_commit_is_one() {
+        assert_eq!(RECORD_TYPE_COMMIT, 1);
+    }
+
+    /// OQ7 validation: reserved sentinel u64::MAX is not a valid commit_seq (D8).
+    #[test]
+    fn oq7_reserved_sentinel_commit_seq() {
+        // Encode a commit with u64::MAX commit_seq — the format allows it in
+        // encoding, but replay MUST reject it. Verify encoding succeeds (the
+        // rejection is at the replay layer, tested in persist.rs).
+        let commit = WalCommit {
+            commit_seq: CommitSeq(u64::MAX),
+            txn_id: TxnId(1),
+            writes: vec![],
+        };
+        let encoded = encode_commit(&commit).expect("encoding should succeed");
+        // Decode should parse it (format layer doesn't enforce semantics)
+        match decode_commit(&encoded) {
+            DecodeResult::Commit(c) => {
+                assert_eq!(c.commit_seq, CommitSeq(u64::MAX));
+            }
+            other => panic!("expected Commit, got {other:?}"),
+        }
+    }
+
+    /// OQ7 validation: writes are encoded in block_number order (D4).
+    #[test]
+    fn oq7_canonical_write_ordering() {
+        let commit = WalCommit {
+            commit_seq: CommitSeq(1),
+            txn_id: TxnId(1),
+            writes: vec![
+                WalWrite {
+                    block: BlockNumber(5),
+                    data: vec![0x55],
+                },
+                WalWrite {
+                    block: BlockNumber(10),
+                    data: vec![0xAA],
+                },
+            ],
+        };
+        let encoded = encode_commit(&commit).expect("encode");
+        let decoded = match decode_commit(&encoded) {
+            DecodeResult::Commit(c) => c,
+            other => panic!("expected Commit, got {other:?}"),
+        };
+        // Verify write ordering preserved
+        assert_eq!(decoded.writes[0].block, BlockNumber(5));
+        assert_eq!(decoded.writes[1].block, BlockNumber(10));
+    }
 }

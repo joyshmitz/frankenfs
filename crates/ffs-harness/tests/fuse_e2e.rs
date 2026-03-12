@@ -161,6 +161,7 @@ fn try_mount_ffs(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSes
     let opts = OpenOptions {
         skip_validation: false,
         ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
     };
     let fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
     let mount_opts = MountOptions {
@@ -347,6 +348,7 @@ fn try_mount_ffs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Background
     let opts = OpenOptions {
         skip_validation: false,
         ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
     };
     let mut fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
     fs.enable_writes(&cx).expect("enable ext4 write support");
@@ -1692,6 +1694,7 @@ fn try_mount_btrfs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Backgrou
     let opts = OpenOptions {
         skip_validation: false,
         ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
     };
     let mut fs = OpenFs::open_with_options(&cx, image, &opts).expect("open btrfs image");
     if let Err(e) = fs.enable_writes(&cx) {

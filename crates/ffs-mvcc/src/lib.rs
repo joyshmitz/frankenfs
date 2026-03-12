@@ -6,6 +6,7 @@ pub mod persist;
 pub mod rcu;
 pub mod sharded;
 pub mod wal;
+pub mod wal_writer;
 
 use asupersync::Cx;
 pub use compression::{CompressionAlgo, CompressionPolicy};
@@ -5687,6 +5688,7 @@ mod tests {
                 &path,
                 crate::persist::PersistOptions {
                     sync_on_commit: false,
+                    ..crate::persist::PersistOptions::default()
                 },
             )
             .expect("open persistent store");
@@ -5703,6 +5705,7 @@ mod tests {
             &path,
             crate::persist::PersistOptions {
                 sync_on_commit: false,
+                ..crate::persist::PersistOptions::default()
             },
         )
         .expect("reopen");

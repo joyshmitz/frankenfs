@@ -282,6 +282,54 @@ impl DeviceId {
     }
 }
 
+/// Filesystem mount mode controlling which on-disk mutations are permitted.
+///
+/// FrankenFS operates in one of two modes:
+///
+/// - **Compat** (default): Only standard ext4/btrfs on-disk structures are read
+///   and written. The resulting image remains mountable by the Linux kernel
+///   driver. All checksums use CRC32C. Journal uses JBD2 physical journaling.
+///
+/// - **Native**: In addition to standard structures, FrankenFS may write
+///   MVCC version chains (to a dedicated version-store inode), RaptorQ repair
+///   symbols (to reserved tail blocks in each block group), and BLAKE3
+///   checksums for native metadata. Journal uses COW semantics.
+///
+/// The mode is set at mount time via [`MountMode`] in `OpenOptions`. Switching
+/// from Compat to Native requires explicit opt-in; Native images can be opened
+/// in Compat mode (read-only for native-only metadata).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum MountMode {
+    /// Compatibility mode: only standard ext4/btrfs mutations allowed.
+    #[default]
+    Compat,
+    /// Native MVCC mode: repair symbols, version store, and BLAKE3 permitted.
+    Native,
+}
+
+impl MountMode {
+    /// Returns `true` if this is native MVCC mode.
+    #[must_use]
+    pub fn is_native(self) -> bool {
+        matches!(self, Self::Native)
+    }
+
+    /// Returns `true` if this is compatibility mode.
+    #[must_use]
+    pub fn is_compat(self) -> bool {
+        matches!(self, Self::Compat)
+    }
+}
+
+impl fmt::Display for MountMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Compat => f.write_str("compat"),
+            Self::Native => f.write_str("native"),
+        }
+    }
+}
+
 /// Inode or filesystem generation counter (ext4: u32, btrfs: u64).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Generation(pub u64);
@@ -1720,5 +1768,24 @@ mod tests {
             let result = trim_nul_padded(bytes);
             prop_assert_eq!(result, s.trim());
         }
+    }
+
+    #[test]
+    fn mount_mode_default_is_compat() {
+        assert_eq!(MountMode::default(), MountMode::Compat);
+    }
+
+    #[test]
+    fn mount_mode_predicates() {
+        assert!(MountMode::Compat.is_compat());
+        assert!(!MountMode::Compat.is_native());
+        assert!(MountMode::Native.is_native());
+        assert!(!MountMode::Native.is_compat());
+    }
+
+    #[test]
+    fn mount_mode_display() {
+        assert_eq!(format!("{}", MountMode::Compat), "compat");
+        assert_eq!(format!("{}", MountMode::Native), "native");
     }
 }

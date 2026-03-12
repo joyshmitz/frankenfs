@@ -39,7 +39,7 @@ use ffs_repair::scrub::{
 };
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, EXT4_SUPERBLOCK_OFFSET,
-    EXT4_SUPERBLOCK_SIZE, GroupNumber, InodeNumber,
+    EXT4_SUPERBLOCK_SIZE, GroupNumber, InodeNumber, MountMode,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -333,6 +333,14 @@ enum Command {
         /// Mount read-write (default is read-only).
         #[arg(long)]
         rw: bool,
+        /// Enable native MVCC mode (allows repair symbols, version store, BLAKE3).
+        ///
+        /// By default FrankenFS mounts in compatibility mode where only standard
+        /// ext4/btrfs on-disk structures are written. Native mode enables
+        /// FrankenFS-specific features: MVCC version chains, RaptorQ repair
+        /// symbols, and BLAKE3 checksums.
+        #[arg(long)]
+        native: bool,
     },
     /// Run a read-only integrity scan (scrub) on a filesystem image.
     Scrub {
@@ -1255,11 +1263,13 @@ fn run() -> Result<()> {
             managed_unmount_timeout_secs,
             allow_other,
             rw,
+            native,
         } => mount_cmd(
             &image,
             &mountpoint,
             allow_other,
             rw,
+            native,
             runtime_mode,
             managed_unmount_timeout_secs,
         ),
@@ -3614,11 +3624,13 @@ fn log_mount_shutdown_metrics(
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn mount_cmd(
     image_path: &Path,
     mountpoint: &Path,
     allow_other: bool,
     rw: bool,
+    native: bool,
     runtime_mode: MountRuntimeMode,
     managed_unmount_timeout_secs: Option<u64>,
 ) -> Result<()> {
@@ -3677,8 +3689,14 @@ fn mount_cmd(
     );
 
     let cx = cli_cx();
+    let mount_mode = if native {
+        MountMode::Native
+    } else {
+        MountMode::Compat
+    };
     let open_opts = OpenOptions {
         ext4_journal_replay_mode: ext4_mount_replay_mode(rw),
+        mount_mode,
         ..OpenOptions::default()
     };
     let mut open_fs = OpenFs::open_with_options(&cx, image_path, &open_opts)
@@ -4553,6 +4571,7 @@ pub fn run_ext4_mount_recovery(path: &PathBuf) -> Result<Ext4RecoveryOutput> {
         &OpenOptions {
             skip_validation: false,
             ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+            ..OpenOptions::default()
         },
     )
     .with_context(|| {
@@ -5686,6 +5705,7 @@ mod tests {
             &PathBuf::from("/definitely/missing-mountpoint"),
             false,
             false,
+            false,
             MountRuntimeMode::Managed,
             Some(30),
         )
@@ -5704,6 +5724,7 @@ mod tests {
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
             &PathBuf::from("/definitely/missing-mountpoint"),
+            false,
             false,
             false,
             MountRuntimeMode::PerCore,
@@ -5755,6 +5776,30 @@ mod tests {
                     MountRuntimeMode::Standard,
                     "default mount runtime mode must remain standard"
                 );
+            }
+            _ => panic!("expected mount command"),
+        }
+    }
+
+    #[test]
+    fn mount_native_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["ffs", "mount", "/img", "/mnt"])
+            .expect("mount should parse with defaults");
+        match cli.command {
+            Command::Mount { native, .. } => {
+                assert!(!native, "default native flag must be false (compat mode)");
+            }
+            _ => panic!("expected mount command"),
+        }
+    }
+
+    #[test]
+    fn mount_native_flag_opt_in() {
+        let cli = Cli::try_parse_from(["ffs", "mount", "--native", "/img", "/mnt"])
+            .expect("mount with --native should parse");
+        match cli.command {
+            Command::Mount { native, .. } => {
+                assert!(native, "--native flag should set native to true");
             }
             _ => panic!("expected mount command"),
         }
@@ -6196,6 +6241,7 @@ mod tests {
                 managed_unmount_timeout_secs,
                 allow_other,
                 rw,
+                native,
             } => {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert_eq!(mountpoint, PathBuf::from("/tmp/mnt"));
@@ -6203,6 +6249,7 @@ mod tests {
                 assert_eq!(managed_unmount_timeout_secs, None);
                 assert!(allow_other);
                 assert!(rw);
+                assert!(!native);
             }
             _ => panic!("expected mount command"),
         }
@@ -6221,6 +6268,7 @@ mod tests {
                 managed_unmount_timeout_secs,
                 allow_other,
                 rw,
+                native,
             } => {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert_eq!(mountpoint, PathBuf::from("/tmp/mnt"));
@@ -6228,6 +6276,7 @@ mod tests {
                 assert_eq!(managed_unmount_timeout_secs, None);
                 assert!(!allow_other);
                 assert!(!rw);
+                assert!(!native);
             }
             _ => panic!("expected mount command"),
         }
@@ -6255,6 +6304,7 @@ mod tests {
                 managed_unmount_timeout_secs,
                 allow_other,
                 rw,
+                native,
             } => {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert_eq!(mountpoint, PathBuf::from("/tmp/mnt"));
@@ -6262,6 +6312,7 @@ mod tests {
                 assert_eq!(managed_unmount_timeout_secs, Some(42));
                 assert!(!allow_other);
                 assert!(!rw);
+                assert!(!native);
             }
             _ => panic!("expected mount command"),
         }

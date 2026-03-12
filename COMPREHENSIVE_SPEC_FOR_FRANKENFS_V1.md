@@ -5922,14 +5922,17 @@ has a tentative resolution and a phase by which it must be finalized.
 **Question:** When running in native MVCC mode, which ext4 on-disk structures
 are preserved verbatim and which are extended or replaced?
 
-**Tentative Resolution:** All ext4 structures (superblock, group descriptors,
-inodes, extents, directory blocks) are preserved in their standard layout.
-MVCC version chains and repair symbols are stored in separate reserved areas
-(reserved blocks at the end of each block group for repair symbols, a
-dedicated "version store" inode for MVCC metadata). This allows fallback to
-JBD2 mode by discarding the version store.
+**Status:** Resolved (2026-03-12, `bd-h6nz.6.1`).
 
-**Must Resolve By:** Phase 4 (before first write path implementation).
+**Decision (Accepted):** Two mount modes with explicit boundary enforcement.
+- **Compat mode** (default): Only standard ext4/btrfs structures are mutated.
+  All checksums use CRC32C. Journal uses JBD2. Image remains kernel-mountable.
+- **Native mode** (opt-in via `--native`): Additionally permits MVCC version
+  chains, RaptorQ repair symbols, and BLAKE3 checksums in reserved areas.
+- Boundary enforcement via `require_native_mode()` guard on `OpenFs`, returning
+  `FfsError::ModeViolation` (errno `EPERM`) for rejected native-only operations.
+- Native images can be opened in compat mode (native metadata is ignored).
+- See `docs/oq1-native-mode-boundary.md` for full decision record.
 
 #### OQ2: Conflict Resolution Beyond FCW
 
@@ -6185,14 +6188,17 @@ across unmount/remount? Options include: (a) a dedicated journal-like area,
 (b) a hidden inode with COW-allocated blocks, (c) an entirely separate file
 alongside the filesystem image.
 
-**Tentative Resolution:** Option (b): a hidden inode (inode number in a
-reserved range, e.g., inode 12) stores version chain metadata in a structured
-format. On clean unmount, the version store is compacted (all uncommitted
-versions discarded, all committed versions with `commit_seq` older than the
-oldest possible snapshot are pruned). On mount, the version store is loaded
-and the MVCC engine is initialized from it.
+**Status:** Resolved (2026-03-12, `bd-h6nz.6.7`).
 
-**Must Resolve By:** Phase 6 (MVCC persistence).
+**Decision (Accepted):** WAL v1 append-only commit log (§5.9.4).
+- Append-only WAL with 16-byte file header + per-record CRC32C framing.
+- Crash-safe: commit records are all-or-nothing; truncated tails discarded.
+- Checkpoint acceleration for fast startup; GC via watermark-driven compaction.
+- 8 durable invariants (D1-D8) with deterministic replay semantics.
+- Storage location is decoupled from wire format (sidecar file, hidden inode,
+  or ByteDevice implementation — decided per deployment target).
+- See `docs/oq7-version-store-format.md` for full decision record and
+  §5.9.2–§5.9.10 for normative format specification.
 
 ---
 

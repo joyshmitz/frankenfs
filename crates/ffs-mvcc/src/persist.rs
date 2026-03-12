@@ -22,6 +22,7 @@
 //! - Partial/corrupted WAL tail records are safely ignored.
 
 use crate::wal::{self, DecodeResult, HEADER_SIZE, WalCommit, WalHeader};
+use crate::wal_writer::{SyncPolicy, WalWriter, WalWriterConfig};
 use crate::{BlockVersion, CommitError, MvccStore, Transaction};
 use asupersync::Cx;
 use ffs_error::{FfsError, Result};
@@ -36,12 +37,33 @@ use std::path::Path;
 pub struct PersistOptions {
     /// Whether to sync after each commit (default: true).
     pub sync_on_commit: bool,
+    /// Whether to verify writes by reading back and checking CRC (default: false).
+    pub verify_writes: bool,
+    /// WAL size threshold in bytes for backpressure signaling (0 = disabled).
+    pub backpressure_threshold_bytes: u64,
 }
 
 impl Default for PersistOptions {
     fn default() -> Self {
         Self {
             sync_on_commit: true,
+            verify_writes: false,
+            backpressure_threshold_bytes: 0,
+        }
+    }
+}
+
+impl PersistOptions {
+    /// Convert to [`WalWriterConfig`] for the underlying writer.
+    fn to_writer_config(&self) -> WalWriterConfig {
+        WalWriterConfig {
+            sync_policy: if self.sync_on_commit {
+                SyncPolicy::Immediate
+            } else {
+                SyncPolicy::Manual
+            },
+            verify_writes: self.verify_writes,
+            backpressure_threshold_bytes: self.backpressure_threshold_bytes,
         }
     }
 }
@@ -128,56 +150,15 @@ const CHECKPOINT_HEADER_SIZE: usize = 28;
 /// This wrapper adds durability to `MvccStore` by writing committed versions
 /// to a Write-Ahead Log before returning from `commit()`. On startup, the
 /// WAL is replayed to restore the committed state.
+///
+/// The write path is backed by [`WalWriter`], which provides integrity checks,
+/// configurable sync policy, backpressure signaling, and structured logging.
 #[derive(Debug)]
 pub struct PersistentMvccStore {
     store: RwLock<MvccStore>,
-    wal: RwLock<WalFile>,
-    options: PersistOptions,
+    wal: RwLock<WalWriter>,
     stats: RwLock<WalStats>,
     recovery_report: WalRecoveryReport,
-}
-
-/// WAL file handle with position tracking.
-#[derive(Debug)]
-struct WalFile {
-    file: File,
-    write_pos: u64,
-    #[cfg(test)]
-    fail_sync: bool,
-}
-
-impl WalFile {
-    fn new(file: File, write_pos: u64) -> Self {
-        Self {
-            file,
-            write_pos,
-            #[cfg(test)]
-            fail_sync: false,
-        }
-    }
-
-    fn append(&mut self, data: &[u8]) -> Result<()> {
-        self.file.seek(SeekFrom::Start(self.write_pos))?;
-        self.file.write_all(data)?;
-        self.write_pos += u64::try_from(data.len())
-            .map_err(|_| FfsError::Format("WAL write size overflow".to_owned()))?;
-        Ok(())
-    }
-
-    fn sync(&self) -> Result<()> {
-        #[cfg(test)]
-        if self.fail_sync {
-            return Err(FfsError::Io(std::io::Error::other(
-                "injected WAL sync failure",
-            )));
-        }
-        self.file.sync_all()?;
-        Ok(())
-    }
-
-    fn size(&self) -> u64 {
-        self.write_pos
-    }
 }
 
 impl PersistentMvccStore {
@@ -237,6 +218,7 @@ impl PersistentMvccStore {
     ) -> Result<Self> {
         let wal_path = wal_path.as_ref();
         let checkpoint_path = checkpoint_path.as_ref();
+        let writer_config = options.to_writer_config();
 
         let mut store = MvccStore::new();
         let mut stats = WalStats::default();
@@ -294,10 +276,12 @@ impl PersistentMvccStore {
 
         stats.wal_size_bytes = write_pos;
 
+        let mut writer = WalWriter::new(file, write_pos, writer_config);
+        writer.set_last_commit_seq(store.next_commit.saturating_sub(1));
+
         Ok(Self {
             store: RwLock::new(store),
-            wal: RwLock::new(WalFile::new(file, write_pos)),
-            options,
+            wal: RwLock::new(writer),
             stats: RwLock::new(stats),
             recovery_report: recovery,
         })
@@ -311,6 +295,7 @@ impl PersistentMvccStore {
     ) -> Result<Self> {
         let path = wal_path.as_ref();
         let exists = path.exists();
+        let writer_config = options.to_writer_config();
 
         let mut file = OpenOptions::new()
             .read(true)
@@ -351,10 +336,12 @@ impl PersistentMvccStore {
 
         stats.wal_size_bytes = write_pos;
 
+        let mut writer = WalWriter::new(file, write_pos, writer_config);
+        writer.set_last_commit_seq(store.next_commit.saturating_sub(1));
+
         Ok(Self {
             store: RwLock::new(store),
-            wal: RwLock::new(WalFile::new(file, write_pos)),
-            options,
+            wal: RwLock::new(writer),
             stats: RwLock::new(stats),
             recovery_report: recovery,
         })
@@ -414,25 +401,8 @@ impl PersistentMvccStore {
             writes,
         };
 
-        let encoded = match wal::encode_commit(&wal_commit) {
-            Ok(encoded) => encoded,
-            Err(error) => {
-                rollback_in_memory_commit(
-                    &mut store_guard,
-                    txn_id.0,
-                    commit_seq,
-                    &write_blocks,
-                    &cow_blocks,
-                    use_ssi,
-                );
-                return Err(CommitError::DurabilityFailure {
-                    detail: format!("failed to encode WAL commit record: {error}"),
-                });
-            }
-        };
-
         let mut wal_guard = self.wal.write();
-        if let Err(error) = wal_guard.append(&encoded) {
+        if let Err(error) = wal_guard.append_commit(&wal_commit) {
             rollback_in_memory_commit(
                 &mut store_guard,
                 txn_id.0,
@@ -442,22 +412,7 @@ impl PersistentMvccStore {
                 use_ssi,
             );
             return Err(CommitError::DurabilityFailure {
-                detail: format!("failed to append WAL commit record: {error}"),
-            });
-        }
-        if self.options.sync_on_commit
-            && let Err(error) = wal_guard.sync()
-        {
-            rollback_in_memory_commit(
-                &mut store_guard,
-                txn_id.0,
-                commit_seq,
-                &write_blocks,
-                &cow_blocks,
-                use_ssi,
-            );
-            return Err(CommitError::DurabilityFailure {
-                detail: format!("failed to sync WAL commit record: {error}"),
+                detail: format!("WAL write failed: {error}"),
             });
         }
 
@@ -522,7 +477,11 @@ impl PersistentMvccStore {
     /// This ensures all written commits are durable. Normally called automatically
     /// if `sync_on_commit` is enabled.
     pub fn sync(&self) -> Result<()> {
-        self.wal.write().sync()
+        self.wal
+            .write()
+            .flush()
+            .map(|_| ())
+            .map_err(FfsError::from)
     }
 
     /// Create a checkpoint of the current MVCC state.
@@ -594,19 +553,21 @@ impl PersistentMvccStore {
     pub fn truncate_wal(&self) -> Result<()> {
         let header_size = {
             let mut wal_guard = self.wal.write();
+            let file = wal_guard.file_mut();
 
             // Rewrite just the header
-            wal_guard.file.seek(SeekFrom::Start(0))?;
+            file.seek(SeekFrom::Start(0))?;
             let header = WalHeader::default();
             let header_bytes = wal::encode_header(&header);
-            wal_guard.file.write_all(&header_bytes)?;
-            wal_guard.file.sync_all()?;
+            file.write_all(&header_bytes)?;
+            file.sync_all()?;
 
             // Truncate to header size
             let header_size = u64::try_from(HEADER_SIZE)
                 .map_err(|_| FfsError::Format("header size overflow".to_owned()))?;
-            wal_guard.file.set_len(header_size)?;
+            file.set_len(header_size)?;
             wal_guard.write_pos = header_size;
+            wal_guard.set_last_commit_seq(0);
 
             header_size
         };

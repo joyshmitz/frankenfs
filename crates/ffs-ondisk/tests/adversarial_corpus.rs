@@ -514,3 +514,204 @@ fn adversarial_corpus_is_panic_free_and_exercises_parse_error_variants() {
         parser_hits.len()
     );
 }
+
+// ── Fuzz infrastructure validation ──────────────────────────────────────────
+
+#[test]
+fn fuzz_workspace_structure_is_valid() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let fuzz_dir = workspace_root.join("fuzz");
+
+    // Fuzz Cargo.toml must exist
+    let fuzz_manifest = fuzz_dir.join("Cargo.toml");
+    assert!(
+        fuzz_manifest.exists(),
+        "fuzz/Cargo.toml must exist for cargo-fuzz"
+    );
+
+    // Read and validate manifest references ffs-ondisk
+    let manifest_contents =
+        fs::read_to_string(&fuzz_manifest).expect("failed to read fuzz/Cargo.toml");
+    assert!(
+        manifest_contents.contains("ffs-ondisk"),
+        "fuzz/Cargo.toml must depend on ffs-ondisk"
+    );
+    assert!(
+        manifest_contents.contains("libfuzzer-sys"),
+        "fuzz/Cargo.toml must depend on libfuzzer-sys"
+    );
+
+    // fuzz_targets/ directory must exist with at least 3 targets
+    let targets_dir = fuzz_dir.join("fuzz_targets");
+    assert!(
+        targets_dir.is_dir(),
+        "fuzz/fuzz_targets/ directory must exist"
+    );
+    let target_files: Vec<_> = fs::read_dir(&targets_dir)
+        .expect("failed to read fuzz/fuzz_targets/")
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    assert!(
+        target_files.len() >= 3,
+        "need at least 3 fuzz targets, found {}",
+        target_files.len()
+    );
+
+    // Each target must contain fuzz_target! macro
+    for entry in &target_files {
+        let content = fs::read_to_string(entry.path())
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", entry.path().display()));
+        assert!(
+            content.contains("fuzz_target!"),
+            "fuzz target {} must contain fuzz_target! macro",
+            entry.path().display()
+        );
+    }
+
+    // Corpus directories must exist with seeds
+    let corpus_dir = fuzz_dir.join("corpus");
+    assert!(
+        corpus_dir.is_dir(),
+        "fuzz/corpus/ directory must exist for seed inputs"
+    );
+}
+
+#[test]
+fn fuzz_dictionaries_exist_and_are_well_formed() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let dict_dir = workspace_root.join("fuzz").join("dictionaries");
+    assert!(dict_dir.is_dir(), "fuzz/dictionaries/ must exist");
+
+    let expected_dicts = ["ext4.dict", "btrfs.dict"];
+    for dict_name in &expected_dicts {
+        let dict_path = dict_dir.join(dict_name);
+        assert!(
+            dict_path.exists(),
+            "dictionary {dict_name} must exist in fuzz/dictionaries/"
+        );
+
+        let content = fs::read_to_string(&dict_path)
+            .unwrap_or_else(|err| panic!("failed to read {dict_name}: {err}"));
+
+        // Must contain at least one quoted token entry
+        let token_lines = content
+            .lines()
+            .filter(|l| {
+                let trimmed = l.trim();
+                trimmed.starts_with('"') || trimmed.contains("=\"")
+            })
+            .count();
+        assert!(
+            token_lines >= 5,
+            "{dict_name} should have at least 5 dictionary entries, found {token_lines}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_seed_generation_script_exists() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let gen_script = workspace_root
+        .join("fuzz")
+        .join("scripts")
+        .join("generate_seeds.sh");
+    assert!(
+        gen_script.exists(),
+        "fuzz/scripts/generate_seeds.sh must exist"
+    );
+
+    let run_script = workspace_root
+        .join("fuzz")
+        .join("scripts")
+        .join("run_fuzz.sh");
+    assert!(run_script.exists(), "fuzz/scripts/run_fuzz.sh must exist");
+}
+
+#[test]
+fn fuzz_nightly_campaign_script_exists() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let nightly_script = workspace_root
+        .join("fuzz")
+        .join("scripts")
+        .join("nightly_fuzz.sh");
+    assert!(
+        nightly_script.exists(),
+        "fuzz/scripts/nightly_fuzz.sh must exist for automated campaigns"
+    );
+
+    // Verify it's executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::metadata(&nightly_script)
+            .expect("read nightly script metadata")
+            .permissions();
+        assert!(
+            perms.mode() & 0o111 != 0,
+            "nightly_fuzz.sh must be executable"
+        );
+    }
+
+    // Verify minimize script exists
+    let minimize_script = workspace_root
+        .join("fuzz")
+        .join("scripts")
+        .join("minimize_corpus.sh");
+    assert!(
+        minimize_script.exists(),
+        "fuzz/scripts/minimize_corpus.sh must exist"
+    );
+}
+
+#[test]
+fn fuzz_seed_corpus_covers_all_targets() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let expected_targets = [
+        "fuzz_ext4_metadata",
+        "fuzz_btrfs_metadata",
+        "fuzz_ext4_dir_extent",
+        "fuzz_ext4_xattr",
+    ];
+
+    for target in &expected_targets {
+        let corpus_path = workspace_root.join("fuzz").join("corpus").join(target);
+        assert!(
+            corpus_path.is_dir(),
+            "corpus directory must exist for target: {target}"
+        );
+        let sample_count = fs::read_dir(&corpus_path)
+            .unwrap_or_else(|err| panic!("failed to read corpus dir for {target}: {err}"))
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_file())
+            .count();
+        assert!(
+            sample_count > 0,
+            "corpus for {target} must contain at least one seed sample, found {sample_count}"
+        );
+    }
+}

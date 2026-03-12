@@ -61,6 +61,7 @@ fn bench_wal_commit_throughput(c: &mut Criterion) {
             &path,
             PersistOptions {
                 sync_on_commit: false,
+                ..PersistOptions::default()
             },
         )
         .expect("open");
@@ -86,6 +87,7 @@ fn bench_wal_commit_throughput(c: &mut Criterion) {
             &path,
             PersistOptions {
                 sync_on_commit: false,
+                ..PersistOptions::default()
             },
         )
         .expect("open");
