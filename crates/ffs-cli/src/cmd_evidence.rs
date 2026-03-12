@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
