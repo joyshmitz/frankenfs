@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn contract_version_is_set() {
-        assert!(CONTRACT_VERSION >= 1);
+        const { assert!(CONTRACT_VERSION >= 1) };
     }
 
     #[test]

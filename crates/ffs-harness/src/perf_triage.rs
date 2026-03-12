@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn triage_version_is_positive() {
-        assert!(TRIAGE_VERSION >= 1);
+        const { assert!(TRIAGE_VERSION >= 1) };
     }
 
     #[test]
@@ -570,19 +570,19 @@ mod tests {
     fn triage_confirmed_fail_blocks_confirmed_warn_does_not_for_warn_verdict() {
         let result = warn_result("test_op");
         // ConfirmedWarn + Warn verdict → should_block is false (only blocks on Fail verdict)
-        let decision_cw = classify_triage(
+        let decision_confirmed_warn = classify_triage(
             &result,
             BenchmarkFamily::MetadataOps,
             Some(HystereticVerdict::ConfirmedWarn),
         );
-        assert!(!decision_cw.should_block);
+        assert!(!decision_confirmed_warn.should_block);
 
         // ConfirmedFail always blocks regardless of verdict
-        let decision_cf = classify_triage(
+        let decision_confirmed_fail = classify_triage(
             &result,
             BenchmarkFamily::MetadataOps,
             Some(HystereticVerdict::ConfirmedFail),
         );
-        assert!(decision_cf.should_block);
+        assert!(decision_confirmed_fail.should_block);
     }
 }

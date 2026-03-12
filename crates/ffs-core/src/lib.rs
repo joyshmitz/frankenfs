@@ -19845,9 +19845,9 @@ mod tests {
         let snap = fs.current_snapshot();
         let store = fs.mvcc_store().read();
         let data10 = store.read_visible(BlockNumber(10), snap);
-        assert_eq!(data10, Some(vec![0xAA; 16]));
+        assert_eq!(data10.as_deref(), Some(vec![0xAA; 16].as_slice()));
         let data20 = store.read_visible(BlockNumber(20), snap);
-        assert_eq!(data20, Some(vec![0xBB; 16]));
+        assert_eq!(data20.as_deref(), Some(vec![0xBB; 16].as_slice()));
     }
 
     #[test]

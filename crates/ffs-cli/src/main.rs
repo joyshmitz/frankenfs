@@ -519,6 +519,8 @@ struct Ext4OrphanDiagnosticsOutput {
 struct MvccStatsOutput {
     block_versions: BlockVersionStatsOutput,
     ebr_versions: EbrVersionStatsOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wal_replay: Option<WalReplayInfoOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -657,6 +659,32 @@ struct MvccInfoOutput {
     blocks_pending_gc: u64,
     ssi_conflict_count: Option<u64>,
     abort_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wal_replay: Option<WalReplayInfoOutput>,
+}
+
+/// WAL replay health telemetry for CLI output.
+#[derive(Debug, Serialize)]
+struct WalReplayInfoOutput {
+    /// Classified replay outcome (Clean, EmptyLog, TruncatedTail, CorruptTail, etc.).
+    outcome: String,
+    /// Whether the replay completed without discarded records.
+    is_clean: bool,
+    /// Number of commits successfully replayed.
+    commits_replayed: u64,
+    /// Number of block versions restored.
+    versions_replayed: u64,
+    /// Number of WAL records discarded (corrupt or truncated).
+    records_discarded: u64,
+    /// Byte offset where valid WAL data ends.
+    wal_valid_bytes: u64,
+    /// Total WAL file size in bytes.
+    wal_total_bytes: u64,
+    /// Whether a checkpoint was used during recovery.
+    used_checkpoint: bool,
+    /// Highest commit sequence from checkpoint, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_commit_seq: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1420,6 +1448,59 @@ fn inspect(path: &PathBuf, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn build_wal_replay_info(open_fs: &OpenFs) -> Option<WalReplayInfoOutput> {
+    open_fs.mvcc_wal_recovery().map(|report| {
+        let outcome_str = format!("{:?}", report.outcome);
+        let is_clean = report.outcome.is_clean();
+        WalReplayInfoOutput {
+            outcome: outcome_str,
+            is_clean,
+            commits_replayed: report.commits_replayed,
+            versions_replayed: report.versions_replayed,
+            records_discarded: report.records_discarded,
+            wal_valid_bytes: report.wal_valid_bytes,
+            wal_total_bytes: report.wal_total_bytes,
+            used_checkpoint: report.used_checkpoint,
+            checkpoint_commit_seq: report.checkpoint_commit_seq,
+        }
+    })
+}
+
+fn print_wal_replay_info(wal: &WalReplayInfoOutput, indent: &str) {
+    println!("{indent}outcome: {}", wal.outcome);
+    println!("{indent}is_clean: {}", wal.is_clean);
+    println!("{indent}commits_replayed: {}", wal.commits_replayed);
+    println!("{indent}versions_replayed: {}", wal.versions_replayed);
+    println!("{indent}records_discarded: {}", wal.records_discarded);
+    println!("{indent}wal_valid_bytes: {}", wal.wal_valid_bytes);
+    println!("{indent}wal_total_bytes: {}", wal.wal_total_bytes);
+    println!("{indent}used_checkpoint: {}", wal.used_checkpoint);
+    if let Some(cp_seq) = wal.checkpoint_commit_seq {
+        println!("{indent}checkpoint_commit_seq: {cp_seq}");
+    }
+}
+
+/// Emit structured log event for WAL recovery telemetry.
+///
+/// The `tracing::info!` macro requires a string literal for `target:`, so callers
+/// should invoke this macro-style helper at the call site instead. This function
+/// provides a fallback using a generic target for contexts where the exact
+/// target is not critical.
+fn log_wal_recovery_telemetry(wal: &WalReplayInfoOutput) {
+    info!(
+        target: "ffs::cli",
+        outcome = %wal.outcome,
+        is_clean = wal.is_clean,
+        commits_replayed = wal.commits_replayed,
+        versions_replayed = wal.versions_replayed,
+        records_discarded = wal.records_discarded,
+        wal_valid_bytes = wal.wal_valid_bytes,
+        wal_total_bytes = wal.wal_total_bytes,
+        used_checkpoint = wal.used_checkpoint,
+        "wal_recovery_telemetry"
+    );
+}
+
 fn mvcc_stats_cmd(path: &PathBuf, json: bool) -> Result<()> {
     let command_span = info_span!(
         target: "ffs::cli::mvcc_stats",
@@ -1458,6 +1539,7 @@ fn mvcc_stats_cmd(path: &PathBuf, json: bool) -> Result<()> {
             reclaimed: ebr_stats.reclaimed_versions,
             pending: ebr_stats.pending_versions(),
         },
+        wal_replay: build_wal_replay_info(&open_fs),
     };
 
     if json {
@@ -1490,6 +1572,14 @@ fn mvcc_stats_cmd(path: &PathBuf, json: bool) -> Result<()> {
         println!("  retired_versions: {}", output.ebr_versions.retired);
         println!("  reclaimed_versions: {}", output.ebr_versions.reclaimed);
         println!("  pending_versions: {}", output.ebr_versions.pending);
+        if let Some(wal) = &output.wal_replay {
+            println!("wal_replay:");
+            print_wal_replay_info(wal, "  ");
+        }
+    }
+
+    if let Some(wal) = &output.wal_replay {
+        log_wal_recovery_telemetry(wal);
     }
 
     info!(
@@ -1755,6 +1845,11 @@ fn build_mvcc_info(open_fs: &OpenFs) -> MvccInfoOutput {
     let txn_outcomes = mvcc_guard.transaction_outcome_stats();
     drop(mvcc_guard);
 
+    let wal_replay = build_wal_replay_info(open_fs);
+    if let Some(wal) = &wal_replay {
+        log_wal_recovery_telemetry(wal);
+    }
+
     MvccInfoOutput {
         current_commit_seq,
         active_snapshot_count,
@@ -1768,6 +1863,7 @@ fn build_mvcc_info(open_fs: &OpenFs) -> MvccInfoOutput {
         blocks_pending_gc: ebr_stats.pending_versions(),
         ssi_conflict_count: Some(txn_outcomes.ssi_conflicts),
         abort_count: Some(txn_outcomes.aborted_transactions),
+        wal_replay,
     }
 }
 
@@ -2040,6 +2136,10 @@ fn print_mvcc_info(mvcc: &MvccInfoOutput) {
     }
     if let Some(abort_count) = mvcc.abort_count {
         println!("  abort_count: {abort_count}");
+    }
+    if let Some(wal) = &mvcc.wal_replay {
+        println!("  wal_replay:");
+        print_wal_replay_info(wal, "    ");
     }
 }
 
@@ -7887,5 +7987,174 @@ mod tests {
         let staleness: Vec<(u32, Ext4RepairStaleness)> = vec![];
         let selected = select_ext4_repair_groups(RepairFlags::empty(), true, &all, &staleness);
         assert!(selected.is_empty());
+    }
+
+    // ── WAL replay telemetry tests ──────────────────────────────────────
+
+    #[test]
+    fn wal_replay_info_output_serializes_to_stable_json_schema() {
+        use super::WalReplayInfoOutput;
+
+        let info = WalReplayInfoOutput {
+            outcome: "Clean".to_owned(),
+            is_clean: true,
+            commits_replayed: 5,
+            versions_replayed: 12,
+            records_discarded: 0,
+            wal_valid_bytes: 2048,
+            wal_total_bytes: 2048,
+            used_checkpoint: false,
+            checkpoint_commit_seq: None,
+        };
+        let json_str =
+            serde_json::to_string_pretty(&info).expect("WalReplayInfoOutput should serialize");
+        let parsed: Value = serde_json::from_str(&json_str).expect("should parse as JSON");
+
+        assert_eq!(parsed["outcome"], "Clean");
+        assert_eq!(parsed["is_clean"], true);
+        assert_eq!(parsed["commits_replayed"], 5);
+        assert_eq!(parsed["versions_replayed"], 12);
+        assert_eq!(parsed["records_discarded"], 0);
+        assert_eq!(parsed["wal_valid_bytes"], 2048);
+        assert_eq!(parsed["wal_total_bytes"], 2048);
+        assert_eq!(parsed["used_checkpoint"], false);
+        // checkpoint_commit_seq should be omitted when None
+        assert!(parsed.get("checkpoint_commit_seq").is_none());
+    }
+
+    #[test]
+    fn wal_replay_info_output_includes_checkpoint_when_present() {
+        use super::WalReplayInfoOutput;
+
+        let info = WalReplayInfoOutput {
+            outcome: "TruncatedTail".to_owned(),
+            is_clean: false,
+            commits_replayed: 3,
+            versions_replayed: 7,
+            records_discarded: 1,
+            wal_valid_bytes: 1024,
+            wal_total_bytes: 1500,
+            used_checkpoint: true,
+            checkpoint_commit_seq: Some(42),
+        };
+        let json_str =
+            serde_json::to_string_pretty(&info).expect("WalReplayInfoOutput should serialize");
+        let parsed: Value = serde_json::from_str(&json_str).expect("should parse as JSON");
+
+        assert_eq!(parsed["is_clean"], false);
+        assert_eq!(parsed["records_discarded"], 1);
+        assert_eq!(parsed["used_checkpoint"], true);
+        assert_eq!(parsed["checkpoint_commit_seq"], 42);
+    }
+
+    #[test]
+    fn mvcc_stats_output_omits_wal_replay_when_none() {
+        use super::{BlockVersionStatsOutput, EbrVersionStatsOutput, MvccStatsOutput};
+
+        let output = MvccStatsOutput {
+            block_versions: BlockVersionStatsOutput {
+                tracked_blocks: 10,
+                max_chain_length: 2,
+                chains_over_cap: 0,
+                chains_over_critical: 0,
+                chain_cap: Some(8),
+                critical_chain_length: Some(6),
+            },
+            ebr_versions: EbrVersionStatsOutput {
+                retired: 5,
+                reclaimed: 3,
+                pending: 2,
+            },
+            wal_replay: None,
+        };
+        let json_str =
+            serde_json::to_string_pretty(&output).expect("MvccStatsOutput should serialize");
+        let parsed: Value = serde_json::from_str(&json_str).expect("should parse as JSON");
+
+        assert!(
+            parsed.get("wal_replay").is_none(),
+            "wal_replay should be omitted from JSON when None"
+        );
+        assert_eq!(parsed["block_versions"]["tracked_blocks"], 10);
+    }
+
+    #[test]
+    fn mvcc_stats_output_includes_wal_replay_when_present() {
+        use super::{
+            BlockVersionStatsOutput, EbrVersionStatsOutput, MvccStatsOutput, WalReplayInfoOutput,
+        };
+
+        let output = MvccStatsOutput {
+            block_versions: BlockVersionStatsOutput {
+                tracked_blocks: 5,
+                max_chain_length: 1,
+                chains_over_cap: 0,
+                chains_over_critical: 0,
+                chain_cap: None,
+                critical_chain_length: None,
+            },
+            ebr_versions: EbrVersionStatsOutput {
+                retired: 0,
+                reclaimed: 0,
+                pending: 0,
+            },
+            wal_replay: Some(WalReplayInfoOutput {
+                outcome: "CorruptTail".to_owned(),
+                is_clean: false,
+                commits_replayed: 1,
+                versions_replayed: 2,
+                records_discarded: 3,
+                wal_valid_bytes: 512,
+                wal_total_bytes: 800,
+                used_checkpoint: false,
+                checkpoint_commit_seq: None,
+            }),
+        };
+        let json_str =
+            serde_json::to_string_pretty(&output).expect("MvccStatsOutput should serialize");
+        let parsed: Value = serde_json::from_str(&json_str).expect("should parse as JSON");
+
+        let wal = &parsed["wal_replay"];
+        assert_eq!(wal["outcome"], "CorruptTail");
+        assert_eq!(wal["is_clean"], false);
+        assert_eq!(wal["commits_replayed"], 1);
+        assert_eq!(wal["records_discarded"], 3);
+    }
+
+    #[test]
+    fn mvcc_info_output_includes_wal_replay_when_present() {
+        use super::{MvccInfoOutput, WalReplayInfoOutput};
+
+        let output = MvccInfoOutput {
+            current_commit_seq: 10,
+            active_snapshot_count: 1,
+            oldest_active_snapshot: Some(5),
+            total_versioned_blocks: 20,
+            max_chain_depth: 3,
+            average_chain_depth: "1.500".to_owned(),
+            blocks_pending_gc: 4,
+            ssi_conflict_count: Some(0),
+            abort_count: Some(0),
+            wal_replay: Some(WalReplayInfoOutput {
+                outcome: "EmptyLog".to_owned(),
+                is_clean: true,
+                commits_replayed: 0,
+                versions_replayed: 0,
+                records_discarded: 0,
+                wal_valid_bytes: 16,
+                wal_total_bytes: 16,
+                used_checkpoint: false,
+                checkpoint_commit_seq: None,
+            }),
+        };
+        let json_str =
+            serde_json::to_string_pretty(&output).expect("MvccInfoOutput should serialize");
+        let parsed: Value = serde_json::from_str(&json_str).expect("should parse as JSON");
+
+        assert_eq!(parsed["current_commit_seq"], 10);
+        let wal = &parsed["wal_replay"];
+        assert_eq!(wal["outcome"], "EmptyLog");
+        assert_eq!(wal["is_clean"], true);
+        assert_eq!(wal["wal_valid_bytes"], 16);
     }
 }

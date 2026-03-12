@@ -7,6 +7,7 @@ pub mod log_contract;
 pub mod perf_comparison;
 pub mod perf_regression;
 pub mod perf_triage;
+pub mod verification_runner;
 
 use anyhow::{Context, Result, bail};
 use ffs_ondisk::{

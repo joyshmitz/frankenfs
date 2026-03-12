@@ -39,6 +39,7 @@ e2e_init() {
     timestamp=$(date +%Y%m%d_%H%M%S)
 
     E2E_START_TIME=$(date +%s)
+    E2E_TEST_NAME="$test_name"
 
     # Create log directory
     E2E_LOG_DIR="${REPO_ROOT:-$(pwd)}/artifacts/e2e/${timestamp}_${test_name}"
@@ -49,7 +50,7 @@ e2e_init() {
     E2E_TEMP_DIR=$(mktemp -d -t "ffs_e2e_XXXXXX")
     E2E_CLEANUP_ITEMS+=("$E2E_TEMP_DIR")
 
-    # Set up cleanup trap
+    # Set up cleanup trap (emits JSON summary before cleanup)
     trap e2e_cleanup EXIT
 
     # Start logging
@@ -517,10 +518,148 @@ e2e_unmount() {
 }
 
 #######################################
+# Emit a machine-parseable JSON summary alongside run.log
+# Reads SCENARIO_RESULT markers from the log and writes result.json
+# Arguments: (none — uses globals)
+#######################################
+e2e_emit_json_summary() {
+    [[ -z "${E2E_LOG_FILE:-}" ]] && return 0
+    [[ ! -f "$E2E_LOG_FILE" ]] && return 0
+
+    local json_path
+    json_path="$E2E_LOG_DIR/result.json"
+    local end_time duration_secs
+    end_time=$(date +%s)
+    duration_secs=$((end_time - E2E_START_TIME))
+
+    # Capture environment
+    local hostname_val cpu_count kernel_ver rustc_ver cargo_ver
+    hostname_val=$(hostname 2>/dev/null || echo "unknown")
+    cpu_count=$(nproc 2>/dev/null || echo "0")
+    kernel_ver=$(uname -r 2>/dev/null || echo "unknown")
+    rustc_ver=$(rustc --version 2>/dev/null || echo "unknown")
+    cargo_ver=$(cargo --version 2>/dev/null || echo "unknown")
+
+    # Capture git context
+    local git_commit git_branch git_clean
+    git_commit=$(git -C "${REPO_ROOT:-.}" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    git_branch=$(git -C "${REPO_ROOT:-.}" branch --show-current 2>/dev/null || echo "unknown")
+    if git -C "${REPO_ROOT:-.}" diff --quiet 2>/dev/null; then
+        git_clean="true"
+    else
+        git_clean="false"
+    fi
+
+    # Extract scenario results from log
+    local scenarios_json="["
+    local first=true
+    while IFS= read -r line; do
+        # Parse: SCENARIO_RESULT|scenario_id=X|outcome=Y[|detail=Z]
+        local scenario_id outcome detail
+        scenario_id=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
+        # Try outcome= first, fall back to status= for legacy scripts
+        outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
+        [[ -z "$outcome" ]] && outcome=$(echo "$line" | sed -n 's/.*status=\([^|]*\).*/\1/p')
+        detail=$(echo "$line" | sed -n 's/.*detail=\(.*\)/\1/p')
+
+        [[ -z "$scenario_id" || -z "$outcome" ]] && continue
+
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            scenarios_json+=","
+        fi
+
+        # Escape JSON special characters in detail
+        detail=$(echo "$detail" | sed 's/\\/\\\\/g; s/"/\\"/g')
+
+        if [[ -n "$detail" ]]; then
+            scenarios_json+="{\"scenario_id\":\"$scenario_id\",\"outcome\":\"$outcome\",\"detail\":\"$detail\"}"
+        else
+            scenarios_json+="{\"scenario_id\":\"$scenario_id\",\"outcome\":\"$outcome\"}"
+        fi
+    done < <(grep "^SCENARIO_RESULT|" "$E2E_LOG_FILE" 2>/dev/null || true)
+    scenarios_json+="]"
+
+    # Determine verdict
+    local verdict="PASS"
+    if echo "$scenarios_json" | grep -q '"outcome":"FAIL"'; then
+        verdict="FAIL"
+    fi
+
+    # Write result.json
+    cat > "$json_path" <<ENDJSON
+{
+  "schema_version": 1,
+  "runner_contract_version": 1,
+  "gate_id": "${E2E_TEST_NAME:-unknown}",
+  "run_id": "$(basename "$E2E_LOG_DIR")",
+  "created_at": "$(date -Iseconds)",
+  "git_context": {
+    "commit": "$git_commit",
+    "branch": "$git_branch",
+    "clean": $git_clean
+  },
+  "environment": {
+    "hostname": "$hostname_val",
+    "cpu_count": $cpu_count,
+    "kernel": "$kernel_ver",
+    "rustc_version": "$rustc_ver",
+    "cargo_version": "$cargo_ver"
+  },
+  "scenarios": $scenarios_json,
+  "verdict": "$verdict",
+  "duration_secs": $duration_secs,
+  "log_file": "$E2E_LOG_FILE"
+}
+ENDJSON
+
+    e2e_log "JSON summary written: $json_path"
+}
+
+#######################################
+# Retry a command with configurable attempts.
+# Intended for CI mode where flaky tests can be retried.
+# Arguments:
+#   $1 - Max attempts
+#   $2.. - Command to retry
+# Returns: exit code of the last attempt
+#######################################
+e2e_retry() {
+    local max_attempts="$1"
+    shift
+    local attempt=1
+    local exit_code=0
+
+    while (( attempt <= max_attempts )); do
+        e2e_log "Attempt $attempt/$max_attempts: $*"
+        exit_code=0
+        "$@" || exit_code=$?
+        if [[ $exit_code -eq 0 ]]; then
+            return 0
+        fi
+        if (( attempt < max_attempts )); then
+            e2e_log "Attempt $attempt failed (exit=$exit_code), retrying..."
+            sleep 1
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    e2e_log "All $max_attempts attempts failed (last exit=$exit_code)"
+    return "$exit_code"
+}
+
+# Store test name for JSON emission
+E2E_TEST_NAME=""
+
+#######################################
 # Cleanup function (called on EXIT)
 #######################################
 e2e_cleanup() {
     local exit_code=$?
+
+    # Emit JSON summary before cleanup (best-effort)
+    e2e_emit_json_summary 2>/dev/null || true
 
     # Unmount any active mount
     e2e_unmount "${E2E_MOUNT_POINT:-}" 2>/dev/null || true

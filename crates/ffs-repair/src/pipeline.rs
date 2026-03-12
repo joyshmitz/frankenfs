@@ -91,6 +91,34 @@ impl RefreshMode {
     }
 }
 
+/// Per-group refresh state summary for telemetry/observability.
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupRefreshSummary {
+    /// Block group number.
+    pub group: u32,
+    /// Whether the group currently has dirty (not-yet-refreshed) symbols.
+    pub dirty: bool,
+    /// Milliseconds since the group was first marked dirty (0 if clean).
+    pub dirty_age_ms: u64,
+    /// Which refresh policy is assigned.
+    pub policy: String,
+    /// Milliseconds since the last successful symbol refresh.
+    pub since_last_refresh_ms: u64,
+}
+
+/// Aggregate refresh-state telemetry for the entire pipeline.
+#[derive(Debug, Clone, Serialize)]
+pub struct RefreshTelemetry {
+    /// Total groups with refresh tracking.
+    pub tracked_groups: usize,
+    /// Number of groups currently dirty.
+    pub dirty_groups: usize,
+    /// Maximum dirty age across all groups (ms).
+    pub max_dirty_age_ms: u64,
+    /// Per-group summaries.
+    pub groups: Vec<GroupRefreshSummary>,
+}
+
 #[derive(Debug, Clone)]
 struct GroupRefreshState {
     dirty: bool,
@@ -526,6 +554,62 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             .iter()
             .filter_map(|(group, state)| state.dirty.then_some(GroupNumber(*group)))
             .collect()
+    }
+
+    /// Build a telemetry snapshot of the refresh state for all tracked groups.
+    #[must_use]
+    pub fn refresh_telemetry(&self) -> RefreshTelemetry {
+        let now = Instant::now();
+        let mut groups = Vec::with_capacity(self.refresh_states.len());
+        let mut max_dirty_age_ms = 0_u64;
+        let mut dirty_count = 0_usize;
+
+        for (&group_id, state) in &self.refresh_states {
+            let dirty_age_ms = state
+                .dirty_since
+                .filter(|_| state.dirty)
+                .map_or(0, |since| {
+                    u64::try_from(now.saturating_duration_since(since).as_millis())
+                        .unwrap_or(u64::MAX)
+                });
+            if state.dirty {
+                dirty_count += 1;
+                max_dirty_age_ms = max_dirty_age_ms.max(dirty_age_ms);
+            }
+            let policy_str = match state.policy {
+                RefreshPolicy::Eager => "eager".to_owned(),
+                RefreshPolicy::Lazy { max_staleness } => {
+                    format!("lazy({}ms)", max_staleness.as_millis())
+                }
+                RefreshPolicy::Adaptive {
+                    risk_threshold,
+                    max_staleness,
+                } => format!(
+                    "adaptive(risk={risk_threshold:.3},max={}ms)",
+                    max_staleness.as_millis()
+                ),
+            };
+            groups.push(GroupRefreshSummary {
+                group: group_id,
+                dirty: state.dirty,
+                dirty_age_ms,
+                policy: policy_str,
+                since_last_refresh_ms: u64::try_from(
+                    now.saturating_duration_since(state.last_refresh)
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX),
+            });
+        }
+
+        groups.sort_by_key(|g| g.group);
+
+        RefreshTelemetry {
+            tracked_groups: self.refresh_states.len(),
+            dirty_groups: dirty_count,
+            max_dirty_age_ms,
+            groups,
+        }
     }
 
     /// Notify the refresh policy that a write dirtied `group`.
@@ -4049,6 +4133,719 @@ mod tests {
         assert!(
             !json.contains("decoder_stats"),
             "None decoder_stats should be omitted"
+        );
+    }
+
+    // ── OQ3 closure: refresh policy and staleness telemetry tests ────────
+
+    #[test]
+    fn refresh_telemetry_reports_clean_state() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 64);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 32, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 16;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        );
+
+        let telemetry = pipeline.refresh_telemetry();
+        assert_eq!(telemetry.tracked_groups, 1);
+        assert_eq!(telemetry.dirty_groups, 0);
+        assert_eq!(telemetry.max_dirty_age_ms, 0);
+        assert_eq!(telemetry.groups.len(), 1);
+        assert!(!telemetry.groups[0].dirty);
+        assert_eq!(telemetry.groups[0].dirty_age_ms, 0);
+    }
+
+    #[test]
+    fn refresh_telemetry_tracks_dirty_group() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_group_refresh_policy(
+            GroupNumber(0),
+            RefreshPolicy::Lazy {
+                max_staleness: Duration::from_secs(60),
+            },
+        );
+
+        pipeline
+            .mark_group_dirty(GroupNumber(0))
+            .expect("mark dirty");
+
+        let telemetry = pipeline.refresh_telemetry();
+        assert_eq!(telemetry.dirty_groups, 1);
+        assert!(telemetry.groups[0].dirty);
+        assert!(telemetry.groups[0].policy.starts_with("lazy("));
+    }
+
+    #[test]
+    fn refresh_telemetry_serializes_to_json() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 64);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 32, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 16;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        );
+
+        let telemetry = pipeline.refresh_telemetry();
+        let json = serde_json::to_string_pretty(&telemetry).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["tracked_groups"], 1);
+        assert_eq!(parsed["dirty_groups"], 0);
+        assert!(parsed["groups"].as_array().expect("groups array").len() == 1);
+    }
+
+    #[test]
+    fn churn_writes_respect_staleness_budget() {
+        // Under sustained rapid writes with Lazy policy, the staleness timeout
+        // must trigger a refresh before the budget is exceeded by more than
+        // one write interval.
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+        let gen_before = read_generation(&cx, &device, layout);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_group_refresh_policy(
+            GroupNumber(0),
+            RefreshPolicy::Lazy {
+                max_staleness: Duration::from_millis(10),
+            },
+        );
+
+        // Simulate 20 rapid writes with artificial aging.
+        // After the first write (which sets dirty), age the dirty_since so
+        // subsequent writes trigger the staleness timeout.
+        pipeline
+            .on_group_write(&cx, GroupNumber(0))
+            .expect("first write");
+
+        // Artificially age the dirty_since to exceed max_staleness.
+        if let Some(state) = pipeline.refresh_states.get_mut(&0) {
+            state.dirty = true;
+            state.dirty_since = Instant::now().checked_sub(Duration::from_millis(50));
+        }
+
+        // This write should trigger staleness timeout and refresh.
+        pipeline
+            .on_group_write(&cx, GroupNumber(0))
+            .expect("stale write");
+
+        let gen_after = read_generation(&cx, &device, layout);
+        assert!(
+            gen_after > gen_before,
+            "staleness timeout must trigger refresh: gen_before={gen_before}, gen_after={gen_after}"
+        );
+
+        // After refresh, group should be clean.
+        let telemetry = pipeline.refresh_telemetry();
+        assert_eq!(
+            telemetry.dirty_groups, 0,
+            "group should be clean after staleness-triggered refresh"
+        );
+    }
+
+    #[test]
+    fn eager_policy_refreshes_on_every_write() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+        let gen_before = read_generation(&cx, &device, layout);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_group_refresh_policy(GroupNumber(0), RefreshPolicy::Eager);
+
+        // Each write should increment generation.
+        for i in 1..=3_u64 {
+            pipeline
+                .on_group_write(&cx, GroupNumber(0))
+                .expect("eager write");
+            assert_eq!(
+                read_generation(&cx, &device, layout),
+                gen_before + i,
+                "eager policy must refresh on every write (iteration {i})"
+            );
+        }
+
+        // Group should always be clean after eager refresh.
+        let telemetry = pipeline.refresh_telemetry();
+        assert_eq!(telemetry.dirty_groups, 0);
+    }
+
+    #[test]
+    fn lazy_policy_defers_refresh_until_scrub_or_timeout() {
+        // Negative test: Lazy policy must NOT refresh on writes when under
+        // the staleness budget. Refresh should only occur on scrub trigger
+        // or staleness timeout.
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+        let gen_before = read_generation(&cx, &device, layout);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_group_refresh_policy(
+            GroupNumber(0),
+            RefreshPolicy::Lazy {
+                max_staleness: Duration::from_secs(3600),
+            },
+        );
+
+        // Several writes within budget — generation must NOT change.
+        for _ in 0..5 {
+            pipeline
+                .on_group_write(&cx, GroupNumber(0))
+                .expect("lazy write");
+        }
+        assert_eq!(
+            read_generation(&cx, &device, layout),
+            gen_before,
+            "lazy policy must NOT refresh within staleness budget"
+        );
+
+        // Group should be dirty (deferred).
+        let telemetry = pipeline.refresh_telemetry();
+        assert_eq!(telemetry.dirty_groups, 1);
+
+        // A scrub trigger (non-write) should refresh.
+        pipeline
+            .refresh_dirty_groups_now(&cx)
+            .expect("scrub trigger refresh");
+        assert!(
+            read_generation(&cx, &device, layout) > gen_before,
+            "scrub trigger must refresh lazy dirty groups"
+        );
+    }
+
+    #[test]
+    fn refresh_telemetry_multiple_groups_sorted() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 256);
+
+        let layout0 =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 32, 0, 4).expect("layout0");
+        let layout1 =
+            RepairGroupLayout::new(GroupNumber(1), BlockNumber(64), 32, 0, 4).expect("layout1");
+        let source_count = 16;
+
+        write_source_blocks(&cx, &device, BlockNumber(0), source_count);
+        write_source_blocks(&cx, &device, BlockNumber(64), source_count);
+        bootstrap_storage(&cx, &device, layout0, BlockNumber(0), source_count, 4);
+        bootstrap_storage(&cx, &device, layout1, BlockNumber(64), source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let groups = vec![
+            GroupConfig {
+                layout: layout0,
+                source_first_block: BlockNumber(0),
+                source_block_count: source_count,
+            },
+            GroupConfig {
+                layout: layout1,
+                source_first_block: BlockNumber(64),
+                source_block_count: source_count,
+            },
+        ];
+        let mut ledger_buf = Vec::new();
+        let mut pipeline =
+            ScrubWithRecovery::new(&device, &validator, test_uuid(), groups, &mut ledger_buf, 4)
+                .with_group_refresh_policy(GroupNumber(0), RefreshPolicy::Eager)
+                .with_group_refresh_policy(
+                    GroupNumber(1),
+                    RefreshPolicy::Lazy {
+                        max_staleness: Duration::from_secs(30),
+                    },
+                );
+
+        // Dirty only group 1.
+        pipeline
+            .mark_group_dirty(GroupNumber(1))
+            .expect("mark group 1 dirty");
+
+        let telemetry = pipeline.refresh_telemetry();
+        assert_eq!(telemetry.tracked_groups, 2);
+        assert_eq!(telemetry.dirty_groups, 1);
+        // Sorted by group number.
+        assert_eq!(telemetry.groups[0].group, 0);
+        assert_eq!(telemetry.groups[1].group, 1);
+        assert!(!telemetry.groups[0].dirty);
+        assert!(telemetry.groups[1].dirty);
+        assert!(telemetry.groups[0].policy.starts_with("eager"));
+        assert!(telemetry.groups[1].policy.starts_with("lazy("));
+    }
+
+    // ── Btrfs write-churn stress tests (bd-h6nz.3.4) ───────────────────
+
+    #[test]
+    fn scrub_detects_corruption_after_write_churn_dirties_symbols() {
+        // Simulate write churn dirtying symbols, then scrub: corruption must
+        // still be detected (no false "clean" outcome).
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        // Inject corruption at block 2.
+        device
+            .write_block(&cx, BlockNumber(2), &vec![0xDE; block_size as usize])
+            .expect("inject corruption");
+
+        let validator = CorruptBlockValidator::new(vec![2]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_group_refresh_policy(
+            GroupNumber(0),
+            RefreshPolicy::Lazy {
+                max_staleness: Duration::from_secs(3600),
+            },
+        );
+
+        // Simulate write churn: multiple writes dirtying the group.
+        for _ in 0..10 {
+            pipeline
+                .on_group_write(&cx, GroupNumber(0))
+                .expect("write churn");
+        }
+
+        // Symbols are now stale (dirty). Scrub must still detect corruption.
+        let report = pipeline.scrub_and_recover(&cx).expect("pipeline");
+        assert_eq!(
+            report.total_corrupt, 1,
+            "corruption must be detected even after write churn"
+        );
+        assert!(
+            !report.block_outcomes.is_empty(),
+            "block outcomes must contain the corrupt block"
+        );
+    }
+
+    #[test]
+    fn recovery_succeeds_with_fresh_symbols_under_write_churn() {
+        // If symbols are refreshed after writes (eager policy), recovery
+        // should succeed even under write churn.
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        let originals = write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        // Simulate eager-policy write churn (symbols refreshed after each write).
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_group_refresh_policy(GroupNumber(0), RefreshPolicy::Eager);
+
+        // Simulate writes that refresh symbols.
+        for _ in 0..3 {
+            pipeline
+                .on_group_write(&cx, GroupNumber(0))
+                .expect("eager write");
+        }
+
+        // Now inject corruption and re-create pipeline with correct validator.
+        drop(pipeline);
+        device
+            .write_block(&cx, BlockNumber(2), &vec![0xDE; block_size as usize])
+            .expect("inject corruption");
+
+        let validator_corrupt = CorruptBlockValidator::new(vec![2]);
+        let mut ledger_buf2 = Vec::new();
+        let mut pipeline2 = ScrubWithRecovery::new(
+            &device,
+            &validator_corrupt,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf2,
+            4,
+        );
+
+        let report = pipeline2.scrub_and_recover(&cx).expect("pipeline2");
+        assert_eq!(report.total_corrupt, 1);
+        assert_eq!(
+            report.total_recovered, 1,
+            "recovery should succeed with fresh symbols"
+        );
+        let restored = device.read_block(&cx, BlockNumber(2)).expect("read");
+        assert_eq!(
+            restored.as_slice(),
+            originals[2].as_slice(),
+            "restored data must match original"
+        );
+    }
+
+    #[test]
+    fn evidence_ledger_captures_churn_context_in_repair_events() {
+        // Under write churn, repair events in the evidence ledger must include
+        // sufficient context for diagnosis.
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        // Inject corruption.
+        device
+            .write_block(&cx, BlockNumber(1), &vec![0xCC; block_size as usize])
+            .expect("inject corruption");
+
+        let validator = CorruptBlockValidator::new(vec![1]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        );
+
+        // Simulate some write churn before scrub.
+        pipeline
+            .mark_group_dirty(GroupNumber(0))
+            .expect("mark dirty");
+
+        let _report = pipeline.scrub_and_recover(&cx).expect("pipeline");
+
+        // Parse evidence ledger and verify events are present.
+        let records = crate::evidence::parse_evidence_ledger(pipeline.into_ledger());
+        let corruption_events = records
+            .iter()
+            .filter(|r| r.event_type == EvidenceEventType::CorruptionDetected)
+            .count();
+        let repair_events = records
+            .iter()
+            .filter(|r| {
+                r.event_type == EvidenceEventType::RepairAttempted
+                    || r.event_type == EvidenceEventType::RepairSucceeded
+                    || r.event_type == EvidenceEventType::RepairFailed
+            })
+            .count();
+
+        assert!(
+            corruption_events >= 1,
+            "evidence must record corruption detection"
+        );
+        assert!(
+            repair_events >= 1,
+            "evidence must record repair attempt/outcome"
+        );
+    }
+
+    #[test]
+    fn no_false_clean_when_corruption_exists_under_heavy_churn() {
+        // Invariant: scrub must NEVER report 0 corruption when blocks are
+        // actually corrupt, regardless of write churn state.
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        // Corrupt multiple blocks.
+        for block in [0, 3, 5] {
+            device
+                .write_block(&cx, BlockNumber(block), &vec![0xFF; block_size as usize])
+                .expect("inject corruption");
+        }
+
+        let validator = CorruptBlockValidator::new(vec![0, 3, 5]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_group_refresh_policy(
+            GroupNumber(0),
+            RefreshPolicy::Lazy {
+                max_staleness: Duration::from_secs(3600),
+            },
+        );
+
+        // Heavy write churn: 50 writes, all deferred (lazy within budget).
+        for _ in 0..50 {
+            pipeline
+                .on_group_write(&cx, GroupNumber(0))
+                .expect("churn write");
+        }
+
+        // Telemetry should show dirty state.
+        let telemetry = pipeline.refresh_telemetry();
+        assert_eq!(telemetry.dirty_groups, 1, "group must be dirty after churn");
+
+        // Scrub must still find all 3 corrupt blocks.
+        let report = pipeline.scrub_and_recover(&cx).expect("pipeline");
+        assert_eq!(
+            report.total_corrupt, 3,
+            "scrub must find all 3 corrupt blocks despite write churn (found {})",
+            report.total_corrupt
+        );
+    }
+
+    #[test]
+    fn write_churn_with_staleness_timeout_still_recovers() {
+        // Under write churn with staleness timeout, symbols get refreshed
+        // but recovery must still work for newly-detected corruption.
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        let originals = write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_group_refresh_policy(
+            GroupNumber(0),
+            RefreshPolicy::Lazy {
+                max_staleness: Duration::from_millis(5),
+            },
+        );
+
+        // First write sets dirty.
+        pipeline
+            .on_group_write(&cx, GroupNumber(0))
+            .expect("first write");
+
+        // Age it past staleness.
+        if let Some(state) = pipeline.refresh_states.get_mut(&0) {
+            state.dirty = true;
+            state.dirty_since = Instant::now().checked_sub(Duration::from_millis(50));
+        }
+        // This triggers staleness refresh.
+        pipeline
+            .on_group_write(&cx, GroupNumber(0))
+            .expect("stale write");
+
+        // Group should be clean after refresh.
+        assert!(!pipeline.is_group_dirty(GroupNumber(0)));
+
+        // Now inject corruption after symbols are fresh.
+        drop(pipeline);
+        device
+            .write_block(&cx, BlockNumber(4), &vec![0xAB; block_size as usize])
+            .expect("inject corruption");
+
+        let validator_corrupt = CorruptBlockValidator::new(vec![4]);
+        let mut ledger_buf2 = Vec::new();
+        let mut pipeline2 = ScrubWithRecovery::new(
+            &device,
+            &validator_corrupt,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf2,
+            4,
+        );
+
+        let report = pipeline2.scrub_and_recover(&cx).expect("recovery");
+        assert_eq!(report.total_corrupt, 1);
+        assert_eq!(report.total_recovered, 1);
+        let restored = device.read_block(&cx, BlockNumber(4)).expect("read");
+        assert_eq!(
+            restored.as_slice(),
+            originals[4].as_slice(),
+            "block 4 must be restored after staleness-refreshed symbols"
         );
     }
 }

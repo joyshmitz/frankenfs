@@ -1206,6 +1206,6 @@ mod tests {
 
     #[test]
     fn comparator_version_is_set() {
-        assert!(COMPARATOR_VERSION >= 1);
+        const { assert!(COMPARATOR_VERSION >= 1) };
     }
 }

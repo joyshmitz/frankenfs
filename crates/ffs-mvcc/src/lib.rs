@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod compression;
+pub mod crash_matrix;
 pub mod demo;
 pub mod persist;
 pub mod rcu;
