@@ -950,7 +950,7 @@ fn truncate_wal_tail_if_needed(file: &File, valid_bytes: u64, total_bytes: u64) 
 ///
 /// This directly inserts versions into the store without going through the
 /// normal transaction commit path, since we're replaying already-committed data.
-fn apply_wal_commit(store: &mut MvccStore, commit: &WalCommit) {
+pub fn apply_wal_commit(store: &mut MvccStore, commit: &WalCommit) {
     // Ensure the store's sequence counters are advanced appropriately
     // We need to update next_commit to be at least commit_seq + 1
     // and next_txn to be at least txn_id + 1

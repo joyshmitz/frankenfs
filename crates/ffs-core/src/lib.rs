@@ -34,6 +34,8 @@ use ffs_error::FfsError;
 use ffs_journal::{
     Jbd2WriteStats, Jbd2Writer, JournalSegment, ReplayOutcome, replay_jbd2_segments,
 };
+use ffs_mvcc::persist::WalRecoveryReport;
+use ffs_mvcc::wal_replay::{ReplayOutcome as MvccReplayOutcome, TailPolicy, WalReplayEngine};
 use ffs_mvcc::{CommitError, MvccStore, Transaction};
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
@@ -220,6 +222,16 @@ pub struct OpenOptions {
     /// are permitted. In `Native` mode, MVCC version chains, repair symbols,
     /// and BLAKE3 checksums are additionally allowed.
     pub mount_mode: MountMode,
+    /// Optional path to a durable MVCC WAL file.
+    ///
+    /// When `Some`, the WAL is replayed at open time to restore committed MVCC
+    /// state.  When `None` (default), the MVCC store starts empty.
+    pub mvcc_wal_path: Option<std::path::PathBuf>,
+    /// Replay policy for the MVCC WAL tail.
+    ///
+    /// Controls whether corrupt or truncated WAL tails are silently truncated
+    /// (`TruncateToLastGood`, default) or cause an immediate error (`FailFast`).
+    pub mvcc_replay_policy: TailPolicy,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -229,6 +241,8 @@ impl Default for OpenOptions {
             skip_validation: false,
             ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
             mount_mode: MountMode::Compat,
+            mvcc_wal_path: None,
+            mvcc_replay_policy: TailPolicy::default(),
         }
     }
 }
@@ -375,6 +389,8 @@ pub struct OpenFs {
     pub ext4_journal_replay: Option<ReplayOutcome>,
     /// Crash recovery outcome, if the filesystem required recovery on mount.
     pub crash_recovery: Option<CrashRecoveryOutcome>,
+    /// MVCC WAL recovery report, if a WAL was replayed at open time.
+    pub mvcc_wal_recovery: Option<WalRecoveryReport>,
     /// Active mount mode (compat or native).
     pub mount_mode: MountMode,
     /// Block device for I/O operations.
@@ -417,6 +433,7 @@ impl std::fmt::Debug for OpenFs {
             .field("btrfs_context", &self.btrfs_context)
             .field("ext4_journal_replay", &self.ext4_journal_replay)
             .field("crash_recovery", &self.crash_recovery)
+            .field("mvcc_wal_recovery", &self.mvcc_wal_recovery)
             .field("dev_len", &self.dev.len_bytes())
             .field("mvcc_version_count", &mvcc_guard.version_count())
             .field("mvcc_active_snapshots", &mvcc_guard.active_snapshot_count())
@@ -616,6 +633,7 @@ impl OpenFs {
     }
 
     /// Open a filesystem from an already-opened device.
+    #[expect(clippy::too_many_lines)]
     pub fn from_device(
         cx: &Cx,
         dev: Box<dyn ByteDevice>,
@@ -672,9 +690,11 @@ impl OpenFs {
             }
         };
 
-        let mvcc_store = Arc::new(RwLock::new(MvccStore::new()));
+        let (mvcc_store, mvcc_wal_recovery) =
+            Self::init_mvcc_store(options)?;
         trace!(
             target: "ffs::mvcc",
+            has_wal = mvcc_wal_recovery.is_some(),
             "mvcc_store_init"
         );
 
@@ -690,6 +710,7 @@ impl OpenFs {
             btrfs_context,
             ext4_journal_replay: None,
             crash_recovery: None,
+            mvcc_wal_recovery,
             mount_mode: options.mount_mode,
             dev,
             mvcc_store,
@@ -727,6 +748,116 @@ impl OpenFs {
         }
 
         Ok(fs)
+    }
+
+    /// Initialize MVCC store, optionally replaying a WAL.
+    ///
+    /// When `options.mvcc_wal_path` is `Some`, the WAL file is opened and
+    /// replayed into a fresh `MvccStore` using the configured `TailPolicy`.
+    /// If the WAL does not exist or is empty, a fresh store is returned.
+    /// If replay fails under [`TailPolicy::FailFast`], the error is logged
+    /// and an empty store is returned (read-only fallback).
+    fn init_mvcc_store(
+        options: &OpenOptions,
+    ) -> Result<(Arc<RwLock<MvccStore>>, Option<WalRecoveryReport>), FfsError> {
+        let Some(wal_path) = &options.mvcc_wal_path else {
+            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+        };
+
+        if !wal_path.exists() {
+            info!(
+                wal_path = %wal_path.display(),
+                "mvcc_wal_not_found"
+            );
+            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+        }
+
+        let wal_size = std::fs::metadata(wal_path).map_or(0, |m| m.len());
+        if wal_size == 0 {
+            info!(
+                wal_path = %wal_path.display(),
+                "mvcc_wal_empty"
+            );
+            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+        }
+
+        info!(
+            wal_path = %wal_path.display(),
+            wal_size,
+            replay_policy = ?options.mvcc_replay_policy,
+            "mvcc_wal_replay_begin"
+        );
+
+        // Read WAL file: header + data.
+        let wal_bytes = std::fs::read(wal_path)?;
+        let header_size = ffs_mvcc::wal::HEADER_SIZE;
+        if wal_bytes.len() < header_size {
+            warn!(
+                wal_path = %wal_path.display(),
+                size = wal_bytes.len(),
+                "mvcc_wal_too_small"
+            );
+            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+        }
+
+        // Validate header.
+        if let Err(e) = ffs_mvcc::wal::decode_header(&wal_bytes[..header_size]) {
+            warn!(
+                wal_path = %wal_path.display(),
+                error = %e,
+                "mvcc_wal_bad_header"
+            );
+            return Ok((Arc::new(RwLock::new(MvccStore::new())), None));
+        }
+
+        let data = &wal_bytes[header_size..];
+        let mut store = MvccStore::new();
+
+        let engine = WalReplayEngine::new(options.mvcc_replay_policy);
+        match engine.replay(data, 0, |commit| {
+            ffs_mvcc::persist::apply_wal_commit(&mut store, commit);
+        }) {
+            Ok(report) => {
+                let recovery = WalRecoveryReport {
+                    outcome: report.outcome.clone(),
+                    commits_replayed: report.commits_replayed,
+                    versions_replayed: report.versions_replayed,
+                    records_discarded: report.records_discarded,
+                    wal_valid_bytes: u64::try_from(header_size).unwrap_or(0)
+                        .saturating_add(report.last_valid_offset),
+                    wal_total_bytes: wal_size,
+                    used_checkpoint: false,
+                    checkpoint_commit_seq: None,
+                };
+
+                info!(
+                    commits_replayed = report.commits_replayed,
+                    versions_replayed = report.versions_replayed,
+                    records_discarded = report.records_discarded,
+                    outcome = ?report.outcome,
+                    "mvcc_wal_replay_done"
+                );
+
+                Ok((Arc::new(RwLock::new(store)), Some(recovery)))
+            }
+            Err(e) => {
+                // FailFast policy triggered — fall back to empty store.
+                warn!(
+                    wal_path = %wal_path.display(),
+                    error = %e,
+                    "mvcc_wal_replay_failed_fallback"
+                );
+                let recovery = WalRecoveryReport {
+                    outcome: MvccReplayOutcome::CorruptTail {
+                        records_discarded: 0,
+                        first_corrupt_offset: 0,
+                    },
+                    wal_total_bytes: wal_size,
+                    ..WalRecoveryReport::default()
+                };
+                Ok((Arc::new(RwLock::new(MvccStore::new())), Some(recovery)))
+            }
+        }
     }
 
     /// The block device backing this filesystem.
@@ -796,6 +927,12 @@ impl OpenFs {
     #[must_use]
     pub fn crash_recovery(&self) -> Option<&CrashRecoveryOutcome> {
         self.crash_recovery.as_ref()
+    }
+
+    /// Return MVCC WAL recovery report if a WAL was replayed at open time.
+    #[must_use]
+    pub fn mvcc_wal_recovery(&self) -> Option<&WalRecoveryReport> {
+        self.mvcc_wal_recovery.as_ref()
     }
 
     // ── Mount-mode boundary enforcement ─────────────────────────────────
