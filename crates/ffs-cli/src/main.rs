@@ -369,6 +369,12 @@ enum Command {
         /// Show only the last N records.
         #[arg(long)]
         tail: Option<usize>,
+        /// Preset query: replay-anomalies, repair-failures, pressure-transitions.
+        #[arg(long)]
+        preset: Option<String>,
+        /// Show aggregated summary instead of individual records.
+        #[arg(long)]
+        summary: bool,
     },
     /// Create a new ext4 filesystem image.
     ///
@@ -1308,7 +1314,16 @@ fn run() -> Result<()> {
             json,
             event_type,
             tail,
-        } => cmd_evidence::evidence_cmd(&ledger, json, event_type.as_deref(), tail),
+            preset,
+            summary,
+        } => cmd_evidence::evidence_cmd(
+            &ledger,
+            json,
+            event_type.as_deref(),
+            tail,
+            preset.as_deref(),
+            summary,
+        ),
         Command::Mkfs {
             output,
             size_mb,
@@ -4979,7 +4994,7 @@ mod tests {
         select_ext4_repair_groups,
     };
     use clap::Parser;
-    use ffs_repair::evidence::EvidenceEventType;
+    use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
     use serde_json::Value;
     use std::io::{self, Seek, SeekFrom, Write};
     use std::path::PathBuf;
@@ -5401,7 +5416,7 @@ mod tests {
             "{\"timestamp_ns\":3,\"event_type\":\"repair_failed\",\"block_group\":3}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, Some("repair_failed"), None)
+            let records = load_evidence_records(&path, Some("repair_failed"), None, None)
                 .expect("filtered evidence read should succeed");
             assert_eq!(records.len(), 2);
             assert!(
@@ -5423,7 +5438,7 @@ mod tests {
             "{\"timestamp_ns\":4,\"event_type\":\"repair_failed\",\"block_group\":4}\n",
         );
         with_temp_image_path(ledger.as_bytes(), |path| {
-            let records = load_evidence_records(&path, Some("repair_failed"), Some(2))
+            let records = load_evidence_records(&path, Some("repair_failed"), Some(2), None)
                 .expect("tailed evidence read should succeed");
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].timestamp_ns, 3);
@@ -5445,12 +5460,161 @@ mod tests {
         );
 
         with_temp_image_path(&ledger, |path| {
-            let records = load_evidence_records(&path, Some("repair_failed"), None)
+            let records = load_evidence_records(&path, Some("repair_failed"), None, None)
                 .expect("evidence read should tolerate non-utf8 torn lines");
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].timestamp_ns, 1);
             assert_eq!(records[1].timestamp_ns, 2);
         });
+    }
+
+    #[test]
+    fn load_evidence_records_preset_filters_multiple_types() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":1,\"event_type\":\"wal_recovery\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":2,\"event_type\":\"corruption_detected\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":3,\"event_type\":\"txn_aborted\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":4,\"event_type\":\"serialization_conflict\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":5,\"event_type\":\"flush_batch\",\"block_group\":0}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            // replay-anomalies preset: wal_recovery + txn_aborted + serialization_conflict
+            let records =
+                load_evidence_records(&path, None, None, Some("replay-anomalies"))
+                    .expect("preset filter should work");
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[0].event_type, EvidenceEventType::WalRecovery);
+            assert_eq!(records[1].event_type, EvidenceEventType::TxnAborted);
+            assert_eq!(records[2].event_type, EvidenceEventType::SerializationConflict);
+        });
+    }
+
+    #[test]
+    fn load_evidence_records_preset_repair_failures_selects_correctly() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":1,\"event_type\":\"corruption_detected\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":2,\"event_type\":\"repair_attempted\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":3,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":4,\"event_type\":\"wal_recovery\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":5,\"event_type\":\"scrub_cycle_complete\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":6,\"event_type\":\"repair_succeeded\",\"block_group\":1}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records =
+                load_evidence_records(&path, None, None, Some("repair-failures"))
+                    .expect("repair-failures preset should work");
+            assert_eq!(records.len(), 5);
+            // wal_recovery should be excluded
+            assert!(records.iter().all(|r| r.event_type != EvidenceEventType::WalRecovery));
+        });
+    }
+
+    #[test]
+    fn load_evidence_records_preset_pressure_transitions() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":1,\"event_type\":\"backpressure_activated\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":2,\"event_type\":\"flush_batch\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":3,\"event_type\":\"durability_policy_changed\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":4,\"event_type\":\"refresh_policy_changed\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":5,\"event_type\":\"repair_failed\",\"block_group\":2}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records =
+                load_evidence_records(&path, None, None, Some("pressure-transitions"))
+                    .expect("pressure-transitions preset should work");
+            assert_eq!(records.len(), 4);
+            // repair_failed should be excluded
+            assert!(records.iter().all(|r| r.event_type != EvidenceEventType::RepairFailed));
+        });
+    }
+
+    #[test]
+    fn preset_event_types_returns_none_for_unknown() {
+        use crate::cmd_evidence::{preset_event_types, KNOWN_PRESETS};
+        assert!(preset_event_types("nonexistent").is_none());
+        for name in KNOWN_PRESETS {
+            assert!(
+                preset_event_types(name).is_some(),
+                "known preset {name} should return Some"
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_summary_aggregates_correctly() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":100,\"event_type\":\"wal_recovery\",\"block_group\":0,",
+            "\"wal_recovery\":{\"commits_replayed\":5,\"versions_replayed\":10,",
+            "\"records_discarded\":2,\"wal_valid_bytes\":1000,\"wal_total_bytes\":1024,",
+            "\"used_checkpoint\":false}}\n",
+            "{\"timestamp_ns\":200,\"event_type\":\"txn_aborted\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":300,\"event_type\":\"corruption_detected\",\"block_group\":1,",
+            "\"corruption\":{\"blocks_affected\":3,\"corruption_kind\":\"crc\",",
+            "\"severity\":\"error\",\"detail\":\"bad crc\"}}\n",
+            "{\"timestamp_ns\":400,\"event_type\":\"repair_succeeded\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":500,\"event_type\":\"backpressure_activated\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":600,\"event_type\":\"flush_batch\",\"block_group\":0,",
+            "\"flush_batch\":{\"blocks_flushed\":42,\"bytes_written\":172032,",
+            "\"flush_duration_us\":500}}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records = load_evidence_records(&path, None, None, None)
+                .expect("load should succeed");
+            let summary = crate::cmd_evidence::build_summary_for_test(&records, None);
+            assert_eq!(summary.total_records, 6);
+            assert_eq!(summary.time_span_ns, Some((100, 600)));
+            assert_eq!(summary.block_groups_seen, vec![1]);
+
+            let replay = summary.replay_summary.as_ref().expect("replay summary");
+            assert_eq!(replay.recovery_count, 1);
+            assert_eq!(replay.total_commits_replayed, 5);
+            assert_eq!(replay.total_records_discarded, 2);
+            assert_eq!(replay.aborts, 1);
+
+            let repair = summary.repair_summary.as_ref().expect("repair summary");
+            assert_eq!(repair.corruptions_detected, 1);
+            assert_eq!(repair.repairs_succeeded, 1);
+            assert_eq!(repair.total_blocks_corrupt, 3);
+
+            let pressure = summary.pressure_summary.as_ref().expect("pressure summary");
+            assert_eq!(pressure.backpressure_events, 1);
+            assert_eq!(pressure.flush_batches, 1);
+            assert_eq!(pressure.total_blocks_flushed, 42);
+        });
+    }
+
+    #[test]
+    fn evidence_summary_json_schema_has_required_fields() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":100,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records = load_evidence_records(&path, None, None, None)
+                .expect("load should succeed");
+            let summary = crate::cmd_evidence::build_summary_for_test(&records, Some("repair-failures"));
+            let json_val = serde_json::to_value(&summary).expect("serialize summary");
+            // Required top-level fields
+            assert!(json_val.get("total_records").is_some());
+            assert!(json_val.get("event_type_counts").is_some());
+            assert!(json_val.get("block_groups_seen").is_some());
+            assert!(json_val.get("preset").is_some());
+            // Conditional fields omitted when empty
+            assert!(json_val.get("replay_summary").is_none());
+            assert!(json_val.get("pressure_summary").is_none());
+        });
+    }
+
+    #[test]
+    fn evidence_record_json_schema_stability() {
+        // Verify that EvidenceRecord JSON contains expected top-level keys.
+        let json_str = r#"{"timestamp_ns":1,"event_type":"repair_failed","block_group":2}"#;
+        let record: EvidenceRecord = serde_json::from_str(json_str).expect("parse");
+        let round_trip = serde_json::to_value(&record).expect("serialize");
+        assert!(round_trip.get("timestamp_ns").is_some());
+        assert!(round_trip.get("event_type").is_some());
+        assert!(round_trip.get("block_group").is_some());
+        // event_type is serialized as snake_case
+        assert_eq!(round_trip["event_type"], "repair_failed");
     }
 
     #[test]
@@ -6490,11 +6654,15 @@ mod tests {
                 json,
                 event_type,
                 tail,
+                preset,
+                summary,
             } => {
                 assert_eq!(ledger, PathBuf::from("/tmp/evidence.jsonl"));
                 assert!(json);
                 assert_eq!(event_type.as_deref(), Some("repair_succeeded"));
                 assert_eq!(tail, Some(25));
+                assert_eq!(preset, None);
+                assert!(!summary);
             }
             _ => panic!("expected evidence command"),
         }
@@ -6511,11 +6679,94 @@ mod tests {
                 json,
                 event_type,
                 tail,
+                preset,
+                summary,
             } => {
                 assert_eq!(ledger, PathBuf::from("/tmp/evidence.jsonl"));
                 assert!(!json);
                 assert_eq!(event_type, None);
                 assert_eq!(tail, None);
+                assert_eq!(preset, None);
+                assert!(!summary);
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_with_preset() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--preset",
+            "replay-anomalies",
+            "--summary",
+            "/tmp/evidence.jsonl",
+        ])
+        .expect("evidence command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                ledger,
+                json,
+                event_type,
+                tail,
+                preset,
+                summary,
+            } => {
+                assert_eq!(ledger, PathBuf::from("/tmp/evidence.jsonl"));
+                assert!(!json);
+                assert_eq!(event_type, None);
+                assert_eq!(tail, None);
+                assert_eq!(preset.as_deref(), Some("replay-anomalies"));
+                assert!(summary);
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_preset_repair_failures() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--preset",
+            "repair-failures",
+            "--json",
+            "/tmp/evidence.jsonl",
+        ])
+        .expect("evidence command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                preset, json, ..
+            } => {
+                assert_eq!(preset.as_deref(), Some("repair-failures"));
+                assert!(json);
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_preset_pressure_transitions() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--preset",
+            "pressure-transitions",
+            "--tail",
+            "10",
+            "/tmp/evidence.jsonl",
+        ])
+        .expect("evidence command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                preset, tail, ..
+            } => {
+                assert_eq!(preset.as_deref(), Some("pressure-transitions"));
+                assert_eq!(tail, Some(10));
             }
             _ => panic!("expected evidence command"),
         }

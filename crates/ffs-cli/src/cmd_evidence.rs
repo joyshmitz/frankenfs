@@ -1,43 +1,376 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::{info, info_span, warn};
+
+// ── Preset definitions ─────────────────────────────────────────────────────
+
+/// Operator-oriented preset query names and their constituent event types.
+pub const PRESET_REPLAY_ANOMALIES: &str = "replay-anomalies";
+pub const PRESET_REPAIR_FAILURES: &str = "repair-failures";
+pub const PRESET_PRESSURE_TRANSITIONS: &str = "pressure-transitions";
+
+/// Returns the event types included in a preset, or `None` if unknown.
+pub fn preset_event_types(preset: &str) -> Option<&'static [EvidenceEventType]> {
+    match preset {
+        PRESET_REPLAY_ANOMALIES => Some(&[
+            EvidenceEventType::WalRecovery,
+            EvidenceEventType::TxnAborted,
+            EvidenceEventType::SerializationConflict,
+        ]),
+        PRESET_REPAIR_FAILURES => Some(&[
+            EvidenceEventType::CorruptionDetected,
+            EvidenceEventType::RepairAttempted,
+            EvidenceEventType::RepairSucceeded,
+            EvidenceEventType::RepairFailed,
+            EvidenceEventType::ScrubCycleComplete,
+        ]),
+        PRESET_PRESSURE_TRANSITIONS => Some(&[
+            EvidenceEventType::BackpressureActivated,
+            EvidenceEventType::FlushBatch,
+            EvidenceEventType::DurabilityPolicyChanged,
+            EvidenceEventType::RefreshPolicyChanged,
+        ]),
+        _ => None,
+    }
+}
+
+/// All known preset names.
+pub const KNOWN_PRESETS: &[&str] = &[
+    PRESET_REPLAY_ANOMALIES,
+    PRESET_REPAIR_FAILURES,
+    PRESET_PRESSURE_TRANSITIONS,
+];
+
+// ── Summary ────────────────────────────────────────────────────────────────
+
+/// Aggregated summary of evidence records.
+#[derive(Debug, serde::Serialize)]
+pub struct EvidenceSummary {
+    pub total_records: usize,
+    pub event_type_counts: BTreeMap<String, usize>,
+    pub time_span_ns: Option<(u64, u64)>,
+    pub block_groups_seen: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_summary: Option<ReplaySummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_summary: Option<RepairSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure_summary: Option<PressureSummary>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ReplaySummary {
+    pub recovery_count: usize,
+    pub total_commits_replayed: u64,
+    pub total_records_discarded: u64,
+    pub aborts: usize,
+    pub conflicts: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RepairSummary {
+    pub corruptions_detected: usize,
+    pub repairs_attempted: usize,
+    pub repairs_succeeded: usize,
+    pub repairs_failed: usize,
+    pub scrub_cycles: usize,
+    pub total_blocks_corrupt: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PressureSummary {
+    pub backpressure_events: usize,
+    pub flush_batches: usize,
+    pub total_blocks_flushed: u64,
+    pub policy_changes: usize,
+}
+
+/// Mutable accumulators for building an evidence summary.
+#[derive(Default)]
+struct SummaryAccumulator {
+    event_type_counts: BTreeMap<String, usize>,
+    min_ts: Option<u64>,
+    max_ts: Option<u64>,
+    groups: Vec<u32>,
+    // Replay
+    recovery_count: usize,
+    total_commits_replayed: u64,
+    total_records_discarded: u64,
+    aborts: usize,
+    conflicts: usize,
+    // Repair
+    corruptions_detected: usize,
+    repairs_attempted: usize,
+    repairs_succeeded: usize,
+    repairs_failed: usize,
+    scrub_cycles: usize,
+    total_blocks_corrupt: u64,
+    // Pressure
+    backpressure_events: usize,
+    flush_batches: usize,
+    total_blocks_flushed: u64,
+    policy_changes: usize,
+}
+
+impl SummaryAccumulator {
+    fn ingest(&mut self, record: &EvidenceRecord) {
+        let name = evidence_event_type_name(record.event_type);
+        *self.event_type_counts.entry(name.to_owned()).or_insert(0) += 1;
+
+        let ts = record.timestamp_ns;
+        self.min_ts = Some(self.min_ts.map_or(ts, |m: u64| m.min(ts)));
+        self.max_ts = Some(self.max_ts.map_or(ts, |m: u64| m.max(ts)));
+
+        if record.block_group != 0 && !self.groups.contains(&record.block_group) {
+            self.groups.push(record.block_group);
+        }
+
+        match record.event_type {
+            EvidenceEventType::WalRecovery => {
+                self.recovery_count += 1;
+                if let Some(w) = record.wal_recovery.as_ref() {
+                    self.total_commits_replayed += w.commits_replayed;
+                    self.total_records_discarded += w.records_discarded;
+                }
+            }
+            EvidenceEventType::TxnAborted => self.aborts += 1,
+            EvidenceEventType::SerializationConflict => self.conflicts += 1,
+            EvidenceEventType::CorruptionDetected => {
+                self.corruptions_detected += 1;
+                if let Some(c) = record.corruption.as_ref() {
+                    self.total_blocks_corrupt += u64::from(c.blocks_affected);
+                }
+            }
+            EvidenceEventType::RepairAttempted => self.repairs_attempted += 1,
+            EvidenceEventType::RepairSucceeded => self.repairs_succeeded += 1,
+            EvidenceEventType::RepairFailed => self.repairs_failed += 1,
+            EvidenceEventType::ScrubCycleComplete => self.scrub_cycles += 1,
+            EvidenceEventType::BackpressureActivated => self.backpressure_events += 1,
+            EvidenceEventType::FlushBatch => {
+                self.flush_batches += 1;
+                if let Some(f) = record.flush_batch.as_ref() {
+                    self.total_blocks_flushed += f.blocks_flushed;
+                }
+            }
+            EvidenceEventType::DurabilityPolicyChanged
+            | EvidenceEventType::RefreshPolicyChanged => {
+                self.policy_changes += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn finalize(mut self, total: usize, preset: Option<&str>) -> EvidenceSummary {
+        self.groups.sort_unstable();
+        let has_replay = self.recovery_count > 0 || self.aborts > 0 || self.conflicts > 0;
+        let has_repair = self.corruptions_detected > 0
+            || self.repairs_attempted > 0
+            || self.repairs_succeeded > 0
+            || self.repairs_failed > 0
+            || self.scrub_cycles > 0;
+        let has_pressure =
+            self.backpressure_events > 0 || self.flush_batches > 0 || self.policy_changes > 0;
+
+        EvidenceSummary {
+            total_records: total,
+            event_type_counts: self.event_type_counts,
+            time_span_ns: self.min_ts.zip(self.max_ts),
+            block_groups_seen: self.groups,
+            preset: preset.map(str::to_owned),
+            replay_summary: if has_replay {
+                Some(ReplaySummary {
+                    recovery_count: self.recovery_count,
+                    total_commits_replayed: self.total_commits_replayed,
+                    total_records_discarded: self.total_records_discarded,
+                    aborts: self.aborts,
+                    conflicts: self.conflicts,
+                })
+            } else {
+                None
+            },
+            repair_summary: if has_repair {
+                Some(RepairSummary {
+                    corruptions_detected: self.corruptions_detected,
+                    repairs_attempted: self.repairs_attempted,
+                    repairs_succeeded: self.repairs_succeeded,
+                    repairs_failed: self.repairs_failed,
+                    scrub_cycles: self.scrub_cycles,
+                    total_blocks_corrupt: self.total_blocks_corrupt,
+                })
+            } else {
+                None
+            },
+            pressure_summary: if has_pressure {
+                Some(PressureSummary {
+                    backpressure_events: self.backpressure_events,
+                    flush_batches: self.flush_batches,
+                    total_blocks_flushed: self.total_blocks_flushed,
+                    policy_changes: self.policy_changes,
+                })
+            } else {
+                None
+            },
+        }
+    }
+}
+
+fn build_summary(records: &[EvidenceRecord], preset: Option<&str>) -> EvidenceSummary {
+    let mut acc = SummaryAccumulator::default();
+    for record in records {
+        acc.ingest(record);
+    }
+    acc.finalize(records.len(), preset)
+}
+
+fn print_summary(summary: &EvidenceSummary) {
+    println!("FrankenFS Evidence Summary");
+    if let Some(preset) = summary.preset.as_ref() {
+        println!("  Preset: {preset}");
+    }
+    println!("  Total records: {}", summary.total_records);
+    if let Some((min_ts, max_ts)) = summary.time_span_ns {
+        let min_s = min_ts / 1_000_000_000;
+        let max_s = max_ts / 1_000_000_000;
+        let span_s = max_s.saturating_sub(min_s);
+        println!("  Time span: {span_s}s (earliest={min_s}, latest={max_s})");
+    }
+    if !summary.block_groups_seen.is_empty() {
+        println!(
+            "  Block groups: {} distinct",
+            summary.block_groups_seen.len()
+        );
+    }
+
+    println!();
+    println!("  Event type breakdown:");
+    for (name, count) in &summary.event_type_counts {
+        println!("    {name:<32} {count}");
+    }
+
+    if let Some(replay) = summary.replay_summary.as_ref() {
+        println!();
+        println!("  Replay anomalies:");
+        println!(
+            "    WAL recoveries: {}  commits_replayed: {}  records_discarded: {}",
+            replay.recovery_count, replay.total_commits_replayed, replay.total_records_discarded
+        );
+        println!(
+            "    Aborts: {}  Serialization conflicts: {}",
+            replay.aborts, replay.conflicts
+        );
+    }
+
+    if let Some(repair) = summary.repair_summary.as_ref() {
+        println!();
+        println!("  Repair activity:");
+        println!(
+            "    Corruptions: {}  Blocks affected: {}",
+            repair.corruptions_detected, repair.total_blocks_corrupt
+        );
+        println!(
+            "    Repairs: {} attempted, {} succeeded, {} failed",
+            repair.repairs_attempted, repair.repairs_succeeded, repair.repairs_failed
+        );
+        println!("    Scrub cycles: {}", repair.scrub_cycles);
+    }
+
+    if let Some(pressure) = summary.pressure_summary.as_ref() {
+        println!();
+        println!("  Pressure transitions:");
+        println!(
+            "    Backpressure activations: {}",
+            pressure.backpressure_events
+        );
+        println!(
+            "    Flush batches: {}  total blocks flushed: {}",
+            pressure.flush_batches, pressure.total_blocks_flushed
+        );
+        println!("    Policy changes: {}", pressure.policy_changes);
+    }
+}
+
+// ── Main command ───────────────────────────────────────────────────────────
 
 pub fn evidence_cmd(
     path: &PathBuf,
     json: bool,
     event_type_filter: Option<&str>,
     tail: Option<usize>,
+    preset: Option<&str>,
+    summary: bool,
 ) -> Result<()> {
     let command_span = info_span!(
         target: "ffs::cli::evidence",
         "evidence",
+        operation_id = %uuid_v4(),
         ledger = %path.display(),
         output_json = json,
         event_type_filter = event_type_filter.unwrap_or(""),
-        tail = tail.unwrap_or(0)
+        tail = tail.unwrap_or(0),
+        preset = preset.unwrap_or(""),
+        summary = summary,
     );
     let _command_guard = command_span.enter();
     let started = Instant::now();
     info!(target: "ffs::cli::evidence", "evidence_start");
 
-    let records = load_evidence_records(path, event_type_filter, tail)?;
+    // Validate preset name if provided.
+    if let Some(preset_name) = preset {
+        if preset_event_types(preset_name).is_none() {
+            warn!(
+                target: "ffs::cli::evidence",
+                preset = preset_name,
+                outcome = "rejected",
+                error_class = "invalid_preset",
+                "evidence_preset_rejected"
+            );
+            bail!(
+                "unknown preset '{preset_name}'. Valid presets: {}",
+                KNOWN_PRESETS.join(", ")
+            );
+        }
+    }
 
-    if json {
+    // Preset and event_type are mutually exclusive.
+    if preset.is_some() && event_type_filter.is_some() {
+        bail!("--preset and --event-type are mutually exclusive");
+    }
+
+    let records = load_evidence_records(path, event_type_filter, tail, preset)?;
+
+    if summary {
+        let s = build_summary(&records, preset);
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&s).context("serialize evidence summary")?
+            );
+        } else {
+            print_summary(&s);
+        }
+    } else if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&records).context("serialize evidence records")?
         );
+    } else if records.is_empty() {
+        println!("No evidence records found.");
     } else {
-        if records.is_empty() {
-            println!("No evidence records found.");
-            return Ok(());
+        if let Some(preset_name) = preset {
+            println!(
+                "FrankenFS Evidence Ledger — preset: {preset_name} ({} records)",
+                records.len()
+            );
+        } else {
+            println!("FrankenFS Evidence Ledger ({} records)", records.len());
         }
-        println!("FrankenFS Evidence Ledger ({} records)", records.len());
         println!();
         for record in &records {
             print_evidence_record(record);
@@ -47,6 +380,9 @@ pub fn evidence_cmd(
     info!(
         target: "ffs::cli::evidence",
         record_count = records.len(),
+        preset = preset.unwrap_or(""),
+        summary = summary,
+        outcome = "success",
         duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         "evidence_complete"
     );
@@ -54,11 +390,16 @@ pub fn evidence_cmd(
     Ok(())
 }
 
+// ── Record loading ─────────────────────────────────────────────────────────
+
 pub fn load_evidence_records(
     path: &PathBuf,
     event_type_filter: Option<&str>,
     tail: Option<usize>,
+    preset: Option<&str>,
 ) -> Result<Vec<EvidenceRecord>> {
+    let preset_types = preset.and_then(preset_event_types);
+
     let file = File::open(path)
         .with_context(|| format!("failed to open evidence ledger: {}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -86,8 +427,17 @@ pub fn load_evidence_records(
             // Preserve torn-write behavior: skip malformed lines.
             continue;
         };
+
+        // Apply single event_type filter.
         if let Some(filter) = event_type_filter {
             if evidence_event_type_name(record.event_type) != filter {
+                continue;
+            }
+        }
+
+        // Apply preset multi-type filter.
+        if let Some(types) = preset_types {
+            if !types.contains(&record.event_type) {
                 continue;
             }
         }
@@ -112,7 +462,20 @@ pub fn load_evidence_records(
     }
 }
 
-const fn evidence_event_type_name(event_type: EvidenceEventType) -> &'static str {
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+fn uuid_v4() -> String {
+    // Minimal v4-like UUID for operation_id correlation.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    std::time::SystemTime::now().hash(&mut h);
+    std::process::id().hash(&mut h);
+    let bits = h.finish();
+    format!("{bits:016x}")
+}
+
+pub const fn evidence_event_type_name(event_type: EvidenceEventType) -> &'static str {
     match event_type {
         EvidenceEventType::CorruptionDetected => "corruption_detected",
         EvidenceEventType::RepairAttempted => "repair_attempted",
@@ -133,6 +496,11 @@ const fn evidence_event_type_name(event_type: EvidenceEventType) -> &'static str
         EvidenceEventType::DurabilityPolicyChanged => "durability_policy_changed",
         EvidenceEventType::RefreshPolicyChanged => "refresh_policy_changed",
     }
+}
+
+#[cfg(test)]
+pub fn build_summary_for_test(records: &[EvidenceRecord], preset: Option<&str>) -> EvidenceSummary {
+    build_summary(records, preset)
 }
 
 fn print_evidence_record(record: &EvidenceRecord) {
