@@ -690,8 +690,7 @@ impl OpenFs {
             }
         };
 
-        let (mvcc_store, mvcc_wal_recovery) =
-            Self::init_mvcc_store(options)?;
+        let (mvcc_store, mvcc_wal_recovery) = Self::init_mvcc_store(options)?;
         trace!(
             target: "ffs::mvcc",
             has_wal = mvcc_wal_recovery.is_some(),
@@ -823,7 +822,8 @@ impl OpenFs {
                     commits_replayed: report.commits_replayed,
                     versions_replayed: report.versions_replayed,
                     records_discarded: report.records_discarded,
-                    wal_valid_bytes: u64::try_from(header_size).unwrap_or(0)
+                    wal_valid_bytes: u64::try_from(header_size)
+                        .unwrap_or(0)
                         .saturating_add(report.last_valid_offset),
                     wal_total_bytes: wal_size,
                     used_checkpoint: false,
@@ -19748,5 +19748,199 @@ mod tests {
             msg.contains("compat mode"),
             "error should mention compat mode: {msg}"
         );
+    }
+
+    // ── MVCC WAL integration tests ───────────────────────────────────────
+
+    #[test]
+    fn open_options_default_has_no_wal() {
+        let opts = OpenOptions::default();
+        assert!(opts.mvcc_wal_path.is_none());
+        assert_eq!(
+            opts.mvcc_replay_policy,
+            ffs_mvcc::wal_replay::TailPolicy::TruncateToLastGood
+        );
+    }
+
+    #[test]
+    fn mvcc_wal_recovery_none_without_wal_path() {
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open");
+        assert!(fs.mvcc_wal_recovery().is_none());
+    }
+
+    #[test]
+    fn mvcc_wal_recovery_none_for_missing_wal_file() {
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            mvcc_wal_path: Some(std::path::PathBuf::from("/tmp/nonexistent_wal_abc123.wal")),
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open");
+        assert!(
+            fs.mvcc_wal_recovery().is_none(),
+            "missing WAL file should not produce a recovery report"
+        );
+    }
+
+    #[test]
+    fn mvcc_wal_replays_committed_data() {
+        use ffs_mvcc::wal::{self, WalCommit, WalHeader, WalWrite};
+        use ffs_types::{BlockNumber, CommitSeq, TxnId};
+
+        // Build a WAL file with 2 commits.
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let wal_path = tmp.path().to_path_buf();
+        {
+            let header = WalHeader::default();
+            let c1 = WalCommit {
+                commit_seq: CommitSeq(1),
+                txn_id: TxnId(1),
+                writes: vec![WalWrite {
+                    block: BlockNumber(10),
+                    data: vec![0xAA; 16],
+                }],
+            };
+            let c2 = WalCommit {
+                commit_seq: CommitSeq(2),
+                txn_id: TxnId(2),
+                writes: vec![WalWrite {
+                    block: BlockNumber(20),
+                    data: vec![0xBB; 16],
+                }],
+            };
+            let mut bytes = Vec::from(wal::encode_header(&header));
+            bytes.extend_from_slice(&wal::encode_commit(&c1).unwrap());
+            bytes.extend_from_slice(&wal::encode_commit(&c2).unwrap());
+            std::fs::write(&wal_path, &bytes).expect("write WAL");
+        }
+
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            mvcc_wal_path: Some(wal_path),
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open");
+
+        // Verify recovery report.
+        let report = fs.mvcc_wal_recovery().expect("should have recovery report");
+        assert_eq!(report.commits_replayed, 2);
+        assert_eq!(report.versions_replayed, 2);
+        assert_eq!(report.records_discarded, 0);
+        assert!(report.outcome.is_clean());
+
+        // Verify replayed data is visible.
+        let snap = fs.current_snapshot();
+        let store = fs.mvcc_store().read();
+        let data10 = store.read_visible(BlockNumber(10), snap);
+        assert_eq!(data10, Some(vec![0xAA; 16]));
+        let data20 = store.read_visible(BlockNumber(20), snap);
+        assert_eq!(data20, Some(vec![0xBB; 16]));
+    }
+
+    #[test]
+    fn mvcc_wal_truncated_tail_tolerant_policy() {
+        use ffs_mvcc::wal::{self, WalCommit, WalHeader, WalWrite};
+        use ffs_types::{BlockNumber, CommitSeq, TxnId};
+
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let wal_path = tmp.path().to_path_buf();
+        {
+            let c1 = WalCommit {
+                commit_seq: CommitSeq(1),
+                txn_id: TxnId(1),
+                writes: vec![WalWrite {
+                    block: BlockNumber(1),
+                    data: vec![1; 32],
+                }],
+            };
+            let c2 = WalCommit {
+                commit_seq: CommitSeq(2),
+                txn_id: TxnId(2),
+                writes: vec![WalWrite {
+                    block: BlockNumber(2),
+                    data: vec![2; 32],
+                }],
+            };
+            let mut bytes = Vec::from(wal::encode_header(&WalHeader::default()));
+            bytes.extend_from_slice(&wal::encode_commit(&c1).unwrap());
+            bytes.extend_from_slice(&wal::encode_commit(&c2).unwrap());
+            // Truncate last 10 bytes.
+            bytes.truncate(bytes.len() - 10);
+            std::fs::write(&wal_path, &bytes).expect("write WAL");
+        }
+
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            mvcc_wal_path: Some(wal_path),
+            mvcc_replay_policy: ffs_mvcc::wal_replay::TailPolicy::TruncateToLastGood,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open");
+
+        let report = fs.mvcc_wal_recovery().expect("should have recovery report");
+        assert_eq!(report.commits_replayed, 1);
+        assert_eq!(report.records_discarded, 1);
+        assert!(!report.outcome.is_clean());
+    }
+
+    #[test]
+    fn mvcc_wal_fail_fast_falls_back_to_empty_store() {
+        use ffs_mvcc::wal::{self, WalCommit, WalHeader, WalWrite};
+        use ffs_types::{BlockNumber, CommitSeq, TxnId};
+
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let wal_path = tmp.path().to_path_buf();
+        {
+            let c1 = WalCommit {
+                commit_seq: CommitSeq(1),
+                txn_id: TxnId(1),
+                writes: vec![WalWrite {
+                    block: BlockNumber(1),
+                    data: vec![1; 32],
+                }],
+            };
+            let mut bytes = Vec::from(wal::encode_header(&WalHeader::default()));
+            bytes.extend_from_slice(&wal::encode_commit(&c1).unwrap());
+            // Truncate to make it corrupt.
+            bytes.truncate(bytes.len() - 5);
+            std::fs::write(&wal_path, &bytes).expect("write WAL");
+        }
+
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            mvcc_wal_path: Some(wal_path),
+            mvcc_replay_policy: ffs_mvcc::wal_replay::TailPolicy::FailFast,
+            ..OpenOptions::default()
+        };
+        // Should NOT error — falls back to empty store.
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open with FailFast");
+
+        let report = fs.mvcc_wal_recovery().expect("should have recovery report");
+        // Store is empty due to FailFast fallback.
+        let snap = fs.current_snapshot();
+        let store = fs.mvcc_store().read();
+        assert_eq!(store.version_count(), 0);
+        assert!(store.read_visible(BlockNumber(1), snap).is_none());
+        drop(store);
+        assert!(!report.outcome.is_clean());
     }
 }
