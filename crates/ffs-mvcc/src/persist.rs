@@ -21,7 +21,8 @@
 //! - WAL replay is idempotent and deterministic.
 //! - Partial/corrupted WAL tail records are safely ignored.
 
-use crate::wal::{self, DecodeResult, HEADER_SIZE, WalCommit, WalHeader};
+use crate::wal::{self, HEADER_SIZE, WalCommit, WalHeader};
+use crate::wal_replay::{ReplayOutcome, TailPolicy, WalReplayEngine};
 use crate::wal_writer::{SyncPolicy, WalWriter, WalWriterConfig};
 use crate::{BlockVersion, CommitError, MvccStore, Transaction};
 use asupersync::Cx;
@@ -90,8 +91,10 @@ pub struct WalStats {
 /// This captures enough detail for the evidence ledger integration:
 /// how many commits were replayed, how many records were discarded
 /// (corrupt or truncated), and whether a checkpoint was used.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct WalRecoveryReport {
+    /// Classified replay outcome (clean, truncated, corrupt, etc.).
+    pub outcome: ReplayOutcome,
     /// Number of commits successfully replayed.
     pub commits_replayed: u64,
     /// Number of block versions restored.
@@ -106,6 +109,21 @@ pub struct WalRecoveryReport {
     pub used_checkpoint: bool,
     /// Highest commit sequence restored from checkpoint, if any.
     pub checkpoint_commit_seq: Option<u64>,
+}
+
+impl Default for WalRecoveryReport {
+    fn default() -> Self {
+        Self {
+            outcome: ReplayOutcome::EmptyLog,
+            commits_replayed: 0,
+            versions_replayed: 0,
+            records_discarded: 0,
+            wal_valid_bytes: 0,
+            wal_total_bytes: 0,
+            used_checkpoint: false,
+            checkpoint_commit_seq: None,
+        }
+    }
 }
 
 // ── Checkpoint format ─────────────────────────────────────────────────────────
@@ -185,10 +203,10 @@ impl PersistentMvccStore {
                 cx,
                 wal_path,
                 checkpoint_path,
-                PersistOptions::default(),
+                &PersistOptions::default(),
             )
         } else {
-            Self::open_with_options(cx, wal_path, PersistOptions::default())
+            Self::open_with_options(cx, wal_path, &PersistOptions::default())
         }
     }
 
@@ -205,7 +223,7 @@ impl PersistentMvccStore {
             cx,
             wal_path,
             checkpoint_path,
-            PersistOptions::default(),
+            &PersistOptions::default(),
         )
     }
 
@@ -214,7 +232,7 @@ impl PersistentMvccStore {
         _cx: &Cx,
         wal_path: impl AsRef<Path>,
         checkpoint_path: impl AsRef<Path>,
-        options: PersistOptions,
+        options: &PersistOptions,
     ) -> Result<Self> {
         let wal_path = wal_path.as_ref();
         let checkpoint_path = checkpoint_path.as_ref();
@@ -259,6 +277,7 @@ impl PersistentMvccStore {
             stats.replayed_commits = replay_stats.commits_replayed;
             stats.replayed_versions = replay_stats.versions_replayed;
 
+            recovery.outcome = replay_stats.outcome;
             recovery.commits_replayed = replay_stats.commits_replayed;
             recovery.versions_replayed = replay_stats.versions_replayed;
             recovery.records_discarded = replay_stats.records_discarded;
@@ -291,7 +310,7 @@ impl PersistentMvccStore {
     pub fn open_with_options(
         _cx: &Cx,
         wal_path: impl AsRef<Path>,
-        options: PersistOptions,
+        options: &PersistOptions,
     ) -> Result<Self> {
         let path = wal_path.as_ref();
         let exists = path.exists();
@@ -319,6 +338,7 @@ impl PersistentMvccStore {
             stats.replayed_commits = replay_stats.commits_replayed;
             stats.replayed_versions = replay_stats.versions_replayed;
 
+            recovery.outcome = replay_stats.outcome;
             recovery.commits_replayed = replay_stats.commits_replayed;
             recovery.versions_replayed = replay_stats.versions_replayed;
             recovery.records_discarded = replay_stats.records_discarded;
@@ -477,11 +497,7 @@ impl PersistentMvccStore {
     /// This ensures all written commits are durable. Normally called automatically
     /// if `sync_on_commit` is enabled.
     pub fn sync(&self) -> Result<()> {
-        self.wal
-            .write()
-            .flush()
-            .map(|_| ())
-            .map_err(FfsError::from)
+        self.wal.write().flush().map(|_| ()).map_err(FfsError::from)
     }
 
     /// Create a checkpoint of the current MVCC state.
@@ -866,6 +882,7 @@ impl Crc32cHasher {
 
 /// Internal replay stats returned by WAL replay functions.
 struct ReplayStats {
+    outcome: ReplayOutcome,
     commits_replayed: u64,
     versions_replayed: u64,
     records_discarded: u64,
@@ -880,7 +897,8 @@ fn replay_wal(file: &mut File, store: &mut MvccStore) -> Result<(u64, ReplayStat
 
 /// Replay WAL file into an MvccStore, skipping commits at or before `skip_up_to_seq`.
 ///
-/// Returns `(write_position, replay_stats)`.
+/// Uses [`WalReplayEngine`] with [`TailPolicy::TruncateToLastGood`] for
+/// production recovery.  Returns `(write_position, replay_stats)`.
 fn replay_wal_from_seq(
     file: &mut File,
     store: &mut MvccStore,
@@ -888,85 +906,34 @@ fn replay_wal_from_seq(
 ) -> Result<(u64, ReplayStats)> {
     file.seek(SeekFrom::Start(0))?;
 
-    // Read and validate header
+    // Read and validate header.
     let mut header_buf = [0_u8; HEADER_SIZE];
     file.read_exact(&mut header_buf)?;
     let _header = wal::decode_header(&header_buf)?;
 
-    // Read rest of file
+    // Read rest of file.
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
 
-    let mut offset = 0_usize;
-    let mut commits_replayed = 0_u64;
-    let mut versions_replayed = 0_u64;
-    let mut records_discarded = 0_u64;
-    let mut last_replayed_seq = skip_up_to_seq;
-
-    while offset < data.len() {
-        match wal::decode_commit(&data[offset..]) {
-            DecodeResult::Commit(commit) => {
-                let Some(size) = wal::commit_byte_size(&data[offset..]) else {
-                    records_discarded += 1;
-                    break;
-                };
-                offset += size;
-
-                // Skip commits already in the checkpoint
-                if commit.commit_seq.0 <= skip_up_to_seq {
-                    continue;
-                }
-
-                // WAL replay must remain strictly monotonic; duplicate or
-                // descending commit sequences indicate a malformed tail.
-                if commit.commit_seq.0 <= last_replayed_seq {
-                    records_discarded += 1;
-                    break;
-                }
-
-                // Reserve u64::MAX so in-memory counters can always advance.
-                if commit.commit_seq.0 == u64::MAX || commit.txn_id.0 == u64::MAX {
-                    records_discarded += 1;
-                    break;
-                }
-
-                // Apply this commit to the store
-                apply_wal_commit(store, &commit);
-                last_replayed_seq = commit.commit_seq.0;
-                commits_replayed += 1;
-                versions_replayed += u64::try_from(commit.writes.len()).unwrap_or(u64::MAX);
-            }
-            DecodeResult::EndOfData => {
-                // Normal end of valid data
-                break;
-            }
-            DecodeResult::NeedMore(_) => {
-                // Truncated record at end — count as discarded
-                records_discarded += 1;
-                break;
-            }
-            DecodeResult::Corrupted(_msg) => {
-                // Corrupted record — count as discarded
-                records_discarded += 1;
-                break;
-            }
-        }
-    }
+    // Run through the replay engine.
+    let engine = WalReplayEngine::new(TailPolicy::TruncateToLastGood);
+    let report = engine.replay(&data, skip_up_to_seq, |commit| {
+        apply_wal_commit(store, commit);
+    })?;
 
     let header_size_u64 = u64::try_from(HEADER_SIZE)
         .map_err(|_| FfsError::Format("header size overflow".to_owned()))?;
-    let offset_u64 =
-        u64::try_from(offset).map_err(|_| FfsError::Format("offset overflow".to_owned()))?;
     let write_pos = header_size_u64
-        .checked_add(offset_u64)
+        .checked_add(report.last_valid_offset)
         .ok_or_else(|| FfsError::Format("WAL position overflow".to_owned()))?;
 
     Ok((
         write_pos,
         ReplayStats {
-            commits_replayed,
-            versions_replayed,
-            records_discarded,
+            outcome: report.outcome,
+            commits_replayed: report.commits_replayed,
+            versions_replayed: report.versions_replayed,
+            records_discarded: report.records_discarded,
         },
     ))
 }

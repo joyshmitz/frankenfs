@@ -20,7 +20,7 @@
 //! - **D8:** Reserved sentinel values (`u64::MAX`) are rejected.
 //! - Per-record CRC32C integrity (via [`crate::wal::encode_commit`]).
 
-use crate::wal::{self, WalCommit, WalHeader, HEADER_SIZE};
+use crate::wal::{self, HEADER_SIZE, WalCommit, WalHeader};
 use ffs_error::{FfsError, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -123,14 +123,14 @@ impl From<WalWriteError> for FfsError {
     fn from(e: WalWriteError) -> Self {
         match e {
             WalWriteError::AppendIo { source, .. } | WalWriteError::SyncIo { source } => {
-                FfsError::Io(source)
+                Self::Io(source)
             }
-            WalWriteError::FormatViolation { detail } => FfsError::Format(detail),
+            WalWriteError::FormatViolation { detail } => Self::Format(detail),
             WalWriteError::VerificationFailed {
                 expected_crc,
                 actual_crc,
                 offset,
-            } => FfsError::Corruption {
+            } => Self::Corruption {
                 block: 0,
                 detail: format!(
                     "WAL write verification failed at offset {offset}: \
@@ -140,7 +140,7 @@ impl From<WalWriteError> for FfsError {
             WalWriteError::Backpressure {
                 wal_size,
                 threshold,
-            } => FfsError::Format(format!(
+            } => Self::Format(format!(
                 "WAL backpressure: size {wal_size} exceeds threshold {threshold}"
             )),
         }
@@ -156,20 +156,15 @@ impl From<WalWriteError> for FfsError {
 /// | `Immediate` | Zero (every record synced) | Lowest |
 /// | `EveryN(n)` | Up to `n-1` records | Medium |
 /// | `Manual` | Unbounded until caller flushes | Highest |
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SyncPolicy {
     /// Sync after every append (maximum durability, minimum throughput).
+    #[default]
     Immediate,
     /// Sync after every `n` appends (trades durability window for throughput).
     EveryN(u32),
     /// Never auto-sync; caller manages durability via explicit [`WalWriter::flush`].
     Manual,
-}
-
-impl Default for SyncPolicy {
-    fn default() -> Self {
-        Self::Immediate
-    }
 }
 
 // ── Writer configuration ─────────────────────────────────────────────────────
@@ -252,6 +247,7 @@ impl WalWriter {
     /// Create a writer wrapping an already-open file at the given position.
     ///
     /// The file must already contain a valid WAL header at offset 0.
+    #[must_use]
     pub fn new(file: File, write_pos: u64, config: WalWriterConfig) -> Self {
         Self {
             file,
@@ -318,10 +314,7 @@ impl WalWriter {
 
         debug!(
             operation_id = op_id,
-            commit_seq,
-            txn_id,
-            num_writes,
-            "wal_append_start"
+            commit_seq, txn_id, num_writes, "wal_append_start"
         );
 
         // ── D8: reject reserved sentinels ────────────────────────────────
@@ -429,11 +422,7 @@ impl WalWriter {
             offset: write_offset,
             bytes_written,
             synced,
-            pending_sync_count: if synced {
-                0
-            } else {
-                self.appends_since_sync
-            },
+            pending_sync_count: if synced { 0 } else { self.appends_since_sync },
         })
     }
 
@@ -478,6 +467,7 @@ impl WalWriter {
     }
 
     /// Borrow the underlying file (for replay, truncation, etc.).
+    #[must_use]
     pub fn file(&self) -> &File {
         &self.file
     }
@@ -520,18 +510,18 @@ impl WalWriter {
         op_id: u64,
     ) -> std::result::Result<(), WalWriteError> {
         let mut readback = vec![0_u8; expected.len()];
-        self.file.seek(SeekFrom::Start(offset)).map_err(|e| {
-            WalWriteError::AppendIo {
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| WalWriteError::AppendIo {
                 source: e,
                 bytes_attempted: expected.len(),
-            }
-        })?;
-        self.file.read_exact(&mut readback).map_err(|e| {
-            WalWriteError::AppendIo {
+            })?;
+        self.file
+            .read_exact(&mut readback)
+            .map_err(|e| WalWriteError::AppendIo {
                 source: e,
                 bytes_attempted: expected.len(),
-            }
-        })?;
+            })?;
 
         let expected_crc = crc32c::crc32c(expected);
         let actual_crc = crc32c::crc32c(&readback);
@@ -813,15 +803,11 @@ mod tests {
         };
         let mut w = WalWriter::create(&path, config).expect("create");
 
-        let r1 = w
-            .append_commit(&make_commit(1, 1, &[]))
-            .expect("append 1");
+        let r1 = w.append_commit(&make_commit(1, 1, &[])).expect("append 1");
         assert!(!r1.synced);
         assert_eq!(r1.pending_sync_count, 1);
 
-        let r2 = w
-            .append_commit(&make_commit(2, 2, &[]))
-            .expect("append 2");
+        let r2 = w.append_commit(&make_commit(2, 2, &[])).expect("append 2");
         assert!(!r2.synced);
         assert_eq!(r2.pending_sync_count, 2);
 

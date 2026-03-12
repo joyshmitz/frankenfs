@@ -38,7 +38,7 @@ fn bench_wal_commit_throughput(c: &mut Criterion) {
         let path = tmp.path().to_path_buf();
         std::fs::remove_file(&path).ok();
 
-        let store = PersistentMvccStore::open_with_options(&cx, &path, PersistOptions::default())
+        let store = PersistentMvccStore::open_with_options(&cx, &path, &PersistOptions::default())
             .expect("open");
 
         let mut block_id = 0_u64;
@@ -59,7 +59,7 @@ fn bench_wal_commit_throughput(c: &mut Criterion) {
         let store = PersistentMvccStore::open_with_options(
             &cx,
             &path,
-            PersistOptions {
+            &PersistOptions {
                 sync_on_commit: false,
                 ..PersistOptions::default()
             },
@@ -85,7 +85,7 @@ fn bench_wal_commit_throughput(c: &mut Criterion) {
         let store = PersistentMvccStore::open_with_options(
             &cx,
             &path,
-            PersistOptions {
+            &PersistOptions {
                 sync_on_commit: false,
                 ..PersistOptions::default()
             },
@@ -951,7 +951,7 @@ fn bench_write_amplification(c: &mut Criterion) {
         let path = tmp.path().to_path_buf();
         std::fs::remove_file(&path).ok();
 
-        let store = PersistentMvccStore::open_with_options(&cx, &path, PersistOptions::default())
+        let store = PersistentMvccStore::open_with_options(&cx, &path, &PersistOptions::default())
             .expect("open");
 
         let mut block_id = 0_u64;
@@ -970,7 +970,7 @@ fn bench_write_amplification(c: &mut Criterion) {
         let path = tmp.path().to_path_buf();
         std::fs::remove_file(&path).ok();
 
-        let store = PersistentMvccStore::open_with_options(&cx, &path, PersistOptions::default())
+        let store = PersistentMvccStore::open_with_options(&cx, &path, &PersistOptions::default())
             .expect("open");
 
         let mut block_id = 0_u64;

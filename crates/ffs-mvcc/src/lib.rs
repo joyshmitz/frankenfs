@@ -6,6 +6,7 @@ pub mod persist;
 pub mod rcu;
 pub mod sharded;
 pub mod wal;
+pub mod wal_replay;
 pub mod wal_writer;
 
 use asupersync::Cx;
@@ -5686,7 +5687,7 @@ mod tests {
             let store = crate::persist::PersistentMvccStore::open_with_options(
                 &cx,
                 &path,
-                crate::persist::PersistOptions {
+                &crate::persist::PersistOptions {
                     sync_on_commit: false,
                     ..crate::persist::PersistOptions::default()
                 },
@@ -5703,7 +5704,7 @@ mod tests {
         let reopened = crate::persist::PersistentMvccStore::open_with_options(
             &cx,
             &path,
-            crate::persist::PersistOptions {
+            &crate::persist::PersistOptions {
                 sync_on_commit: false,
                 ..crate::persist::PersistOptions::default()
             },
