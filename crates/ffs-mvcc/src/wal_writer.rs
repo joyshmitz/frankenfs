@@ -795,9 +795,7 @@ mod tests {
         let mut w = WalWriter::create(&path, config).expect("create");
 
         for i in 1_u64..=3 {
-            let r = w
-                .append_commit(&make_commit(i, i, &[]))
-                .expect("append");
+            let r = w.append_commit(&make_commit(i, i, &[])).expect("append");
             assert!(r.synced, "commit {i} should be synced");
             assert_eq!(r.pending_sync_count, 0);
         }
@@ -827,9 +825,7 @@ mod tests {
         assert!(!r2.synced);
         assert_eq!(r2.pending_sync_count, 2);
 
-        let r3 = w
-            .append_commit(&make_commit(3, 3, &[]))
-            .expect("append 3");
+        let r3 = w.append_commit(&make_commit(3, 3, &[])).expect("append 3");
         assert!(r3.synced, "third append should trigger sync");
         assert_eq!(r3.pending_sync_count, 0);
 
@@ -846,9 +842,7 @@ mod tests {
         let mut w = WalWriter::create(&path, config).expect("create");
 
         for i in 1_u64..=5 {
-            let r = w
-                .append_commit(&make_commit(i, i, &[]))
-                .expect("append");
+            let r = w.append_commit(&make_commit(i, i, &[])).expect("append");
             assert!(!r.synced);
         }
         assert_eq!(w.pending_sync_count(), 5);
