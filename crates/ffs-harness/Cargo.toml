@@ -12,6 +12,7 @@ ffs-core = { workspace = true }
 ffs-ondisk = { workspace = true }
 ffs-types = { workspace = true }
 hex = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

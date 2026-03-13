@@ -234,6 +234,42 @@ warn_percent = 12
 fail_percent = 25
 noise_floor_percent = 5
 
+# ── Extent Resolve family (Parser) ─────────────────────────────────────
+# CPU-bound extent tree resolution; low variance, tight thresholds.
+# Uses Parser family defaults: warn=8%, fail=15%, noise=3%.
+
+[operation_thresholds.extent_resolve_depth0_cached]
+# taxonomy_id: extent_resolve_depth0_cached
+# family: parser
+# Depth-0 resolve: pure CPU, no I/O. Tightest thresholds.
+warn_percent = 8
+fail_percent = 15
+noise_floor_percent = 3
+
+[operation_thresholds.extent_resolve_depth1_uncached]
+# taxonomy_id: extent_resolve_depth1_uncached
+# family: parser
+# Depth-1 resolve: one in-memory block read. Slightly wider.
+warn_percent = 10
+fail_percent = 20
+noise_floor_percent = 3
+
+[operation_thresholds.extent_resolve_range_50blocks]
+# taxonomy_id: extent_resolve_range_50blocks
+# family: parser
+# Batch resolve: 50 blocks, CPU-bound iteration.
+warn_percent = 8
+fail_percent = 15
+noise_floor_percent = 3
+
+[operation_thresholds.extent_resolve_depth1_repeated]
+# taxonomy_id: extent_resolve_depth1_repeated
+# family: parser
+# Repeated resolve: 10x same block. Measures hot-path consistency.
+warn_percent = 10
+fail_percent = 20
+noise_floor_percent = 3
+
 # ── Legacy thresholds (retained for backward compatibility with
 #    benchmark_record.sh; mapped to taxonomy via owning family) ──────────
 

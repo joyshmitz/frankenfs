@@ -705,12 +705,14 @@ name = "ffs-extent"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "criterion",
  "ffs-alloc",
  "ffs-block",
  "ffs-btree",
  "ffs-error",
  "ffs-ondisk",
  "ffs-types",
+ "parking_lot",
  "proptest",
 ]
 
@@ -747,6 +749,7 @@ dependencies = [
  "ffs-types",
  "fuser",
  "hex",
+ "parking_lot",
  "serde",
  "serde_json",
  "tempfile",

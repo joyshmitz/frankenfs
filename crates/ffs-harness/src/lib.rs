@@ -9,6 +9,7 @@ pub mod error_taxonomy;
 pub mod fuzz_dashboard;
 pub mod health_consistency;
 pub mod log_contract;
+pub mod metrics;
 pub mod oq_decision_matrix;
 pub mod perf_comparison;
 pub mod perf_regression;

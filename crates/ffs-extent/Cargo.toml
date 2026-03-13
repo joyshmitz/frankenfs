@@ -16,7 +16,13 @@ ffs-ondisk = { workspace = true }
 asupersync = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
+parking_lot = { workspace = true }
 proptest = { workspace = true }
+
+[[bench]]
+name = "extent_resolve"
+harness = false
 
 [lints]
 workspace = true

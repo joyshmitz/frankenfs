@@ -353,6 +353,7 @@ impl Taxonomy {
         Self::register_mount_ops(&mut operations);
         Self::register_concurrency_ops(&mut operations);
         Self::register_repair_ops(&mut operations);
+        Self::register_extent_ops(&mut operations);
 
         let mut host_profiles = BTreeMap::new();
         for profile in [
@@ -661,6 +662,32 @@ impl Taxonomy {
         );
     }
 
+    fn register_extent_ops(ops: &mut BTreeMap<String, BenchmarkEntry>) {
+        Self::insert_ops(
+            ops,
+            &[
+                (
+                    "extent_resolve_depth0_cached",
+                    "Extent tree resolve in root node (depth-0, no I/O)",
+                ),
+                (
+                    "extent_resolve_depth1_uncached",
+                    "Extent tree resolve with external leaf read (depth-1)",
+                ),
+                (
+                    "extent_resolve_range_50blocks",
+                    "Extent tree batch resolve of 50 contiguous logical blocks",
+                ),
+                (
+                    "extent_resolve_depth1_repeated",
+                    "Extent tree repeated resolve of same block (10x, depth-1)",
+                ),
+            ],
+            BenchmarkFamily::Parser,
+            "ffs-extent",
+        );
+    }
+
     /// Load a taxonomy from a TOML file, or fall back to canonical if not found.
     pub fn load_or_canonical(path: &Path) -> Result<Self, TaxonomyError> {
         if !path.exists() {
@@ -832,6 +859,10 @@ mod tests {
             "mount_runtime_backpressure_normal",
             "mount_runtime_backpressure_degraded",
             "mount_runtime_backpressure_emergency",
+            "extent_resolve_depth0_cached",
+            "extent_resolve_depth1_uncached",
+            "extent_resolve_range_50blocks",
+            "extent_resolve_depth1_repeated",
         ];
         for op in &expected_ops {
             assert!(
@@ -860,6 +891,10 @@ mod tests {
             "block_cache_s3fifo_mixed_seq70_hot30",
             "block_cache_s3fifo_compile_like",
             "block_cache_s3fifo_database_like",
+            "extent_resolve_depth0_cached",
+            "extent_resolve_depth1_uncached",
+            "extent_resolve_range_50blocks",
+            "extent_resolve_depth1_repeated",
             "block_cache_lookup_latency",
             "block_cache_writeback_single_4k",
             "block_cache_writeback_batch_100x4k",
@@ -886,6 +921,7 @@ mod tests {
 
         // All families with registered operations must be present.
         for family in [
+            BenchmarkFamily::Parser,
             BenchmarkFamily::MetadataOps,
             BenchmarkFamily::BlockCache,
             BenchmarkFamily::WritePath,
