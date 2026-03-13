@@ -183,7 +183,7 @@ pub fn canonical_scenarios() -> Vec<ErrorScenario> {
             code: "FFS-RPL-001".to_owned(),
             class: ErrorClass::Replay,
             title: "WAL replay failure".to_owned(),
-            ffs_error_variant: "RepairFailed".to_owned(),
+            ffs_error_variant: "Cancelled".to_owned(),
             remediation_hint: "Inspect WAL with \
                                `ffs evidence --preset replay-anomalies <ledger>`. \
                                See runbook: docs/runbooks/replay-failure-triage.md"
