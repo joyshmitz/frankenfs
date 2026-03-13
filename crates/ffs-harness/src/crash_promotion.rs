@@ -1,0 +1,503 @@
+//! Crash minimization and auto-promotion pipeline for fuzz artifacts.
+//!
+//! Provides a structured workflow for converting fuzz-discovered crashes into
+//! deterministic regression tests:
+//!
+//! 1. **Discover** — scan campaign artifacts for crash files.
+//! 2. **Minimize** — shrink crash inputs via `cargo fuzz tmin`.
+//! 3. **Promote** — generate a regression test file with metadata tags.
+//! 4. **Validate** — verify the regression test compiles and the corpus seed exists.
+//!
+//! Each promoted test is tagged with metadata linking it back to the originating
+//! crash artifact (target, campaign ID, commit SHA, timestamp).
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// Number of fuzz targets in the workspace.
+pub const FUZZ_TARGET_COUNT: usize = 4;
+
+/// Expected fuzz targets (canonical list).
+pub const FUZZ_TARGETS: &[&str] = &[
+    "fuzz_btrfs_metadata",
+    "fuzz_ext4_dir_extent",
+    "fuzz_ext4_metadata",
+    "fuzz_ext4_xattr",
+];
+
+/// A discovered crash artifact from a fuzz campaign.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrashArtifact {
+    /// Fuzz target that discovered this crash.
+    pub target: String,
+    /// Path to the crash-reproducing input file.
+    pub crash_path: PathBuf,
+    /// Campaign ID (timestamp-based) if from a nightly run.
+    pub campaign_id: Option<String>,
+    /// Git commit SHA at time of discovery.
+    pub commit_sha: Option<String>,
+    /// Whether this crash has been minimized.
+    pub minimized: bool,
+    /// Size of the crash input in bytes.
+    pub input_size: u64,
+}
+
+/// Metadata tag embedded in promoted regression tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegressionTag {
+    /// Originating fuzz target.
+    pub target: String,
+    /// Campaign ID (if from nightly).
+    pub campaign_id: String,
+    /// Commit SHA at discovery.
+    pub commit_sha: String,
+    /// Timestamp of promotion.
+    pub promoted_at: String,
+    /// Whether the input was minimized before promotion.
+    pub minimized: bool,
+    /// Corpus seed filename.
+    pub corpus_seed: String,
+}
+
+/// A promoted regression test case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegressionCase {
+    /// Test function name (e.g., `regression_fuzz_ext4_metadata_20260312`).
+    pub test_name: String,
+    /// Metadata linking back to the crash.
+    pub tag: RegressionTag,
+    /// Path where the corpus seed is stored.
+    pub seed_path: PathBuf,
+    /// Path where the regression test source would be generated.
+    pub test_path: PathBuf,
+}
+
+/// Promotion step outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionStep {
+    Discovered,
+    Minimized,
+    SeedCopied,
+    TestGenerated,
+    Validated,
+}
+
+/// Result of a promotion attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromotionResult {
+    pub crash: CrashArtifact,
+    pub steps_completed: Vec<PromotionStep>,
+    pub regression_case: Option<RegressionCase>,
+    pub error: Option<String>,
+}
+
+/// Scan a campaign directory for crash artifacts.
+#[must_use]
+pub fn discover_crashes(campaign_dir: &Path) -> Vec<CrashArtifact> {
+    let mut crashes = Vec::new();
+    if !campaign_dir.exists() {
+        return crashes;
+    }
+
+    for target in FUZZ_TARGETS {
+        let crashes_dir = campaign_dir.join(target).join("crashes");
+        if !crashes_dir.exists() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&crashes_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+                    crashes.push(CrashArtifact {
+                        target: (*target).to_owned(),
+                        crash_path: path,
+                        campaign_id: campaign_dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned()),
+                        commit_sha: None,
+                        minimized: false,
+                        input_size: size,
+                    });
+                }
+            }
+        }
+    }
+    crashes
+}
+
+/// Generate the `cargo fuzz tmin` command for minimizing a crash input.
+#[must_use]
+pub fn minimize_command(target: &str, crash_path: &Path) -> String {
+    format!(
+        "cargo fuzz tmin {target} --fuzz-dir fuzz -- {}",
+        crash_path.display()
+    )
+}
+
+/// Generate the corpus seed filename from a crash artifact.
+#[must_use]
+pub fn seed_filename(crash: &CrashArtifact) -> String {
+    let campaign = crash.campaign_id.as_deref().unwrap_or("manual");
+    format!(
+        "regression_{}_{}_{}bytes",
+        crash.target, campaign, crash.input_size
+    )
+}
+
+/// Generate the regression test function name.
+#[must_use]
+pub fn test_function_name(crash: &CrashArtifact) -> String {
+    let campaign = crash.campaign_id.as_deref().unwrap_or("manual");
+    // Sanitize for Rust identifier
+    let sanitized: String = format!("regression_{}_{}", crash.target, campaign)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    sanitized
+}
+
+/// Generate the Rust source for a regression test function.
+///
+/// The generated test loads the corpus seed and feeds it to the same parser
+/// exercised by the fuzz target, ensuring panic-freedom is preserved.
+#[must_use]
+pub fn generate_regression_test_source(case: &RegressionCase) -> String {
+    let tag = &case.tag;
+    format!(
+        r#"/// Regression test promoted from fuzz crash.
+///
+/// - Fuzz target: `{target}`
+/// - Campaign: `{campaign_id}`
+/// - Commit at discovery: `{commit_sha}`
+/// - Promoted: `{promoted_at}`
+/// - Minimized: `{minimized}`
+/// - Corpus seed: `{corpus_seed}`
+#[test]
+fn {test_name}() {{
+    let seed = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("{seed_path}")
+    ).expect("regression seed must exist");
+
+    // Feed to the same parser as the fuzz target — must not panic.
+    let _ = ffs_ondisk::Ext4Superblock::parse_superblock_region(&seed);
+    let _ = ffs_ondisk::Ext4Inode::parse_from_bytes(&seed);
+    let _ = ffs_ondisk::Ext4GroupDesc::parse_from_bytes(&seed, 32);
+    let _ = ffs_ondisk::Ext4GroupDesc::parse_from_bytes(&seed, 64);
+    let _ = ffs_ondisk::parse_dir_block(&seed, 4096);
+    let _ = ffs_ondisk::BtrfsSuperblock::parse_superblock_region(&seed);
+}}
+"#,
+        target = tag.target,
+        campaign_id = tag.campaign_id,
+        commit_sha = tag.commit_sha,
+        promoted_at = tag.promoted_at,
+        minimized = tag.minimized,
+        corpus_seed = tag.corpus_seed,
+        test_name = case.test_name,
+        seed_path = case.seed_path.display(),
+    )
+}
+
+/// Validate the promotion pipeline structure is intact.
+///
+/// Checks that all required infrastructure exists: fuzz targets, corpus dirs,
+/// crash artifact dir, minimize script, and regression test directory.
+#[must_use]
+pub fn validate_pipeline(repo_root: &str) -> Vec<PipelineCheck> {
+    let mut checks = Vec::new();
+
+    // Check fuzz targets exist
+    let targets_dir = format!("{repo_root}/fuzz/fuzz_targets");
+    let targets_exist = Path::new(&targets_dir).is_dir();
+    let target_count = if targets_exist {
+        FUZZ_TARGETS
+            .iter()
+            .filter(|t| Path::new(&format!("{targets_dir}/{t}.rs")).exists())
+            .count()
+    } else {
+        0
+    };
+    checks.push(PipelineCheck {
+        component: "fuzz_targets".to_owned(),
+        passed: target_count == FUZZ_TARGET_COUNT,
+        detail: format!("{target_count}/{FUZZ_TARGET_COUNT} fuzz targets found"),
+    });
+
+    // Check corpus directories exist
+    let corpus_count = FUZZ_TARGETS
+        .iter()
+        .filter(|t| Path::new(&format!("{repo_root}/fuzz/corpus/{t}")).is_dir())
+        .count();
+    checks.push(PipelineCheck {
+        component: "corpus_dirs".to_owned(),
+        passed: corpus_count == FUZZ_TARGET_COUNT,
+        detail: format!("{corpus_count}/{FUZZ_TARGET_COUNT} corpus directories found"),
+    });
+
+    // Check minimize script exists
+    let minimize_exists =
+        Path::new(&format!("{repo_root}/fuzz/scripts/minimize_corpus.sh")).exists();
+    checks.push(PipelineCheck {
+        component: "minimize_script".to_owned(),
+        passed: minimize_exists,
+        detail: if minimize_exists {
+            "minimize_corpus.sh found".to_owned()
+        } else {
+            "minimize_corpus.sh missing".to_owned()
+        },
+    });
+
+    // Check nightly campaign script exists
+    let nightly_exists = Path::new(&format!("{repo_root}/fuzz/scripts/nightly_fuzz.sh")).exists();
+    checks.push(PipelineCheck {
+        component: "nightly_script".to_owned(),
+        passed: nightly_exists,
+        detail: if nightly_exists {
+            "nightly_fuzz.sh found".to_owned()
+        } else {
+            "nightly_fuzz.sh missing".to_owned()
+        },
+    });
+
+    // Check dictionaries exist
+    let dict_count = ["ext4.dict", "btrfs.dict"]
+        .iter()
+        .filter(|d| Path::new(&format!("{repo_root}/fuzz/dictionaries/{d}")).exists())
+        .count();
+    checks.push(PipelineCheck {
+        component: "dictionaries".to_owned(),
+        passed: dict_count == 2,
+        detail: format!("{dict_count}/2 dictionaries found"),
+    });
+
+    // Check adversarial corpus exists
+    let adversarial_exists = Path::new(&format!("{repo_root}/tests/fuzz_corpus")).is_dir();
+    checks.push(PipelineCheck {
+        component: "adversarial_corpus".to_owned(),
+        passed: adversarial_exists,
+        detail: if adversarial_exists {
+            "adversarial corpus directory found".to_owned()
+        } else {
+            "adversarial corpus directory missing".to_owned()
+        },
+    });
+
+    // Check artifact manifest includes fuzz categories
+    let manifest_src = format!("{repo_root}/crates/ffs-harness/src/artifact_manifest.rs");
+    let manifest_has_fuzz = std::fs::read_to_string(&manifest_src)
+        .is_ok_and(|s| s.contains("FuzzCrash") && s.contains("FuzzCorpus"));
+    checks.push(PipelineCheck {
+        component: "artifact_manifest".to_owned(),
+        passed: manifest_has_fuzz,
+        detail: if manifest_has_fuzz {
+            "FuzzCrash + FuzzCorpus in artifact manifest".to_owned()
+        } else {
+            "artifact manifest missing fuzz categories".to_owned()
+        },
+    });
+
+    checks
+}
+
+/// Result of checking a pipeline component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineCheck {
+    pub component: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_root() -> String {
+        env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/ffs-harness")
+            .expect("harness must be in crates/ffs-harness")
+            .to_owned()
+    }
+
+    #[test]
+    fn fuzz_targets_constant_matches_actual() {
+        let root = repo_root();
+        for target in FUZZ_TARGETS {
+            let path = format!("{root}/fuzz/fuzz_targets/{target}.rs");
+            assert!(
+                Path::new(&path).exists(),
+                "fuzz target {target}.rs not found at {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn corpus_directories_exist() {
+        let root = repo_root();
+        for target in FUZZ_TARGETS {
+            let path = format!("{root}/fuzz/corpus/{target}");
+            assert!(
+                Path::new(&path).is_dir(),
+                "corpus dir for {target} not found at {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_validation_passes() {
+        let root = repo_root();
+        let checks = validate_pipeline(&root);
+        for check in &checks {
+            assert!(
+                check.passed,
+                "pipeline check '{}' failed: {}",
+                check.component, check.detail
+            );
+        }
+    }
+
+    #[test]
+    fn minimize_command_format() {
+        let cmd = minimize_command("fuzz_ext4_metadata", Path::new("/tmp/crash-abc"));
+        assert!(cmd.contains("cargo fuzz tmin"));
+        assert!(cmd.contains("fuzz_ext4_metadata"));
+        assert!(cmd.contains("/tmp/crash-abc"));
+    }
+
+    #[test]
+    fn seed_filename_includes_target_and_campaign() {
+        let crash = CrashArtifact {
+            target: "fuzz_ext4_metadata".to_owned(),
+            crash_path: PathBuf::from("/tmp/crash-abc"),
+            campaign_id: Some("20260312T120000Z".to_owned()),
+            commit_sha: Some("abc1234".to_owned()),
+            minimized: true,
+            input_size: 42,
+        };
+        let name = seed_filename(&crash);
+        assert!(name.contains("fuzz_ext4_metadata"));
+        assert!(name.contains("20260312T120000Z"));
+        assert!(name.contains("42bytes"));
+    }
+
+    #[test]
+    fn test_function_name_is_valid_rust_identifier() {
+        let crash = CrashArtifact {
+            target: "fuzz_ext4_metadata".to_owned(),
+            crash_path: PathBuf::from("/tmp/crash-abc"),
+            campaign_id: Some("20260312T120000Z".to_owned()),
+            commit_sha: None,
+            minimized: false,
+            input_size: 100,
+        };
+        let name = test_function_name(&crash);
+        assert!(
+            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "test name must be valid Rust identifier: {name}"
+        );
+        assert!(name.starts_with("regression_"));
+    }
+
+    #[test]
+    fn generate_regression_test_includes_metadata() {
+        let case = RegressionCase {
+            test_name: "regression_fuzz_ext4_metadata_20260312".to_owned(),
+            tag: RegressionTag {
+                target: "fuzz_ext4_metadata".to_owned(),
+                campaign_id: "20260312T120000Z".to_owned(),
+                commit_sha: "abc1234".to_owned(),
+                promoted_at: "2026-03-12".to_owned(),
+                minimized: true,
+                corpus_seed: "regression_fuzz_ext4_metadata_20260312T120000Z_42bytes".to_owned(),
+            },
+            seed_path: PathBuf::from("tests/fuzz_corpus/regression_seed.bin"),
+            test_path: PathBuf::from("tests/fuzz_regressions.rs"),
+        };
+        let source = generate_regression_test_source(&case);
+        assert!(source.contains("#[test]"));
+        assert!(source.contains("regression_fuzz_ext4_metadata_20260312"));
+        assert!(source.contains("Campaign: `20260312T120000Z`"));
+        assert!(source.contains("Commit at discovery: `abc1234`"));
+        assert!(source.contains("Minimized: `true`"));
+        assert!(source.contains("parse_superblock_region"));
+    }
+
+    #[test]
+    fn discover_crashes_returns_empty_for_nonexistent_dir() {
+        let crashes = discover_crashes(Path::new("/nonexistent/campaign"));
+        assert!(crashes.is_empty());
+    }
+
+    #[test]
+    fn promotion_result_json_round_trips() {
+        let result = PromotionResult {
+            crash: CrashArtifact {
+                target: "fuzz_ext4_metadata".to_owned(),
+                crash_path: PathBuf::from("/tmp/crash"),
+                campaign_id: Some("test".to_owned()),
+                commit_sha: Some("abc".to_owned()),
+                minimized: false,
+                input_size: 10,
+            },
+            steps_completed: vec![PromotionStep::Discovered, PromotionStep::Minimized],
+            regression_case: None,
+            error: None,
+        };
+        let json = serde_json::to_string(&result).expect("serialize");
+        let parsed: PromotionResult = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.crash.target, "fuzz_ext4_metadata");
+        assert_eq!(parsed.steps_completed.len(), 2);
+    }
+
+    #[test]
+    fn adversarial_corpus_exists_and_has_samples() {
+        let root = repo_root();
+        let corpus_dir = format!("{root}/tests/fuzz_corpus");
+        assert!(
+            Path::new(&corpus_dir).is_dir(),
+            "adversarial corpus dir missing"
+        );
+        let count = std::fs::read_dir(&corpus_dir)
+            .expect("read fuzz_corpus dir")
+            .filter(|e| e.as_ref().is_ok_and(|e| e.path().is_file()))
+            .count();
+        assert!(
+            count >= 10,
+            "adversarial corpus should have >= 10 samples, got {count}"
+        );
+    }
+
+    #[test]
+    fn dictionaries_have_tokens() {
+        let root = repo_root();
+        for dict in ["ext4.dict", "btrfs.dict"] {
+            let path = format!("{root}/fuzz/dictionaries/{dict}");
+            let content = std::fs::read_to_string(&path).expect("read dictionary");
+            let token_count = content
+                .lines()
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .count();
+            assert!(
+                token_count >= 5,
+                "{dict} should have >= 5 tokens, got {token_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_check_fails_for_missing_repo() {
+        let checks = validate_pipeline("/nonexistent/repo");
+        assert!(
+            checks.iter().any(|c| !c.passed),
+            "pipeline should fail for missing repo"
+        );
+    }
+}

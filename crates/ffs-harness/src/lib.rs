@@ -2,11 +2,18 @@
 
 pub mod artifact_manifest;
 pub mod benchmark_taxonomy;
+pub mod btrfs_capability_drift;
+pub mod crash_promotion;
 pub mod e2e;
+pub mod error_taxonomy;
+pub mod fuzz_dashboard;
+pub mod health_consistency;
 pub mod log_contract;
+pub mod oq_decision_matrix;
 pub mod perf_comparison;
 pub mod perf_regression;
 pub mod perf_triage;
+pub mod tabletop_drill;
 pub mod verification_runner;
 
 use anyhow::{Context, Result, bail};
