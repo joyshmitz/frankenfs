@@ -61,7 +61,14 @@ The scrub command validates all reachable metadata blocks against their checksum
 - `scrub_and_recover` — scrub engine start
 - `scrub complete` — scrub finished with corruption count
 
-## Section 2: Evidence — Check the Ledger
+## Section 2: Evidence Ledger — Check the Ledger
+
+```bash
+ffs evidence --preset repair-failures <image-path>
+```
+
+This filters for corruption detection, repair attempt, and scrub cycle events.
+For the full unfiltered ledger:
 
 ```bash
 ffs evidence <image-path>

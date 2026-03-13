@@ -36,7 +36,15 @@ Performance degradation observed
 
 ## Section 1: Verify Mount Configuration
 
-Check which runtime mode is active:
+Filter the evidence ledger for pressure-related events:
+
+```bash
+ffs evidence --preset pressure-transitions <image-path>
+```
+
+This filters for backpressure, flush batch, and policy change events.
+
+Check which runtime mode is active (use `ffs mount --runtime-mode` to select):
 
 ```bash
 # In mount logs (stderr):

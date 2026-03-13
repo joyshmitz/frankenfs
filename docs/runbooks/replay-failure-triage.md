@@ -64,6 +64,14 @@ WAL Replay:
 
 ## Section 2: Check Structured Logs
 
+Filter the evidence ledger for replay-related events:
+
+```bash
+ffs evidence --preset replay-anomalies <image-path>
+```
+
+This filters for WAL recovery, transaction abort, and serialization conflict events.
+
 Run with verbose logging to capture replay lifecycle:
 
 ```bash
