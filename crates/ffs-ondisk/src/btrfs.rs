@@ -375,6 +375,387 @@ pub fn map_logical_to_physical(
     Ok(None)
 }
 
+// ── RAID profiles ───────────────────────────────────────────────────────────
+
+/// Btrfs chunk type flags for RAID profiles (from `include/uapi/linux/btrfs.h`).
+pub mod chunk_type_flags {
+    /// Data chunk.
+    pub const BTRFS_BLOCK_GROUP_DATA: u64 = 1 << 0;
+    /// System chunk (bootstrap).
+    pub const BTRFS_BLOCK_GROUP_SYSTEM: u64 = 1 << 1;
+    /// Metadata chunk.
+    pub const BTRFS_BLOCK_GROUP_METADATA: u64 = 1 << 2;
+
+    // RAID profile bits (bit 3+)
+    /// RAID0: striped across N devices (no redundancy).
+    pub const BTRFS_BLOCK_GROUP_RAID0: u64 = 1 << 3;
+    /// RAID1: mirrored on 2 devices.
+    pub const BTRFS_BLOCK_GROUP_RAID1: u64 = 1 << 4;
+    /// DUP: duplicate on same device (not multi-device).
+    pub const BTRFS_BLOCK_GROUP_DUP: u64 = 1 << 5;
+    /// RAID10: striped mirrors (N/2 stripes, each mirrored).
+    pub const BTRFS_BLOCK_GROUP_RAID10: u64 = 1 << 6;
+    /// RAID5: striped with single parity.
+    pub const BTRFS_BLOCK_GROUP_RAID5: u64 = 1 << 7;
+    /// RAID6: striped with double parity.
+    pub const BTRFS_BLOCK_GROUP_RAID6: u64 = 1 << 8;
+    /// RAID1C3: mirrored on 3 devices.
+    pub const BTRFS_BLOCK_GROUP_RAID1C3: u64 = 1 << 9;
+    /// RAID1C4: mirrored on 4 devices.
+    pub const BTRFS_BLOCK_GROUP_RAID1C4: u64 = 1 << 10;
+
+    /// Mask for RAID profile bits.
+    pub const RAID_MASK: u64 = BTRFS_BLOCK_GROUP_RAID0
+        | BTRFS_BLOCK_GROUP_RAID1
+        | BTRFS_BLOCK_GROUP_DUP
+        | BTRFS_BLOCK_GROUP_RAID10
+        | BTRFS_BLOCK_GROUP_RAID5
+        | BTRFS_BLOCK_GROUP_RAID6
+        | BTRFS_BLOCK_GROUP_RAID1C3
+        | BTRFS_BLOCK_GROUP_RAID1C4;
+}
+
+/// Identified RAID profile for a chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BtrfsRaidProfile {
+    /// Single device / no RAID (linear mapping).
+    Single,
+    /// Duplicate on same device.
+    Dup,
+    /// RAID0: striped, no redundancy.
+    Raid0,
+    /// RAID1: mirrored on 2 devices.
+    Raid1,
+    /// RAID1C3: mirrored on 3 devices.
+    Raid1C3,
+    /// RAID1C4: mirrored on 4 devices.
+    Raid1C4,
+    /// RAID10: striped mirrors.
+    Raid10,
+    /// RAID5: single parity.
+    Raid5,
+    /// RAID6: double parity.
+    Raid6,
+}
+
+impl BtrfsRaidProfile {
+    /// Identify the RAID profile from chunk_type flags.
+    #[must_use]
+    pub fn from_chunk_type(chunk_type: u64) -> Self {
+        use chunk_type_flags::{
+            BTRFS_BLOCK_GROUP_DUP, BTRFS_BLOCK_GROUP_RAID0, BTRFS_BLOCK_GROUP_RAID1,
+            BTRFS_BLOCK_GROUP_RAID10, BTRFS_BLOCK_GROUP_RAID1C3, BTRFS_BLOCK_GROUP_RAID1C4,
+            BTRFS_BLOCK_GROUP_RAID5, BTRFS_BLOCK_GROUP_RAID6, RAID_MASK,
+        };
+        let raid_bits = chunk_type & RAID_MASK;
+        if raid_bits & BTRFS_BLOCK_GROUP_RAID0 != 0 {
+            Self::Raid0
+        } else if raid_bits & BTRFS_BLOCK_GROUP_RAID1 != 0 {
+            Self::Raid1
+        } else if raid_bits & BTRFS_BLOCK_GROUP_RAID1C3 != 0 {
+            Self::Raid1C3
+        } else if raid_bits & BTRFS_BLOCK_GROUP_RAID1C4 != 0 {
+            Self::Raid1C4
+        } else if raid_bits & BTRFS_BLOCK_GROUP_RAID10 != 0 {
+            Self::Raid10
+        } else if raid_bits & BTRFS_BLOCK_GROUP_RAID5 != 0 {
+            Self::Raid5
+        } else if raid_bits & BTRFS_BLOCK_GROUP_RAID6 != 0 {
+            Self::Raid6
+        } else if raid_bits & BTRFS_BLOCK_GROUP_DUP != 0 {
+            Self::Dup
+        } else {
+            Self::Single
+        }
+    }
+
+    /// Number of data copies available for reads (mirrors).
+    #[must_use]
+    pub const fn data_copies(self) -> u16 {
+        match self {
+            Self::Single | Self::Raid0 | Self::Raid5 | Self::Raid6 => 1,
+            Self::Dup | Self::Raid1 | Self::Raid10 => 2,
+            Self::Raid1C3 => 3,
+            Self::Raid1C4 => 4,
+        }
+    }
+
+    /// Whether this profile provides redundancy (can tolerate device loss).
+    #[must_use]
+    pub const fn is_redundant(self) -> bool {
+        self.data_copies() > 1 || matches!(self, Self::Raid5 | Self::Raid6)
+    }
+}
+
+/// Result of multi-device logical-to-physical stripe resolution.
+///
+/// Returns all readable stripes for a given logical address, enabling
+/// the caller to select a device (round-robin, failover, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsStripeMapping {
+    /// RAID profile of the chunk.
+    pub profile: BtrfsRaidProfile,
+    /// All readable stripes (device, physical offset) for this logical address.
+    /// For RAID1: 2 entries (either can serve the read).
+    /// For RAID0: 1 entry (the stripe owning this offset).
+    /// For Single: 1 entry.
+    pub stripes: Vec<BtrfsPhysicalMapping>,
+}
+
+/// Map a logical byte address to all readable stripe locations.
+///
+/// Unlike [`map_logical_to_physical`] which assumes single-device, this
+/// function resolves the full stripe layout for the matching chunk,
+/// enabling multi-device reads and failover.
+pub fn map_logical_to_stripes(
+    chunks: &[BtrfsChunkEntry],
+    logical: u64,
+) -> Result<Option<BtrfsStripeMapping>, ParseError> {
+    for chunk in chunks {
+        let chunk_start = chunk.key.offset;
+        let chunk_end = chunk_start
+            .checked_add(chunk.length)
+            .ok_or(ParseError::InvalidField {
+                field: "chunk_length",
+                reason: "logical range overflow",
+            })?;
+
+        if logical < chunk_start || logical >= chunk_end {
+            continue;
+        }
+
+        let offset_within = logical - chunk_start;
+        let profile = BtrfsRaidProfile::from_chunk_type(chunk.chunk_type);
+        let stripes = resolve_chunk_stripes(chunk, offset_within, profile)?;
+        return Ok(Some(BtrfsStripeMapping { profile, stripes }));
+    }
+    Ok(None)
+}
+
+/// Resolve stripe mappings for a single chunk at the given offset.
+fn resolve_chunk_stripes(
+    chunk: &BtrfsChunkEntry,
+    offset_within: u64,
+    profile: BtrfsRaidProfile,
+) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+    match profile {
+        BtrfsRaidProfile::Single
+        | BtrfsRaidProfile::Dup
+        | BtrfsRaidProfile::Raid1
+        | BtrfsRaidProfile::Raid1C3
+        | BtrfsRaidProfile::Raid1C4 => resolve_mirror_stripes(chunk, offset_within),
+        BtrfsRaidProfile::Raid0 => resolve_raid0_stripe(chunk, offset_within),
+        BtrfsRaidProfile::Raid10 => resolve_raid10_stripes(chunk, offset_within),
+        BtrfsRaidProfile::Raid5 | BtrfsRaidProfile::Raid6 => {
+            resolve_raid56_stripe(chunk, offset_within, profile)
+        }
+    }
+}
+
+/// Mirror profiles (Single/DUP/RAID1/RAID1C3/RAID1C4): all stripes are copies.
+fn resolve_mirror_stripes(
+    chunk: &BtrfsChunkEntry,
+    offset_within: u64,
+) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+    chunk
+        .stripes
+        .iter()
+        .map(|s| stripe_physical(s, offset_within))
+        .collect()
+}
+
+/// RAID0: data is striped across devices.
+fn resolve_raid0_stripe(
+    chunk: &BtrfsChunkEntry,
+    offset_within: u64,
+) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+    let stripe_len = require_nonzero_stripe_len(chunk, "RAID0")?;
+    let num = u64::from(chunk.num_stripes);
+    let stripe_idx = (offset_within / stripe_len) % num;
+    let offset_in_stripe = offset_within % stripe_len;
+    let stripe_nr = offset_within / (stripe_len * num);
+    let idx = usize::try_from(stripe_idx).unwrap_or(usize::MAX);
+    let s = chunk.stripes.get(idx).ok_or(ParseError::InvalidField {
+        field: "stripe_index",
+        reason: "stripe index out of range",
+    })?;
+    Ok(vec![stripe_physical_at(s, stripe_nr, stripe_len, offset_in_stripe)?])
+}
+
+/// RAID10: striped mirrors (sub_stripes mirrors per data stripe).
+fn resolve_raid10_stripes(
+    chunk: &BtrfsChunkEntry,
+    offset_within: u64,
+) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+    let stripe_len = require_nonzero_stripe_len(chunk, "RAID10")?;
+    let sub = u64::from(chunk.sub_stripes.max(1));
+    let data_stripes = u64::from(chunk.num_stripes) / sub;
+    if data_stripes == 0 {
+        return Err(ParseError::InvalidField {
+            field: "num_stripes",
+            reason: "RAID10 has zero data stripes",
+        });
+    }
+    let stripe_idx = (offset_within / stripe_len) % data_stripes;
+    let offset_in_stripe = offset_within % stripe_len;
+    let stripe_nr = offset_within / (stripe_len * data_stripes);
+    let base = usize::try_from(stripe_idx * sub).unwrap_or(usize::MAX);
+    let sub_usize = usize::try_from(sub).unwrap_or(0);
+    Ok((0..sub_usize)
+        .filter_map(|m| {
+            let s = chunk.stripes.get(base + m)?;
+            let physical = s
+                .offset
+                .checked_add(stripe_nr * stripe_len + offset_in_stripe)?;
+            Some(BtrfsPhysicalMapping {
+                devid: s.devid,
+                physical,
+            })
+        })
+        .collect())
+}
+
+/// RAID5/6: return the data stripe (parity stripes excluded).
+fn resolve_raid56_stripe(
+    chunk: &BtrfsChunkEntry,
+    offset_within: u64,
+    profile: BtrfsRaidProfile,
+) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+    let stripe_len = require_nonzero_stripe_len(chunk, "RAID5/6")?;
+    let num = u64::from(chunk.num_stripes);
+    let parity_count: u64 = if profile == BtrfsRaidProfile::Raid6 { 2 } else { 1 };
+    let data_stripes = num.saturating_sub(parity_count);
+    if data_stripes == 0 {
+        return Err(ParseError::InvalidField {
+            field: "num_stripes",
+            reason: "RAID5/6 has no data stripes",
+        });
+    }
+    let stripe_idx = (offset_within / stripe_len) % data_stripes;
+    let offset_in_stripe = offset_within % stripe_len;
+    let stripe_nr = offset_within / (stripe_len * data_stripes);
+    let parity_pos = stripe_nr % num;
+    let mut actual_idx = stripe_idx;
+    if actual_idx >= parity_pos {
+        actual_idx += parity_count;
+    }
+    actual_idx %= num;
+    let idx = usize::try_from(actual_idx).unwrap_or(usize::MAX);
+    let s = chunk.stripes.get(idx).ok_or(ParseError::InvalidField {
+        field: "stripe_index",
+        reason: "stripe index out of range",
+    })?;
+    Ok(vec![stripe_physical_at(s, stripe_nr, stripe_len, offset_in_stripe)?])
+}
+
+fn require_nonzero_stripe_len(chunk: &BtrfsChunkEntry, label: &str) -> Result<u64, ParseError> {
+    if chunk.stripe_len == 0 {
+        return Err(ParseError::InvalidField {
+            field: "stripe_len",
+            reason: "chunk has zero stripe length",
+        });
+    }
+    let _ = label; // used for error context in caller
+    Ok(chunk.stripe_len)
+}
+
+fn stripe_physical(s: &BtrfsStripe, offset_within: u64) -> Result<BtrfsPhysicalMapping, ParseError> {
+    Ok(BtrfsPhysicalMapping {
+        devid: s.devid,
+        physical: s.offset.checked_add(offset_within).ok_or(ParseError::InvalidField {
+            field: "stripe_offset",
+            reason: "physical address overflow",
+        })?,
+    })
+}
+
+fn stripe_physical_at(
+    s: &BtrfsStripe,
+    stripe_nr: u64,
+    stripe_len: u64,
+    offset_in_stripe: u64,
+) -> Result<BtrfsPhysicalMapping, ParseError> {
+    let physical = s
+        .offset
+        .checked_add(stripe_nr * stripe_len + offset_in_stripe)
+        .ok_or(ParseError::InvalidField {
+            field: "stripe_offset",
+            reason: "physical address overflow",
+        })?;
+    Ok(BtrfsPhysicalMapping {
+        devid: s.devid,
+        physical,
+    })
+}
+
+// ── DEV_ITEM parsing ────────────────────────────────────────────────────────
+
+/// Parsed btrfs device item (from the device tree or superblock).
+///
+/// Contains device identification and capacity information.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BtrfsDevItem {
+    /// Device ID (matches BtrfsStripe::devid).
+    pub devid: u64,
+    /// Total bytes on this device.
+    pub total_bytes: u64,
+    /// Bytes used on this device.
+    pub bytes_used: u64,
+    /// I/O alignment for this device.
+    pub io_align: u32,
+    /// I/O width for this device.
+    pub io_width: u32,
+    /// Sector size of this device.
+    pub sector_size: u32,
+    /// Device type (0 = regular).
+    pub dev_type: u64,
+    /// Generation when this item was last updated.
+    pub generation: u64,
+    /// Byte offset of the start of data on device.
+    pub start_offset: u64,
+    /// Device group (for RAID assignment).
+    pub dev_group: u32,
+    /// Seek speed classification.
+    pub seek_speed: u8,
+    /// Bandwidth classification.
+    pub bandwidth: u8,
+    /// Device UUID.
+    pub uuid: [u8; 16],
+    /// Filesystem UUID.
+    pub fsid: [u8; 16],
+}
+
+/// Size of a btrfs_dev_item on disk (98 bytes).
+const BTRFS_DEV_ITEM_SIZE: usize = 98;
+
+/// Parse a DEV_ITEM from raw leaf data.
+pub fn parse_dev_item(data: &[u8]) -> Result<BtrfsDevItem, ParseError> {
+    if data.len() < BTRFS_DEV_ITEM_SIZE {
+        return Err(ParseError::InsufficientData {
+            needed: BTRFS_DEV_ITEM_SIZE,
+            offset: 0,
+            actual: data.len(),
+        });
+    }
+
+    Ok(BtrfsDevItem {
+        devid: read_le_u64(data, 0)?,
+        total_bytes: read_le_u64(data, 8)?,
+        bytes_used: read_le_u64(data, 16)?,
+        io_align: read_le_u32(data, 24)?,
+        io_width: read_le_u32(data, 28)?,
+        sector_size: read_le_u32(data, 32)?,
+        dev_type: read_le_u64(data, 36)?,
+        generation: read_le_u64(data, 44)?,
+        start_offset: read_le_u64(data, 52)?,
+        dev_group: read_le_u32(data, 60)?,
+        seek_speed: data[64],
+        bandwidth: data[65],
+        uuid: read_fixed::<16>(data, 66)?,
+        fsid: read_fixed::<16>(data, 82)?,
+    })
+}
+
 // ── Tree node types ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -71,14 +71,62 @@ const BTRFS_TX_TREE_ROOT_BASE_BLOCK: u64 = 0x4_1000_0000;
 /// Internal MVCC metadata block base used for pending-free ledgers.
 const BTRFS_TX_PENDING_FREE_BASE_BLOCK: u64 = 0x4_2000_0000;
 
-/// Parsed subset of `btrfs_root_item` needed for tree bootstrapping.
+/// Parsed subset of `btrfs_root_item` needed for tree bootstrapping
+/// and subvolume enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BtrfsRootItem {
     /// Logical address of the tree root block (`bytenr`).
     pub bytenr: u64,
     /// Root tree level (`0` for leaf roots).
     pub level: u8,
+    /// Generation when this root was last modified.
+    pub generation: u64,
+    /// Directory inode for the root of this subvolume (typically 256).
+    pub root_dirid: u64,
+    /// Flags (bit 0 = read-only subvolume).
+    pub flags: u64,
+    /// Reference count.
+    pub refs: u64,
 }
+
+/// A parsed btrfs ROOT_REF item linking parent subvolume to child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsRootRef {
+    /// Directory inode in parent subvolume containing this entry.
+    pub dirid: u64,
+    /// Sequence number.
+    pub sequence: u64,
+    /// Name of the subvolume entry.
+    pub name: Vec<u8>,
+}
+
+/// Descriptor for an enumerated btrfs subvolume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsSubvolume {
+    /// Subvolume object ID (also the tree ID).
+    pub id: u64,
+    /// Parent subvolume ID (0 if top-level).
+    pub parent_id: u64,
+    /// Name of the subvolume (from ROOT_REF).
+    pub name: String,
+    /// Generation when last modified.
+    pub generation: u64,
+    /// Whether this subvolume is read-only.
+    pub read_only: bool,
+    /// Logical address of the subvolume's root tree block.
+    pub bytenr: u64,
+    /// Root tree level.
+    pub level: u8,
+}
+
+/// btrfs ROOT_REF item type (parent → child subvolume link).
+pub const BTRFS_ITEM_ROOT_REF: u8 = 156;
+/// btrfs ROOT_BACKREF item type (child → parent subvolume link).
+pub const BTRFS_ITEM_ROOT_BACKREF: u8 = 144;
+/// Flag bit in `BtrfsRootItem::flags` indicating a read-only subvolume.
+const BTRFS_ROOT_SUBVOL_RDONLY: u64 = 1 << 0;
+/// First free objectid for user subvolumes.
+pub const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
 
 /// Parsed subset of `btrfs_inode_item` needed for read-only VFS operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,21 +392,30 @@ fn read_u64(data: &[u8], off: usize, field: &'static str) -> Result<u64, ParseEr
     Ok(u64::from_le_bytes(read_exact::<8>(data, off, field)?))
 }
 
-/// Parse the subset of `btrfs_root_item` needed to find the FS tree root.
+/// Parse the subset of `btrfs_root_item` needed to find the FS tree root
+/// and enumerate subvolumes.
 ///
-/// Layout assumption (stable for the supported on-disk variants):
-/// - `bytenr` at offset 176
-/// - `level` in the final byte of the item payload
+/// Layout (stable for the supported on-disk variants):
+/// - offset 160: `expected_generation` (u64)
+/// - offset 168: `root_dirid` (u64)
+/// - offset 176: `bytenr` (u64)
+/// - offset 208: `flags` (u64)
+/// - offset 216: `refs` (u64)
+/// - last byte: `level` (u8)
 pub fn parse_root_item(data: &[u8]) -> Result<BtrfsRootItem, ParseError> {
-    if data.len() < 184 {
+    if data.len() < 224 {
         return Err(ParseError::InsufficientData {
-            needed: 184,
+            needed: 224,
             offset: 0,
             actual: data.len(),
         });
     }
 
+    let generation = read_u64(data, 160, "root_item.generation")?;
+    let root_dirid = read_u64(data, 168, "root_item.root_dirid")?;
     let bytenr = read_u64(data, 176, "root_item.bytenr")?;
+    let flags = read_u64(data, 208, "root_item.flags")?;
+    let refs = read_u64(data, 216, "root_item.refs")?;
     let level = *data.last().ok_or(ParseError::InsufficientData {
         needed: 1,
         offset: 0,
@@ -372,7 +429,96 @@ pub fn parse_root_item(data: &[u8]) -> Result<BtrfsRootItem, ParseError> {
         });
     }
 
-    Ok(BtrfsRootItem { bytenr, level })
+    Ok(BtrfsRootItem {
+        bytenr,
+        level,
+        generation,
+        root_dirid,
+        flags,
+        refs,
+    })
+}
+
+/// Parse a ROOT_REF item payload.
+///
+/// Layout:
+/// - offset 0: `dirid` (u64) — directory inode in parent subvolume
+/// - offset 8: `sequence` (u64)
+/// - offset 16: `name_len` (u16)
+/// - offset 18: name bytes (variable length)
+pub fn parse_root_ref(data: &[u8]) -> Result<BtrfsRootRef, ParseError> {
+    if data.len() < 18 {
+        return Err(ParseError::InsufficientData {
+            needed: 18,
+            offset: 0,
+            actual: data.len(),
+        });
+    }
+    let dirid = read_u64(data, 0, "root_ref.dirid")?;
+    let sequence = read_u64(data, 8, "root_ref.sequence")?;
+    let name_len = u16::from_le_bytes([data[16], data[17]]);
+    let name_end = 18 + usize::from(name_len);
+    if data.len() < name_end {
+        return Err(ParseError::InsufficientData {
+            needed: name_end,
+            offset: 18,
+            actual: data.len() - 18,
+        });
+    }
+    Ok(BtrfsRootRef {
+        dirid,
+        sequence,
+        name: data[18..name_end].to_vec(),
+    })
+}
+
+/// Enumerate subvolumes from root tree leaf entries.
+///
+/// Takes all leaf entries from the root tree (obtained via `walk_tree`)
+/// and extracts subvolume information by correlating ROOT_ITEM and ROOT_REF
+/// entries for objectids >= 256 (user subvolumes).
+pub fn enumerate_subvolumes(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSubvolume> {
+    let mut subvols = Vec::new();
+
+    // Collect ROOT_ITEM entries for user subvolumes
+    for entry in entries {
+        if entry.key.item_type != BTRFS_ITEM_ROOT_ITEM {
+            continue;
+        }
+        let id = entry.key.objectid;
+        if id < BTRFS_FIRST_FREE_OBJECTID {
+            continue;
+        }
+        let Ok(root) = parse_root_item(&entry.data) else {
+            continue;
+        };
+
+        // Find matching ROOT_REF for this subvolume
+        let (parent_id, name) = entries
+            .iter()
+            .find_map(|e| {
+                if e.key.item_type == BTRFS_ITEM_ROOT_REF && e.key.offset == id {
+                    let rref = parse_root_ref(&e.data).ok()?;
+                    let name = String::from_utf8_lossy(&rref.name).into_owned();
+                    Some((e.key.objectid, name))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((0, format!("subvol-{id}")));
+
+        subvols.push(BtrfsSubvolume {
+            id,
+            parent_id,
+            name,
+            generation: root.generation,
+            read_only: root.flags & BTRFS_ROOT_SUBVOL_RDONLY != 0,
+            bytenr: root.bytenr,
+            level: root.level,
+        });
+    }
+
+    subvols
 }
 
 /// Parse the subset of `btrfs_inode_item` needed for read-only VFS operations.
