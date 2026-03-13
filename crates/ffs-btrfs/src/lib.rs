@@ -71,8 +71,8 @@ const BTRFS_TX_TREE_ROOT_BASE_BLOCK: u64 = 0x4_1000_0000;
 /// Internal MVCC metadata block base used for pending-free ledgers.
 const BTRFS_TX_PENDING_FREE_BASE_BLOCK: u64 = 0x4_2000_0000;
 
-/// Parsed subset of `btrfs_root_item` needed for tree bootstrapping
-/// and subvolume enumeration.
+/// Parsed subset of `btrfs_root_item` needed for tree bootstrapping,
+/// subvolume enumeration, and snapshot navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BtrfsRootItem {
     /// Logical address of the tree root block (`bytenr`).
@@ -87,6 +87,10 @@ pub struct BtrfsRootItem {
     pub flags: u64,
     /// Reference count.
     pub refs: u64,
+    /// UUID of this subvolume/snapshot (zero if not set).
+    pub uuid: [u8; 16],
+    /// Parent UUID — set when this is a snapshot (identifies source subvolume).
+    pub parent_uuid: [u8; 16],
 }
 
 /// A parsed btrfs ROOT_REF item linking parent subvolume to child.
@@ -117,6 +121,50 @@ pub struct BtrfsSubvolume {
     pub bytenr: u64,
     /// Root tree level.
     pub level: u8,
+}
+
+/// Descriptor for an enumerated btrfs snapshot.
+///
+/// A snapshot is a read-only subvolume whose `parent_uuid` is non-zero,
+/// indicating which subvolume it was created from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsSnapshot {
+    /// Snapshot subvolume ID.
+    pub id: u64,
+    /// Source subvolume ID (the subvolume this is a snapshot of).
+    pub source_id: u64,
+    /// Name of the snapshot.
+    pub name: String,
+    /// Generation when the snapshot was created.
+    pub generation: u64,
+    /// UUID of this snapshot.
+    pub uuid: [u8; 16],
+    /// UUID of the source subvolume.
+    pub parent_uuid: [u8; 16],
+    /// Logical address of the snapshot's root tree block.
+    pub bytenr: u64,
+    /// Root tree level.
+    pub level: u8,
+}
+
+/// Type of change detected in a generation-based snapshot diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotChangeType {
+    /// Item was added (present in newer, absent in older).
+    Added,
+    /// Item was modified (present in both, newer generation).
+    Modified,
+    /// Item was deleted (present in older, absent in newer).
+    Deleted,
+}
+
+/// A single change entry from a generation-based snapshot diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotDiffEntry {
+    /// Inode objectid of the changed file.
+    pub inode: u64,
+    /// Type of change.
+    pub change_type: SnapshotChangeType,
 }
 
 /// btrfs ROOT_REF item type (parent → child subvolume link).
@@ -392,8 +440,8 @@ fn read_u64(data: &[u8], off: usize, field: &'static str) -> Result<u64, ParseEr
     Ok(u64::from_le_bytes(read_exact::<8>(data, off, field)?))
 }
 
-/// Parse the subset of `btrfs_root_item` needed to find the FS tree root
-/// and enumerate subvolumes.
+/// Parse the subset of `btrfs_root_item` needed to find the FS tree root,
+/// enumerate subvolumes, and identify snapshots.
 ///
 /// Layout (stable for the supported on-disk variants):
 /// - offset 160: `expected_generation` (u64)
@@ -401,6 +449,8 @@ fn read_u64(data: &[u8], off: usize, field: &'static str) -> Result<u64, ParseEr
 /// - offset 176: `bytenr` (u64)
 /// - offset 208: `flags` (u64)
 /// - offset 216: `refs` (u64)
+/// - offset 224: `uuid` (16 bytes) — optional, zero if payload too short
+/// - offset 240: `parent_uuid` (16 bytes) — optional, zero if payload too short
 /// - last byte: `level` (u8)
 pub fn parse_root_item(data: &[u8]) -> Result<BtrfsRootItem, ParseError> {
     if data.len() < 224 {
@@ -422,6 +472,18 @@ pub fn parse_root_item(data: &[u8]) -> Result<BtrfsRootItem, ParseError> {
         actual: data.len(),
     })?;
 
+    // UUID fields are optional (older format root items may be shorter)
+    let uuid = if data.len() >= 240 {
+        read_exact::<16>(data, 224, "root_item.uuid")?
+    } else {
+        [0u8; 16]
+    };
+    let parent_uuid = if data.len() >= 256 {
+        read_exact::<16>(data, 240, "root_item.parent_uuid")?
+    } else {
+        [0u8; 16]
+    };
+
     if bytenr == 0 {
         return Err(ParseError::InvalidField {
             field: "root_item.bytenr",
@@ -436,6 +498,8 @@ pub fn parse_root_item(data: &[u8]) -> Result<BtrfsRootItem, ParseError> {
         root_dirid,
         flags,
         refs,
+        uuid,
+        parent_uuid,
     })
 }
 
@@ -477,6 +541,7 @@ pub fn parse_root_ref(data: &[u8]) -> Result<BtrfsRootRef, ParseError> {
 /// Takes all leaf entries from the root tree (obtained via `walk_tree`)
 /// and extracts subvolume information by correlating ROOT_ITEM and ROOT_REF
 /// entries for objectids >= 256 (user subvolumes).
+#[must_use]
 pub fn enumerate_subvolumes(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSubvolume> {
     let mut subvols = Vec::new();
 
@@ -505,7 +570,7 @@ pub fn enumerate_subvolumes(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSubvolume> {
                     None
                 }
             })
-            .unwrap_or((0, format!("subvol-{id}")));
+            .unwrap_or_else(|| (0, format!("subvol-{id}")));
 
         subvols.push(BtrfsSubvolume {
             id,
@@ -519,6 +584,145 @@ pub fn enumerate_subvolumes(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSubvolume> {
     }
 
     subvols
+}
+
+/// Check if a UUID is non-zero (i.e., has been set).
+fn uuid_is_set(uuid: &[u8; 16]) -> bool {
+    uuid.iter().any(|&b| b != 0)
+}
+
+/// Enumerate snapshots from root tree leaf entries.
+///
+/// A snapshot is a subvolume whose `parent_uuid` is non-zero, indicating
+/// it was created as a snapshot of another subvolume.
+#[must_use]
+pub fn enumerate_snapshots(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
+    let mut snapshots = Vec::new();
+
+    // First pass: collect all ROOT_ITEM entries with parent_uuid set
+    for entry in entries {
+        if entry.key.item_type != BTRFS_ITEM_ROOT_ITEM {
+            continue;
+        }
+        let id = entry.key.objectid;
+        if id < BTRFS_FIRST_FREE_OBJECTID {
+            continue;
+        }
+        let Ok(root) = parse_root_item(&entry.data) else {
+            continue;
+        };
+        if !uuid_is_set(&root.parent_uuid) {
+            continue;
+        }
+
+        // Find the source subvolume by matching parent_uuid to uuid
+        let source_id = entries
+            .iter()
+            .find_map(|e| {
+                if e.key.item_type != BTRFS_ITEM_ROOT_ITEM {
+                    return None;
+                }
+                let src = parse_root_item(&e.data).ok()?;
+                if src.uuid == root.parent_uuid {
+                    Some(e.key.objectid)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        // Find matching ROOT_REF for the snapshot name
+        let name = entries
+            .iter()
+            .find_map(|e| {
+                if e.key.item_type == BTRFS_ITEM_ROOT_REF && e.key.offset == id {
+                    let rref = parse_root_ref(&e.data).ok()?;
+                    Some(String::from_utf8_lossy(&rref.name).into_owned())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| format!("snap-{id}"));
+
+        snapshots.push(BtrfsSnapshot {
+            id,
+            source_id,
+            name,
+            generation: root.generation,
+            uuid: root.uuid,
+            parent_uuid: root.parent_uuid,
+            bytenr: root.bytenr,
+            level: root.level,
+        });
+    }
+
+    snapshots
+}
+
+/// Compute a generation-based diff between two sets of tree leaf entries.
+///
+/// Compares inode items by objectid. An inode is:
+/// - **Added** if it exists in `newer` but not `older`.
+/// - **Deleted** if it exists in `older` but not `newer`.
+/// - **Modified** if it exists in both but the `newer` entry has a higher
+///   generation in its inode item.
+///
+/// This is a simplified diff that does NOT produce full paths — it
+/// operates on inode objectids only.
+#[must_use]
+pub fn snapshot_diff_by_generation(
+    older_entries: &[BtrfsLeafEntry],
+    newer_entries: &[BtrfsLeafEntry],
+) -> Vec<SnapshotDiffEntry> {
+    use std::collections::BTreeMap;
+
+    // Collect inode items (type 1) by objectid with generation
+    let collect_inodes = |entries: &[BtrfsLeafEntry]| -> BTreeMap<u64, u64> {
+        entries
+            .iter()
+            .filter(|e| e.key.item_type == BTRFS_ITEM_INODE_ITEM)
+            .filter_map(|e| {
+                let inode = parse_inode_item(&e.data).ok()?;
+                Some((e.key.objectid, inode.generation))
+            })
+            .collect()
+    };
+
+    let old_inodes = collect_inodes(older_entries);
+    let new_inodes = collect_inodes(newer_entries);
+    let mut diffs = Vec::new();
+
+    // Deleted: in old but not in new
+    for &oid in old_inodes.keys() {
+        if !new_inodes.contains_key(&oid) {
+            diffs.push(SnapshotDiffEntry {
+                inode: oid,
+                change_type: SnapshotChangeType::Deleted,
+            });
+        }
+    }
+
+    // Added or Modified
+    for (&oid, &new_gen) in &new_inodes {
+        match old_inodes.get(&oid) {
+            None => {
+                diffs.push(SnapshotDiffEntry {
+                    inode: oid,
+                    change_type: SnapshotChangeType::Added,
+                });
+            }
+            Some(&old_gen) if new_gen > old_gen => {
+                diffs.push(SnapshotDiffEntry {
+                    inode: oid,
+                    change_type: SnapshotChangeType::Modified,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    diffs.sort_by_key(|d| d.inode);
+    diffs
 }
 
 /// Parse the subset of `btrfs_inode_item` needed for read-only VFS operations.

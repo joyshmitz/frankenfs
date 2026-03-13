@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
 use ffs_btrfs::{
     BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
-    parse_inode_item, parse_root_item,
+    enumerate_snapshots, enumerate_subvolumes, parse_inode_item, parse_root_item,
 };
 use ffs_core::{
     CrashRecoveryOutcome, Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions,
@@ -226,6 +226,12 @@ enum Command {
         /// Output in JSON format.
         #[arg(long)]
         json: bool,
+        /// List all btrfs subvolumes.
+        #[arg(long)]
+        subvolumes: bool,
+        /// List all btrfs snapshots.
+        #[arg(long)]
+        snapshots: bool,
     },
     /// Show MVCC and EBR version statistics for a filesystem image.
     MvccStats {
@@ -341,6 +347,12 @@ enum Command {
         /// symbols, and BLAKE3 checksums.
         #[arg(long)]
         native: bool,
+        /// Mount a specific btrfs subvolume by name.
+        #[arg(long)]
+        subvol: Option<String>,
+        /// Mount a specific btrfs snapshot by name.
+        #[arg(long)]
+        snapshot: Option<String>,
     },
     /// Run a read-only integrity scan (scrub) on a filesystem image.
     Scrub {
@@ -1231,7 +1243,12 @@ fn run() -> Result<()> {
     );
 
     let result = match cli.command {
-        Command::Inspect { image, json } => inspect(&image, json),
+        Command::Inspect {
+            image,
+            json,
+            subvolumes,
+            snapshots,
+        } => inspect(&image, json, subvolumes, snapshots),
         Command::MvccStats { image, json } => mvcc_stats_cmd(&image, json),
         Command::Info {
             image,
@@ -1298,15 +1315,27 @@ fn run() -> Result<()> {
             allow_other,
             rw,
             native,
-        } => mount_cmd(
-            &image,
-            &mountpoint,
-            allow_other,
-            rw,
-            native,
-            runtime_mode,
-            managed_unmount_timeout_secs,
-        ),
+            subvol,
+            snapshot,
+        } => {
+            if subvol.is_some() || snapshot.is_some() {
+                info!(
+                    target: "ffs::cli::mount",
+                    subvol = subvol.as_deref().unwrap_or("(none)"),
+                    snapshot = snapshot.as_deref().unwrap_or("(none)"),
+                    "btrfs_subvol_mount_requested"
+                );
+            }
+            mount_cmd(
+                &image,
+                &mountpoint,
+                allow_other,
+                rw,
+                native,
+                runtime_mode,
+                managed_unmount_timeout_secs,
+            )
+        }
         Command::Scrub { image, json } => scrub_cmd(&image, json),
         Command::Parity { json } => parity(json),
         Command::Evidence {
@@ -1354,7 +1383,7 @@ fn run() -> Result<()> {
     result
 }
 
-fn inspect(path: &PathBuf, json: bool) -> Result<()> {
+fn inspect(path: &PathBuf, json: bool, list_subvolumes: bool, list_snapshots: bool) -> Result<()> {
     let command_span = info_span!(
         target: "ffs::cli::inspect",
         "inspect",
@@ -1372,6 +1401,14 @@ fn inspect(path: &PathBuf, json: bool) -> Result<()> {
     };
     let flavor = detect_filesystem_at_path(&cx, path)
         .with_context(|| format!("failed to detect ext4/btrfs metadata in {}", path.display()))?;
+
+    // Handle --subvolumes and --snapshots for btrfs
+    if (list_subvolumes || list_snapshots) && matches!(&flavor, FsFlavor::Btrfs(_)) {
+        return inspect_btrfs_subvolumes(&cx, path, &flavor, json, list_subvolumes, list_snapshots);
+    }
+    if (list_subvolumes || list_snapshots) && matches!(&flavor, FsFlavor::Ext4(_)) {
+        anyhow::bail!("--subvolumes and --snapshots are only supported for btrfs images");
+    }
 
     let output = match &flavor {
         FsFlavor::Ext4(sb) => inspect_ext4_output(
@@ -3384,6 +3421,98 @@ fn read_ext4_directory_hex_blocks(
     }
 
     Ok(blocks)
+}
+
+fn inspect_btrfs_subvolumes(
+    cx: &Cx,
+    path: &Path,
+    _flavor: &FsFlavor,
+    json: bool,
+    list_subvolumes: bool,
+    list_snapshots: bool,
+) -> Result<()> {
+    let fs = OpenFs::open(cx, path)
+        .with_context(|| format!("open {}", path.display()))?;
+
+    // Walk the root tree to get all leaf entries
+    let root_entries = fs
+        .walk_btrfs_root_tree(cx)
+        .context("walk btrfs root tree")?;
+
+    if list_subvolumes {
+        let subvols = ffs_btrfs::enumerate_subvolumes(&root_entries);
+        if json {
+            #[derive(serde::Serialize)]
+            struct SubvolEntry {
+                id: u64,
+                parent_id: u64,
+                name: String,
+                generation: u64,
+                read_only: bool,
+            }
+            let entries: Vec<SubvolEntry> = subvols
+                .iter()
+                .map(|s| SubvolEntry {
+                    id: s.id,
+                    parent_id: s.parent_id,
+                    name: s.name.clone(),
+                    generation: s.generation,
+                    read_only: s.read_only,
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&entries).context("serialize")?
+            );
+        } else {
+            println!("Subvolumes ({} found):", subvols.len());
+            println!("{:<8} {:<8} {:<12} {:<5} {}", "ID", "Parent", "Generation", "RO", "Name");
+            for s in &subvols {
+                println!(
+                    "{:<8} {:<8} {:<12} {:<5} {}",
+                    s.id,
+                    s.parent_id,
+                    s.generation,
+                    if s.read_only { "yes" } else { "no" },
+                    s.name
+                );
+            }
+        }
+    }
+
+    if list_snapshots {
+        let snapshots = ffs_btrfs::enumerate_snapshots(&root_entries);
+        if json {
+            #[derive(serde::Serialize)]
+            struct SnapEntry {
+                id: u64,
+                source_id: u64,
+                name: String,
+                generation: u64,
+            }
+            let entries: Vec<SnapEntry> = snapshots
+                .iter()
+                .map(|s| SnapEntry {
+                    id: s.id,
+                    source_id: s.source_id,
+                    name: s.name.clone(),
+                    generation: s.generation,
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&entries).context("serialize")?
+            );
+        } else {
+            println!("Snapshots ({} found):", snapshots.len());
+            println!("{:<8} {:<8} {:<12} {}", "ID", "Source", "Generation", "Name");
+            for s in &snapshots {
+                println!("{:<8} {:<8} {:<12} {}", s.id, s.source_id, s.generation, s.name);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn inspect_ext4_output(
@@ -6191,7 +6320,7 @@ mod tests {
             .expect("inspect command should parse");
 
         match cli.command {
-            Command::Inspect { image, json } => {
+            Command::Inspect { image, json, .. } => {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert!(json);
             }
