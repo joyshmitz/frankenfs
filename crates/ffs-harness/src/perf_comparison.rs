@@ -411,6 +411,20 @@ impl Default for ComparatorConfig {
     }
 }
 
+/// Optional context for structured logging of comparison decisions.
+///
+/// Provides `benchmark_id`, `profile_id`, and `baseline_ref` fields that
+/// appear in the comparison log event for post-mortem correlation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComparisonContext {
+    /// Benchmark identifier (e.g., `"metadata_parity_cli"`).
+    pub benchmark_id: String,
+    /// Host profile used for threshold normalization (e.g., `"csd-threadripper"`).
+    pub profile_id: String,
+    /// Git ref or tag of the baseline measurement (e.g., `"v1.0.3"` or a commit SHA).
+    pub baseline_ref: String,
+}
+
 /// Statistically robust regression comparator.
 ///
 /// Combines envelope thresholds with effect size and significance testing
@@ -437,6 +451,28 @@ impl RegressionComparator {
         baseline_values: &[f64],
         current_values: &[f64],
         envelope: &AcceptanceEnvelope,
+    ) -> ComparisonResult {
+        self.compare_with_context(
+            operation_id,
+            baseline_values,
+            current_values,
+            envelope,
+            None,
+        )
+    }
+
+    /// Compare with optional benchmark context for structured logging.
+    ///
+    /// When `ctx` is provided, the structured log includes `benchmark_id`,
+    /// `profile_id`, and `baseline_ref` fields for post-mortem correlation.
+    #[must_use]
+    pub fn compare_with_context(
+        &self,
+        operation_id: &str,
+        baseline_values: &[f64],
+        current_values: &[f64],
+        envelope: &AcceptanceEnvelope,
+        ctx: Option<&ComparisonContext>,
     ) -> ComparisonResult {
         let baseline = compute_stats(baseline_values).unwrap_or(SampleStats {
             n: 0,
@@ -491,8 +527,14 @@ impl RegressionComparator {
             &current,
         );
 
+        let benchmark_id = ctx.map_or("", |c| c.benchmark_id.as_str());
+        let profile_id = ctx.map_or("", |c| c.profile_id.as_str());
+        let baseline_ref = ctx.map_or("", |c| c.baseline_ref.as_str());
         debug!(
             operation_id,
+            benchmark_id,
+            profile_id,
+            baseline_ref,
             delta_percent,
             effect_size,
             effect_label,
@@ -1207,5 +1249,44 @@ mod tests {
     #[test]
     fn comparator_version_is_set() {
         const { assert!(COMPARATOR_VERSION >= 1) };
+    }
+
+    // ── ComparisonContext tests ──────────────────────────────────────
+
+    #[test]
+    fn compare_with_context_produces_same_verdict() {
+        let comparator = RegressionComparator::new(ComparatorConfig::default());
+        let baseline = &[100.0, 100.5, 99.5, 100.2, 99.8];
+        let current = &[100.0, 100.5, 99.5, 100.2, 99.8];
+        let ctx = ComparisonContext {
+            benchmark_id: "metadata_parity_cli".to_owned(),
+            profile_id: "csd-threadripper".to_owned(),
+            baseline_ref: "abc1234".to_owned(),
+        };
+
+        let without = comparator.compare("test_op", baseline, current, &test_envelope());
+        let with = comparator.compare_with_context(
+            "test_op",
+            baseline,
+            current,
+            &test_envelope(),
+            Some(&ctx),
+        );
+        assert_eq!(without.final_verdict, with.final_verdict);
+        assert!((without.delta_percent - with.delta_percent).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn comparison_context_json_round_trip() {
+        let ctx = ComparisonContext {
+            benchmark_id: "block_cache_arc_scan".to_owned(),
+            profile_id: "ci-github-actions".to_owned(),
+            baseline_ref: "v1.0.3".to_owned(),
+        };
+        let json = serde_json::to_string(&ctx).expect("serialize");
+        let parsed: ComparisonContext = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.benchmark_id, ctx.benchmark_id);
+        assert_eq!(parsed.profile_id, ctx.profile_id);
+        assert_eq!(parsed.baseline_ref, ctx.baseline_ref);
     }
 }

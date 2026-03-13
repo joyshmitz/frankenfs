@@ -72,6 +72,42 @@ pub struct TriageDecision {
     pub should_block: bool,
     /// Reference to the runbook section.
     pub runbook_ref: String,
+    /// Exact CLI command to confirm/reproduce the regression.
+    ///
+    /// Guard failures include a deterministic repro command so the operator
+    /// can immediately rerun without reading the runbook.
+    pub followup_command: String,
+}
+
+/// Build a deterministic follow-up command for a given operation and action.
+fn followup_for(operation_id: &str, action: TriageAction) -> String {
+    match action {
+        TriageAction::NoAction => String::new(),
+        TriageAction::CollectMoreSamples => {
+            format!(
+                "rch exec -- cargo bench -p ffs-harness -- {operation_id} && \
+                 scripts/benchmark_record.sh --op {operation_id} --runs 10"
+            )
+        }
+        TriageAction::RerunOnReference | TriageAction::CheckEnvironment => {
+            format!(
+                "rch exec -- scripts/benchmark_record.sh --op {operation_id} \
+                 --runs 10 --compare-baseline"
+            )
+        }
+        TriageAction::BisectCommits => {
+            format!(
+                "git log --oneline -10 -- crates/ && \
+                 rch exec -- scripts/benchmark_record.sh --op {operation_id} --runs 10"
+            )
+        }
+        TriageAction::RecalibrateThresholds => {
+            format!(
+                "rch exec -- scripts/benchmark_record.sh --op {operation_id} \
+                 --runs 30 --out-json artifacts/baselines/recalibration_{operation_id}.json"
+            )
+        }
+    }
 }
 
 /// Classify a comparison result into a triage decision.
@@ -110,6 +146,7 @@ pub fn classify_triage(
         ),
         should_block,
         runbook_ref: "docs/runbooks/perf-regression-triage.md#step-5".to_owned(),
+        followup_command: followup_for(op, action),
     };
     emit_triage_log(&decision, result);
     decision
@@ -135,6 +172,7 @@ fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<
             ),
             should_block: false,
             runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
+            followup_command: followup_for(op, TriageAction::NoAction),
         });
     }
 
@@ -151,6 +189,7 @@ fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<
             ),
             should_block: false,
             runbook_ref: "docs/runbooks/perf-regression-triage.md#step-2".to_owned(),
+            followup_command: followup_for(op, TriageAction::CollectMoreSamples),
         });
     }
 
@@ -168,6 +207,7 @@ fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<
             ),
             should_block: false,
             runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
+            followup_command: followup_for(op, TriageAction::RerunOnReference),
         });
     }
 
@@ -184,6 +224,7 @@ fn try_early_exit(result: &ComparisonResult, family: BenchmarkFamily) -> Option<
             ),
             should_block: false,
             runbook_ref: "docs/runbooks/perf-regression-triage.md#step-3".to_owned(),
+            followup_command: followup_for(op, TriageAction::NoAction),
         });
     }
 
@@ -291,6 +332,7 @@ fn emit_triage_log(decision: &TriageDecision, result: &ComparisonResult) {
         effect_size = result.effect_size,
         should_block = decision.should_block,
         runbook_ref = %decision.runbook_ref,
+        followup_command = %decision.followup_command,
         "triage_decision"
     );
 }
@@ -584,5 +626,62 @@ mod tests {
             Some(HystereticVerdict::ConfirmedFail),
         );
         assert!(decision_confirmed_fail.should_block);
+    }
+
+    #[test]
+    fn triage_followup_command_nonempty_for_actionable_decisions() {
+        // Fail → bisect → non-empty followup
+        let result = fail_result("scrub_clean");
+        let decision = classify_triage(&result, BenchmarkFamily::Parser, None);
+        assert!(
+            !decision.followup_command.is_empty(),
+            "BisectCommits should have a followup command"
+        );
+        assert!(
+            decision.followup_command.contains("scrub_clean"),
+            "followup must reference the failing operation"
+        );
+    }
+
+    #[test]
+    fn triage_followup_command_empty_for_noise() {
+        let result = noise_result("metadata_parity_cli");
+        let decision = classify_triage(&result, BenchmarkFamily::Parser, None);
+        assert!(
+            decision.followup_command.is_empty(),
+            "NoAction should have empty followup command"
+        );
+    }
+
+    #[test]
+    fn triage_followup_command_contains_benchmark_record_for_collect_more() {
+        let result = inconclusive_result("wal_commit");
+        let decision = classify_triage(&result, BenchmarkFamily::Concurrency, None);
+        assert_eq!(decision.action, TriageAction::CollectMoreSamples);
+        assert!(
+            decision.followup_command.contains("benchmark_record"),
+            "CollectMoreSamples followup should reference benchmark_record.sh"
+        );
+    }
+
+    #[test]
+    fn triage_followup_includes_runs_count() {
+        let result = fail_result("block_cache_arc_scan");
+        let decision = classify_triage(&result, BenchmarkFamily::MetadataOps, None);
+        assert!(
+            decision.followup_command.contains("--runs"),
+            "followup command should specify --runs for reproducibility"
+        );
+    }
+
+    #[test]
+    fn triage_decision_json_includes_followup_command() {
+        let result = fail_result("test_op");
+        let decision = classify_triage(&result, BenchmarkFamily::Parser, None);
+        let json = serde_json::to_string(&decision).expect("serialize");
+        assert!(
+            json.contains("followup_command"),
+            "JSON must include followup_command field"
+        );
     }
 }
