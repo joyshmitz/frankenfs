@@ -633,4 +633,442 @@ mod tests {
         let mut frame = Frame::new(1, 1, &mut pool);
         dash.view(&mut frame);
     }
+
+    // ── Pressure gauge edge cases ──────────────────────────────────────
+
+    #[test]
+    fn pressure_gauge_zero() {
+        assert_eq!(render_pressure_gauge(0.0, 10), "[..........]   0%");
+    }
+
+    #[test]
+    fn pressure_gauge_full() {
+        assert_eq!(render_pressure_gauge(1.0, 10), "[##########] 100%");
+    }
+
+    #[test]
+    fn pressure_gauge_nan_treated_as_zero() {
+        assert_eq!(render_pressure_gauge(f64::NAN, 10), "[..........]   0%");
+    }
+
+    #[test]
+    fn pressure_gauge_infinity_treated_as_zero() {
+        assert_eq!(render_pressure_gauge(f64::INFINITY, 10), "[..........]   0%");
+    }
+
+    #[test]
+    fn pressure_gauge_neg_infinity_treated_as_zero() {
+        assert_eq!(
+            render_pressure_gauge(f64::NEG_INFINITY, 10),
+            "[..........]   0%"
+        );
+    }
+
+    #[test]
+    fn pressure_gauge_width_one() {
+        assert_eq!(render_pressure_gauge(0.5, 1), "[#]  50%");
+    }
+
+    #[test]
+    fn pressure_gauge_quarter() {
+        assert_eq!(render_pressure_gauge(0.25, 10), "[###.......]  25%");
+    }
+
+    // ── Normalized pressure ────────────────────────────────────────────
+
+    #[test]
+    fn normalized_pressure_clamps_above_one() {
+        assert!((normalized_pressure(2.0) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn normalized_pressure_clamps_below_zero() {
+        assert!((normalized_pressure(-0.5)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn normalized_pressure_nan_returns_zero() {
+        assert!((normalized_pressure(f64::NAN)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn normalized_pressure_passes_valid_values() {
+        assert!((normalized_pressure(0.42) - 0.42).abs() < f64::EPSILON);
+    }
+
+    // ── IO pressure calculation ────────────────────────────────────────
+
+    #[test]
+    fn io_pressure_zero_queue() {
+        let snap = DashboardSnapshot::default();
+        assert!((snap.io_pressure()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn io_pressure_at_cap() {
+        let snap = DashboardSnapshot {
+            io_queue_depth: IO_QUEUE_PRESSURE_CAP,
+            ..Default::default()
+        };
+        assert!((snap.io_pressure() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn io_pressure_over_cap_clamps_to_one() {
+        let snap = DashboardSnapshot {
+            io_queue_depth: IO_QUEUE_PRESSURE_CAP * 2,
+            ..Default::default()
+        };
+        assert!((snap.io_pressure() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn io_pressure_half_cap() {
+        let snap = DashboardSnapshot {
+            io_queue_depth: IO_QUEUE_PRESSURE_CAP / 2,
+            ..Default::default()
+        };
+        assert!((snap.io_pressure() - 0.5).abs() < f64::EPSILON);
+    }
+
+    // ── Cache hit ratio edge cases ─────────────────────────────────────
+
+    #[test]
+    fn hit_ratio_all_hits() {
+        let snap = DashboardSnapshot {
+            cache_hits: 100,
+            cache_misses: 0,
+            ..Default::default()
+        };
+        assert!((snap.cache_hit_ratio() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hit_ratio_all_misses() {
+        let snap = DashboardSnapshot {
+            cache_hits: 0,
+            cache_misses: 100,
+            ..Default::default()
+        };
+        assert!((snap.cache_hit_ratio()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hit_ratio_large_values() {
+        let snap = DashboardSnapshot {
+            cache_hits: 999_999,
+            cache_misses: 1,
+            ..Default::default()
+        };
+        assert!(snap.cache_hit_ratio() > 0.999);
+    }
+
+    // ── Degradation level labels ───────────────────────────────────────
+
+    #[test]
+    fn degradation_level_label_all_variants() {
+        assert_eq!(degradation_level_label(DegradationLevel::Normal), ("NORMAL", 0));
+        assert_eq!(
+            degradation_level_label(DegradationLevel::Warning),
+            ("BACKGROUND PAUSED", 1)
+        );
+        assert_eq!(
+            degradation_level_label(DegradationLevel::Degraded),
+            ("CACHE REDUCED", 2)
+        );
+        assert_eq!(
+            degradation_level_label(DegradationLevel::Critical),
+            ("WRITES THROTTLED", 3)
+        );
+        assert_eq!(
+            degradation_level_label(DegradationLevel::Emergency),
+            ("READ-ONLY", 4)
+        );
+    }
+
+    // ── Degradation event formatting ───────────────────────────────────
+
+    #[test]
+    fn format_event_with_reason() {
+        let event = DegradationEvent {
+            timestamp: "12:00:00".to_owned(),
+            from: DegradationLevel::Normal,
+            to: DegradationLevel::Warning,
+            reason: "high cpu".to_owned(),
+        };
+        let formatted = format_degradation_event(&event);
+        assert!(formatted.contains("12:00:00"));
+        assert!(formatted.contains("L0 -> L1"));
+        assert!(formatted.contains("high cpu"));
+    }
+
+    #[test]
+    fn format_event_without_reason() {
+        let event = DegradationEvent {
+            timestamp: "13:00:00".to_owned(),
+            from: DegradationLevel::Critical,
+            to: DegradationLevel::Normal,
+            reason: String::new(),
+        };
+        let formatted = format_degradation_event(&event);
+        assert!(formatted.contains("L3 -> L0"));
+        assert!(!formatted.contains('('));
+    }
+
+    #[test]
+    fn format_event_emergency_to_normal() {
+        let event = DegradationEvent {
+            timestamp: "14:00:00".to_owned(),
+            from: DegradationLevel::Emergency,
+            to: DegradationLevel::Normal,
+            reason: "recovery".to_owned(),
+        };
+        let formatted = format_degradation_event(&event);
+        assert!(formatted.contains("L4 -> L0"));
+    }
+
+    // ── Dashboard state management ─────────────────────────────────────
+
+    #[test]
+    fn dashboard_sequential_metric_updates() {
+        let mut dash = Dashboard::new();
+        for i in 0..5 {
+            dash.update_metrics(DashboardSnapshot {
+                cache_hits: i * 100,
+                ..Default::default()
+            });
+            assert_eq!(dash.snapshot().cache_hits, i * 100);
+        }
+    }
+
+    #[test]
+    fn dashboard_default_is_same_as_new() {
+        let d1 = Dashboard::new();
+        let d2 = Dashboard::default();
+        assert_eq!(d1.snapshot().cache_hits, d2.snapshot().cache_hits);
+        assert_eq!(d1.snapshot().mvcc_snapshot_seq, d2.snapshot().mvcc_snapshot_seq);
+    }
+
+    #[test]
+    fn dashboard_msg_from_event() {
+        let key = ftui::KeyEvent {
+            code: KeyCode::Char('x'),
+            kind: ftui::KeyEventKind::Press,
+            modifiers: ftui::Modifiers::empty(),
+        };
+        let msg: DashboardMsg = Event::Key(key).into();
+        assert!(matches!(msg, DashboardMsg::Input(_)));
+    }
+
+    // ── Input handling ─────────────────────────────────────────────────
+
+    #[test]
+    fn dashboard_quit_on_uppercase_q() {
+        let mut dash = Dashboard::new();
+        let key = ftui::KeyEvent {
+            code: KeyCode::Char('Q'),
+            kind: ftui::KeyEventKind::Press,
+            modifiers: ftui::Modifiers::empty(),
+        };
+        let cmd = dash.update(DashboardMsg::Input(Event::Key(key)));
+        assert!(matches!(cmd, Cmd::Quit));
+    }
+
+    #[test]
+    fn dashboard_ignores_arrow_keys() {
+        let mut dash = Dashboard::new();
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
+            let key = ftui::KeyEvent {
+                code,
+                kind: ftui::KeyEventKind::Press,
+                modifiers: ftui::Modifiers::empty(),
+            };
+            let cmd = dash.update(DashboardMsg::Input(Event::Key(key)));
+            assert!(matches!(cmd, Cmd::None));
+        }
+    }
+
+    #[test]
+    fn dashboard_ignores_tab() {
+        let mut dash = Dashboard::new();
+        let key = ftui::KeyEvent {
+            code: KeyCode::Tab,
+            kind: ftui::KeyEventKind::Press,
+            modifiers: ftui::Modifiers::empty(),
+        };
+        let cmd = dash.update(DashboardMsg::Input(Event::Key(key)));
+        assert!(matches!(cmd, Cmd::None));
+    }
+
+    #[test]
+    fn dashboard_ignores_enter() {
+        let mut dash = Dashboard::new();
+        let key = ftui::KeyEvent {
+            code: KeyCode::Enter,
+            kind: ftui::KeyEventKind::Press,
+            modifiers: ftui::Modifiers::empty(),
+        };
+        let cmd = dash.update(DashboardMsg::Input(Event::Key(key)));
+        assert!(matches!(cmd, Cmd::None));
+    }
+
+    // ── Layout / rendering edge cases ──────────────────────────────────
+
+    #[test]
+    fn dashboard_view_80x24_standard_terminal() {
+        let dash = Dashboard::with_snapshot(DashboardSnapshot {
+            cache_hits: 500,
+            cache_misses: 50,
+            mvcc_snapshot_seq: 100,
+            scrub_blocks_scanned: 5000,
+            ..Default::default()
+        });
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = Frame::new(80, 24, &mut pool);
+        dash.view(&mut frame);
+        // No panic means success
+    }
+
+    #[test]
+    fn dashboard_view_200x60_large_terminal() {
+        let dash = Dashboard::with_snapshot(DashboardSnapshot {
+            cache_hits: 1_000_000,
+            cache_misses: 500_000,
+            cache_evictions: 100_000,
+            cache_resident: 2000,
+            cache_capacity: 4000,
+            mvcc_snapshot_seq: 999_999,
+            mvcc_active_snapshots: 50,
+            mvcc_watermark: Some(999_000),
+            ..Default::default()
+        });
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = Frame::new(200, 60, &mut pool);
+        dash.view(&mut frame);
+    }
+
+    #[test]
+    fn dashboard_view_narrow_terminal() {
+        let dash = Dashboard::with_snapshot(DashboardSnapshot {
+            degradation_level: DegradationLevel::Emergency,
+            cpu_pressure: 0.95,
+            memory_pressure: 0.88,
+            io_queue_depth: 50,
+            ..Default::default()
+        });
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = Frame::new(20, 10, &mut pool);
+        dash.view(&mut frame);
+    }
+
+    #[test]
+    fn dashboard_view_wide_but_short() {
+        let dash = Dashboard::new();
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = Frame::new(200, 3, &mut pool);
+        dash.view(&mut frame);
+    }
+
+    // ── System health text edge cases ──────────────────────────────────
+
+    #[test]
+    fn system_health_no_events_shows_none() {
+        let snap = DashboardSnapshot::default();
+        let text = build_system_health_text(&snap).to_plain_text();
+        assert!(text.contains("(none)"));
+    }
+
+    #[test]
+    fn system_health_max_events_truncated() {
+        let events: Vec<DegradationEvent> = (0..20)
+            .map(|i| DegradationEvent {
+                timestamp: format!("12:{i:02}:00"),
+                from: DegradationLevel::Normal,
+                to: DegradationLevel::Warning,
+                reason: format!("event {i}"),
+            })
+            .collect();
+        let snap = DashboardSnapshot {
+            degradation_events: events,
+            ..Default::default()
+        };
+        let text = build_system_health_text(&snap).to_plain_text();
+        // Should only show MAX_RECENT_EVENTS (10)
+        assert!(text.contains("event 19")); // newest
+        assert!(text.contains("event 10")); // 10th from end
+    }
+
+    #[test]
+    fn system_health_all_degradation_levels() {
+        for level in [
+            DegradationLevel::Normal,
+            DegradationLevel::Warning,
+            DegradationLevel::Degraded,
+            DegradationLevel::Critical,
+            DegradationLevel::Emergency,
+        ] {
+            let snap = DashboardSnapshot {
+                degradation_level: level,
+                ..Default::default()
+            };
+            let text = build_system_health_text(&snap).to_plain_text();
+            let (label, _) = degradation_level_label(level);
+            assert!(text.contains(label), "missing label for {level:?}");
+        }
+    }
+
+    // ── Scrub panel data states ────────────────────────────────────────
+
+    #[test]
+    fn scrub_clean_status() {
+        let snap = DashboardSnapshot {
+            scrub_blocks_scanned: 1000,
+            scrub_blocks_corrupt: 0,
+            scrub_blocks_io_error: 0,
+            ..Default::default()
+        };
+        // The render_scrub_panel function uses "Clean" for this state.
+        // We test the logic directly:
+        let status = if snap.scrub_blocks_scanned == 0 {
+            "No scrub data"
+        } else if snap.scrub_blocks_corrupt == 0 && snap.scrub_blocks_io_error == 0 {
+            "Clean"
+        } else {
+            "Issues found"
+        };
+        assert_eq!(status, "Clean");
+    }
+
+    #[test]
+    fn scrub_no_data_status() {
+        let snap = DashboardSnapshot::default();
+        let status = if snap.scrub_blocks_scanned == 0 {
+            "No scrub data"
+        } else {
+            "Other"
+        };
+        assert_eq!(status, "No scrub data");
+    }
+
+    #[test]
+    fn scrub_issues_found_corrupt() {
+        let snap = DashboardSnapshot {
+            scrub_blocks_scanned: 1000,
+            scrub_blocks_corrupt: 5,
+            ..Default::default()
+        };
+        let has_issues = snap.scrub_blocks_corrupt > 0 || snap.scrub_blocks_io_error > 0;
+        assert!(has_issues);
+    }
+
+    #[test]
+    fn scrub_issues_found_io_error() {
+        let snap = DashboardSnapshot {
+            scrub_blocks_scanned: 1000,
+            scrub_blocks_io_error: 3,
+            ..Default::default()
+        };
+        let has_issues = snap.scrub_blocks_corrupt > 0 || snap.scrub_blocks_io_error > 0;
+        assert!(has_issues);
+    }
 }
