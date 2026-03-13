@@ -6643,6 +6643,7 @@ mod tests {
                 allow_other,
                 rw,
                 native,
+                ..
             } => {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert_eq!(mountpoint, PathBuf::from("/tmp/mnt"));
@@ -6670,6 +6671,7 @@ mod tests {
                 allow_other,
                 rw,
                 native,
+                ..
             } => {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert_eq!(mountpoint, PathBuf::from("/tmp/mnt"));
@@ -6706,6 +6708,7 @@ mod tests {
                 allow_other,
                 rw,
                 native,
+                ..
             } => {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert_eq!(mountpoint, PathBuf::from("/tmp/mnt"));
