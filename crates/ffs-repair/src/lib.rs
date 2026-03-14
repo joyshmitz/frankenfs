@@ -11,6 +11,7 @@ pub mod decision;
 pub mod demo;
 pub mod evidence;
 pub mod lrc;
+pub mod ownership;
 pub mod pipeline;
 pub mod por;
 pub mod recovery;

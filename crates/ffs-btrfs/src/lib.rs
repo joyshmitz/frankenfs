@@ -6524,4 +6524,59 @@ mod tests {
         let err = parse_root_ref(&data).unwrap_err();
         assert!(matches!(err, ParseError::InsufficientData { .. }));
     }
+
+    // ── RAID6 parity wraparound regression test ────────────────────
+
+    #[test]
+    fn raid6_parity_wraparound_selects_correct_data_device() {
+        use ffs_ondisk::{
+            BtrfsChunkEntry, BtrfsKey, BtrfsRaidProfile, BtrfsStripe, chunk_type_flags,
+            map_logical_to_stripes,
+        };
+
+        // 4 devices, RAID6 (2 parity), stripe_len=65536, data_stripes=2
+        let chunk = BtrfsChunkEntry {
+            key: BtrfsKey {
+                objectid: 0x100,
+                item_type: 228,
+                offset: 0,
+            },
+            length: 65536 * 2 * 8,
+            owner: 2,
+            stripe_len: 65536,
+            chunk_type: chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+                | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6,
+            io_align: 4096,
+            io_width: 4096,
+            sector_size: 4096,
+            num_stripes: 4,
+            sub_stripes: 0,
+            stripes: vec![
+                BtrfsStripe { devid: 1, offset: 0x10_0000, dev_uuid: [0; 16] },
+                BtrfsStripe { devid: 2, offset: 0x20_0000, dev_uuid: [0; 16] },
+                BtrfsStripe { devid: 3, offset: 0x30_0000, dev_uuid: [0; 16] },
+                BtrfsStripe { devid: 4, offset: 0x40_0000, dev_uuid: [0; 16] },
+            ],
+        };
+        let chunks = vec![chunk];
+
+        // Row 3: P at pos 3 (dev 4), Q at pos 0 (dev 1).
+        // Data should be at pos 1 (dev 2) and pos 2 (dev 3).
+        // Row 3 offset = 3 * 65536 * 2 = 393216
+        let r = map_logical_to_stripes(&chunks, 393216).unwrap().unwrap();
+        assert_eq!(r.profile, BtrfsRaidProfile::Raid6);
+        assert_ne!(
+            r.stripes[0].devid, 1,
+            "dev 1 is Q parity in row 3, must not be data target"
+        );
+        assert_ne!(
+            r.stripes[0].devid, 4,
+            "dev 4 is P parity in row 3, must not be data target"
+        );
+        assert_eq!(r.stripes[0].devid, 2, "data stripe 0 should be dev 2");
+
+        // Row 3, data stripe 1
+        let r2 = map_logical_to_stripes(&chunks, 393216 + 65536).unwrap().unwrap();
+        assert_eq!(r2.stripes[0].devid, 3, "data stripe 1 should be dev 3");
+    }
 }

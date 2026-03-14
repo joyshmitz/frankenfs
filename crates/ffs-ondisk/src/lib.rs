@@ -11,9 +11,11 @@ pub mod btrfs;
 pub mod ext4;
 
 pub use btrfs::{
-    BtrfsChunkEntry, BtrfsHeader, BtrfsItem, BtrfsKey, BtrfsKeyPtr, BtrfsPhysicalMapping,
-    BtrfsStripe, BtrfsSuperblock, map_logical_to_physical, parse_internal_items, parse_leaf_items,
-    parse_sys_chunk_array, verify_superblock_checksum as verify_btrfs_superblock_checksum,
+    BtrfsChunkEntry, BtrfsDevItem, BtrfsHeader, BtrfsItem, BtrfsKey, BtrfsKeyPtr,
+    BtrfsPhysicalMapping, BtrfsRaidProfile, BtrfsStripe, BtrfsStripeMapping, BtrfsSuperblock,
+    chunk_type_flags, map_logical_to_physical, map_logical_to_stripes, parse_dev_item,
+    parse_internal_items, parse_leaf_items, parse_sys_chunk_array,
+    verify_superblock_checksum as verify_btrfs_superblock_checksum,
     verify_tree_block_checksum as verify_btrfs_tree_block_checksum,
 };
 pub use ext4::{
