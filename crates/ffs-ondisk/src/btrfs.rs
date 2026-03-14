@@ -616,6 +616,13 @@ fn resolve_raid10_stripes(
 }
 
 /// RAID5/6: return the data stripe (parity stripes excluded).
+///
+/// Parity rotation: for each "row" (stripe_nr), the parity position(s) rotate
+/// across devices. RAID5 has 1 parity (P), RAID6 has 2 (P + Q at adjacent
+/// positions modulo num_stripes). Data stripe indices are mapped to actual
+/// device positions by explicitly skipping all parity positions — this
+/// correctly handles the wrap-around case where P is at the last position
+/// and Q wraps to position 0.
 fn resolve_raid56_stripe(
     chunk: &BtrfsChunkEntry,
     offset_within: u64,
@@ -634,12 +641,36 @@ fn resolve_raid56_stripe(
     let stripe_idx = (offset_within / stripe_len) % data_stripes;
     let offset_in_stripe = offset_within % stripe_len;
     let stripe_nr = offset_within / (stripe_len * data_stripes);
-    let parity_pos = stripe_nr % num;
-    let mut actual_idx = stripe_idx;
-    if actual_idx >= parity_pos {
-        actual_idx += parity_count;
+
+    // Build set of parity positions for this row.
+    // RAID5: P at (stripe_nr % num)
+    // RAID6: P at (stripe_nr % num), Q at ((stripe_nr + 1) % num)
+    let p_pos = stripe_nr % num;
+    let is_parity = |pos: u64| -> bool {
+        if pos == p_pos {
+            return true;
+        }
+        if parity_count >= 2 && pos == (p_pos + 1) % num {
+            return true;
+        }
+        false
+    };
+
+    // Map data stripe_idx to actual device position by walking positions
+    // and skipping parity ones.
+    let mut data_seen = 0_u64;
+    let mut actual_idx = 0_u64;
+    for pos in 0..num {
+        if is_parity(pos) {
+            continue;
+        }
+        if data_seen == stripe_idx {
+            actual_idx = pos;
+            break;
+        }
+        data_seen += 1;
     }
-    actual_idx %= num;
+
     let idx = usize::try_from(actual_idx).unwrap_or(usize::MAX);
     let s = chunk.stripes.get(idx).ok_or(ParseError::InvalidField {
         field: "stripe_index",
@@ -648,14 +679,13 @@ fn resolve_raid56_stripe(
     Ok(vec![stripe_physical_at(s, stripe_nr, stripe_len, offset_in_stripe)?])
 }
 
-fn require_nonzero_stripe_len(chunk: &BtrfsChunkEntry, label: &str) -> Result<u64, ParseError> {
+fn require_nonzero_stripe_len(chunk: &BtrfsChunkEntry, _label: &str) -> Result<u64, ParseError> {
     if chunk.stripe_len == 0 {
         return Err(ParseError::InvalidField {
             field: "stripe_len",
             reason: "chunk has zero stripe length",
         });
     }
-    let _ = label; // used for error context in caller
     Ok(chunk.stripe_len)
 }
 
@@ -2962,6 +2992,50 @@ mod tests {
             let r1 = map_logical_to_stripes(&chunks, 65536).unwrap().unwrap();
             assert_eq!(r1.stripes.len(), 1);
             assert_eq!(r1.stripes[0].devid, 2);
+        }
+
+        #[test]
+        fn stripe_resolve_raid6_parity_wraparound() {
+            // 4 devices, RAID6 (2 parity), stripe_len=65536
+            // This tests the case where P is at the last device and Q wraps to device 0.
+            let chunks = vec![make_chunk(
+                0,
+                // Large enough to cover multiple stripe rows
+                65536 * 2 * 8, // data_stripes=2, 8 rows
+                65536,
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+                    | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6,
+                vec![
+                    stripe(1, 0x10_0000),
+                    stripe(2, 0x20_0000),
+                    stripe(3, 0x30_0000),
+                    stripe(4, 0x40_0000),
+                ],
+                0,
+            )];
+
+            // Row 3 (stripe_nr=3): P at pos 3 (dev 4), Q at pos 0 (dev 1).
+            // Data should be at pos 1 (dev 2) and pos 2 (dev 3).
+            // offset for row 3, data stripe 0 = 3 * 65536 * 2 + 0 = 393216
+            let r = map_logical_to_stripes(&chunks, 393216).unwrap().unwrap();
+            assert_eq!(r.profile, BtrfsRaidProfile::Raid6);
+            assert_eq!(r.stripes.len(), 1);
+            // Should NOT be dev 1 (which is Q in this row)
+            assert_ne!(
+                r.stripes[0].devid, 1,
+                "stripe_nr=3: position 0 is Q parity, data should not map there"
+            );
+            assert_eq!(
+                r.stripes[0].devid, 2,
+                "stripe_nr=3, data_idx=0: should map to device 2 (position 1)"
+            );
+
+            // Row 3, data stripe 1 = 393216 + 65536 = 458752
+            let r2 = map_logical_to_stripes(&chunks, 458752).unwrap().unwrap();
+            assert_eq!(
+                r2.stripes[0].devid, 3,
+                "stripe_nr=3, data_idx=1: should map to device 3 (position 2)"
+            );
         }
 
         #[test]
