@@ -6294,4 +6294,234 @@ mod tests {
         assert_eq!(queue.pending_for(&key_a).len(), 2);
         assert_eq!(queue.pending_for(&key_b).len(), 1);
     }
+
+    // ── Subvolume enumeration tests ────────────────────────────────
+
+    fn make_root_item_data(bytenr: u64, generation: u64, flags: u64) -> Vec<u8> {
+        let mut data = vec![0_u8; 272];
+        data[160..168].copy_from_slice(&generation.to_le_bytes()); // generation
+        data[168..176].copy_from_slice(&256_u64.to_le_bytes()); // root_dirid
+        data[176..184].copy_from_slice(&bytenr.to_le_bytes()); // bytenr
+        data[208..216].copy_from_slice(&flags.to_le_bytes()); // flags
+        data[216..224].copy_from_slice(&1_u64.to_le_bytes()); // refs
+        // uuid at 224, parent_uuid at 240 — left as zeros
+        data[271] = 0; // level
+        data
+    }
+
+    fn make_root_item_with_uuids(
+        bytenr: u64,
+        generation: u64,
+        flags: u64,
+        uuid: [u8; 16],
+        parent_uuid: [u8; 16],
+    ) -> Vec<u8> {
+        let mut data = make_root_item_data(bytenr, generation, flags);
+        data[224..240].copy_from_slice(&uuid);
+        data[240..256].copy_from_slice(&parent_uuid);
+        data
+    }
+
+    fn make_root_ref_data(dirid: u64, name: &[u8]) -> Vec<u8> {
+        let mut data = vec![0_u8; 18 + name.len()];
+        data[0..8].copy_from_slice(&dirid.to_le_bytes());
+        data[8..16].copy_from_slice(&0_u64.to_le_bytes()); // sequence
+        data[16..18].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        data[18..18 + name.len()].copy_from_slice(name);
+        data
+    }
+
+    #[test]
+    fn enumerate_subvolumes_finds_user_subvols() {
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                data: make_root_item_data(0x1000, 10, 0),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 5, item_type: BTRFS_ITEM_ROOT_REF, offset: 256 },
+                data: make_root_ref_data(256, b"mysubvol"),
+            },
+        ];
+        let subvols = enumerate_subvolumes(&entries);
+        assert_eq!(subvols.len(), 1);
+        assert_eq!(subvols[0].id, 256);
+        assert_eq!(subvols[0].name, "mysubvol");
+        assert_eq!(subvols[0].generation, 10);
+        assert!(!subvols[0].read_only);
+    }
+
+    #[test]
+    fn enumerate_subvolumes_skips_system_trees() {
+        let entries = vec![
+            // System tree (objectid < 256) — should be skipped
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 5, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                data: make_root_item_data(0x2000, 5, 0),
+            },
+        ];
+        let subvols = enumerate_subvolumes(&entries);
+        assert!(subvols.is_empty());
+    }
+
+    #[test]
+    fn enumerate_subvolumes_read_only_flag() {
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 300, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                data: make_root_item_data(0x3000, 20, 1), // flags=1 = RDONLY
+            },
+        ];
+        let subvols = enumerate_subvolumes(&entries);
+        assert_eq!(subvols.len(), 1);
+        assert!(subvols[0].read_only);
+    }
+
+    #[test]
+    fn enumerate_subvolumes_no_root_ref_uses_fallback_name() {
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 500, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                data: make_root_item_data(0x5000, 15, 0),
+            },
+        ];
+        let subvols = enumerate_subvolumes(&entries);
+        assert_eq!(subvols.len(), 1);
+        assert_eq!(subvols[0].name, "subvol-500");
+    }
+
+    // ── Snapshot enumeration tests ─────────────────────────────────
+
+    #[test]
+    fn enumerate_snapshots_finds_snapshots() {
+        let src_uuid = [1_u8; 16];
+        let snap_uuid = [2_u8; 16];
+        let entries = vec![
+            // Source subvolume
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                data: make_root_item_with_uuids(0x1000, 10, 0, src_uuid, [0; 16]),
+            },
+            // Snapshot (parent_uuid = src_uuid)
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                data: make_root_item_with_uuids(0x2000, 15, 1, snap_uuid, src_uuid),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_ROOT_REF, offset: 257 },
+                data: make_root_ref_data(256, b"my_snapshot"),
+            },
+        ];
+        let snapshots = enumerate_snapshots(&entries);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].id, 257);
+        assert_eq!(snapshots[0].source_id, 256);
+        assert_eq!(snapshots[0].name, "my_snapshot");
+        assert_eq!(snapshots[0].generation, 15);
+    }
+
+    #[test]
+    fn enumerate_snapshots_ignores_regular_subvolumes() {
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                data: make_root_item_with_uuids(0x1000, 10, 0, [1; 16], [0; 16]),
+            },
+        ];
+        let snapshots = enumerate_snapshots(&entries);
+        assert!(snapshots.is_empty(), "regular subvolume should not be listed as snapshot");
+    }
+
+    // ── Snapshot diff tests ────────────────────────────────────────
+
+    fn make_inode_entry(objectid: u64, generation: u64) -> BtrfsLeafEntry {
+        let mut data = vec![0_u8; 160];
+        data[0..8].copy_from_slice(&generation.to_le_bytes()); // generation
+        data[8..16].copy_from_slice(&100_u64.to_le_bytes()); // size
+        data[24..28].copy_from_slice(&1_u32.to_le_bytes()); // nlink
+        data[32..36].copy_from_slice(&0o100644_u32.to_le_bytes()); // mode
+        BtrfsLeafEntry {
+            key: BtrfsKey { objectid, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+            data,
+        }
+    }
+
+    #[test]
+    fn snapshot_diff_detects_added() {
+        let older = vec![make_inode_entry(256, 10)];
+        let newer = vec![make_inode_entry(256, 10), make_inode_entry(257, 15)];
+        let diffs = snapshot_diff_by_generation(&older, &newer);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].inode, 257);
+        assert_eq!(diffs[0].change_type, SnapshotChangeType::Added);
+    }
+
+    #[test]
+    fn snapshot_diff_detects_deleted() {
+        let older = vec![make_inode_entry(256, 10), make_inode_entry(257, 10)];
+        let newer = vec![make_inode_entry(256, 10)];
+        let diffs = snapshot_diff_by_generation(&older, &newer);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].inode, 257);
+        assert_eq!(diffs[0].change_type, SnapshotChangeType::Deleted);
+    }
+
+    #[test]
+    fn snapshot_diff_detects_modified() {
+        let older = vec![make_inode_entry(256, 10)];
+        let newer = vec![make_inode_entry(256, 20)]; // higher generation
+        let diffs = snapshot_diff_by_generation(&older, &newer);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].inode, 256);
+        assert_eq!(diffs[0].change_type, SnapshotChangeType::Modified);
+    }
+
+    #[test]
+    fn snapshot_diff_identical_no_changes() {
+        let older = vec![make_inode_entry(256, 10), make_inode_entry(257, 10)];
+        let newer = vec![make_inode_entry(256, 10), make_inode_entry(257, 10)];
+        let diffs = snapshot_diff_by_generation(&older, &newer);
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn snapshot_diff_multiple_changes() {
+        let older = vec![
+            make_inode_entry(100, 5),
+            make_inode_entry(200, 5),
+            make_inode_entry(300, 5),
+        ];
+        let newer = vec![
+            make_inode_entry(200, 10), // modified
+            make_inode_entry(400, 8),  // added (100 and 300 deleted)
+        ];
+        let diffs = snapshot_diff_by_generation(&older, &newer);
+        assert_eq!(diffs.len(), 4);
+        // Sorted by inode
+        assert_eq!(diffs[0].inode, 100);
+        assert_eq!(diffs[0].change_type, SnapshotChangeType::Deleted);
+        assert_eq!(diffs[1].inode, 200);
+        assert_eq!(diffs[1].change_type, SnapshotChangeType::Modified);
+        assert_eq!(diffs[2].inode, 300);
+        assert_eq!(diffs[2].change_type, SnapshotChangeType::Deleted);
+        assert_eq!(diffs[3].inode, 400);
+        assert_eq!(diffs[3].change_type, SnapshotChangeType::Added);
+    }
+
+    // ── ROOT_REF parsing tests ─────────────────────────────────────
+
+    #[test]
+    fn parse_root_ref_valid() {
+        let data = make_root_ref_data(256, b"test_subvol");
+        let rref = parse_root_ref(&data).unwrap();
+        assert_eq!(rref.dirid, 256);
+        assert_eq!(rref.name, b"test_subvol");
+    }
+
+    #[test]
+    fn parse_root_ref_too_short() {
+        let data = vec![0_u8; 10];
+        let err = parse_root_ref(&data).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
 }
