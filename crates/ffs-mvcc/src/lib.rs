@@ -1408,7 +1408,16 @@ impl MvccStore {
         }
         let loss_strict = self.contention_metrics.expected_loss_strict(&self.adaptive_config);
         let loss_merge = self.contention_metrics.expected_loss_safe_merge(&self.adaptive_config);
-        let delta = loss_strict - loss_merge; // Positive = SafeMerge is cheaper.
+        // Positive delta = the new policy is cheaper than the old one.
+        let loss_old = match prev_effective {
+            ConflictPolicy::Strict => loss_strict,
+            _ => loss_merge,
+        };
+        let loss_new = match new_effective {
+            ConflictPolicy::Strict => loss_strict,
+            _ => loss_merge,
+        };
+        let delta = loss_old - loss_new;
 
         info!(
             target: "ffs::mvcc::merge",
@@ -1597,7 +1606,7 @@ impl MvccStore {
         let mut merge_succeeded = false;
         let mut merged_block_count: usize = 0;
         let mut combined_write_bytes: usize = 0;
-        let mut last_merge_variant = String::new();
+        let mut merge_variants: BTreeSet<String> = BTreeSet::new();
 
         for block in txn.writes.keys() {
             let latest = self.latest_commit_seq(*block);
@@ -1608,7 +1617,7 @@ impl MvccStore {
                         merge_succeeded = true;
                         merged_block_count += 1;
                         combined_write_bytes += bytes_len;
-                        last_merge_variant = variant;
+                        merge_variants.insert(variant);
                     }
                     Err(err) => {
                         self.contention_metrics.record_commit(
@@ -1631,16 +1640,17 @@ impl MvccStore {
 
         // mvcc_merge_applied — emit after successful merge commit preflight.
         if merged_block_count > 0 {
+            let variants_joined: String = merge_variants.into_iter().collect::<Vec<_>>().join("+");
             info!(
                 target: "ffs::mvcc::merge",
                 event = "mvcc_merge_applied",
                 txn_id = txn.id.0,
                 merged_block_count,
                 combined_write_set_bytes = combined_write_bytes,
-                proof_variant = %last_merge_variant,
+                proof_variant = %variants_joined,
             );
             self.emit_merge_applied(
-                txn.id.0, merged_block_count, combined_write_bytes, &last_merge_variant,
+                txn.id.0, merged_block_count, combined_write_bytes, &variants_joined,
             );
         }
 
