@@ -67,10 +67,7 @@ impl ByteDevice for MemByteDevice {
 }
 
 /// Create an in-memory block device for tests.
-fn mem_block_device(
-    block_size: u32,
-    block_count: usize,
-) -> ByteBlockDevice<MemByteDevice> {
+fn mem_block_device(block_size: u32, block_count: usize) -> ByteBlockDevice<MemByteDevice> {
     let mem = MemByteDevice::new(block_size as usize * block_count);
     ByteBlockDevice::new(mem, block_size).expect("valid device")
 }
@@ -97,13 +94,14 @@ mod mvcc_journal {
         txn2.stage_write(block, vec![0xBB; 16]);
         let seq2 = store.commit(txn2).expect("commit 2");
 
-        assert!(seq2.0 > seq1.0, "commit sequences must be monotonically increasing");
+        assert!(
+            seq2.0 > seq1.0,
+            "commit sequences must be monotonically increasing"
+        );
 
         // Read at latest snapshot should see second write
         let snap = store.current_snapshot();
-        let data = store
-            .read_visible(block, snap)
-            .expect("should be visible");
+        let data = store.read_visible(block, snap).expect("should be visible");
         assert_eq!(data, vec![0xBB; 16]);
     }
 
@@ -181,9 +179,7 @@ mod mvcc_journal {
 
         let snap = store.current_snapshot();
         for i in 0..10 {
-            let data = store
-                .read_visible(BlockNumber(i), snap)
-                .expect("visible");
+            let data = store.read_visible(BlockNumber(i), snap).expect("visible");
             assert_eq!(data, vec![i as u8; 16]);
         }
     }
@@ -330,8 +326,7 @@ mod block_readwrite {
         let dev = mem_block_device(4096, 100);
 
         let data = vec![0xDE; 4096];
-        dev.write_block(&cx, BlockNumber(50), &data)
-            .expect("write");
+        dev.write_block(&cx, BlockNumber(50), &data).expect("write");
 
         let buf = dev.read_block(&cx, BlockNumber(50)).expect("read");
         assert_eq!(buf.as_slice(), &data);
@@ -351,11 +346,7 @@ mod block_readwrite {
         // Verify each block has correct data
         for i in 0..10_u64 {
             let buf = dev.read_block(&cx, BlockNumber(i)).expect("read");
-            assert_eq!(
-                buf.as_slice(),
-                &vec![i as u8; 4096],
-                "block {i} mismatch"
-            );
+            assert_eq!(buf.as_slice(), &vec![i as u8; 4096], "block {i} mismatch");
         }
     }
 
@@ -450,8 +441,8 @@ mod extent_mapping {
         let dev = mem_block_device(BLOCK_SIZE, 1);
         let root = build_root(1, 100);
 
-        let mappings = ffs_extent::map_logical_to_physical(&cx, &dev, &root, 50, 1)
-            .expect("resolve");
+        let mappings =
+            ffs_extent::map_logical_to_physical(&cx, &dev, &root, 50, 1).expect("resolve");
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].logical_start, 50);
         assert_eq!(mappings[0].physical_start, 1050);
@@ -486,10 +477,13 @@ mod extent_mapping {
         let root = build_root(1, 10);
 
         // Block 20 is beyond the extent → hole
-        let mappings = ffs_extent::map_logical_to_physical(&cx, &dev, &root, 20, 1)
-            .expect("resolve hole");
+        let mappings =
+            ffs_extent::map_logical_to_physical(&cx, &dev, &root, 20, 1).expect("resolve hole");
         assert_eq!(mappings.len(), 1);
-        assert_eq!(mappings[0].physical_start, 0, "hole should have physical_start=0");
+        assert_eq!(
+            mappings[0].physical_start, 0,
+            "hole should have physical_start=0"
+        );
     }
 
     #[test]
@@ -498,8 +492,8 @@ mod extent_mapping {
         let dev = mem_block_device(BLOCK_SIZE, 1);
         let root = build_root(1, 100);
 
-        let mappings = ffs_extent::map_logical_to_physical(&cx, &dev, &root, 0, 0)
-            .expect("empty range");
+        let mappings =
+            ffs_extent::map_logical_to_physical(&cx, &dev, &root, 0, 0).expect("empty range");
         assert!(mappings.is_empty());
     }
 
@@ -510,8 +504,8 @@ mod extent_mapping {
         // 4 extents, each 25 blocks
         let root = build_root(4, 25);
 
-        let mappings = ffs_extent::map_logical_to_physical(&cx, &dev, &root, 0, 100)
-            .expect("resolve all");
+        let mappings =
+            ffs_extent::map_logical_to_physical(&cx, &dev, &root, 0, 100).expect("resolve all");
 
         // Should cover all 100 blocks
         let total: u32 = mappings.iter().map(|m| m.count).sum();

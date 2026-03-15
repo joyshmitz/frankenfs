@@ -55,9 +55,7 @@ impl CoordinationRecord {
             return true;
         };
         let ttl = Duration::from_secs(self.lease_ttl_secs);
-        claimed
-            .checked_add(ttl)
-            .is_some_and(|expiry| now >= expiry)
+        claimed.checked_add(ttl).is_some_and(|expiry| now >= expiry)
     }
 
     /// Renew the lease by updating `claimed_at` to the current time.
@@ -111,9 +109,7 @@ pub enum AcquireResult {
         expires_in_secs: u64,
     },
     /// Ownership conflict detected; we lost the tiebreak.
-    ConflictLost {
-        winner_host_id: String,
-    },
+    ConflictLost { winner_host_id: String },
 }
 
 impl RepairOwnership {
@@ -163,8 +159,8 @@ impl RepairOwnership {
 
                 if !existing.is_expired(now) && existing.host_id != self.host_id {
                     // Another host owns it and lease is valid
-                    let claimed = parse_iso8601(&existing.claimed_at)
-                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let claimed =
+                        parse_iso8601(&existing.claimed_at).unwrap_or(SystemTime::UNIX_EPOCH);
                     let expiry = claimed + Duration::from_secs(existing.lease_ttl_secs);
                     let remaining = expiry
                         .duration_since(now)
@@ -215,8 +211,7 @@ impl RepairOwnership {
             groups_owned: Vec::new(),
         };
 
-        let json = serde_json::to_string_pretty(&record)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
 
         // Atomic write: write to temp, then rename
         let tmp_path = record_path.with_extension("tmp");
@@ -280,8 +275,7 @@ impl RepairOwnership {
     /// Renew an existing lease.
     pub fn renew(&self, guard: &mut OwnershipGuard) -> std::io::Result<()> {
         guard.record.renew();
-        let json = serde_json::to_string_pretty(&guard.record)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(&guard.record).map_err(std::io::Error::other)?;
         let tmp_path = guard.record_path.with_extension("tmp");
         std::fs::write(&tmp_path, &json)?;
         std::fs::rename(&tmp_path, &guard.record_path)?;
@@ -405,10 +399,7 @@ mod tests {
     #[test]
     fn record_path_for_image_no_parent() {
         let path = RepairOwnership::record_path_for(Path::new("image.img"));
-        assert_eq!(
-            path,
-            PathBuf::from(".image.img.ffs-repair-owner.json")
-        );
+        assert_eq!(path, PathBuf::from(".image.img.ffs-repair-owner.json"));
     }
 
     #[test]
@@ -571,11 +562,7 @@ mod tests {
             groups_owned: vec![],
         };
         let record_path = RepairOwnership::record_path_for(&image);
-        std::fs::write(
-            &record_path,
-            serde_json::to_string_pretty(&record).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
 
         // New host should be able to claim
         let mgr = RepairOwnership::new("new-host".into(), "alive".into());
@@ -606,7 +593,10 @@ mod tests {
         assert!(record_path.exists());
 
         RepairOwnership::release(guard).expect("release");
-        assert!(!record_path.exists(), "record should be removed after release");
+        assert!(
+            !record_path.exists(),
+            "record should be removed after release"
+        );
     }
 
     #[test]
@@ -615,8 +605,8 @@ mod tests {
         let image = dir.join("test.img");
         std::fs::write(&image, b"fake image").unwrap();
 
-        let mgr = RepairOwnership::new("host-1".into(), "test".into())
-            .with_ttl(Duration::from_secs(10));
+        let mgr =
+            RepairOwnership::new("host-1".into(), "test".into()).with_ttl(Duration::from_secs(10));
         let result = mgr.try_acquire(&image).expect("acquire");
         let mut guard = match result {
             AcquireResult::Acquired(g) => g,
@@ -627,7 +617,11 @@ mod tests {
         // Sleep > 1s to ensure timestamp changes (ISO 8601 has 1s resolution)
         std::thread::sleep(Duration::from_millis(1100));
         mgr.renew(&mut guard).expect("renew");
-        assert_ne!(guard.record().claimed_at, old_time, "timestamp should update");
+        assert_ne!(
+            guard.record().claimed_at,
+            old_time,
+            "timestamp should update"
+        );
     }
 
     #[test]
@@ -651,10 +645,8 @@ mod tests {
     fn tempdir() -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "ffs-test-ownership-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ffs-test-ownership-{}-{n}", std::process::id()));
         // Clean up any leftover from previous run
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);

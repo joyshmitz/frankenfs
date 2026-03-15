@@ -6335,11 +6335,19 @@ mod tests {
     fn enumerate_subvolumes_finds_user_subvols() {
         let entries = vec![
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
                 data: make_root_item_data(0x1000, 10, 0),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 5, item_type: BTRFS_ITEM_ROOT_REF, offset: 256 },
+                key: BtrfsKey {
+                    objectid: 5,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 256,
+                },
                 data: make_root_ref_data(256, b"mysubvol"),
             },
         ];
@@ -6356,7 +6364,11 @@ mod tests {
         let entries = vec![
             // System tree (objectid < 256) — should be skipped
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 5, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 5,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
                 data: make_root_item_data(0x2000, 5, 0),
             },
         ];
@@ -6366,12 +6378,14 @@ mod tests {
 
     #[test]
     fn enumerate_subvolumes_read_only_flag() {
-        let entries = vec![
-            BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 300, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
-                data: make_root_item_data(0x3000, 20, 1), // flags=1 = RDONLY
+        let entries = vec![BtrfsLeafEntry {
+            key: BtrfsKey {
+                objectid: 300,
+                item_type: BTRFS_ITEM_ROOT_ITEM,
+                offset: 0,
             },
-        ];
+            data: make_root_item_data(0x3000, 20, 1), // flags=1 = RDONLY
+        }];
         let subvols = enumerate_subvolumes(&entries);
         assert_eq!(subvols.len(), 1);
         assert!(subvols[0].read_only);
@@ -6379,12 +6393,14 @@ mod tests {
 
     #[test]
     fn enumerate_subvolumes_no_root_ref_uses_fallback_name() {
-        let entries = vec![
-            BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 500, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
-                data: make_root_item_data(0x5000, 15, 0),
+        let entries = vec![BtrfsLeafEntry {
+            key: BtrfsKey {
+                objectid: 500,
+                item_type: BTRFS_ITEM_ROOT_ITEM,
+                offset: 0,
             },
-        ];
+            data: make_root_item_data(0x5000, 15, 0),
+        }];
         let subvols = enumerate_subvolumes(&entries);
         assert_eq!(subvols.len(), 1);
         assert_eq!(subvols[0].name, "subvol-500");
@@ -6399,16 +6415,28 @@ mod tests {
         let entries = vec![
             // Source subvolume
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
                 data: make_root_item_with_uuids(0x1000, 10, 0, src_uuid, [0; 16]),
             },
             // Snapshot (parent_uuid = src_uuid)
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 257, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
                 data: make_root_item_with_uuids(0x2000, 15, 1, snap_uuid, src_uuid),
             },
             BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_ROOT_REF, offset: 257 },
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 257,
+                },
                 data: make_root_ref_data(256, b"my_snapshot"),
             },
         ];
@@ -6422,14 +6450,19 @@ mod tests {
 
     #[test]
     fn enumerate_snapshots_ignores_regular_subvolumes() {
-        let entries = vec![
-            BtrfsLeafEntry {
-                key: BtrfsKey { objectid: 256, item_type: BTRFS_ITEM_ROOT_ITEM, offset: 0 },
-                data: make_root_item_with_uuids(0x1000, 10, 0, [1; 16], [0; 16]),
+        let entries = vec![BtrfsLeafEntry {
+            key: BtrfsKey {
+                objectid: 256,
+                item_type: BTRFS_ITEM_ROOT_ITEM,
+                offset: 0,
             },
-        ];
+            data: make_root_item_with_uuids(0x1000, 10, 0, [1; 16], [0; 16]),
+        }];
         let snapshots = enumerate_snapshots(&entries);
-        assert!(snapshots.is_empty(), "regular subvolume should not be listed as snapshot");
+        assert!(
+            snapshots.is_empty(),
+            "regular subvolume should not be listed as snapshot"
+        );
     }
 
     // ── Snapshot diff tests ────────────────────────────────────────
@@ -6441,7 +6474,11 @@ mod tests {
         data[24..28].copy_from_slice(&1_u32.to_le_bytes()); // nlink
         data[32..36].copy_from_slice(&0o100644_u32.to_le_bytes()); // mode
         BtrfsLeafEntry {
-            key: BtrfsKey { objectid, item_type: BTRFS_ITEM_INODE_ITEM, offset: 0 },
+            key: BtrfsKey {
+                objectid,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            },
             data,
         }
     }
@@ -6552,10 +6589,26 @@ mod tests {
             num_stripes: 4,
             sub_stripes: 0,
             stripes: vec![
-                BtrfsStripe { devid: 1, offset: 0x10_0000, dev_uuid: [0; 16] },
-                BtrfsStripe { devid: 2, offset: 0x20_0000, dev_uuid: [0; 16] },
-                BtrfsStripe { devid: 3, offset: 0x30_0000, dev_uuid: [0; 16] },
-                BtrfsStripe { devid: 4, offset: 0x40_0000, dev_uuid: [0; 16] },
+                BtrfsStripe {
+                    devid: 1,
+                    offset: 0x10_0000,
+                    dev_uuid: [0; 16],
+                },
+                BtrfsStripe {
+                    devid: 2,
+                    offset: 0x20_0000,
+                    dev_uuid: [0; 16],
+                },
+                BtrfsStripe {
+                    devid: 3,
+                    offset: 0x30_0000,
+                    dev_uuid: [0; 16],
+                },
+                BtrfsStripe {
+                    devid: 4,
+                    offset: 0x40_0000,
+                    dev_uuid: [0; 16],
+                },
             ],
         };
         let chunks = vec![chunk];
@@ -6576,7 +6629,9 @@ mod tests {
         assert_eq!(r.stripes[0].devid, 2, "data stripe 0 should be dev 2");
 
         // Row 3, data stripe 1
-        let r2 = map_logical_to_stripes(&chunks, 393216 + 65536).unwrap().unwrap();
+        let r2 = map_logical_to_stripes(&chunks, 393216 + 65536)
+            .unwrap()
+            .unwrap();
         assert_eq!(r2.stripes[0].devid, 3, "data stripe 1 should be dev 3");
     }
 }

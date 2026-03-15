@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
 use ffs_btrfs::{
     BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
-    enumerate_snapshots, enumerate_subvolumes, parse_inode_item, parse_root_item,
+    parse_inode_item, parse_root_item,
 };
 use ffs_core::{
     CrashRecoveryOutcome, Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions,
@@ -3431,8 +3431,7 @@ fn inspect_btrfs_subvolumes(
     list_subvolumes: bool,
     list_snapshots: bool,
 ) -> Result<()> {
-    let fs = OpenFs::open(cx, path)
-        .with_context(|| format!("open {}", path.display()))?;
+    let fs = OpenFs::open(cx, path).with_context(|| format!("open {}", path.display()))?;
 
     // Walk the root tree to get all leaf entries
     let root_entries = fs
@@ -3466,7 +3465,10 @@ fn inspect_btrfs_subvolumes(
             );
         } else {
             println!("Subvolumes ({} found):", subvols.len());
-            println!("{:<8} {:<8} {:<12} {:<5} {}", "ID", "Parent", "Generation", "RO", "Name");
+            println!(
+                "{:<8} {:<8} {:<12} {:<5} {}",
+                "ID", "Parent", "Generation", "RO", "Name"
+            );
             for s in &subvols {
                 println!(
                     "{:<8} {:<8} {:<12} {:<5} {}",
@@ -3505,9 +3507,15 @@ fn inspect_btrfs_subvolumes(
             );
         } else {
             println!("Snapshots ({} found):", snapshots.len());
-            println!("{:<8} {:<8} {:<12} {}", "ID", "Source", "Generation", "Name");
+            println!(
+                "{:<8} {:<8} {:<12} {}",
+                "ID", "Source", "Generation", "Name"
+            );
             for s in &snapshots {
-                println!("{:<8} {:<8} {:<12} {}", s.id, s.source_id, s.generation, s.name);
+                println!(
+                    "{:<8} {:<8} {:<12} {}",
+                    s.id, s.source_id, s.generation, s.name
+                );
             }
         }
     }

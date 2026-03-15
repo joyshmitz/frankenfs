@@ -444,8 +444,8 @@ impl BtrfsRaidProfile {
     pub fn from_chunk_type(chunk_type: u64) -> Self {
         use chunk_type_flags::{
             BTRFS_BLOCK_GROUP_DUP, BTRFS_BLOCK_GROUP_RAID0, BTRFS_BLOCK_GROUP_RAID1,
-            BTRFS_BLOCK_GROUP_RAID10, BTRFS_BLOCK_GROUP_RAID1C3, BTRFS_BLOCK_GROUP_RAID1C4,
-            BTRFS_BLOCK_GROUP_RAID5, BTRFS_BLOCK_GROUP_RAID6, RAID_MASK,
+            BTRFS_BLOCK_GROUP_RAID1C3, BTRFS_BLOCK_GROUP_RAID1C4, BTRFS_BLOCK_GROUP_RAID5,
+            BTRFS_BLOCK_GROUP_RAID6, BTRFS_BLOCK_GROUP_RAID10, RAID_MASK,
         };
         let raid_bits = chunk_type & RAID_MASK;
         if raid_bits & BTRFS_BLOCK_GROUP_RAID0 != 0 {
@@ -579,7 +579,12 @@ fn resolve_raid0_stripe(
         field: "stripe_index",
         reason: "stripe index out of range",
     })?;
-    Ok(vec![stripe_physical_at(s, stripe_nr, stripe_len, offset_in_stripe)?])
+    Ok(vec![stripe_physical_at(
+        s,
+        stripe_nr,
+        stripe_len,
+        offset_in_stripe,
+    )?])
 }
 
 /// RAID10: striped mirrors (sub_stripes mirrors per data stripe).
@@ -630,7 +635,11 @@ fn resolve_raid56_stripe(
 ) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
     let stripe_len = require_nonzero_stripe_len(chunk, "RAID5/6")?;
     let num = u64::from(chunk.num_stripes);
-    let parity_count: u64 = if profile == BtrfsRaidProfile::Raid6 { 2 } else { 1 };
+    let parity_count: u64 = if profile == BtrfsRaidProfile::Raid6 {
+        2
+    } else {
+        1
+    };
     let data_stripes = num.saturating_sub(parity_count);
     if data_stripes == 0 {
         return Err(ParseError::InvalidField {
@@ -676,7 +685,12 @@ fn resolve_raid56_stripe(
         field: "stripe_index",
         reason: "stripe index out of range",
     })?;
-    Ok(vec![stripe_physical_at(s, stripe_nr, stripe_len, offset_in_stripe)?])
+    Ok(vec![stripe_physical_at(
+        s,
+        stripe_nr,
+        stripe_len,
+        offset_in_stripe,
+    )?])
 }
 
 fn require_nonzero_stripe_len(chunk: &BtrfsChunkEntry, _label: &str) -> Result<u64, ParseError> {
@@ -689,13 +703,19 @@ fn require_nonzero_stripe_len(chunk: &BtrfsChunkEntry, _label: &str) -> Result<u
     Ok(chunk.stripe_len)
 }
 
-fn stripe_physical(s: &BtrfsStripe, offset_within: u64) -> Result<BtrfsPhysicalMapping, ParseError> {
+fn stripe_physical(
+    s: &BtrfsStripe,
+    offset_within: u64,
+) -> Result<BtrfsPhysicalMapping, ParseError> {
     Ok(BtrfsPhysicalMapping {
         devid: s.devid,
-        physical: s.offset.checked_add(offset_within).ok_or(ParseError::InvalidField {
-            field: "stripe_offset",
-            reason: "physical address overflow",
-        })?,
+        physical: s
+            .offset
+            .checked_add(offset_within)
+            .ok_or(ParseError::InvalidField {
+                field: "stripe_offset",
+                reason: "physical address overflow",
+            })?,
     })
 }
 

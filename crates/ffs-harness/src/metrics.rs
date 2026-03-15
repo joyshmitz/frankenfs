@@ -31,8 +31,8 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
 
 // ── Metric Kind ────────────────────────────────────────────────────────────
@@ -97,25 +97,23 @@ impl Default for HistogramState {
 /// Default histogram bounds for latency measurements (microseconds).
 /// Covers sub-microsecond to 10s range.
 const DEFAULT_HISTOGRAM_BOUNDS: [u64; 12] = [
-    1,      // 1us
-    5,      // 5us
-    10,     // 10us
-    50,     // 50us
-    100,    // 100us
-    500,    // 500us
-    1_000,  // 1ms
-    5_000,  // 5ms
-    10_000, // 10ms
-    50_000, // 50ms
-    100_000, // 100ms
+    1,         // 1us
+    5,         // 5us
+    10,        // 10us
+    50,        // 50us
+    100,       // 100us
+    500,       // 500us
+    1_000,     // 1ms
+    5_000,     // 5ms
+    10_000,    // 10ms
+    50_000,    // 50ms
+    100_000,   // 100ms
     1_000_000, // 1s
 ];
 
 impl HistogramState {
     fn with_bounds(bounds: &[u64]) -> Self {
-        let counts = (0..=bounds.len())
-            .map(|_| AtomicU64::new(0))
-            .collect();
+        let counts = (0..=bounds.len()).map(|_| AtomicU64::new(0)).collect();
         Self {
             bounds: bounds.to_vec(),
             counts,
@@ -518,8 +516,8 @@ mod tests {
         let hist = registry.register("latency.us", MetricKind::Histogram);
 
         // Observe values in different buckets
-        hist.observe(3);   // 5us bucket
-        hist.observe(50);  // 50us bucket
+        hist.observe(3); // 5us bucket
+        hist.observe(50); // 50us bucket
         hist.observe(500); // 500us bucket
         hist.observe(999_999); // 1s bucket
         hist.observe(5_000_000); // +Inf bucket
@@ -549,8 +547,8 @@ mod tests {
         registry.enable();
         let hist = registry.register_histogram("custom.hist", &[10, 100, 1000]);
 
-        hist.observe(5);   // bucket 0 (le=10)
-        hist.observe(50);  // bucket 1 (le=100)
+        hist.observe(5); // bucket 0 (le=10)
+        hist.observe(50); // bucket 1 (le=100)
         hist.observe(500); // bucket 2 (le=1000)
         hist.observe(5000); // inf
 

@@ -653,7 +653,10 @@ mod tests {
 
     #[test]
     fn pressure_gauge_infinity_treated_as_zero() {
-        assert_eq!(render_pressure_gauge(f64::INFINITY, 10), "[..........]   0%");
+        assert_eq!(
+            render_pressure_gauge(f64::INFINITY, 10),
+            "[..........]   0%"
+        );
     }
 
     #[test]
@@ -767,7 +770,10 @@ mod tests {
 
     #[test]
     fn degradation_level_label_all_variants() {
-        assert_eq!(degradation_level_label(DegradationLevel::Normal), ("NORMAL", 0));
+        assert_eq!(
+            degradation_level_label(DegradationLevel::Normal),
+            ("NORMAL", 0)
+        );
         assert_eq!(
             degradation_level_label(DegradationLevel::Warning),
             ("BACKGROUND PAUSED", 1)
@@ -846,7 +852,10 @@ mod tests {
         let d1 = Dashboard::new();
         let d2 = Dashboard::default();
         assert_eq!(d1.snapshot().cache_hits, d2.snapshot().cache_hits);
-        assert_eq!(d1.snapshot().mvcc_snapshot_seq, d2.snapshot().mvcc_snapshot_seq);
+        assert_eq!(
+            d1.snapshot().mvcc_snapshot_seq,
+            d2.snapshot().mvcc_snapshot_seq
+        );
     }
 
     #[test]
