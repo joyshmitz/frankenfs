@@ -10,8 +10,8 @@
 use crate::SnapshotRegistry;
 use crate::compression::{self, CompressionPolicy, VersionData};
 use crate::{
-    BlockVersion, CommitError, CommittedTxnRecord, MergeProof, Transaction,
-    resolve_version_bytes_at_or_before,
+    AdaptivePolicyConfig, BlockVersion, CommitError, CommittedTxnRecord, ConflictPolicy,
+    ContentionMetrics, MergeProof, Transaction, resolve_version_bytes_at_or_before,
 };
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{RwLock, RwLockWriteGuard};
@@ -65,6 +65,12 @@ pub struct ShardedMvccStore {
     active_snapshots: RwLock<BTreeMap<CommitSeq, u32>>,
     /// Compression policy for version chains.
     compression_policy: CompressionPolicy,
+    /// Conflict resolution policy (Strict / SafeMerge / Adaptive).
+    conflict_policy: RwLock<ConflictPolicy>,
+    /// Configuration for the adaptive expected-loss decision model.
+    adaptive_config: AdaptivePolicyConfig,
+    /// Runtime contention metrics tracked via EMA (behind a lock for thread safety).
+    contention_metrics: RwLock<ContentionMetrics>,
 }
 
 impl ShardedMvccStore {
@@ -91,6 +97,9 @@ impl ShardedMvccStore {
             next_commit: AtomicU64::new(1),
             active_snapshots: RwLock::new(BTreeMap::new()),
             compression_policy: policy,
+            conflict_policy: RwLock::new(ConflictPolicy::default()),
+            adaptive_config: AdaptivePolicyConfig::default(),
+            contention_metrics: RwLock::new(ContentionMetrics::default()),
         }
     }
 
@@ -98,6 +107,36 @@ impl ShardedMvccStore {
     #[must_use]
     pub fn shard_count(&self) -> usize {
         self.shard_count
+    }
+
+    /// Set the conflict resolution policy.
+    pub fn set_conflict_policy(&self, policy: ConflictPolicy) {
+        *self.conflict_policy.write() = policy;
+    }
+
+    /// Returns the current conflict policy.
+    #[must_use]
+    pub fn conflict_policy(&self) -> ConflictPolicy {
+        *self.conflict_policy.read()
+    }
+
+    /// Returns a snapshot of current contention metrics.
+    #[must_use]
+    pub fn contention_metrics(&self) -> ContentionMetrics {
+        *self.contention_metrics.read()
+    }
+
+    /// The effective policy for the next commit: resolves `Adaptive` to a
+    /// concrete `Strict` or `SafeMerge` based on current contention metrics.
+    #[must_use]
+    pub fn effective_policy(&self) -> ConflictPolicy {
+        let policy = *self.conflict_policy.read();
+        match policy {
+            ConflictPolicy::Adaptive => {
+                self.contention_metrics.read().select_policy(&self.adaptive_config)
+            }
+            other => other,
+        }
     }
 
     /// Map a block number to its shard index.
@@ -201,6 +240,10 @@ impl ShardedMvccStore {
         shard_guards: &[(usize, ShardWriteGuard<'_>)],
         merge_log_event: &'static str,
     ) -> Result<(), CommitError> {
+        let effective = self.effective_policy();
+        let mut had_conflict = false;
+        let mut merge_succeeded = false;
+
         for &block in txn.write_set().keys() {
             let shard_idx = self.shard_index(block);
             let shard = shard_guards
@@ -210,15 +253,35 @@ impl ShardedMvccStore {
                 .expect("shard must be locked");
             let latest = Self::latest_commit_seq_in_shard(shard, block);
             if latest > txn.snapshot().high {
+                had_conflict = true;
+
+                // Under Strict policy, any conflict is an immediate abort.
+                if effective == ConflictPolicy::Strict {
+                    self.contention_metrics.write().record_commit(
+                        self.adaptive_config.ema_alpha, true, false, true,
+                    );
+                    return Err(CommitError::Conflict {
+                        block,
+                        snapshot: txn.snapshot().high,
+                        observed: latest,
+                    });
+                }
+
+                // SafeMerge: attempt merge-proof resolution.
                 if Self::resolved_write_bytes_locked(txn, block, shard).is_ok() {
+                    merge_succeeded = true;
                     debug!(
                         block = block.0,
                         merge_proof = ?txn.merge_proof(block),
                         snapshot_commit_seq = txn.snapshot().high.0,
                         observed_commit_seq = latest.0,
+                        policy = ?effective,
                         "{merge_log_event}"
                     );
                 } else {
+                    self.contention_metrics.write().record_commit(
+                        self.adaptive_config.ema_alpha, true, false, true,
+                    );
                     return Err(CommitError::Conflict {
                         block,
                         snapshot: txn.snapshot().high,
@@ -227,6 +290,11 @@ impl ShardedMvccStore {
                 }
             }
         }
+
+        // Record successful preflight (no abort).
+        self.contention_metrics.write().record_commit(
+            self.adaptive_config.ema_alpha, had_conflict, merge_succeeded, false,
+        );
         Ok(())
     }
 

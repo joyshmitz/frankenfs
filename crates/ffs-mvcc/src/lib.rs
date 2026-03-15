@@ -423,6 +423,184 @@ pub struct TransactionOutcomeStats {
     pub ssi_conflicts: u64,
 }
 
+/// Conflict resolution policy governing how MVCC commit handles FCW conflicts.
+///
+/// - `Strict`: Pure first-committer-wins.  Any conflict aborts the later writer.
+/// - `SafeMerge`: When a [`MergeProof`] is available and validates, the conflicting
+///   writes are merged.  Falls back to abort when no proof exists.
+/// - `Adaptive`: Automatically selects between `Strict` and `SafeMerge` based on
+///   observed contention metrics and an expected-loss decision rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ConflictPolicy {
+    /// Pure FCW — any block-level conflict aborts the later writer.
+    Strict,
+    /// Merge when a valid [`MergeProof`] exists; abort otherwise.
+    #[default]
+    SafeMerge,
+    /// Runtime-tunable: selects between `Strict` and `SafeMerge` per commit
+    /// based on observed contention and expected-loss calculation.
+    Adaptive,
+}
+
+/// Parameters for the expected-loss decision model used by [`ConflictPolicy::Adaptive`].
+///
+/// The adaptive policy selects the strategy with the lowest expected loss:
+///
+/// ```text
+/// E[loss] = P(corruption) * severity + P(unnecessary_abort) * abort_cost
+/// ```
+///
+/// `SafeMerge` has lower `P(unnecessary_abort)` but higher `P(corruption)` because
+/// a buggy merge proof could silently corrupt data.  `Strict` has zero corruption
+/// risk but wastes throughput under high contention with safe-mergeable workloads.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AdaptivePolicyConfig {
+    /// Cost multiplier for a data corruption event (must-not-happen severity).
+    /// Default: 1000.0 — corruption is catastrophic.
+    pub corruption_severity: f64,
+    /// Cost multiplier for an unnecessary transaction abort.
+    /// Default: 1.0 — aborts are annoying but recoverable.
+    pub abort_cost: f64,
+    /// Baseline probability of corruption from a merge-proof bug.
+    /// Default: 1e-6 — merge proofs are heavily tested, but non-zero risk.
+    pub base_corruption_probability: f64,
+    /// EMA smoothing factor for contention metrics (0..1, higher = more responsive).
+    /// Default: 0.1 — smooth out noise while tracking trends.
+    pub ema_alpha: f64,
+    /// Minimum number of commits observed before adaptive kicks in.
+    /// Below this, the policy falls back to `SafeMerge`.
+    /// Default: 20.
+    pub warmup_commits: u64,
+}
+
+impl Default for AdaptivePolicyConfig {
+    fn default() -> Self {
+        Self {
+            corruption_severity: 1000.0,
+            abort_cost: 1.0,
+            base_corruption_probability: 1e-6,
+            ema_alpha: 0.1,
+            warmup_commits: 20,
+        }
+    }
+}
+
+/// Exponential moving average contention metrics tracked per [`MvccStore`].
+///
+/// Updated on every commit attempt (success or abort).  Used by
+/// [`ConflictPolicy::Adaptive`] to drive the expected-loss calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ContentionMetrics {
+    /// EMA of conflicts per commit (0.0 = no conflicts, 1.0 = every commit conflicts).
+    pub conflict_rate: f64,
+    /// EMA of successful merges per conflict (0.0 = merges always fail, 1.0 = always succeed).
+    pub merge_success_rate: f64,
+    /// EMA of aborts per commit (0.0 = no aborts, 1.0 = every commit aborts).
+    pub abort_rate: f64,
+    /// Total commits observed (for warmup gating).
+    pub total_commits: u64,
+    /// Total conflicts observed.
+    pub total_conflicts: u64,
+    /// Total successful merges observed.
+    pub total_merges: u64,
+    /// Total aborts observed.
+    pub total_aborts: u64,
+}
+
+impl Default for ContentionMetrics {
+    fn default() -> Self {
+        Self {
+            conflict_rate: 0.0,
+            merge_success_rate: 1.0,
+            abort_rate: 0.0,
+            total_commits: 0,
+            total_conflicts: 0,
+            total_merges: 0,
+            total_aborts: 0,
+        }
+    }
+}
+
+impl ContentionMetrics {
+    /// Update metrics after a commit attempt.
+    ///
+    /// - `had_conflict`: true if any block in the write set had a version newer
+    ///   than the transaction's snapshot.
+    /// - `merge_succeeded`: true if the conflict was resolved via merge proof
+    ///   (only meaningful when `had_conflict` is true).
+    /// - `aborted`: true if the commit was aborted.
+    pub fn record_commit(&mut self, alpha: f64, had_conflict: bool, merge_succeeded: bool, aborted: bool) {
+        self.total_commits += 1;
+        let conflict_sample = if had_conflict { 1.0 } else { 0.0 };
+        self.conflict_rate = self.conflict_rate * (1.0 - alpha) + conflict_sample * alpha;
+
+        if had_conflict {
+            self.total_conflicts += 1;
+            let merge_sample = if merge_succeeded { 1.0 } else { 0.0 };
+            self.merge_success_rate = self.merge_success_rate * (1.0 - alpha) + merge_sample * alpha;
+            if merge_succeeded {
+                self.total_merges += 1;
+            }
+        }
+
+        if aborted {
+            self.total_aborts += 1;
+        }
+        let abort_sample = if aborted { 1.0 } else { 0.0 };
+        self.abort_rate = self.abort_rate * (1.0 - alpha) + abort_sample * alpha;
+    }
+
+    /// Compute the expected loss for `Strict` policy given current metrics.
+    ///
+    /// Strict never corrupts (`P(corruption) = 0`) but aborts every conflict:
+    /// `E[loss] = conflict_rate * abort_cost`
+    #[must_use]
+    pub fn expected_loss_strict(&self, config: &AdaptivePolicyConfig) -> f64 {
+        self.conflict_rate * config.abort_cost
+    }
+
+    /// Compute the expected loss for `SafeMerge` policy given current metrics.
+    ///
+    /// SafeMerge has a small corruption risk but avoids most aborts:
+    /// `E[loss] = P(corruption) * severity + (conflict_rate * (1 - merge_success_rate)) * abort_cost`
+    #[must_use]
+    pub fn expected_loss_safe_merge(&self, config: &AdaptivePolicyConfig) -> f64 {
+        let corruption_loss = config.base_corruption_probability * config.corruption_severity;
+        let residual_abort_rate = self.conflict_rate * (1.0 - self.merge_success_rate);
+        corruption_loss + residual_abort_rate * config.abort_cost
+    }
+
+    /// Select the conflict resolution strategy with the lowest expected loss.
+    ///
+    /// Returns `Strict` if the expected loss of strict FCW is lower than safe-merge,
+    /// or if we haven't observed enough commits yet (warmup period).
+    #[must_use]
+    pub fn select_policy(&self, config: &AdaptivePolicyConfig) -> ConflictPolicy {
+        if self.total_commits < config.warmup_commits {
+            return ConflictPolicy::SafeMerge;
+        }
+        let loss_strict = self.expected_loss_strict(config);
+        let loss_merge = self.expected_loss_safe_merge(config);
+
+        trace!(
+            target: "ffs::mvcc::adaptive",
+            loss_strict,
+            loss_merge,
+            conflict_rate = self.conflict_rate,
+            merge_success_rate = self.merge_success_rate,
+            abort_rate = self.abort_rate,
+            total_commits = self.total_commits,
+            "adaptive_policy_selection"
+        );
+
+        if loss_strict <= loss_merge {
+            ConflictPolicy::Strict
+        } else {
+            ConflictPolicy::SafeMerge
+        }
+    }
+}
+
 /// Budget-driven controls for MVCC version GC batches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcBackpressureConfig {
@@ -599,6 +777,12 @@ pub struct MvccStore {
     aborted_transactions: u64,
     /// Total number of SSI conflicts observed since store creation.
     ssi_conflicts: u64,
+    /// Conflict resolution policy (Strict / SafeMerge / Adaptive).
+    conflict_policy: ConflictPolicy,
+    /// Configuration for the adaptive expected-loss decision model.
+    adaptive_config: AdaptivePolicyConfig,
+    /// Runtime contention metrics tracked via EMA.
+    contention_metrics: ContentionMetrics,
 }
 
 impl Default for MvccStore {
@@ -623,6 +807,9 @@ impl MvccStore {
             gc_throttled: false,
             aborted_transactions: 0,
             ssi_conflicts: 0,
+            conflict_policy: ConflictPolicy::default(),
+            adaptive_config: AdaptivePolicyConfig::default(),
+            contention_metrics: ContentionMetrics::default(),
         }
     }
 
@@ -632,6 +819,44 @@ impl MvccStore {
         Self {
             compression_policy: policy,
             ..Self::new()
+        }
+    }
+
+    /// Set the conflict resolution policy.
+    pub fn set_conflict_policy(&mut self, policy: ConflictPolicy) {
+        self.conflict_policy = policy;
+    }
+
+    /// Set the adaptive policy configuration.
+    pub fn set_adaptive_config(&mut self, config: AdaptivePolicyConfig) {
+        self.adaptive_config = config;
+    }
+
+    /// Returns the current conflict policy.
+    #[must_use]
+    pub fn conflict_policy(&self) -> ConflictPolicy {
+        self.conflict_policy
+    }
+
+    /// Returns the current contention metrics.
+    #[must_use]
+    pub fn contention_metrics(&self) -> &ContentionMetrics {
+        &self.contention_metrics
+    }
+
+    /// Returns the adaptive policy configuration.
+    #[must_use]
+    pub fn adaptive_config(&self) -> &AdaptivePolicyConfig {
+        &self.adaptive_config
+    }
+
+    /// The effective policy for the next commit: resolves `Adaptive` to a
+    /// concrete `Strict` or `SafeMerge` based on current contention metrics.
+    #[must_use]
+    pub fn effective_policy(&self) -> ConflictPolicy {
+        match self.conflict_policy {
+            ConflictPolicy::Adaptive => self.contention_metrics.select_policy(&self.adaptive_config),
+            other => other,
         }
     }
 
@@ -1146,10 +1371,40 @@ impl MvccStore {
 
     fn preflight_fcw(&mut self, txn: &Transaction) -> Result<(), CommitError> {
         let chain_cap = self.compression_policy.max_chain_length;
+        let effective = self.effective_policy();
+        let mut had_conflict = false;
+        let mut merge_succeeded = false;
+
         for block in txn.writes.keys() {
             let latest = self.latest_commit_seq(*block);
             if latest > txn.snapshot.high {
+                had_conflict = true;
+
+                // Under Strict policy, any conflict is an immediate abort.
+                if effective == ConflictPolicy::Strict {
+                    warn!(
+                        target: "ffs::mvcc::evidence",
+                        event = "txn_aborted",
+                        txn_id = txn.id.0,
+                        reason = "strict_fcw_conflict",
+                        block = block.0,
+                        snapshot_commit_seq = txn.snapshot.high.0,
+                        observed_commit_seq = latest.0,
+                        policy = ?effective,
+                    );
+                    self.contention_metrics.record_commit(
+                        self.adaptive_config.ema_alpha, true, false, true,
+                    );
+                    return Err(CommitError::Conflict {
+                        block: *block,
+                        snapshot: txn.snapshot.high,
+                        observed: latest,
+                    });
+                }
+
+                // SafeMerge: attempt merge-proof resolution.
                 if self.resolved_write_bytes(txn, *block).is_ok() {
+                    merge_succeeded = true;
                     debug!(
                         target: "ffs::mvcc",
                         txn_id = txn.id.0,
@@ -1157,6 +1412,7 @@ impl MvccStore {
                         merge_proof = ?txn.merge_proof(*block),
                         snapshot_commit_seq = txn.snapshot.high.0,
                         observed_commit_seq = latest.0,
+                        policy = ?effective,
                         "fcw_conflict_merged"
                     );
                 } else {
@@ -1167,7 +1423,11 @@ impl MvccStore {
                         reason = "fcw_conflict",
                         block = block.0,
                         snapshot_commit_seq = txn.snapshot.high.0,
-                        observed_commit_seq = latest.0
+                        observed_commit_seq = latest.0,
+                        policy = ?effective,
+                    );
+                    self.contention_metrics.record_commit(
+                        self.adaptive_config.ema_alpha, true, false, true,
                     );
                     return Err(CommitError::Conflict {
                         block: *block,
@@ -1180,6 +1440,11 @@ impl MvccStore {
                 self.enforce_chain_pressure(txn.id, *block, cap)?;
             }
         }
+
+        // Record successful preflight (no abort).
+        self.contention_metrics.record_commit(
+            self.adaptive_config.ema_alpha, had_conflict, merge_succeeded, false,
+        );
         Ok(())
     }
 
