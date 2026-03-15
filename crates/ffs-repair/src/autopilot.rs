@@ -430,12 +430,17 @@ impl RefreshLossModel {
     /// amortized as `refresh_io_cost / max_staleness_secs`.
     #[must_use]
     pub fn expected_loss_age_only(&self, max_staleness_secs: f64, write_rate: f64) -> f64 {
-        if max_staleness_secs <= 0.0 || self.source_block_count == 0 {
-            return self.refresh_io_cost; // Degenerate: refresh every tick.
+        if self.source_block_count == 0 {
+            return 0.0; // No blocks → no loss.
+        }
+        if max_staleness_secs <= 0.0 {
+            // Degenerate: refresh on every tick → infinite refresh cost rate.
+            return f64::MAX;
         }
         let blocks = f64::from(self.source_block_count);
+        let clamped_rate = write_rate.max(0.0);
         // Average stale fraction over the refresh interval.
-        let avg_stale_blocks = (write_rate * max_staleness_secs / 2.0).min(blocks);
+        let avg_stale_blocks = (clamped_rate * max_staleness_secs / 2.0).min(blocks);
         let avg_stale_fraction = avg_stale_blocks / blocks;
         let data_loss_rate =
             self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
@@ -450,8 +455,17 @@ impl RefreshLossModel {
     /// as `refresh_io_cost * write_rate / block_threshold`.
     #[must_use]
     pub fn expected_loss_block_count(&self, block_threshold: u32, write_rate: f64) -> f64 {
-        if block_threshold == 0 || self.source_block_count == 0 || write_rate <= 0.0 {
-            return self.refresh_io_cost * write_rate.max(0.0);
+        if self.source_block_count == 0 {
+            return 0.0; // No blocks → no loss.
+        }
+        let clamped_rate = write_rate.max(0.0);
+        if block_threshold == 0 {
+            // Refresh on every write → cost = refresh_io_cost per write.
+            return self.refresh_io_cost * clamped_rate;
+        }
+        if clamped_rate <= 0.0 {
+            // No writes → no refreshes, no stale blocks, no loss.
+            return 0.0;
         }
         let blocks = f64::from(self.source_block_count);
         let threshold_f = f64::from(block_threshold);
@@ -459,7 +473,7 @@ impl RefreshLossModel {
         let avg_stale_fraction = avg_stale_blocks / blocks;
         let data_loss_rate =
             self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
-        let refresh_amortized = self.refresh_io_cost * write_rate / threshold_f;
+        let refresh_amortized = self.refresh_io_cost * clamped_rate / threshold_f;
         data_loss_rate * self.data_loss_cost + refresh_amortized
     }
 
@@ -476,22 +490,24 @@ impl RefreshLossModel {
         if self.source_block_count == 0 {
             return 0.0;
         }
+        let clamped_rate = write_rate.max(0.0);
         let age_window = if max_staleness_secs > 0.0 {
             max_staleness_secs
         } else {
             f64::INFINITY
         };
-        let block_window = if write_rate > 0.0 && block_threshold > 0 {
-            f64::from(block_threshold) / write_rate
+        let block_window = if clamped_rate > 0.0 && block_threshold > 0 {
+            f64::from(block_threshold) / clamped_rate
         } else {
             f64::INFINITY
         };
         let effective_window = age_window.min(block_window);
         if !effective_window.is_finite() || effective_window <= 0.0 {
-            return self.refresh_io_cost;
+            // Both triggers disabled (or nonsensical) — no refreshes, no writes.
+            return 0.0;
         }
         let blocks = f64::from(self.source_block_count);
-        let avg_stale_blocks = (write_rate * effective_window / 2.0).min(blocks);
+        let avg_stale_blocks = (clamped_rate * effective_window / 2.0).min(blocks);
         let avg_stale_fraction = avg_stale_blocks / blocks;
         let data_loss_rate =
             self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
@@ -1042,13 +1058,32 @@ mod tests {
     }
 
     #[test]
-    fn refresh_loss_zero_source_blocks_no_panic() {
+    fn refresh_loss_zero_source_blocks_returns_zero() {
         let m = RefreshLossModel {
             source_block_count: 0,
             ..RefreshLossModel::default()
         };
-        assert!(m.expected_loss_age_only(30.0, 100.0).is_finite());
-        assert!(m.expected_loss_block_count(500, 100.0).is_finite());
-        assert!(m.expected_loss_hybrid(30.0, 500, 100.0).is_finite());
+        // With zero source blocks, there's nothing to protect → zero loss.
+        assert!((m.expected_loss_age_only(30.0, 100.0) - 0.0).abs() < f64::EPSILON);
+        assert!((m.expected_loss_block_count(500, 100.0) - 0.0).abs() < f64::EPSILON);
+        assert!((m.expected_loss_hybrid(30.0, 500, 100.0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn refresh_loss_zero_write_rate_block_count_returns_zero() {
+        let m = RefreshLossModel::default();
+        // With zero write rate, block-count never triggers → zero loss.
+        assert!((m.expected_loss_block_count(500, 0.0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn refresh_loss_zero_staleness_returns_max() {
+        let m = RefreshLossModel::default();
+        // Zero staleness = "refresh every tick" → infinite cost.
+        let loss = m.expected_loss_age_only(0.0, 100.0);
+        assert!(
+            loss >= f64::MAX - 1.0,
+            "expected f64::MAX, got {loss}"
+        );
     }
 }
