@@ -1454,6 +1454,11 @@ mod tests {
             DirtyBlockDiscarded,
             DurabilityPolicyChanged,
             RefreshPolicyChanged,
+            MergeProofChecked,
+            MergeApplied,
+            MergeRejected,
+            PolicySwitched,
+            ContentionSample,
         ];
         for variant in variants {
             let json = serde_json::to_string(&variant).expect("serialize");
