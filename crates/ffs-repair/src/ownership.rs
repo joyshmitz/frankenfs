@@ -504,7 +504,7 @@ mod tests {
 
         // If our host_id < other host_id, we should win
         let mgr = RepairOwnership::new(host_a.into(), "worker-a".into());
-        assert!(mgr.host_id < host_b.to_string());
+        assert!(mgr.host_id.as_str() < host_b);
     }
 
     #[test]
@@ -584,9 +584,8 @@ mod tests {
 
         let mgr = RepairOwnership::new("host-1".into(), "test".into());
         let result = mgr.try_acquire(&image).expect("acquire");
-        let guard = match result {
-            AcquireResult::Acquired(g) => g,
-            _ => panic!("expected acquired"),
+        let AcquireResult::Acquired(guard) = result else {
+            panic!("expected acquired");
         };
 
         let record_path = RepairOwnership::record_path_for(&image);
@@ -608,9 +607,8 @@ mod tests {
         let mgr =
             RepairOwnership::new("host-1".into(), "test".into()).with_ttl(Duration::from_secs(10));
         let result = mgr.try_acquire(&image).expect("acquire");
-        let mut guard = match result {
-            AcquireResult::Acquired(g) => g,
-            _ => panic!("expected acquired"),
+        let AcquireResult::Acquired(mut guard) = result else {
+            panic!("expected acquired");
         };
 
         let old_time = guard.record().claimed_at.clone();
