@@ -7,10 +7,14 @@
 //!
 //! Snapshot lifecycle is managed externally via [`SnapshotRegistry`].
 
+use crate::SnapshotRegistry;
 use crate::compression::{self, CompressionPolicy, VersionData};
-use crate::{BlockVersion, CommitError, CommittedTxnRecord, SnapshotRegistry, Transaction};
+use crate::{
+    BlockVersion, CommitError, CommittedTxnRecord, MergeProof, Transaction,
+    resolve_version_bytes_at_or_before,
+};
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace};
@@ -22,6 +26,16 @@ struct MvccShard {
     /// Per-shard SSI log.  Entries are kept here because SSI checks
     /// are per-block and shards are block-partitioned.
     ssi_log: Vec<CommittedTxnRecord>,
+}
+
+type ShardWriteGuard<'a> = RwLockWriteGuard<'a, MvccShard>;
+
+#[derive(Debug, Clone, Copy)]
+struct CommitInstallContext {
+    snapshot: Snapshot,
+    commit_seq: CommitSeq,
+    txn_id: TxnId,
+    dedup_enabled: bool,
 }
 
 /// Thread-safe, sharded MVCC version store.
@@ -133,6 +147,189 @@ impl ShardedMvccStore {
         }
     }
 
+    fn latest_commit_seq_in_shard(shard: &MvccShard, block: BlockNumber) -> CommitSeq {
+        shard
+            .versions
+            .get(&block)
+            .and_then(|versions| versions.last())
+            .map_or(CommitSeq(0), |version| version.commit_seq)
+    }
+
+    fn resolved_write_bytes_locked(
+        txn: &Transaction,
+        block: BlockNumber,
+        shard: &MvccShard,
+    ) -> Result<Vec<u8>, CommitError> {
+        let staged = txn
+            .staged_write(block)
+            .expect("write_set keys must have staged bytes");
+        let observed = Self::latest_commit_seq_in_shard(shard, block);
+        if observed <= txn.snapshot().high {
+            return Ok(staged.to_vec());
+        }
+
+        let proof = txn.merge_proof(block).cloned().unwrap_or_default();
+        let base = shard
+            .versions
+            .get(&block)
+            .and_then(|versions| resolve_version_bytes_at_or_before(versions, txn.snapshot().high))
+            .unwrap_or_default();
+        let latest = shard
+            .versions
+            .get(&block)
+            .and_then(|versions| resolve_version_bytes_at_or_before(versions, observed))
+            .unwrap_or_default();
+        proof
+            .merge_bytes(&base, &latest, staged)
+            .ok_or_else(|| CommitError::Conflict {
+                block,
+                snapshot: txn.snapshot().high,
+                observed,
+            })
+    }
+
+    fn lock_shards(&self, shard_indices: &[usize]) -> Vec<(usize, ShardWriteGuard<'_>)> {
+        shard_indices
+            .iter()
+            .map(|&idx| (idx, self.shards[idx].write()))
+            .collect()
+    }
+
+    fn preflight_fcw_locked(
+        &self,
+        txn: &Transaction,
+        shard_guards: &[(usize, ShardWriteGuard<'_>)],
+        merge_log_event: &'static str,
+    ) -> Result<(), CommitError> {
+        for &block in txn.write_set().keys() {
+            let shard_idx = self.shard_index(block);
+            let shard = shard_guards
+                .iter()
+                .find(|(idx, _)| *idx == shard_idx)
+                .map(|(_, guard)| guard)
+                .expect("shard must be locked");
+            let latest = Self::latest_commit_seq_in_shard(shard, block);
+            if latest > txn.snapshot().high {
+                if Self::resolved_write_bytes_locked(txn, block, shard).is_ok() {
+                    debug!(
+                        block = block.0,
+                        merge_proof = ?txn.merge_proof(block),
+                        snapshot_commit_seq = txn.snapshot().high.0,
+                        observed_commit_seq = latest.0,
+                        "{merge_log_event}"
+                    );
+                } else {
+                    return Err(CommitError::Conflict {
+                        block,
+                        snapshot: txn.snapshot().high,
+                        observed: latest,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn merged_write_bytes_locked(
+        shard: &MvccShard,
+        block: BlockNumber,
+        snapshot: Snapshot,
+        bytes: Vec<u8>,
+        merge_proof: Option<&MergeProof>,
+    ) -> Vec<u8> {
+        let observed = Self::latest_commit_seq_in_shard(shard, block);
+        if observed <= snapshot.high {
+            return bytes;
+        }
+
+        let proof = merge_proof.cloned().unwrap_or_default();
+        let base = shard
+            .versions
+            .get(&block)
+            .and_then(|versions| resolve_version_bytes_at_or_before(versions, snapshot.high))
+            .unwrap_or_default();
+        let latest = shard
+            .versions
+            .get(&block)
+            .and_then(|versions| resolve_version_bytes_at_or_before(versions, observed))
+            .unwrap_or_default();
+        proof
+            .merge_bytes(&base, &latest, &bytes)
+            .expect("preflight must reject unmergeable conflicts")
+    }
+
+    fn install_committed_version_locked(
+        shard: &mut MvccShard,
+        block: BlockNumber,
+        bytes: Vec<u8>,
+        merge_proof: Option<&MergeProof>,
+        ctx: CommitInstallContext,
+    ) {
+        let version_bytes =
+            Self::merged_write_bytes_locked(shard, block, ctx.snapshot, bytes, merge_proof);
+        let version_data = Self::build_version_data(
+            shard.versions.get(&block),
+            version_bytes,
+            ctx.dedup_enabled,
+            block,
+        );
+        shard.versions.entry(block).or_default().push(BlockVersion {
+            block,
+            commit_seq: ctx.commit_seq,
+            writer: ctx.txn_id,
+            data: version_data,
+        });
+    }
+
+    fn ssi_shards_for_txn(&self, txn: &Transaction) -> Vec<usize> {
+        let mut shard_indices = BTreeSet::new();
+        for block in txn.write_set().keys() {
+            shard_indices.insert(self.shard_index(*block));
+        }
+        for block in txn.read_set().keys() {
+            shard_indices.insert(self.shard_index(*block));
+        }
+        shard_indices.into_iter().collect()
+    }
+
+    fn validate_ssi_read_set_locked(
+        &self,
+        txn: &Transaction,
+        shard_guards: &[(usize, ShardWriteGuard<'_>)],
+    ) -> Result<(), CommitError> {
+        for (&block, &read_version) in txn.read_set() {
+            let shard_idx = self.shard_index(block);
+            let shard = shard_guards
+                .iter()
+                .find(|(idx, _)| *idx == shard_idx)
+                .map(|(_, guard)| guard)
+                .expect("shard must be locked");
+            for record in shard.ssi_log.iter().rev() {
+                if record.commit_seq <= txn.snapshot().high {
+                    break;
+                }
+                if record.write_set.contains(&block) {
+                    return Err(CommitError::SsiConflict {
+                        pivot_block: block,
+                        read_version,
+                        write_version: record.commit_seq,
+                        concurrent_txn: record.txn_id,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn append_ssi_record_locked(
+        shard_guards: &mut [(usize, ShardWriteGuard<'_>)],
+        record: &CommittedTxnRecord,
+    ) {
+        for (_, shard) in shard_guards {
+            shard.ssi_log.push(record.clone());
+        }
+    }
+
     /// The current snapshot (latest committed version).
     #[must_use]
     pub fn current_snapshot(&self) -> Snapshot {
@@ -185,40 +382,16 @@ impl ShardedMvccStore {
             return Ok(self.current_snapshot().high);
         }
 
-        // Determine which shards are involved and sort for consistent ordering.
         let shard_indices = self.involved_shards(&txn);
+        let mut shard_guards = self.lock_shards(&shard_indices);
 
-        // Acquire write locks in sorted order.
-        let mut shard_guards: Vec<(usize, parking_lot::RwLockWriteGuard<'_, MvccShard>)> =
-            shard_indices
-                .iter()
-                .map(|&idx| (idx, self.shards[idx].write()))
-                .collect();
-
-        // FCW check across all shards.
-        for &block in txn.write_set().keys() {
-            let shard_idx = self.shard_index(block);
-            let latest = shard_guards
-                .iter()
-                .find(|(idx, _)| *idx == shard_idx)
-                .and_then(|(_, guard)| guard.versions.get(&block))
-                .and_then(|v| v.last())
-                .map_or(CommitSeq(0), |v| v.commit_seq);
-            if latest > txn.snapshot().high {
-                return Err((
-                    CommitError::Conflict {
-                        block,
-                        snapshot: txn.snapshot().high,
-                        observed: latest,
-                    },
-                    txn,
-                ));
-            }
+        if let Err(error) =
+            self.preflight_fcw_locked(&txn, &shard_guards, "sharded_fcw_conflict_merged")
+        {
+            return Err((error, txn));
         }
 
-        // Allocate commit sequence (atomic, unique).
         let commit_seq = CommitSeq(self.next_commit.fetch_add(1, Ordering::SeqCst));
-
         trace!(
             commit_seq = commit_seq.0,
             shards_involved = shard_indices.len(),
@@ -226,26 +399,27 @@ impl ShardedMvccStore {
             "sharded_commit"
         );
 
-        // Write versions to shards.
-        let txn_id = txn.id();
-        let dedup_enabled = self.compression_policy.dedup_identical;
-        for (block, bytes) in txn.into_writes() {
+        let install_ctx = CommitInstallContext {
+            snapshot: txn.snapshot(),
+            commit_seq,
+            txn_id: txn.id(),
+            dedup_enabled: self.compression_policy.dedup_identical,
+        };
+        let (writes, merge_proofs) = txn.into_writes_and_merge_proofs();
+        for (block, bytes) in writes {
             let shard_idx = self.shard_index(block);
             let shard = shard_guards
                 .iter_mut()
                 .find(|(idx, _)| *idx == shard_idx)
                 .map(|(_, guard)| guard)
                 .expect("shard must be locked");
-
-            let version_data =
-                Self::build_version_data(shard.versions.get(&block), bytes, dedup_enabled, block);
-
-            shard.versions.entry(block).or_default().push(BlockVersion {
+            Self::install_committed_version_locked(
+                shard,
                 block,
-                commit_seq,
-                writer: txn_id,
-                data: version_data,
-            });
+                bytes,
+                merge_proofs.get(&block),
+                install_ctx,
+            );
         }
 
         Ok(commit_seq)
@@ -258,109 +432,54 @@ impl ShardedMvccStore {
             return Ok(self.current_snapshot().high);
         }
 
-        // Determine all involved shards (writes + reads).
-        let mut all_blocks: BTreeSet<usize> = BTreeSet::new();
-        for block in txn.write_set().keys() {
-            all_blocks.insert(self.shard_index(*block));
-        }
-        for block in txn.read_set().keys() {
-            all_blocks.insert(self.shard_index(*block));
-        }
-        let shard_indices: Vec<usize> = all_blocks.into_iter().collect();
+        let shard_indices = self.ssi_shards_for_txn(&txn);
+        let mut shard_guards = self.lock_shards(&shard_indices);
 
-        let mut shard_guards: Vec<(usize, parking_lot::RwLockWriteGuard<'_, MvccShard>)> =
-            shard_indices
-                .iter()
-                .map(|&idx| (idx, self.shards[idx].write()))
-                .collect();
-
-        // FCW check.
-        for &block in txn.write_set().keys() {
-            let shard_idx = self.shard_index(block);
-            let latest = shard_guards
-                .iter()
-                .find(|(idx, _)| *idx == shard_idx)
-                .and_then(|(_, guard)| guard.versions.get(&block))
-                .and_then(|v| v.last())
-                .map_or(CommitSeq(0), |v| v.commit_seq);
-            if latest > txn.snapshot().high {
-                return Err((
-                    CommitError::Conflict {
-                        block,
-                        snapshot: txn.snapshot().high,
-                        observed: latest,
-                    },
-                    txn,
-                ));
-            }
+        if let Err(error) =
+            self.preflight_fcw_locked(&txn, &shard_guards, "sharded_ssi_fcw_conflict_merged")
+        {
+            return Err((error, txn));
         }
 
-        // SSI rw-antidependency check.
-        for (&block, &read_version) in txn.read_set() {
-            let shard_idx = self.shard_index(block);
-            let shard = shard_guards
-                .iter()
-                .find(|(idx, _)| *idx == shard_idx)
-                .map(|(_, guard)| guard)
-                .expect("shard must be locked");
-            for record in shard.ssi_log.iter().rev() {
-                if record.commit_seq <= txn.snapshot().high {
-                    break;
-                }
-                if record.write_set.contains(&block) {
-                    return Err((
-                        CommitError::SsiConflict {
-                            pivot_block: block,
-                            read_version,
-                            write_version: record.commit_seq,
-                            concurrent_txn: record.txn_id,
-                        },
-                        txn,
-                    ));
-                }
-            }
+        if let Err(error) = self.validate_ssi_read_set_locked(&txn, &shard_guards) {
+            return Err((error, txn));
         }
 
-        // Allocate commit sequence.
         let commit_seq = CommitSeq(self.next_commit.fetch_add(1, Ordering::SeqCst));
-
-        let txn_id = txn.id();
-        let snapshot = txn.snapshot();
+        let install_ctx = CommitInstallContext {
+            snapshot: txn.snapshot(),
+            commit_seq,
+            txn_id: txn.id(),
+            dedup_enabled: self.compression_policy.dedup_identical,
+        };
         let read_set = txn.read_set().clone();
         let write_keys: BTreeSet<BlockNumber> = txn.write_set().keys().copied().collect();
 
-        // Write versions and SSI log entries per shard.
-        let dedup_enabled = self.compression_policy.dedup_identical;
-        for (block, bytes) in txn.into_writes() {
+        let (writes, merge_proofs) = txn.into_writes_and_merge_proofs();
+        for (block, bytes) in writes {
             let shard_idx = self.shard_index(block);
             let shard = shard_guards
                 .iter_mut()
                 .find(|(idx, _)| *idx == shard_idx)
                 .map(|(_, guard)| guard)
                 .expect("shard must be locked");
-
-            let version_data =
-                Self::build_version_data(shard.versions.get(&block), bytes, dedup_enabled, block);
-
-            shard.versions.entry(block).or_default().push(BlockVersion {
+            Self::install_committed_version_locked(
+                shard,
                 block,
-                commit_seq,
-                writer: txn_id,
-                data: version_data,
-            });
+                bytes,
+                merge_proofs.get(&block),
+                install_ctx,
+            );
         }
 
-        // Add SSI log entry to all involved shards (read + write sets).
         let ssi_record = CommittedTxnRecord {
-            txn_id,
+            txn_id: install_ctx.txn_id,
             commit_seq,
-            snapshot,
+            snapshot: install_ctx.snapshot,
             write_set: write_keys,
             read_set,
         };
-        for (_, shard) in &mut shard_guards {
-            shard.ssi_log.push(ssi_record.clone());
-        }
+        Self::append_ssi_record_locked(&mut shard_guards, &ssi_record);
 
         Ok(commit_seq)
     }
@@ -513,6 +632,39 @@ mod tests {
         store.commit(t1).expect("t1");
         let err = store.commit(t2).expect_err("t2 should conflict");
         assert!(matches!(err, (CommitError::Conflict { .. }, _)));
+    }
+
+    #[test]
+    fn fcw_append_only_merge_proof_allows_same_block_commit() {
+        let store = make_store(4);
+        let block = BlockNumber(9);
+
+        let mut seed = store.begin();
+        seed.stage_write(block, vec![0]);
+        store.commit(seed).expect("seed");
+
+        let mut t1 = store.begin();
+        let mut t2 = store.begin();
+
+        t1.stage_write_with_proof(
+            block,
+            vec![0, 1],
+            crate::MergeProof::AppendOnly { base_len: 1 },
+        );
+        t2.stage_write_with_proof(
+            block,
+            vec![0, 2],
+            crate::MergeProof::AppendOnly { base_len: 1 },
+        );
+
+        store.commit(t1).expect("first append");
+        store
+            .commit(t2)
+            .expect("second append should merge instead of conflicting");
+
+        let latest = store.current_snapshot();
+        let visible = store.read_visible(block, latest).expect("visible");
+        assert_eq!(visible, vec![0, 1, 2]);
     }
 
     #[test]

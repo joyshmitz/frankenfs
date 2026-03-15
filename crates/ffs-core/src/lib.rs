@@ -2413,12 +2413,6 @@ impl OpenFs {
             block_size,
         };
 
-        let writes: Vec<_> = txn
-            .write_set()
-            .iter()
-            .map(|(b, d)| (*b, d.clone()))
-            .collect();
-
         // Hold the MVCC write lock across preflight, journal I/O, and final
         // visibility so no other writer can invalidate this transaction in between.
         let mut mvcc_guard = self.mvcc_store.write();
@@ -2443,6 +2437,29 @@ impl OpenFs {
                 },
                 CommitError::DurabilityFailure { detail } => FfsError::Io(std::io::Error::other(
                     format!("MVCC durability failure during preflight: {detail}"),
+                )),
+            }
+        })?;
+
+        let writes = mvcc_guard.resolved_writes_for_commit(&txn).map_err(|e| {
+            warn!(
+                target: "ffs::journal",
+                txn_id = txn_id.0,
+                error = %e,
+                "journaled_commit_merge_resolution_failed"
+            );
+            match e {
+                CommitError::Conflict { block, .. }
+                | CommitError::ChainBackpressure { block, .. } => FfsError::MvccConflict {
+                    tx: txn_id.0,
+                    block: block.0,
+                },
+                CommitError::SsiConflict { pivot_block, .. } => FfsError::MvccConflict {
+                    tx: txn_id.0,
+                    block: pivot_block.0,
+                },
+                CommitError::DurabilityFailure { detail } => FfsError::Io(std::io::Error::other(
+                    format!("MVCC durability failure during merge resolution: {detail}"),
                 )),
             }
         })?;

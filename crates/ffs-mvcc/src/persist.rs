@@ -399,16 +399,13 @@ impl PersistentMvccStore {
             .copied()
             .filter(|block| txn.staged_physical(*block).is_some())
             .collect();
-        let writes: Vec<wal::WalWrite> = txn
-            .write_set()
-            .iter()
-            .map(|(block, data)| wal::WalWrite {
-                block: *block,
-                data: data.clone(),
-            })
-            .collect();
 
         let mut store_guard = self.store.write();
+        let writes: Vec<wal::WalWrite> = store_guard
+            .resolved_writes_for_commit(&txn)?
+            .into_iter()
+            .map(|(block, data)| wal::WalWrite { block, data })
+            .collect();
         let commit_seq = if use_ssi {
             store_guard.commit_ssi(txn)?
         } else {

@@ -77,11 +77,124 @@ pub trait CowAllocator {
     fn gc_free(&self, watermark: CommitSeq, cx: &Cx) -> usize;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeByteRange {
+    pub start: usize,
+    pub len: usize,
+}
+
+impl MergeByteRange {
+    #[must_use]
+    pub const fn new(start: usize, len: usize) -> Self {
+        Self { start, len }
+    }
+
+    #[must_use]
+    const fn end(self) -> usize {
+        self.start.saturating_add(self.len)
+    }
+
+    #[must_use]
+    const fn overlaps(self, other: Self) -> bool {
+        self.start < other.end() && other.start < self.end()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MergeProof {
+    #[default]
+    Unsafe,
+    DisjointBlocks,
+    AppendOnly {
+        base_len: usize,
+    },
+    IndependentKeys {
+        touched_ranges: Vec<MergeByteRange>,
+    },
+    NonOverlappingExtents {
+        touched_ranges: Vec<MergeByteRange>,
+    },
+    TimestampOnlyInode {
+        touched_ranges: Vec<MergeByteRange>,
+    },
+}
+
+impl MergeProof {
+    pub(crate) fn merge_bytes(&self, base: &[u8], latest: &[u8], staged: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            Self::Unsafe | Self::DisjointBlocks => None,
+            Self::AppendOnly { base_len } => {
+                if *base_len > base.len() || *base_len > latest.len() || *base_len > staged.len() {
+                    return None;
+                }
+                let prefix = &base[..*base_len];
+                if latest[..*base_len] != *prefix || staged[..*base_len] != *prefix {
+                    return None;
+                }
+                let mut merged = latest.to_vec();
+                merged.extend_from_slice(&staged[*base_len..]);
+                Some(merged)
+            }
+            Self::IndependentKeys { touched_ranges }
+            | Self::NonOverlappingExtents { touched_ranges }
+            | Self::TimestampOnlyInode { touched_ranges } => {
+                merge_non_overlapping_ranges(touched_ranges, base, latest, staged)
+            }
+        }
+    }
+}
+
+fn merge_non_overlapping_ranges(
+    touched_ranges: &[MergeByteRange],
+    base: &[u8],
+    latest: &[u8],
+    staged: &[u8],
+) -> Option<Vec<u8>> {
+    if latest.len() != base.len() || staged.len() != base.len() {
+        return None;
+    }
+    if !ranges_are_pairwise_disjoint(touched_ranges) {
+        return None;
+    }
+
+    let mut merged = latest.to_vec();
+    for range in touched_ranges {
+        if range.end() > base.len() {
+            return None;
+        }
+        if latest[range.start..range.end()] != base[range.start..range.end()] {
+            return None;
+        }
+        merged[range.start..range.end()].copy_from_slice(&staged[range.start..range.end()]);
+    }
+    Some(merged)
+}
+
+fn ranges_are_pairwise_disjoint(touched_ranges: &[MergeByteRange]) -> bool {
+    touched_ranges.iter().enumerate().all(|(idx, left)| {
+        touched_ranges[idx + 1..]
+            .iter()
+            .all(|right| !left.overlaps(*right))
+    })
+}
+
+pub(crate) fn resolve_version_bytes_at_or_before(
+    versions: &[BlockVersion],
+    visible_high: CommitSeq,
+) -> Option<Vec<u8>> {
+    let idx = versions
+        .iter()
+        .rposition(|version| version.commit_seq <= visible_high)?;
+    compression::resolve_data_with(versions, idx, |version| &version.data)
+        .map(std::borrow::Cow::into_owned)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: TxnId,
     pub snapshot: Snapshot,
     writes: BTreeMap<BlockNumber, Vec<u8>>,
+    merge_proofs: BTreeMap<BlockNumber, MergeProof>,
     /// Blocks read during the transaction's lifetime.  Each entry maps
     /// the block to the `CommitSeq` of the version that was read (or
     /// `CommitSeq(0)` if the block had no version at that snapshot).
@@ -107,6 +220,7 @@ impl Transaction {
             id,
             snapshot,
             writes: BTreeMap::new(),
+            merge_proofs: BTreeMap::new(),
             reads: BTreeMap::new(),
             cow_writes: BTreeMap::new(),
             cow_orphans: BTreeSet::new(),
@@ -125,13 +239,18 @@ impl Transaction {
         self.snapshot
     }
 
-    /// Consume the transaction and return its staged writes.
-    pub(crate) fn into_writes(self) -> BTreeMap<BlockNumber, Vec<u8>> {
-        self.writes
+    pub fn stage_write(&mut self, block: BlockNumber, bytes: Vec<u8>) {
+        self.stage_write_with_proof(block, bytes, MergeProof::Unsafe);
     }
 
-    pub fn stage_write(&mut self, block: BlockNumber, bytes: Vec<u8>) {
+    pub fn stage_write_with_proof(
+        &mut self,
+        block: BlockNumber,
+        bytes: Vec<u8>,
+        merge_proof: MergeProof,
+    ) {
         self.writes.insert(block, bytes);
+        self.merge_proofs.insert(block, merge_proof);
     }
 
     fn stage_cow_rewrite(
@@ -157,6 +276,7 @@ impl Transaction {
             );
         }
         self.writes.insert(logical, bytes);
+        self.merge_proofs.insert(logical, MergeProof::Unsafe);
     }
 
     #[must_use]
@@ -203,6 +323,20 @@ impl Transaction {
     #[must_use]
     pub fn write_set(&self) -> &BTreeMap<BlockNumber, Vec<u8>> {
         &self.writes
+    }
+
+    #[must_use]
+    pub fn merge_proof(&self, block: BlockNumber) -> Option<&MergeProof> {
+        self.merge_proofs.get(&block)
+    }
+
+    pub(crate) fn into_writes_and_merge_proofs(
+        self,
+    ) -> (
+        BTreeMap<BlockNumber, Vec<u8>>,
+        BTreeMap<BlockNumber, MergeProof>,
+    ) {
+        (self.writes, self.merge_proofs)
     }
 
     #[must_use]
@@ -672,6 +806,7 @@ impl MvccStore {
             id: TxnId(self.next_txn),
             snapshot: self.current_snapshot(),
             writes: BTreeMap::new(),
+            merge_proofs: BTreeMap::new(),
             reads: BTreeMap::new(),
             cow_writes: BTreeMap::new(),
             cow_orphans: BTreeSet::new(),
@@ -787,6 +922,20 @@ impl MvccStore {
         let (commit_seq, _deferred) = self.apply_fcw_commit(txn);
         self.emit_transaction_commit(txn_id, commit_seq, write_set_size, started);
         commit_seq
+    }
+
+    pub fn resolved_writes_for_commit(
+        &self,
+        txn: &Transaction,
+    ) -> Result<Vec<(BlockNumber, Vec<u8>)>, CommitError> {
+        txn.write_set()
+            .keys()
+            .copied()
+            .map(|block| {
+                self.resolved_write_bytes(txn, block)
+                    .map(|bytes| (block, bytes))
+            })
+            .collect()
     }
 
     /// Commit with Serializable Snapshot Isolation (SSI) enforcement.
@@ -962,25 +1111,70 @@ impl MvccStore {
         Ok(self.apply_fcw_commit(txn))
     }
 
+    fn version_bytes_at(&self, block: BlockNumber, visible_high: CommitSeq) -> Option<Vec<u8>> {
+        self.versions
+            .get(&block)
+            .and_then(|versions| resolve_version_bytes_at_or_before(versions, visible_high))
+    }
+
+    fn resolved_write_bytes(
+        &self,
+        txn: &Transaction,
+        block: BlockNumber,
+    ) -> Result<Vec<u8>, CommitError> {
+        let staged = txn
+            .staged_write(block)
+            .expect("write_set keys must have staged bytes");
+        let observed = self.latest_commit_seq(block);
+        if observed <= txn.snapshot.high {
+            return Ok(staged.to_vec());
+        }
+
+        let proof = txn.merge_proof(block).cloned().unwrap_or_default();
+        let base = self
+            .version_bytes_at(block, txn.snapshot.high)
+            .unwrap_or_default();
+        let latest = self.version_bytes_at(block, observed).unwrap_or_default();
+        proof
+            .merge_bytes(&base, &latest, staged)
+            .ok_or(CommitError::Conflict {
+                block,
+                snapshot: txn.snapshot.high,
+                observed,
+            })
+    }
+
     fn preflight_fcw(&mut self, txn: &Transaction) -> Result<(), CommitError> {
         let chain_cap = self.compression_policy.max_chain_length;
         for block in txn.writes.keys() {
             let latest = self.latest_commit_seq(*block);
             if latest > txn.snapshot.high {
-                warn!(
-                    target: "ffs::mvcc::evidence",
-                    event = "txn_aborted",
-                    txn_id = txn.id.0,
-                    reason = "fcw_conflict",
-                    block = block.0,
-                    snapshot_commit_seq = txn.snapshot.high.0,
-                    observed_commit_seq = latest.0
-                );
-                return Err(CommitError::Conflict {
-                    block: *block,
-                    snapshot: txn.snapshot.high,
-                    observed: latest,
-                });
+                if self.resolved_write_bytes(txn, *block).is_ok() {
+                    debug!(
+                        target: "ffs::mvcc",
+                        txn_id = txn.id.0,
+                        block = block.0,
+                        merge_proof = ?txn.merge_proof(*block),
+                        snapshot_commit_seq = txn.snapshot.high.0,
+                        observed_commit_seq = latest.0,
+                        "fcw_conflict_merged"
+                    );
+                } else {
+                    warn!(
+                        target: "ffs::mvcc::evidence",
+                        event = "txn_aborted",
+                        txn_id = txn.id.0,
+                        reason = "fcw_conflict",
+                        block = block.0,
+                        snapshot_commit_seq = txn.snapshot.high.0,
+                        observed_commit_seq = latest.0
+                    );
+                    return Err(CommitError::Conflict {
+                        block: *block,
+                        snapshot: txn.snapshot.high,
+                        observed: latest,
+                    });
+                }
             }
             if let Some(cap) = chain_cap {
                 self.enforce_chain_pressure(txn.id, *block, cap)?;
@@ -993,8 +1187,9 @@ impl MvccStore {
         let chain_cap = self.compression_policy.max_chain_length;
         let Transaction {
             id: txn_id,
-            snapshot: _,
+            snapshot,
             writes,
+            merge_proofs,
             reads: _,
             cow_writes,
             cow_orphans,
@@ -1005,10 +1200,24 @@ impl MvccStore {
         let dedup_enabled = self.compression_policy.dedup_identical;
 
         for (block, bytes) in writes {
-            let version_data = if dedup_enabled {
-                self.maybe_dedup(block, &bytes)
+            let version_bytes = if self.latest_commit_seq(block) > snapshot.high {
+                let proof = merge_proofs.get(&block).cloned().unwrap_or_default();
+                let base = self
+                    .version_bytes_at(block, snapshot.high)
+                    .unwrap_or_default();
+                let latest = self
+                    .version_bytes_at(block, self.latest_commit_seq(block))
+                    .unwrap_or_default();
+                proof
+                    .merge_bytes(&base, &latest, &bytes)
+                    .expect("preflight_fcw must reject unmergeable conflicts")
             } else {
-                self.compress_data(&bytes)
+                bytes
+            };
+            let version_data = if dedup_enabled {
+                self.maybe_dedup(block, &version_bytes)
+            } else {
+                self.compress_data(&version_bytes)
             };
 
             self.versions.entry(block).or_default().push(BlockVersion {
@@ -1059,6 +1268,7 @@ impl MvccStore {
             id: txn_id,
             snapshot,
             writes,
+            merge_proofs,
             reads,
             cow_writes,
             cow_orphans,
@@ -1070,10 +1280,24 @@ impl MvccStore {
 
         let write_keys: BTreeSet<BlockNumber> = writes.keys().copied().collect();
         for (block, bytes) in writes {
-            let version_data = if dedup_enabled {
-                self.maybe_dedup(block, &bytes)
+            let version_bytes = if self.latest_commit_seq(block) > snapshot.high {
+                let proof = merge_proofs.get(&block).cloned().unwrap_or_default();
+                let base = self
+                    .version_bytes_at(block, snapshot.high)
+                    .unwrap_or_default();
+                let latest = self
+                    .version_bytes_at(block, self.latest_commit_seq(block))
+                    .unwrap_or_default();
+                proof
+                    .merge_bytes(&base, &latest, &bytes)
+                    .expect("preflight_fcw must reject unmergeable conflicts")
             } else {
-                self.compress_data(&bytes)
+                bytes
+            };
+            let version_data = if dedup_enabled {
+                self.maybe_dedup(block, &version_bytes)
+            } else {
+                self.compress_data(&version_bytes)
             };
 
             self.versions.entry(block).or_default().push(BlockVersion {
@@ -2425,6 +2649,22 @@ mod tests {
         Cx::for_testing()
     }
 
+    fn seed_block(store: &mut MvccStore, block: BlockNumber, bytes: &[u8]) {
+        let mut txn = store.begin();
+        txn.stage_write(block, bytes.to_vec());
+        store.commit(txn).expect("seed commit");
+    }
+
+    fn append_only_proof(base_len: usize) -> MergeProof {
+        MergeProof::AppendOnly { base_len }
+    }
+
+    fn independent_range_proof(start: usize, len: usize) -> MergeProof {
+        MergeProof::IndependentKeys {
+            touched_ranges: vec![MergeByteRange::new(start, len)],
+        }
+    }
+
     #[derive(Debug)]
     struct TestCowAllocator {
         next_block: std::sync::atomic::AtomicU64,
@@ -2509,6 +2749,141 @@ mod tests {
                 panic!("unexpected durability failure from in-memory FCW path")
             }
         }
+    }
+
+    #[test]
+    fn merge_proof_unsafe_rejects_merge() {
+        let merged = MergeProof::Unsafe.merge_bytes(&[0], &[0, 1], &[0, 2]);
+        assert!(merged.is_none(), "unsafe proof must fall back to FCW");
+    }
+
+    #[test]
+    fn merge_proof_disjoint_blocks_rejects_same_block_merge() {
+        let merged = MergeProof::DisjointBlocks.merge_bytes(&[0], &[0, 1], &[0, 2]);
+        assert!(
+            merged.is_none(),
+            "disjoint-block proof is not valid for same-block FCW resolution"
+        );
+    }
+
+    #[test]
+    fn resolved_writes_for_commit_returns_merged_bytes_for_append_only_proof() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(7);
+        seed_block(&mut store, block, &[0]);
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+
+        first.stage_write_with_proof(block, vec![0, 1], append_only_proof(1));
+        second.stage_write_with_proof(block, vec![0, 2], append_only_proof(1));
+
+        store.commit(first).expect("first append commit");
+
+        let resolved = store
+            .resolved_writes_for_commit(&second)
+            .expect("append-only proof should resolve");
+        assert_eq!(resolved, vec![(block, vec![0, 1, 2])]);
+    }
+
+    #[test]
+    fn fcw_append_only_merge_proof_allows_same_block_commit() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(11);
+        seed_block(&mut store, block, &[0]);
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+
+        first.stage_write_with_proof(block, vec![0, 1], append_only_proof(1));
+        second.stage_write_with_proof(block, vec![0, 2], append_only_proof(1));
+
+        store.commit(first).expect("first append commit");
+        store
+            .commit(second)
+            .expect("second append should merge instead of conflicting");
+
+        let latest = store.current_snapshot();
+        let visible = store.read_visible(block, latest).expect("latest bytes");
+        assert_eq!(visible.as_ref(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn fcw_independent_range_merge_proof_allows_same_block_commit() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(12);
+        seed_block(&mut store, block, &[0, 0, 0, 0]);
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+
+        first.stage_write_with_proof(block, vec![1, 1, 0, 0], independent_range_proof(0, 2));
+        second.stage_write_with_proof(block, vec![0, 0, 2, 2], independent_range_proof(2, 2));
+
+        store.commit(first).expect("first range commit");
+        store
+            .commit(second)
+            .expect("disjoint ranges should merge instead of conflicting");
+
+        let latest = store.current_snapshot();
+        let visible = store.read_visible(block, latest).expect("latest bytes");
+        assert_eq!(visible.as_ref(), &[1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn hundred_same_snapshot_append_only_writers_all_commit_without_chain_cap() {
+        let mut store = MvccStore::with_compression_policy(CompressionPolicy::dedup_only());
+        let block = BlockNumber(13);
+        seed_block(&mut store, block, &[0]);
+
+        let mut txns = Vec::new();
+        for value in 1_u8..=100 {
+            let mut txn = store.begin();
+            txn.stage_write_with_proof(block, vec![0, value], append_only_proof(1));
+            txns.push(txn);
+        }
+
+        for txn in txns {
+            store
+                .commit(txn)
+                .expect("append-only writers should merge cleanly");
+        }
+
+        let latest = store.current_snapshot();
+        let visible = store.read_visible(block, latest).expect("latest bytes");
+        let mut expected = vec![0];
+        expected.extend(1_u8..=100);
+        assert_eq!(visible.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn hundred_same_snapshot_unsafe_writers_only_first_commits() {
+        let mut store = MvccStore::new();
+        let block = BlockNumber(14);
+
+        let mut txns = Vec::new();
+        for value in 1_u8..=100 {
+            let mut txn = store.begin();
+            txn.stage_write(block, vec![value]);
+            txns.push(txn);
+        }
+
+        let mut successes = 0usize;
+        let mut failures = 0usize;
+        for txn in txns {
+            match store.commit(txn) {
+                Ok(_) => successes += 1,
+                Err(CommitError::Conflict { .. }) => failures += 1,
+                Err(other) => panic!("unexpected commit error: {other:?}"),
+            }
+        }
+
+        assert_eq!(successes, 1, "exactly one unsafe writer should commit");
+        assert_eq!(failures, 99, "remaining unsafe writers should conflict");
+
+        let latest = store.current_snapshot();
+        let visible = store.read_visible(block, latest).expect("latest bytes");
+        assert_eq!(visible.as_ref(), &[1]);
     }
 
     #[test]
