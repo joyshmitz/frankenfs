@@ -664,7 +664,8 @@ mod tests {
         let mut w = WalWriter::create(&path, WalWriterConfig::default()).expect("create");
 
         for i in 1_u64..=5 {
-            let commit = make_commit(i, i, &[(i, &[i as u8; 16])]);
+            let byte = u8::try_from(i).expect("test value fits in u8");
+            let commit = make_commit(i, i, &[(i, &[byte; 16])]);
             w.append_commit(&commit).expect("append");
         }
 

@@ -871,7 +871,7 @@ mod tests {
             .expect("replay");
 
         let result = verify_oracle(&replay_store, &oracle, &commits, 5);
-        assert!(result.is_ok(), "oracle mismatch: {:?}", result);
+        assert!(result.is_ok(), "oracle mismatch: {result:?}");
     }
 
     #[test]
@@ -1089,9 +1089,13 @@ mod tests {
         assert_eq!(r1.outcome, r2.outcome);
 
         // Verify both stores agree.
-        let oracle = build_oracle_store(&commits, r1.commits_replayed as usize);
-        assert!(verify_oracle(&store1, &oracle, &commits, r1.commits_replayed as usize).is_ok());
-        assert!(verify_oracle(&store2, &oracle, &commits, r2.commits_replayed as usize).is_ok());
+        let commits_replayed_1 =
+            usize::try_from(r1.commits_replayed).expect("replayed commit count fits in usize");
+        let commits_replayed_2 =
+            usize::try_from(r2.commits_replayed).expect("replayed commit count fits in usize");
+        let oracle = build_oracle_store(&commits, commits_replayed_1);
+        assert!(verify_oracle(&store1, &oracle, &commits, commits_replayed_1).is_ok());
+        assert!(verify_oracle(&store2, &oracle, &commits, commits_replayed_2).is_ok());
     }
 
     // ── Negative: intentionally wrong oracle detects divergence ──────────

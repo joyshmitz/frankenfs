@@ -176,13 +176,13 @@ mod tests {
 
     #[test]
     fn parse_capability_table_extracts_rows() {
-        let content = r#"
+        let content = r"
 | Contract ID | Operation | Class | Expected |
 |---|---|---|---|
 | `unit::btrfs_write_create_file` | create | supported | success |
 | `e2e::btrfs_rw_crash_matrix_01_create_alpha_no_fsync` | crash 1 | crash-consistency | ok |
 | Some other row | stuff | stuff | stuff |
-"#;
+";
         let rows = parse_capability_table(content);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].contract_id, "unit::btrfs_write_create_file");
@@ -287,12 +287,12 @@ mod tests {
 
     #[test]
     fn parse_ignores_non_contract_rows() {
-        let content = r#"
+        let content = r"
 | Contract ID | Op | Class | Result |
 |---|---|---|---|
 | MVCC snapshot visibility | spec §3 | ✅ | ok |
 | `unit::btrfs_write_mkdir` | mkdir | supported | success |
-"#;
+";
         let rows = parse_capability_table(content);
         // Only the unit:: row should match
         assert_eq!(rows.len(), 1);

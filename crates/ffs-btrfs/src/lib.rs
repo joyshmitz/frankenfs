@@ -6324,9 +6324,10 @@ mod tests {
 
     fn make_root_ref_data(dirid: u64, name: &[u8]) -> Vec<u8> {
         let mut data = vec![0_u8; 18 + name.len()];
+        let name_len = u16::try_from(name.len()).expect("root ref name length must fit u16");
         data[0..8].copy_from_slice(&dirid.to_le_bytes());
         data[8..16].copy_from_slice(&0_u64.to_le_bytes()); // sequence
-        data[16..18].copy_from_slice(&(name.len() as u16).to_le_bytes());
+        data[16..18].copy_from_slice(&name_len.to_le_bytes());
         data[18..18 + name.len()].copy_from_slice(name);
         data
     }
@@ -6472,7 +6473,7 @@ mod tests {
         data[0..8].copy_from_slice(&generation.to_le_bytes()); // generation
         data[8..16].copy_from_slice(&100_u64.to_le_bytes()); // size
         data[24..28].copy_from_slice(&1_u32.to_le_bytes()); // nlink
-        data[32..36].copy_from_slice(&0o100644_u32.to_le_bytes()); // mode
+        data[32..36].copy_from_slice(&0o100_644_u32.to_le_bytes()); // mode
         BtrfsLeafEntry {
             key: BtrfsKey {
                 objectid,
@@ -6616,7 +6617,7 @@ mod tests {
         // Row 3: P at pos 3 (dev 4), Q at pos 0 (dev 1).
         // Data should be at pos 1 (dev 2) and pos 2 (dev 3).
         // Row 3 offset = 3 * 65536 * 2 = 393216
-        let r = map_logical_to_stripes(&chunks, 393216).unwrap().unwrap();
+        let r = map_logical_to_stripes(&chunks, 393_216).unwrap().unwrap();
         assert_eq!(r.profile, BtrfsRaidProfile::Raid6);
         assert_ne!(
             r.stripes[0].devid, 1,
@@ -6629,7 +6630,7 @@ mod tests {
         assert_eq!(r.stripes[0].devid, 2, "data stripe 0 should be dev 2");
 
         // Row 3, data stripe 1
-        let r2 = map_logical_to_stripes(&chunks, 393216 + 65536)
+        let r2 = map_logical_to_stripes(&chunks, 393_216 + 65_536)
             .unwrap()
             .unwrap();
         assert_eq!(r2.stripes[0].devid, 3, "data stripe 1 should be dev 3");

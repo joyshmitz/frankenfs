@@ -598,8 +598,7 @@ mod tests {
                 let full = format!("{root}/{path}");
                 assert!(
                     std::path::Path::new(&full).exists(),
-                    "runbook for {:?} not found: {path}",
-                    class
+                    "runbook for {class:?} not found: {path}"
                 );
             }
         }

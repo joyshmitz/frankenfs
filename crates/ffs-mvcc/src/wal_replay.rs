@@ -675,7 +675,10 @@ mod tests {
     fn replay_preserves_commit_ordering() {
         // Generate 20 commits with strictly increasing sequences.
         let commits: Vec<WalCommit> = (1..=20)
-            .map(|i| make_commit(i, i, &[(i, &[i as u8; 8])]))
+            .map(|i| {
+                let byte = u8::try_from(i).expect("test value fits in u8");
+                make_commit(i, i, &[(i, &[byte; 8])])
+            })
             .collect();
         let data = encode_commits(&commits);
 
@@ -776,7 +779,10 @@ mod tests {
     #[test]
     fn replay_handles_many_commits() {
         let commits: Vec<WalCommit> = (1..=100)
-            .map(|i| make_commit(i, i, &[(i, &[i as u8; 4])]))
+            .map(|i| {
+                let byte = u8::try_from(i).expect("test value fits in u8");
+                make_commit(i, i, &[(i, &[byte; 4])])
+            })
             .collect();
         let data = encode_commits(&commits);
 
