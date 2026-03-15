@@ -4,6 +4,10 @@
 **Status:** Design
 **Scope:** ffs-block `ArcCache` write-back, FlushDaemon, MVCC integration
 
+Kernel FUSE `writeback_cache` ordering and MVCC publication semantics are
+tracked separately in [`docs/design-writeback-cache-mvcc.md`](design-writeback-cache-mvcc.md).
+This document stays focused on the block-layer cache and dirty-flush pipeline.
+
 ## Current State
 
 `ArcCache` is **write-through**: every `write_block()` immediately writes to

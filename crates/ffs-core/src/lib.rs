@@ -616,6 +616,244 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
     }
 }
 
+// Kernel FUSE writeback-cache is intentionally disabled in V1.x. If it is
+// ever enabled later, these schedule invariants define the minimum barrier
+// contract the daemon must uphold before request-scope MVCC can remain
+// correct under kernel-side write reordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritebackBarrierModel {
+    Disabled,
+    EpochFence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritebackOpClass {
+    Data,
+    Metadata,
+    Flush,
+    Fsync,
+    Fsyncdir,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WritebackScheduleEvent {
+    source_order: u64,
+    delivery_order: u64,
+    epoch: u64,
+    class: WritebackOpClass,
+    inode: InodeNumber,
+    alias_key: Option<u64>,
+    data_dependency: Option<InodeNumber>,
+    advances_durability: bool,
+}
+
+impl WritebackScheduleEvent {
+    fn data(
+        source_order: u64,
+        delivery_order: u64,
+        epoch: u64,
+        inode: InodeNumber,
+        alias_key: u64,
+    ) -> Self {
+        Self {
+            source_order,
+            delivery_order,
+            epoch,
+            class: WritebackOpClass::Data,
+            inode,
+            alias_key: Some(alias_key),
+            data_dependency: None,
+            advances_durability: false,
+        }
+    }
+
+    fn metadata(
+        source_order: u64,
+        delivery_order: u64,
+        epoch: u64,
+        inode: InodeNumber,
+        data_dependency: Option<InodeNumber>,
+    ) -> Self {
+        Self {
+            source_order,
+            delivery_order,
+            epoch,
+            class: WritebackOpClass::Metadata,
+            inode,
+            alias_key: None,
+            data_dependency,
+            advances_durability: false,
+        }
+    }
+
+    fn flush(
+        source_order: u64,
+        delivery_order: u64,
+        inode: InodeNumber,
+        advances_durability: bool,
+    ) -> Self {
+        Self {
+            source_order,
+            delivery_order,
+            epoch: 0,
+            class: WritebackOpClass::Flush,
+            inode,
+            alias_key: None,
+            data_dependency: None,
+            advances_durability,
+        }
+    }
+
+    fn fsync(source_order: u64, delivery_order: u64, epoch: u64, inode: InodeNumber) -> Self {
+        Self {
+            source_order,
+            delivery_order,
+            epoch,
+            class: WritebackOpClass::Fsync,
+            inode,
+            alias_key: None,
+            data_dependency: None,
+            advances_durability: true,
+        }
+    }
+
+    fn fsyncdir(source_order: u64, delivery_order: u64, epoch: u64, inode: InodeNumber) -> Self {
+        Self {
+            source_order,
+            delivery_order,
+            epoch,
+            class: WritebackOpClass::Fsyncdir,
+            inode,
+            alias_key: None,
+            data_dependency: None,
+            advances_durability: true,
+        }
+    }
+
+    const fn is_mutation(self) -> bool {
+        matches!(
+            self.class,
+            WritebackOpClass::Data | WritebackOpClass::Metadata
+        )
+    }
+
+    const fn is_sync_boundary(self) -> bool {
+        matches!(
+            self.class,
+            WritebackOpClass::Fsync | WritebackOpClass::Fsyncdir
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritebackInvariantViolationKind {
+    SourceOrderWithoutBarrier,
+    CrossEpochReordering,
+    AliasedWriteReordered,
+    MetadataAheadOfDependentData,
+    SyncBoundaryBeforePriorWrites,
+    FlushAdvancedDurability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WritebackInvariantViolation {
+    kind: WritebackInvariantViolationKind,
+    source_order: u64,
+    related_source_order: Option<u64>,
+}
+
+fn writeback_schedule_invariant_violations(
+    mode: WritebackBarrierModel,
+    events: &[WritebackScheduleEvent],
+) -> Vec<WritebackInvariantViolation> {
+    let mut ordered = events.to_vec();
+    ordered.sort_by_key(|event| event.source_order);
+
+    let mut violations = Vec::new();
+
+    for (index, event) in ordered.iter().enumerate() {
+        if matches!(event.class, WritebackOpClass::Flush) && event.advances_durability {
+            violations.push(WritebackInvariantViolation {
+                kind: WritebackInvariantViolationKind::FlushAdvancedDurability,
+                source_order: event.source_order,
+                related_source_order: None,
+            });
+        }
+
+        if event.is_sync_boundary() {
+            let prior_blocker = ordered[..index].iter().find(|prior| {
+                prior.is_mutation()
+                    && prior.delivery_order > event.delivery_order
+                    && match mode {
+                        WritebackBarrierModel::Disabled => true,
+                        WritebackBarrierModel::EpochFence => prior.epoch == event.epoch,
+                    }
+            });
+            if let Some(prior) = prior_blocker {
+                violations.push(WritebackInvariantViolation {
+                    kind: WritebackInvariantViolationKind::SyncBoundaryBeforePriorWrites,
+                    source_order: event.source_order,
+                    related_source_order: Some(prior.source_order),
+                });
+            }
+        }
+
+        for later in &ordered[index + 1..] {
+            let reordered = later.delivery_order < event.delivery_order;
+            if !reordered {
+                continue;
+            }
+
+            match mode {
+                WritebackBarrierModel::Disabled => {
+                    if event.is_mutation() && later.is_mutation() {
+                        violations.push(WritebackInvariantViolation {
+                            kind: WritebackInvariantViolationKind::SourceOrderWithoutBarrier,
+                            source_order: later.source_order,
+                            related_source_order: Some(event.source_order),
+                        });
+                    }
+                }
+                WritebackBarrierModel::EpochFence => {
+                    if event.epoch != later.epoch {
+                        violations.push(WritebackInvariantViolation {
+                            kind: WritebackInvariantViolationKind::CrossEpochReordering,
+                            source_order: later.source_order,
+                            related_source_order: Some(event.source_order),
+                        });
+                        continue;
+                    }
+
+                    if matches!(event.class, WritebackOpClass::Data)
+                        && matches!(later.class, WritebackOpClass::Data)
+                        && event.alias_key.is_some()
+                        && event.alias_key == later.alias_key
+                    {
+                        violations.push(WritebackInvariantViolation {
+                            kind: WritebackInvariantViolationKind::AliasedWriteReordered,
+                            source_order: later.source_order,
+                            related_source_order: Some(event.source_order),
+                        });
+                    }
+
+                    if matches!(event.class, WritebackOpClass::Data)
+                        && matches!(later.class, WritebackOpClass::Metadata)
+                        && later.data_dependency == Some(event.inode)
+                    {
+                        violations.push(WritebackInvariantViolation {
+                            kind: WritebackInvariantViolationKind::MetadataAheadOfDependentData,
+                            source_order: later.source_order,
+                            related_source_order: Some(event.source_order),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    violations
+}
+
 impl OpenFs {
     /// Open a filesystem image at `path` with default options (validation enabled).
     pub fn open(cx: &Cx, path: impl AsRef<Path>) -> Result<Self, FfsError> {
@@ -18003,6 +18241,108 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some_and(|value| value.starts_with("btrfs-fsyncdir-")),
             "missing or malformed fsyncdir operation_id: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn writeback_schedule_checker_rejects_reordering_without_barrier() {
+        let violations = writeback_schedule_invariant_violations(
+            WritebackBarrierModel::Disabled,
+            &[
+                WritebackScheduleEvent::data(1, 2, 0, InodeNumber(11), 0),
+                WritebackScheduleEvent::data(2, 1, 0, InodeNumber(11), 1),
+            ],
+        );
+
+        assert!(violations.iter().any(|violation| {
+            violation.kind == WritebackInvariantViolationKind::SourceOrderWithoutBarrier
+                && violation.source_order == 2
+                && violation.related_source_order == Some(1)
+        }));
+    }
+
+    #[test]
+    fn writeback_schedule_checker_allows_disjoint_same_epoch_reordering_with_epoch_barrier() {
+        let violations = writeback_schedule_invariant_violations(
+            WritebackBarrierModel::EpochFence,
+            &[
+                WritebackScheduleEvent::data(1, 2, 7, InodeNumber(11), 10),
+                WritebackScheduleEvent::data(2, 1, 7, InodeNumber(11), 11),
+                WritebackScheduleEvent::fsyncdir(3, 3, 7, InodeNumber(11)),
+            ],
+        );
+
+        assert!(
+            violations.is_empty(),
+            "unexpected violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn writeback_schedule_checker_rejects_aliased_write_reordering() {
+        let violations = writeback_schedule_invariant_violations(
+            WritebackBarrierModel::EpochFence,
+            &[
+                WritebackScheduleEvent::data(1, 2, 7, InodeNumber(11), 10),
+                WritebackScheduleEvent::data(2, 1, 7, InodeNumber(11), 10),
+            ],
+        );
+
+        assert!(violations.iter().any(|violation| {
+            violation.kind == WritebackInvariantViolationKind::AliasedWriteReordered
+                && violation.source_order == 2
+                && violation.related_source_order == Some(1)
+        }));
+    }
+
+    #[test]
+    fn writeback_schedule_checker_rejects_metadata_ahead_of_dependent_data() {
+        let violations = writeback_schedule_invariant_violations(
+            WritebackBarrierModel::EpochFence,
+            &[
+                WritebackScheduleEvent::data(1, 2, 3, InodeNumber(55), 0),
+                WritebackScheduleEvent::metadata(2, 1, 3, InodeNumber(2), Some(InodeNumber(55))),
+            ],
+        );
+
+        assert!(violations.iter().any(|violation| {
+            violation.kind == WritebackInvariantViolationKind::MetadataAheadOfDependentData
+                && violation.source_order == 2
+                && violation.related_source_order == Some(1)
+        }));
+    }
+
+    #[test]
+    fn writeback_schedule_checker_rejects_fsync_before_prior_epoch_delivery() {
+        let violations = writeback_schedule_invariant_violations(
+            WritebackBarrierModel::EpochFence,
+            &[
+                WritebackScheduleEvent::data(1, 2, 9, InodeNumber(77), 0),
+                WritebackScheduleEvent::fsync(2, 1, 9, InodeNumber(77)),
+            ],
+        );
+
+        assert!(violations.iter().any(|violation| {
+            violation.kind == WritebackInvariantViolationKind::SyncBoundaryBeforePriorWrites
+                && violation.source_order == 2
+                && violation.related_source_order == Some(1)
+        }));
+    }
+
+    #[test]
+    fn writeback_schedule_checker_rejects_flush_as_durability_boundary() {
+        let violations = writeback_schedule_invariant_violations(
+            WritebackBarrierModel::EpochFence,
+            &[WritebackScheduleEvent::flush(1, 1, InodeNumber(88), true)],
+        );
+
+        assert_eq!(
+            violations,
+            vec![WritebackInvariantViolation {
+                kind: WritebackInvariantViolationKind::FlushAdvancedDurability,
+                source_order: 1,
+                related_source_order: None,
+            }]
         );
     }
 
