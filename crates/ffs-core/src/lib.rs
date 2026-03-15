@@ -620,12 +620,14 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
 // ever enabled later, these schedule invariants define the minimum barrier
 // contract the daemon must uphold before request-scope MVCC can remain
 // correct under kernel-side write reordering.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WritebackBarrierModel {
     Disabled,
     EpochFence,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WritebackOpClass {
     Data,
@@ -635,6 +637,7 @@ enum WritebackOpClass {
     Fsyncdir,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WritebackScheduleEvent {
     source_order: u64,
@@ -647,6 +650,7 @@ struct WritebackScheduleEvent {
     advances_durability: bool,
 }
 
+#[cfg(test)]
 impl WritebackScheduleEvent {
     fn data(
         source_order: u64,
@@ -745,6 +749,7 @@ impl WritebackScheduleEvent {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WritebackInvariantViolationKind {
     SourceOrderWithoutBarrier,
@@ -755,6 +760,7 @@ enum WritebackInvariantViolationKind {
     FlushAdvancedDurability,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WritebackInvariantViolation {
     kind: WritebackInvariantViolationKind,
@@ -762,6 +768,7 @@ struct WritebackInvariantViolation {
     related_source_order: Option<u64>,
 }
 
+#[cfg(test)]
 fn writeback_schedule_invariant_violations(
     mode: WritebackBarrierModel,
     events: &[WritebackScheduleEvent],
