@@ -2,7 +2,9 @@ use asupersync::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::Budget;
 use ffs_mvcc::sharded::ShardedMvccStore;
-use ffs_mvcc::{CommitError, CompressionAlgo, CompressionPolicy, GcBackpressureConfig, MvccStore};
+use ffs_mvcc::{
+    CommitError, CompressionAlgo, CompressionPolicy, GcBackpressureConfig, MergeProof, MvccStore,
+};
 use ffs_types::{BlockNumber, Snapshot};
 use std::collections::VecDeque;
 use std::future::Future;
@@ -279,6 +281,49 @@ fn stress_fcw_conflicts() {
             .expect("hot block must remain readable");
         assert_eq!(data.len(), 8, "seed {seed}: payload width should remain 8");
     }
+}
+
+#[test]
+fn stress_merge_proof_append_only_conflicts_emit_structured_progress() {
+    const WRITER_COUNT: u8 = 100;
+    let hot_block = BlockNumber(7);
+    let store = ShardedMvccStore::with_compression_policy(1, CompressionPolicy::dedup_only());
+
+    let mut seed_txn = store.begin();
+    seed_txn.stage_write(hot_block, vec![0]);
+    store.commit(seed_txn).expect("seed commit should succeed");
+
+    let mut txns = Vec::new();
+    for writer in 1_u8..=WRITER_COUNT {
+        let mut txn = store.begin();
+        txn.stage_write_with_proof(
+            hot_block,
+            vec![0, writer],
+            MergeProof::AppendOnly { base_len: 1 },
+        );
+        txns.push((writer, txn));
+    }
+
+    for (writer, txn) in txns {
+        let commit_seq = store
+            .commit(txn)
+            .expect("append-only merge proof should avoid unnecessary aborts");
+        eprintln!(
+            "event=merge_append_commit writer={} commit_seq={} block={}",
+            writer, commit_seq.0, hot_block.0
+        );
+    }
+
+    let latest = store.current_snapshot();
+    let data = store
+        .read_visible(hot_block, latest)
+        .expect("hot block must remain readable");
+    let mut expected = vec![0];
+    expected.extend(1_u8..=WRITER_COUNT);
+    assert_eq!(
+        data, expected,
+        "append-only merge stress must retain all tails"
+    );
 }
 
 #[test]
