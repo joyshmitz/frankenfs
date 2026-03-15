@@ -1444,51 +1444,7 @@ fn inspect(path: &PathBuf, json: bool, list_subvolumes: bool, list_snapshots: bo
             serde_json::to_string_pretty(&output).context("serialize output")?
         );
     } else {
-        println!("FrankenFS Inspector");
-        match output {
-            InspectOutput::Ext4 {
-                block_size,
-                inodes_count,
-                blocks_count,
-                volume_name,
-                free_blocks_total,
-                free_inodes_total,
-                free_space_mismatch,
-                orphan_diagnostics,
-            } => {
-                println!("filesystem: ext4");
-                println!("block_size: {block_size}");
-                println!("inodes_count: {inodes_count}");
-                println!("blocks_count: {blocks_count}");
-                println!("volume_name: {volume_name}");
-                println!("free_blocks: {free_blocks_total}");
-                println!("free_inodes: {free_inodes_total}");
-                if let Some(mismatch) = free_space_mismatch {
-                    println!(
-                        "WARNING: mismatch with group descriptors (gd_free_blocks={}, gd_free_inodes={})",
-                        mismatch.gd_free_blocks, mismatch.gd_free_inodes
-                    );
-                }
-                if let Some(orphan_diag) = orphan_diagnostics {
-                    println!(
-                        "orphans: count={} sample_inodes={:?}",
-                        orphan_diag.count, orphan_diag.sample_inodes
-                    );
-                }
-            }
-            InspectOutput::Btrfs {
-                sectorsize,
-                nodesize,
-                generation,
-                label,
-            } => {
-                println!("filesystem: btrfs");
-                println!("sectorsize: {sectorsize}");
-                println!("nodesize: {nodesize}");
-                println!("generation: {generation}");
-                println!("label: {label}");
-            }
-        }
+        print_inspect_output(&output);
     }
 
     info!(
@@ -1498,6 +1454,54 @@ fn inspect(path: &PathBuf, json: bool, list_subvolumes: bool, list_snapshots: bo
     );
 
     Ok(())
+}
+
+fn print_inspect_output(output: &InspectOutput) {
+    println!("FrankenFS Inspector");
+    match output {
+        InspectOutput::Ext4 {
+            block_size,
+            inodes_count,
+            blocks_count,
+            volume_name,
+            free_blocks_total,
+            free_inodes_total,
+            free_space_mismatch,
+            orphan_diagnostics,
+        } => {
+            println!("filesystem: ext4");
+            println!("block_size: {block_size}");
+            println!("inodes_count: {inodes_count}");
+            println!("blocks_count: {blocks_count}");
+            println!("volume_name: {volume_name}");
+            println!("free_blocks: {free_blocks_total}");
+            println!("free_inodes: {free_inodes_total}");
+            if let Some(mismatch) = free_space_mismatch {
+                println!(
+                    "WARNING: mismatch with group descriptors (gd_free_blocks={}, gd_free_inodes={})",
+                    mismatch.gd_free_blocks, mismatch.gd_free_inodes
+                );
+            }
+            if let Some(orphan_diag) = orphan_diagnostics {
+                println!(
+                    "orphans: count={} sample_inodes={:?}",
+                    orphan_diag.count, orphan_diag.sample_inodes
+                );
+            }
+        }
+        InspectOutput::Btrfs {
+            sectorsize,
+            nodesize,
+            generation,
+            label,
+        } => {
+            println!("filesystem: btrfs");
+            println!("sectorsize: {sectorsize}");
+            println!("nodesize: {nodesize}");
+            println!("generation: {generation}");
+            println!("label: {label}");
+        }
+    }
 }
 
 fn build_wal_replay_info(open_fs: &OpenFs) -> Option<WalReplayInfoOutput> {
@@ -3466,8 +3470,8 @@ fn inspect_btrfs_subvolumes(
         } else {
             println!("Subvolumes ({} found):", subvols.len());
             println!(
-                "{:<8} {:<8} {:<12} {:<5} {}",
-                "ID", "Parent", "Generation", "RO", "Name"
+                "{:<8} {:<8} {:<12} {:<5} Name",
+                "ID", "Parent", "Generation", "RO"
             );
             for s in &subvols {
                 println!(
@@ -3507,10 +3511,7 @@ fn inspect_btrfs_subvolumes(
             );
         } else {
             println!("Snapshots ({} found):", snapshots.len());
-            println!(
-                "{:<8} {:<8} {:<12} {}",
-                "ID", "Source", "Generation", "Name"
-            );
+            println!("{:<8} {:<8} {:<12} Name", "ID", "Source", "Generation");
             for s in &snapshots {
                 println!(
                     "{:<8} {:<8} {:<12} {}",
@@ -5730,8 +5731,7 @@ mod tests {
 
     #[test]
     fn evidence_summary_json_schema_has_required_fields() {
-        let ledger =
-            concat!("{\"timestamp_ns\":100,\"event_type\":\"repair_failed\",\"block_group\":1}\n",);
+        let ledger = "{\"timestamp_ns\":100,\"event_type\":\"repair_failed\",\"block_group\":1}\n";
         with_temp_image_path(ledger.as_bytes(), |path| {
             let records =
                 load_evidence_records(&path, None, None, None).expect("load should succeed");
