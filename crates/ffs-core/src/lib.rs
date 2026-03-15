@@ -973,6 +973,156 @@ const TIMESTAMP_ONLY_OBLIGATIONS: &[&str] = &[
 ];
 
 #[cfg(test)]
+const fn merge_safe(
+    proof_family: &'static str,
+    reason: &'static str,
+    obligations: &'static [&'static str],
+) -> MergeClassification {
+    MergeClassification {
+        safety: MergeSafety::Safe,
+        proof_family,
+        reason,
+        obligations,
+    }
+}
+
+#[cfg(test)]
+const fn merge_unsafe(proof_family: &'static str, reason: &'static str) -> MergeClassification {
+    MergeClassification {
+        safety: MergeSafety::Unsafe,
+        proof_family,
+        reason,
+        obligations: NO_MERGE_OBLIGATIONS,
+    }
+}
+
+#[cfg(test)]
+fn classify_data_block_write_pair(
+    left_inode: InodeNumber,
+    left_block: u64,
+    right_inode: InodeNumber,
+    right_block: u64,
+) -> MergeClassification {
+    if left_inode == right_inode && left_block == right_block {
+        merge_unsafe(
+            "same-data-block",
+            "same canonical data block aliases the same logical bytes",
+        )
+    } else {
+        merge_safe(
+            "disjoint-data-blocks",
+            "disjoint canonical data blocks can commute after derived metadata repair",
+            DISJOINT_DATA_BLOCK_OBLIGATIONS,
+        )
+    }
+}
+
+#[cfg(test)]
+fn classify_directory_add_pair(
+    left_parent: InodeNumber,
+    left_name: &'static str,
+    left_append_only: bool,
+    right_parent: InodeNumber,
+    right_name: &'static str,
+    right_append_only: bool,
+) -> MergeClassification {
+    if left_parent == right_parent && left_name == right_name {
+        merge_unsafe(
+            "directory-name-collision",
+            "two adds for the same directory name cannot commute",
+        )
+    } else if left_append_only && right_append_only {
+        merge_safe(
+            "append-only-directory-add",
+            "distinct append-only directory additions can merge if slot allocation is canonicalized",
+            DIRECTORY_APPEND_OBLIGATIONS,
+        )
+    } else {
+        merge_unsafe(
+            "directory-topology-rewrite",
+            "non-append directory additions may alias shared rec_len topology",
+        )
+    }
+}
+
+#[cfg(test)]
+fn classify_xattr_update_pair(
+    left_inode: InodeNumber,
+    left_key: &'static str,
+    right_inode: InodeNumber,
+    right_key: &'static str,
+) -> MergeClassification {
+    if left_inode == right_inode && left_key == right_key {
+        merge_unsafe(
+            "same-xattr-key",
+            "two updates to the same xattr key require ordered conflict resolution",
+        )
+    } else {
+        merge_safe(
+            "independent-xattrs",
+            "distinct xattr keys can merge if external-block rewrites are materialized by key",
+            XATTR_KEYSPACE_OBLIGATIONS,
+        )
+    }
+}
+
+#[cfg(test)]
+fn classify_extent_update_pair(
+    left_inode: InodeNumber,
+    left_logical: MergeInterval,
+    left_changes_file_size: bool,
+    right_inode: InodeNumber,
+    right_logical: MergeInterval,
+    right_changes_file_size: bool,
+) -> MergeClassification {
+    if left_inode == right_inode
+        && (left_logical.overlaps(right_logical)
+            || left_changes_file_size
+            || right_changes_file_size)
+    {
+        merge_unsafe(
+            "overlapping-extents",
+            "overlapping extent edits or concurrent size changes cannot commute on one inode",
+        )
+    } else {
+        merge_safe(
+            "non-overlapping-extents",
+            "non-overlapping extent edits can merge if tree rebalancing is canonicalized",
+            EXTENT_INTERVAL_OBLIGATIONS,
+        )
+    }
+}
+
+#[cfg(test)]
+fn classify_inode_metadata_pair(
+    left_timestamps_only: bool,
+    left_touches_size: bool,
+    left_touches_links: bool,
+    right_timestamps_only: bool,
+    right_touches_size: bool,
+    right_touches_links: bool,
+) -> MergeClassification {
+    if left_timestamps_only
+        && right_timestamps_only
+        && !left_touches_size
+        && !right_touches_size
+        && !left_touches_links
+        && !right_touches_links
+    {
+        merge_safe(
+            "timestamp-only-inode-metadata",
+            "timestamp-only inode metadata can merge by recomputing the final timestamps once",
+            TIMESTAMP_ONLY_OBLIGATIONS,
+        )
+    } else {
+        merge_unsafe(
+            "inode-structural-metadata",
+            "inode size/link-count semantics must be resolved by a single writer",
+        )
+    }
+}
+
+#[cfg(test)]
 fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassification {
     match (left, right) {
         (
@@ -984,23 +1134,7 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 inode: right_inode,
                 logical_block: right_block,
             },
-        ) => {
-            if left_inode == right_inode && left_block == right_block {
-                MergeClassification {
-                    safety: MergeSafety::Unsafe,
-                    proof_family: "same-data-block",
-                    reason: "same canonical data block aliases the same logical bytes",
-                    obligations: NO_MERGE_OBLIGATIONS,
-                }
-            } else {
-                MergeClassification {
-                    safety: MergeSafety::Safe,
-                    proof_family: "disjoint-data-blocks",
-                    reason: "disjoint canonical data blocks can commute after derived metadata repair",
-                    obligations: DISJOINT_DATA_BLOCK_OBLIGATIONS,
-                }
-            }
-        }
+        ) => classify_data_block_write_pair(left_inode, left_block, right_inode, right_block),
         (
             MergeMutation::DirectoryAdd {
                 parent: left_parent,
@@ -1012,30 +1146,14 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 name: right_name,
                 append_only: right_append_only,
             },
-        ) => {
-            if left_parent == right_parent && left_name == right_name {
-                MergeClassification {
-                    safety: MergeSafety::Unsafe,
-                    proof_family: "directory-name-collision",
-                    reason: "two adds for the same directory name cannot commute",
-                    obligations: NO_MERGE_OBLIGATIONS,
-                }
-            } else if left_append_only && right_append_only {
-                MergeClassification {
-                    safety: MergeSafety::Safe,
-                    proof_family: "append-only-directory-add",
-                    reason: "distinct append-only directory additions can merge if slot allocation is canonicalized",
-                    obligations: DIRECTORY_APPEND_OBLIGATIONS,
-                }
-            } else {
-                MergeClassification {
-                    safety: MergeSafety::Unsafe,
-                    proof_family: "directory-topology-rewrite",
-                    reason: "non-append directory additions may alias shared rec_len topology",
-                    obligations: NO_MERGE_OBLIGATIONS,
-                }
-            }
-        }
+        ) => classify_directory_add_pair(
+            left_parent,
+            left_name,
+            left_append_only,
+            right_parent,
+            right_name,
+            right_append_only,
+        ),
         (
             MergeMutation::XattrUpdate {
                 inode: left_inode,
@@ -1045,23 +1163,7 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 inode: right_inode,
                 key: right_key,
             },
-        ) => {
-            if left_inode == right_inode && left_key == right_key {
-                MergeClassification {
-                    safety: MergeSafety::Unsafe,
-                    proof_family: "same-xattr-key",
-                    reason: "two updates to the same xattr key require ordered conflict resolution",
-                    obligations: NO_MERGE_OBLIGATIONS,
-                }
-            } else {
-                MergeClassification {
-                    safety: MergeSafety::Safe,
-                    proof_family: "independent-xattrs",
-                    reason: "distinct xattr keys can merge if external-block rewrites are materialized by key",
-                    obligations: XATTR_KEYSPACE_OBLIGATIONS,
-                }
-            }
-        }
+        ) => classify_xattr_update_pair(left_inode, left_key, right_inode, right_key),
         (
             MergeMutation::ExtentUpdate {
                 inode: left_inode,
@@ -1073,27 +1175,14 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 logical: right_logical,
                 changes_file_size: right_changes_file_size,
             },
-        ) => {
-            if left_inode == right_inode
-                && (left_logical.overlaps(right_logical)
-                    || left_changes_file_size
-                    || right_changes_file_size)
-            {
-                MergeClassification {
-                    safety: MergeSafety::Unsafe,
-                    proof_family: "overlapping-extents",
-                    reason: "overlapping extent edits or concurrent size changes cannot commute on one inode",
-                    obligations: NO_MERGE_OBLIGATIONS,
-                }
-            } else {
-                MergeClassification {
-                    safety: MergeSafety::Safe,
-                    proof_family: "non-overlapping-extents",
-                    reason: "non-overlapping extent edits can merge if tree rebalancing is canonicalized",
-                    obligations: EXTENT_INTERVAL_OBLIGATIONS,
-                }
-            }
-        }
+        ) => classify_extent_update_pair(
+            left_inode,
+            left_logical,
+            left_changes_file_size,
+            right_inode,
+            right_logical,
+            right_changes_file_size,
+        ),
         (
             MergeMutation::InodeMetadata {
                 timestamps_only: left_timestamps_only,
@@ -1107,61 +1196,36 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 touches_links: right_touches_links,
                 ..
             },
-        ) => {
-            if left_timestamps_only
-                && right_timestamps_only
-                && !left_touches_size
-                && !right_touches_size
-                && !left_touches_links
-                && !right_touches_links
-            {
-                MergeClassification {
-                    safety: MergeSafety::Safe,
-                    proof_family: "timestamp-only-inode-metadata",
-                    reason: "timestamp-only inode metadata can merge by recomputing the final timestamps once",
-                    obligations: TIMESTAMP_ONLY_OBLIGATIONS,
-                }
-            } else {
-                MergeClassification {
-                    safety: MergeSafety::Unsafe,
-                    proof_family: "inode-structural-metadata",
-                    reason: "inode size/link-count semantics must be resolved by a single writer",
-                    obligations: NO_MERGE_OBLIGATIONS,
-                }
-            }
-        }
+        ) => classify_inode_metadata_pair(
+            left_timestamps_only,
+            left_touches_size,
+            left_touches_links,
+            right_timestamps_only,
+            right_touches_size,
+            right_touches_links,
+        ),
         (MergeMutation::DirectoryRemove { .. }, MergeMutation::DirectoryRemove { .. })
         | (MergeMutation::DirectoryRemove { .. }, MergeMutation::DirectoryAdd { .. })
         | (MergeMutation::DirectoryAdd { .. }, MergeMutation::DirectoryRemove { .. }) => {
-            MergeClassification {
-                safety: MergeSafety::Unsafe,
-                proof_family: "directory-removal",
-                reason: "directory removals rewrite slot topology and link-count invariants",
-                obligations: NO_MERGE_OBLIGATIONS,
-            }
+            merge_unsafe(
+                "directory-removal",
+                "directory removals rewrite slot topology and link-count invariants",
+            )
         }
         (MergeMutation::DirectoryRename { .. }, MergeMutation::DirectoryRename { .. }) => {
-            MergeClassification {
-                safety: MergeSafety::Unsafe,
-                proof_family: "directory-rename",
-                reason: "rename carries atomic replace and parent-link semantics",
-                obligations: NO_MERGE_OBLIGATIONS,
-            }
+            merge_unsafe(
+                "directory-rename",
+                "rename carries atomic replace and parent-link semantics",
+            )
         }
-        (MergeMutation::BitmapUpdate { .. }, MergeMutation::BitmapUpdate { .. }) => {
-            MergeClassification {
-                safety: MergeSafety::Unsafe,
-                proof_family: "bitmap-exact-accounting",
-                reason: "bitmap allocation/free operations require exact single-writer accounting",
-                obligations: NO_MERGE_OBLIGATIONS,
-            }
-        }
-        _ => MergeClassification {
-            safety: MergeSafety::Unsafe,
-            proof_family: "mixed-family",
-            reason: "mixed mutation families need higher-level dependency analysis before merging",
-            obligations: NO_MERGE_OBLIGATIONS,
-        },
+        (MergeMutation::BitmapUpdate { .. }, MergeMutation::BitmapUpdate { .. }) => merge_unsafe(
+            "bitmap-exact-accounting",
+            "bitmap allocation/free operations require exact single-writer accounting",
+        ),
+        _ => merge_unsafe(
+            "mixed-family",
+            "mixed mutation families need higher-level dependency analysis before merging",
+        ),
     }
 }
 
@@ -20501,12 +20565,12 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
 
         // Each native-only operation must fail with ModeViolation
-        let ops = [
+        let access_results = [
             fs.require_repair_write_access(),
             fs.require_version_store_access(),
             fs.require_blake3_write_access(),
         ];
-        for result in &ops {
+        for result in &access_results {
             assert!(
                 result.is_err(),
                 "expected error for native operation in compat mode"
@@ -20663,11 +20727,13 @@ mod tests {
 
         // Verify replayed data is visible.
         let snap = fs.current_snapshot();
-        let store = fs.mvcc_store().read();
-        let data10 = store.read_visible(BlockNumber(10), snap);
-        assert_eq!(data10.as_deref(), Some(vec![0xAA; 16].as_slice()));
-        let data20 = store.read_visible(BlockNumber(20), snap);
-        assert_eq!(data20.as_deref(), Some(vec![0xBB; 16].as_slice()));
+        {
+            let store = fs.mvcc_store().read();
+            let data10 = store.read_visible(BlockNumber(10), snap);
+            let data20 = store.read_visible(BlockNumber(20), snap);
+            assert_eq!(data10.as_deref(), Some(vec![0xAA; 16].as_slice()));
+            assert_eq!(data20.as_deref(), Some(vec![0xBB; 16].as_slice()));
+        }
     }
 
     #[test]

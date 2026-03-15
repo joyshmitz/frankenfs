@@ -2823,281 +2823,277 @@ mod tests {
                 ParseError::InvalidField { field: "sys_chunk_array_size", .. }
             ));
         }
+    }
 
-        // ── RAID profile identification ────────────────────────────────
+    // ── RAID profile identification ────────────────────────────────
 
-        #[test]
-        fn raid_profile_single() {
-            assert_eq!(
-                BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_DATA),
-                BtrfsRaidProfile::Single
-            );
-        }
+    #[test]
+    fn raid_profile_single() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_DATA),
+            BtrfsRaidProfile::Single
+        );
+    }
 
-        #[test]
-        fn raid_profile_dup() {
-            assert_eq!(
-                BtrfsRaidProfile::from_chunk_type(
-                    chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
-                        | chunk_type_flags::BTRFS_BLOCK_GROUP_DUP
-                ),
-                BtrfsRaidProfile::Dup
-            );
-        }
+    #[test]
+    fn raid_profile_dup() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_DUP
+            ),
+            BtrfsRaidProfile::Dup
+        );
+    }
 
-        #[test]
-        fn raid_profile_raid0() {
-            assert_eq!(
-                BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0),
-                BtrfsRaidProfile::Raid0
-            );
-        }
+    #[test]
+    fn raid_profile_raid0() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0),
+            BtrfsRaidProfile::Raid0
+        );
+    }
 
-        #[test]
-        fn raid_profile_raid1() {
-            assert_eq!(
-                BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1),
-                BtrfsRaidProfile::Raid1
-            );
-        }
+    #[test]
+    fn raid_profile_raid1() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1),
+            BtrfsRaidProfile::Raid1
+        );
+    }
 
-        #[test]
-        fn raid_profile_raid10() {
-            assert_eq!(
-                BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10),
-                BtrfsRaidProfile::Raid10
-            );
-        }
+    #[test]
+    fn raid_profile_raid10() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10),
+            BtrfsRaidProfile::Raid10
+        );
+    }
 
-        #[test]
-        fn raid_profile_raid5() {
-            assert_eq!(
-                BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5),
-                BtrfsRaidProfile::Raid5
-            );
-        }
+    #[test]
+    fn raid_profile_raid5() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5),
+            BtrfsRaidProfile::Raid5
+        );
+    }
 
-        #[test]
-        fn raid_profile_raid6() {
-            assert_eq!(
-                BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6),
-                BtrfsRaidProfile::Raid6
-            );
-        }
+    #[test]
+    fn raid_profile_raid6() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6),
+            BtrfsRaidProfile::Raid6
+        );
+    }
 
-        #[test]
-        fn raid_profile_raid1c3() {
-            assert_eq!(
-                BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C3),
-                BtrfsRaidProfile::Raid1C3
-            );
-        }
+    #[test]
+    fn raid_profile_raid1c3() {
+        assert_eq!(
+            BtrfsRaidProfile::from_chunk_type(chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1C3),
+            BtrfsRaidProfile::Raid1C3
+        );
+    }
 
-        #[test]
-        fn raid_profile_data_copies() {
-            assert_eq!(BtrfsRaidProfile::Single.data_copies(), 1);
-            assert_eq!(BtrfsRaidProfile::Dup.data_copies(), 2);
-            assert_eq!(BtrfsRaidProfile::Raid0.data_copies(), 1);
-            assert_eq!(BtrfsRaidProfile::Raid1.data_copies(), 2);
-            assert_eq!(BtrfsRaidProfile::Raid1C3.data_copies(), 3);
-            assert_eq!(BtrfsRaidProfile::Raid1C4.data_copies(), 4);
-            assert_eq!(BtrfsRaidProfile::Raid10.data_copies(), 2);
-            assert_eq!(BtrfsRaidProfile::Raid5.data_copies(), 1);
-            assert_eq!(BtrfsRaidProfile::Raid6.data_copies(), 1);
-        }
+    #[test]
+    fn raid_profile_data_copies() {
+        assert_eq!(BtrfsRaidProfile::Single.data_copies(), 1);
+        assert_eq!(BtrfsRaidProfile::Dup.data_copies(), 2);
+        assert_eq!(BtrfsRaidProfile::Raid0.data_copies(), 1);
+        assert_eq!(BtrfsRaidProfile::Raid1.data_copies(), 2);
+        assert_eq!(BtrfsRaidProfile::Raid1C3.data_copies(), 3);
+        assert_eq!(BtrfsRaidProfile::Raid1C4.data_copies(), 4);
+        assert_eq!(BtrfsRaidProfile::Raid10.data_copies(), 2);
+        assert_eq!(BtrfsRaidProfile::Raid5.data_copies(), 1);
+        assert_eq!(BtrfsRaidProfile::Raid6.data_copies(), 1);
+    }
 
-        #[test]
-        fn raid_profile_redundancy() {
-            assert!(!BtrfsRaidProfile::Single.is_redundant());
-            assert!(!BtrfsRaidProfile::Raid0.is_redundant());
-            assert!(BtrfsRaidProfile::Dup.is_redundant());
-            assert!(BtrfsRaidProfile::Raid1.is_redundant());
-            assert!(BtrfsRaidProfile::Raid5.is_redundant());
-            assert!(BtrfsRaidProfile::Raid6.is_redundant());
-            assert!(BtrfsRaidProfile::Raid10.is_redundant());
-        }
+    #[test]
+    fn raid_profile_redundancy() {
+        assert!(!BtrfsRaidProfile::Single.is_redundant());
+        assert!(!BtrfsRaidProfile::Raid0.is_redundant());
+        assert!(BtrfsRaidProfile::Dup.is_redundant());
+        assert!(BtrfsRaidProfile::Raid1.is_redundant());
+        assert!(BtrfsRaidProfile::Raid5.is_redundant());
+        assert!(BtrfsRaidProfile::Raid6.is_redundant());
+        assert!(BtrfsRaidProfile::Raid10.is_redundant());
+    }
 
-        // ── Stripe resolution ──────────────────────────────────────────
+    // ── Stripe resolution ──────────────────────────────────────────
 
-        fn make_chunk(
-            offset: u64,
-            length: u64,
-            stripe_len: u64,
-            chunk_type: u64,
-            stripes: Vec<BtrfsStripe>,
-            sub_stripes: u16,
-        ) -> BtrfsChunkEntry {
-            let num_stripes = stripes.len() as u16;
-            BtrfsChunkEntry {
-                key: BtrfsKey {
-                    objectid: 0x100,
-                    item_type: 228,
-                    offset,
-                },
-                length,
-                owner: 2,
-                stripe_len,
-                chunk_type,
-                io_align: 4096,
-                io_width: 4096,
-                sector_size: 4096,
-                num_stripes,
-                sub_stripes,
-                stripes,
-            }
-        }
-
-        fn stripe(devid: u64, offset: u64) -> BtrfsStripe {
-            BtrfsStripe {
-                devid,
+    fn make_chunk(
+        offset: u64,
+        length: u64,
+        stripe_len: u64,
+        chunk_type: u64,
+        stripes: Vec<BtrfsStripe>,
+        sub_stripes: u16,
+    ) -> BtrfsChunkEntry {
+        let num_stripes = u16::try_from(stripes.len()).expect("test stripes length fits in u16");
+        BtrfsChunkEntry {
+            key: BtrfsKey {
+                objectid: 0x100,
+                item_type: 228,
                 offset,
-                dev_uuid: [0; 16],
-            }
+            },
+            length,
+            owner: 2,
+            stripe_len,
+            chunk_type,
+            io_align: 4096,
+            io_width: 4096,
+            sector_size: 4096,
+            num_stripes,
+            sub_stripes,
+            stripes,
         }
+    }
 
-        #[test]
-        fn stripe_resolve_single() {
-            let chunks = vec![make_chunk(
-                0,
-                1_048_576,
-                65536,
-                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
-                vec![stripe(1, 0x10_0000)],
-                0,
-            )];
-            let result = map_logical_to_stripes(&chunks, 4096).unwrap().unwrap();
-            assert_eq!(result.profile, BtrfsRaidProfile::Single);
-            assert_eq!(result.stripes.len(), 1);
-            assert_eq!(result.stripes[0].devid, 1);
-            assert_eq!(result.stripes[0].physical, 0x10_0000 + 4096);
+    fn stripe(devid: u64, offset: u64) -> BtrfsStripe {
+        BtrfsStripe {
+            devid,
+            offset,
+            dev_uuid: [0; 16],
         }
+    }
 
-        #[test]
-        fn stripe_resolve_raid1_returns_both_mirrors() {
-            let chunks = vec![make_chunk(
-                0,
-                1_048_576,
-                65536,
-                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
-                    | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1,
-                vec![stripe(1, 0x10_0000), stripe(2, 0x20_0000)],
-                0,
-            )];
-            let result = map_logical_to_stripes(&chunks, 4096).unwrap().unwrap();
-            assert_eq!(result.profile, BtrfsRaidProfile::Raid1);
-            assert_eq!(result.stripes.len(), 2);
-            assert_eq!(result.stripes[0].devid, 1);
-            assert_eq!(result.stripes[1].devid, 2);
-            assert_eq!(result.stripes[0].physical, 0x10_0000 + 4096);
-            assert_eq!(result.stripes[1].physical, 0x20_0000 + 4096);
-        }
+    #[test]
+    fn stripe_resolve_single() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+            vec![stripe(1, 0x10_0000)],
+            0,
+        )];
+        let result = map_logical_to_stripes(&chunks, 4096).unwrap().unwrap();
+        assert_eq!(result.profile, BtrfsRaidProfile::Single);
+        assert_eq!(result.stripes.len(), 1);
+        assert_eq!(result.stripes[0].devid, 1);
+        assert_eq!(result.stripes[0].physical, 0x10_0000 + 4096);
+    }
 
-        #[test]
-        fn stripe_resolve_raid0_selects_correct_stripe() {
-            let chunks = vec![make_chunk(
-                0,
-                1_048_576,
-                65536,
-                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
-                    | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
-                vec![stripe(1, 0x10_0000), stripe(2, 0x20_0000)],
-                0,
-            )];
-            // offset 0 -> stripe 0 (dev 1)
-            let r0 = map_logical_to_stripes(&chunks, 0).unwrap().unwrap();
-            assert_eq!(r0.stripes.len(), 1);
-            assert_eq!(r0.stripes[0].devid, 1);
+    #[test]
+    fn stripe_resolve_raid1_returns_both_mirrors() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1,
+            vec![stripe(1, 0x10_0000), stripe(2, 0x20_0000)],
+            0,
+        )];
+        let result = map_logical_to_stripes(&chunks, 4096).unwrap().unwrap();
+        assert_eq!(result.profile, BtrfsRaidProfile::Raid1);
+        assert_eq!(result.stripes.len(), 2);
+        assert_eq!(result.stripes[0].devid, 1);
+        assert_eq!(result.stripes[1].devid, 2);
+        assert_eq!(result.stripes[0].physical, 0x10_0000 + 4096);
+        assert_eq!(result.stripes[1].physical, 0x20_0000 + 4096);
+    }
 
-            // offset 65536 -> stripe 1 (dev 2)
-            let r1 = map_logical_to_stripes(&chunks, 65536).unwrap().unwrap();
-            assert_eq!(r1.stripes.len(), 1);
-            assert_eq!(r1.stripes[0].devid, 2);
-        }
+    #[test]
+    fn stripe_resolve_raid0_selects_correct_stripe() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+            vec![stripe(1, 0x10_0000), stripe(2, 0x20_0000)],
+            0,
+        )];
+        // offset 0 -> stripe 0 (dev 1)
+        let r0 = map_logical_to_stripes(&chunks, 0).unwrap().unwrap();
+        assert_eq!(r0.stripes.len(), 1);
+        assert_eq!(r0.stripes[0].devid, 1);
 
-        #[test]
-        fn stripe_resolve_raid6_parity_wraparound() {
-            // 4 devices, RAID6 (2 parity), stripe_len=65536
-            // This tests the case where P is at the last device and Q wraps to device 0.
-            let chunks = vec![make_chunk(
-                0,
-                // Large enough to cover multiple stripe rows
-                65536 * 2 * 8, // data_stripes=2, 8 rows
-                65536,
-                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
-                    | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6,
-                vec![
-                    stripe(1, 0x10_0000),
-                    stripe(2, 0x20_0000),
-                    stripe(3, 0x30_0000),
-                    stripe(4, 0x40_0000),
-                ],
-                0,
-            )];
+        // offset 65536 -> stripe 1 (dev 2)
+        let r1 = map_logical_to_stripes(&chunks, 65536).unwrap().unwrap();
+        assert_eq!(r1.stripes.len(), 1);
+        assert_eq!(r1.stripes[0].devid, 2);
+    }
 
-            // Row 3 (stripe_nr=3): P at pos 3 (dev 4), Q at pos 0 (dev 1).
-            // Data should be at pos 1 (dev 2) and pos 2 (dev 3).
-            // offset for row 3, data stripe 0 = 3 * 65536 * 2 + 0 = 393216
-            let r = map_logical_to_stripes(&chunks, 393216).unwrap().unwrap();
-            assert_eq!(r.profile, BtrfsRaidProfile::Raid6);
-            assert_eq!(r.stripes.len(), 1);
-            // Should NOT be dev 1 (which is Q in this row)
-            assert_ne!(
-                r.stripes[0].devid, 1,
-                "stripe_nr=3: position 0 is Q parity, data should not map there"
-            );
-            assert_eq!(
-                r.stripes[0].devid, 2,
-                "stripe_nr=3, data_idx=0: should map to device 2 (position 1)"
-            );
+    #[test]
+    fn stripe_resolve_raid6_parity_wraparound() {
+        // 4 devices, RAID6 (2 parity), stripe_len=65536
+        // This tests the case where P is at the last device and Q wraps to device 0.
+        let chunks = vec![make_chunk(
+            0,
+            // Large enough to cover multiple stripe rows
+            65536 * 2 * 8, // data_stripes=2, 8 rows
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6,
+            vec![
+                stripe(1, 0x10_0000),
+                stripe(2, 0x20_0000),
+                stripe(3, 0x30_0000),
+                stripe(4, 0x40_0000),
+            ],
+            0,
+        )];
 
-            // Row 3, data stripe 1 = 393216 + 65536 = 458752
-            let r2 = map_logical_to_stripes(&chunks, 458752).unwrap().unwrap();
-            assert_eq!(
-                r2.stripes[0].devid, 3,
-                "stripe_nr=3, data_idx=1: should map to device 3 (position 2)"
-            );
-        }
+        // Row 3 (stripe_nr=3): P at pos 3 (dev 4), Q at pos 0 (dev 1).
+        // Data should be at pos 1 (dev 2) and pos 2 (dev 3).
+        // offset for row 3, data stripe 0 = 3 * 65536 * 2 + 0 = 393216
+        let r = map_logical_to_stripes(&chunks, 393_216).unwrap().unwrap();
+        assert_eq!(r.profile, BtrfsRaidProfile::Raid6);
+        assert_eq!(r.stripes.len(), 1);
+        // Should NOT be dev 1 (which is Q in this row)
+        assert_ne!(
+            r.stripes[0].devid, 1,
+            "stripe_nr=3: position 0 is Q parity, data should not map there"
+        );
+        assert_eq!(
+            r.stripes[0].devid, 2,
+            "stripe_nr=3, data_idx=0: should map to device 2 (position 1)"
+        );
 
-        #[test]
-        fn stripe_resolve_no_match_returns_none() {
-            let chunks = vec![make_chunk(
-                0,
-                1_048_576,
-                65536,
-                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
-                vec![stripe(1, 0)],
-                0,
-            )];
-            let result = map_logical_to_stripes(&chunks, 2_000_000).unwrap();
-            assert!(result.is_none());
-        }
+        // Row 3, data stripe 1 = 393216 + 65536 = 458752
+        let r2 = map_logical_to_stripes(&chunks, 458_752).unwrap().unwrap();
+        assert_eq!(
+            r2.stripes[0].devid, 3,
+            "stripe_nr=3, data_idx=1: should map to device 3 (position 2)"
+        );
+    }
 
-        // ── DEV_ITEM parsing ───────────────────────────────────────────
+    #[test]
+    fn stripe_resolve_no_match_returns_none() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+            vec![stripe(1, 0)],
+            0,
+        )];
+        let result = map_logical_to_stripes(&chunks, 2_000_000).unwrap();
+        assert!(result.is_none());
+    }
 
-        #[test]
-        fn parse_dev_item_valid() {
-            let mut data = vec![0u8; 98];
-            // devid = 1
-            data[0..8].copy_from_slice(&1_u64.to_le_bytes());
-            // total_bytes = 1GB
-            data[8..16].copy_from_slice(&(1024 * 1024 * 1024_u64).to_le_bytes());
-            // bytes_used = 500MB
-            data[16..24].copy_from_slice(&(500 * 1024 * 1024_u64).to_le_bytes());
-            // sector_size = 4096
-            data[32..36].copy_from_slice(&4096_u32.to_le_bytes());
+    // ── DEV_ITEM parsing ───────────────────────────────────────────
 
-            let item = parse_dev_item(&data).unwrap();
-            assert_eq!(item.devid, 1);
-            assert_eq!(item.total_bytes, 1024 * 1024 * 1024);
-            assert_eq!(item.bytes_used, 500 * 1024 * 1024);
-            assert_eq!(item.sector_size, 4096);
-        }
+    #[test]
+    fn parse_dev_item_valid() {
+        let mut data = vec![0u8; 98];
+        // devid = 1
+        data[0..8].copy_from_slice(&1_u64.to_le_bytes());
+        // total_bytes = 1GB
+        data[8..16].copy_from_slice(&(1024 * 1024 * 1024_u64).to_le_bytes());
+        // bytes_used = 500MB
+        data[16..24].copy_from_slice(&(500 * 1024 * 1024_u64).to_le_bytes());
+        // sector_size = 4096
+        data[32..36].copy_from_slice(&4096_u32.to_le_bytes());
 
-        #[test]
-        fn parse_dev_item_too_short() {
-            let data = vec![0u8; 50];
-            let err = parse_dev_item(&data).unwrap_err();
-            assert!(matches!(err, ParseError::InsufficientData { .. }));
-        }
+        let item = parse_dev_item(&data).unwrap();
+        assert_eq!(item.devid, 1);
+        assert_eq!(item.total_bytes, 1024 * 1024 * 1024);
+        assert_eq!(item.bytes_used, 500 * 1024 * 1024);
+        assert_eq!(item.sector_size, 4096);
+    }
+
+    #[test]
+    fn parse_dev_item_too_short() {
+        let data = vec![0u8; 50];
+        let err = parse_dev_item(&data).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
     }
 }
