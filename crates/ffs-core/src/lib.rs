@@ -1094,20 +1094,35 @@ fn classify_extent_update_pair(
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InodeMetadataMergeFootprint {
+    timestamps_only: bool,
+    touches_size: bool,
+    touches_links: bool,
+}
+
+#[cfg(test)]
+impl InodeMetadataMergeFootprint {
+    const fn new(timestamps_only: bool, touches_size: bool, touches_links: bool) -> Self {
+        Self {
+            timestamps_only,
+            touches_size,
+            touches_links,
+        }
+    }
+}
+
+#[cfg(test)]
 fn classify_inode_metadata_pair(
-    left_timestamps_only: bool,
-    left_touches_size: bool,
-    left_touches_links: bool,
-    right_timestamps_only: bool,
-    right_touches_size: bool,
-    right_touches_links: bool,
+    left: InodeMetadataMergeFootprint,
+    right: InodeMetadataMergeFootprint,
 ) -> MergeClassification {
-    if left_timestamps_only
-        && right_timestamps_only
-        && !left_touches_size
-        && !right_touches_size
-        && !left_touches_links
-        && !right_touches_links
+    if left.timestamps_only
+        && right.timestamps_only
+        && !left.touches_size
+        && !right.touches_size
+        && !left.touches_links
+        && !right.touches_links
     {
         merge_safe(
             "timestamp-only-inode-metadata",
@@ -1123,7 +1138,10 @@ fn classify_inode_metadata_pair(
 }
 
 #[cfg(test)]
-fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassification {
+fn classify_commutative_merge_pair(
+    left: MergeMutation,
+    right: MergeMutation,
+) -> Option<MergeClassification> {
     match (left, right) {
         (
             MergeMutation::DataBlockWrite {
@@ -1134,7 +1152,12 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 inode: right_inode,
                 logical_block: right_block,
             },
-        ) => classify_data_block_write_pair(left_inode, left_block, right_inode, right_block),
+        ) => Some(classify_data_block_write_pair(
+            left_inode,
+            left_block,
+            right_inode,
+            right_block,
+        )),
         (
             MergeMutation::DirectoryAdd {
                 parent: left_parent,
@@ -1146,14 +1169,14 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 name: right_name,
                 append_only: right_append_only,
             },
-        ) => classify_directory_add_pair(
+        ) => Some(classify_directory_add_pair(
             left_parent,
             left_name,
             left_append_only,
             right_parent,
             right_name,
             right_append_only,
-        ),
+        )),
         (
             MergeMutation::XattrUpdate {
                 inode: left_inode,
@@ -1163,7 +1186,12 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 inode: right_inode,
                 key: right_key,
             },
-        ) => classify_xattr_update_pair(left_inode, left_key, right_inode, right_key),
+        ) => Some(classify_xattr_update_pair(
+            left_inode,
+            left_key,
+            right_inode,
+            right_key,
+        )),
         (
             MergeMutation::ExtentUpdate {
                 inode: left_inode,
@@ -1175,14 +1203,14 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 logical: right_logical,
                 changes_file_size: right_changes_file_size,
             },
-        ) => classify_extent_update_pair(
+        ) => Some(classify_extent_update_pair(
             left_inode,
             left_logical,
             left_changes_file_size,
             right_inode,
             right_logical,
             right_changes_file_size,
-        ),
+        )),
         (
             MergeMutation::InodeMetadata {
                 timestamps_only: left_timestamps_only,
@@ -1196,37 +1224,62 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
                 touches_links: right_touches_links,
                 ..
             },
-        ) => classify_inode_metadata_pair(
-            left_timestamps_only,
-            left_touches_size,
-            left_touches_links,
-            right_timestamps_only,
-            right_touches_size,
-            right_touches_links,
-        ),
+        ) => Some(classify_inode_metadata_pair(
+            InodeMetadataMergeFootprint::new(
+                left_timestamps_only,
+                left_touches_size,
+                left_touches_links,
+            ),
+            InodeMetadataMergeFootprint::new(
+                right_timestamps_only,
+                right_touches_size,
+                right_touches_links,
+            ),
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn classify_alias_sensitive_merge_pair(
+    left: MergeMutation,
+    right: MergeMutation,
+) -> Option<MergeClassification> {
+    match (left, right) {
         (MergeMutation::DirectoryRemove { .. }, MergeMutation::DirectoryRemove { .. })
         | (MergeMutation::DirectoryRemove { .. }, MergeMutation::DirectoryAdd { .. })
         | (MergeMutation::DirectoryAdd { .. }, MergeMutation::DirectoryRemove { .. }) => {
-            merge_unsafe(
+            Some(merge_unsafe(
                 "directory-removal",
                 "directory removals rewrite slot topology and link-count invariants",
-            )
+            ))
         }
         (MergeMutation::DirectoryRename { .. }, MergeMutation::DirectoryRename { .. }) => {
-            merge_unsafe(
+            Some(merge_unsafe(
                 "directory-rename",
                 "rename carries atomic replace and parent-link semantics",
-            )
+            ))
         }
-        (MergeMutation::BitmapUpdate { .. }, MergeMutation::BitmapUpdate { .. }) => merge_unsafe(
-            "bitmap-exact-accounting",
-            "bitmap allocation/free operations require exact single-writer accounting",
-        ),
-        _ => merge_unsafe(
-            "mixed-family",
-            "mixed mutation families need higher-level dependency analysis before merging",
-        ),
+        (MergeMutation::BitmapUpdate { .. }, MergeMutation::BitmapUpdate { .. }) => {
+            Some(merge_unsafe(
+                "bitmap-exact-accounting",
+                "bitmap allocation/free operations require exact single-writer accounting",
+            ))
+        }
+        _ => None,
     }
+}
+
+#[cfg(test)]
+fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassification {
+    classify_commutative_merge_pair(left, right)
+        .or_else(|| classify_alias_sensitive_merge_pair(left, right))
+        .unwrap_or_else(|| {
+            merge_unsafe(
+                "mixed-family",
+                "mixed mutation families need higher-level dependency analysis before merging",
+            )
+        })
 }
 
 impl OpenFs {
@@ -20727,13 +20780,21 @@ mod tests {
 
         // Verify replayed data is visible.
         let snap = fs.current_snapshot();
-        {
+        let (data10, data20) = {
             let store = fs.mvcc_store().read();
-            let data10 = store.read_visible(BlockNumber(10), snap);
-            let data20 = store.read_visible(BlockNumber(20), snap);
-            assert_eq!(data10.as_deref(), Some(vec![0xAA; 16].as_slice()));
-            assert_eq!(data20.as_deref(), Some(vec![0xBB; 16].as_slice()));
-        }
+            (
+                store
+                    .read_visible(BlockNumber(10), snap)
+                    .map(|data| data.to_vec()),
+                store
+                    .read_visible(BlockNumber(20), snap)
+                    .map(|data| data.to_vec()),
+            )
+        };
+        let expected10 = [0xAA; 16];
+        let expected20 = [0xBB; 16];
+        assert_eq!(data10.as_deref(), Some(&expected10[..]));
+        assert_eq!(data20.as_deref(), Some(&expected20[..]));
     }
 
     #[test]
