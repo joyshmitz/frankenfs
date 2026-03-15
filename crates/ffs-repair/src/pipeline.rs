@@ -75,6 +75,8 @@ enum RefreshMode {
     AdaptiveEagerWrite,
     AdaptiveLazyScrub,
     StalenessTimeout,
+    /// Triggered when block-count writes since last refresh exceeds threshold.
+    BlockCountThreshold,
 }
 
 impl RefreshMode {
@@ -87,6 +89,7 @@ impl RefreshMode {
             Self::AdaptiveEagerWrite => "adaptive_eager_write",
             Self::AdaptiveLazyScrub => "adaptive_lazy_scrub",
             Self::StalenessTimeout => "staleness_timeout",
+            Self::BlockCountThreshold => "block_count_threshold",
         }
     }
 }
@@ -104,6 +107,10 @@ pub struct GroupRefreshSummary {
     pub policy: String,
     /// Milliseconds since the last successful symbol refresh.
     pub since_last_refresh_ms: u64,
+    /// Number of block writes since the last symbol refresh.
+    pub writes_since_refresh: u64,
+    /// Block-count threshold (0 if disabled).
+    pub block_count_threshold: u64,
 }
 
 /// Aggregate refresh-state telemetry for the entire pipeline.
@@ -125,6 +132,11 @@ struct GroupRefreshState {
     dirty_since: Option<Instant>,
     policy: RefreshPolicy,
     last_refresh: Instant,
+    /// Number of block writes to this group since the last symbol refresh.
+    writes_since_refresh: u64,
+    /// Block-count threshold: trigger eager refresh when exceeded.
+    /// `None` disables block-count tracking.
+    block_count_threshold: Option<u64>,
 }
 
 impl GroupRefreshState {
@@ -136,7 +148,23 @@ impl GroupRefreshState {
             dirty_since: None,
             policy,
             last_refresh: now,
+            writes_since_refresh: 0,
+            block_count_threshold: None,
         }
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    fn with_block_count_threshold(mut self, threshold: u64) -> Self {
+        self.block_count_threshold = Some(threshold);
+        self
+    }
+
+    /// Returns true if the block-count threshold has been exceeded.
+    #[must_use]
+    fn block_count_exceeded(&self) -> bool {
+        self.block_count_threshold
+            .is_some_and(|threshold| self.writes_since_refresh >= threshold)
     }
 }
 
@@ -599,6 +627,8 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                         .as_millis(),
                 )
                 .unwrap_or(u64::MAX),
+                writes_since_refresh: state.writes_since_refresh,
+                block_count_threshold: state.block_count_threshold.unwrap_or(0),
             });
         }
 
@@ -616,9 +646,42 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
     ///
     /// Eager/adaptive-eager policies will immediately refresh symbols.
     pub fn on_group_write(&mut self, cx: &Cx, group: GroupNumber) -> Result<()> {
+        // Increment per-group write counter for block-count staleness tracking.
+        if let Some(state) = self.refresh_states.get_mut(&group.0) {
+            state.writes_since_refresh = state.writes_since_refresh.saturating_add(1);
+            if state.block_count_exceeded() {
+                info!(
+                    target: "ffs::repair::refresh",
+                    group = group.0,
+                    writes_since_refresh = state.writes_since_refresh,
+                    threshold = state.block_count_threshold.unwrap_or(0),
+                    "block_count_threshold_exceeded"
+                );
+            }
+        }
         self.mark_group_dirty_with_cause(group, "write")?;
         self.maybe_refresh_dirty_group(cx, group, true)?;
         Ok(())
+    }
+
+    /// Set the block-count threshold for a group.
+    ///
+    /// When the number of writes since the last refresh exceeds this threshold,
+    /// an eager symbol refresh is triggered regardless of the group's time-based
+    /// refresh policy.  Set to `None` to disable block-count tracking.
+    pub fn set_block_count_threshold(&mut self, group: GroupNumber, threshold: Option<u64>) {
+        if let Some(state) = self.refresh_states.get_mut(&group.0) {
+            state.block_count_threshold = threshold;
+        }
+    }
+
+    /// Returns the current write count since last refresh for a group, or `None`
+    /// if the group is not tracked.
+    #[must_use]
+    pub fn writes_since_refresh(&self, group: GroupNumber) -> Option<u64> {
+        self.refresh_states
+            .get(&group.0)
+            .map(|s| s.writes_since_refresh)
     }
 
     /// Notify the refresh policy that dirty data for `group` reached a flush boundary.
@@ -910,6 +973,14 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             }
         };
 
+        // If policy didn't trigger but block-count threshold is exceeded, force refresh.
+        let refresh_mode = refresh_mode.or_else(|| {
+            self.refresh_states
+                .get(&group.0)
+                .filter(|s| s.block_count_exceeded())
+                .map(|_| RefreshMode::BlockCountThreshold)
+        });
+
         if let Some(mode) = refresh_mode {
             let refresh_symbol_count = self.selected_refresh_symbol_count(&group_cfg);
             if refresh_symbol_count == 0 {
@@ -929,6 +1000,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                 state.dirty = false;
                 state.dirty_since = None;
                 state.last_refresh = Instant::now();
+                state.writes_since_refresh = 0;
             }
         }
         Ok(())

@@ -306,6 +306,276 @@ fn floor_to_u32(value: f64, upper: u32) -> u32 {
     low
 }
 
+// ── Refresh trigger expected-loss model ────────────────────────────────────
+
+/// Workload intensity profile for refresh policy comparison.
+///
+/// Each profile characterizes the expected write rate to a block group,
+/// enabling expected-loss comparison of age-only vs block-count triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkloadProfile {
+    /// Near-zero writes (e.g., cold archive).  ~0.01 writes/sec.
+    Idle,
+    /// Steady low-rate writes.  ~1 write/sec.
+    Light,
+    /// Sustained high-rate writes.  ~100 writes/sec.
+    Heavy,
+    /// Short intense bursts followed by quiescence.  ~1000 writes/sec peak.
+    Burst,
+}
+
+impl WorkloadProfile {
+    /// Expected writes per second for this profile.
+    #[must_use]
+    pub const fn writes_per_second(self) -> f64 {
+        match self {
+            Self::Idle => 0.01,
+            Self::Light => 1.0,
+            Self::Heavy => 100.0,
+            Self::Burst => 1000.0,
+        }
+    }
+
+    /// All defined profiles.
+    pub const ALL: [Self; 4] = [Self::Idle, Self::Light, Self::Heavy, Self::Burst];
+}
+
+/// Expected-loss model for comparing refresh trigger policies.
+///
+/// The model evaluates three policies:
+///
+/// - **Age-only**: Refresh after `max_staleness` seconds since first dirty write.
+///   Current default is 30s.
+/// - **Block-count**: Refresh after `block_threshold` writes to the group since
+///   last refresh.
+/// - **Hybrid**: Refresh at `min(age_timeout, block_threshold)` — whichever
+///   trigger fires first.
+///
+/// Expected loss for each policy:
+///
+/// ```text
+/// E[loss] = P(data_loss | stale_symbols) * data_loss_cost
+///         + P(unnecessary_refresh) * refresh_io_cost
+/// ```
+///
+/// `P(data_loss | stale_symbols)` increases with the number of blocks written
+/// since the last refresh, because each write invalidates one source block's
+/// repair symbols.  The probability that a crash during this window requires
+/// recovery AND hits an invalidated block is approximately:
+///
+/// ```text
+/// P(data_loss) ≈ P(crash) * (stale_blocks / source_blocks) * P(corruption | crash)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RefreshLossModel {
+    /// Cost of unrecoverable data loss (same scale as `DurabilityAutopilot`).
+    pub data_loss_cost: f64,
+    /// I/O cost of one refresh operation (encode + write repair symbols).
+    pub refresh_io_cost: f64,
+    /// Probability of a crash per second (annualized failure rate / seconds_per_year).
+    /// Default: ~3.17e-8 (≈ 1 crash/year).
+    pub crash_rate_per_sec: f64,
+    /// Posterior corruption probability per block (from autopilot).
+    pub corruption_probability: f64,
+    /// Number of source blocks in the group.
+    pub source_block_count: u32,
+}
+
+impl Default for RefreshLossModel {
+    fn default() -> Self {
+        Self {
+            data_loss_cost: 1_000_000.0,
+            refresh_io_cost: 0.01,
+            crash_rate_per_sec: 1.0 / 31_536_000.0, // 1 crash/year
+            corruption_probability: 0.01,
+            source_block_count: 32_768,
+        }
+    }
+}
+
+/// Result of a refresh policy comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RefreshPolicyComparison {
+    /// Expected loss per second under age-only refresh.
+    pub loss_age_only: f64,
+    /// Expected loss per second under block-count refresh.
+    pub loss_block_count: f64,
+    /// Expected loss per second under hybrid refresh.
+    pub loss_hybrid: f64,
+    /// Age-only trigger interval in seconds.
+    pub age_trigger_secs: f64,
+    /// Block-count trigger threshold.
+    pub block_trigger_count: u32,
+    /// The policy with the lowest expected loss.
+    pub best_policy: RefreshTriggerPolicy,
+}
+
+/// Trigger policy selection result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefreshTriggerPolicy {
+    /// Refresh based on time since first dirty write.
+    AgeOnly,
+    /// Refresh based on number of writes since last refresh.
+    BlockCount,
+    /// Refresh on whichever fires first (min of age and block-count).
+    Hybrid,
+}
+
+impl RefreshLossModel {
+    /// Expected loss rate (per second) for age-only refresh with the given timeout.
+    ///
+    /// During the staleness window `[0, max_staleness_secs]`, blocks accumulate
+    /// at `write_rate` per second.  The average number of stale blocks over the
+    /// window is `write_rate * max_staleness_secs / 2`.  The refresh cost is
+    /// amortized as `refresh_io_cost / max_staleness_secs`.
+    #[must_use]
+    pub fn expected_loss_age_only(&self, max_staleness_secs: f64, write_rate: f64) -> f64 {
+        if max_staleness_secs <= 0.0 || self.source_block_count == 0 {
+            return self.refresh_io_cost; // Degenerate: refresh every tick.
+        }
+        let blocks = f64::from(self.source_block_count);
+        // Average stale fraction over the refresh interval.
+        let avg_stale_blocks = (write_rate * max_staleness_secs / 2.0).min(blocks);
+        let avg_stale_fraction = avg_stale_blocks / blocks;
+        let data_loss_rate =
+            self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
+        let refresh_amortized = self.refresh_io_cost / max_staleness_secs;
+        data_loss_rate * self.data_loss_cost + refresh_amortized
+    }
+
+    /// Expected loss rate (per second) for block-count refresh with the given threshold.
+    ///
+    /// Refreshes after every `block_threshold` writes.  The average number of
+    /// stale blocks is `block_threshold / 2`.  The refresh cost is amortized
+    /// as `refresh_io_cost * write_rate / block_threshold`.
+    #[must_use]
+    pub fn expected_loss_block_count(&self, block_threshold: u32, write_rate: f64) -> f64 {
+        if block_threshold == 0 || self.source_block_count == 0 || write_rate <= 0.0 {
+            return self.refresh_io_cost * write_rate.max(0.0);
+        }
+        let blocks = f64::from(self.source_block_count);
+        let threshold_f = f64::from(block_threshold);
+        let avg_stale_blocks = (threshold_f / 2.0).min(blocks);
+        let avg_stale_fraction = avg_stale_blocks / blocks;
+        let data_loss_rate =
+            self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
+        let refresh_amortized = self.refresh_io_cost * write_rate / threshold_f;
+        data_loss_rate * self.data_loss_cost + refresh_amortized
+    }
+
+    /// Expected loss rate (per second) for hybrid refresh (min of age and block-count).
+    ///
+    /// The effective staleness window is `min(max_staleness_secs, block_threshold / write_rate)`.
+    #[must_use]
+    pub fn expected_loss_hybrid(
+        &self,
+        max_staleness_secs: f64,
+        block_threshold: u32,
+        write_rate: f64,
+    ) -> f64 {
+        if self.source_block_count == 0 {
+            return 0.0;
+        }
+        let age_window = if max_staleness_secs > 0.0 {
+            max_staleness_secs
+        } else {
+            f64::INFINITY
+        };
+        let block_window = if write_rate > 0.0 && block_threshold > 0 {
+            f64::from(block_threshold) / write_rate
+        } else {
+            f64::INFINITY
+        };
+        let effective_window = age_window.min(block_window);
+        if !effective_window.is_finite() || effective_window <= 0.0 {
+            return self.refresh_io_cost;
+        }
+        let blocks = f64::from(self.source_block_count);
+        let avg_stale_blocks = (write_rate * effective_window / 2.0).min(blocks);
+        let avg_stale_fraction = avg_stale_blocks / blocks;
+        let data_loss_rate =
+            self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
+        let refresh_amortized = self.refresh_io_cost / effective_window;
+        data_loss_rate * self.data_loss_cost + refresh_amortized
+    }
+
+    /// Compare all three policies for a given workload and return the best.
+    #[must_use]
+    pub fn compare_policies(
+        &self,
+        max_staleness_secs: f64,
+        block_threshold: u32,
+        profile: WorkloadProfile,
+    ) -> RefreshPolicyComparison {
+        let rate = profile.writes_per_second();
+        let loss_age = self.expected_loss_age_only(max_staleness_secs, rate);
+        let loss_block = self.expected_loss_block_count(block_threshold, rate);
+        let loss_hybrid = self.expected_loss_hybrid(max_staleness_secs, block_threshold, rate);
+
+        let best = if loss_hybrid <= loss_age && loss_hybrid <= loss_block {
+            RefreshTriggerPolicy::Hybrid
+        } else if loss_block <= loss_age {
+            RefreshTriggerPolicy::BlockCount
+        } else {
+            RefreshTriggerPolicy::AgeOnly
+        };
+
+        RefreshPolicyComparison {
+            loss_age_only: loss_age,
+            loss_block_count: loss_block,
+            loss_hybrid,
+            age_trigger_secs: max_staleness_secs,
+            block_trigger_count: block_threshold,
+            best_policy: best,
+        }
+    }
+
+    /// Find the write rate at which block-count triggers become cheaper than
+    /// age-only.  Returns `None` if age-only is always cheaper (e.g., zero
+    /// corruption probability).
+    ///
+    /// This is the "decision boundary" from the bead spec.
+    #[must_use]
+    pub fn block_count_dominance_threshold(
+        &self,
+        max_staleness_secs: f64,
+        block_threshold: u32,
+    ) -> Option<f64> {
+        if self.source_block_count == 0 || max_staleness_secs <= 0.0 || block_threshold == 0 {
+            return None;
+        }
+        // Binary search for the write rate where block-count loss == age-only loss.
+        let mut lo: f64 = 0.0;
+        let mut hi: f64 = 100_000.0;
+        let loss_age_lo = self.expected_loss_age_only(max_staleness_secs, lo);
+        let loss_block_lo = self.expected_loss_block_count(block_threshold, lo);
+        let loss_age_hi = self.expected_loss_age_only(max_staleness_secs, hi);
+        let loss_block_hi = self.expected_loss_block_count(block_threshold, hi);
+
+        // Check if block-count is always better or always worse.
+        let diff_lo = loss_age_lo - loss_block_lo;
+        let diff_hi = loss_age_hi - loss_block_hi;
+        if diff_lo.signum() == diff_hi.signum() {
+            return None; // No crossover in range.
+        }
+
+        for _ in 0..64 {
+            let mid = f64::midpoint(lo, hi);
+            let diff = self.expected_loss_age_only(max_staleness_secs, mid)
+                - self.expected_loss_block_count(block_threshold, mid);
+            if diff.abs() < 1e-15 {
+                return Some(mid);
+            }
+            if diff.signum() == diff_lo.signum() {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Some(f64::midpoint(lo, hi))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,5 +880,175 @@ mod tests {
                 sum_before, sum_after
             );
         }
+    }
+
+    // ── RefreshLossModel tests ────────────────────────────────────────────
+
+    #[test]
+    fn refresh_loss_age_only_short_staleness_has_high_refresh_cost() {
+        let m = RefreshLossModel::default();
+        let rate = WorkloadProfile::Heavy.writes_per_second();
+        // Very short staleness → dominated by refresh I/O amortization.
+        let loss_tiny = m.expected_loss_age_only(0.1, rate);
+        let loss_moderate = m.expected_loss_age_only(30.0, rate);
+        assert!(
+            loss_tiny > loss_moderate,
+            "very short staleness should cost more than moderate: \
+             tiny={loss_tiny:.12} moderate={loss_moderate:.12}"
+        );
+    }
+
+    #[test]
+    fn refresh_loss_age_only_u_shape_under_high_risk() {
+        // With high corruption probability, data-loss cost dominates at long
+        // staleness, creating a clear U-shape.
+        let m = RefreshLossModel {
+            corruption_probability: 0.5,
+            source_block_count: 1024,
+            ..RefreshLossModel::default()
+        };
+        let rate = WorkloadProfile::Heavy.writes_per_second();
+        let loss_tiny = m.expected_loss_age_only(0.01, rate);
+        let loss_mid = m.expected_loss_age_only(1.0, rate);
+        let loss_huge = m.expected_loss_age_only(1000.0, rate);
+        assert!(
+            loss_tiny > loss_mid,
+            "short staleness should cost more than moderate: \
+             tiny={loss_tiny:.12} mid={loss_mid:.12}"
+        );
+        assert!(
+            loss_huge > loss_mid,
+            "long staleness should cost more than moderate: \
+             huge={loss_huge:.12} mid={loss_mid:.12}"
+        );
+    }
+
+    #[test]
+    fn refresh_loss_block_count_decreases_with_larger_threshold_under_low_corruption() {
+        let m = RefreshLossModel {
+            corruption_probability: 1e-9,
+            ..RefreshLossModel::default()
+        };
+        let rate = WorkloadProfile::Light.writes_per_second();
+        let loss_small = m.expected_loss_block_count(10, rate);
+        let loss_large = m.expected_loss_block_count(10_000, rate);
+        assert!(
+            loss_large < loss_small,
+            "with low corruption, larger threshold should reduce loss: \
+             small={loss_small:.12} large={loss_large:.12}"
+        );
+    }
+
+    #[test]
+    fn refresh_loss_hybrid_uses_shorter_window() {
+        // The hybrid effective window is min(age, block/rate). With age=30s
+        // and block_threshold=100 at rate=100/s, block triggers at 1s.
+        // So hybrid effective window = 1s.
+        let m = RefreshLossModel::default();
+        let rate = 100.0; // 100 writes/sec.
+        let staleness_secs = 30.0;
+        let block_threshold = 100_u32;
+        // Effective hybrid window: min(30, 100/100) = 1.0s.
+        let loss_hybrid = m.expected_loss_hybrid(staleness_secs, block_threshold, rate);
+        // This should equal the age-only loss at 1.0s window.
+        let loss_age_at_1s = m.expected_loss_age_only(1.0, rate);
+        assert!(
+            (loss_hybrid - loss_age_at_1s).abs() < 1e-12,
+            "hybrid should equal age-only at effective window: \
+             hybrid={loss_hybrid:.12} age_at_1s={loss_age_at_1s:.12}"
+        );
+    }
+
+    #[test]
+    fn refresh_compare_all_profiles() {
+        let m = RefreshLossModel::default();
+        for profile in WorkloadProfile::ALL {
+            let cmp = m.compare_policies(30.0, 500, profile);
+            assert!(cmp.loss_age_only.is_finite());
+            assert!(cmp.loss_block_count.is_finite());
+            assert!(cmp.loss_hybrid.is_finite());
+            assert!(cmp.loss_age_only >= 0.0);
+            assert!(cmp.loss_block_count >= 0.0);
+            assert!(cmp.loss_hybrid >= 0.0);
+            let min_loss = cmp
+                .loss_age_only
+                .min(cmp.loss_block_count)
+                .min(cmp.loss_hybrid);
+            match cmp.best_policy {
+                RefreshTriggerPolicy::AgeOnly => {
+                    assert!((cmp.loss_age_only - min_loss).abs() < 1e-12);
+                }
+                RefreshTriggerPolicy::BlockCount => {
+                    assert!((cmp.loss_block_count - min_loss).abs() < 1e-12);
+                }
+                RefreshTriggerPolicy::Hybrid => {
+                    assert!((cmp.loss_hybrid - min_loss).abs() < 1e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_block_count_dominates_when_data_loss_is_catastrophic() {
+        // When data_loss_cost is very high and corruption probability is
+        // significant, keeping the stale fraction low via block-count
+        // triggers outweighs the higher refresh frequency cost.
+        let m = RefreshLossModel {
+            data_loss_cost: 1e9,
+            corruption_probability: 0.5,
+            source_block_count: 4096,
+            ..RefreshLossModel::default()
+        };
+        let rate = WorkloadProfile::Burst.writes_per_second();
+        let loss_age = m.expected_loss_age_only(30.0, rate);
+        let loss_block = m.expected_loss_block_count(200, rate);
+        assert!(
+            loss_block < loss_age,
+            "block-count should dominate when data loss is catastrophic: \
+             age={loss_age:.6} block={loss_block:.6}"
+        );
+    }
+
+    #[test]
+    fn refresh_all_policies_finite_under_idle() {
+        let m = RefreshLossModel::default();
+        let rate = WorkloadProfile::Idle.writes_per_second();
+        let loss_age = m.expected_loss_age_only(30.0, rate);
+        let loss_block = m.expected_loss_block_count(500, rate);
+        let loss_hybrid = m.expected_loss_hybrid(30.0, 500, rate);
+        assert!(loss_age.is_finite() && loss_age >= 0.0);
+        assert!(loss_block.is_finite() && loss_block >= 0.0);
+        assert!(loss_hybrid.is_finite() && loss_hybrid >= 0.0);
+    }
+
+    #[test]
+    fn refresh_decision_boundary_exists_under_high_risk() {
+        let m = RefreshLossModel {
+            corruption_probability: 0.1,
+            source_block_count: 4096,
+            ..RefreshLossModel::default()
+        };
+        let boundary = m.block_count_dominance_threshold(30.0, 500);
+        if let Some(rate) = boundary {
+            assert!(rate > 0.0, "crossover rate should be positive");
+            let loss_age = m.expected_loss_age_only(30.0, rate);
+            let loss_block = m.expected_loss_block_count(500, rate);
+            assert!(
+                (loss_age - loss_block).abs() < 1e-8,
+                "at crossover rate {rate:.4}, losses should be equal: \
+                 age={loss_age:.12} block={loss_block:.12}"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_loss_zero_source_blocks_no_panic() {
+        let m = RefreshLossModel {
+            source_block_count: 0,
+            ..RefreshLossModel::default()
+        };
+        assert!(m.expected_loss_age_only(30.0, 100.0).is_finite());
+        assert!(m.expected_loss_block_count(500, 100.0).is_finite());
+        assert!(m.expected_loss_hybrid(30.0, 500, 100.0).is_finite());
     }
 }
