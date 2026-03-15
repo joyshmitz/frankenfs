@@ -87,6 +87,16 @@ pub enum EvidenceEventType {
     DurabilityPolicyChanged,
     /// Symbol refresh policy mode changed.
     RefreshPolicyChanged,
+    /// Merge proof was checked during conflict resolution.
+    MergeProofChecked,
+    /// Merge was successfully applied to resolve a conflict.
+    MergeApplied,
+    /// Merge was rejected (invalid proof, overlapping ranges, etc.).
+    MergeRejected,
+    /// Adaptive conflict policy switched between Strict and SafeMerge.
+    PolicySwitched,
+    /// Periodic contention metrics sample.
+    ContentionSample,
 }
 
 // ── Detail structs ──────────────────────────────────────────────────────────
@@ -345,6 +355,82 @@ pub struct RefreshPolicyChangedDetail {
     pub new_policy: String,
 }
 
+/// Detail payload for merge-proof-checked events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeProofCheckedDetail {
+    /// Transaction that attempted the merge.
+    pub txn_id: u64,
+    /// Block where the conflict occurred.
+    pub block_id: u64,
+    /// Merge proof variant name (e.g., "AppendOnly", "IndependentKeys").
+    pub proof_variant: String,
+    /// Whether the proof validated successfully.
+    pub valid: bool,
+    /// Rejection reason (only populated when `valid` is false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<String>,
+}
+
+/// Detail payload for merge-applied events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeAppliedDetail {
+    /// Transaction that committed with merged writes.
+    pub txn_id: u64,
+    /// Number of blocks that were merged (had conflicts resolved by proof).
+    pub merged_block_count: usize,
+    /// Total size in bytes of the combined write set after merge.
+    pub combined_write_set_bytes: usize,
+    /// Merge proof variant used (e.g., "AppendOnly").
+    pub proof_variant: String,
+}
+
+/// Detail payload for merge-rejected events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeRejectedDetail {
+    /// Transaction that was rejected.
+    pub txn_id: u64,
+    /// Block where the merge failed.
+    pub block_id: u64,
+    /// Merge proof variant attempted (e.g., "Unsafe").
+    pub proof_variant: String,
+    /// Reason for rejection.
+    pub reason: String,
+}
+
+/// Detail payload for adaptive policy-switch events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicySwitchedDetail {
+    /// Previous effective policy.
+    pub from_policy: String,
+    /// New effective policy.
+    pub to_policy: String,
+    /// Expected-loss delta (positive = new policy is cheaper).
+    pub expected_loss_delta: f64,
+    /// Trigger reason (e.g., "contention_rate_change").
+    pub trigger_reason: String,
+}
+
+/// Detail payload for periodic contention sample events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContentionSampleDetail {
+    /// EMA conflict rate at sample time.
+    pub conflict_rate: f64,
+    /// EMA merge success rate at sample time.
+    pub merge_success_rate: f64,
+    /// EMA abort rate at sample time.
+    pub abort_rate: f64,
+    /// Total commits observed.
+    pub total_commits: u64,
+    /// Total conflicts observed.
+    pub total_conflicts: u64,
+    /// Total successful merges.
+    pub total_merges: u64,
+    /// Total aborts.
+    pub total_aborts: u64,
+    /// Currently effective policy.
+    pub effective_policy: String,
+}
+
 // ── Evidence record ─────────────────────────────────────────────────────────
 
 /// A single evidence record in the JSONL ledger.
@@ -411,6 +497,21 @@ pub struct EvidenceRecord {
     /// Refresh-policy detail (present when `event_type` is `RefreshPolicyChanged`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_policy_changed: Option<RefreshPolicyChangedDetail>,
+    /// Merge-proof-checked detail (present when `event_type` is `MergeProofChecked`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_proof_checked: Option<MergeProofCheckedDetail>,
+    /// Merge-applied detail (present when `event_type` is `MergeApplied`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_applied: Option<MergeAppliedDetail>,
+    /// Merge-rejected detail (present when `event_type` is `MergeRejected`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_rejected: Option<MergeRejectedDetail>,
+    /// Policy-switched detail (present when `event_type` is `PolicySwitched`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_switched: Option<PolicySwitchedDetail>,
+    /// Contention-sample detail (present when `event_type` is `ContentionSample`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contention_sample: Option<ContentionSampleDetail>,
 }
 
 impl EvidenceRecord {
@@ -436,6 +537,11 @@ impl EvidenceRecord {
             dirty_block_discarded: None,
             durability_policy_changed: None,
             refresh_policy_changed: None,
+            merge_proof_checked: None,
+            merge_applied: None,
+            merge_rejected: None,
+            policy_switched: None,
+            contention_sample: None,
         }
     }
 
@@ -580,6 +686,46 @@ impl EvidenceRecord {
     pub fn refresh_policy_changed(detail: RefreshPolicyChangedDetail) -> Self {
         let mut r = Self::base(EvidenceEventType::RefreshPolicyChanged, detail.block_group);
         r.refresh_policy_changed = Some(detail);
+        r
+    }
+
+    /// Create a merge-proof-checked evidence record.
+    #[must_use]
+    pub fn merge_proof_checked(detail: MergeProofCheckedDetail) -> Self {
+        let mut r = Self::base(EvidenceEventType::MergeProofChecked, 0);
+        r.merge_proof_checked = Some(detail);
+        r
+    }
+
+    /// Create a merge-applied evidence record.
+    #[must_use]
+    pub fn merge_applied(detail: MergeAppliedDetail) -> Self {
+        let mut r = Self::base(EvidenceEventType::MergeApplied, 0);
+        r.merge_applied = Some(detail);
+        r
+    }
+
+    /// Create a merge-rejected evidence record.
+    #[must_use]
+    pub fn merge_rejected(detail: MergeRejectedDetail) -> Self {
+        let mut r = Self::base(EvidenceEventType::MergeRejected, 0);
+        r.merge_rejected = Some(detail);
+        r
+    }
+
+    /// Create a policy-switched evidence record.
+    #[must_use]
+    pub fn policy_switched(detail: PolicySwitchedDetail) -> Self {
+        let mut r = Self::base(EvidenceEventType::PolicySwitched, 0);
+        r.policy_switched = Some(detail);
+        r
+    }
+
+    /// Create a contention-sample evidence record.
+    #[must_use]
+    pub fn contention_sample(detail: ContentionSampleDetail) -> Self {
+        let mut r = Self::base(EvidenceEventType::ContentionSample, 0);
+        r.contention_sample = Some(detail);
         r
     }
 

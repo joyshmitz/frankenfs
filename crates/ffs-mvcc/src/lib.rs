@@ -17,8 +17,9 @@ use crossbeam_epoch as epoch;
 use ffs_block::{BlockBuf, BlockDevice, FlushPinToken, MvccFlushLifecycle};
 use ffs_error::{FfsError, Result as FfsResult};
 use ffs_repair::evidence::{
-    EvidenceRecord, SerializationConflictDetail, TransactionCommitDetail, TxnAbortReason,
-    TxnAbortedDetail,
+    ContentionSampleDetail, EvidenceRecord, MergeAppliedDetail, MergeProofCheckedDetail,
+    MergeRejectedDetail, PolicySwitchedDetail, SerializationConflictDetail,
+    TransactionCommitDetail, TxnAbortReason, TxnAbortedDetail,
 };
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Mutex, RwLock};
@@ -529,15 +530,23 @@ impl ContentionMetrics {
     /// - `merge_succeeded`: true if the conflict was resolved via merge proof
     ///   (only meaningful when `had_conflict` is true).
     /// - `aborted`: true if the commit was aborted.
-    pub fn record_commit(&mut self, alpha: f64, had_conflict: bool, merge_succeeded: bool, aborted: bool) {
+    pub fn record_commit(
+        &mut self,
+        alpha: f64,
+        had_conflict: bool,
+        merge_succeeded: bool,
+        aborted: bool,
+    ) {
         self.total_commits += 1;
+        let decay = 1.0 - alpha;
         let conflict_sample = if had_conflict { 1.0 } else { 0.0 };
-        self.conflict_rate = self.conflict_rate * (1.0 - alpha) + conflict_sample * alpha;
+        self.conflict_rate = decay.mul_add(self.conflict_rate, conflict_sample * alpha);
 
         if had_conflict {
             self.total_conflicts += 1;
             let merge_sample = if merge_succeeded { 1.0 } else { 0.0 };
-            self.merge_success_rate = self.merge_success_rate * (1.0 - alpha) + merge_sample * alpha;
+            self.merge_success_rate =
+                decay.mul_add(self.merge_success_rate, merge_sample * alpha);
             if merge_succeeded {
                 self.total_merges += 1;
             }
@@ -547,7 +556,7 @@ impl ContentionMetrics {
             self.total_aborts += 1;
         }
         let abort_sample = if aborted { 1.0 } else { 0.0 };
-        self.abort_rate = self.abort_rate * (1.0 - alpha) + abort_sample * alpha;
+        self.abort_rate = decay.mul_add(self.abort_rate, abort_sample * alpha);
     }
 
     /// Compute the expected loss for `Strict` policy given current metrics.
@@ -1325,6 +1334,137 @@ impl MvccStore {
         );
     }
 
+    // ── Merge evidence emission helpers ────────────────────────────────────
+
+    fn emit_merge_proof_checked(
+        &self,
+        txn_id: u64,
+        block_id: u64,
+        proof_variant: &str,
+        valid: bool,
+        rejection_reason: Option<&str>,
+    ) {
+        let Some(sink) = &self.evidence_sink else {
+            return;
+        };
+        sink.append(
+            &EvidenceRecord::merge_proof_checked(MergeProofCheckedDetail {
+                txn_id,
+                block_id,
+                proof_variant: proof_variant.to_owned(),
+                valid,
+                rejection_reason: rejection_reason.map(str::to_owned),
+            }),
+            txn_id,
+        );
+    }
+
+    fn emit_merge_applied(
+        &self,
+        txn_id: u64,
+        merged_block_count: usize,
+        combined_write_set_bytes: usize,
+        proof_variant: &str,
+    ) {
+        let Some(sink) = &self.evidence_sink else {
+            return;
+        };
+        sink.append(
+            &EvidenceRecord::merge_applied(MergeAppliedDetail {
+                txn_id,
+                merged_block_count,
+                combined_write_set_bytes,
+                proof_variant: proof_variant.to_owned(),
+            }),
+            txn_id,
+        );
+    }
+
+    fn emit_merge_rejected(
+        &self,
+        txn_id: u64,
+        block_id: u64,
+        proof_variant: &str,
+        reason: &str,
+    ) {
+        let Some(sink) = &self.evidence_sink else {
+            return;
+        };
+        sink.append(
+            &EvidenceRecord::merge_rejected(MergeRejectedDetail {
+                txn_id,
+                block_id,
+                proof_variant: proof_variant.to_owned(),
+                reason: reason.to_owned(),
+            }),
+            txn_id,
+        );
+    }
+
+    fn maybe_emit_policy_switch(&self, prev_effective: ConflictPolicy) {
+        let new_effective = self.effective_policy();
+        if prev_effective == new_effective {
+            return;
+        }
+        let loss_strict = self.contention_metrics.expected_loss_strict(&self.adaptive_config);
+        let loss_merge = self.contention_metrics.expected_loss_safe_merge(&self.adaptive_config);
+        let delta = loss_strict - loss_merge; // Positive = SafeMerge is cheaper.
+
+        info!(
+            target: "ffs::mvcc::merge",
+            event = "mvcc_policy_switched",
+            from_policy = ?prev_effective,
+            to_policy = ?new_effective,
+            expected_loss_delta = delta,
+            trigger = "contention_rate_change",
+        );
+        let Some(sink) = &self.evidence_sink else {
+            return;
+        };
+        sink.append(
+            &EvidenceRecord::policy_switched(PolicySwitchedDetail {
+                from_policy: format!("{prev_effective:?}"),
+                to_policy: format!("{new_effective:?}"),
+                expected_loss_delta: delta,
+                trigger_reason: "contention_rate_change".to_owned(),
+            }),
+            0,
+        );
+    }
+
+    fn emit_contention_sample(&self) {
+        let m = &self.contention_metrics;
+        let effective = self.effective_policy();
+        info!(
+            target: "ffs::mvcc::merge",
+            event = "mvcc_contention_sample",
+            conflict_rate = m.conflict_rate,
+            merge_success_rate = m.merge_success_rate,
+            abort_rate = m.abort_rate,
+            total_commits = m.total_commits,
+            total_conflicts = m.total_conflicts,
+            total_merges = m.total_merges,
+            total_aborts = m.total_aborts,
+            effective_policy = ?effective,
+        );
+        let Some(sink) = &self.evidence_sink else {
+            return;
+        };
+        sink.append(
+            &EvidenceRecord::contention_sample(ContentionSampleDetail {
+                conflict_rate: m.conflict_rate,
+                merge_success_rate: m.merge_success_rate,
+                abort_rate: m.abort_rate,
+                total_commits: m.total_commits,
+                total_conflicts: m.total_conflicts,
+                total_merges: m.total_merges,
+                total_aborts: m.total_aborts,
+                effective_policy: format!("{effective:?}"),
+            }),
+            0,
+        );
+    }
+
     #[allow(clippy::result_large_err)]
     fn commit_fcw_internal(
         &mut self,
@@ -1369,71 +1509,114 @@ impl MvccStore {
             })
     }
 
+    /// Extract the short variant name from a `MergeProof`'s debug representation.
+    fn merge_proof_variant_name(proof: &MergeProof) -> String {
+        let debug = format!("{proof:?}");
+        debug
+            .split_once(' ')
+            .or_else(|| debug.split_once('{'))
+            .map_or_else(|| debug.clone(), |(name, _)| name.to_owned())
+    }
+
+    /// Handle a single block-level conflict during FCW preflight.
+    ///
+    /// Returns `Ok((variant, bytes_len))` if the conflict was resolved via
+    /// merge, `Err` if the commit should be aborted.
+    fn preflight_resolve_block_conflict(
+        &self,
+        txn: &Transaction,
+        block: BlockNumber,
+        latest: CommitSeq,
+        effective: ConflictPolicy,
+    ) -> Result<(String, usize), CommitError> {
+        let proof = txn.merge_proof(block).cloned().unwrap_or_default();
+        let variant = Self::merge_proof_variant_name(&proof);
+
+        if effective == ConflictPolicy::Strict {
+            self.emit_merge_check_and_reject(txn.id.0, block.0, &variant,
+                "strict_policy_rejects_all_merges", "strict_fcw_conflict");
+            return Err(CommitError::Conflict {
+                block,
+                snapshot: txn.snapshot.high,
+                observed: latest,
+            });
+        }
+
+        if self.resolved_write_bytes(txn, block).is_ok() {
+            let bytes_len = txn.staged_write(block).map_or(0, <[u8]>::len);
+            info!(
+                target: "ffs::mvcc::merge",
+                event = "mvcc_merge_proof_checked",
+                txn_id = txn.id.0, block = block.0,
+                proof_variant = %variant, valid = true,
+            );
+            self.emit_merge_proof_checked(txn.id.0, block.0, &variant, true, None);
+            Ok((variant, bytes_len))
+        } else {
+            self.emit_merge_check_and_reject(txn.id.0, block.0, &variant,
+                "merge_bytes_returned_none", "merge_validation_failed");
+            Err(CommitError::Conflict {
+                block,
+                snapshot: txn.snapshot.high,
+                observed: latest,
+            })
+        }
+    }
+
+    /// Emit both a merge-proof-checked (invalid) and merge-rejected event.
+    fn emit_merge_check_and_reject(
+        &self,
+        txn_id: u64,
+        block_id: u64,
+        variant: &str,
+        check_reason: &str,
+        reject_reason: &str,
+    ) {
+        info!(
+            target: "ffs::mvcc::merge",
+            event = "mvcc_merge_proof_checked",
+            txn_id, block = block_id,
+            proof_variant = %variant, valid = false,
+            reason = %check_reason,
+        );
+        self.emit_merge_proof_checked(txn_id, block_id, variant, false, Some(check_reason));
+        info!(
+            target: "ffs::mvcc::merge",
+            event = "mvcc_merge_rejected",
+            txn_id, block = block_id,
+            proof_variant = %variant,
+            reason = %reject_reason,
+        );
+        self.emit_merge_rejected(txn_id, block_id, variant, reject_reason);
+    }
+
     fn preflight_fcw(&mut self, txn: &Transaction) -> Result<(), CommitError> {
         let chain_cap = self.compression_policy.max_chain_length;
-        let effective = self.effective_policy();
+        let prev_effective = self.effective_policy();
         let mut had_conflict = false;
         let mut merge_succeeded = false;
+        let mut merged_block_count: usize = 0;
+        let mut combined_write_bytes: usize = 0;
+        let mut last_merge_variant = String::new();
 
         for block in txn.writes.keys() {
             let latest = self.latest_commit_seq(*block);
             if latest > txn.snapshot.high {
                 had_conflict = true;
-
-                // Under Strict policy, any conflict is an immediate abort.
-                if effective == ConflictPolicy::Strict {
-                    warn!(
-                        target: "ffs::mvcc::evidence",
-                        event = "txn_aborted",
-                        txn_id = txn.id.0,
-                        reason = "strict_fcw_conflict",
-                        block = block.0,
-                        snapshot_commit_seq = txn.snapshot.high.0,
-                        observed_commit_seq = latest.0,
-                        policy = ?effective,
-                    );
-                    self.contention_metrics.record_commit(
-                        self.adaptive_config.ema_alpha, true, false, true,
-                    );
-                    return Err(CommitError::Conflict {
-                        block: *block,
-                        snapshot: txn.snapshot.high,
-                        observed: latest,
-                    });
-                }
-
-                // SafeMerge: attempt merge-proof resolution.
-                if self.resolved_write_bytes(txn, *block).is_ok() {
-                    merge_succeeded = true;
-                    debug!(
-                        target: "ffs::mvcc",
-                        txn_id = txn.id.0,
-                        block = block.0,
-                        merge_proof = ?txn.merge_proof(*block),
-                        snapshot_commit_seq = txn.snapshot.high.0,
-                        observed_commit_seq = latest.0,
-                        policy = ?effective,
-                        "fcw_conflict_merged"
-                    );
-                } else {
-                    warn!(
-                        target: "ffs::mvcc::evidence",
-                        event = "txn_aborted",
-                        txn_id = txn.id.0,
-                        reason = "fcw_conflict",
-                        block = block.0,
-                        snapshot_commit_seq = txn.snapshot.high.0,
-                        observed_commit_seq = latest.0,
-                        policy = ?effective,
-                    );
-                    self.contention_metrics.record_commit(
-                        self.adaptive_config.ema_alpha, true, false, true,
-                    );
-                    return Err(CommitError::Conflict {
-                        block: *block,
-                        snapshot: txn.snapshot.high,
-                        observed: latest,
-                    });
+                match self.preflight_resolve_block_conflict(txn, *block, latest, prev_effective) {
+                    Ok((variant, bytes_len)) => {
+                        merge_succeeded = true;
+                        merged_block_count += 1;
+                        combined_write_bytes += bytes_len;
+                        last_merge_variant = variant;
+                    }
+                    Err(err) => {
+                        self.contention_metrics.record_commit(
+                            self.adaptive_config.ema_alpha, true, false, true,
+                        );
+                        self.maybe_emit_policy_switch(prev_effective);
+                        return Err(err);
+                    }
                 }
             }
             if let Some(cap) = chain_cap {
@@ -1445,6 +1628,31 @@ impl MvccStore {
         self.contention_metrics.record_commit(
             self.adaptive_config.ema_alpha, had_conflict, merge_succeeded, false,
         );
+
+        // mvcc_merge_applied — emit after successful merge commit preflight.
+        if merged_block_count > 0 {
+            info!(
+                target: "ffs::mvcc::merge",
+                event = "mvcc_merge_applied",
+                txn_id = txn.id.0,
+                merged_block_count,
+                combined_write_set_bytes = combined_write_bytes,
+                proof_variant = %last_merge_variant,
+            );
+            self.emit_merge_applied(
+                txn.id.0, merged_block_count, combined_write_bytes, &last_merge_variant,
+            );
+        }
+
+        self.maybe_emit_policy_switch(prev_effective);
+
+        // Periodic contention sample (every 100 commits).
+        if self.contention_metrics.total_commits % 100 == 0
+            && self.contention_metrics.total_commits > 0
+        {
+            self.emit_contention_sample();
+        }
+
         Ok(())
     }
 
@@ -8378,5 +8586,233 @@ mod tests {
         for t in readers {
             assert!(store.commit_ssi(t).is_ok());
         }
+    }
+
+    // ── Adaptive conflict policy tests ─────────────────────────────────
+
+    #[test]
+    fn contention_metrics_ema_tracks_conflicts() {
+        let mut m = ContentionMetrics::default();
+        let alpha = 0.5;
+
+        // No conflicts initially.
+        assert!((m.conflict_rate - 0.0).abs() < f64::EPSILON);
+
+        // Record a commit with a conflict that was merged.
+        m.record_commit(alpha, true, true, false);
+        assert!((m.conflict_rate - 0.5).abs() < f64::EPSILON);
+        assert!((m.merge_success_rate - 1.0).abs() < f64::EPSILON);
+        assert!((m.abort_rate - 0.0).abs() < f64::EPSILON);
+        assert_eq!(m.total_commits, 1);
+        assert_eq!(m.total_conflicts, 1);
+        assert_eq!(m.total_merges, 1);
+
+        // Record a commit with no conflict.
+        m.record_commit(alpha, false, false, false);
+        assert!((m.conflict_rate - 0.25).abs() < f64::EPSILON);
+        assert_eq!(m.total_commits, 2);
+
+        // Record an abort.
+        m.record_commit(alpha, true, false, true);
+        assert_eq!(m.total_aborts, 1);
+        assert!(m.abort_rate > 0.0);
+    }
+
+    #[test]
+    fn expected_loss_strict_scales_with_conflict_rate() {
+        let config = AdaptivePolicyConfig::default();
+        let mut m = ContentionMetrics::default();
+
+        // Zero conflicts => zero loss for strict.
+        assert!((m.expected_loss_strict(&config) - 0.0).abs() < f64::EPSILON);
+
+        // High conflict rate => proportional loss.
+        // expected = 0.5 * 1.0 = 0.5
+        m.conflict_rate = 0.5;
+        let loss = m.expected_loss_strict(&config);
+        assert!((loss - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn expected_loss_safe_merge_accounts_for_corruption_risk() {
+        let config = AdaptivePolicyConfig::default();
+        // Default ContentionMetrics has conflict_rate=0.0 and merge_success_rate=1.0.
+        let m = ContentionMetrics::default();
+
+        // Even with zero conflicts, safe-merge has a small baseline corruption cost.
+        let loss = m.expected_loss_safe_merge(&config);
+        let expected = config.base_corruption_probability * config.corruption_severity;
+        assert!((loss - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn adaptive_selects_safe_merge_under_high_contention() {
+        let config = AdaptivePolicyConfig {
+            warmup_commits: 0,
+            ..AdaptivePolicyConfig::default()
+        };
+        let m = ContentionMetrics {
+            conflict_rate: 0.8,
+            merge_success_rate: 0.95,
+            abort_rate: 0.04,
+            total_commits: 100,
+            total_conflicts: 80,
+            total_merges: 76,
+            total_aborts: 4,
+        };
+
+        // Under high contention with good merge success, SafeMerge should win
+        // because strict would abort 80% of commits.
+        assert_eq!(m.select_policy(&config), ConflictPolicy::SafeMerge);
+    }
+
+    #[test]
+    fn adaptive_selects_strict_when_merges_fail() {
+        let config = AdaptivePolicyConfig {
+            warmup_commits: 0,
+            corruption_severity: 1000.0,
+            abort_cost: 1.0,
+            base_corruption_probability: 0.01, // Elevated corruption risk.
+            ..AdaptivePolicyConfig::default()
+        };
+        let m = ContentionMetrics {
+            conflict_rate: 0.1,
+            merge_success_rate: 0.0, // Merges never succeed.
+            abort_rate: 0.1,
+            total_commits: 100,
+            total_conflicts: 10,
+            total_merges: 0,
+            total_aborts: 10,
+        };
+
+        // When corruption risk is high and merges don't help, strict is safer.
+        // Strict loss = 0.1 * 1.0 = 0.1
+        // SafeMerge loss = 0.01 * 1000 + 0.1 * 1.0 = 10.1
+        assert_eq!(m.select_policy(&config), ConflictPolicy::Strict);
+    }
+
+    #[test]
+    fn adaptive_defaults_to_safe_merge_during_warmup() {
+        let config = AdaptivePolicyConfig {
+            warmup_commits: 20,
+            ..AdaptivePolicyConfig::default()
+        };
+        let m = ContentionMetrics {
+            total_commits: 5, // Below warmup threshold.
+            ..ContentionMetrics::default()
+        };
+        assert_eq!(m.select_policy(&config), ConflictPolicy::SafeMerge);
+    }
+
+    #[test]
+    fn mvcc_store_strict_policy_aborts_on_conflict() {
+        let mut store = MvccStore::new();
+        store.set_conflict_policy(ConflictPolicy::Strict);
+
+        // Writer A writes block 0.
+        let mut txn_a = store.begin();
+        txn_a.stage_write(BlockNumber(0), vec![1, 2, 3]);
+        store.commit(txn_a).unwrap();
+
+        // Writer B starts before A committed, then tries to write block 0
+        // with an AppendOnly merge proof — should still abort under Strict.
+        let snapshot = store.current_snapshot();
+        let mut txn_b = Transaction::new(TxnId(store.next_txn), snapshot);
+        store.next_txn += 1;
+        txn_b.stage_write_with_proof(
+            BlockNumber(0),
+            vec![1, 2, 3, 4],
+            MergeProof::AppendOnly { base_len: 0 },
+        );
+
+        // But first, let another writer commit to block 0.
+        let mut txn_c = store.begin();
+        txn_c.stage_write(BlockNumber(0), vec![10, 20, 30]);
+        store.commit(txn_c).unwrap();
+
+        // Now B tries to commit — should fail because Strict ignores merge proofs.
+        let result = store.commit(txn_b);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CommitError::Conflict { block, .. } => assert_eq!(block, BlockNumber(0)),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mvcc_store_safe_merge_policy_allows_mergeable_conflicts() {
+        let mut store = MvccStore::new();
+        store.set_conflict_policy(ConflictPolicy::SafeMerge);
+
+        let mut txn_a = store.begin();
+        txn_a.stage_write(BlockNumber(0), vec![0; 64]);
+        store.commit(txn_a).unwrap();
+
+        // B reads at snapshot before C writes.
+        let snap = store.current_snapshot();
+        let base_len = 64;
+
+        // C appends to block 0.
+        let mut txn_c = store.begin();
+        let mut c_data = vec![0; 64];
+        c_data.extend_from_slice(&[0xCC; 16]);
+        txn_c.stage_write_with_proof(
+            BlockNumber(0),
+            c_data,
+            MergeProof::AppendOnly { base_len },
+        );
+        store.commit(txn_c).unwrap();
+
+        // B appends to block 0 with AppendOnly proof.
+        let mut txn_b = Transaction::new(TxnId(store.next_txn), snap);
+        store.next_txn += 1;
+        let mut b_data = vec![0; 64];
+        b_data.extend_from_slice(&[0xBB; 8]);
+        txn_b.stage_write_with_proof(
+            BlockNumber(0),
+            b_data,
+            MergeProof::AppendOnly { base_len },
+        );
+
+        // Should succeed via merge proof.
+        let result = store.commit(txn_b);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn mvcc_store_adaptive_policy_tracks_contention() {
+        let mut store = MvccStore::new();
+        store.set_conflict_policy(ConflictPolicy::Adaptive);
+        store.set_adaptive_config(AdaptivePolicyConfig {
+            warmup_commits: 0,
+            ..AdaptivePolicyConfig::default()
+        });
+
+        // Warm up with non-conflicting commits.
+        for i in 0..10_u8 {
+            let mut txn = store.begin();
+            txn.stage_write(BlockNumber(u64::from(i)), vec![i]);
+            store.commit(txn).unwrap();
+        }
+
+        let metrics = store.contention_metrics();
+        assert_eq!(metrics.total_commits, 10);
+        assert_eq!(metrics.total_conflicts, 0);
+        assert!((metrics.conflict_rate - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn effective_policy_resolves_adaptive() {
+        let mut store = MvccStore::new();
+
+        // SafeMerge by default.
+        assert_eq!(store.effective_policy(), ConflictPolicy::SafeMerge);
+
+        store.set_conflict_policy(ConflictPolicy::Strict);
+        assert_eq!(store.effective_policy(), ConflictPolicy::Strict);
+
+        store.set_conflict_policy(ConflictPolicy::Adaptive);
+        // During warmup, adaptive defaults to SafeMerge.
+        assert_eq!(store.effective_policy(), ConflictPolicy::SafeMerge);
     }
 }

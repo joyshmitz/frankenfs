@@ -13,6 +13,7 @@ use tracing::{info, info_span, warn};
 pub const PRESET_REPLAY_ANOMALIES: &str = "replay-anomalies";
 pub const PRESET_REPAIR_FAILURES: &str = "repair-failures";
 pub const PRESET_PRESSURE_TRANSITIONS: &str = "pressure-transitions";
+pub const PRESET_CONTENTION: &str = "contention";
 
 /// Returns the event types included in a preset, or `None` if unknown.
 pub fn preset_event_types(preset: &str) -> Option<&'static [EvidenceEventType]> {
@@ -35,6 +36,13 @@ pub fn preset_event_types(preset: &str) -> Option<&'static [EvidenceEventType]> 
             EvidenceEventType::DurabilityPolicyChanged,
             EvidenceEventType::RefreshPolicyChanged,
         ]),
+        PRESET_CONTENTION => Some(&[
+            EvidenceEventType::MergeProofChecked,
+            EvidenceEventType::MergeApplied,
+            EvidenceEventType::MergeRejected,
+            EvidenceEventType::PolicySwitched,
+            EvidenceEventType::ContentionSample,
+        ]),
         _ => None,
     }
 }
@@ -44,6 +52,7 @@ pub const KNOWN_PRESETS: &[&str] = &[
     PRESET_REPLAY_ANOMALIES,
     PRESET_REPAIR_FAILURES,
     PRESET_PRESSURE_TRANSITIONS,
+    PRESET_CONTENTION,
 ];
 
 // ── Summary ────────────────────────────────────────────────────────────────
@@ -495,6 +504,11 @@ pub const fn evidence_event_type_name(event_type: EvidenceEventType) -> &'static
         EvidenceEventType::DirtyBlockDiscarded => "dirty_block_discarded",
         EvidenceEventType::DurabilityPolicyChanged => "durability_policy_changed",
         EvidenceEventType::RefreshPolicyChanged => "refresh_policy_changed",
+        EvidenceEventType::MergeProofChecked => "merge_proof_checked",
+        EvidenceEventType::MergeApplied => "merge_applied",
+        EvidenceEventType::MergeRejected => "merge_rejected",
+        EvidenceEventType::PolicySwitched => "policy_switched",
+        EvidenceEventType::ContentionSample => "contention_sample",
     }
 }
 
@@ -543,6 +557,11 @@ fn print_evidence_record_event_payload(record: &EvidenceRecord) {
             print_durability_policy_changed_payload(record);
         }
         EvidenceEventType::RefreshPolicyChanged => print_refresh_policy_changed_payload(record),
+        EvidenceEventType::MergeProofChecked => print_merge_proof_checked_payload(record),
+        EvidenceEventType::MergeApplied => print_merge_applied_payload(record),
+        EvidenceEventType::MergeRejected => print_merge_rejected_payload(record),
+        EvidenceEventType::PolicySwitched => print_policy_switched_payload(record),
+        EvidenceEventType::ContentionSample => print_contention_sample_payload(record),
     }
 }
 
@@ -709,6 +728,55 @@ fn print_refresh_policy_changed_payload(record: &EvidenceRecord) {
         print!(
             " policy=\"{}\"->\"{}\" policy_group={}",
             p.old_policy, p.new_policy, p.block_group
+        );
+    }
+}
+
+fn print_merge_proof_checked_payload(record: &EvidenceRecord) {
+    if let Some(p) = record.merge_proof_checked.as_ref() {
+        print!(
+            " txn={} block={} proof={} valid={}",
+            p.txn_id, p.block_id, p.proof_variant, p.valid
+        );
+        if let Some(reason) = p.rejection_reason.as_ref() {
+            print!(" reason={reason}");
+        }
+    }
+}
+
+fn print_merge_applied_payload(record: &EvidenceRecord) {
+    if let Some(p) = record.merge_applied.as_ref() {
+        print!(
+            " txn={} merged_blocks={} bytes={} proof={}",
+            p.txn_id, p.merged_block_count, p.combined_write_set_bytes, p.proof_variant
+        );
+    }
+}
+
+fn print_merge_rejected_payload(record: &EvidenceRecord) {
+    if let Some(p) = record.merge_rejected.as_ref() {
+        print!(
+            " txn={} block={} proof={} reason={}",
+            p.txn_id, p.block_id, p.proof_variant, p.reason
+        );
+    }
+}
+
+fn print_policy_switched_payload(record: &EvidenceRecord) {
+    if let Some(p) = record.policy_switched.as_ref() {
+        print!(
+            " from={} to={} delta={:.6} trigger={}",
+            p.from_policy, p.to_policy, p.expected_loss_delta, p.trigger_reason
+        );
+    }
+}
+
+fn print_contention_sample_payload(record: &EvidenceRecord) {
+    if let Some(p) = record.contention_sample.as_ref() {
+        print!(
+            " conflict_rate={:.4} merge_success={:.4} abort_rate={:.4} commits={} policy={}",
+            p.conflict_rate, p.merge_success_rate, p.abort_rate, p.total_commits,
+            p.effective_policy
         );
     }
 }
