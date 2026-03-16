@@ -146,6 +146,117 @@ pub struct RefreshTelemetry {
     pub groups: Vec<GroupRefreshSummary>,
 }
 
+// ── Stale-window SLO ──────────────────────────────────────────────────────
+
+/// Service-level objective for repair symbol freshness.
+///
+/// A stale-window SLO is breached when any group's staleness exceeds the
+/// configured thresholds.  The SLO uses an OR condition: breach fires when
+/// EITHER the age threshold OR the block-count threshold is exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StaleWindowSlo {
+    /// Maximum acceptable age (ms) since last refresh for p95 of groups.
+    /// Default: 60_000ms (60 seconds).
+    pub max_age_ms: u64,
+    /// Maximum acceptable writes since last refresh for p95 of groups.
+    /// Default: 5000 blocks.
+    pub max_writes: u64,
+    /// Percentile threshold for SLO evaluation (0.0–1.0).
+    /// Default: 0.95 (p95).
+    pub percentile: f64,
+}
+
+impl Default for StaleWindowSlo {
+    fn default() -> Self {
+        Self {
+            max_age_ms: 60_000,
+            max_writes: 5_000,
+            percentile: 0.95,
+        }
+    }
+}
+
+/// Result of a stale-window SLO evaluation.
+#[derive(Debug, Clone, Serialize)]
+pub struct SloEvaluation {
+    /// Whether the SLO is currently breached.
+    pub breached: bool,
+    /// The age (ms) at the configured percentile across all groups.
+    pub age_at_percentile_ms: u64,
+    /// The write count at the configured percentile across all groups.
+    pub writes_at_percentile: u64,
+    /// Number of groups whose age exceeds the SLO age threshold.
+    pub groups_age_breached: usize,
+    /// Number of groups whose write count exceeds the SLO write threshold.
+    pub groups_writes_breached: usize,
+    /// Total tracked groups.
+    pub total_groups: usize,
+}
+
+impl StaleWindowSlo {
+    /// Evaluate the SLO against current pipeline state.
+    ///
+    /// Computes the percentile staleness across all tracked groups and checks
+    /// whether it exceeds the configured thresholds.
+    #[must_use]
+    pub fn evaluate(&self, telemetry: &RefreshTelemetry) -> SloEvaluation {
+        if telemetry.groups.is_empty() {
+            return SloEvaluation {
+                breached: false,
+                age_at_percentile_ms: 0,
+                writes_at_percentile: 0,
+                groups_age_breached: 0,
+                groups_writes_breached: 0,
+                total_groups: 0,
+            };
+        }
+
+        let mut ages: Vec<u64> = telemetry.groups.iter().map(|g| g.dirty_age_ms).collect();
+        let mut writes: Vec<u64> = telemetry
+            .groups
+            .iter()
+            .map(|g| g.writes_since_refresh)
+            .collect();
+        ages.sort_unstable();
+        writes.sort_unstable();
+
+        let idx = percentile_index(ages.len(), self.percentile);
+        let age_pctl = ages[idx];
+        let writes_pctl = writes[idx];
+
+        let groups_age_breached = ages.iter().filter(|&&a| a > self.max_age_ms).count();
+        let groups_writes_breached = writes.iter().filter(|&&w| w > self.max_writes).count();
+
+        let breached = age_pctl > self.max_age_ms || writes_pctl > self.max_writes;
+
+        SloEvaluation {
+            breached,
+            age_at_percentile_ms: age_pctl,
+            writes_at_percentile: writes_pctl,
+            groups_age_breached,
+            groups_writes_breached,
+            total_groups: telemetry.groups.len(),
+        }
+    }
+}
+
+/// Compute the index for a given percentile in a sorted array of `len` elements.
+fn percentile_index(len: usize, percentile: f64) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let raw = (percentile.clamp(0.0, 1.0) * (len as f64 - 1.0)).round();
+    // Safe conversion: raw is in [0, len-1] after clamp+round, always non-negative and fits usize.
+    let idx = if raw.is_finite() && raw >= 0.0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let i = raw as usize;
+        i
+    } else {
+        0
+    };
+    idx.min(len - 1)
+}
+
 #[derive(Debug, Clone)]
 struct GroupRefreshState {
     dirty: bool,
@@ -681,6 +792,32 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             max_dirty_age_ms,
             groups,
         }
+    }
+
+    /// Evaluate the stale-window SLO against current pipeline state.
+    ///
+    /// If the SLO is breached, emits a `repair_stale_window_slo_breach`
+    /// structured log event with the evaluation details.
+    #[must_use]
+    pub fn evaluate_slo(&self, slo: &StaleWindowSlo) -> SloEvaluation {
+        let telemetry = self.refresh_telemetry();
+        let eval = slo.evaluate(&telemetry);
+        if eval.breached {
+            warn!(
+                target: "ffs::repair::slo",
+                event = "repair_stale_window_slo_breach",
+                age_at_percentile_ms = eval.age_at_percentile_ms,
+                writes_at_percentile = eval.writes_at_percentile,
+                max_age_ms = slo.max_age_ms,
+                max_writes = slo.max_writes,
+                groups_age_breached = eval.groups_age_breached,
+                groups_writes_breached = eval.groups_writes_breached,
+                total_groups = eval.total_groups,
+                percentile = slo.percentile,
+                "stale-window SLO breached"
+            );
+        }
+        eval
     }
 
     /// Notify the refresh policy that a write dirtied `group`.
@@ -4999,5 +5136,183 @@ mod tests {
             originals[4].as_slice(),
             "block 4 must be restored after staleness-refreshed symbols"
         );
+    }
+
+    // ── Stale-window SLO tests ────────────────────────────────────────────
+
+    #[test]
+    fn slo_no_breach_when_all_groups_fresh() {
+        let slo = StaleWindowSlo::default();
+        let telemetry = RefreshTelemetry {
+            tracked_groups: 3,
+            dirty_groups: 0,
+            max_dirty_age_ms: 0,
+            groups: vec![
+                GroupRefreshSummary {
+                    group: 0,
+                    dirty: false,
+                    dirty_age_ms: 0,
+                    policy: "lazy(30000ms)".to_owned(),
+                    since_last_refresh_ms: 1000,
+                    writes_since_refresh: 0,
+                    block_count_threshold: 0,
+                },
+                GroupRefreshSummary {
+                    group: 1,
+                    dirty: false,
+                    dirty_age_ms: 0,
+                    policy: "lazy(30000ms)".to_owned(),
+                    since_last_refresh_ms: 2000,
+                    writes_since_refresh: 10,
+                    block_count_threshold: 0,
+                },
+                GroupRefreshSummary {
+                    group: 2,
+                    dirty: false,
+                    dirty_age_ms: 0,
+                    policy: "lazy(30000ms)".to_owned(),
+                    since_last_refresh_ms: 500,
+                    writes_since_refresh: 5,
+                    block_count_threshold: 0,
+                },
+            ],
+        };
+        let eval = slo.evaluate(&telemetry);
+        assert!(!eval.breached);
+        assert_eq!(eval.groups_age_breached, 0);
+        assert_eq!(eval.groups_writes_breached, 0);
+    }
+
+    #[test]
+    fn slo_breach_when_age_exceeds_threshold() {
+        let slo = StaleWindowSlo {
+            max_age_ms: 60_000,
+            max_writes: 5_000,
+            percentile: 0.95,
+        };
+        let telemetry = RefreshTelemetry {
+            tracked_groups: 2,
+            dirty_groups: 2,
+            max_dirty_age_ms: 120_000,
+            groups: vec![
+                GroupRefreshSummary {
+                    group: 0,
+                    dirty: true,
+                    dirty_age_ms: 120_000, // 2 minutes — exceeds 60s SLO.
+                    policy: "lazy(30000ms)".to_owned(),
+                    since_last_refresh_ms: 120_000,
+                    writes_since_refresh: 100,
+                    block_count_threshold: 0,
+                },
+                GroupRefreshSummary {
+                    group: 1,
+                    dirty: true,
+                    dirty_age_ms: 90_000, // 90s — also exceeds.
+                    policy: "lazy(30000ms)".to_owned(),
+                    since_last_refresh_ms: 90_000,
+                    writes_since_refresh: 50,
+                    block_count_threshold: 0,
+                },
+            ],
+        };
+        let eval = slo.evaluate(&telemetry);
+        assert!(eval.breached);
+        assert_eq!(eval.groups_age_breached, 2);
+        assert!(eval.age_at_percentile_ms > 60_000);
+    }
+
+    #[test]
+    fn slo_breach_when_writes_exceed_threshold() {
+        let slo = StaleWindowSlo {
+            max_age_ms: 60_000,
+            max_writes: 5_000,
+            percentile: 0.5, // p50 for 2-group test.
+        };
+        let telemetry = RefreshTelemetry {
+            tracked_groups: 2,
+            dirty_groups: 2,
+            max_dirty_age_ms: 10_000,
+            groups: vec![
+                GroupRefreshSummary {
+                    group: 0,
+                    dirty: true,
+                    dirty_age_ms: 5_000,
+                    policy: "hybrid(age=30000ms,blocks=10000)".to_owned(),
+                    since_last_refresh_ms: 5_000,
+                    writes_since_refresh: 8_000, // Exceeds 5000.
+                    block_count_threshold: 10_000,
+                },
+                GroupRefreshSummary {
+                    group: 1,
+                    dirty: true,
+                    dirty_age_ms: 10_000,
+                    policy: "hybrid(age=30000ms,blocks=10000)".to_owned(),
+                    since_last_refresh_ms: 10_000,
+                    writes_since_refresh: 6_000, // Also exceeds.
+                    block_count_threshold: 10_000,
+                },
+            ],
+        };
+        let eval = slo.evaluate(&telemetry);
+        assert!(eval.breached);
+        assert_eq!(eval.groups_writes_breached, 2);
+    }
+
+    #[test]
+    fn slo_no_breach_when_below_percentile() {
+        // 10 groups, only 1 exceeds — well below p95.
+        let slo = StaleWindowSlo {
+            max_age_ms: 60_000,
+            max_writes: 5_000,
+            percentile: 0.95,
+        };
+        let mut groups = Vec::new();
+        for i in 0..10_u32 {
+            groups.push(GroupRefreshSummary {
+                group: i,
+                dirty: i == 9,
+                dirty_age_ms: if i == 9 { 100_000 } else { 1_000 },
+                policy: "lazy(30000ms)".to_owned(),
+                since_last_refresh_ms: if i == 9 { 100_000 } else { 1_000 },
+                writes_since_refresh: if i == 9 { 10_000 } else { 10 },
+                block_count_threshold: 0,
+            });
+        }
+        let telemetry = RefreshTelemetry {
+            tracked_groups: 10,
+            dirty_groups: 1,
+            max_dirty_age_ms: 100_000,
+            groups,
+        };
+        let eval = slo.evaluate(&telemetry);
+        // p95 index for 10 items = round(0.95 * 9) = round(8.55) = 9.
+        // Item 9 has age 100_000 > 60_000 → breach.
+        assert!(eval.breached);
+        assert_eq!(eval.groups_age_breached, 1);
+    }
+
+    #[test]
+    fn slo_empty_groups_no_breach() {
+        let slo = StaleWindowSlo::default();
+        let telemetry = RefreshTelemetry {
+            tracked_groups: 0,
+            dirty_groups: 0,
+            max_dirty_age_ms: 0,
+            groups: vec![],
+        };
+        let eval = slo.evaluate(&telemetry);
+        assert!(!eval.breached);
+        assert_eq!(eval.total_groups, 0);
+    }
+
+    #[test]
+    fn percentile_index_boundary_cases() {
+        assert_eq!(percentile_index(1, 0.0), 0);
+        assert_eq!(percentile_index(1, 1.0), 0);
+        assert_eq!(percentile_index(10, 0.0), 0);
+        assert_eq!(percentile_index(10, 1.0), 9);
+        assert_eq!(percentile_index(10, 0.5), 5); // round(0.5 * 9) = 5
+        assert_eq!(percentile_index(100, 0.95), 94); // round(0.95 * 99) = 94
+        assert_eq!(percentile_index(0, 0.95), 0);
     }
 }
