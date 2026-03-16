@@ -1016,10 +1016,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                 max_staleness,
                 block_count_threshold,
             } => {
-                if !write_trigger {
-                    // Scrub trigger always refreshes.
-                    Some(RefreshMode::HybridScrub)
-                } else {
+                if write_trigger {
                     let writes = self
                         .refresh_states
                         .get(&group.0)
@@ -1049,6 +1046,9 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                     } else {
                         None
                     }
+                } else {
+                    // Scrub trigger always refreshes.
+                    Some(RefreshMode::HybridScrub)
                 }
             }
         };
