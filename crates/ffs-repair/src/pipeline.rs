@@ -150,9 +150,10 @@ pub struct RefreshTelemetry {
 
 /// Service-level objective for repair symbol freshness.
 ///
-/// A stale-window SLO is breached when any group's staleness exceeds the
-/// configured thresholds.  The SLO uses an OR condition: breach fires when
-/// EITHER the age threshold OR the block-count threshold is exceeded.
+/// A stale-window SLO is breached when the configured percentile of groups
+/// exceeds either the age or write-count threshold.  For example, with
+/// `percentile = 0.95`, the SLO is met only if at least 95% of groups have
+/// staleness below the thresholds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StaleWindowSlo {
     /// Maximum acceptable age (ms) since last refresh for p95 of groups.
@@ -5259,8 +5260,9 @@ mod tests {
     }
 
     #[test]
-    fn slo_no_breach_when_below_percentile() {
-        // 10 groups, only 1 exceeds — well below p95.
+    fn slo_breach_single_outlier_at_p95_boundary() {
+        // 10 groups, 1 outlier (10% violation rate).  With p95, the p95 index
+        // lands on the outlier: round(0.95 * 9) = round(8.55) = 9.
         let slo = StaleWindowSlo {
             max_age_ms: 60_000,
             max_writes: 5_000,
@@ -5285,10 +5287,44 @@ mod tests {
             groups,
         };
         let eval = slo.evaluate(&telemetry);
-        // p95 index for 10 items = round(0.95 * 9) = round(8.55) = 9.
-        // Item 9 has age 100_000 > 60_000 → breach.
+        // p95 index = 9 → outlier value → breach.
         assert!(eval.breached);
         assert_eq!(eval.groups_age_breached, 1);
+    }
+
+    #[test]
+    fn slo_no_breach_when_outlier_below_percentile() {
+        // 100 groups, 1 outlier (1% violation rate).  With p95, 99% are healthy
+        // which exceeds the 95% requirement → no breach.
+        let slo = StaleWindowSlo {
+            max_age_ms: 60_000,
+            max_writes: 5_000,
+            percentile: 0.95,
+        };
+        let mut groups = Vec::new();
+        for i in 0..100_u32 {
+            groups.push(GroupRefreshSummary {
+                group: i,
+                dirty: i == 99,
+                dirty_age_ms: if i == 99 { 100_000 } else { 1_000 },
+                policy: "lazy(30000ms)".to_owned(),
+                since_last_refresh_ms: if i == 99 { 100_000 } else { 1_000 },
+                writes_since_refresh: if i == 99 { 10_000 } else { 10 },
+                block_count_threshold: 0,
+            });
+        }
+        let telemetry = RefreshTelemetry {
+            tracked_groups: 100,
+            dirty_groups: 1,
+            max_dirty_age_ms: 100_000,
+            groups,
+        };
+        let eval = slo.evaluate(&telemetry);
+        // p95 index = round(0.95 * 99) = round(94.05) = 94. Ages[94] = 1000 < 60000.
+        assert!(!eval.breached, "1% violation should not breach p95 SLO");
+        // But individual group counts still reflect the 1 outlier.
+        assert_eq!(eval.groups_age_breached, 1);
+        assert_eq!(eval.groups_writes_breached, 1);
     }
 
     #[test]
