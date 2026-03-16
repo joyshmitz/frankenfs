@@ -1629,7 +1629,13 @@ impl MvccStore {
                 }
             }
             if let Some(cap) = chain_cap {
-                self.enforce_chain_pressure(txn.id, *block, cap)?;
+                if let Err(err) = self.enforce_chain_pressure(txn.id, *block, cap) {
+                    // Chain backpressure abort — still record the commit attempt.
+                    self.contention_metrics.record_commit(
+                        self.adaptive_config.ema_alpha, had_conflict, merge_succeeded, true,
+                    );
+                    return Err(err);
+                }
             }
         }
 
