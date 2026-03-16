@@ -65,6 +65,17 @@ pub enum RefreshPolicy {
         /// Maximum allowed dirty age before forced refresh.
         max_staleness: Duration,
     },
+    /// Refresh when EITHER age timeout OR block-count threshold is exceeded.
+    ///
+    /// This is the expected-loss-optimal policy identified by `RefreshLossModel`:
+    /// it caps both the time-based staleness and the write-count-based staleness,
+    /// using whichever trigger fires first.
+    Hybrid {
+        /// Maximum allowed dirty age before forced refresh.
+        max_staleness: Duration,
+        /// Maximum writes before forced refresh.
+        block_count_threshold: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +88,12 @@ enum RefreshMode {
     StalenessTimeout,
     /// Triggered when block-count writes since last refresh exceeds threshold.
     BlockCountThreshold,
+    /// Hybrid policy: age timeout fired first.
+    HybridAge,
+    /// Hybrid policy: block-count threshold fired first.
+    HybridBlockCount,
+    /// Hybrid policy: triggered on scrub cycle.
+    HybridScrub,
 }
 
 impl RefreshMode {
@@ -90,6 +107,9 @@ impl RefreshMode {
             Self::AdaptiveLazyScrub => "adaptive_lazy_scrub",
             Self::StalenessTimeout => "staleness_timeout",
             Self::BlockCountThreshold => "block_count_threshold",
+            Self::HybridAge => "hybrid_age",
+            Self::HybridBlockCount => "hybrid_block_count",
+            Self::HybridScrub => "hybrid_scrub",
         }
     }
 }
@@ -552,10 +572,24 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
     /// Override refresh policy for a single block group.
     #[must_use]
     pub fn with_group_refresh_policy(mut self, group: GroupNumber, policy: RefreshPolicy) -> Self {
+        let threshold = match policy {
+            RefreshPolicy::Hybrid {
+                block_count_threshold,
+                ..
+            } => Some(block_count_threshold),
+            _ => None,
+        };
         self.refresh_states
             .entry(group.0)
-            .and_modify(|state| state.policy = policy)
-            .or_insert_with(|| GroupRefreshState::new(policy));
+            .and_modify(|state| {
+                state.policy = policy;
+                state.block_count_threshold = threshold;
+            })
+            .or_insert_with(|| {
+                let mut s = GroupRefreshState::new(policy);
+                s.block_count_threshold = threshold;
+                s
+            });
         self
     }
 
@@ -614,6 +648,13 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                     max_staleness,
                 } => format!(
                     "adaptive(risk={risk_threshold:.3},max={}ms)",
+                    max_staleness.as_millis()
+                ),
+                RefreshPolicy::Hybrid {
+                    max_staleness,
+                    block_count_threshold,
+                } => format!(
+                    "hybrid(age={}ms,blocks={block_count_threshold})",
                     max_staleness.as_millis()
                 ),
             };
@@ -969,6 +1010,45 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                     }
                 } else {
                     Some(RefreshMode::AdaptiveLazyScrub)
+                }
+            }
+            RefreshPolicy::Hybrid {
+                max_staleness,
+                block_count_threshold,
+            } => {
+                if !write_trigger {
+                    // Scrub trigger always refreshes.
+                    Some(RefreshMode::HybridScrub)
+                } else {
+                    let writes = self
+                        .refresh_states
+                        .get(&group.0)
+                        .map_or(0, |s| s.writes_since_refresh);
+                    let age_exceeded = dirty_age >= max_staleness;
+                    let count_exceeded = writes >= block_count_threshold;
+                    if count_exceeded {
+                        debug!(
+                            target: "ffs::repair::refresh",
+                            group = group.0,
+                            writes_since_refresh = writes,
+                            block_count_threshold,
+                            dirty_age_ms = dirty_age.as_millis(),
+                            "hybrid_block_count_triggered"
+                        );
+                        Some(RefreshMode::HybridBlockCount)
+                    } else if age_exceeded {
+                        debug!(
+                            target: "ffs::repair::refresh",
+                            group = group.0,
+                            dirty_age_ms = dirty_age.as_millis(),
+                            max_staleness_ms = max_staleness.as_millis(),
+                            writes_since_refresh = writes,
+                            "hybrid_age_triggered"
+                        );
+                        Some(RefreshMode::HybridAge)
+                    } else {
+                        None
+                    }
                 }
             }
         };
