@@ -19127,6 +19127,255 @@ mod tests {
         assert!(barrier.inode_state(inode).unwrap().is_valid());
     }
 
+    // ── Crash consistency matrix for writeback epoch barrier ─────────────
+    //
+    // Each scenario simulates a crash at a specific point in the writeback
+    // lifecycle and verifies the epoch state invariants hold after "recovery"
+    // (i.e., constructing a fresh barrier from the last known durable state).
+
+    /// Simulate recovery by creating a fresh barrier whose state reflects
+    /// what was durable before the crash.
+    fn recover_barrier(pre_crash: &WritebackEpochBarrier) -> WritebackEpochBarrier {
+        let mut recovered = WritebackEpochBarrier::enabled();
+        // After crash, only durable state survives. Staged and visible
+        // epochs that weren't synced are lost.
+        for (&inode, state) in &pre_crash.inodes {
+            // Only durable_epoch survives crash. staged and visible reset to
+            // durable (the last known-good state).
+            let durable = state.durable_epoch;
+            recovered.inodes.insert(inode, InodeEpochState {
+                staged_epoch: durable,
+                visible_epoch: durable,
+                durable_epoch: durable,
+            });
+        }
+        recovered.current_epoch = pre_crash.current_epoch;
+        recovered
+    }
+
+    /// Verify that all inodes in the barrier satisfy the monotonicity invariant
+    /// and no partial epochs are visible.
+    fn verify_crash_recovery_invariants(barrier: &WritebackEpochBarrier, scenario: &str) {
+        for (&inode, state) in &barrier.inodes {
+            assert!(
+                state.is_valid(),
+                "invariant violated after {scenario}: inode={inode:?} state={state:?}"
+            );
+            // No partial visibility: visible must equal durable after recovery.
+            assert_eq!(
+                state.visible_epoch, state.durable_epoch,
+                "partial epoch visible after {scenario}: inode={inode:?} state={state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crash_01_during_buffered_write_before_epoch_commit() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(1);
+        b.stage_write(inode);
+        // Crash here: staged but never committed or synced.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_01_buffered_write");
+        // After recovery, nothing should be visible (durable was 0).
+        let state = r.inode_state(inode).unwrap();
+        assert_eq!(state.visible_epoch, 0);
+    }
+
+    #[test]
+    fn crash_02_after_commit_before_device_sync() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(2);
+        b.stage_write(inode);
+        b.commit_inode(inode); // Visible but not yet durable.
+        // Crash here: visible_epoch=1 but durable_epoch=0.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_02_commit_no_sync");
+        let state = r.inode_state(inode).unwrap();
+        // Recovery resets to durable (0) — the committed data is lost.
+        assert_eq!(state.visible_epoch, 0);
+        assert_eq!(state.durable_epoch, 0);
+    }
+
+    #[test]
+    fn crash_03_after_fsync_completes() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(3);
+        b.stage_write(inode);
+        b.fsync_barrier(inode).unwrap();
+        // Crash here: everything was synced → data survives.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_03_after_fsync");
+        let state = r.inode_state(inode).unwrap();
+        assert_eq!(state.durable_epoch, 1);
+        assert_eq!(state.visible_epoch, 1);
+    }
+
+    #[test]
+    fn crash_04_during_epoch_advance() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(4);
+        b.stage_write(inode);
+        b.fsync_barrier(inode).unwrap(); // Epoch 1 fully durable.
+        b.advance_epoch(); // Epoch 2.
+        b.stage_write(inode); // Staged at epoch 2 but not committed.
+        // Crash here: epoch 2 writes lost, epoch 1 survives.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_04_epoch_advance");
+        let state = r.inode_state(inode).unwrap();
+        assert_eq!(state.durable_epoch, 1);
+    }
+
+    #[test]
+    fn crash_05_concurrent_inodes_partial_sync() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let a = InodeNumber(10);
+        let c = InodeNumber(11);
+        b.stage_write(a);
+        b.stage_write(c);
+        // Inode A fsyncs, inode C doesn't.
+        b.fsync_barrier(a).unwrap();
+        // Crash: A is durable, C is not.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_05_partial_sync");
+        assert_eq!(r.inode_state(a).unwrap().durable_epoch, 1);
+        assert_eq!(r.inode_state(c).unwrap().durable_epoch, 0);
+    }
+
+    #[test]
+    fn crash_06_multiple_writes_single_epoch() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(6);
+        // Multiple writes in the same epoch.
+        for _ in 0..5 {
+            b.stage_write(inode);
+        }
+        // All staged at epoch 1 (stage_write takes max).
+        assert_eq!(b.inode_state(inode).unwrap().staged_epoch, 1);
+        // Crash before commit: all 5 writes lost.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_06_multi_write");
+        assert_eq!(r.inode_state(inode).unwrap().durable_epoch, 0);
+    }
+
+    #[test]
+    fn crash_07_fsync_then_more_writes_then_crash() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(7);
+        b.stage_write(inode);
+        b.fsync_barrier(inode).unwrap(); // Epoch 1 durable.
+        b.advance_epoch();
+        b.stage_write(inode); // Epoch 2 staged.
+        b.commit_inode(inode); // Epoch 2 visible but NOT durable.
+        // Crash: epoch 1 data survives, epoch 2 data lost.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_07_post_fsync_writes");
+        let state = r.inode_state(inode).unwrap();
+        assert_eq!(state.durable_epoch, 1);
+        assert_eq!(state.visible_epoch, 1);
+    }
+
+    #[test]
+    fn crash_08_interleaved_epochs_three_inodes() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        let ino_alpha = InodeNumber(20);
+        let ino_beta = InodeNumber(21);
+        let ino_gamma = InodeNumber(22);
+
+        // Epoch 1: all three write.
+        barrier.stage_write(ino_alpha);
+        barrier.stage_write(ino_beta);
+        barrier.stage_write(ino_gamma);
+        barrier.fsync_barrier(ino_alpha).unwrap(); // alpha durable at 1.
+        barrier.fsync_barrier(ino_beta).unwrap(); // beta durable at 1.
+        // gamma not fsynced.
+
+        barrier.advance_epoch(); // Epoch 2.
+        barrier.stage_write(ino_alpha);
+        barrier.fsync_barrier(ino_alpha).unwrap(); // alpha durable at 2.
+        barrier.stage_write(ino_gamma); // gamma staged at 2, still not durable from epoch 1!
+
+        // Crash: alpha has epoch 2, beta has epoch 1, gamma has nothing durable.
+        let recovered = recover_barrier(&barrier);
+        verify_crash_recovery_invariants(&recovered, "crash_08_interleaved");
+        assert_eq!(recovered.inode_state(ino_alpha).unwrap().durable_epoch, 2);
+        assert_eq!(recovered.inode_state(ino_beta).unwrap().durable_epoch, 1);
+        assert_eq!(recovered.inode_state(ino_gamma).unwrap().durable_epoch, 0);
+    }
+
+    #[test]
+    fn crash_09_rapid_epoch_advances_no_writes() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(9);
+        b.stage_write(inode);
+        b.fsync_barrier(inode).unwrap();
+        // Rapidly advance epochs without any writes.
+        for _ in 0..10 {
+            b.advance_epoch();
+        }
+        // Crash: only epoch 1 was ever durable.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_09_rapid_advance");
+        assert_eq!(r.inode_state(inode).unwrap().durable_epoch, 1);
+    }
+
+    #[test]
+    fn crash_10_commit_at_higher_epoch_than_staged() {
+        let mut b = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(10);
+        b.stage_write(inode); // Staged at epoch 1.
+        b.advance_epoch(); // Epoch 2.
+        // Commit at epoch 2 (inode only staged at 1) → advances visible to 1.
+        b.commit_inode(inode);
+        let state = b.inode_state(inode).unwrap();
+        assert_eq!(state.visible_epoch, 1);
+        // But NOT durable — crash loses it.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_10_higher_epoch_commit");
+        assert_eq!(r.inode_state(inode).unwrap().durable_epoch, 0);
+    }
+
+    #[test]
+    fn crash_11_disabled_barrier_always_consistent() {
+        let b = WritebackEpochBarrier::new(); // Disabled.
+        let r = recover_barrier(&b);
+        // No inodes tracked in disabled mode → trivially consistent.
+        assert_eq!(r.tracked_inode_count(), 0);
+    }
+
+    #[test]
+    fn crash_12_all_scenarios_maintain_monotonicity() {
+        // Meta-test: run through a complex sequence and verify invariant
+        // holds at every step and after recovery.
+        let mut b = WritebackEpochBarrier::enabled();
+        let inodes: Vec<InodeNumber> = (100..110).map(InodeNumber).collect();
+
+        for epoch_round in 0..5_u64 {
+            for &inode in &inodes {
+                b.stage_write(inode);
+            }
+            // Fsync half the inodes.
+            for &inode in &inodes[..5] {
+                b.fsync_barrier(inode).unwrap();
+            }
+            // Verify all inodes valid mid-round.
+            for (&_inode, state) in &b.inodes {
+                assert!(state.is_valid(), "mid-round {epoch_round}");
+            }
+            b.advance_epoch();
+        }
+
+        // Crash at end: only fsynced inodes have durable data.
+        let r = recover_barrier(&b);
+        verify_crash_recovery_invariants(&r, "crash_12_complex_sequence");
+        for &inode in &inodes[..5] {
+            assert!(r.inode_state(inode).unwrap().durable_epoch > 0);
+        }
+        for &inode in &inodes[5..] {
+            assert_eq!(r.inode_state(inode).unwrap().durable_epoch, 0);
+        }
+    }
+
     #[test]
     fn merge_taxonomy_marks_disjoint_data_blocks_safe() {
         let classification = classify_merge_pair(
