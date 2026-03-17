@@ -918,11 +918,13 @@ pub struct WritebackBenchmarkResult {
 pub struct WritebackComparison {
     /// Workload compared.
     pub workload: WritebackWorkload,
-    /// Throughput ratio (enabled / disabled).  >1.0 means enabled is faster.
+    /// Throughput ratio: `baseline_duration / writeback_duration`.
+    /// >1.0 means writeback-enabled is faster (higher throughput).
     pub throughput_ratio: f64,
-    /// p50 latency ratio (enabled / disabled).  <1.0 means enabled is faster.
+    /// p50 latency ratio: `writeback_p50 / baseline_p50`.
+    /// <1.0 means writeback-enabled has lower latency.
     pub latency_p50_ratio: f64,
-    /// p95 latency ratio.
+    /// p95 latency ratio: `writeback_p95 / baseline_p95`.
     pub latency_p95_ratio: f64,
     /// The disabled baseline result.
     pub baseline: WritebackBenchmarkResult,
@@ -989,12 +991,12 @@ pub fn run_writeback_barrier_benchmark(
     let mut epoch_transitions = 0_u64;
     let mut fsync_count = 0_u64;
 
-    // Fsync frequency: every N writes.
+    // Fsync frequency: every N writes (not ops — read ops don't advance write_idx).
     let fsync_every = match workload {
-        WritebackWorkload::SmallWrites => 100,     // Fsync every 100 writes.
-        WritebackWorkload::SequentialLarge => 1024, // Fsync every 4MB.
-        WritebackWorkload::RandomWrites => 500,     // Fsync every 500 writes.
-        WritebackWorkload::MixedReadWrite => 200,   // Fsync every 200 ops.
+        WritebackWorkload::SmallWrites => 100,
+        WritebackWorkload::SequentialLarge => 1024,
+        WritebackWorkload::RandomWrites => 500,
+        WritebackWorkload::MixedReadWrite => 200,
     };
 
     let start = Instant::now();
