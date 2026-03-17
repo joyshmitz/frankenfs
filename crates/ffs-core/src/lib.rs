@@ -812,14 +812,20 @@ impl WritebackEpochBarrier {
     }
 
     /// Whether a given epoch is visible for an inode (safe for MVCC readers).
+    ///
+    /// Returns `true` when the barrier is disabled, or when the inode is not
+    /// tracked (pre-existing inodes that never went through writeback staging
+    /// have all their data committed via the direct MVCC path).
     #[must_use]
     pub fn is_epoch_visible(&self, inode: InodeNumber, epoch: u64) -> bool {
         if !self.enabled {
-            return true; // All epochs visible when barrier disabled.
+            return true;
         }
+        // Untracked inodes predate writeback-cache — all their data is
+        // already committed directly to MVCC.
         self.inodes
             .get(&inode)
-            .is_some_and(|state| epoch <= state.visible_epoch)
+            .is_none_or(|state| epoch <= state.visible_epoch)
     }
 
     /// Number of tracked inodes.
@@ -19019,6 +19025,17 @@ mod tests {
     }
 
     #[test]
+    fn epoch_barrier_untracked_inode_is_visible() {
+        let barrier = WritebackEpochBarrier::enabled();
+        // An inode that was never staged (predates writeback-cache) should
+        // be visible at any epoch — its data was committed via the direct path.
+        let untracked = InodeNumber(999);
+        assert!(barrier.is_epoch_visible(untracked, 0));
+        assert!(barrier.is_epoch_visible(untracked, 1));
+        assert!(barrier.is_epoch_visible(untracked, 100));
+    }
+
+    #[test]
     fn epoch_barrier_stage_and_commit_cycle() {
         let mut barrier = WritebackEpochBarrier::enabled();
         let inode = InodeNumber(42);
@@ -19136,12 +19153,14 @@ mod tests {
     /// Simulate recovery by creating a fresh barrier whose state reflects
     /// what was durable before the crash.
     fn recover_barrier(pre_crash: &WritebackEpochBarrier) -> WritebackEpochBarrier {
-        let mut recovered = WritebackEpochBarrier::enabled();
+        let mut recovered = if pre_crash.is_enabled() {
+            WritebackEpochBarrier::enabled()
+        } else {
+            WritebackEpochBarrier::new()
+        };
         // After crash, only durable state survives. Staged and visible
         // epochs that weren't synced are lost.
         for (&inode, state) in &pre_crash.inodes {
-            // Only durable_epoch survives crash. staged and visible reset to
-            // durable (the last known-good state).
             let durable = state.durable_epoch;
             recovered.inodes.insert(inode, InodeEpochState {
                 staged_epoch: durable,
