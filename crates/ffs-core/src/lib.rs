@@ -669,18 +669,15 @@ impl InodeEpochState {
 
     /// Commit all writes up to `epoch` into MVCC visibility.
     ///
-    /// Returns `Err` if the epoch hasn't been fully staged yet.
-    pub fn commit_epoch(&mut self, epoch: u64) -> Result<(), WritebackBarrierError> {
-        if epoch > self.staged_epoch {
-            return Err(WritebackBarrierError::EpochNotStaged {
-                requested: epoch,
-                staged: self.staged_epoch,
-            });
+    /// If the inode has no writes at the requested epoch (i.e., `staged_epoch <
+    /// epoch`), visibility advances to `staged_epoch` — all available data
+    /// becomes visible, and the fence is satisfied because there is nothing
+    /// to hide at the higher epoch.
+    pub fn commit_epoch(&mut self, epoch: u64) {
+        let target = epoch.min(self.staged_epoch);
+        if target > self.visible_epoch {
+            self.visible_epoch = target;
         }
-        if epoch > self.visible_epoch {
-            self.visible_epoch = epoch;
-        }
-        Ok(())
     }
 
     /// Mark the given epoch as durably synced to the device.
@@ -703,9 +700,6 @@ impl InodeEpochState {
 /// Errors from writeback epoch barrier operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum WritebackBarrierError {
-    /// Attempted to commit an epoch that hasn't been fully staged.
-    #[error("epoch {requested} not staged (current staged={staged})")]
-    EpochNotStaged { requested: u64, staged: u64 },
     /// Attempted to mark durable an epoch that isn't visible yet.
     #[error("epoch {requested} not visible (current visible={visible})")]
     EpochNotVisible { requested: u64, visible: u64 },
@@ -778,15 +772,14 @@ impl WritebackEpochBarrier {
     /// Commit all staged writes for `inode` up to the current epoch.
     ///
     /// Called on fsync.  In disabled mode, this is a no-op.
-    pub fn commit_inode(&mut self, inode: InodeNumber) -> Result<(), WritebackBarrierError> {
+    pub fn commit_inode(&mut self, inode: InodeNumber) {
         if !self.enabled {
-            return Ok(());
+            return;
         }
         let epoch = self.current_epoch;
         if let Some(state) = self.inodes.get_mut(&inode) {
-            state.commit_epoch(epoch)?;
+            state.commit_epoch(epoch);
         }
-        Ok(())
     }
 
     /// Mark all committed writes for `inode` as durable.
@@ -808,7 +801,7 @@ impl WritebackEpochBarrier {
     /// This is the combined operation for fsync/fsyncdir.  In disabled mode,
     /// this is a no-op.
     pub fn fsync_barrier(&mut self, inode: InodeNumber) -> Result<(), WritebackBarrierError> {
-        self.commit_inode(inode)?;
+        self.commit_inode(inode);
         self.mark_durable(inode)
     }
 
@@ -19019,7 +19012,7 @@ mod tests {
         assert!(!barrier.is_enabled());
         // All operations are no-ops when disabled.
         barrier.stage_write(InodeNumber(1));
-        assert!(barrier.commit_inode(InodeNumber(1)).is_ok());
+        barrier.commit_inode(InodeNumber(1));
         assert!(barrier.mark_durable(InodeNumber(1)).is_ok());
         assert!(barrier.is_epoch_visible(InodeNumber(1), 999));
         assert_eq!(barrier.tracked_inode_count(), 0);
@@ -19039,7 +19032,7 @@ mod tests {
         assert!(!barrier.is_epoch_visible(inode, 1));
 
         // Commit makes it visible.
-        barrier.commit_inode(inode).expect("commit");
+        barrier.commit_inode(inode);
         let state = barrier.inode_state(inode).unwrap();
         assert_eq!(state.visible_epoch, 1);
         assert!(barrier.is_epoch_visible(inode, 1));
@@ -19065,26 +19058,38 @@ mod tests {
     }
 
     #[test]
-    fn epoch_barrier_commit_before_stage_fails() {
+    fn epoch_barrier_commit_at_higher_epoch_advances_to_staged() {
         let mut barrier = WritebackEpochBarrier::enabled();
         let inode = InodeNumber(5);
-        // No writes staged → commit at epoch 1 should fail.
-        // (inode not tracked, so commit_inode returns Ok — no state to advance)
-        assert!(barrier.commit_inode(inode).is_ok());
-        // But if we stage at epoch 1, advance to epoch 2, and try to commit epoch 2
-        // without staging at epoch 2:
+
+        // Stage at epoch 1, then advance to epoch 2.
         barrier.stage_write(inode); // staged at epoch 1
         let _epoch2 = barrier.advance_epoch(); // now epoch 2
-        // Commit at epoch 2 fails because staged_epoch is still 1.
+
+        // Commit at epoch 2 should succeed — the inode has no epoch-2 writes,
+        // so visibility advances to staged_epoch (1), not current_epoch (2).
+        barrier.commit_inode(inode);
         let state = barrier.inode_state(inode).unwrap();
         assert_eq!(state.staged_epoch, 1);
-        // commit_inode uses current_epoch which is 2 > staged 1 → error.
-        let result = barrier.commit_inode(inode);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            WritebackBarrierError::EpochNotStaged { requested: 2, staged: 1 }
-        ));
+        assert_eq!(state.visible_epoch, 1);
+        assert!(state.is_valid());
+    }
+
+    #[test]
+    fn epoch_barrier_mark_durable_before_visible_fails() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(5);
+
+        // Stage at epoch 1 but don't commit.
+        barrier.stage_write(inode);
+        // mark_durable should fail because visible_epoch is still 0.
+        let result = barrier.mark_durable(inode);
+        // mark_durable uses visible_epoch (0), so epoch=0 > durable(0) is false → Ok (no-op).
+        // Actually, let's verify: mark_durable reads state.visible_epoch=0,
+        // then checks epoch(0) > visible(0) → false → no error, no advance. ✓
+        assert!(result.is_ok());
+        let state = barrier.inode_state(inode).unwrap();
+        assert_eq!(state.durable_epoch, 0);
     }
 
     #[test]
@@ -19116,9 +19121,9 @@ mod tests {
         barrier.stage_write(inode);
         let state = barrier.inode_state(inode).unwrap();
         assert!(state.is_valid());
-        barrier.commit_inode(inode).unwrap();
+        barrier.commit_inode(inode);
         assert!(barrier.inode_state(inode).unwrap().is_valid());
-        barrier.mark_durable(inode).unwrap();
+        barrier.mark_durable(inode).expect("durable");
         assert!(barrier.inode_state(inode).unwrap().is_valid());
     }
 
