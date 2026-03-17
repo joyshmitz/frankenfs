@@ -50,7 +50,7 @@ use ffs_types::{
 use ffs_xattr::XattrWriteAccess;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
@@ -613,6 +613,226 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
 
     fn sync(&self, cx: &Cx) -> Result<(), FfsError> {
         self.dev.sync(cx)
+    }
+}
+
+// ── Writeback-cache epoch barrier ──────────────────────────────────────────
+//
+// Implements the commit barrier mechanism from design-writeback-cache-mvcc.md.
+// Feature-gated: only active when `--writeback-cache` is enabled. When disabled,
+// all writes flow through the existing immediate-commit path.
+
+/// Per-inode writeback epoch state for deferred visibility under FUSE
+/// writeback-cache mode.
+///
+/// Each inode tracks three monotonically advancing epochs:
+/// - `staged_epoch`: latest epoch whose dirty pages have arrived from kernel
+/// - `visible_epoch`: latest epoch committed to MVCC (readable by snapshots)
+/// - `durable_epoch`: latest epoch whose commit reached stable storage
+///
+/// Invariant: `staged_epoch >= visible_epoch >= durable_epoch`
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InodeEpochState {
+    /// Latest epoch whose writes have been received from the kernel.
+    pub staged_epoch: u64,
+    /// Latest epoch whose writes are committed to MVCC and visible to readers.
+    pub visible_epoch: u64,
+    /// Latest epoch that has been durably synced to the device.
+    pub durable_epoch: u64,
+}
+
+impl InodeEpochState {
+    /// Returns true if the monotonicity invariant holds.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.staged_epoch >= self.visible_epoch && self.visible_epoch >= self.durable_epoch
+    }
+
+    /// Returns true if there are staged writes not yet visible.
+    #[must_use]
+    pub const fn has_pending_visibility(&self) -> bool {
+        self.staged_epoch > self.visible_epoch
+    }
+
+    /// Returns true if there are visible writes not yet durable.
+    #[must_use]
+    pub const fn has_pending_durability(&self) -> bool {
+        self.visible_epoch > self.durable_epoch
+    }
+
+    /// Stage a write at the given epoch.  Advances `staged_epoch` if needed.
+    pub fn stage_write(&mut self, epoch: u64) {
+        if epoch > self.staged_epoch {
+            self.staged_epoch = epoch;
+        }
+    }
+
+    /// Commit all writes up to `epoch` into MVCC visibility.
+    ///
+    /// Returns `Err` if the epoch hasn't been fully staged yet.
+    pub fn commit_epoch(&mut self, epoch: u64) -> Result<(), WritebackBarrierError> {
+        if epoch > self.staged_epoch {
+            return Err(WritebackBarrierError::EpochNotStaged {
+                requested: epoch,
+                staged: self.staged_epoch,
+            });
+        }
+        if epoch > self.visible_epoch {
+            self.visible_epoch = epoch;
+        }
+        Ok(())
+    }
+
+    /// Mark the given epoch as durably synced to the device.
+    ///
+    /// Returns `Err` if the epoch hasn't been made visible yet.
+    pub fn mark_durable(&mut self, epoch: u64) -> Result<(), WritebackBarrierError> {
+        if epoch > self.visible_epoch {
+            return Err(WritebackBarrierError::EpochNotVisible {
+                requested: epoch,
+                visible: self.visible_epoch,
+            });
+        }
+        if epoch > self.durable_epoch {
+            self.durable_epoch = epoch;
+        }
+        Ok(())
+    }
+}
+
+/// Errors from writeback epoch barrier operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum WritebackBarrierError {
+    /// Attempted to commit an epoch that hasn't been fully staged.
+    #[error("epoch {requested} not staged (current staged={staged})")]
+    EpochNotStaged { requested: u64, staged: u64 },
+    /// Attempted to mark durable an epoch that isn't visible yet.
+    #[error("epoch {requested} not visible (current visible={visible})")]
+    EpochNotVisible { requested: u64, visible: u64 },
+}
+
+/// Writeback epoch barrier tracking deferred visibility for all inodes.
+///
+/// When FUSE writeback-cache is enabled, writes are not immediately visible
+/// to MVCC readers. Instead, they are staged into epochs and only become
+/// visible when an explicit sync boundary (fsync/fsyncdir) commits the epoch.
+///
+/// When writeback-cache is **disabled** (the V1.x default), this barrier is
+/// a no-op pass-through.
+#[derive(Debug, Default)]
+pub struct WritebackEpochBarrier {
+    /// Whether writeback-cache mode is active.
+    enabled: bool,
+    /// Current global epoch counter.
+    current_epoch: u64,
+    /// Per-inode epoch state.
+    inodes: BTreeMap<InodeNumber, InodeEpochState>,
+}
+
+impl WritebackEpochBarrier {
+    /// Create a new barrier in disabled (pass-through) mode.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a barrier with writeback-cache mode enabled.
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            current_epoch: 1,
+            inodes: BTreeMap::new(),
+        }
+    }
+
+    /// Whether writeback-cache mode is active.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// The current epoch number.
+    #[must_use]
+    pub const fn current_epoch(&self) -> u64 {
+        self.current_epoch
+    }
+
+    /// Advance to a new epoch.  Returns the new epoch number.
+    pub fn advance_epoch(&mut self) -> u64 {
+        self.current_epoch = self.current_epoch.saturating_add(1);
+        self.current_epoch
+    }
+
+    /// Stage a write for `inode` at the current epoch.
+    ///
+    /// In disabled mode, this is a no-op (writes are immediately visible).
+    pub fn stage_write(&mut self, inode: InodeNumber) {
+        if !self.enabled {
+            return;
+        }
+        let epoch = self.current_epoch;
+        self.inodes.entry(inode).or_default().stage_write(epoch);
+    }
+
+    /// Commit all staged writes for `inode` up to the current epoch.
+    ///
+    /// Called on fsync.  In disabled mode, this is a no-op.
+    pub fn commit_inode(&mut self, inode: InodeNumber) -> Result<(), WritebackBarrierError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let epoch = self.current_epoch;
+        if let Some(state) = self.inodes.get_mut(&inode) {
+            state.commit_epoch(epoch)?;
+        }
+        Ok(())
+    }
+
+    /// Mark all committed writes for `inode` as durable.
+    ///
+    /// Called after device sync succeeds.  In disabled mode, this is a no-op.
+    pub fn mark_durable(&mut self, inode: InodeNumber) -> Result<(), WritebackBarrierError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if let Some(state) = self.inodes.get_mut(&inode) {
+            let epoch = state.visible_epoch;
+            state.mark_durable(epoch)?;
+        }
+        Ok(())
+    }
+
+    /// Full fsync cycle: commit current epoch, then mark durable.
+    ///
+    /// This is the combined operation for fsync/fsyncdir.  In disabled mode,
+    /// this is a no-op.
+    pub fn fsync_barrier(&mut self, inode: InodeNumber) -> Result<(), WritebackBarrierError> {
+        self.commit_inode(inode)?;
+        self.mark_durable(inode)
+    }
+
+    /// Returns the epoch state for an inode, or `None` if not tracked.
+    #[must_use]
+    pub fn inode_state(&self, inode: InodeNumber) -> Option<&InodeEpochState> {
+        self.inodes.get(&inode)
+    }
+
+    /// Whether a given epoch is visible for an inode (safe for MVCC readers).
+    #[must_use]
+    pub fn is_epoch_visible(&self, inode: InodeNumber, epoch: u64) -> bool {
+        if !self.enabled {
+            return true; // All epochs visible when barrier disabled.
+        }
+        self.inodes
+            .get(&inode)
+            .is_some_and(|state| epoch <= state.visible_epoch)
+    }
+
+    /// Number of tracked inodes.
+    #[must_use]
+    pub fn tracked_inode_count(&self) -> usize {
+        self.inodes.len()
     }
 }
 
@@ -18789,6 +19009,117 @@ mod tests {
                 related_source_order: None,
             }]
         );
+    }
+
+    // ── WritebackEpochBarrier tests ──────────────────────────────────────
+
+    #[test]
+    fn epoch_barrier_disabled_is_noop() {
+        let mut barrier = WritebackEpochBarrier::new();
+        assert!(!barrier.is_enabled());
+        // All operations are no-ops when disabled.
+        barrier.stage_write(InodeNumber(1));
+        assert!(barrier.commit_inode(InodeNumber(1)).is_ok());
+        assert!(barrier.mark_durable(InodeNumber(1)).is_ok());
+        assert!(barrier.is_epoch_visible(InodeNumber(1), 999));
+        assert_eq!(barrier.tracked_inode_count(), 0);
+    }
+
+    #[test]
+    fn epoch_barrier_stage_and_commit_cycle() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(42);
+
+        // Stage a write.
+        barrier.stage_write(inode);
+        let state = barrier.inode_state(inode).expect("inode tracked");
+        assert_eq!(state.staged_epoch, 1);
+        assert_eq!(state.visible_epoch, 0);
+        assert!(state.has_pending_visibility());
+        assert!(!barrier.is_epoch_visible(inode, 1));
+
+        // Commit makes it visible.
+        barrier.commit_inode(inode).expect("commit");
+        let state = barrier.inode_state(inode).unwrap();
+        assert_eq!(state.visible_epoch, 1);
+        assert!(barrier.is_epoch_visible(inode, 1));
+        assert!(state.has_pending_durability());
+
+        // Mark durable.
+        barrier.mark_durable(inode).expect("durable");
+        let state = barrier.inode_state(inode).unwrap();
+        assert_eq!(state.durable_epoch, 1);
+        assert!(!state.has_pending_durability());
+    }
+
+    #[test]
+    fn epoch_barrier_fsync_commits_and_durables() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(10);
+        barrier.stage_write(inode);
+        barrier.fsync_barrier(inode).expect("fsync");
+        let state = barrier.inode_state(inode).unwrap();
+        assert_eq!(state.visible_epoch, 1);
+        assert_eq!(state.durable_epoch, 1);
+        assert!(state.is_valid());
+    }
+
+    #[test]
+    fn epoch_barrier_commit_before_stage_fails() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(5);
+        // No writes staged → commit at epoch 1 should fail.
+        // (inode not tracked, so commit_inode returns Ok — no state to advance)
+        assert!(barrier.commit_inode(inode).is_ok());
+        // But if we stage at epoch 1, advance to epoch 2, and try to commit epoch 2
+        // without staging at epoch 2:
+        barrier.stage_write(inode); // staged at epoch 1
+        let _epoch2 = barrier.advance_epoch(); // now epoch 2
+        // Commit at epoch 2 fails because staged_epoch is still 1.
+        let state = barrier.inode_state(inode).unwrap();
+        assert_eq!(state.staged_epoch, 1);
+        // commit_inode uses current_epoch which is 2 > staged 1 → error.
+        let result = barrier.commit_inode(inode);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WritebackBarrierError::EpochNotStaged { requested: 2, staged: 1 }
+        ));
+    }
+
+    #[test]
+    fn epoch_barrier_multi_epoch_advances() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(7);
+
+        // Epoch 1: stage and commit.
+        barrier.stage_write(inode);
+        barrier.fsync_barrier(inode).unwrap();
+
+        // Advance to epoch 2.
+        barrier.advance_epoch();
+        assert_eq!(barrier.current_epoch(), 2);
+
+        // Epoch 2: stage and commit.
+        barrier.stage_write(inode);
+        barrier.fsync_barrier(inode).unwrap();
+        let state = barrier.inode_state(inode).unwrap();
+        assert_eq!(state.staged_epoch, 2);
+        assert_eq!(state.visible_epoch, 2);
+        assert_eq!(state.durable_epoch, 2);
+    }
+
+    #[test]
+    fn epoch_barrier_invariant_always_holds() {
+        let mut barrier = WritebackEpochBarrier::enabled();
+        let inode = InodeNumber(99);
+        barrier.stage_write(inode);
+        let state = barrier.inode_state(inode).unwrap();
+        assert!(state.is_valid());
+        barrier.commit_inode(inode).unwrap();
+        assert!(barrier.inode_state(inode).unwrap().is_valid());
+        barrier.mark_durable(inode).unwrap();
+        assert!(barrier.inode_state(inode).unwrap().is_valid());
     }
 
     #[test]
