@@ -609,6 +609,181 @@ impl ContentionMetrics {
     }
 }
 
+const DEFAULT_RUNTIME_HISTOGRAM_BOUNDS: [u64; 12] = [
+    1, 5, 10, 50, 100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 1_000_000,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHistogramBucket {
+    pub le: u64,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHistogramSnapshot {
+    pub buckets: Vec<RuntimeHistogramBucket>,
+    pub inf_count: u64,
+    pub sum: u64,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MvccRuntimeMetricsSnapshot {
+    pub active_snapshots: usize,
+    pub commit_rate: f64,
+    pub conflict_rate: f64,
+    pub abort_rate: f64,
+    pub version_chain_max_length: usize,
+    pub prune_throughput: f64,
+    pub commit_attempts_total: u64,
+    pub commit_successes_total: u64,
+    pub conflicts_total: u64,
+    pub aborts_total: u64,
+    pub pruned_versions_total: u64,
+    pub commit_latency_us: RuntimeHistogramSnapshot,
+    pub conflict_resolution_latency_us: RuntimeHistogramSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeHistogram {
+    bounds: Vec<u64>,
+    counts: Vec<u64>,
+    sum: u64,
+    count: u64,
+}
+
+impl Default for RuntimeHistogram {
+    fn default() -> Self {
+        Self::with_bounds(&DEFAULT_RUNTIME_HISTOGRAM_BOUNDS)
+    }
+}
+
+impl RuntimeHistogram {
+    fn with_bounds(bounds: &[u64]) -> Self {
+        Self {
+            bounds: bounds.to_vec(),
+            counts: vec![0; bounds.len() + 1],
+            sum: 0,
+            count: 0,
+        }
+    }
+
+    fn observe(&mut self, value: u64) {
+        let idx = self.bounds.partition_point(|&bound| bound < value);
+        self.counts[idx] = self.counts[idx].saturating_add(1);
+        self.sum = self.sum.saturating_add(value);
+        self.count = self.count.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> RuntimeHistogramSnapshot {
+        RuntimeHistogramSnapshot {
+            buckets: self
+                .bounds
+                .iter()
+                .enumerate()
+                .map(|(idx, &bound)| RuntimeHistogramBucket {
+                    le: bound,
+                    count: self.counts[idx],
+                })
+                .collect(),
+            inf_count: self.counts[self.bounds.len()],
+            sum: self.sum,
+            count: self.count,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MvccRuntimeMetricsState {
+    started_at: Instant,
+    commit_attempts_total: u64,
+    commit_successes_total: u64,
+    conflicts_total: u64,
+    aborts_total: u64,
+    pruned_versions_total: u64,
+    commit_latency_us: RuntimeHistogram,
+    conflict_resolution_latency_us: RuntimeHistogram,
+}
+
+impl Default for MvccRuntimeMetricsState {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+            commit_attempts_total: 0,
+            commit_successes_total: 0,
+            conflicts_total: 0,
+            aborts_total: 0,
+            pruned_versions_total: 0,
+            commit_latency_us: RuntimeHistogram::default(),
+            conflict_resolution_latency_us: RuntimeHistogram::default(),
+        }
+    }
+}
+
+impl MvccRuntimeMetricsState {
+    fn record_commit_attempt(&mut self) {
+        self.commit_attempts_total = self.commit_attempts_total.saturating_add(1);
+    }
+
+    fn record_commit_success(&mut self, latency_us: u64) {
+        self.commit_successes_total = self.commit_successes_total.saturating_add(1);
+        self.commit_latency_us.observe(latency_us);
+    }
+
+    fn record_commit_abort(&mut self, error: &CommitError) {
+        self.aborts_total = self.aborts_total.saturating_add(1);
+        if matches!(
+            error,
+            CommitError::Conflict { .. } | CommitError::SsiConflict { .. }
+        ) {
+            self.conflicts_total = self.conflicts_total.saturating_add(1);
+        }
+    }
+
+    fn record_conflict_resolution_latency(&mut self, latency_us: u64) {
+        self.conflict_resolution_latency_us.observe(latency_us);
+    }
+
+    fn record_versions_pruned(&mut self, count: usize) {
+        self.pruned_versions_total = self
+            .pruned_versions_total
+            .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+
+    fn snapshot(
+        &self,
+        active_snapshots: usize,
+        version_chain_max_length: usize,
+    ) -> MvccRuntimeMetricsSnapshot {
+        let elapsed_secs = self.started_at.elapsed().as_secs_f64();
+        let safe_elapsed_secs = elapsed_secs.max(f64::EPSILON);
+        let commit_attempts = self.commit_attempts_total as f64;
+        MvccRuntimeMetricsSnapshot {
+            active_snapshots,
+            commit_rate: self.commit_successes_total as f64 / safe_elapsed_secs,
+            conflict_rate: if self.commit_attempts_total == 0 {
+                0.0
+            } else {
+                self.conflicts_total as f64 / commit_attempts
+            },
+            abort_rate: if self.commit_attempts_total == 0 {
+                0.0
+            } else {
+                self.aborts_total as f64 / commit_attempts
+            },
+            version_chain_max_length,
+            prune_throughput: self.pruned_versions_total as f64 / safe_elapsed_secs,
+            commit_attempts_total: self.commit_attempts_total,
+            commit_successes_total: self.commit_successes_total,
+            conflicts_total: self.conflicts_total,
+            aborts_total: self.aborts_total,
+            pruned_versions_total: self.pruned_versions_total,
+            commit_latency_us: self.commit_latency_us.snapshot(),
+            conflict_resolution_latency_us: self.conflict_resolution_latency_us.snapshot(),
+        }
+    }
+}
+
 /// Budget-driven controls for MVCC version GC batches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcBackpressureConfig {
@@ -791,6 +966,8 @@ pub struct MvccStore {
     adaptive_config: AdaptivePolicyConfig,
     /// Runtime contention metrics tracked via EMA.
     contention_metrics: ContentionMetrics,
+    /// JSON-exportable runtime counters/histograms for observability.
+    runtime_metrics: MvccRuntimeMetricsState,
 }
 
 impl Default for MvccStore {
@@ -818,6 +995,7 @@ impl MvccStore {
             conflict_policy: ConflictPolicy::default(),
             adaptive_config: AdaptivePolicyConfig::default(),
             contention_metrics: ContentionMetrics::default(),
+            runtime_metrics: MvccRuntimeMetricsState::default(),
         }
     }
 
@@ -1023,6 +1201,15 @@ impl MvccStore {
         }
     }
 
+    /// JSON-friendly runtime metrics export for MVCC health/performance.
+    #[must_use]
+    pub fn runtime_metrics(&self) -> MvccRuntimeMetricsSnapshot {
+        self.runtime_metrics.snapshot(
+            self.active_snapshot_count(),
+            self.block_version_stats().max_chain_length,
+        )
+    }
+
     fn critical_chain_len(max_len: usize) -> usize {
         let cap = max_len.max(1);
         cap.saturating_mul(4).max(cap.saturating_add(1))
@@ -1092,6 +1279,7 @@ impl MvccStore {
         let txn_id = txn.id().0;
         let read_set_size = txn.read_set().len();
         let write_set_size = txn.pending_writes();
+        self.runtime_metrics.record_commit_attempt();
         match self.commit_fcw_internal(txn) {
             Ok((commit_seq, _)) => {
                 self.emit_transaction_commit(txn_id, commit_seq, write_set_size, started);
@@ -1114,6 +1302,7 @@ impl MvccStore {
         let txn_id = txn.id().0;
         let read_set_size = txn.read_set().len();
         let write_set_size = txn.pending_writes();
+        self.runtime_metrics.record_commit_attempt();
         match self.commit_fcw_internal(txn) {
             Ok((commit_seq, deferred)) => {
                 for block in deferred {
@@ -1154,6 +1343,7 @@ impl MvccStore {
         let started = Instant::now();
         let txn_id = txn.id().0;
         let write_set_size = txn.pending_writes();
+        self.runtime_metrics.record_commit_attempt();
         let (commit_seq, _deferred) = self.apply_fcw_commit(txn);
         self.emit_transaction_commit(txn_id, commit_seq, write_set_size, started);
         commit_seq
@@ -1192,6 +1382,7 @@ impl MvccStore {
         let txn_id = txn.id().0;
         let read_set_size = txn.read_set().len();
         let write_set_size = txn.pending_writes();
+        self.runtime_metrics.record_commit_attempt();
         match self.commit_ssi_internal(txn) {
             Ok((commit_seq, _)) => {
                 self.emit_transaction_commit(txn_id, commit_seq, write_set_size, started);
@@ -1214,6 +1405,7 @@ impl MvccStore {
         let txn_id = txn.id().0;
         let read_set_size = txn.read_set().len();
         let write_set_size = txn.pending_writes();
+        self.runtime_metrics.record_commit_attempt();
         match self.commit_ssi_internal(txn) {
             Ok((commit_seq, deferred)) => {
                 for block in deferred {
@@ -1245,6 +1437,7 @@ impl MvccStore {
         write_set_size: usize,
         error: &CommitError,
     ) {
+        self.runtime_metrics.record_commit_abort(error);
         match error {
             CommitError::Conflict { .. } => self.emit_txn_aborted(TxnAbortedDetail {
                 txn_id,
@@ -1285,16 +1478,17 @@ impl MvccStore {
     }
 
     fn emit_transaction_commit(
-        &self,
+        &mut self,
         txn_id: u64,
         commit_seq: CommitSeq,
         write_set_size: usize,
         started: Instant,
     ) {
+        let duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.runtime_metrics.record_commit_success(duration_us);
         let Some(sink) = &self.evidence_sink else {
             return;
         };
-        let duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         sink.append(
             &EvidenceRecord::transaction_commit(TransactionCommitDetail {
                 txn_id,
@@ -1621,7 +1815,14 @@ impl MvccStore {
             let latest = self.latest_commit_seq(*block);
             if latest > txn.snapshot.high {
                 had_conflict = true;
-                match self.preflight_resolve_block_conflict(txn, *block, latest, prev_effective) {
+                let resolution_started = Instant::now();
+                let resolution =
+                    self.preflight_resolve_block_conflict(txn, *block, latest, prev_effective);
+                let resolution_latency_us =
+                    u64::try_from(resolution_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                self.runtime_metrics
+                    .record_conflict_resolution_latency(resolution_latency_us);
+                match resolution {
                     Ok((variant, bytes_len)) => {
                         merge_succeeded = true;
                         merged_block_count += 1;
@@ -2395,6 +2596,8 @@ impl MvccStore {
             }
         }
         if !retired_versions.is_empty() {
+            self.runtime_metrics
+                .record_versions_pruned(retired_versions.len());
             self.ebr_reclaimer.retire_versions(retired_versions);
         }
 
@@ -8739,6 +8942,86 @@ mod tests {
             ..ContentionMetrics::default()
         };
         assert_eq!(m.select_policy(&config), ConflictPolicy::SafeMerge);
+    }
+
+    #[test]
+    fn mvcc_runtime_metrics_export_serializes_expected_fields() {
+        let mut store = MvccStore::new();
+
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(7), vec![0xAB; 64]);
+        store.commit(txn).expect("commit");
+
+        let metrics = store.runtime_metrics();
+        let json = serde_json::to_value(&metrics).expect("serialize runtime metrics");
+
+        assert_eq!(json["active_snapshots"], 0);
+        assert_eq!(json["commit_attempts_total"], 1);
+        assert_eq!(json["commit_successes_total"], 1);
+        assert_eq!(json["conflicts_total"], 0);
+        assert_eq!(json["aborts_total"], 0);
+        assert_eq!(json["pruned_versions_total"], 0);
+        assert!(
+            json["commit_rate"].as_f64().expect("commit_rate f64") > 0.0,
+            "commit_rate should be positive after a successful commit"
+        );
+        assert_eq!(json["commit_latency_us"]["count"], 1);
+        assert_eq!(json["conflict_resolution_latency_us"]["count"], 0);
+    }
+
+    #[test]
+    fn mvcc_runtime_metrics_track_conflicts_and_aborts() {
+        let mut store = MvccStore::new();
+        store.set_conflict_policy(ConflictPolicy::Strict);
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+        first.stage_write(BlockNumber(3), vec![1; 32]);
+        second.stage_write(BlockNumber(3), vec![2; 32]);
+
+        store.commit(first).expect("first commit");
+        let err = store.commit(second).expect_err("second should conflict");
+        assert!(matches!(err, CommitError::Conflict { .. }));
+
+        let metrics = store.runtime_metrics();
+        assert_eq!(metrics.commit_attempts_total, 2);
+        assert_eq!(metrics.commit_successes_total, 1);
+        assert_eq!(metrics.conflicts_total, 1);
+        assert_eq!(metrics.aborts_total, 1);
+        assert!(metrics.conflict_rate > 0.0);
+        assert!(metrics.abort_rate > 0.0);
+        assert_eq!(metrics.conflict_resolution_latency_us.count, 1);
+    }
+
+    #[test]
+    fn mvcc_runtime_metrics_track_active_snapshots_and_pruning() {
+        let mut store = MvccStore::new();
+
+        let mut txn1 = store.begin();
+        txn1.stage_write(BlockNumber(11), vec![1; 32]);
+        let snap = store.current_snapshot();
+        store.commit(txn1).expect("commit 1");
+
+        let mut txn2 = store.begin();
+        txn2.stage_write(BlockNumber(11), vec![2; 32]);
+        store.commit(txn2).expect("commit 2");
+
+        store.register_snapshot(snap);
+        assert_eq!(store.runtime_metrics().active_snapshots, 1);
+
+        assert!(store.release_snapshot(snap));
+        store.prune_safe();
+
+        let metrics = store.runtime_metrics();
+        assert_eq!(metrics.active_snapshots, 0);
+        assert!(
+            metrics.pruned_versions_total >= 1,
+            "pruning should retire at least one older version"
+        );
+        assert!(
+            metrics.prune_throughput > 0.0,
+            "prune throughput should be positive once versions are pruned"
+        );
     }
 
     #[test]
