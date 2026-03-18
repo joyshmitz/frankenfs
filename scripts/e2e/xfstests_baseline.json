@@ -1,0 +1,13 @@
+[
+  { "test_id": "generic/001", "expected_status": "not_run" },
+  { "test_id": "generic/013", "expected_status": "not_run" },
+  { "test_id": "generic/030", "expected_status": "skipped" },
+  { "test_id": "generic/035", "expected_status": "not_run" },
+  { "test_id": "generic/068", "expected_status": "skipped" },
+  { "test_id": "generic/112", "expected_status": "skipped" },
+  { "test_id": "generic/231", "expected_status": "skipped" },
+  { "test_id": "ext4/001", "expected_status": "skipped" },
+  { "test_id": "ext4/003", "expected_status": "skipped" },
+  { "test_id": "ext4/005", "expected_status": "skipped" },
+  { "test_id": "ext4/013", "expected_status": "skipped" }
+]

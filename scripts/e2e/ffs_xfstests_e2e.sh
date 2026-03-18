@@ -28,6 +28,9 @@ XFSTESTS_DIR="${XFSTESTS_DIR:-}"
 XFSTESTS_GENERIC_LIST="${XFSTESTS_GENERIC_LIST:-$REPO_ROOT/scripts/e2e/xfstests_generic.list}"
 XFSTESTS_EXT4_LIST="${XFSTESTS_EXT4_LIST:-$REPO_ROOT/scripts/e2e/xfstests_ext4.list}"
 XFSTESTS_REGRESSION_GUARD_JSON="${XFSTESTS_REGRESSION_GUARD_JSON:-$REPO_ROOT/scripts/e2e/xfstests_regression_guard.json}"
+XFSTESTS_ALLOWLIST_JSON="${XFSTESTS_ALLOWLIST_JSON:-$REPO_ROOT/scripts/e2e/xfstests_allowlist.json}"
+XFSTESTS_BASELINE_JSON="${XFSTESTS_BASELINE_JSON:-}"
+FFS_HARNESS_BIN="${FFS_HARNESS_BIN:-$REPO_ROOT/target/debug/ffs-harness}"
 
 ARTIFACT_DIR="$E2E_LOG_DIR/xfstests"
 SELECTED_FILE="$ARTIFACT_DIR/selected_tests.txt"
@@ -42,6 +45,11 @@ declare -a EXT4_TESTS=()
 declare -a SELECTED_TESTS=()
 EFFECTIVE_MODE="$XFSTESTS_MODE"
 LAST_CHECK_RC="null"
+
+harness_supports_xfstests_report() {
+    [[ -x "$FFS_HARNESS_BIN" ]] || return 1
+    "$FFS_HARNESS_BIN" help 2>&1 | grep -Fq "xfstests-report"
+}
 
 resolve_xfstests_dir() {
     if [[ -n "$XFSTESTS_DIR" ]]; then
@@ -68,6 +76,8 @@ write_summary() {
     local safe_reason="${reason//\"/\\\"}"
     local safe_dir="${XFSTESTS_DIR//\"/\\\"}"
     local safe_guard="${XFSTESTS_REGRESSION_GUARD_JSON//\"/\\\"}"
+    local safe_allowlist="${XFSTESTS_ALLOWLIST_JSON//\"/\\\"}"
+    local safe_baseline="${XFSTESTS_BASELINE_JSON//\"/\\\"}"
     local safe_results="${RESULTS_JSON//\"/\\\"}"
     local safe_junit="${JUNIT_FILE//\"/\\\"}"
     local safe_selected="${SELECTED_FILE//\"/\\\"}"
@@ -82,6 +92,8 @@ write_summary() {
   "check_rc": $check_rc,
   "xfstests_dir": "$safe_dir",
   "regression_guard_json": "$safe_guard",
+  "allowlist_json": "$safe_allowlist",
+  "baseline_json": "$safe_baseline",
   "selected_file": "$safe_selected",
   "results_json": "$safe_results",
   "junit_xml": "$safe_junit",
@@ -269,6 +281,24 @@ verify_tests_exist() {
 generate_results_from_check_log() {
     local check_rc="$1"
     LAST_CHECK_RC="$check_rc"
+
+    if harness_supports_xfstests_report; then
+        local -a harness_args=(
+            xfstests-report
+            --selected "$SELECTED_FILE"
+            --check-log "$CHECK_LOG"
+            --results-json "$RESULTS_JSON"
+            --junit-xml "$JUNIT_FILE"
+            --check-rc "$check_rc"
+            --dry-run "$XFSTESTS_DRY_RUN"
+            --allowlist-json "$XFSTESTS_ALLOWLIST_JSON"
+        )
+        if [[ -n "$XFSTESTS_BASELINE_JSON" ]]; then
+            harness_args+=(--baseline-json "$XFSTESTS_BASELINE_JSON")
+        fi
+        "$FFS_HARNESS_BIN" "${harness_args[@]}"
+        return 0
+    fi
 
     if ! command -v python3 >/dev/null 2>&1; then
         e2e_log "python3 not found; writing fallback not_run result artifacts"
@@ -464,7 +494,17 @@ fi
 
 if [[ "$EFFECTIVE_MODE" == "plan" ]]; then
     e2e_step "Plan mode"
-    write_uniform_results "planned" "subset materialized; execution not requested"
+    if harness_supports_xfstests_report; then
+        "$FFS_HARNESS_BIN" xfstests-report \
+            --selected "$SELECTED_FILE" \
+            --results-json "$RESULTS_JSON" \
+            --junit-xml "$JUNIT_FILE" \
+            --allowlist-json "$XFSTESTS_ALLOWLIST_JSON" \
+            --uniform-status planned \
+            --uniform-note "subset materialized; execution not requested"
+    else
+        write_uniform_results "planned" "subset materialized; execution not requested"
+    fi
     write_summary "planned" "$EFFECTIVE_MODE" "subset materialized; execution not requested" "null"
     e2e_log "Plan summary: $SUMMARY_JSON"
     e2e_pass

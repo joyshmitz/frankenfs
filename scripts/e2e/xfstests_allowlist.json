@@ -1,0 +1,42 @@
+[
+  {
+    "test_id": "generic/030",
+    "failure_reason": "Requires xfs_io mremap command; FUSE mmap consistency and mremap ioctl not fully supported",
+    "status": "known_fail"
+  },
+  {
+    "test_id": "generic/068",
+    "failure_reason": "Requires xfs_freeze (FIFREEZE ioctl); FUSE filesystems lack kernel-level freeze/thaw support",
+    "status": "wont_fix"
+  },
+  {
+    "test_id": "generic/112",
+    "failure_reason": "Requires AIO + preallocation (unwritten extents via fallocate); FUSE AIO semantics and preallocation may be unsupported",
+    "status": "investigating"
+  },
+  {
+    "test_id": "generic/231",
+    "failure_reason": "Requires Linux disk quota subsystem; FUSE filesystems do not integrate with kernel quota infrastructure",
+    "status": "wont_fix"
+  },
+  {
+    "test_id": "ext4/001",
+    "failure_reason": "Requires fallocate FALLOC_FL_ZERO_RANGE + FIEMAP ioctl; FUSE does not forward FIEMAP and zero_range may not be exposed",
+    "status": "known_fail"
+  },
+  {
+    "test_id": "ext4/003",
+    "failure_reason": "Requires scratch device with ext4 bigalloc mkfs feature; test infrastructure setup for FUSE-backed ext4 not available",
+    "status": "known_fail"
+  },
+  {
+    "test_id": "ext4/005",
+    "failure_reason": "Requires chattr -e for extent-to-non-extent conversion; ext4 inode flag manipulation through FUSE is not supported",
+    "status": "known_fail"
+  },
+  {
+    "test_id": "ext4/013",
+    "failure_reason": "Requires debugfs for direct inode corruption on raw device; incompatible with FUSE-mounted filesystem testing",
+    "status": "wont_fix"
+  }
+]

@@ -6,10 +6,28 @@ use ffs_harness::{
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region, validate_btrfs_fixture,
     validate_ext4_fixture,
+    xfstests::{
+        XfstestsStatus, apply_allowlist, compare_against_baseline, load_allowlist, load_baseline,
+        load_selected_tests, parse_check_output, summarize_uniform, write_junit_xml,
+    },
 };
 use std::env;
 use std::fs;
 use std::path::Path;
+
+#[derive(Debug, Default)]
+struct XfstestsReportConfig {
+    selected: Option<String>,
+    check_log: Option<String>,
+    results_json: Option<String>,
+    junit_xml: Option<String>,
+    allowlist_json: Option<String>,
+    baseline_json: Option<String>,
+    uniform_status: Option<XfstestsStatus>,
+    uniform_note: Option<String>,
+    check_rc: i32,
+    dry_run: bool,
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -47,6 +65,7 @@ fn run() -> Result<()> {
         Some("generate-fixture") => generate_fixture(&args[1..]),
         Some("run-crash-replay") => run_crash_replay(&args[1..]),
         Some("run-fsx-stress") => run_fsx_stress_cmd(&args[1..]),
+        Some("xfstests-report") => xfstests_report(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
             print_usage();
             Ok(())
@@ -56,6 +75,190 @@ fn run() -> Result<()> {
             bail!("unknown command: {other}")
         }
     }
+}
+
+fn xfstests_report(args: &[String]) -> Result<()> {
+    let config = parse_xfstests_report_config(args)?;
+    let selected_path = Path::new(
+        config
+            .selected
+            .as_deref()
+            .context("--selected is required")?,
+    );
+    let results_path = Path::new(
+        config
+            .results_json
+            .as_deref()
+            .context("--results-json is required")?,
+    );
+    let junit_path = Path::new(
+        config
+            .junit_xml
+            .as_deref()
+            .context("--junit-xml is required")?,
+    );
+    let selected_tests = load_selected_tests(selected_path)?;
+    let mut run = build_xfstests_run(&config, &selected_tests)?;
+    apply_xfstests_metadata(&config, &mut run)?;
+
+    fs::write(results_path, serde_json::to_string_pretty(&run)? + "\n")
+        .with_context(|| format!("failed to write {}", results_path.display()))?;
+    write_junit_xml(junit_path, &run)?;
+    println!("{}", serde_json::to_string_pretty(&run)?);
+    Ok(())
+}
+
+fn parse_xfstests_report_config(args: &[String]) -> Result<XfstestsReportConfig> {
+    let mut config = XfstestsReportConfig::default();
+    let mut index = 0_usize;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--selected" => {
+                config.selected = Some(require_value(args, index, "--selected")?.clone());
+                index += 2;
+            }
+            "--check-log" => {
+                config.check_log = Some(require_value(args, index, "--check-log")?.clone());
+                index += 2;
+            }
+            "--results-json" => {
+                config.results_json = Some(require_value(args, index, "--results-json")?.clone());
+                index += 2;
+            }
+            "--junit-xml" => {
+                config.junit_xml = Some(require_value(args, index, "--junit-xml")?.clone());
+                index += 2;
+            }
+            "--allowlist-json" => {
+                config.allowlist_json =
+                    Some(require_value(args, index, "--allowlist-json")?.clone());
+                index += 2;
+            }
+            "--baseline-json" => {
+                config.baseline_json = Some(require_value(args, index, "--baseline-json")?.clone());
+                index += 2;
+            }
+            "--check-rc" => {
+                config.check_rc = require_value(args, index, "--check-rc")?
+                    .parse()
+                    .context("invalid --check-rc value")?;
+                index += 2;
+            }
+            "--dry-run" => {
+                config.dry_run = require_value(args, index, "--dry-run")?
+                    .parse::<u8>()
+                    .context("invalid --dry-run value")?
+                    != 0;
+                index += 2;
+            }
+            "--uniform-status" => {
+                config.uniform_status = Some(parse_xfstests_status(require_value(
+                    args,
+                    index,
+                    "--uniform-status",
+                )?)?);
+                index += 2;
+            }
+            "--uniform-note" => {
+                config.uniform_note = Some(require_value(args, index, "--uniform-note")?.clone());
+                index += 2;
+            }
+            other => bail!("unknown xfstests-report option: {other}"),
+        }
+    }
+
+    Ok(config)
+}
+
+fn require_value<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a String> {
+    args.get(index + 1)
+        .with_context(|| format!("{flag} requires a value"))
+}
+
+fn parse_xfstests_status(raw: &str) -> Result<XfstestsStatus> {
+    match raw {
+        "passed" => Ok(XfstestsStatus::Passed),
+        "failed" => Ok(XfstestsStatus::Failed),
+        "skipped" => Ok(XfstestsStatus::Skipped),
+        "not_run" => Ok(XfstestsStatus::NotRun),
+        "planned" => Ok(XfstestsStatus::Planned),
+        other => bail!("invalid --uniform-status value: {other}"),
+    }
+}
+
+fn build_xfstests_run(
+    config: &XfstestsReportConfig,
+    selected_tests: &[String],
+) -> Result<ffs_harness::xfstests::XfstestsRun> {
+    if let Some(status) = config.uniform_status {
+        return Ok(summarize_uniform(
+            selected_tests,
+            status,
+            config.uniform_note.as_deref(),
+        ));
+    }
+
+    let check_log_path = Path::new(
+        config
+            .check_log
+            .as_deref()
+            .context("--check-log is required")?,
+    );
+    let check_log_text = fs::read_to_string(check_log_path)
+        .with_context(|| format!("failed to read {}", check_log_path.display()))?;
+    Ok(parse_check_output(
+        selected_tests,
+        &check_log_text,
+        config.check_rc,
+        config.dry_run,
+    ))
+}
+
+fn apply_xfstests_metadata(
+    config: &XfstestsReportConfig,
+    run: &mut ffs_harness::xfstests::XfstestsRun,
+) -> Result<()> {
+    apply_allowlist_if_present(run, config.allowlist_json.as_deref())?;
+    emit_baseline_comparison_if_present(run, config.baseline_json.as_deref())
+}
+
+fn apply_allowlist_if_present(
+    run: &mut ffs_harness::xfstests::XfstestsRun,
+    allowlist_json: Option<&str>,
+) -> Result<()> {
+    let Some(path) = allowlist_json else {
+        return Ok(());
+    };
+    let allowlist_path = Path::new(path);
+    if allowlist_path.exists() {
+        let allowlist = load_allowlist(allowlist_path)?;
+        apply_allowlist(run, &allowlist);
+    }
+    Ok(())
+}
+
+fn emit_baseline_comparison_if_present(
+    run: &mut ffs_harness::xfstests::XfstestsRun,
+    baseline_json: Option<&str>,
+) -> Result<()> {
+    let Some(path) = baseline_json else {
+        return Ok(());
+    };
+    let baseline_path = Path::new(path);
+    if !baseline_path.exists() {
+        return Ok(());
+    }
+
+    let baseline = load_baseline(baseline_path)?;
+    let comparison = compare_against_baseline(run, &baseline);
+    if !comparison.regressions.is_empty()
+        || !comparison.improvements.is_empty()
+        || !comparison.unchanged.is_empty()
+    {
+        eprintln!("{}", serde_json::to_string_pretty(&comparison)?);
+    }
+    Ok(())
 }
 
 fn generate_fixture(args: &[String]) -> Result<()> {
@@ -225,6 +428,9 @@ fn print_usage() {
     );
     println!(
         "  ffs-harness run-fsx-stress [--ops N] [--seed S] [--max-file-bytes N] [--corrupt-every N] [--verify-every N] [--out DIR]"
+    );
+    println!(
+        "  ffs-harness xfstests-report --selected FILE --results-json FILE --junit-xml FILE [--check-log FILE --check-rc N --dry-run 0|1] [--allowlist-json FILE] [--baseline-json FILE] [--uniform-status STATUS --uniform-note NOTE]"
     );
     println!();
     println!("FIXTURE GENERATION:");

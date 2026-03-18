@@ -7,11 +7,10 @@
 //! - `mkfs.ext4` and `debugfs` on `$PATH`
 //! - `fusermount3` permission to mount (may fail in containers)
 //!
-//! A small smoke subset (read-only + lightweight rw ext4/btrfs) runs by
-//! default and returns early when prerequisites are unavailable.
-//! Heavier write-path and btrfs coverage remains gated with
-//! `#[ignore = "requires /dev/fuse"]` and can be run explicitly via
-//! `cargo test -- --ignored` or `cargo test -- --include-ignored`.
+//! All tests run by default and return early (soft-skip) when prerequisites
+//! are unavailable. This makes the suite CI-compatible: tests pass
+//! everywhere, and exercise FUSE when the environment supports it.
+//! Only `fuse_setattr_chown` remains `#[ignore]` as it requires root.
 
 use asupersync::Cx;
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
@@ -406,7 +405,6 @@ fn fuse_create_and_read_file() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_write_overwrite_and_append() {
     with_rw_mount(|mnt| {
         let path = mnt.join("overwrite.txt");
@@ -437,7 +435,6 @@ fn fuse_write_overwrite_and_append() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_write_with_offset_extends_file_and_zero_fills_gap() {
     with_rw_mount(|mnt| {
         let path = mnt.join("offset_write.bin");
@@ -479,7 +476,6 @@ fn fuse_mkdir_and_nested_create() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_mkdir_existing_directory_fails() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("already_there");
@@ -503,7 +499,6 @@ fn fuse_unlink_removes_file() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_rmdir_missing_directory_fails() {
     with_rw_mount(|mnt| {
         let missing = mnt.join("no_such_dir");
@@ -513,7 +508,6 @@ fn fuse_rmdir_missing_directory_fails() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_rmdir_removes_empty_directory() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("empty_dir");
@@ -526,7 +520,6 @@ fn fuse_rmdir_removes_empty_directory() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_rmdir_non_empty_fails() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("non_empty_dir");
@@ -543,7 +536,6 @@ fn fuse_rmdir_non_empty_fails() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_rename_over_existing_destination_replaces_target() {
     with_rw_mount(|mnt| {
         let src = mnt.join("src.txt");
@@ -561,7 +553,6 @@ fn fuse_rename_over_existing_destination_replaces_target() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_rename_file() {
     with_rw_mount(|mnt| {
         let old = mnt.join("hello.txt");
@@ -578,7 +569,6 @@ fn fuse_rename_file() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_rename_across_directories() {
     with_rw_mount(|mnt| {
         let src = mnt.join("hello.txt");
@@ -594,7 +584,6 @@ fn fuse_rename_across_directories() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_hard_link() {
     with_rw_mount(|mnt| {
         let original = mnt.join("hello.txt");
@@ -617,7 +606,6 @@ fn fuse_hard_link() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_symlink_create_and_follow() {
     with_rw_mount(|mnt| {
         let target = mnt.join("hello.txt");
@@ -641,7 +629,6 @@ fn fuse_symlink_create_and_follow() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_setattr_truncate() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -665,7 +652,6 @@ fn fuse_setattr_truncate() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_setattr_chmod() {
     with_rw_mount(|mnt| {
         // hello.txt exists from create_test_image.
@@ -754,7 +740,6 @@ fn fuse_setattr_chown() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_setattr_utimes() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -809,7 +794,6 @@ fn fuse_setattr_utimes() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_fallocate_preallocate() {
     with_rw_mount(|mnt| {
         let path = mnt.join("preallocated.bin");
@@ -849,7 +833,6 @@ fn fuse_fallocate_preallocate() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_fallocate_keep_size() {
     with_rw_mount(|mnt| {
         let path = mnt.join("keepsize.bin");
@@ -889,7 +872,6 @@ fn fuse_fallocate_keep_size() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_statfs_returns_valid_stats() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -1002,7 +984,6 @@ fn statfs_snapshot(path: &Path) -> StatFsSnapshot {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_write_large_file() {
     with_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
@@ -1017,7 +998,6 @@ fn fuse_write_large_file() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_spec_i3_write_and_persist_after_remount() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -1065,7 +1045,6 @@ fn fuse_spec_i3_write_and_persist_after_remount() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_spec_i5_delete_reclaims_free_counts() {
     with_rw_mount_sized(64 * 1024 * 1024, |mnt| {
         let before = statfs_snapshot(mnt);
@@ -1133,7 +1112,6 @@ fn fuse_spec_i5_delete_reclaims_free_counts() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_spec_i6_concurrent_writes_no_corruption() {
     with_rw_mount(|mnt| {
         const THREADS: usize = 4;
@@ -1182,7 +1160,6 @@ fn fuse_spec_i6_concurrent_writes_no_corruption() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_spec_i7_reader_sees_pre_modification_version_during_write() {
     with_rw_mount(|mnt| {
         let path = mnt.join("i7_snapshot.txt");
@@ -1218,7 +1195,6 @@ fn fuse_spec_i7_reader_sees_pre_modification_version_during_write() {
 // ── Large directory and ENOSPC E2E tests ─────────────────────────────────────
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_readdir_large_directory() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("bigdir");
@@ -1265,7 +1241,6 @@ fn fuse_readdir_large_directory() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_write_enospc_on_full_filesystem() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -1335,7 +1310,6 @@ fn fuse_write_enospc_on_full_filesystem() {
 // ── fsync/flush E2E tests ────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_fsync_persists_written_data() {
     with_rw_mount(|mnt| {
         let path = mnt.join("synced.txt");
@@ -1362,7 +1336,6 @@ fn fuse_fsync_persists_written_data() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_sync_data_without_metadata() {
     with_rw_mount(|mnt| {
         let path = mnt.join("datasync.txt");
@@ -1388,7 +1361,6 @@ fn fuse_sync_data_without_metadata() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_flush_on_close_preserves_data() {
     with_rw_mount(|mnt| {
         let path = mnt.join("flushed.txt");
@@ -1413,7 +1385,6 @@ fn fuse_flush_on_close_preserves_data() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_fsync_after_multiple_writes() {
     with_rw_mount(|mnt| {
         let path = mnt.join("multi_write_sync.txt");
@@ -1520,7 +1491,6 @@ fn py_removexattr(path: &Path, name: &str) -> bool {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_xattr_set_get_list_remove() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -1561,7 +1531,6 @@ fn fuse_xattr_set_get_list_remove() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_xattr_multiple_attributes() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -1588,7 +1557,6 @@ fn fuse_xattr_multiple_attributes() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_xattr_overwrite_value() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -1607,7 +1575,6 @@ fn fuse_xattr_overwrite_value() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_xattr_on_directory() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("testdir");
@@ -1627,7 +1594,6 @@ fn fuse_xattr_on_directory() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_xattr_get_nonexistent_returns_error() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -1641,7 +1607,6 @@ fn fuse_xattr_get_nonexistent_returns_error() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn fuse_xattr_remove_nonexistent_fails() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -1762,7 +1727,6 @@ fn btrfs_fuse_create_and_read_file() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_mkdir_and_nested_file() {
     with_btrfs_rw_mount(|mnt| {
         let dir = mnt.join("subdir");
@@ -1777,7 +1741,6 @@ fn btrfs_fuse_mkdir_and_nested_file() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_unlink_and_rmdir() {
     with_btrfs_rw_mount(|mnt| {
         // Create and remove a file.
@@ -1797,7 +1760,6 @@ fn btrfs_fuse_unlink_and_rmdir() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_rename() {
     with_btrfs_rw_mount(|mnt| {
         let old = mnt.join("original.txt");
@@ -1816,7 +1778,6 @@ fn btrfs_fuse_rename() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_hard_link() {
     with_btrfs_rw_mount(|mnt| {
         let original = mnt.join("linkme.txt");
@@ -1841,7 +1802,6 @@ fn btrfs_fuse_hard_link() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_symlink_create_and_follow() {
     with_btrfs_rw_mount(|mnt| {
         let target = mnt.join("sym_target.txt");
@@ -1865,7 +1825,6 @@ fn btrfs_fuse_symlink_create_and_follow() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_setattr_truncate() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("trunc.txt");
@@ -1891,7 +1850,6 @@ fn btrfs_fuse_setattr_truncate() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_setattr_chmod() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("chmod_test.txt");
@@ -1925,7 +1883,6 @@ fn btrfs_fuse_setattr_chmod() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_setattr_utimes() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("utimes_test.txt");
@@ -1961,7 +1918,6 @@ fn btrfs_fuse_setattr_utimes() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_statfs() {
     if !btrfs_fuse_available() {
         eprintln!("btrfs FUSE prerequisites not met, skipping");
@@ -2032,7 +1988,6 @@ fn btrfs_fuse_statfs() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_xattr_set_get_list_remove() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("xattr_test.txt");
@@ -2067,7 +2022,6 @@ fn btrfs_fuse_xattr_set_get_list_remove() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_xattr_multiple_attributes() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("multi_xattr.txt");
@@ -2095,7 +2049,6 @@ fn btrfs_fuse_xattr_multiple_attributes() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_xattr_on_directory() {
     with_btrfs_rw_mount(|mnt| {
         let dir = mnt.join("xattr_dir");
@@ -2116,7 +2069,6 @@ fn btrfs_fuse_xattr_on_directory() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_write_large_file() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
@@ -2131,7 +2083,6 @@ fn btrfs_fuse_write_large_file() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_fsync_persists_written_data() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("synced.txt");
@@ -2158,7 +2109,6 @@ fn btrfs_fuse_fsync_persists_written_data() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_rename_across_directories() {
     with_btrfs_rw_mount(|mnt| {
         let dir_a = mnt.join("dir_a");
@@ -2181,7 +2131,6 @@ fn btrfs_fuse_rename_across_directories() {
 }
 
 #[test]
-#[ignore = "requires /dev/fuse"]
 fn btrfs_fuse_rename_overwrite() {
     with_btrfs_rw_mount(|mnt| {
         let src = mnt.join("src.txt");
@@ -2194,6 +2143,156 @@ fn btrfs_fuse_rename_overwrite() {
         assert_eq!(
             fs::read_to_string(&dst).expect("read overwritten"),
             "new content"
+        );
+    });
+}
+
+// ── New CI-compatible E2E scenarios ────────────────────────────────
+
+#[test]
+fn fuse_deep_directory_tree() {
+    with_rw_mount(|mnt| {
+        // Create a 5-level deep directory tree and verify traversal.
+        let mut path = mnt.to_path_buf();
+        for i in 0..5 {
+            path = path.join(format!("level_{i}"));
+            fs::create_dir(&path).unwrap_or_else(|e| panic!("mkdir level_{i}: {e}"));
+        }
+
+        // Write a file at the deepest level.
+        let deep_file = path.join("deep.txt");
+        fs::write(&deep_file, b"deep content").expect("write deep file");
+        assert_eq!(
+            fs::read_to_string(&deep_file).expect("read deep file"),
+            "deep content"
+        );
+
+        // Verify the full path exists via metadata.
+        let meta = fs::metadata(&deep_file).expect("stat deep file");
+        assert!(meta.is_file());
+        assert_eq!(meta.len(), 12);
+    });
+}
+
+#[test]
+fn fuse_many_files_in_directory() {
+    with_rw_mount(|mnt| {
+        // Create 100 files in a single directory and verify readdir returns all.
+        let dir = mnt.join("many_files");
+        fs::create_dir(&dir).expect("mkdir many_files");
+
+        for i in 0..100 {
+            let path = dir.join(format!("file_{i:03}.txt"));
+            fs::write(&path, format!("content_{i}")).expect("write file");
+        }
+
+        let entries: Vec<String> = fs::read_dir(&dir)
+            .expect("readdir many_files")
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(entries.len(), 100, "expected 100 entries in readdir");
+
+        // Verify a random file.
+        let content = fs::read_to_string(dir.join("file_042.txt")).expect("read file_042");
+        assert_eq!(content, "content_42");
+    });
+}
+
+#[test]
+fn fuse_empty_file_operations() {
+    with_rw_mount(|mnt| {
+        // Create an empty file and verify it reads back as empty.
+        let path = mnt.join("empty.txt");
+        fs::write(&path, b"").expect("create empty file");
+
+        let content = fs::read(&path).expect("read empty file");
+        assert!(content.is_empty());
+
+        let meta = fs::metadata(&path).expect("stat empty file");
+        assert_eq!(meta.len(), 0);
+    });
+}
+
+#[test]
+fn fuse_rename_chain() {
+    with_rw_mount(|mnt| {
+        // Rename a file through a chain of names and verify content persists.
+        let file_a = mnt.join("chain_a.txt");
+        fs::write(&file_a, b"chain content").expect("write chain_a");
+
+        let file_b = mnt.join("chain_b.txt");
+        fs::rename(&file_a, &file_b).expect("rename a -> b");
+        assert!(!file_a.exists());
+
+        let file_c = mnt.join("chain_c.txt");
+        fs::rename(&file_b, &file_c).expect("rename b -> c");
+        assert!(!file_b.exists());
+
+        assert_eq!(
+            fs::read_to_string(&file_c).expect("read chain_c"),
+            "chain content"
+        );
+    });
+}
+
+#[test]
+fn fuse_concurrent_file_creation() {
+    with_rw_mount(|mnt| {
+        // Create files concurrently from multiple threads.
+        let mnt_path = mnt.to_path_buf();
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let mp = mnt_path.clone();
+                thread::spawn(move || {
+                    let path = mp.join(format!("concurrent_{i}.txt"));
+                    fs::write(&path, format!("thread_{i}")).expect("concurrent write");
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread join");
+        }
+
+        // Verify all files exist with correct content.
+        for i in 0..10 {
+            let path = mnt_path.join(format!("concurrent_{i}.txt"));
+            let content = fs::read_to_string(&path).expect("read concurrent file");
+            assert_eq!(content, format!("thread_{i}"));
+        }
+    });
+}
+
+#[test]
+fn fuse_unlink_nonexistent_returns_error() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("nonexistent.txt");
+        let result = fs::remove_file(&path);
+        assert!(
+            result.is_err(),
+            "removing nonexistent file should return error"
+        );
+    });
+}
+
+#[test]
+fn fuse_overwrite_preserves_inode() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("inode_test.txt");
+        fs::write(&path, b"first").expect("write first");
+        let ino_before = fs::metadata(&path).expect("stat before").ino();
+
+        // Overwrite with new content — inode should be preserved (same file, truncate+write).
+        fs::write(&path, b"second").expect("write second");
+        let ino_after = fs::metadata(&path).expect("stat after").ino();
+
+        assert_eq!(
+            ino_before, ino_after,
+            "inode should be preserved on overwrite"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("read after overwrite"),
+            "second"
         );
     });
 }

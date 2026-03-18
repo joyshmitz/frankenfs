@@ -16,6 +16,7 @@ pub mod perf_regression;
 pub mod perf_triage;
 pub mod tabletop_drill;
 pub mod verification_runner;
+pub mod xfstests;
 
 use anyhow::{Context, Result, bail};
 use ffs_ondisk::{

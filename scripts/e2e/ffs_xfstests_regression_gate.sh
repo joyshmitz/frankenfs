@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# ffs_xfstests_regression_gate.sh - CI gate that detects xfstests regressions.
+#
+# Compares current xfstests results against baseline and:
+# - Exits 0 if no regressions (previously-passing tests still pass)
+# - Exits 1 if any regression detected (pass→fail or pass→skip)
+# - Reports newly-passing tests as positive progress
+#
+# Modes:
+# - If XFSTESTS_RESULTS_JSON is set, uses existing results (post-hoc analysis)
+# - Otherwise, runs ffs_xfstests_e2e.sh first to generate results
+#
+# Environment:
+#   XFSTESTS_RESULTS_JSON   Path to existing results JSON (optional)
+#   XFSTESTS_BASELINE_JSON  Path to baseline (default: scripts/e2e/xfstests_baseline.json)
+#   XFSTESTS_ALLOWLIST_JSON Path to allowlist (default: scripts/e2e/xfstests_allowlist.json)
+#   XFSTESTS_STRICT         If 1, any failure (not just regression) is an error
+
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+REPO_ROOT="$(pwd)"
+export REPO_ROOT
+
+source "$REPO_ROOT/scripts/e2e/lib.sh"
+
+e2e_init "ffs_xfstests_regression_gate"
+e2e_print_env
+
+XFSTESTS_RESULTS_JSON="${XFSTESTS_RESULTS_JSON:-}"
+XFSTESTS_BASELINE_JSON="${XFSTESTS_BASELINE_JSON:-$REPO_ROOT/scripts/e2e/xfstests_baseline.json}"
+XFSTESTS_ALLOWLIST_JSON="${XFSTESTS_ALLOWLIST_JSON:-$REPO_ROOT/scripts/e2e/xfstests_allowlist.json}"
+XFSTESTS_STRICT="${XFSTESTS_STRICT:-0}"
+FFS_HARNESS_BIN="${FFS_HARNESS_BIN:-$REPO_ROOT/target/debug/ffs-harness}"
+
+ARTIFACT_DIR="$E2E_LOG_DIR/regression_gate"
+GATE_REPORT="$ARTIFACT_DIR/gate_report.json"
+mkdir -p "$ARTIFACT_DIR"
+
+# ── Step 1: Obtain results ────────────────────────────────────────
+
+if [[ -n "$XFSTESTS_RESULTS_JSON" ]] && [[ -f "$XFSTESTS_RESULTS_JSON" ]]; then
+    e2e_step "Using existing xfstests results"
+    e2e_log "Results: $XFSTESTS_RESULTS_JSON"
+    RESULTS_JSON="$XFSTESTS_RESULTS_JSON"
+else
+    e2e_step "Running xfstests to generate results"
+    # Run xfstests E2E, capturing its artifacts.
+    XFSTESTS_ALLOWLIST_JSON="$XFSTESTS_ALLOWLIST_JSON" \
+    XFSTESTS_BASELINE_JSON="$XFSTESTS_BASELINE_JSON" \
+        bash "$REPO_ROOT/scripts/e2e/ffs_xfstests_e2e.sh" || true
+
+    # Find the most recent results file.
+    RESULTS_JSON=""
+    for candidate in "$REPO_ROOT"/artifacts/e2e/*/xfstests/results.json; do
+        if [[ -f "$candidate" ]]; then
+            RESULTS_JSON="$candidate"
+        fi
+    done
+
+    if [[ -z "$RESULTS_JSON" ]]; then
+        e2e_log "No xfstests results found; gate passes vacuously"
+        cat >"$GATE_REPORT" <<EOF
+{
+  "gate": "xfstests_regression",
+  "verdict": "pass",
+  "reason": "no results to compare",
+  "regressions": [],
+  "new_passes": [],
+  "total_compared": 0
+}
+EOF
+        e2e_pass
+        exit 0
+    fi
+    e2e_log "Found results: $RESULTS_JSON"
+fi
+
+# ── Step 2: Compare against baseline ──────────────────────────────
+
+e2e_step "Comparing results against baseline"
+
+if [[ ! -f "$XFSTESTS_BASELINE_JSON" ]]; then
+    e2e_log "No baseline found at $XFSTESTS_BASELINE_JSON; gate passes vacuously"
+    cat >"$GATE_REPORT" <<EOF
+{
+  "gate": "xfstests_regression",
+  "verdict": "pass",
+  "reason": "no baseline to compare against",
+  "regressions": [],
+  "new_passes": [],
+  "total_compared": 0
+}
+EOF
+    e2e_pass
+    exit 0
+fi
+
+# Use python3 for comparison (portable, no Rust binary dependency for gate)
+if ! command -v python3 >/dev/null 2>&1; then
+    e2e_log "python3 required for regression gate"
+    e2e_fail "python3 not available"
+fi
+
+GATE_RC=0
+python3 - "$RESULTS_JSON" "$XFSTESTS_BASELINE_JSON" "$XFSTESTS_ALLOWLIST_JSON" "$GATE_REPORT" "$XFSTESTS_STRICT" <<'PY' || GATE_RC=$?
+import json
+import pathlib
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+baseline_path = pathlib.Path(sys.argv[2])
+allowlist_path = pathlib.Path(sys.argv[3])
+report_path = pathlib.Path(sys.argv[4])
+strict = int(sys.argv[5])
+
+results = json.loads(results_path.read_text(encoding="utf-8"))
+baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+
+# Load allowlist
+allowlisted_ids = set()
+if allowlist_path.exists():
+    allowlist = json.loads(allowlist_path.read_text(encoding="utf-8"))
+    for entry in allowlist:
+        allowlisted_ids.add(entry.get("test_id", ""))
+
+# Build status maps
+current_status = {}
+for test in results.get("tests", []):
+    current_status[test["id"]] = test["status"]
+
+baseline_status = {}
+for entry in baseline:
+    baseline_status[entry["test_id"]] = entry["expected_status"]
+
+regressions = []
+new_passes = []
+unchanged = []
+total_compared = 0
+
+for test_id, expected in baseline_status.items():
+    actual = current_status.get(test_id)
+    if actual is None:
+        continue
+    total_compared += 1
+
+    if expected == actual:
+        unchanged.append(test_id)
+        continue
+
+    # Regression: was passing, now failing or skipped
+    if expected == "passed" and actual in ("failed", "skipped", "not_run"):
+        is_allowlisted = test_id in allowlisted_ids
+        regressions.append({
+            "test_id": test_id,
+            "baseline": expected,
+            "current": actual,
+            "allowlisted": is_allowlisted,
+        })
+    # Improvement: was failing/skipped, now passing
+    elif expected in ("failed", "skipped", "not_run") and actual == "passed":
+        new_passes.append({
+            "test_id": test_id,
+            "baseline": expected,
+            "current": actual,
+        })
+
+# Determine verdict
+unexpected_regressions = [r for r in regressions if not r["allowlisted"]]
+if unexpected_regressions:
+    verdict = "fail"
+elif strict and regressions:
+    verdict = "fail"
+else:
+    verdict = "pass"
+
+report = {
+    "gate": "xfstests_regression",
+    "verdict": verdict,
+    "total_compared": total_compared,
+    "unchanged_count": len(unchanged),
+    "regression_count": len(regressions),
+    "unexpected_regression_count": len(unexpected_regressions),
+    "new_pass_count": len(new_passes),
+    "regressions": regressions,
+    "new_passes": new_passes,
+}
+
+report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+# Print summary to stderr for human consumption
+print(f"\n{'='*50}", file=sys.stderr)
+print(f"XFSTESTS REGRESSION GATE: {verdict.upper()}", file=sys.stderr)
+print(f"{'='*50}", file=sys.stderr)
+print(f"Compared: {total_compared} tests", file=sys.stderr)
+print(f"Unchanged: {len(unchanged)}", file=sys.stderr)
+print(f"New passes: {len(new_passes)}", file=sys.stderr)
+print(f"Regressions: {len(regressions)} ({len(unexpected_regressions)} unexpected)", file=sys.stderr)
+
+if new_passes:
+    print(f"\n  New passes (update baseline!):", file=sys.stderr)
+    for p in new_passes:
+        print(f"    {p['test_id']}: {p['baseline']} -> {p['current']}", file=sys.stderr)
+
+if regressions:
+    print(f"\n  Regressions:", file=sys.stderr)
+    for r in regressions:
+        tag = " [allowlisted]" if r["allowlisted"] else " ** BLOCKING **"
+        print(f"    {r['test_id']}: {r['baseline']} -> {r['current']}{tag}", file=sys.stderr)
+
+print(f"\nReport: {report_path}", file=sys.stderr)
+sys.exit(0 if verdict == "pass" else 1)
+PY
+
+# ── Step 3: Report result ─────────────────────────────────────────
+
+e2e_step "Gate result"
+e2e_log "Gate report: $GATE_REPORT"
+
+if [[ -f "$GATE_REPORT" ]]; then
+    e2e_log "Report contents:"
+    cat "$GATE_REPORT" >&2 || true
+fi
+
+if [[ $GATE_RC -ne 0 ]]; then
+    e2e_fail "xfstests regression gate FAILED — see $GATE_REPORT"
+fi
+
+e2e_pass
+exit 0
