@@ -324,11 +324,14 @@ selected = [line.strip() for line in selected_file.read_text(encoding="utf-8").s
 status = {tid: "not_run" for tid in selected}
 rank = {"not_run": 1, "planned": 1, "skipped": 2, "passed": 3, "failed": 4}
 
+def line_mentions_test_id(line: str, test_id: str) -> bool:
+    return any(part == test_id for part in line.split())
+
 if check_log.exists():
     for line in check_log.read_text(encoding="utf-8", errors="replace").splitlines():
         low = line.lower()
         for tid in selected:
-            if tid not in line:
+            if not line_mentions_test_id(line, tid):
                 continue
             candidate = None
             if "not run" in low or "notrun" in low or "skipped" in low:

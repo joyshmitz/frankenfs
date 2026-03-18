@@ -135,7 +135,7 @@ pub fn parse_check_output(
     for line in check_log.lines() {
         let lower = line.to_ascii_lowercase();
         for case in &mut cases {
-            if !line.contains(case.id.as_str()) {
+            if !line_mentions_test_id(line, case.id.as_str()) {
                 continue;
             }
 
@@ -360,6 +360,10 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
         .any(|part| part == needle)
 }
 
+fn line_mentions_test_id(line: &str, test_id: &str) -> bool {
+    line.split_whitespace().any(|part| part == test_id)
+}
+
 fn parse_duration_secs(line: &str) -> Option<f64> {
     for token in line.split_whitespace() {
         if let Some(raw) = token.strip_suffix('s') {
@@ -415,6 +419,19 @@ generic/030  skipped: needs root\n";
         let run = parse_check_output(&selected, "", 0, false);
         assert_eq!(run.tests[0].status, XfstestsStatus::Passed);
         assert_eq!(run.passed, 1);
+    }
+
+    #[test]
+    fn parse_check_output_requires_exact_test_id_match() {
+        let selected = vec!["generic/001".to_owned(), "generic/0010".to_owned()];
+        let log = "\
+generic/0010  1s ... failed due to mismatch\n\
+generic/001  2s ... pass\n";
+
+        let run = parse_check_output(&selected, log, 1, false);
+
+        assert_eq!(run.tests[0].status, XfstestsStatus::Passed);
+        assert_eq!(run.tests[1].status, XfstestsStatus::Failed);
     }
 
     #[test]
