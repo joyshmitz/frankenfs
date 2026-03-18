@@ -25,7 +25,7 @@
 
 ## TL;DR
 
-**The problem:** Linux filesystems are trapped in kernel space. ext4 is 30 years old with a global journal lock (JBD2) that serializes all writes. btrfs has better internals but remains kernel-only, hard to test, and impossible to extend from userspace. Both lack automatic corruption recovery -- you run `fsck` after the fact and hope.
+**The problem:** Linux filesystems are trapped in kernel space. ext4 is 30 years old with a global journal lock (JBD2) that serializes all writes. btrfs has better internals but remains kernel-only, hard to test, and impossible to extend from userspace. Both lack automatic corruption recovery; you run `fsck` after the fact and hope.
 
 **The solution:** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19) and re-implements it idiomatically in Rust as a FUSE filesystem. It reads real ext4/btrfs disk images today and can mount both in experimental mode (default read-only, optional `--rw`), while write-path hardening continues.
 
@@ -132,46 +132,23 @@ Parser crates are pure (no I/O). MVCC knows nothing about files. FUSE knows noth
 FrankenFS is a 21-crate Cargo workspace with a strict DAG dependency graph:
 
 ```
-                    +----------+  +----------+
-                    | ffs-types|  | ffs-error |
-                    +----+-----+  +-----+----+
-                         +------+-------+
-                                |
-                         +------v------+
-                         |  ffs-ondisk  |       +----------+
-                         +------+------+       | ffs-mvcc  |
-                                |              |           |
-              +-----------------+----------+   |           |
-              |                 |          |   |           |
-       +------v------+  +------v------+  +v---+----------+
-       |  ffs-block   |  |  ffs-btree  |  |   ffs-xattr   |
-       |  (+ ARC)     |  +------+------+  +---------------+
-       +--+---+---+--+         |
-          |   |   |      +-----v-----+
-          |   |   |      | ffs-alloc  |
-          |   |   |      +-----+-----+
-          |   |   |            |
-   +------v+  |  +v------+  +-v--------+  +--------------+
-   |ffs-   |  |  |ffs-   |  |ffs-extent|  |  ffs-inode   |
-   |journal|  |  |repair |  +----------+  +------+-------+
-   +-------+  |  +-------+                       |
-              |                           +------v------+
-              |                           |   ffs-dir   |
-              |                           +-------------+
-              |
-       +------v------+
-       |   ffs-core   |  (orchestrates everything)
-       +--+-------+--+
-          |       |
-   +------v----+  |  +------------+
-   |  ffs-fuse  |  |  |    ffs     |  (public facade)
-   +------------+  |  +--+---+----+
-                   |     |   |
-           +-------+     |   +--------+
-           |             |            |
-    +------v--+  +------v-----+ +---v--------+
-    | ffs-cli  |  |  ffs-tui   | | ffs-harness |
-    +---------+  +------------+ +------------+
+Layer 1 (Foundation):     [ffs-types]  [ffs-error]
+                                  \      /
+Layer 2 (On-disk):            [ffs-ondisk]              [ffs-mvcc]
+                               /    |    \                   |
+Layer 3 (Storage):   [ffs-block]  [ffs-btree]  [ffs-xattr]--+
+                      (+ ARC)        |
+Layer 4 (Alloc):              [ffs-alloc]
+                                  |
+Layer 5 (Mid):  [ffs-journal] [ffs-repair] [ffs-extent] [ffs-inode]
+                                                            |
+Layer 6 (Dir):                                         [ffs-dir]
+
+Layer 7 (Core):              [ffs-core]  <-- orchestrates everything
+                              /      \
+Layer 8 (Interface): [ffs-fuse]      [ffs]  (public facade)
+                                    / | \
+Layer 9 (Tooling):     [ffs-cli] [ffs-tui] [ffs-harness]
 ```
 
 ### Crate Responsibilities
@@ -189,7 +166,7 @@ FrankenFS is a 21-crate Cargo workspace with a strict DAG dependency graph:
 
 ### Layering Rules
 
-- **Parser crates are pure.** `ffs-ondisk` performs no I/O -- it parses byte slices into typed structures.
+- **Parser crates are pure.** `ffs-ondisk` performs no I/O. It parses byte slices into typed structures.
 - **MVCC is transport-agnostic.** `ffs-mvcc` knows nothing about FUSE, files, or directories.
 - **FUSE delegates to `FsOps`.** `ffs-fuse` maps FUSE protocol to an `ffs-core::FsOps` implementation (currently `OpenFs`) and contains no filesystem logic.
 - **Repair is orthogonal.** `ffs-repair` operates on blocks, not files. It doesn't know about inodes or directories.
@@ -249,13 +226,13 @@ Traditional FUSE filesystems serialize all writes through a single lock. Franken
 
 ### Version Chains and Snapshot Isolation
 
-Every logical block maintains a version chain -- an ordered sequence of `BlockVersion` entries, each tagged with a `CommitSeq` and a writer `TxnId`. Readers acquire a snapshot (`Snapshot { high: CommitSeq }`) and see only versions with `commit_seq <= snapshot.high`. Writers accumulate staged writes in a `Transaction` and attempt to commit atomically.
+Every logical block maintains a version chain: an ordered sequence of `BlockVersion` entries, each tagged with a `CommitSeq` and a writer `TxnId`. Readers acquire a snapshot (`Snapshot { high: CommitSeq }`) and see only versions with `commit_seq <= snapshot.high`. Writers accumulate staged writes in a `Transaction` and attempt to commit atomically.
 
 ### First-Committer-Wins (FCW) with Merge Proofs
 
-When a writer commits and discovers that a block it wrote has been modified since its snapshot, the default response is to abort (First-Committer-Wins). But many concurrent writes don't actually conflict at the byte level -- for example, two writers appending to different regions of the same block, or updating disjoint metadata fields in the same inode block.
+When a writer commits and discovers that a block it wrote has been modified since its snapshot, the default response is to abort (First-Committer-Wins). But many concurrent writes don't actually conflict at the byte level. Two writers might be appending to different regions of the same block, or updating disjoint metadata fields in the same inode block.
 
-FrankenFS introduces **merge proofs** -- structured evidence that two writes can be combined without data loss:
+FrankenFS introduces **merge proofs**, structured evidence that two writes can be combined without data loss:
 
 | Merge Proof | Use case | Merge strategy |
 |-------------|----------|---------------|
@@ -313,7 +290,7 @@ The optimal overhead minimizes expected loss:
 E[loss] = P(unrecoverable | overhead) * data_loss_cost + overhead * storage_cost
 ```
 
-Where `P(unrecoverable | overhead)` is computed via a Beta-Binomial tail probability -- the chance that more than `overhead * source_blocks` blocks are simultaneously corrupted. The autopilot grid-searches the `[min_overhead, max_overhead]` range (default 3%--10%) for the minimum, with a 2x multiplier for metadata-critical groups.
+`P(unrecoverable | overhead)` is the Beta-Binomial tail probability that more than `overhead * source_blocks` blocks are simultaneously corrupted. The autopilot grid-searches the `[min_overhead, max_overhead]` range (default 3%--10%) for the minimum, with a 2x multiplier for metadata-critical groups.
 
 ### Adaptive Refresh Triggers
 
@@ -388,9 +365,9 @@ The crash matrix exercises every combination of crash timing against the epoch s
 
 | # | Crash point | What survives |
 |---|-------------|---------------|
-| 1 | During buffered write (before commit) | Nothing -- staged data lost |
-| 2 | After commit, before device sync | Nothing -- visible but not durable |
-| 3 | After fsync completes | Everything -- fully durable |
+| 1 | During buffered write (before commit) | Nothing; staged data lost |
+| 2 | After commit, before device sync | Nothing; visible but not durable |
+| 3 | After fsync completes | Everything; fully durable |
 | 4 | During epoch advance | Previous epoch survives, new epoch lost |
 | 5 | Concurrent inodes, partial sync | Only fsynced inodes survive |
 | 6 | Multiple writes in single epoch | All lost if not committed |
@@ -407,7 +384,7 @@ Recovery resets each inode to `staged = visible = durable = last_durable_epoch`.
 
 ## Observability and Evidence
 
-FrankenFS maintains a comprehensive, machine-readable audit trail for every significant decision across all subsystems.
+FrankenFS maintains a machine-readable audit trail for every significant decision across all subsystems.
 
 ### Evidence Ledger
 
@@ -527,7 +504,7 @@ Every call takes `&Cx`, enabling cooperative cancellation and budget tracking ev
 
 ### ARC Cache
 
-`ArcCache<D>` wraps any `BlockDevice` with an Adaptive Replacement Cache -- a self-tuning algorithm that balances recency and frequency by maintaining four LRU lists (T1, T2, B1, B2). Unlike a simple LRU, ARC adapts its recency-vs-frequency split based on observed miss patterns, improving hit rates for mixed workloads without manual tuning.
+`ArcCache<D>` wraps any `BlockDevice` with an Adaptive Replacement Cache (ARC), a self-tuning algorithm that balances recency and frequency by maintaining four LRU lists (T1, T2, B1, B2). ARC adapts its recency-vs-frequency split based on observed miss patterns, improving hit rates for mixed workloads without manual tuning.
 
 The cache supports two write policies:
 
@@ -551,7 +528,7 @@ A background flush daemon periodically writes dirty blocks in configurable batch
 
 ## Deep Dive: Format Detection and Dual-Personality Parsing
 
-FrankenFS is unique among FUSE filesystems in supporting both ext4 and btrfs from a single binary. Format detection happens at mount time by probing the superblock at format-specific offsets.
+FrankenFS supports both ext4 and btrfs from a single binary. Format detection happens at mount time by probing the superblock at format-specific offsets.
 
 ### Superblock Probing
 
@@ -560,11 +537,11 @@ ext4:  offset 1024, size 1024 bytes, magic 0xEF53 at offset 0x38
 btrfs: offset 65536, size 4096 bytes, magic "_BHRfS_M" at offset 0x40
 ```
 
-The `OpenFs::open()` constructor reads both regions, attempts parsing in each format, and returns a `FsFlavor::Ext4(superblock)` or `FsFlavor::Btrfs(superblock)`. If neither magic matches, `DetectionError::UnsupportedImage` is returned. The detected flavor determines which code paths are used for every subsequent operation -- extent mapping, inode parsing, directory traversal, and journal recovery all dispatch through the flavor.
+The `OpenFs::open()` constructor reads both regions, attempts parsing in each format, and returns a `FsFlavor::Ext4(superblock)` or `FsFlavor::Btrfs(superblock)`. If neither magic matches, `DetectionError::UnsupportedImage` is returned. The detected flavor determines which code paths are used for every subsequent operation: extent mapping, inode parsing, directory traversal, and journal recovery all dispatch through it.
 
 ### Pure Parsing (No I/O)
 
-The `ffs-ondisk` crate is intentionally pure -- it takes `&[u8]` byte slices and returns typed structures, with zero I/O. This design enables:
+The `ffs-ondisk` crate takes `&[u8]` byte slices and returns typed structures, with zero I/O. This enables:
 
 - **Fuzz-friendly parsing**: byte slices can be generated by proptest or AFL without needing real images
 - **Snapshot testing**: parse results can be serialized to JSON for golden-file comparison
@@ -594,7 +571,7 @@ When mounting an ext4 image with a dirty journal (the `needs_recovery` flag is s
 4. **Revoke**: honor revoke records by skipping any target blocks that were later revoked
 5. **Finalize**: clear the `needs_recovery` flag and reset journal sequence numbers
 
-The replay is idempotent -- replaying an already-clean journal is a no-op.
+The replay is idempotent; replaying an already-clean journal is a no-op.
 
 ### MVCC WAL (Native Mode)
 
@@ -640,7 +617,7 @@ Internal crate-specific errors (e.g., `ParseError` from `ffs-types`) are convert
 
 ## Deep Dive: Structured Concurrency with asupersync
 
-FrankenFS uses the `asupersync` runtime instead of Tokio for all async and concurrent operations. This is not an arbitrary preference -- the design requires properties that Tokio cannot provide.
+FrankenFS uses the `asupersync` runtime instead of Tokio for all async and concurrent operations. The design requires properties that Tokio cannot provide.
 
 ### Why Not Tokio?
 
@@ -676,9 +653,433 @@ This is how FrankenFS stress tests (e.g., the 120-writer merge-proof test) achie
 
 ---
 
+## Deep Dive: Block Allocation
+
+The allocator (`ffs-alloc`) manages free space using bitmap-based tracking with goal-directed placement, inspired by ext4's `mballoc` but reimplemented in safe Rust.
+
+### Bitmap Operations
+
+Free/used state is tracked per-block in packed bitmaps (one bit per block per group). Core primitives:
+
+- `bitmap_find_free(bitmap, start)`: scan forward for the first free bit
+- `bitmap_find_contiguous(bitmap, start, count)`: find `count` consecutive free bits
+- `bitmap_count_free(bitmap)`: population count of zero bits
+
+All operations are O(n) in group size but run on L1-cacheable data (a 32K-block group's bitmap fits in 4KB).
+
+### Goal-Directed Placement
+
+When allocating blocks for a file, the allocator uses a three-tier strategy:
+
+1. **Goal group/block**: if the caller provides an `AllocHint` (e.g., "near block 1000 in group 3"), try that location first
+2. **Nearby groups**: scan groups within a distance of 8, alternating +/- direction from the goal group
+3. **Full scan**: linear scan through all groups as a last resort
+
+This locality-aware placement keeps related file extents physically contiguous, improving sequential read performance.
+
+### Orlov Directory Spreading
+
+New directories use the Orlov allocator, which distributes directory inodes across groups to reduce contention. The algorithm biases toward groups with above-average free inode counts and low existing directory density, spreading the namespace tree across the disk.
+
+### Reserved Block Protection
+
+The allocator enforces that metadata blocks (superblock copies, group descriptor tables, inode tables, bitmap blocks) are never allocated to file data. A two-phase validation marks reserved regions in a temporary bitmap before confirming any allocation.
+
+---
+
+## Deep Dive: Extent Tree and Block Mapping
+
+File data in ext4 (and FrankenFS's native mode) is mapped via an extent tree, a compact B+tree stored in the inode's `i_block` field with optional overflow blocks.
+
+### Extent Structure
+
+Each extent maps a contiguous range of logical blocks to physical blocks:
+
+```
+ExtentMapping {
+    logical_start: u64,    // File-relative block offset
+    physical_start: u64,   // Disk-absolute block offset
+    count: u16,            // Number of contiguous blocks (max 32768)
+    unwritten: bool,       // Preallocated but not yet written (reads as zeros)
+}
+```
+
+### Tree Geometry
+
+| Level | Location | Max entries | Coverage at 4KB blocks |
+|-------|----------|-------------|----------------------|
+| Root | Inode `i_block[0..14]` (60 bytes) | 4 extents | 128 MB |
+| Depth 1 | External blocks | 340 per block | ~43 GB |
+| Depth 2 | Two-level index | 340 x 340 = 115,600 | ~14.5 TB |
+| Depth 3 | Three-level index | ~39 million | ~4.9 PB |
+
+### Operations
+
+- **Lookup** (`map_logical_to_physical`): binary search at each tree level, returning either a mapping (physical block found) or a hole (sparse region, reads as zeros)
+- **Insert** (`allocate_extent`): request contiguous physical blocks from `ffs-alloc`, create an extent, insert into the tree with mid-point splitting when nodes overflow
+- **Delete** (`truncate_extents`): remove all extents beyond a logical boundary, free physical blocks, collapse empty index nodes
+- **Mark written** (`mark_written`): clear the unwritten flag on preallocated extents, splitting at range boundaries if the write doesn't cover the entire extent (produces up to 3 replacement extents: left-unwritten + middle-written + right-unwritten)
+- **Punch hole** (`punch_hole`): remove block mappings within a range without changing file size (sparse file creation)
+
+---
+
+## Deep Dive: Directory Indexing
+
+Directory entries in ext4 use a two-level indexing scheme: a hash tree (htree) provides block-level indexing, while entries within each block are stored as a linked list.
+
+### Entry Format
+
+```
++--------+---------+----------+-----------+------+
+| inode  | rec_len | name_len | file_type | name |
+| (4B)   | (2B)    | (1B)     | (1B)      | (var)|
++--------+---------+----------+-----------+------+
+```
+
+Entries are 4-byte aligned. Deleted entries have `inode = 0` and their `rec_len` is coalesced with the previous entry (space reclamation without compaction).
+
+### Hash Tree (htree)
+
+For directories with more than ~200 entries, ext4 uses a DX hash tree, a balanced B-tree indexed by a hash of the filename:
+
+1. **Hash computation**: half-MD4 or TEA hash (configurable per filesystem) with a 4-word seed for collision resistance
+2. **Index lookup**: binary search over `(hash, block)` pairs to find the leaf block containing entries with matching hash values
+3. **Leaf scan**: linear scan within the leaf block for the exact filename match (handles hash collisions)
+
+The htree provides O(log n) lookup for large directories vs O(n) for linear scan.
+
+### Operations
+
+- **`add_entry`**: insert a new directory entry, reusing deleted slots when available. If the entry doesn't fit in the target block, the htree (if present) directs placement to the correct hash bucket.
+- **`remove_entry`**: mark the entry deleted (`inode = 0`) and coalesce `rec_len` with the previous entry
+- **`init_dir_block`**: create the initial `.` and `..` entries for a new directory
+
+---
+
+## Deep Dive: Extended Attributes
+
+Extended attributes (xattrs) provide per-file key-value metadata outside the standard POSIX inode fields. FrankenFS supports the full ext4 xattr model.
+
+### Namespace Routing
+
+| Namespace | Prefix | Permission required | Typical use |
+|-----------|--------|-------------------|-------------|
+| User | `user.*` | File owner or `CAP_FOWNER` | Application metadata |
+| System | `system.*` | `CAP_SYS_ADMIN` | POSIX ACLs |
+| Security | `security.*` | `CAP_SYS_ADMIN` | SELinux labels, IMA |
+| Trusted | `trusted.*` | `CAP_SYS_ADMIN` | Privileged daemon data |
+
+### Hybrid Storage Model
+
+xattrs use a two-tier storage strategy:
+
+1. **Inline** (fast path): stored directly in the inode after `extra_isize`, sharing the inode's block I/O. Limited by remaining inode space (~100-200 bytes for a 256-byte inode).
+2. **External block** (overflow): a separate block pointed to by `inode.file_acl`. Used when inline space is exhausted or values are large (up to 64KB per value).
+
+The set operation tries inline first, then spills to external. The get operation checks both locations. This hybrid minimizes I/O for small attributes (the common case) while supporting arbitrarily large values.
+
+### Write Modes
+
+xattr set operations support two modes matching the `XATTR_CREATE` and `XATTR_REPLACE` flags:
+
+- **Create**: fails if the attribute already exists (for atomic create-if-absent)
+- **Replace**: fails if the attribute does not exist (for atomic update-if-present)
+
+---
+
+## Deep Dive: Inode Lifecycle
+
+The inode layer (`ffs-inode`) manages the complete lifecycle of filesystem objects from birth to deletion.
+
+### On-Disk Location
+
+Inodes are stored in per-group inode tables. Given an inode number, the location is computed as:
+
+```
+group  = (ino - 1) / inodes_per_group
+index  = (ino - 1) % inodes_per_group
+block  = inode_table_block[group] + (index * inode_size) / block_size
+offset = (index * inode_size) % block_size
+```
+
+### Timestamps
+
+FrankenFS tracks four timestamps per inode with nanosecond precision:
+
+| Field | When updated | ext4 field |
+|-------|-------------|------------|
+| `atime` | File read | `i_atime` + `i_atime_extra` (ns) |
+| `mtime` | File data write | `i_mtime` + `i_mtime_extra` (ns) |
+| `ctime` | Metadata change | `i_ctime` + `i_ctime_extra` (ns) |
+| `crtime` | File creation | `i_crtime` + `i_crtime_extra` (ns) |
+
+The `_extra` fields provide sub-second precision (nanoseconds) and extended epoch range (additional high bits for post-2038 timestamps).
+
+### Checksum Verification
+
+Each inode includes a CRC32c checksum (`i_checksum_lo` + `i_checksum_hi`) computed over the inode's raw bytes with the filesystem UUID as salt. FrankenFS validates this checksum on read and recomputes it on write, detecting single-bit corruption in the inode table.
+
+### Operations
+
+- **Read** (`read_inode`): locate in inode table, read containing block, parse at byte offset, validate checksum
+- **Write** (`write_inode`): recompute checksum, read-modify-write the containing block
+- **Create** (`create_inode`): allocate from group's inode bitmap (via `ffs-alloc`), initialize fields, write to table
+- **Delete**: clear inode bitmap bit, zero timestamps, update group free counts
+
+---
+
+## Deep Dive: Background Scrub Pipeline
+
+The scrub pipeline (`ffs-repair::pipeline`) continuously monitors block integrity and orchestrates automatic recovery.
+
+### Scrub Cycle
+
+1. **Block scan**: read every block in the group, compute checksum (CRC32c for compat mode, BLAKE3 for native mode)
+2. **Mismatch detection**: compare computed checksum against stored checksum; any difference is flagged as corruption
+3. **Severity classification**: single-bit flips vs multi-byte corruption vs unreadable blocks
+4. **Evidence logging**: every detection emits a `CorruptionDetected` record with block ID, expected/actual checksums, and severity
+
+### Recovery Orchestration
+
+When corruption is detected:
+
+1. **Load repair symbols**: read the group's RaptorQ encoded symbols from the repair tail region
+2. **Decode**: feed available source blocks + repair symbols into the RaptorQ decoder
+3. **Validate**: verify the recovered block's checksum matches
+4. **Write back**: replace the corrupted block with the recovered data
+5. **Refresh symbols**: re-encode repair symbols with the corrected data (generation number advances)
+
+### Evidence Trail
+
+Every step produces a structured evidence record: `RepairAttempted` (with source/symbol counts), `RepairSucceeded` or `RepairFailed` (with decoder statistics), `ScrubCycleComplete` (with aggregate stats). The evidence ledger provides a complete forensic timeline of every corruption event and its resolution.
+
+### Multi-Host Coordination
+
+For shared storage (multiple hosts accessing the same image), the repair ownership system uses optimistic lease-based coordination:
+
+- A coordination record (`.<image>.ffs-repair-owner.json`) stores the owning host's UUID, hostname, and lease TTL
+- Hosts attempt to claim ownership before performing write-side repair operations
+- Expired leases can be taken over with deterministic tie-breaking (UUID comparison)
+- Read-only scrub (detection only) does not require ownership
+
+---
+
+## Deep Dive: FUSE Request Lifecycle
+
+The FUSE layer (`ffs-fuse`) translates kernel FUSE protocol messages into filesystem operations, managing request scoping, backpressure, and thread dispatch.
+
+### Request Flow
+
+Every FUSE callback follows a three-phase lifecycle:
+
+```
+1. begin_request_scope(cx, op)  ->  acquire MVCC snapshot, check backpressure
+2. execute operation             ->  dispatch to ext4/btrfs handler in ffs-core
+3. end_request_scope(cx, scope)  ->  release snapshot, update metrics
+```
+
+The `RequestScope` captures the MVCC snapshot at request start, ensuring that all reads within a single FUSE callback see a consistent point-in-time view of the filesystem, even if concurrent writers are committing new versions.
+
+### Backpressure and Graceful Degradation
+
+When the system is under pressure (high dirty-cache ratio, long GC pauses, or external memory pressure), the `BackpressureGate` can shed load by deferring or rejecting non-critical requests:
+
+- **Read operations**: always proceed (readers never block)
+- **Write operations**: may be delayed when dirty ratio exceeds the high watermark
+- **Metadata operations**: may be shed when system pressure reaches critical levels
+
+The `DegradationFsm` (finite state machine) tracks pressure level transitions and ensures that degradation decisions are monotonic. The system degrades progressively rather than oscillating between healthy and degraded states.
+
+### Mount Configuration
+
+```rust
+MountOptions {
+    read_only: true,       // Default: safe read-only mount
+    allow_other: false,    // FUSE allow_other for multi-user access
+    auto_unmount: true,    // Clean up on process exit
+    worker_threads: 0,     // 0 = auto (min(available_parallelism, 8))
+}
+```
+
+The worker thread count maps to kernel FUSE queue tuning parameters (`max_background` and `congestion_threshold`), adjusting kernel-side request batching to match daemon capacity.
+
+---
+
+## Deep Dive: btrfs Tree Walk and Chunk Mapping
+
+btrfs uses a fundamentally different on-disk structure than ext4. Instead of fixed-location group descriptors and inode tables, everything is stored in copy-on-write B-trees addressed by logical (virtual) block addresses that must be translated to physical disk offsets via a chunk mapping layer.
+
+### Logical-to-Physical Translation
+
+btrfs addresses blocks by logical address. To read a block, the logical address must be translated through the chunk map:
+
+1. **Bootstrap**: the superblock embeds a `sys_chunk_array` containing enough chunk entries to locate the chunk tree itself
+2. **Chunk lookup**: find the chunk entry whose `[key.offset, key.offset + length)` range contains the target logical address
+3. **Stripe calculation**: for single-device images, `physical = stripe.offset + (logical - chunk.key.offset)`
+
+For RAID profiles (single, DUP, RAID0, RAID1, RAID5, RAID6, RAID10), the stripe calculation accounts for stripe width, sub-stripe interleaving, and mirror selection. FrankenFS V1 supports single-device profiles only.
+
+### Tree Walk Algorithm
+
+`walk_tree` performs a depth-first traversal of any btrfs B-tree (root tree, extent tree, fs tree, checksum tree):
+
+1. Read the node at the given logical address (translate via chunk map)
+2. Parse the header: level, generation, number of items, owner
+3. If **leaf** (level 0): parse all items and collect them
+4. If **internal** (level > 0): recursively walk each child pointer in key order
+5. **Cycle detection**: maintain an `active_path` set of logical addresses; reject if a cycle is found
+6. **Depth bound**: reject trees deeper than 7 levels (btrfs maximum)
+7. **Visit deduplication**: `visited_nodes` set prevents re-reading shared subtrees (COW sharing)
+
+This produces all leaf items in key order, which are then dispatched by item type (inode, dir entry, extent data, xattr, etc.) to build the filesystem's in-memory structures.
+
+### Key Types in btrfs Trees
+
+| Key type | Object ID | Item type | What it represents |
+|----------|-----------|-----------|-------------------|
+| `INODE_ITEM` | inode number | 1 | Inode metadata (size, mode, timestamps) |
+| `DIR_ITEM` | parent inode | 84 | Directory entry (name + child inode) |
+| `EXTENT_DATA` | inode number | 108 | File extent (inline data or disk reference) |
+| `ROOT_ITEM` | tree ID | 132 | Root of a subvolume or internal tree |
+| `CHUNK_ITEM` | logical offset | 228 | Chunk-to-physical mapping |
+
+---
+
+## Deep Dive: Version Chain Compression
+
+MVCC version chains grow with every write to a block. Without compression, a hot block with thousands of versions would consume unbounded memory. FrankenFS uses three strategies to keep chains compact.
+
+### Strategy 1: Identical-Version Deduplication
+
+When a new version's bytes are identical to the previous version (common for metadata blocks that are "touched" but unchanged), the version chain stores an `Identical` marker with zero data:
+
+```
+Version chain: [Full(4KB), Identical, Identical, Full(4KB), Identical]
+Memory:         4096        0          0          4096        0      = 8192 bytes
+Without dedup:  4096        4096       4096       4096        4096   = 20480 bytes
+```
+
+Resolution walks backward from the `Identical` marker to find the nearest `Full` or compressed version.
+
+### Strategy 2: Block-Level Compression
+
+Versions can be stored as Zstd or Brotli compressed data:
+
+| Variant | Compression | Decompression | Best for |
+|---------|-------------|---------------|----------|
+| `Full(Vec<u8>)` | None | None | Hot blocks accessed frequently |
+| `Zstd(Vec<u8>)` | Zstd | Zstd | Cold blocks in long chains |
+| `Brotli(Vec<u8>)` | Brotli | Brotli | Maximum compression ratio |
+| `Identical` | None | Walk backward | Metadata blocks touched but unchanged |
+
+The `CompressionPolicy` configures which algorithm to use and at what chain depth compression kicks in.
+
+### Strategy 3: Chain Length Capping
+
+Configurable maximum chain length per block. When exceeded, the oldest versions beyond the cap are pruned, but only if no active snapshot still needs them. The GC watermark tracks the oldest active snapshot; versions older than the watermark and beyond the cap are retired via epoch-based reclamation (`crossbeam-epoch`), ensuring no reader ever sees a dangling reference.
+
+A critical chain length (4x the cap) triggers backpressure: writers to that block are rejected with `ChainBackpressure` until GC catches up. This prevents unbounded memory growth even under pathological write patterns.
+
+---
+
+## Deep Dive: Conformance Harness
+
+The `ffs-harness` crate provides the testing infrastructure that validates FrankenFS against real filesystem images and tracks feature parity quantitatively.
+
+### Sparse Fixtures
+
+Real ext4 and btrfs images are impractical to check into git. FrankenFS uses **sparse JSON fixtures** instead, files containing only the non-zero byte regions of an image:
+
+```json
+{"offset": 1024, "data": "0xEF530001..."}   // ext4 superblock
+{"offset": 2048, "data": "..."}              // group descriptors
+```
+
+`load_sparse_fixture()` reconstructs a full-size byte buffer from these sparse entries, which can then be parsed by `ffs-ondisk` the same way a real image would be. This keeps fixtures under a few KB while covering the full parse surface.
+
+### Golden-File Conformance
+
+Parse results are serialized to JSON and compared against golden files. If the parse output changes, the test fails with a diff showing exactly which fields changed. This catches regressions from refactoring and ensures that ext4/btrfs compatibility is maintained across code changes.
+
+### Parity Tracking
+
+`FEATURE_PARITY.md` is both a human-readable document and a machine-parseable data source. The harness reads it to generate a quantitative parity report:
+
+```
+Domain                        Implemented  Total  Coverage
+ext4 metadata parsing         19           19     100.0%
+btrfs metadata parsing        20           20     100.0%
+MVCC/COW core                 14           14     100.0%
+FUSE surface                  12           12     100.0%
+self-healing durability        10           10     100.0%
+```
+
+Every feature is either implemented (with a test ID), explicitly excluded (with a reason documented in the spec), or tracked as in-progress. No feature can silently fall out of scope.
+
+### Metrics Framework
+
+The runtime metrics system provides three metric types, all based on lock-free atomic operations:
+
+| Type | Operation | Use case |
+|------|-----------|----------|
+| **Counter** | `increment(n)` | Total operations, bytes transferred, errors |
+| **Gauge** | `set(val)` / `adjust(delta)` | Current cache size, active snapshots, dirty blocks |
+| **Histogram** | `observe(value)` | Latency distributions with fixed buckets |
+
+Metrics are registered with a global `MetricsRegistry` that supports enable/disable toggle (zero overhead when disabled), rolling window snapshots for time-series analysis, and JSON export for integration with monitoring systems. A `noop_handle` provides a zero-cost placeholder for optional metric paths.
+
+---
+
+## Tuning and Configuration
+
+FrankenFS exposes several tuning knobs for operators and benchmark authors. All are configured via struct fields (no magic environment variables).
+
+### MVCC Tuning
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `ConflictPolicy` | `SafeMerge` | `Strict` for maximum safety, `Adaptive` for auto-tuning |
+| `AdaptivePolicyConfig.ema_alpha` | 0.1 | EMA smoothing (higher = more responsive to contention changes) |
+| `AdaptivePolicyConfig.warmup_commits` | 20 | Commits before adaptive policy activates |
+| `CompressionPolicy.max_chain_length` | None | Version chain cap (enables GC when set) |
+| `CompressionPolicy.dedup_identical` | true | Identical-version deduplication |
+| `GcBackpressureConfig.min_poll_quota` | 256 | Budget threshold for GC batch throttling |
+
+### Cache Tuning
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `ArcWritePolicy` | `WriteThrough` | `WriteBack` for batched I/O (requires flush daemon) |
+| `DIRTY_HIGH_WATERMARK` | 0.80 | Dirty ratio triggering aggressive flush |
+| `DIRTY_CRITICAL_WATERMARK` | 0.95 | Dirty ratio blocking new writes |
+| `FlushDaemonConfig.batch_size` | Configurable | Dirty blocks per flush cycle |
+| `FlushDaemonConfig.interval` | Configurable | Sleep between flush cycles |
+
+### Repair Tuning
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `DurabilityAutopilot.min_overhead` | 0.03 | Minimum repair symbol overhead (3%) |
+| `DurabilityAutopilot.max_overhead` | 0.10 | Maximum repair symbol overhead (10%) |
+| `DurabilityAutopilot.metadata_multiplier` | 2.0 | Extra overhead for metadata groups |
+| `RefreshPolicy` | `Lazy { 30s }` | `Eager` for metadata, `Hybrid` for write-heavy groups |
+| `StaleWindowSlo.max_age_ms` | 60,000 | SLO breach threshold (age) |
+| `StaleWindowSlo.max_writes` | 5,000 | SLO breach threshold (writes) |
+| `StaleWindowSlo.percentile` | 0.95 | Percentile for SLO evaluation |
+
+### FUSE Tuning
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `MountOptions.read_only` | `true` | Safe default; `--rw` for experimental writes |
+| `MountOptions.worker_threads` | 0 (auto) | `min(available_parallelism, 8)` |
+| `MountOptions.allow_other` | `false` | Multi-user FUSE access |
+
+---
+
 ## How Spec-First Porting Works in Practice
 
-The porting doctrine is more than a philosophy -- it's a concrete workflow with traceable artifacts.
+The porting doctrine is a concrete workflow with traceable artifacts at every step.
 
 ### Step 1: Behavioral Extraction
 
@@ -709,7 +1110,7 @@ Code is written from the spec, not by translating C control flow. This means:
 
 ### Step 4: Conformance Validation
 
-The `ffs-harness` crate validates the implementation against real filesystem images using golden-file comparison. Sparse JSON fixtures capture expected parse results; the harness reads the same image and asserts field-by-field equality. Feature parity is tracked quantitatively in `FEATURE_PARITY.md` -- every feature is either implemented (with a test), explicitly excluded (with a reason), or marked as in-progress.
+The `ffs-harness` crate validates the implementation against real filesystem images using golden-file comparison. Sparse JSON fixtures capture expected parse results; the harness reads the same image and asserts field-by-field equality. Feature parity is tracked quantitatively in `FEATURE_PARITY.md`. Every feature is either implemented (with a test), explicitly excluded (with a reason), or marked as in-progress.
 
 ### The Result
 
@@ -749,7 +1150,7 @@ On mount, FrankenFS validates the image against a strict compatibility contract:
 - Geometry parameters must be within supported ranges
 - Superblock checksum must validate (ext4 CRC32c)
 
-Images that fail validation are rejected with a specific error variant (`UnsupportedFeature`, `IncompatibleFeature`, `InvalidGeometry`) -- FrankenFS never attempts to "best-effort" parse a potentially incompatible image.
+Images that fail validation are rejected with a specific error variant (`UnsupportedFeature`, `IncompatibleFeature`, `InvalidGeometry`). FrankenFS will not attempt to "best-effort" parse a potentially incompatible image.
 
 ---
 
@@ -769,7 +1170,7 @@ The `rust-toolchain.toml` pins the nightly channel. Cargo handles the rest.
 ### Requirements
 
 - **Rust nightly** (edition 2024, minimum version 1.85)
-- **Linux** (FUSE target -- `libfuse-dev` or `fuse3` for mount support)
+- **Linux** (FUSE target; `libfuse-dev` or `fuse3` for mount support)
 - **FUSE headers**: `sudo apt install libfuse-dev` (Debian/Ubuntu) or `sudo dnf install fuse-devel` (Fedora)
 
 ---
@@ -978,13 +1379,13 @@ A: Instead of translating C to Rust line by line, we first extract the *behavior
 A: ext4's JBD2 journal uses a global lock that serializes all writes through a single thread. Block-level MVCC with version chains allows concurrent writers with snapshot isolation. The adaptive conflict policy automatically selects between strict first-committer-wins and safe-merge resolution based on observed contention, minimizing both unnecessary aborts and corruption risk.
 
 **Q: What are fountain codes / RaptorQ?**
-A: RaptorQ (RFC 6330) is a fountain code -- an erasure coding scheme that generates repair symbols from source data. Given enough symbols, you can recover any lost/corrupted source blocks. FrankenFS stores a configurable overhead of repair symbols per block group (default 5%), enabling automatic corruption recovery without redundant copies. The Bayesian autopilot adjusts overhead based on observed corruption rates.
+A: RaptorQ (RFC 6330) is a fountain code, an erasure coding scheme that generates repair symbols from source data. Given enough symbols, you can recover any lost/corrupted source blocks. FrankenFS stores a configurable overhead of repair symbols per block group (default 5%), enabling automatic corruption recovery without redundant copies. The Bayesian autopilot adjusts overhead based on observed corruption rates.
 
 **Q: Why `forbid(unsafe_code)` everywhere?**
 A: Filesystem bugs in C frequently involve buffer overflows, use-after-free, and uninitialized memory. By forbidding unsafe Rust entirely, we eliminate these categories of bugs at compile time. The performance cost is negligible for a FUSE filesystem (the FUSE protocol is already the bottleneck).
 
 **Q: What is "adaptive conflict policy"?**
-A: When two transactions write the same block, FrankenFS can either abort the later writer (Strict FCW) or merge the writes using a proof that they don't conflict (SafeMerge). The Adaptive policy uses an expected-loss decision model -- tracking conflict rate, merge success rate, and abort rate via exponential moving averages -- to automatically select whichever strategy has the lowest expected cost. Under a 120-writer stress test, SafeMerge achieved 9.5x lower expected loss than Strict.
+A: When two transactions write the same block, FrankenFS can either abort the later writer (Strict FCW) or merge the writes using a proof that they don't conflict (SafeMerge). The Adaptive policy uses an expected-loss decision model that tracks conflict rate, merge success rate, and abort rate via exponential moving averages, then selects whichever strategy has the lowest expected cost. Under a 120-writer stress test, SafeMerge achieved 9.5x lower expected loss than Strict.
 
 **Q: How does self-healing refresh work?**
 A: Repair symbols become stale when source blocks are modified. FrankenFS supports three refresh triggers: age-only (time since last refresh), block-count (writes since last refresh), and hybrid (whichever fires first). The `RefreshLossModel` compares all three using expected-loss calculations across workload profiles, and the `StaleWindowSlo` monitors percentile staleness with configurable breach detection.
@@ -995,7 +1396,7 @@ A: Repair symbols become stale when source blocks are modified. FrankenFS suppor
 
 | Document | Size | What it covers |
 |----------|------|----------------|
-| [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md) | 242KB | Canonical specification -- 24 sections covering every subsystem |
+| [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md) | 242KB | Canonical specification, 24 sections covering every subsystem |
 | [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md) | 95KB | Behavioral extraction from Linux kernel ext4/btrfs source |
 | [PLAN_TO_PORT_FRANKENFS_TO_RUST.md](PLAN_TO_PORT_FRANKENFS_TO_RUST.md) | 69KB | 9-phase porting roadmap with scope and acceptance criteria |
 | [PROPOSED_ARCHITECTURE.md](PROPOSED_ARCHITECTURE.md) | 18KB | 21-crate architecture, trait hierarchy, data flow |
@@ -1017,8 +1418,8 @@ A: Repair symbols become stale when source blocks are modified. FrankenFS suppor
 
 FrankenFS was designed by extracting behavior from Linux kernel v6.19 filesystem source (~205K lines of C):
 
-- **ext4** -- superblock, inode, extent tree, journal (JBD2), block allocation (mballoc)
-- **btrfs** -- B-tree, transaction, delayed refs, scrub, extent allocation
+- **ext4**: superblock, inode, extent tree, journal (JBD2), block allocation (mballoc)
+- **btrfs**: B-tree, transaction, delayed refs, scrub, extent allocation
 
 The legacy kernel source corpus is present in this repository under `legacy_ext4_and_btrfs_code/linux-fs/`. All extracted behavioral contracts are captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md) (95KB).
 
