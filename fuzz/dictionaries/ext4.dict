@@ -1,0 +1,24 @@
+# ext4 magic numbers and constants
+ext4_magic="\x53\xEF"
+ext4_magic_le="\xEF\x53"
+jbd2_magic="\xC0\x3B\x39\x98"
+extent_magic="\x0A\xF3"
+dx_hash_magic="\xDE"
+xattr_magic="\xEA\x02\x00\x00"
+
+# Common block sizes
+block_1k="\x00\x04\x00\x00"
+block_4k="\x00\x10\x00\x00"
+
+# Common inode sizes
+inode_128="\x80\x00"
+inode_256="\x00\x01"
+
+# File type constants
+ft_regular="\x01"
+ft_directory="\x02"
+ft_symlink="\x07"
+
+# Feature flags
+has_journal="\x04\x00\x00\x00"
+extents="\x40\x00\x00\x00"

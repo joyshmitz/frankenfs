@@ -858,8 +858,7 @@ fn verification_gate_safe_merge_correctness_under_high_contention() {
     for writer in 41_u8..=80 {
         let offset = usize::from(writer - 41) * 3;
         assert_eq!(
-            keys_data[offset],
-            writer,
+            keys_data[offset], writer,
             "independent-keys merge: byte at offset {offset} must be {writer}"
         );
     }

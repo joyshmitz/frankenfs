@@ -775,7 +775,10 @@ fn print_contention_sample_payload(record: &EvidenceRecord) {
     if let Some(p) = record.contention_sample.as_ref() {
         print!(
             " conflict_rate={:.4} merge_success={:.4} abort_rate={:.4} commits={} policy={}",
-            p.conflict_rate, p.merge_success_rate, p.abort_rate, p.total_commits,
+            p.conflict_rate,
+            p.merge_success_rate,
+            p.abort_rate,
+            p.total_commits,
             p.effective_policy
         );
     }

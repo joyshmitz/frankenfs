@@ -57,7 +57,9 @@ pub enum SearchResult {
     Hole {
         /// Number of unmapped blocks from target until the next extent
         /// (or end of address space if no subsequent extent).
-        hole_len: u32,
+        ///
+        /// This is u64 because a hole can span the entire 32-bit range + 1.
+        hole_len: u64,
     },
 }
 
@@ -126,7 +128,9 @@ fn descend_search(
 /// Binary search leaf extents for the target logical block.
 fn search_leaf(extents: &[Ext4Extent], target: u32) -> Result<SearchResult> {
     if extents.is_empty() {
-        return Ok(SearchResult::Hole { hole_len: u32::MAX });
+        return Ok(SearchResult::Hole {
+            hole_len: 1_u64 << 32,
+        });
     }
 
     // Validate: reject zero-length extents (on-disk corruption).
@@ -148,8 +152,8 @@ fn search_leaf(extents: &[Ext4Extent], target: u32) -> Result<SearchResult> {
     if pos > 0 {
         let ext = &extents[pos - 1];
         let len = actual_len(ext.raw_len);
-        let end = ext.logical_block.saturating_add(u32::from(len));
-        if target < end {
+        let end = u64::from(ext.logical_block) + u64::from(len);
+        if u64::from(target) < end {
             return Ok(SearchResult::Found {
                 extent: *ext,
                 offset_in_extent: target - ext.logical_block,
@@ -159,11 +163,11 @@ fn search_leaf(extents: &[Ext4Extent], target: u32) -> Result<SearchResult> {
 
     // Target is in a hole. Determine hole length.
     let next_start = if pos < extents.len() {
-        extents[pos].logical_block
+        u64::from(extents[pos].logical_block)
     } else {
-        u32::MAX
+        1_u64 << 32
     };
-    let hole_len = next_start.saturating_sub(target);
+    let hole_len = next_start.saturating_sub(u64::from(target));
     Ok(SearchResult::Hole { hole_len })
 }
 
@@ -626,10 +630,15 @@ pub fn delete_range(
     dev: &dyn BlockDevice,
     root_bytes: &mut [u8; 60],
     logical_start: u32,
-    count: u32,
+    count: u64,
     alloc: &mut dyn BlockAllocator,
 ) -> Result<Vec<FreedRange>> {
-    let logical_end = logical_start.saturating_add(count);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let logical_end = u64::from(logical_start) + count;
+    cx_checkpoint(cx)?;
+
     let (header, _) = parse_header(root_bytes)?;
     validate_header(&header, ROOT_MAX_ENTRIES)?;
     trace!(
@@ -641,7 +650,7 @@ pub fn delete_range(
 
     if header.depth == 0 {
         let extents = parse_leaf_entries(root_bytes, &header)?;
-        let (remaining, freed) = trim_extents(extents, logical_start, logical_end);
+        let (remaining, freed) = trim_extents(extents, u64::from(logical_start), logical_end);
         write_leaf_root(root_bytes, &header, &remaining);
         trace!(
             logical_start,
@@ -665,7 +674,7 @@ pub fn delete_range(
             dev,
             child_block,
             header.depth - 1,
-            logical_start,
+            u64::from(logical_start),
             logical_end,
             alloc,
         )?;
@@ -740,8 +749,8 @@ fn delete_range_subtree(
     dev: &dyn BlockDevice,
     block: u64,
     depth: u16,
-    logical_start: u32,
-    logical_end: u32,
+    logical_start: u64,
+    logical_end: u64,
     alloc: &mut dyn BlockAllocator,
 ) -> Result<DeleteSubtreeResult> {
     cx_checkpoint(cx)?;
@@ -903,16 +912,16 @@ fn maybe_shrink_root(
 #[expect(clippy::cast_possible_truncation)]
 fn trim_extents(
     extents: Vec<Ext4Extent>,
-    start: u32,
-    end: u32,
+    start: u64,
+    end: u64,
 ) -> (Vec<Ext4Extent>, Vec<FreedRange>) {
     let mut remaining = Vec::new();
     let mut freed = Vec::new();
 
     for ext in extents {
         let ext_len = actual_len(ext.raw_len);
-        let ext_start = ext.logical_block;
-        let ext_end = ext_start.saturating_add(u32::from(ext_len));
+        let ext_start = u64::from(ext.logical_block);
+        let ext_end = ext_start.saturating_add(u64::from(ext_len));
 
         if ext_end <= start || ext_start >= end {
             // No overlap: keep extent as-is.
@@ -933,26 +942,26 @@ fn trim_extents(
 
         // Left portion: extent starts before the delete range.
         if ext_start < start {
-            let keep_len = start - ext_start;
+            let keep_len = (start - ext_start) as u16;
             remaining.push(Ext4Extent {
-                logical_block: ext_start,
-                raw_len: encode_len(keep_len as u16, ext.is_unwritten()),
+                logical_block: ext.logical_block,
+                raw_len: encode_len(keep_len, ext.is_unwritten()),
                 physical_start: ext.physical_start,
             });
             let freed_start = u64::from(keep_len);
             // The freed portion might be further trimmed by the right side.
             if ext_end > end {
                 // Delete range is in the middle: free the middle, keep right.
-                let middle_len = end - start;
+                let middle_len = (end - start) as u16;
                 freed.push(FreedRange {
                     physical_start: ext.physical_start + freed_start,
-                    count: middle_len as u16,
+                    count: middle_len,
                 });
                 let right_offset = end - ext_start;
                 remaining.push(Ext4Extent {
-                    logical_block: end,
+                    logical_block: end as u32,
                     raw_len: encode_len((ext_end - end) as u16, ext.is_unwritten()),
-                    physical_start: ext.physical_start + u64::from(right_offset),
+                    physical_start: ext.physical_start + right_offset,
                 });
             } else {
                 freed.push(FreedRange {
@@ -962,19 +971,18 @@ fn trim_extents(
             }
         } else {
             // ext_start >= start, ext_end > end: trim from the left.
-            let trim_count = end - ext_start;
+            let trim_count = (end - ext_start) as u16;
             freed.push(FreedRange {
                 physical_start: ext.physical_start,
-                count: trim_count as u16,
+                count: trim_count,
             });
             remaining.push(Ext4Extent {
-                logical_block: end,
+                logical_block: end as u32,
                 raw_len: encode_len((ext_end - end) as u16, ext.is_unwritten()),
                 physical_start: ext.physical_start + u64::from(trim_count),
             });
         }
     }
-
     (remaining, freed)
 }
 
@@ -1488,7 +1496,7 @@ mod tests {
         let root = make_root();
 
         let result = search(&cx, &dev, &root, 0).unwrap();
-        assert_eq!(result, SearchResult::Hole { hole_len: u32::MAX });
+        assert_eq!(result, SearchResult::Hole { hole_len: 1_u64 << 32 });
     }
 
     #[test]
@@ -2074,7 +2082,7 @@ mod tests {
         assert_eq!(header.entries, 0);
 
         let result = search(&cx, &dev, &root, 0).unwrap();
-        assert_eq!(result, SearchResult::Hole { hole_len: u32::MAX });
+        assert_eq!(result, SearchResult::Hole { hole_len: 1_u64 << 32 });
 
         let count = walk(&cx, &dev, &root, &mut |_| Ok(())).unwrap();
         assert_eq!(count, 0);
@@ -2451,7 +2459,7 @@ mod tests {
         let root = make_root();
 
         let result = search(&cx, &dev, &root, u32::MAX).unwrap();
-        assert_eq!(result, SearchResult::Hole { hole_len: u32::MAX });
+        assert_eq!(result, SearchResult::Hole { hole_len: 1_u64 << 32 });
     }
 
     #[test]
@@ -2594,8 +2602,7 @@ mod tests {
 
         // Delete starting near u32::MAX with large count — should saturate, not overflow.
         let freed =
-            delete_range(&cx, &dev, &mut root, u32::MAX - 10, u32::MAX, &mut alloc).unwrap();
-        assert_eq!(freed.len(), 1);
+            delete_range(&cx, &dev, &mut root, u32::MAX - 10, u32::MAX.into(), &mut alloc).unwrap();
         assert_eq!(freed[0].physical_start, 777);
         assert_eq!(freed[0].count, 5);
     }
@@ -2886,7 +2893,7 @@ mod tests {
         assert!(header.depth >= 1, "should be multi-level");
 
         // Delete everything.
-        delete_range(&cx, &dev, &mut root, 0, u32::MAX, &mut alloc).unwrap();
+        delete_range(&cx, &dev, &mut root, 0, u32::MAX.into(), &mut alloc).unwrap();
 
         // Walk should visit 0 extents.
         let mut count = 0;
@@ -3493,8 +3500,8 @@ mod tests {
         // Empty tree: search at u32::MAX should return a hole
         match search(&cx, &dev, &root, u32::MAX).unwrap() {
             SearchResult::Hole { hole_len } => {
-                // hole_len should be u32::MAX (saturating_sub behavior)
-                assert_eq!(hole_len, u32::MAX);
+                // hole_len should be 1 << 32 (saturating_sub behavior in u32 used to return u32::MAX)
+                assert_eq!(hole_len, 1_u64 << 32);
             }
             other => panic!("expected Hole, got {other:?}"),
         }
@@ -3619,7 +3626,7 @@ mod tests {
 
             let ds = u32::from(del_start);
             let dc = u32::from(del_count);
-            delete_range(&cx, &dev, &mut root, ds, dc, &mut alloc).unwrap();
+            delete_range(&cx, &dev, &mut root, ds, dc.into(), &mut alloc).unwrap();
             model.retain(|logical, _| *logical < ds || *logical >= ds.saturating_add(dc));
 
             // Verify remaining keys are intact.
@@ -3687,7 +3694,7 @@ mod tests {
                 } else {
                     let ds = u32::from(key_or_start);
                     let dc = u32::from(count);
-                    delete_range(&cx, &dev, &mut root, ds, dc, &mut alloc).unwrap();
+                    delete_range(&cx, &dev, &mut root, ds, dc.into(), &mut alloc).unwrap();
                     model.retain(|logical, _| *logical < ds || *logical >= ds.saturating_add(dc));
                 }
 
@@ -3797,7 +3804,7 @@ mod tests {
             }
 
             // Delete the entire possible range.
-            delete_range(&cx, &dev, &mut root, 0, u32::MAX, &mut alloc).unwrap();
+            delete_range(&cx, &dev, &mut root, 0, u32::MAX.into(), &mut alloc).unwrap();
 
             let mut walked = Vec::new();
             walk(&cx, &dev, &root, &mut |ext| {
@@ -3836,7 +3843,7 @@ mod tests {
             for (start, count) in delete_ranges {
                 let delete_start = u32::from(start);
                 let delete_end = delete_start.saturating_add(u32::from(count));
-                delete_range(&cx, &dev, &mut root, delete_start, u32::from(count), &mut alloc).unwrap();
+                delete_range(&cx, &dev, &mut root, delete_start, u64::from(count), &mut alloc).unwrap();
                 model.retain(|logical, _| *logical < delete_start || *logical >= delete_end);
                 assert_tree_invariants(&cx, &dev, &root).unwrap();
             }

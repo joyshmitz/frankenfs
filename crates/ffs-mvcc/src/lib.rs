@@ -545,8 +545,7 @@ impl ContentionMetrics {
         if had_conflict {
             self.total_conflicts += 1;
             let merge_sample = if merge_succeeded { 1.0 } else { 0.0 };
-            self.merge_success_rate =
-                decay.mul_add(self.merge_success_rate, merge_sample * alpha);
+            self.merge_success_rate = decay.mul_add(self.merge_success_rate, merge_sample * alpha);
             if merge_succeeded {
                 self.total_merges += 1;
             }
@@ -864,7 +863,9 @@ impl MvccStore {
     #[must_use]
     pub fn effective_policy(&self) -> ConflictPolicy {
         match self.conflict_policy {
-            ConflictPolicy::Adaptive => self.contention_metrics.select_policy(&self.adaptive_config),
+            ConflictPolicy::Adaptive => {
+                self.contention_metrics.select_policy(&self.adaptive_config)
+            }
             other => other,
         }
     }
@@ -1380,13 +1381,7 @@ impl MvccStore {
         );
     }
 
-    fn emit_merge_rejected(
-        &self,
-        txn_id: u64,
-        block_id: u64,
-        proof_variant: &str,
-        reason: &str,
-    ) {
+    fn emit_merge_rejected(&self, txn_id: u64, block_id: u64, proof_variant: &str, reason: &str) {
         let Some(sink) = &self.evidence_sink else {
             return;
         };
@@ -1406,8 +1401,12 @@ impl MvccStore {
         if prev_effective == new_effective {
             return;
         }
-        let loss_strict = self.contention_metrics.expected_loss_strict(&self.adaptive_config);
-        let loss_merge = self.contention_metrics.expected_loss_safe_merge(&self.adaptive_config);
+        let loss_strict = self
+            .contention_metrics
+            .expected_loss_strict(&self.adaptive_config);
+        let loss_merge = self
+            .contention_metrics
+            .expected_loss_safe_merge(&self.adaptive_config);
         // Positive delta = the new policy is cheaper than the old one.
         let loss_old = match prev_effective {
             ConflictPolicy::Strict => loss_strict,
@@ -1542,8 +1541,13 @@ impl MvccStore {
         let variant = Self::merge_proof_variant_name(&proof);
 
         if effective == ConflictPolicy::Strict {
-            self.emit_merge_check_and_reject(txn.id.0, block.0, &variant,
-                "strict_policy_rejects_all_merges", "strict_fcw_conflict");
+            self.emit_merge_check_and_reject(
+                txn.id.0,
+                block.0,
+                &variant,
+                "strict_policy_rejects_all_merges",
+                "strict_fcw_conflict",
+            );
             return Err(CommitError::Conflict {
                 block,
                 snapshot: txn.snapshot.high,
@@ -1562,8 +1566,13 @@ impl MvccStore {
             self.emit_merge_proof_checked(txn.id.0, block.0, &variant, true, None);
             Ok((variant, bytes_len))
         } else {
-            self.emit_merge_check_and_reject(txn.id.0, block.0, &variant,
-                "merge_bytes_returned_none", "merge_validation_failed");
+            self.emit_merge_check_and_reject(
+                txn.id.0,
+                block.0,
+                &variant,
+                "merge_bytes_returned_none",
+                "merge_validation_failed",
+            );
             Err(CommitError::Conflict {
                 block,
                 snapshot: txn.snapshot.high,
@@ -1621,7 +1630,10 @@ impl MvccStore {
                     }
                     Err(err) => {
                         self.contention_metrics.record_commit(
-                            self.adaptive_config.ema_alpha, true, false, true,
+                            self.adaptive_config.ema_alpha,
+                            true,
+                            false,
+                            true,
                         );
                         self.maybe_emit_policy_switch(prev_effective);
                         return Err(err);
@@ -1632,7 +1644,10 @@ impl MvccStore {
                 if let Err(err) = self.enforce_chain_pressure(txn.id, *block, cap) {
                     // Chain backpressure abort — still record the commit attempt.
                     self.contention_metrics.record_commit(
-                        self.adaptive_config.ema_alpha, had_conflict, merge_succeeded, true,
+                        self.adaptive_config.ema_alpha,
+                        had_conflict,
+                        merge_succeeded,
+                        true,
                     );
                     return Err(err);
                 }
@@ -1641,7 +1656,10 @@ impl MvccStore {
 
         // Record successful preflight (no abort).
         self.contention_metrics.record_commit(
-            self.adaptive_config.ema_alpha, had_conflict, merge_succeeded, false,
+            self.adaptive_config.ema_alpha,
+            had_conflict,
+            merge_succeeded,
+            false,
         );
 
         // mvcc_merge_applied — emit after successful merge commit preflight.
@@ -1656,7 +1674,10 @@ impl MvccStore {
                 proof_variant = %variants_joined,
             );
             self.emit_merge_applied(
-                txn.id.0, merged_block_count, combined_write_bytes, &variants_joined,
+                txn.id.0,
+                merged_block_count,
+                combined_write_bytes,
+                &variants_joined,
             );
         }
 
@@ -8772,11 +8793,7 @@ mod tests {
         let mut txn_c = store.begin();
         let mut c_data = vec![0; 64];
         c_data.extend_from_slice(&[0xCC; 16]);
-        txn_c.stage_write_with_proof(
-            BlockNumber(0),
-            c_data,
-            MergeProof::AppendOnly { base_len },
-        );
+        txn_c.stage_write_with_proof(BlockNumber(0), c_data, MergeProof::AppendOnly { base_len });
         store.commit(txn_c).unwrap();
 
         // B appends to block 0 with AppendOnly proof.
@@ -8784,11 +8801,7 @@ mod tests {
         store.next_txn += 1;
         let mut b_data = vec![0; 64];
         b_data.extend_from_slice(&[0xBB; 8]);
-        txn_b.stage_write_with_proof(
-            BlockNumber(0),
-            b_data,
-            MergeProof::AppendOnly { base_len },
-        );
+        txn_b.stage_write_with_proof(BlockNumber(0), b_data, MergeProof::AppendOnly { base_len });
 
         // Should succeed via merge proof.
         let result = store.commit(txn_b);

@@ -17,6 +17,7 @@ use ffs_types::{
     EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, TxnId,
 };
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -50,12 +51,20 @@ fn normalized_alignment(requested: usize) -> usize {
 ///
 /// This type remains fully safe by keeping the original backing allocation and
 /// exposing an aligned subslice.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AlignedVec {
     storage: Vec<u8>,
     start: usize,
     len: usize,
     alignment: usize,
+}
+
+impl Clone for AlignedVec {
+    fn clone(&self) -> Self {
+        let mut new = Self::new(self.len, self.alignment);
+        new.as_mut_slice().copy_from_slice(self.as_slice());
+        new
+    }
 }
 
 impl AlignedVec {
@@ -664,6 +673,8 @@ pub struct CacheMetrics {
     pub dirty_blocks: usize,
     /// Total bytes represented by dirty blocks.
     pub dirty_bytes: usize,
+    /// Current number of committed dirty blocks waiting for writeback.
+    pub writeback_queue_depth: usize,
     /// Age of the oldest dirty block in write-order ticks.
     ///
     /// This is a logical clock (not wall time), incremented per dirty-mark.
@@ -697,6 +708,30 @@ impl CacheMetrics {
             self.dirty_blocks as f64 / self.capacity as f64
         }
     }
+
+    /// Convert the internal cache counters into the shared runtime export shape.
+    #[must_use]
+    pub fn runtime_metrics_snapshot(&self) -> CacheRuntimeMetricsSnapshot {
+        CacheRuntimeMetricsSnapshot {
+            cache_hits: self.hits,
+            cache_misses: self.misses,
+            cache_evictions: self.evictions,
+            cache_dirty_count: u64::try_from(self.dirty_blocks).unwrap_or(u64::MAX),
+            writeback_queue_depth: u64::try_from(self.writeback_queue_depth).unwrap_or(u64::MAX),
+            hit_rate: self.hit_ratio(),
+        }
+    }
+}
+
+/// JSON-friendly cache metrics export used by runtime/e2e reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CacheRuntimeMetricsSnapshot {
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_evictions: u64,
+    pub cache_dirty_count: u64,
+    pub writeback_queue_depth: u64,
+    pub hit_rate: f64,
 }
 
 /// Memory pressure levels used to adapt cache target size.
@@ -861,6 +896,11 @@ impl DirtyTracker {
         }
         (in_flight, committed)
     }
+
+    fn flushable_count(&self) -> usize {
+        let (_, committed) = self.state_counts();
+        committed
+    }
 }
 
 #[derive(Debug)]
@@ -986,6 +1026,7 @@ impl ArcState {
             resident: self.resident_len(),
             dirty_blocks: self.dirty.dirty_count(),
             dirty_bytes: self.dirty.dirty_bytes(),
+            writeback_queue_depth: self.dirty.flushable_count(),
             oldest_dirty_age_ticks: self.dirty.oldest_dirty_age_ticks(),
             capacity: self.capacity,
             p: {
@@ -1447,6 +1488,7 @@ impl ArcState {
     }
 
     #[cfg(feature = "s3fifo")]
+    #[allow(clippy::too_many_lines)]
     fn s3_rebalance_queues(&mut self, block_hint: Option<BlockNumber>) {
         let pending_admission = block_hint.filter(|block| !self.resident.contains_key(block));
 
@@ -1479,26 +1521,24 @@ impl ArcState {
                     main_len = self.t2.len(),
                     ghost_len = self.b1.len()
                 );
+            } else if self.evict_resident(victim) {
+                self.loc.insert(victim, ArcList::B1);
+                self.b1.push_back(victim);
+                self.evictions = self.evictions.saturating_add(1);
+                trace!(
+                    target: "ffs::block::s3fifo",
+                    event = "victim_selection",
+                    block = victim.0,
+                    from_queue = "small",
+                    to_queue = "ghost",
+                    access_count,
+                    small_len = self.t1.len(),
+                    main_len = self.t2.len(),
+                    ghost_len = self.b1.len()
+                );
             } else {
-                if self.evict_resident(victim) {
-                    self.loc.insert(victim, ArcList::B1);
-                    self.b1.push_back(victim);
-                    self.evictions = self.evictions.saturating_add(1);
-                    trace!(
-                        target: "ffs::block::s3fifo",
-                        event = "victim_selection",
-                        block = victim.0,
-                        from_queue = "small",
-                        to_queue = "ghost",
-                        access_count,
-                        small_len = self.t1.len(),
-                        main_len = self.t2.len(),
-                        ghost_len = self.b1.len()
-                    );
-                } else {
-                    self.t1.push_back(victim);
-                    self.loc.insert(victim, ArcList::T1);
-                }
+                self.t1.push_back(victim);
+                self.loc.insert(victim, ArcList::T1);
             }
         }
 
@@ -2262,6 +2302,12 @@ impl<D: BlockDevice> ArcCache<D> {
     #[must_use]
     pub fn metrics(&self) -> CacheMetrics {
         self.state.lock().snapshot_metrics()
+    }
+
+    /// Export cache metrics using the runtime/e2e JSON field names.
+    #[must_use]
+    pub fn runtime_metrics(&self) -> CacheRuntimeMetricsSnapshot {
+        self.metrics().runtime_metrics_snapshot()
     }
 
     #[must_use]
@@ -5433,6 +5479,7 @@ mod tests {
         assert_eq!(m.resident, 0);
         assert_eq!(m.dirty_blocks, 0);
         assert_eq!(m.dirty_bytes, 0);
+        assert_eq!(m.writeback_queue_depth, 0);
         assert_eq!(m.oldest_dirty_age_ticks, None);
         assert!(m.dirty_ratio().abs() < f64::EPSILON);
         assert_eq!(m.capacity, 4);
@@ -5511,6 +5558,54 @@ mod tests {
         assert_eq!(m.misses, 1);
         assert_eq!(m.hits, 1);
         assert!((m.hit_ratio() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cache_runtime_metrics_snapshot_uses_export_field_names() {
+        let metrics = CacheMetrics {
+            hits: 7,
+            misses: 3,
+            evictions: 2,
+            dirty_flushes: 0,
+            t1_len: 0,
+            t2_len: 0,
+            b1_len: 0,
+            b2_len: 0,
+            resident: 4,
+            dirty_blocks: 5,
+            dirty_bytes: 4096 * 5,
+            writeback_queue_depth: 2,
+            oldest_dirty_age_ticks: Some(9),
+            capacity: 8,
+            p: 0,
+        };
+
+        let export = metrics.runtime_metrics_snapshot();
+        assert_eq!(export.cache_hits, 7);
+        assert_eq!(export.cache_misses, 3);
+        assert_eq!(export.cache_evictions, 2);
+        assert_eq!(export.cache_dirty_count, 5);
+        assert_eq!(export.writeback_queue_depth, 2);
+        assert!((export.hit_rate - 0.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn arc_cache_runtime_metrics_export_serializes_to_json() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 4);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new(dev, 2).expect("cache");
+
+        let _ = cache.read_block(&cx, BlockNumber(0)).expect("read miss");
+        let _ = cache.read_block(&cx, BlockNumber(0)).expect("read hit");
+
+        let json = serde_json::to_value(cache.runtime_metrics()).expect("serialize metrics");
+        assert_eq!(json["cache_hits"], 1);
+        assert_eq!(json["cache_misses"], 1);
+        assert_eq!(json["cache_evictions"], 0);
+        assert_eq!(json["cache_dirty_count"], 0);
+        assert_eq!(json["writeback_queue_depth"], 0);
+        assert!((json["hit_rate"].as_f64().expect("hit rate") - 0.5).abs() < 1e-12);
     }
 
     #[test]
@@ -6732,6 +6827,7 @@ mod tests {
             resident: 0,
             dirty_blocks: 0,
             dirty_bytes: 0,
+            writeback_queue_depth: 0,
             oldest_dirty_age_ticks: None,
             capacity: 0,
             p: 0,
@@ -6760,6 +6856,7 @@ mod tests {
             resident: 0,
             dirty_blocks: 5,
             dirty_bytes: 20480,
+            writeback_queue_depth: 0,
             oldest_dirty_age_ticks: Some(3),
             capacity: 0,
             p: 0,
@@ -6921,6 +7018,32 @@ mod tests {
         let m = cache.metrics();
         assert_eq!(m.dirty_blocks, 0);
         assert_eq!(m.dirty_bytes, 0);
+        assert_eq!(m.writeback_queue_depth, 0);
+    }
+
+    #[test]
+    fn arc_cache_runtime_metrics_track_writeback_queue_depth() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 16);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let cache = ArcCache::new_with_policy(dev, 8, ArcWritePolicy::WriteBack).expect("cache");
+
+        for block in 0..4_u64 {
+            cache
+                .write_block(
+                    &cx,
+                    BlockNumber(block),
+                    &[u8::try_from(block).expect("fits"); 4096],
+                )
+                .expect("write");
+        }
+
+        let flushed = cache.flush_dirty_batch(&cx, 1).expect("flush batch");
+        assert_eq!(flushed, 1);
+
+        let export = cache.runtime_metrics();
+        assert_eq!(export.cache_dirty_count, 3);
+        assert_eq!(export.writeback_queue_depth, 3);
     }
 
     #[test]
@@ -7191,6 +7314,7 @@ mod tests {
             resident: 0,
             dirty_blocks: 0,
             dirty_bytes: 0,
+            writeback_queue_depth: 0,
             oldest_dirty_age_ticks: None,
             capacity: 10,
             p: 5,
@@ -7212,6 +7336,7 @@ mod tests {
             resident: 10,
             dirty_blocks: 10,
             dirty_bytes: 40960,
+            writeback_queue_depth: 0,
             oldest_dirty_age_ticks: Some(0),
             capacity: 10,
             p: 5,
@@ -7727,7 +7852,7 @@ mod tests {
                 hits, misses,
                 evictions: 0, dirty_flushes: 0,
                 t1_len: 0, t2_len: 0, b1_len: 0, b2_len: 0,
-                resident: 0, dirty_blocks: 0, dirty_bytes: 0,
+                resident: 0, dirty_blocks: 0, dirty_bytes: 0, writeback_queue_depth: 0,
                 oldest_dirty_age_ticks: None, capacity: 100, p: 0,
             };
             let ratio = metrics.hit_ratio();
@@ -7744,7 +7869,7 @@ mod tests {
             let metrics = CacheMetrics {
                 hits: 0, misses: 0, evictions: 0, dirty_flushes: 0,
                 t1_len: 0, t2_len: 0, b1_len: 0, b2_len: 0,
-                resident: 0, dirty_blocks, dirty_bytes: 0,
+                resident: 0, dirty_blocks, dirty_bytes: 0, writeback_queue_depth: 0,
                 oldest_dirty_age_ticks: None, capacity, p: 0,
             };
             let ratio = metrics.dirty_ratio();
@@ -8303,6 +8428,7 @@ mod tests {
             resident: 0,
             dirty_blocks: 0,
             dirty_bytes: 0,
+            writeback_queue_depth: 0,
             oldest_dirty_age_ticks: None,
             capacity: 10,
             p: 0,
@@ -8325,6 +8451,7 @@ mod tests {
             resident: 10,
             dirty_blocks: 0,
             dirty_bytes: 0,
+            writeback_queue_depth: 0,
             oldest_dirty_age_ticks: None,
             capacity: 10,
             p: 0,
@@ -8346,6 +8473,7 @@ mod tests {
             resident: 10,
             dirty_blocks: 10,
             dirty_bytes: 40960,
+            writeback_queue_depth: 0,
             oldest_dirty_age_ticks: Some(5),
             capacity: 10,
             p: 0,

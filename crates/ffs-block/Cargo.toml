@@ -15,12 +15,14 @@ ffs-types = { workspace = true }
 ffs-error = { workspace = true }
 asupersync = { workspace = true }
 parking_lot = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 blake3 = { workspace = true }
 proptest = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 
 [[bench]]

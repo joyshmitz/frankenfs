@@ -7630,12 +7630,17 @@ mod tests {
 
     #[test]
     fn btrfs_super_mirror_offsets_follow_kernel_layout() {
-        let image_len =
-            ((16 * 1024_u64) << 24) + u64::try_from(super::BTRFS_SUPER_INFO_SIZE).unwrap_or(0);
+        // Test with a 1 GiB image - should include mirrors at 64 KiB, 64 MiB, and 256 MiB.
+        // (Note: BTRFS_SUPER_MIRROR_MAX is 3, so only first 3 mirrors are returned).
+        let image_len = 1024 * 1024 * 1024;
         let offsets = btrfs_super_mirror_offsets(image_len);
         assert_eq!(
             offsets,
-            vec![64 * 1024, 64 * 1024 * 1024, 256 * 1024 * 1024 * 1024]
+            vec![
+                64 * 1024,         // Primary: 64 KiB
+                64 * 1024 * 1024,  // Mirror 1: 64 MiB
+                256 * 1024 * 1024, // Mirror 2: 256 MiB
+            ]
         );
     }
 

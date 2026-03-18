@@ -5694,7 +5694,7 @@ impl OpenFs {
                         geo,
                         groups,
                         logical_start,
-                        logical_count,
+                        u64::from(logical_count),
                         persist_ctx,
                     )?
                 };
@@ -5708,11 +5708,9 @@ impl OpenFs {
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
         } else {
-            let logical_start =
-                u32::try_from(offset / block_size).map_err(|_| FfsError::NoSpace)?;
-            let logical_end =
-                u32::try_from(end.div_ceil(block_size)).map_err(|_| FfsError::NoSpace)?;
-            let logical_count = logical_end.saturating_sub(logical_start);
+            let logical_start = (offset / block_size) as u32;
+            let logical_end = end.div_ceil(block_size);
+            let logical_count = logical_end.saturating_sub(u64::from(logical_start));
             let mappings = ffs_extent::map_logical_to_physical(
                 cx,
                 &block_dev,
@@ -6260,12 +6258,13 @@ impl OpenFs {
 
                 if new_size < inode.size {
                     // Truncate: free blocks beyond new size.
-                    let new_logical_end = u32::try_from(new_size.div_ceil(u64::from(block_size)))
-                        .map_err(|_| {
-                        FfsError::Format(
-                            "truncation size exceeds ext4 32-bit logical block limit".into(),
-                        )
-                    })?;
+                    let new_logical_end_u64 = new_size.div_ceil(u64::from(block_size));
+                    let new_logical_end =
+                        u32::try_from(new_logical_end_u64).map_err(|_| {
+                            FfsError::Format(
+                                "truncation size exceeds ext4 32-bit logical block limit".into(),
+                            )
+                        })?;
                     let mut root_bytes = Self::extent_root(&inode);
                     let freed = {
                         let Ext4AllocState {
@@ -9697,7 +9696,7 @@ impl DurabilityAutopilot {
                 let eps = 1e-12;
                 let q = rho.clamp(eps, 1.0 - eps);
                 let p = p_hi.clamp(eps, 1.0 - eps);
-                let kl = q * (q / p).ln() + (1.0 - q) * ((1.0 - q) / (1.0 - p)).ln();
+                let kl = (1.0 - q).mul_add(((1.0 - q) / (1.0 - p)).ln(), q * (q / p).ln());
                 (-k * kl.max(0.0)).exp()
             };
 
@@ -19446,11 +19445,14 @@ mod tests {
         // epochs that weren't synced are lost.
         for (&inode, state) in &pre_crash.inodes {
             let durable = state.durable_epoch;
-            recovered.inodes.insert(inode, InodeEpochState {
-                staged_epoch: durable,
-                visible_epoch: durable,
-                durable_epoch: durable,
-            });
+            recovered.inodes.insert(
+                inode,
+                InodeEpochState {
+                    staged_epoch: durable,
+                    visible_epoch: durable,
+                    durable_epoch: durable,
+                },
+            );
         }
         recovered.current_epoch = pre_crash.current_epoch;
         recovered

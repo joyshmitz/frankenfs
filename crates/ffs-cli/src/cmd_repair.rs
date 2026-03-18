@@ -660,7 +660,9 @@ pub fn btrfs_super_mirror_offsets(image_len: u64) -> Vec<u64> {
         let offset = if mirror == 0 {
             BTRFS_SUPER_INFO_OFFSET as u64
         } else {
-            let shift = BTRFS_SUPER_MIRROR_SHIFT.saturating_mul(mirror);
+            // Btrfs mirrors for index n >= 1 are at 64 MiB, 256 MiB, 1 GiB, 4 GiB...
+            // These are powers of 4: 16 KiB << (12 + 2*(n-1)) = 16 KiB << (10 + 2n).
+            let shift = 10_u32.saturating_add(mirror.saturating_mul(2));
             let Some(candidate) = BTRFS_SUPER_MIRROR_BASE.checked_shl(shift) else {
                 continue;
             };
@@ -2514,8 +2516,12 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                 let rebuild_groups = if rebuild_symbols_requested {
                     // --rebuild-symbols: discover all groups and rebuild.
                     if btrfs_specs_for_rebuild.is_empty() {
-                        btrfs_specs_for_rebuild =
-                            discover_btrfs_repair_group_specs(path, block_size).unwrap_or_default();
+                        match discover_btrfs_repair_group_specs(path, block_size) {
+                            Ok(specs) => btrfs_specs_for_rebuild = specs,
+                            Err(error) => {
+                                limitations.push(format!("failed to discover btrfs repair groups: {error:#}"));
+                            }
+                        }
                     }
                     btrfs_specs_for_rebuild
                         .iter()

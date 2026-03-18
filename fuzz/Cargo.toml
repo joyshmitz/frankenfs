@@ -1,0 +1,58 @@
+[package]
+name = "ffs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.ffs-ondisk]
+path = "../crates/ffs-ondisk"
+
+[dependencies.ffs-mvcc]
+path = "../crates/ffs-mvcc"
+
+[dependencies.ffs-types]
+path = "../crates/ffs-types"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_ext4_metadata"
+path = "fuzz_targets/fuzz_ext4_metadata.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_btrfs_metadata"
+path = "fuzz_targets/fuzz_btrfs_metadata.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ext4_xattr"
+path = "fuzz_targets/fuzz_ext4_xattr.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ext4_dir_extent"
+path = "fuzz_targets/fuzz_ext4_dir_extent.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_wal_replay"
+path = "fuzz_targets/fuzz_wal_replay.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_mvcc_operations"
+path = "fuzz_targets/fuzz_mvcc_operations.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_extent_tree"
+path = "fuzz_targets/fuzz_extent_tree.rs"
+doc = false

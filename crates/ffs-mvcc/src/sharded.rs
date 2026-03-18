@@ -132,9 +132,10 @@ impl ShardedMvccStore {
     pub fn effective_policy(&self) -> ConflictPolicy {
         let policy = *self.conflict_policy.read();
         match policy {
-            ConflictPolicy::Adaptive => {
-                self.contention_metrics.read().select_policy(&self.adaptive_config)
-            }
+            ConflictPolicy::Adaptive => self
+                .contention_metrics
+                .read()
+                .select_policy(&self.adaptive_config),
             other => other,
         }
     }
@@ -258,7 +259,10 @@ impl ShardedMvccStore {
                 // Under Strict policy, any conflict is an immediate abort.
                 if effective == ConflictPolicy::Strict {
                     self.contention_metrics.write().record_commit(
-                        self.adaptive_config.ema_alpha, true, false, true,
+                        self.adaptive_config.ema_alpha,
+                        true,
+                        false,
+                        true,
                     );
                     return Err(CommitError::Conflict {
                         block,
@@ -280,7 +284,10 @@ impl ShardedMvccStore {
                     );
                 } else {
                     self.contention_metrics.write().record_commit(
-                        self.adaptive_config.ema_alpha, true, false, true,
+                        self.adaptive_config.ema_alpha,
+                        true,
+                        false,
+                        true,
                     );
                     return Err(CommitError::Conflict {
                         block,
@@ -293,7 +300,10 @@ impl ShardedMvccStore {
 
         // Record successful preflight (no abort).
         self.contention_metrics.write().record_commit(
-            self.adaptive_config.ema_alpha, had_conflict, merge_succeeded, false,
+            self.adaptive_config.ema_alpha,
+            had_conflict,
+            merge_succeeded,
+            false,
         );
         Ok(())
     }

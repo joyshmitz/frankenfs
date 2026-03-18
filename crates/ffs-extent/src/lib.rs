@@ -18,7 +18,7 @@ use ffs_alloc::{AllocHint, BlockAlloc, FsGeometry, GroupStats};
 use ffs_block::BlockDevice;
 use ffs_btree::{BlockAllocator, SearchResult};
 use ffs_error::{FfsError, Result};
-use ffs_ondisk::{Ext4Extent, ExtentTree, parse_extent_tree};
+use ffs_ondisk::{EXT_INIT_MAX_LEN, Ext4Extent, ExtentTree, parse_extent_tree};
 use ffs_types::BlockNumber;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ pub fn map_logical_to_physical(
     dev: &dyn BlockDevice,
     root_bytes: &[u8; 60],
     logical_start: u32,
-    count: u32,
+    count: u64,
 ) -> Result<Vec<ExtentMapping>> {
     if count == 0 {
         return Ok(Vec::new());
@@ -56,19 +56,19 @@ pub fn map_logical_to_physical(
     validate_root_header("map_logical_to_physical", root_bytes)?;
 
     let mut mappings = Vec::new();
-    let mut pos = logical_start;
-    let end = logical_start.saturating_add(count);
+    let mut pos = u64::from(logical_start);
+    let end = u64::from(logical_start) + count;
 
     while pos < end {
         cx_checkpoint(cx)?;
-        let result = ffs_btree::search(cx, dev, root_bytes, pos)?;
+        let result = ffs_btree::search(cx, dev, root_bytes, pos as u32)?;
         match result {
             SearchResult::Found {
                 extent,
                 offset_in_extent,
             } => {
                 let actual_len = u32::from(extent.actual_len());
-                let remaining_in_extent = actual_len.saturating_sub(offset_in_extent);
+                let remaining_in_extent = u64::from(actual_len.saturating_sub(offset_in_extent));
                 let to_map = remaining_in_extent.min(end - pos);
                 if to_map == 0 {
                     return Err(FfsError::Corruption {
@@ -79,9 +79,9 @@ pub fn map_logical_to_physical(
                     });
                 }
                 mappings.push(ExtentMapping {
-                    logical_start: pos,
+                    logical_start: pos as u32,
                     physical_start: extent.physical_start + u64::from(offset_in_extent),
-                    count: to_map,
+                    count: to_map as u32,
                     unwritten: extent.is_unwritten(),
                 });
                 pos += to_map;
@@ -97,9 +97,9 @@ pub fn map_logical_to_physical(
                     });
                 }
                 mappings.push(ExtentMapping {
-                    logical_start: pos,
+                    logical_start: pos as u32,
                     physical_start: 0,
-                    count: to_map,
+                    count: to_map as u32,
                     unwritten: false,
                 });
                 pos += to_map;
@@ -167,8 +167,10 @@ pub fn allocate_extent(
 ) -> Result<ExtentMapping> {
     cx_checkpoint(cx)?;
 
-    if count == 0 || count > u32::from(u16::MAX >> 1) {
-        return Err(FfsError::Format("extent count must be 1..=32767".into()));
+    if count == 0 || count > u32::from(EXT_INIT_MAX_LEN) {
+        return Err(FfsError::Format(
+            format!("extent count must be 1..={EXT_INIT_MAX_LEN}").into(),
+        ));
     }
     validate_root_header("allocate_extent", root_bytes)?;
 
@@ -294,12 +296,13 @@ pub fn truncate_extents(
             hint: AllocHint::default(),
             pctx,
         };
+        let count_to_delete = (1_u64 << 32).saturating_sub(u64::from(new_logical_end));
         ffs_btree::delete_range(
             cx,
             dev,
             root_bytes,
             new_logical_end,
-            u32::MAX - new_logical_end,
+            count_to_delete,
             &mut tree_alloc,
         )?
     };
@@ -334,7 +337,7 @@ pub fn punch_hole(
     geo: &FsGeometry,
     groups: &mut [GroupStats],
     logical_start: u32,
-    count: u32,
+    count: u64,
     pctx: &ffs_alloc::PersistCtx,
 ) -> Result<u64> {
     if count == 0 {
@@ -432,7 +435,7 @@ pub fn mark_written(
             dev,
             root_bytes,
             ext.logical_block,
-            ext_len,
+            u64::from(ext_len),
             &mut tree_alloc,
         )?;
 
@@ -2231,7 +2234,7 @@ mod tests {
             &geo,
             &mut groups,
             0,
-            32768,
+            32769,
             &AllocHint::default(),
             &pctx,
         )
@@ -2813,10 +2816,10 @@ mod tests {
     }
 
     #[test]
-    fn allocate_extent_count_boundary_32767() {
-        // Maximum valid count is 32767 (u16::MAX >> 1).
-        // Cannot test actual allocation of 32767 blocks (insufficient space in test fixture)
-        // but can verify that 32768 is rejected.
+    fn allocate_extent_count_boundary_32768() {
+        // Maximum valid count for regular extent is 32768.
+        // Cannot test actual allocation of 32768 blocks (insufficient space in test fixture)
+        // but can verify that 32769 is rejected.
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let geo = make_geometry();
@@ -2831,13 +2834,13 @@ mod tests {
             &geo,
             &mut groups,
             0,
-            32768,
+            32769,
             &AllocHint::default(),
             &pctx,
         )
         .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("32767"), "error should mention limit: {msg}");
+        assert!(msg.contains("32768"), "error should mention limit: {msg}");
     }
 
     #[test]
@@ -3039,7 +3042,7 @@ mod tests {
             prop_assert_eq!(alloc.count, count);
 
             let maps = map_logical_to_physical(
-                &cx, &dev, &root, logical_start, count,
+                &cx, &dev, &root, logical_start, count.into(),
             ).unwrap();
 
             // Total mapped blocks should equal count.
@@ -3107,13 +3110,13 @@ mod tests {
 
             let freed1 = punch_hole(
                 &cx, &dev, &mut root, &geo, &mut groups,
-                hole_offset, actual_hole_len, &pctx,
+                hole_offset, actual_hole_len.into(), &pctx,
             ).unwrap();
             prop_assert_eq!(freed1, u64::from(actual_hole_len));
 
             let freed2 = punch_hole(
                 &cx, &dev, &mut root, &geo, &mut groups,
-                hole_offset, actual_hole_len, &pctx,
+                hole_offset, actual_hole_len.into(), &pctx,
             ).unwrap();
             prop_assert_eq!(freed2, 0_u64, "second punch of same range should free 0 blocks");
         }
@@ -3140,7 +3143,7 @@ mod tests {
             ).unwrap();
 
             let maps = map_logical_to_physical(
-                &cx, &dev, &root, map_start, map_count,
+                &cx, &dev, &root, map_start, map_count.into(),
             ).unwrap();
 
             // Total mapped blocks (data + holes) must equal the requested count.
@@ -3196,7 +3199,7 @@ mod tests {
             // Mapping the full range should show both extents and any hole between.
             let total_logical = logical_b + count_b;
             let maps = map_logical_to_physical(
-                &cx, &dev, &root, 0, total_logical,
+                &cx, &dev, &root, 0, total_logical.into(),
             ).unwrap();
             let total_mapped: u32 = maps.iter().map(|m| m.count).sum();
             prop_assert_eq!(total_mapped, total_logical);
@@ -3229,12 +3232,12 @@ mod tests {
 
             punch_hole(
                 &cx, &dev, &mut root, &geo, &mut groups,
-                hole_offset, actual_hole, &pctx,
+                hole_offset, actual_hole.into(), &pctx,
             ).unwrap();
 
             // Blocks before hole should still map to original physical range.
             let pre_maps = map_logical_to_physical(
-                &cx, &dev, &root, 0, hole_offset,
+                &cx, &dev, &root, 0, hole_offset.into(),
             ).unwrap();
             let pre_total: u32 = pre_maps.iter()
                 .filter(|m| m.physical_start != 0)
@@ -3272,7 +3275,7 @@ mod tests {
             prop_assert!(alloc.unwritten, "allocate_unwritten_extent must set unwritten=true");
 
             let maps = map_logical_to_physical(
-                &cx, &dev, &root, 0, count,
+                &cx, &dev, &root, 0, count.into(),
             ).unwrap();
             prop_assert_eq!(maps.len(), 1);
             prop_assert!(maps[0].unwritten, "mapping of unwritten extent must report unwritten=true");
@@ -3309,7 +3312,7 @@ mod tests {
 
             // Map the full range and verify physical addresses are preserved.
             let maps = map_logical_to_physical(
-                &cx, &dev, &root, 0, count,
+                &cx, &dev, &root, 0, count.into(),
             ).unwrap();
 
             // All physical addresses should reference the same physical region.
@@ -3450,7 +3453,7 @@ mod tests {
 
             let freed = punch_hole(
                 &cx, &dev, &mut root, &geo, &mut groups,
-                hole_offset, actual_hole, &pctx,
+                hole_offset, actual_hole.into(), &pctx,
             ).unwrap();
             prop_assert_eq!(freed, u64::from(actual_hole));
 
@@ -3501,7 +3504,7 @@ mod tests {
             ).unwrap();
 
             // Map sub-range and check physical addresses.
-            let maps = map_logical_to_physical(&cx, &dev, &root, sub_start, sub_len).unwrap();
+            let maps = map_logical_to_physical(&cx, &dev, &root, sub_start, sub_len.into()).unwrap();
             let total: u32 = maps.iter().map(|m| m.count).sum();
             prop_assert_eq!(total, sub_len, "sub-range should cover requested count");
 
@@ -3546,13 +3549,13 @@ mod tests {
             prop_assert_eq!(freed, u64::from(count - cut), "freed block count");
 
             // Head should still map correctly.
-            let maps = map_logical_to_physical(&cx, &dev, &root, 0, cut).unwrap();
+            let maps = map_logical_to_physical(&cx, &dev, &root, 0, cut.into()).unwrap();
             let mapped: u32 = maps.iter().filter(|m| m.physical_start != 0).map(|m| m.count).sum();
             prop_assert_eq!(mapped, cut, "head blocks should survive truncation");
             prop_assert_eq!(maps[0].physical_start, alloc.physical_start);
 
             // Tail should be holes.
-            let tail = map_logical_to_physical(&cx, &dev, &root, cut, 1).unwrap();
+            let tail = map_logical_to_physical(&cx, &dev, &root, cut, 1_u64).unwrap();
             prop_assert_eq!(tail[0].physical_start, 0, "truncated block should be hole");
         }
 
@@ -3586,14 +3589,14 @@ mod tests {
                 &cx, &dev, &mut root, &geo, &mut groups,
                 mark_offset, actual_mark, &pctx,
             ).unwrap();
-            let maps1 = map_logical_to_physical(&cx, &dev, &root, 0, count).unwrap();
+            let maps1 = map_logical_to_physical(&cx, &dev, &root, 0, count.into()).unwrap();
 
             // Second mark_written on the same range.
             mark_written(
                 &cx, &dev, &mut root, &geo, &mut groups,
                 mark_offset, actual_mark, &pctx,
             ).unwrap();
-            let maps2 = map_logical_to_physical(&cx, &dev, &root, 0, count).unwrap();
+            let maps2 = map_logical_to_physical(&cx, &dev, &root, 0, count.into()).unwrap();
 
             prop_assert_eq!(maps1.len(), maps2.len(), "idempotent: same number of mappings");
             for (a, b) in maps1.iter().zip(maps2.iter()) {
@@ -3672,11 +3675,11 @@ mod tests {
 
             punch_hole(
                 &cx, &dev, &mut root, &geo, &mut groups,
-                hole_offset, actual_hole, &pctx,
+                hole_offset, actual_hole.into(), &pctx,
             ).unwrap();
 
             // Map the full range.
-            let maps = map_logical_to_physical(&cx, &dev, &root, 0, count).unwrap();
+            let maps = map_logical_to_physical(&cx, &dev, &root, 0, count.into()).unwrap();
 
             // Prefix [0, hole_offset) should still be physically mapped.
             let prefix_mapped: u32 = maps.iter()

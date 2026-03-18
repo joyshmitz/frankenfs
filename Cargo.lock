@@ -590,6 +590,8 @@ dependencies = [
  "ffs-types",
  "parking_lot",
  "proptest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tracing",
 ]

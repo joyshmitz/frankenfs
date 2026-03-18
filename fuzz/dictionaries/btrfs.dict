@@ -1,0 +1,22 @@
+# btrfs magic numbers and constants
+btrfs_magic="_BHRfS_M"
+btrfs_magic_hex="\x5f\x42\x48\x52\x66\x53\x5f\x4d"
+btrfs_csum_type_crc32c="\x00\x00"
+
+# Common node sizes
+nodesize_4k="\x00\x10\x00\x00"
+nodesize_16k="\x00\x40\x00\x00"
+nodesize_64k="\x00\x00\x01\x00"
+
+# Item types
+inode_item="\x01"
+inode_ref="\x0C"
+dir_item="\x54"
+dir_index="\x60"
+extent_data="\x6C"
+root_item="\x84"
+chunk_item="\xE4"
+dev_item="\xD8"
+
+# Superblock offset
+super_offset="\x00\x00\x01\x00\x00\x00\x00\x00"

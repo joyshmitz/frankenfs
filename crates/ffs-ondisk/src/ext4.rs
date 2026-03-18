@@ -11,7 +11,7 @@ use ffs_types::{
 use serde::{Deserialize, Serialize};
 
 const EXT4_EXTENT_MAGIC: u16 = 0xF30A;
-const EXT_INIT_MAX_LEN: u16 = 1_u16 << 15;
+pub const EXT_INIT_MAX_LEN: u16 = 1_u16 << 15;
 
 /// Match the Linux kernel's `ext4_chksum()` / `crc32c_le()` convention.
 ///

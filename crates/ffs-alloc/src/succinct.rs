@@ -281,8 +281,9 @@ impl SuccinctBitmap {
         let mut hi = self.superblocks.len() - 1;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let zeros_before_next =
-                ((mid + 1) as u32) * SUPERBLOCK_BITS - self.superblocks[mid + 1];
+            let next_super_bit =
+                (((mid + 1) as u64) * u64::from(SUPERBLOCK_BITS)).min(u64::from(self.len)) as u32;
+            let zeros_before_next = next_super_bit - self.superblocks[mid + 1];
             let zeros_before_next = zeros_before_next.min(zeros);
             if zeros_before_next <= k {
                 lo = mid + 1;
@@ -291,7 +292,9 @@ impl SuccinctBitmap {
             }
         }
         let super_idx = lo;
-        let zeros_before_super = (super_idx as u32) * SUPERBLOCK_BITS - self.superblocks[super_idx];
+        let super_bit =
+            ((super_idx as u64) * u64::from(SUPERBLOCK_BITS)).min(u64::from(self.len)) as u32;
+        let zeros_before_super = super_bit - self.superblocks[super_idx];
         let mut remaining = k - zeros_before_super;
 
         // Linear search within blocks.
@@ -302,17 +305,18 @@ impl SuccinctBitmap {
         for bi in block_start..block_end {
             let block_bit_start = (bi as u32) * BLOCK_BITS;
             let local_ones = u32::from(self.blocks[bi]);
-            let local_zeros = block_bit_start - (super_idx as u32) * SUPERBLOCK_BITS - local_ones;
+            let local_zeros = block_bit_start - super_bit - local_ones;
 
             let next_bi = bi + 1;
             let next_zeros = if next_bi < block_end {
                 let next_bit_start = (next_bi as u32) * BLOCK_BITS;
                 let next_local_ones = u32::from(self.blocks[next_bi]);
-                next_bit_start - (super_idx as u32) * SUPERBLOCK_BITS - next_local_ones
+                next_bit_start - super_bit - next_local_ones
             } else {
-                let end_bit = (self.len).min(((super_idx + 1) as u32) * SUPERBLOCK_BITS);
+                let next_super_bit = (((super_idx + 1) as u64) * u64::from(SUPERBLOCK_BITS))
+                    .min(u64::from(self.len)) as u32;
                 let total_ones = self.superblocks[super_idx + 1] - self.superblocks[super_idx];
-                end_bit - (super_idx as u32) * SUPERBLOCK_BITS - total_ones
+                next_super_bit - super_bit - total_ones
             };
 
             if next_zeros > remaining {

@@ -502,16 +502,26 @@ impl RefreshLossModel {
             f64::INFINITY
         };
         let effective_window = age_window.min(block_window);
-        if !effective_window.is_finite() || effective_window <= 0.0 {
-            // Both triggers disabled (or nonsensical) — no refreshes, no writes.
-            return 0.0;
+        if effective_window <= 0.0 {
+            // Refresh on every write.
+            return self.refresh_io_cost * clamped_rate;
         }
         let blocks = f64::from(self.source_block_count);
-        let avg_stale_blocks = (clamped_rate * effective_window / 2.0).min(blocks);
+        let avg_stale_blocks = if effective_window.is_finite() {
+            (clamped_rate * effective_window / 2.0).min(blocks)
+        } else if clamped_rate > 0.0 {
+            blocks
+        } else {
+            0.0
+        };
         let avg_stale_fraction = avg_stale_blocks / blocks;
         let data_loss_rate =
             self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
-        let refresh_amortized = self.refresh_io_cost / effective_window;
+        let refresh_amortized = if effective_window.is_finite() {
+            self.refresh_io_cost / effective_window
+        } else {
+            0.0
+        };
         data_loss_rate * self.data_loss_cost + refresh_amortized
     }
 
@@ -1081,10 +1091,7 @@ mod tests {
         let m = RefreshLossModel::default();
         // Zero staleness = "refresh every tick" → infinite cost.
         let loss = m.expected_loss_age_only(0.0, 100.0);
-        assert!(
-            loss >= f64::MAX - 1.0,
-            "expected f64::MAX, got {loss}"
-        );
+        assert!(loss >= f64::MAX - 1.0, "expected f64::MAX, got {loss}");
     }
 
     // ── Verification Gate: bd-m5wf.4.5 — adaptive refresh improvement ────
@@ -1189,9 +1196,7 @@ mod tests {
     /// under heavy writes compared to age-only.
     #[test]
     fn verification_gate_hybrid_stale_window_reduction() {
-        use crate::pipeline::{
-            GroupRefreshSummary, RefreshTelemetry, StaleWindowSlo,
-        };
+        use crate::pipeline::{GroupRefreshSummary, RefreshTelemetry, StaleWindowSlo};
 
         // Simulate age-only at 30s under heavy writes (100 writes/sec).
         // Average stale blocks = 100 * 30 / 2 = 1500.
@@ -1263,8 +1268,7 @@ mod tests {
 
         // p95 age reduction: hybrid should be much lower.
         let age_reduction_pct = if age_eval.age_at_percentile_ms > 0 {
-            (1.0 - hybrid_eval.age_at_percentile_ms as f64
-                / age_eval.age_at_percentile_ms as f64)
+            (1.0 - hybrid_eval.age_at_percentile_ms as f64 / age_eval.age_at_percentile_ms as f64)
                 * 100.0
         } else {
             0.0
@@ -1278,8 +1282,7 @@ mod tests {
 
         // p95 writes reduction should also be significant.
         let writes_reduction_pct = if age_eval.writes_at_percentile > 0 {
-            (1.0 - hybrid_eval.writes_at_percentile as f64
-                / age_eval.writes_at_percentile as f64)
+            (1.0 - hybrid_eval.writes_at_percentile as f64 / age_eval.writes_at_percentile as f64)
                 * 100.0
         } else {
             0.0
@@ -1295,8 +1298,7 @@ mod tests {
         assert!(
             !hybrid_eval.breached,
             "hybrid policy should meet default SLO (p95 age={}ms < 60000ms, writes={} < 5000)",
-            hybrid_eval.age_at_percentile_ms,
-            hybrid_eval.writes_at_percentile
+            hybrid_eval.age_at_percentile_ms, hybrid_eval.writes_at_percentile
         );
 
         eprintln!(
