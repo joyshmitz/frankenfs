@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -132,12 +132,10 @@ pub fn parse_check_output(
         })
         .collect();
 
-    let selected_ids: BTreeSet<&str> = selected.iter().map(String::as_str).collect();
-
     for line in check_log.lines() {
         let lower = line.to_ascii_lowercase();
         for case in &mut cases {
-            if !selected_ids.contains(case.id.as_str()) || !line.contains(case.id.as_str()) {
+            if !line.contains(case.id.as_str()) {
                 continue;
             }
 

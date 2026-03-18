@@ -46,15 +46,16 @@ for target in "${TARGETS[@]}"; do
 
     DICT_FLAG=""
     if [[ "$target" == *ext4* ]]; then
-        DICT_FLAG="-- -dict=fuzz/dictionaries/ext4.dict"
+        DICT_FLAG="-dict=fuzz/dictionaries/ext4.dict"
     elif [[ "$target" == *btrfs* ]]; then
-        DICT_FLAG="-- -dict=fuzz/dictionaries/btrfs.dict"
+        DICT_FLAG="-dict=fuzz/dictionaries/btrfs.dict"
     fi
 
     cargo fuzz run "$target" \
         -- \
         -max_total_time="$DURATION" \
         -max_len=65536 \
+        $DICT_FLAG \
         > "$TARGET_LOG" 2>&1 || TARGET_RC=$?
 
     TARGET_END=$(date +%s)
