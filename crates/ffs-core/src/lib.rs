@@ -5079,7 +5079,8 @@ impl OpenFs {
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
         let parent_u32 = u32::try_from(parent.0)
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
-        ffs_dir::init_dir_block(&mut dir_block, ino_u32, parent_u32)?;
+        let reserved_tail = self.ext4_dir_reserved_tail();
+        ffs_dir::init_dir_block(&mut dir_block, ino_u32, parent_u32, reserved_tail)?;
         block_dev.write_block(cx, dir_alloc.start, &dir_block)?;
 
         // Set up the extent tree to point to this block.
@@ -5189,10 +5190,11 @@ impl OpenFs {
         // Try adding to each existing block.
         let child_ino_u32 = u32::try_from(child_ino.0)
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+        let reserved_tail = self.ext4_dir_reserved_tail();
         for ext in &extents {
             for block in Self::extent_phys_blocks(ext) {
                 let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type).is_ok() {
+                if ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail).is_ok() {
                     block_dev.write_block(cx, block, &data)?;
 
                     // Update parent mtime/ctime.
@@ -5230,17 +5232,17 @@ impl OpenFs {
         let block_size = usize::try_from(alloc.geo.block_size)
             .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
         let mut new_block = vec![0u8; block_size];
-        // Write a single empty dir entry spanning the whole block, then add our entry.
-        // Initialize with a single unused entry spanning the whole block.
+        // Write a single empty dir entry spanning the whole block (minus tail), then add our entry.
+        // Initialize with a single unused entry spanning the usable area.
         {
-            // rec_len covers the whole block
-            let rec_len = u16::try_from(block_size).map_err(|_| {
+            // rec_len covers the usable area
+            let rec_len = u16::try_from(block_size.saturating_sub(reserved_tail)).map_err(|_| {
                 FfsError::Format("directory block size exceeds 16-bit rec_len field".into())
             })?;
             new_block[4..6].copy_from_slice(&rec_len.to_le_bytes());
             // inode=0, name_len=0, file_type=0 ⇒ unused entry
         }
-        ffs_dir::add_entry(&mut new_block, child_ino_u32, name, file_type)?;
+        ffs_dir::add_entry(&mut new_block, child_ino_u32, name, file_type, reserved_tail)?;
         block_dev.write_block(cx, new_alloc.start, &new_block)?;
 
         // Insert extent for the new directory block.
@@ -5343,13 +5345,14 @@ impl OpenFs {
         // Remove directory entry from parent blocks.
         let extents = self.collect_extents(cx, &parent_inode)?;
         let mut removed = false;
+        let reserved_tail = self.ext4_dir_reserved_tail();
         'outer: for ext in &extents {
             if removed {
                 break;
             }
             for block in Self::extent_phys_blocks(ext) {
                 let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::remove_entry(&mut data, name)? {
+                if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
                     block_dev.write_block(cx, block, &data)?;
                     removed = true;
                     break 'outer;
@@ -6051,10 +6054,11 @@ impl OpenFs {
 
             // Remove the existing target.
             let extents = self.collect_extents(cx, &new_parent_inode)?;
+            let reserved_tail = self.ext4_dir_reserved_tail();
             'rm_existing: for ext in &extents {
                 for block in Self::extent_phys_blocks(ext) {
                     let mut data = self.read_block_vec(cx, block)?;
-                    if ffs_dir::remove_entry(&mut data, new_name)? {
+                    if ffs_dir::remove_entry(&mut data, new_name, reserved_tail)? {
                         block_dev.write_block(cx, block, &data)?;
                         break 'rm_existing;
                     }
@@ -6112,10 +6116,11 @@ impl OpenFs {
 
         // Remove old entry from source parent.
         let src_extents = self.collect_extents(cx, &parent_inode)?;
+        let reserved_tail = self.ext4_dir_reserved_tail();
         'rm_src: for ext in &src_extents {
             for block in Self::extent_phys_blocks(ext) {
                 let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::remove_entry(&mut data, name)? {
+                if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
                     block_dev.write_block(cx, block, &data)?;
                     break 'rm_src;
                 }
@@ -6146,13 +6151,14 @@ impl OpenFs {
                 let dot_dot_block = BlockNumber(first_ext.physical_start);
                 let mut data = self.read_block_vec(cx, dot_dot_block)?;
                 // Remove old .. and add new one.
-                if let Err(e) = ffs_dir::remove_entry(&mut data, b"..") {
+                let reserved_tail = self.ext4_dir_reserved_tail();
+                if let Err(e) = ffs_dir::remove_entry(&mut data, b"..", reserved_tail) {
                     warn!("rename: failed to remove '..' entry: {e}");
                 }
                 let parent_ino_u32 = u32::try_from(new_parent.0).map_err(|_| {
                     FfsError::Format("inode number exceeds ext4 32-bit limit".into())
                 })?;
-                ffs_dir::add_entry(&mut data, parent_ino_u32, b"..", Ext4FileType::Dir)?;
+                ffs_dir::add_entry(&mut data, parent_ino_u32, b"..", Ext4FileType::Dir, reserved_tail)?;
                 block_dev.write_block(cx, dot_dot_block, &data)?;
             }
 
@@ -8451,6 +8457,15 @@ impl OpenFs {
             .update(&key, &inode.to_bytes())
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         Ok(())
+    }
+
+    fn ext4_dir_reserved_tail(&self) -> usize {
+        if let FsFlavor::Ext4(sb) = &self.flavor {
+            if sb.has_metadata_csum() {
+                return 12;
+            }
+        }
+        0
     }
 }
 

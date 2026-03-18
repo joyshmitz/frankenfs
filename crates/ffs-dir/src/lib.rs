@@ -10,6 +10,8 @@ use ffs_ondisk::Ext4FileType;
 
 /// ext4 directory entry header size (`ext4_dir_entry_2`).
 const DIR_ENTRY_HEADER_LEN: usize = 8;
+/// Fake file type for metadata checksum tail.
+const EXT4_FT_DIR_CSUM: u8 = 0xDE;
 
 fn align4(n: usize) -> usize {
     (n + 3) & !3
@@ -330,6 +332,17 @@ pub fn init_dir_block(
         Ext4FileType::Dir,
         b"..",
     )?;
+
+    if reserved_tail == 12 {
+        let off = block.len() - 12;
+        // struct ext4_dir_entry_tail: { 0(4), rec_len=12(2), 0(1), 0xDE(1), checksum(4) }
+        write_u32_le(block, off, 0)?;
+        write_u16_le(block, off + 4, 12)?;
+        block[off + 6] = 0;
+        block[off + 7] = EXT4_FT_DIR_CSUM;
+        write_u32_le(block, off + 8, 0)?; // checksum initially 0
+    }
+
     Ok(())
 }
 
@@ -402,8 +415,9 @@ mod tests {
     fn init_dir_block_with_tail() {
         let mut block = vec![0u8; 1024];
         init_dir_block(&mut block, 11, 2, 12).unwrap();
-        let (entries, _) = parse_dir_block(&block, 1024).unwrap();
+        let (entries, tail) = parse_dir_block(&block, 1024).unwrap();
         assert_eq!(entries[1].rec_len, 1024 - 12 - 12);
+        assert!(tail.is_some());
     }
 
     #[test]
