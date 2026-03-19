@@ -14,6 +14,10 @@ pub const PRESET_REPLAY_ANOMALIES: &str = "replay-anomalies";
 pub const PRESET_REPAIR_FAILURES: &str = "repair-failures";
 pub const PRESET_PRESSURE_TRANSITIONS: &str = "pressure-transitions";
 pub const PRESET_CONTENTION: &str = "contention";
+pub const PRESET_METRICS: &str = "metrics";
+pub const PRESET_CACHE: &str = "cache";
+pub const PRESET_MVCC: &str = "mvcc";
+pub const PRESET_REPAIR_LIVE: &str = "repair-live";
 
 /// Returns the event types included in a preset, or `None` if unknown.
 pub fn preset_event_types(preset: &str) -> Option<&'static [EvidenceEventType]> {
@@ -43,6 +47,39 @@ pub fn preset_event_types(preset: &str) -> Option<&'static [EvidenceEventType]> 
             EvidenceEventType::PolicySwitched,
             EvidenceEventType::ContentionSample,
         ]),
+        PRESET_METRICS => Some(&[
+            EvidenceEventType::VersionGc,
+            EvidenceEventType::SnapshotAdvanced,
+            EvidenceEventType::FlushBatch,
+            EvidenceEventType::BackpressureActivated,
+            EvidenceEventType::PolicyDecision,
+            EvidenceEventType::ContentionSample,
+        ]),
+        PRESET_CACHE => Some(&[
+            EvidenceEventType::FlushBatch,
+            EvidenceEventType::BackpressureActivated,
+            EvidenceEventType::DirtyBlockDiscarded,
+        ]),
+        PRESET_MVCC => Some(&[
+            EvidenceEventType::TransactionCommit,
+            EvidenceEventType::TxnAborted,
+            EvidenceEventType::SerializationConflict,
+            EvidenceEventType::VersionGc,
+            EvidenceEventType::SnapshotAdvanced,
+            EvidenceEventType::ContentionSample,
+            EvidenceEventType::MergeApplied,
+            EvidenceEventType::MergeRejected,
+            EvidenceEventType::PolicySwitched,
+        ]),
+        PRESET_REPAIR_LIVE => Some(&[
+            EvidenceEventType::CorruptionDetected,
+            EvidenceEventType::RepairAttempted,
+            EvidenceEventType::RepairSucceeded,
+            EvidenceEventType::RepairFailed,
+            EvidenceEventType::SymbolRefresh,
+            EvidenceEventType::ScrubCycleComplete,
+            EvidenceEventType::PolicyDecision,
+        ]),
         _ => None,
     }
 }
@@ -53,6 +90,10 @@ pub const KNOWN_PRESETS: &[&str] = &[
     PRESET_REPAIR_FAILURES,
     PRESET_PRESSURE_TRANSITIONS,
     PRESET_CONTENTION,
+    PRESET_METRICS,
+    PRESET_CACHE,
+    PRESET_MVCC,
+    PRESET_REPAIR_LIVE,
 ];
 
 // ── Summary ────────────────────────────────────────────────────────────────

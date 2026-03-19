@@ -107,38 +107,50 @@ pub fn bitmap_find_contiguous(bitmap: &[u8], count: u32, n: u32, start: u32) -> 
     if n == 0 {
         return Some(0);
     }
+    if n > count {
+        return None;
+    }
 
     // Pass 1: from `start` to `count`
+    if let Some(pos) = bitmap_find_contiguous_linear(bitmap, count, n, start) {
+        return Some(pos);
+    }
+
+    // Pass 2: wrap around from 0 to `start + n - 1`
+    let pass2_end = start.saturating_add(n).saturating_sub(1).min(count);
+    bitmap_find_contiguous_linear(bitmap, pass2_end, n, 0)
+}
+
+/// Linear scan for `n` contiguous free bits in `[start, count)`.
+fn bitmap_find_contiguous_linear(bitmap: &[u8], count: u32, n: u32, start: u32) -> Option<u32> {
     let mut run_start = start;
     let mut run_len = 0u32;
-    for idx in start..count {
+    let mut idx = start;
+
+    while idx < count {
+        // Optimization: if we are at a byte boundary and need more than 8 bits,
+        // we can skip full 0xFF bytes.
+        if idx % 8 == 0 && (idx + 8) <= count && run_len == 0 {
+            let byte_idx = (idx / 8) as usize;
+            if bitmap[byte_idx] == 0xFF {
+                idx += 8;
+                run_start = idx;
+                continue;
+            }
+        }
+
         if bitmap_get(bitmap, idx) {
-            run_start = idx + 1;
+            idx += 1;
+            run_start = idx;
             run_len = 0;
         } else {
             run_len += 1;
             if run_len >= n {
                 return Some(run_start);
             }
+            idx += 1;
         }
     }
-
-    // Pass 2: wrap around from 0 to `start + n - 1` (to allow runs overlapping `start`)
-    run_start = 0;
-    run_len = 0;
-    let pass2_end = start.saturating_add(n).saturating_sub(1).min(count);
-    for idx in 0..pass2_end {
-        if bitmap_get(bitmap, idx) {
-            run_start = idx + 1;
-            run_len = 0;
-        } else {
-            run_len += 1;
-            if run_len >= n {
-                return Some(run_start);
-            }
-        }
-    }
-
     None
 }
 
@@ -230,6 +242,8 @@ pub struct FsGeometry {
     pub first_data_block: u32,
     pub group_count: u32,
     pub inode_size: u16,
+    pub desc_size: u16,
+    pub feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures,
 }
 
 impl FsGeometry {
@@ -256,6 +270,8 @@ impl FsGeometry {
             first_data_block: sb.first_data_block,
             group_count,
             inode_size: sb.inode_size,
+            desc_size: sb.desc_size,
+            feature_ro_compat: sb.feature_ro_compat,
         }
     }
 
