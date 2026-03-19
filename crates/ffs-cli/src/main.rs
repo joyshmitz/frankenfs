@@ -370,7 +370,7 @@ enum Command {
     },
     /// Display the repair evidence ledger (JSONL).
     Evidence {
-        /// Path to the evidence ledger file.
+        /// Path to the evidence ledger JSONL or metrics snapshot JSON file.
         ledger: PathBuf,
         /// Output in JSON format (array of records).
         #[arg(long)]
@@ -381,7 +381,9 @@ enum Command {
         /// Show only the last N records.
         #[arg(long)]
         tail: Option<usize>,
-        /// Preset query: replay-anomalies, repair-failures, pressure-transitions.
+        /// Preset query:
+        /// replay-anomalies, repair-failures, pressure-transitions, contention,
+        /// metrics, cache, mvcc, repair-live.
         #[arg(long)]
         preset: Option<String>,
         /// Show aggregated summary instead of individual records.
@@ -5122,7 +5124,10 @@ mod tests {
         read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
         summarize_repair_staleness, unavailable_repair_info,
     };
-    use crate::cmd_evidence::load_evidence_records;
+    use crate::cmd_evidence::{
+        EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
+        load_evidence_records, load_metrics_report_for_test,
+    };
     use crate::cmd_repair::{
         Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_REPAIR, RepairCoordinationRecord,
         RepairCoordinationStatus, btrfs_super_mirror_offsets, build_btrfs_repair_group_spec,
@@ -5132,7 +5137,9 @@ mod tests {
         select_ext4_repair_groups,
     };
     use clap::Parser;
+    use ffs_block::CacheRuntimeMetricsSnapshot;
     use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
+    use ffs_repair::pipeline::RepairRuntimeMetricsSnapshot;
     use serde_json::Value;
     use std::io::{self, Seek, SeekFrom, Write};
     use std::path::PathBuf;
@@ -5684,6 +5691,179 @@ mod tests {
                 "known preset {name} should return Some"
             );
         }
+    }
+
+    fn test_histogram(count: u64, sum: u64) -> EvidenceHistogramSnapshot {
+        EvidenceHistogramSnapshot {
+            buckets: vec![
+                EvidenceHistogramBucket { le: 10, count: 1 },
+                EvidenceHistogramBucket {
+                    le: 100,
+                    count: count.saturating_sub(1),
+                },
+            ],
+            inf_count: 0,
+            sum,
+            count,
+        }
+    }
+
+    #[test]
+    fn load_metrics_report_metrics_preset_reads_bundle() {
+        let bundle = serde_json::json!({
+            "metrics": {
+                "requests_total": 100,
+                "requests_ok": 97,
+                "requests_err": 3,
+                "bytes_read": 8192,
+                "requests_throttled": 4,
+                "requests_shed": 1
+            },
+            "cache": {
+                "cache_hits": 80,
+                "cache_misses": 20,
+                "cache_evictions": 5,
+                "cache_dirty_count": 9,
+                "writeback_queue_depth": 3,
+                "hit_rate": 0.8
+            },
+            "mvcc": {
+                "active_snapshots": 2,
+                "commit_rate": 15.0,
+                "conflict_rate": 0.125,
+                "abort_rate": 0.125,
+                "version_chain_max_length": 6,
+                "prune_throughput": 42.0,
+                "commit_attempts_total": 80,
+                "commit_successes_total": 70,
+                "conflicts_total": 10,
+                "aborts_total": 10,
+                "pruned_versions_total": 120,
+                "commit_latency_us": {
+                    "buckets": [{"le": 10, "count": 1}, {"le": 100, "count": 7}],
+                    "inf_count": 0,
+                    "sum": 800,
+                    "count": 8
+                },
+                "conflict_resolution_latency_us": {
+                    "buckets": [{"le": 10, "count": 1}, {"le": 100, "count": 3}],
+                    "inf_count": 0,
+                    "sum": 250,
+                    "count": 4
+                }
+            },
+            "repair_live": {
+                "groups_scrubbed": 12,
+                "corruption_detected": 2,
+                "decode_attempts": 5,
+                "decode_successes": 4,
+                "symbol_refresh_count": 8,
+                "symbol_staleness_max_seconds": 12.5
+            }
+        });
+
+        with_temp_image_path(
+            serde_json::to_string_pretty(&bundle)
+                .expect("serialize bundle")
+                .as_bytes(),
+            |path| {
+                let report =
+                    load_metrics_report_for_test(&path, "metrics").expect("load metrics report");
+                let value = serde_json::to_value(report).expect("serialize report");
+                assert_eq!(value["preset"], "metrics");
+                assert_eq!(value["metrics"]["requests_total"], 100);
+                assert_eq!(value["cache"]["cache_hits"], 80);
+                assert_eq!(value["mvcc"]["commit_attempts_total"], 80);
+                assert_eq!(value["repair_live"]["decode_successes"], 4);
+                assert_eq!(value["analyses"]["repair_freshness"], "fresh");
+                assert_eq!(value["analyses"]["mvcc_contention_level"], "high");
+            },
+        );
+    }
+
+    #[test]
+    fn load_metrics_report_cache_preset_reads_direct_snapshot() {
+        let snapshot = CacheRuntimeMetricsSnapshot {
+            cache_hits: 90,
+            cache_misses: 10,
+            cache_evictions: 3,
+            cache_dirty_count: 40,
+            writeback_queue_depth: 12,
+            hit_rate: 0.9,
+        };
+        with_temp_image_path(
+            serde_json::to_string_pretty(&snapshot)
+                .expect("serialize cache snapshot")
+                .as_bytes(),
+            |path| {
+                let report =
+                    load_metrics_report_for_test(&path, "cache").expect("load cache report");
+                let value = serde_json::to_value(report).expect("serialize report");
+                assert_eq!(value["preset"], "cache");
+                assert_eq!(value["snapshot"]["cache_hits"], 90);
+                assert_eq!(value["miss_rate"], 0.1);
+                assert_eq!(value["dirty_pressure"], "high");
+                assert_eq!(value["writeback_pressure"], "queued");
+            },
+        );
+    }
+
+    #[test]
+    fn load_metrics_report_mvcc_preset_reads_direct_snapshot() {
+        let snapshot = EvidenceMvccRuntimeMetricsSnapshot {
+            active_snapshots: 3,
+            commit_rate: 10.0,
+            conflict_rate: 0.05,
+            abort_rate: 0.02,
+            version_chain_max_length: 4,
+            prune_throughput: 11.0,
+            commit_attempts_total: 50,
+            commit_successes_total: 45,
+            conflicts_total: 2,
+            aborts_total: 1,
+            pruned_versions_total: 99,
+            commit_latency_us: test_histogram(5, 200),
+            conflict_resolution_latency_us: test_histogram(2, 50),
+        };
+        with_temp_image_path(
+            serde_json::to_string_pretty(&snapshot)
+                .expect("serialize mvcc snapshot")
+                .as_bytes(),
+            |path| {
+                let report = load_metrics_report_for_test(&path, "mvcc").expect("load mvcc report");
+                let value = serde_json::to_value(report).expect("serialize report");
+                assert_eq!(value["preset"], "mvcc");
+                assert_eq!(value["snapshot"]["active_snapshots"], 3);
+                assert_eq!(value["commit_success_rate"], 0.9);
+                assert_eq!(value["contention_level"], "elevated");
+            },
+        );
+    }
+
+    #[test]
+    fn load_metrics_report_repair_live_reads_direct_snapshot() {
+        let snapshot = RepairRuntimeMetricsSnapshot {
+            groups_scrubbed: 20,
+            corruption_detected: 5,
+            decode_attempts: 8,
+            decode_successes: 6,
+            symbol_refresh_count: 14,
+            symbol_staleness_max_seconds: 120.0,
+        };
+        with_temp_image_path(
+            serde_json::to_string_pretty(&snapshot)
+                .expect("serialize repair snapshot")
+                .as_bytes(),
+            |path| {
+                let report = load_metrics_report_for_test(&path, "repair-live")
+                    .expect("load repair-live report");
+                let value = serde_json::to_value(report).expect("serialize report");
+                assert_eq!(value["preset"], "repair-live");
+                assert_eq!(value["snapshot"]["groups_scrubbed"], 20);
+                assert_eq!(value["decode_success_rate"], 0.75);
+                assert_eq!(value["freshness"], "aging");
+            },
+        );
     }
 
     #[test]
@@ -6911,6 +7091,33 @@ mod tests {
             Command::Evidence { preset, tail, .. } => {
                 assert_eq!(preset.as_deref(), Some("pressure-transitions"));
                 assert_eq!(tail, Some(10));
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_preset_metrics() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--preset",
+            "metrics",
+            "--json",
+            "/tmp/metrics.json",
+        ])
+        .expect("evidence metrics command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                ledger,
+                preset,
+                json,
+                ..
+            } => {
+                assert_eq!(ledger, PathBuf::from("/tmp/metrics.json"));
+                assert_eq!(preset.as_deref(), Some("metrics"));
+                assert!(json);
             }
             _ => panic!("expected evidence command"),
         }

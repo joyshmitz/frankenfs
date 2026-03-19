@@ -1352,6 +1352,8 @@ mod tests {
             first_data_block: 0,
             group_count: 4,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         }
     }
 
@@ -2188,6 +2190,8 @@ mod tests {
             first_data_block: 0,
             group_count: 4,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         };
 
         assert_eq!(geo.blocks_in_group(GroupNumber(0)), 8192);
@@ -2208,6 +2212,8 @@ mod tests {
             first_data_block: 1, // ext4 with 1K blocks has first_data_block=1
             group_count: 4,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         };
 
         // Block 1 should be in group 0, relative 0.
@@ -2232,6 +2238,8 @@ mod tests {
             total_blocks: u64::MAX,
             total_inodes: 0,
             group_count: u32::MAX,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         };
         // Block number large enough that group index exceeds u32.
         let huge_block = BlockNumber(u64::from(u32::MAX) * 8192 + 8193);
@@ -2300,6 +2308,8 @@ mod tests {
             first_data_block: 1,
             group_count: 4,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         };
         // Group 0, rel 0 -> absolute = first_data_block + 0 = 1
         let abs = geo.group_block_to_absolute(GroupNumber(0), 0);
@@ -2328,6 +2338,8 @@ mod tests {
             first_data_block: 0,
             group_count: 3,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         };
         assert_eq!(geo.inodes_in_group(GroupNumber(0)), 2048);
         assert_eq!(geo.inodes_in_group(GroupNumber(1)), 2048);
@@ -2422,6 +2434,8 @@ mod tests {
             first_data_block: 0,
             group_count: 0,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         };
         assert_eq!(geo.group_count, 0);
     }
@@ -2533,6 +2547,8 @@ mod tests {
             first_data_block: 1, // non-zero
             group_count: 4,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         };
         // Group 0, rel 0 → absolute 1 (first_data_block).
         assert_eq!(
@@ -3020,6 +3036,8 @@ mod tests {
                 first_data_block: 0,
                 group_count: gc,
                 inode_size: 256,
+                desc_size: 32,
+                feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             };
             let sum: u64 = (0..gc).map(|g| u64::from(geo.blocks_in_group(GroupNumber(g)))).sum();
             prop_assert_eq!(sum, total_blocks);

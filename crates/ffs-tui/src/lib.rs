@@ -17,6 +17,92 @@ use ftui::{Cmd, Event, KeyCode, Model, PackedRgba, Style};
 const PRESSURE_BAR_WIDTH: usize = 10;
 const MAX_RECENT_EVENTS: usize = 10;
 const IO_QUEUE_PRESSURE_CAP: usize = 64;
+/// Default number of sparkline data points (60 seconds at 1Hz).
+const SPARKLINE_CAPACITY: usize = 60;
+/// Unicode block characters for sparkline rendering (⅛ to full block).
+const SPARKLINE_CHARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+// ── Sparkline history ─────────────────────────────────────────────────────────
+
+/// Rolling window of values for rendering sparkline charts.
+///
+/// Stores the most recent `capacity` data points. New values push out the
+/// oldest when full.
+#[derive(Debug, Clone)]
+pub struct SparklineHistory {
+    values: std::collections::VecDeque<f64>,
+    capacity: usize,
+}
+
+impl SparklineHistory {
+    /// Create a new history with the default 60-point capacity.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_capacity(SPARKLINE_CAPACITY)
+    }
+
+    /// Create a new history with a custom capacity.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            values: std::collections::VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Push a new value, evicting the oldest if at capacity.
+    pub fn push(&mut self, value: f64) {
+        if self.values.len() >= self.capacity {
+            self.values.pop_front();
+        }
+        self.values.push_back(value);
+    }
+
+    /// Render the sparkline as a string of unicode block characters.
+    ///
+    /// Values are normalized to `[0.0, max_val]` and mapped to 8 block levels.
+    /// Returns an empty string if no data points exist.
+    #[must_use]
+    pub fn render(&self, width: usize, max_val: f64) -> String {
+        if self.values.is_empty() || max_val <= 0.0 {
+            return String::new();
+        }
+        let skip = self.values.len().saturating_sub(width);
+        self.values
+            .iter()
+            .skip(skip)
+            .map(|&v| {
+                let normalized = (v / max_val).clamp(0.0, 1.0);
+                let idx = (normalized * (SPARKLINE_CHARS.len() - 1) as f64).round() as usize;
+                SPARKLINE_CHARS[idx.min(SPARKLINE_CHARS.len() - 1)]
+            })
+            .collect()
+    }
+
+    /// Number of data points currently stored.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Whether the history is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Most recent value, if any.
+    #[must_use]
+    pub fn latest(&self) -> Option<f64> {
+        self.values.back().copied()
+    }
+}
+
+impl Default for SparklineHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ── Metric snapshot ─────────────────────────────────────────────────────────
 
@@ -35,6 +121,13 @@ pub struct DegradationEvent {
 
 #[derive(Debug, Clone)]
 pub struct DashboardSnapshot {
+    // Mount status
+    pub fs_type: String,
+    pub mount_point: String,
+    pub uptime_seconds: u64,
+    pub bytes_read_total: u64,
+    pub bytes_written_total: u64,
+
     // ARC cache
     pub cache_hits: u64,
     pub cache_misses: u64,
@@ -62,11 +155,17 @@ pub struct DashboardSnapshot {
     /// Recent transitions (newest is expected at the end of this vector).
     pub degradation_events: Vec<DegradationEvent>,
 
-    // Scrub
+    // Scrub / repair
     pub scrub_blocks_scanned: u64,
     pub scrub_blocks_corrupt: u64,
     pub scrub_blocks_io_error: u64,
     pub scrub_findings_count: usize,
+    pub repair_symbol_freshness_secs: Option<f64>,
+
+    // Sparkline histories (rolling 60-second windows)
+    pub hit_rate_history: SparklineHistory,
+    pub commit_rate_history: SparklineHistory,
+    pub io_throughput_history: SparklineHistory,
 }
 
 impl DashboardSnapshot {
@@ -92,6 +191,11 @@ impl DashboardSnapshot {
 impl Default for DashboardSnapshot {
     fn default() -> Self {
         Self {
+            fs_type: String::new(),
+            mount_point: String::new(),
+            uptime_seconds: 0,
+            bytes_read_total: 0,
+            bytes_written_total: 0,
             cache_hits: 0,
             cache_misses: 0,
             cache_evictions: 0,
@@ -113,6 +217,10 @@ impl Default for DashboardSnapshot {
             scrub_blocks_corrupt: 0,
             scrub_blocks_io_error: 0,
             scrub_findings_count: 0,
+            repair_symbol_freshness_secs: None,
+            hit_rate_history: SparklineHistory::new(),
+            commit_rate_history: SparklineHistory::new(),
+            io_throughput_history: SparklineHistory::new(),
         }
     }
 }
@@ -206,22 +314,30 @@ impl Model for Dashboard {
 
         let rows = Flex::vertical()
             .constraints([
-                Constraint::Percentage(35.0),
-                Constraint::Percentage(35.0),
                 Constraint::Percentage(30.0),
+                Constraint::Percentage(35.0),
+                Constraint::Percentage(35.0),
             ])
             .split(bounds);
 
-        // Top row: cache + MVCC side by side
+        // Top row: mount status + cache side by side
         let top_cols = Flex::horizontal()
             .constraints([Constraint::Percentage(50.0), Constraint::Percentage(50.0)])
             .split(rows[0]);
 
-        render_cache_panel(&self.snapshot, top_cols[0], frame);
-        render_mvcc_panel(&self.snapshot, top_cols[1], frame);
+        render_mount_panel(&self.snapshot, top_cols[0], frame);
+        render_cache_panel(&self.snapshot, top_cols[1], frame);
 
-        render_system_health_panel(&self.snapshot, rows[1], frame);
-        render_scrub_panel(&self.snapshot, rows[2], frame);
+        // Middle row: MVCC + repair side by side
+        let mid_cols = Flex::horizontal()
+            .constraints([Constraint::Percentage(50.0), Constraint::Percentage(50.0)])
+            .split(rows[1]);
+
+        render_mvcc_panel(&self.snapshot, mid_cols[0], frame);
+        render_scrub_panel(&self.snapshot, mid_cols[1], frame);
+
+        // Bottom row: system health (full width)
+        render_system_health_panel(&self.snapshot, rows[2], frame);
     }
 }
 
@@ -233,13 +349,19 @@ fn render_cache_panel(snap: &DashboardSnapshot, area: Rect, frame: &mut Frame) {
     block.render(area, frame);
 
     let hit_pct = snap.cache_hit_ratio() * 100.0;
+    let sparkline = snap.hit_rate_history.render(20, 1.0);
+    let sparkline_line = if sparkline.is_empty() {
+        String::new()
+    } else {
+        format!("\nHit rate:   {sparkline}")
+    };
     let text = format!(
         "Hit ratio:  {hit_pct:>6.1}%\n\
          Hits:       {:>10}\n\
          Misses:     {:>10}\n\
          Evictions:  {:>10}\n\
          Resident:   {:>6} / {}\n\
-         T1 / T2:    {} / {}",
+         T1 / T2:    {} / {}{sparkline_line}",
         snap.cache_hits,
         snap.cache_misses,
         snap.cache_evictions,
@@ -247,6 +369,44 @@ fn render_cache_panel(snap: &DashboardSnapshot, area: Rect, frame: &mut Frame) {
         snap.cache_capacity,
         snap.cache_t1_len,
         snap.cache_t2_len,
+    );
+    Paragraph::new(text).render(inner, frame);
+}
+
+fn render_mount_panel(snap: &DashboardSnapshot, area: Rect, frame: &mut Frame) {
+    let block = Block::bordered().title("Mount Status");
+    let inner = block.inner(area);
+    block.render(area, frame);
+
+    let fs_type = if snap.fs_type.is_empty() {
+        "unknown"
+    } else {
+        &snap.fs_type
+    };
+    let mount = if snap.mount_point.is_empty() {
+        "-"
+    } else {
+        &snap.mount_point
+    };
+    let uptime_h = snap.uptime_seconds / 3600;
+    let uptime_m = (snap.uptime_seconds % 3600) / 60;
+    let uptime_s = snap.uptime_seconds % 60;
+    let read_mb = snap.bytes_read_total as f64 / (1024.0 * 1024.0);
+    let write_mb = snap.bytes_written_total as f64 / (1024.0 * 1024.0);
+
+    let io_sparkline = snap.io_throughput_history.render(20, 100.0);
+    let sparkline_line = if io_sparkline.is_empty() {
+        String::new()
+    } else {
+        format!("\nI/O:        {io_sparkline}")
+    };
+
+    let text = format!(
+        "Type:       {fs_type}\n\
+         Mount:      {mount}\n\
+         Uptime:     {uptime_h:02}:{uptime_m:02}:{uptime_s:02}\n\
+         Read:       {read_mb:>8.1} MB\n\
+         Written:    {write_mb:>8.1} MB{sparkline_line}"
     );
     Paragraph::new(text).render(inner, frame);
 }
@@ -617,6 +777,7 @@ mod tests {
                 to: DegradationLevel::Warning,
                 reason: "cpu".to_owned(),
             }],
+            ..DashboardSnapshot::default()
         });
 
         // Render into a small buffer — should not panic.

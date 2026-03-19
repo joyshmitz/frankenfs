@@ -21,6 +21,7 @@ use fuser::{
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr,
     Request, TimeOrNow,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::raw::c_int;
@@ -277,7 +278,7 @@ impl std::fmt::Debug for AtomicMetrics {
 }
 
 /// Point-in-time snapshot of metrics (all plain `u64`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub requests_total: u64,
     pub requests_ok: u64,

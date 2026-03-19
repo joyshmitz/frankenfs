@@ -69,6 +69,8 @@ fn make_geometry() -> FsGeometry {
         first_data_block: 0,
         group_count: 4,
         inode_size: 256,
+        desc_size: 32,
+        feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
     }
 }
 

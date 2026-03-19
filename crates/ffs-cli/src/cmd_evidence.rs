@@ -1,5 +1,9 @@
 use anyhow::{Context, Result, bail};
+use ffs_block::CacheRuntimeMetricsSnapshot;
+use ffs_fuse::MetricsSnapshot;
 use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
+use ffs_repair::pipeline::RepairRuntimeMetricsSnapshot;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -95,6 +99,130 @@ pub const KNOWN_PRESETS: &[&str] = &[
     PRESET_MVCC,
     PRESET_REPAIR_LIVE,
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresetMode {
+    Ledger,
+    Metrics,
+}
+
+fn preset_mode(preset: &str) -> Option<PresetMode> {
+    match preset {
+        PRESET_REPLAY_ANOMALIES
+        | PRESET_REPAIR_FAILURES
+        | PRESET_PRESSURE_TRANSITIONS
+        | PRESET_CONTENTION => Some(PresetMode::Ledger),
+        PRESET_METRICS | PRESET_CACHE | PRESET_MVCC | PRESET_REPAIR_LIVE => {
+            Some(PresetMode::Metrics)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceMetricsBundle {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<MetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheRuntimeMetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mvcc: Option<EvidenceMvccRuntimeMetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_live: Option<RepairRuntimeMetricsSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MetricsAggregateAnalysis {
+    pub request_error_rate: f64,
+    pub throttled_ratio: f64,
+    pub shed_ratio: f64,
+    pub cache_miss_rate: Option<f64>,
+    pub cache_dirty_pressure: Option<String>,
+    pub mvcc_commit_success_rate: Option<f64>,
+    pub mvcc_contention_level: Option<String>,
+    pub repair_decode_success_rate: Option<f64>,
+    pub repair_freshness: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MetricsAggregateReport {
+    pub preset: String,
+    pub analyses: MetricsAggregateAnalysis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<MetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheRuntimeMetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mvcc: Option<EvidenceMvccRuntimeMetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_live: Option<RepairRuntimeMetricsSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CacheMetricsReport {
+    pub preset: String,
+    pub snapshot: CacheRuntimeMetricsSnapshot,
+    pub total_accesses: u64,
+    pub miss_rate: f64,
+    pub dirty_pressure: String,
+    pub writeback_pressure: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MvccMetricsReport {
+    pub preset: String,
+    pub snapshot: EvidenceMvccRuntimeMetricsSnapshot,
+    pub commit_success_rate: f64,
+    pub contention_level: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RepairLiveMetricsReport {
+    pub preset: String,
+    pub snapshot: RepairRuntimeMetricsSnapshot,
+    pub decode_success_rate: f64,
+    pub freshness: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum MetricsPresetReport {
+    Aggregate(MetricsAggregateReport),
+    Cache(CacheMetricsReport),
+    Mvcc(MvccMetricsReport),
+    RepairLive(RepairLiveMetricsReport),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceHistogramBucket {
+    pub le: u64,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceHistogramSnapshot {
+    pub buckets: Vec<EvidenceHistogramBucket>,
+    pub inf_count: u64,
+    pub sum: u64,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceMvccRuntimeMetricsSnapshot {
+    pub active_snapshots: usize,
+    pub commit_rate: f64,
+    pub conflict_rate: f64,
+    pub abort_rate: f64,
+    pub version_chain_max_length: usize,
+    pub prune_throughput: f64,
+    pub commit_attempts_total: u64,
+    pub commit_successes_total: u64,
+    pub conflicts_total: u64,
+    pub aborts_total: u64,
+    pub pruned_versions_total: u64,
+    pub commit_latency_us: EvidenceHistogramSnapshot,
+    pub conflict_resolution_latency_us: EvidenceHistogramSnapshot,
+}
 
 // ── Summary ────────────────────────────────────────────────────────────────
 
@@ -346,6 +474,346 @@ fn print_summary(summary: &EvidenceSummary) {
     }
 }
 
+fn safe_ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn cache_dirty_pressure(snapshot: &CacheRuntimeMetricsSnapshot) -> String {
+    match snapshot.cache_dirty_count {
+        0 => "clean".to_owned(),
+        1..=32 => "elevated".to_owned(),
+        33..=128 => "high".to_owned(),
+        _ => "critical".to_owned(),
+    }
+}
+
+fn writeback_pressure(snapshot: &CacheRuntimeMetricsSnapshot) -> String {
+    match snapshot.writeback_queue_depth {
+        0 => "idle".to_owned(),
+        1..=8 => "active".to_owned(),
+        9..=32 => "queued".to_owned(),
+        _ => "saturated".to_owned(),
+    }
+}
+
+fn mvcc_contention_level(snapshot: &EvidenceMvccRuntimeMetricsSnapshot) -> String {
+    if snapshot.conflict_rate >= 0.25 || snapshot.abort_rate >= 0.30 {
+        "critical".to_owned()
+    } else if snapshot.conflict_rate >= 0.10 || snapshot.abort_rate >= 0.15 {
+        "high".to_owned()
+    } else if snapshot.conflict_rate > 0.0 || snapshot.abort_rate > 0.0 {
+        "elevated".to_owned()
+    } else {
+        "nominal".to_owned()
+    }
+}
+
+fn repair_freshness(snapshot: &RepairRuntimeMetricsSnapshot) -> String {
+    if snapshot.symbol_staleness_max_seconds >= 300.0 {
+        "stale".to_owned()
+    } else if snapshot.symbol_staleness_max_seconds >= 60.0 {
+        "aging".to_owned()
+    } else {
+        "fresh".to_owned()
+    }
+}
+
+fn load_metrics_bundle(path: &PathBuf) -> Result<EvidenceMetricsBundle> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read metrics snapshot: {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse metrics snapshot JSON: {}", path.display()))
+}
+
+fn load_direct_metrics<T>(path: &PathBuf, label: &str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let raw = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read {label} metrics snapshot: {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse {label} metrics snapshot JSON: {}",
+            path.display()
+        )
+    })
+}
+
+fn metrics_report_from_bundle(bundle: EvidenceMetricsBundle) -> MetricsPresetReport {
+    let analyses = MetricsAggregateAnalysis {
+        request_error_rate: bundle.metrics.map_or(0.0, |snapshot| {
+            safe_ratio(snapshot.requests_err, snapshot.requests_total)
+        }),
+        throttled_ratio: bundle.metrics.map_or(0.0, |snapshot| {
+            safe_ratio(snapshot.requests_throttled, snapshot.requests_total)
+        }),
+        shed_ratio: bundle.metrics.map_or(0.0, |snapshot| {
+            safe_ratio(snapshot.requests_shed, snapshot.requests_total)
+        }),
+        cache_miss_rate: bundle.cache.map(|snapshot| {
+            safe_ratio(
+                snapshot.cache_misses,
+                snapshot.cache_hits.saturating_add(snapshot.cache_misses),
+            )
+        }),
+        cache_dirty_pressure: bundle.cache.map(|snapshot| cache_dirty_pressure(&snapshot)),
+        mvcc_commit_success_rate: bundle.mvcc.as_ref().map(|snapshot| {
+            safe_ratio(
+                snapshot.commit_successes_total,
+                snapshot.commit_attempts_total,
+            )
+        }),
+        mvcc_contention_level: bundle.mvcc.as_ref().map(mvcc_contention_level),
+        repair_decode_success_rate: bundle
+            .repair_live
+            .as_ref()
+            .map(|snapshot| safe_ratio(snapshot.decode_successes, snapshot.decode_attempts)),
+        repair_freshness: bundle.repair_live.as_ref().map(repair_freshness),
+    };
+
+    MetricsPresetReport::Aggregate(MetricsAggregateReport {
+        preset: PRESET_METRICS.to_owned(),
+        analyses,
+        metrics: bundle.metrics,
+        cache: bundle.cache,
+        mvcc: bundle.mvcc,
+        repair_live: bundle.repair_live,
+    })
+}
+
+fn cache_report(snapshot: CacheRuntimeMetricsSnapshot) -> MetricsPresetReport {
+    MetricsPresetReport::Cache(CacheMetricsReport {
+        preset: PRESET_CACHE.to_owned(),
+        total_accesses: snapshot.cache_hits.saturating_add(snapshot.cache_misses),
+        miss_rate: safe_ratio(
+            snapshot.cache_misses,
+            snapshot.cache_hits.saturating_add(snapshot.cache_misses),
+        ),
+        dirty_pressure: cache_dirty_pressure(&snapshot),
+        writeback_pressure: writeback_pressure(&snapshot),
+        snapshot,
+    })
+}
+
+fn mvcc_report(snapshot: EvidenceMvccRuntimeMetricsSnapshot) -> MetricsPresetReport {
+    MetricsPresetReport::Mvcc(MvccMetricsReport {
+        preset: PRESET_MVCC.to_owned(),
+        commit_success_rate: safe_ratio(
+            snapshot.commit_successes_total,
+            snapshot.commit_attempts_total,
+        ),
+        contention_level: mvcc_contention_level(&snapshot),
+        snapshot,
+    })
+}
+
+fn repair_live_report(snapshot: RepairRuntimeMetricsSnapshot) -> MetricsPresetReport {
+    MetricsPresetReport::RepairLive(RepairLiveMetricsReport {
+        preset: PRESET_REPAIR_LIVE.to_owned(),
+        decode_success_rate: safe_ratio(snapshot.decode_successes, snapshot.decode_attempts),
+        freshness: repair_freshness(&snapshot),
+        snapshot,
+    })
+}
+
+fn load_metrics_report(path: &PathBuf, preset: &str) -> Result<MetricsPresetReport> {
+    match preset {
+        PRESET_METRICS => Ok(metrics_report_from_bundle(load_metrics_bundle(path)?)),
+        PRESET_CACHE => {
+            let bundle = load_metrics_bundle(path);
+            match bundle {
+                Ok(bundle) => bundle
+                    .cache
+                    .map(cache_report)
+                    .map(Ok)
+                    .unwrap_or_else(|| Ok(cache_report(load_direct_metrics(path, "cache")?))),
+                _ => Ok(cache_report(load_direct_metrics(path, "cache")?)),
+            }
+        }
+        PRESET_MVCC => {
+            let bundle = load_metrics_bundle(path);
+            match bundle {
+                Ok(bundle) => bundle
+                    .mvcc
+                    .map(mvcc_report)
+                    .map(Ok)
+                    .unwrap_or_else(|| Ok(mvcc_report(load_direct_metrics(path, "MVCC")?))),
+                _ => Ok(mvcc_report(load_direct_metrics(path, "MVCC")?)),
+            }
+        }
+        PRESET_REPAIR_LIVE => {
+            let bundle = load_metrics_bundle(path);
+            match bundle {
+                Ok(bundle) => bundle
+                    .repair_live
+                    .map(repair_live_report)
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        Ok(repair_live_report(load_direct_metrics(
+                            path,
+                            "repair-live",
+                        )?))
+                    }),
+                _ => Ok(repair_live_report(load_direct_metrics(
+                    path,
+                    "repair-live",
+                )?)),
+            }
+        }
+        _ => bail!("metrics report requested for unsupported preset '{preset}'"),
+    }
+}
+
+fn print_metrics_report(report: &MetricsPresetReport) {
+    match report {
+        MetricsPresetReport::Aggregate(report) => {
+            println!("FrankenFS Evidence Metrics");
+            println!("  Preset: {}", report.preset);
+            if let Some(snapshot) = report.metrics {
+                println!("  FUSE request metrics:");
+                println!(
+                    "    total={} ok={} err={} bytes_read={}",
+                    snapshot.requests_total,
+                    snapshot.requests_ok,
+                    snapshot.requests_err,
+                    snapshot.bytes_read
+                );
+                println!(
+                    "    throttled={} shed={} error_rate={:.3}",
+                    snapshot.requests_throttled,
+                    snapshot.requests_shed,
+                    report.analyses.request_error_rate
+                );
+            }
+            if let Some(snapshot) = report.cache {
+                println!("  Cache metrics:");
+                println!(
+                    "    hits={} misses={} evictions={} hit_rate={:.3}",
+                    snapshot.cache_hits,
+                    snapshot.cache_misses,
+                    snapshot.cache_evictions,
+                    snapshot.hit_rate
+                );
+                println!(
+                    "    dirty_count={} writeback_depth={} pressure={}",
+                    snapshot.cache_dirty_count,
+                    snapshot.writeback_queue_depth,
+                    report
+                        .analyses
+                        .cache_dirty_pressure
+                        .as_deref()
+                        .unwrap_or("unknown")
+                );
+            }
+            if let Some(snapshot) = report.mvcc.as_ref() {
+                println!("  MVCC metrics:");
+                println!(
+                    "    active_snapshots={} commits={} successes={} conflicts={} aborts={}",
+                    snapshot.active_snapshots,
+                    snapshot.commit_attempts_total,
+                    snapshot.commit_successes_total,
+                    snapshot.conflicts_total,
+                    snapshot.aborts_total
+                );
+                println!(
+                    "    contention={} prune_throughput={:.3}/s version_chain_max={}",
+                    report
+                        .analyses
+                        .mvcc_contention_level
+                        .as_deref()
+                        .unwrap_or("unknown"),
+                    snapshot.prune_throughput,
+                    snapshot.version_chain_max_length
+                );
+            }
+            if let Some(snapshot) = report.repair_live.as_ref() {
+                println!("  Repair-live metrics:");
+                println!(
+                    "    groups_scrubbed={} corruption_detected={} decode_attempts={} decode_successes={}",
+                    snapshot.groups_scrubbed,
+                    snapshot.corruption_detected,
+                    snapshot.decode_attempts,
+                    snapshot.decode_successes
+                );
+                println!(
+                    "    symbol_refresh_count={} freshness={} max_staleness_s={:.3}",
+                    snapshot.symbol_refresh_count,
+                    report
+                        .analyses
+                        .repair_freshness
+                        .as_deref()
+                        .unwrap_or("unknown"),
+                    snapshot.symbol_staleness_max_seconds
+                );
+            }
+        }
+        MetricsPresetReport::Cache(report) => {
+            println!("FrankenFS Evidence Metrics");
+            println!("  Preset: {}", report.preset);
+            println!(
+                "  hits={} misses={} total_accesses={} hit_rate={:.3} miss_rate={:.3}",
+                report.snapshot.cache_hits,
+                report.snapshot.cache_misses,
+                report.total_accesses,
+                report.snapshot.hit_rate,
+                report.miss_rate
+            );
+            println!(
+                "  evictions={} dirty_count={} dirty_pressure={} writeback_depth={} writeback_pressure={}",
+                report.snapshot.cache_evictions,
+                report.snapshot.cache_dirty_count,
+                report.dirty_pressure,
+                report.snapshot.writeback_queue_depth,
+                report.writeback_pressure
+            );
+        }
+        MetricsPresetReport::Mvcc(report) => {
+            println!("FrankenFS Evidence Metrics");
+            println!("  Preset: {}", report.preset);
+            println!(
+                "  active_snapshots={} commits={} successes={} commit_success_rate={:.3}",
+                report.snapshot.active_snapshots,
+                report.snapshot.commit_attempts_total,
+                report.snapshot.commit_successes_total,
+                report.commit_success_rate
+            );
+            println!(
+                "  conflicts={} aborts={} contention={} version_chain_max={}",
+                report.snapshot.conflicts_total,
+                report.snapshot.aborts_total,
+                report.contention_level,
+                report.snapshot.version_chain_max_length
+            );
+        }
+        MetricsPresetReport::RepairLive(report) => {
+            println!("FrankenFS Evidence Metrics");
+            println!("  Preset: {}", report.preset);
+            println!(
+                "  groups_scrubbed={} corruption_detected={} decode_attempts={} decode_successes={}",
+                report.snapshot.groups_scrubbed,
+                report.snapshot.corruption_detected,
+                report.snapshot.decode_attempts,
+                report.snapshot.decode_successes
+            );
+            println!(
+                "  decode_success_rate={:.3} freshness={} symbol_refresh_count={} max_staleness_s={:.3}",
+                report.decode_success_rate,
+                report.freshness,
+                report.snapshot.symbol_refresh_count,
+                report.snapshot.symbol_staleness_max_seconds
+            );
+        }
+    }
+}
+
 // ── Main command ───────────────────────────────────────────────────────────
 
 pub fn evidence_cmd(
@@ -371,9 +839,9 @@ pub fn evidence_cmd(
     let started = Instant::now();
     info!(target: "ffs::cli::evidence", "evidence_start");
 
-    // Validate preset name if provided.
-    if let Some(preset_name) = preset {
-        if preset_event_types(preset_name).is_none() {
+    let preset_kind = if let Some(preset_name) = preset {
+        let kind = preset_mode(preset_name);
+        if kind.is_none() {
             warn!(
                 target: "ffs::cli::evidence",
                 preset = preset_name,
@@ -386,11 +854,41 @@ pub fn evidence_cmd(
                 KNOWN_PRESETS.join(", ")
             );
         }
-    }
+        kind
+    } else {
+        None
+    };
 
     // Preset and event_type are mutually exclusive.
     if preset.is_some() && event_type_filter.is_some() {
         bail!("--preset and --event-type are mutually exclusive");
+    }
+
+    if matches!(preset_kind, Some(PresetMode::Metrics)) {
+        if tail.is_some() {
+            bail!("--tail is only supported for ledger-backed evidence presets");
+        }
+
+        let preset_name = preset.expect("metrics preset kind requires preset name");
+        let report = load_metrics_report(path, preset_name)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).context("serialize metrics report")?
+            );
+        } else {
+            print_metrics_report(&report);
+        }
+
+        info!(
+            target: "ffs::cli::evidence",
+            preset = preset_name,
+            summary = summary,
+            outcome = "success",
+            duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            "evidence_metrics_complete"
+        );
+        return Ok(());
     }
 
     let records = load_evidence_records(path, event_type_filter, tail, preset)?;
@@ -556,6 +1054,11 @@ pub const fn evidence_event_type_name(event_type: EvidenceEventType) -> &'static
 #[cfg(test)]
 pub fn build_summary_for_test(records: &[EvidenceRecord], preset: Option<&str>) -> EvidenceSummary {
     build_summary(records, preset)
+}
+
+#[cfg(test)]
+pub fn load_metrics_report_for_test(path: &PathBuf, preset: &str) -> Result<MetricsPresetReport> {
+    load_metrics_report(path, preset)
 }
 
 fn print_evidence_record(record: &EvidenceRecord) {
