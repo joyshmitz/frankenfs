@@ -2519,7 +2519,9 @@ pub fn build_repair_output(path: &PathBuf, options: RepairCommandOptions) -> Res
                         match discover_btrfs_repair_group_specs(path, block_size) {
                             Ok(specs) => btrfs_specs_for_rebuild = specs,
                             Err(error) => {
-                                limitations.push(format!("failed to discover btrfs repair groups: {error:#}"));
+                                limitations.push(format!(
+                                    "failed to discover btrfs repair groups: {error:#}"
+                                ));
                             }
                         }
                     }

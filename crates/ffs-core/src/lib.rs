@@ -5194,7 +5194,9 @@ impl OpenFs {
         for ext in &extents {
             for block in Self::extent_phys_blocks(ext) {
                 let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail).is_ok() {
+                if ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail)
+                    .is_ok()
+                {
                     block_dev.write_block(cx, block, &data)?;
 
                     // Update parent mtime/ctime.
@@ -5236,13 +5238,20 @@ impl OpenFs {
         // Initialize with a single unused entry spanning the usable area.
         {
             // rec_len covers the usable area
-            let rec_len = u16::try_from(block_size.saturating_sub(reserved_tail)).map_err(|_| {
-                FfsError::Format("directory block size exceeds 16-bit rec_len field".into())
-            })?;
+            let rec_len =
+                u16::try_from(block_size.saturating_sub(reserved_tail)).map_err(|_| {
+                    FfsError::Format("directory block size exceeds 16-bit rec_len field".into())
+                })?;
             new_block[4..6].copy_from_slice(&rec_len.to_le_bytes());
             // inode=0, name_len=0, file_type=0 ⇒ unused entry
         }
-        ffs_dir::add_entry(&mut new_block, child_ino_u32, name, file_type, reserved_tail)?;
+        ffs_dir::add_entry(
+            &mut new_block,
+            child_ino_u32,
+            name,
+            file_type,
+            reserved_tail,
+        )?;
         block_dev.write_block(cx, new_alloc.start, &new_block)?;
 
         // Insert extent for the new directory block.
@@ -6158,7 +6167,13 @@ impl OpenFs {
                 let parent_ino_u32 = u32::try_from(new_parent.0).map_err(|_| {
                     FfsError::Format("inode number exceeds ext4 32-bit limit".into())
                 })?;
-                ffs_dir::add_entry(&mut data, parent_ino_u32, b"..", Ext4FileType::Dir, reserved_tail)?;
+                ffs_dir::add_entry(
+                    &mut data,
+                    parent_ino_u32,
+                    b"..",
+                    Ext4FileType::Dir,
+                    reserved_tail,
+                )?;
                 block_dev.write_block(cx, dot_dot_block, &data)?;
             }
 
@@ -6265,12 +6280,11 @@ impl OpenFs {
                 if new_size < inode.size {
                     // Truncate: free blocks beyond new size.
                     let new_logical_end_u64 = new_size.div_ceil(u64::from(block_size));
-                    let new_logical_end =
-                        u32::try_from(new_logical_end_u64).map_err(|_| {
-                            FfsError::Format(
-                                "truncation size exceeds ext4 32-bit logical block limit".into(),
-                            )
-                        })?;
+                    let new_logical_end = u32::try_from(new_logical_end_u64).map_err(|_| {
+                        FfsError::Format(
+                            "truncation size exceeds ext4 32-bit logical block limit".into(),
+                        )
+                    })?;
                     let mut root_bytes = Self::extent_root(&inode);
                     let freed = {
                         let Ext4AllocState {

@@ -1031,6 +1031,94 @@ fn bench_mvcc_contention(c: &mut Criterion) {
     }
 }
 
+fn bench_pruning_throughput(c: &mut Criterion) {
+    let block_data = vec![0xAB_u8; 4096];
+    let num_blocks = 256_u64;
+    let versions_per_block = 32_u64;
+
+    // Pruning a single-threaded MvccStore with many versions.
+    c.bench_function("prune_256blocks_32versions", |b| {
+        b.iter_batched(
+            || {
+                // Setup: build a store with many versions per block.
+                let mut store = MvccStore::new();
+                for v in 0..versions_per_block {
+                    for blk in 0..num_blocks {
+                        let mut txn = store.begin();
+                        txn.stage_write(BlockNumber(blk), block_data.clone());
+                        store.commit(txn).expect("commit");
+                    }
+                    // Register and release snapshots to allow pruning.
+                    if v < versions_per_block - 2 {
+                        let snap = store.current_snapshot();
+                        store.register_snapshot(snap);
+                        store.release_snapshot(snap);
+                    }
+                }
+                // Register current snapshot so watermark is one behind head.
+                let current = store.current_snapshot();
+                store.register_snapshot(current);
+                store.release_snapshot(current);
+                store
+            },
+            |mut store| {
+                store.prune_safe();
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // Pruning with EBR reclamation cycle.
+    c.bench_function("prune_and_reclaim_256blocks", |b| {
+        b.iter_batched(
+            || {
+                let mut store = MvccStore::new();
+                for _v in 0..versions_per_block {
+                    for blk in 0..num_blocks {
+                        let mut txn = store.begin();
+                        txn.stage_write(BlockNumber(blk), block_data.clone());
+                        store.commit(txn).expect("commit");
+                    }
+                }
+                let current = store.current_snapshot();
+                store.register_snapshot(current);
+                store.release_snapshot(current);
+                store
+            },
+            |mut store| {
+                store.prune_safe();
+                store.ebr_collect();
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // Sharded pruning throughput.
+    c.bench_function("prune_sharded_256blocks_32versions", |b| {
+        use ffs_mvcc::sharded::ShardedMvccStore;
+        b.iter_batched(
+            || {
+                let store = ShardedMvccStore::new(4);
+                for _v in 0..versions_per_block {
+                    for blk in 0..num_blocks {
+                        let mut txn = store.begin();
+                        txn.stage_write(BlockNumber(blk), block_data.clone());
+                        store.commit(txn).expect("commit");
+                    }
+                }
+                let snap = store.current_snapshot();
+                store.register_snapshot(snap);
+                store.release_snapshot(snap);
+                store
+            },
+            |store| {
+                store.prune_safe();
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+}
+
 criterion_group!(
     wal_benches,
     bench_wal_commit_throughput,
@@ -1038,6 +1126,7 @@ criterion_group!(
     bench_ebr_memory_report,
     bench_rcu_read_throughput,
     bench_write_amplification,
-    bench_mvcc_contention
+    bench_mvcc_contention,
+    bench_pruning_throughput
 );
 criterion_main!(wal_benches);

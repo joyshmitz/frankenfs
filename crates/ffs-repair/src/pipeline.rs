@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -558,6 +559,127 @@ impl Default for ScrubDaemonMetrics {
     }
 }
 
+/// Thread-safe atomic metrics for concurrent external repair observation.
+#[derive(Debug, Clone)]
+pub struct RepairPipelineMetrics {
+    pub groups_scrubbed: Arc<AtomicU64>,
+    pub corruption_detected: Arc<AtomicU64>,
+    pub decode_attempts: Arc<AtomicU64>,
+    pub decode_successes: Arc<AtomicU64>,
+    pub symbol_refresh_count: Arc<AtomicU64>,
+    pub symbol_staleness_max_seconds: Arc<AtomicI64>,
+    pub blocks_scanned: Arc<AtomicU64>,
+    pub blocks_recovered: Arc<AtomicU64>,
+    pub blocks_unrecoverable: Arc<AtomicU64>,
+    pub scrub_rounds_completed: Arc<AtomicU64>,
+}
+
+impl RepairPipelineMetrics {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            groups_scrubbed: Arc::new(AtomicU64::new(0)),
+            corruption_detected: Arc::new(AtomicU64::new(0)),
+            decode_attempts: Arc::new(AtomicU64::new(0)),
+            decode_successes: Arc::new(AtomicU64::new(0)),
+            symbol_refresh_count: Arc::new(AtomicU64::new(0)),
+            symbol_staleness_max_seconds: Arc::new(AtomicI64::new(0)),
+            blocks_scanned: Arc::new(AtomicU64::new(0)),
+            blocks_recovered: Arc::new(AtomicU64::new(0)),
+            blocks_unrecoverable: Arc::new(AtomicU64::new(0)),
+            scrub_rounds_completed: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> RepairMetricsSnapshot {
+        RepairMetricsSnapshot {
+            groups_scrubbed: self.groups_scrubbed.load(Ordering::Relaxed),
+            corruption_detected: self.corruption_detected.load(Ordering::Relaxed),
+            decode_attempts: self.decode_attempts.load(Ordering::Relaxed),
+            decode_successes: self.decode_successes.load(Ordering::Relaxed),
+            symbol_refresh_count: self.symbol_refresh_count.load(Ordering::Relaxed),
+            symbol_staleness_max_seconds: self.symbol_staleness_max_seconds.load(Ordering::Relaxed),
+            blocks_scanned: self.blocks_scanned.load(Ordering::Relaxed),
+            blocks_recovered: self.blocks_recovered.load(Ordering::Relaxed),
+            blocks_unrecoverable: self.blocks_unrecoverable.load(Ordering::Relaxed),
+            scrub_rounds_completed: self.scrub_rounds_completed.load(Ordering::Relaxed),
+        }
+    }
+
+    fn update_staleness_gauge(&self, telemetry: &RefreshTelemetry) {
+        let max_staleness_ms = telemetry
+            .groups
+            .iter()
+            .map(|group| group.since_last_refresh_ms)
+            .max()
+            .unwrap_or(0);
+        let max_staleness_secs = i64::try_from(max_staleness_ms / 1000).unwrap_or(i64::MAX);
+        self.symbol_staleness_max_seconds
+            .store(max_staleness_secs, Ordering::Relaxed);
+    }
+}
+
+impl Default for RepairPipelineMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Serializable point-in-time snapshot of the atomic repair metrics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepairMetricsSnapshot {
+    pub groups_scrubbed: u64,
+    pub corruption_detected: u64,
+    pub decode_attempts: u64,
+    pub decode_successes: u64,
+    pub symbol_refresh_count: u64,
+    pub symbol_staleness_max_seconds: i64,
+    pub blocks_scanned: u64,
+    pub blocks_recovered: u64,
+    pub blocks_unrecoverable: u64,
+    pub scrub_rounds_completed: u64,
+}
+
+/// JSON-friendly runtime metrics export for repair pipeline health.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepairRuntimeMetricsSnapshot {
+    pub groups_scrubbed: u64,
+    pub corruption_detected: u64,
+    pub decode_attempts: u64,
+    pub decode_successes: u64,
+    pub symbol_refresh_count: u64,
+    pub symbol_staleness_max_seconds: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RepairRuntimeMetrics {
+    groups_scrubbed: u64,
+    corruption_detected: u64,
+    decode_attempts: u64,
+    decode_successes: u64,
+    symbol_refresh_count: u64,
+}
+
+impl RepairRuntimeMetrics {
+    fn snapshot(&self, telemetry: &RefreshTelemetry) -> RepairRuntimeMetricsSnapshot {
+        let max_staleness_ms = telemetry
+            .groups
+            .iter()
+            .map(|group| group.since_last_refresh_ms)
+            .max()
+            .unwrap_or(0);
+        RepairRuntimeMetricsSnapshot {
+            groups_scrubbed: self.groups_scrubbed,
+            corruption_detected: self.corruption_detected,
+            decode_attempts: self.decode_attempts,
+            decode_successes: self.decode_successes,
+            symbol_refresh_count: self.symbol_refresh_count,
+            symbol_staleness_max_seconds: max_staleness_ms as f64 / 1000.0,
+        }
+    }
+}
+
 /// Summary for one daemon tick (one group scan attempt).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScrubDaemonStep {
@@ -607,6 +729,10 @@ pub struct ScrubWithRecovery<'a, W: Write> {
     policy_decisions: BTreeMap<u32, OverheadDecision>,
     /// Per-group refresh protocol state (dirty tracking + policy).
     refresh_states: BTreeMap<u32, GroupRefreshState>,
+    /// Runtime metrics for scrub/decode/refresh activity.
+    runtime_metrics: RepairRuntimeMetrics,
+    /// Optional thread-safe atomic metrics for concurrent external observation.
+    atomic_metrics: Option<RepairPipelineMetrics>,
 }
 
 impl<'a, W: Write> ScrubWithRecovery<'a, W> {
@@ -660,7 +786,27 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             metadata_groups,
             policy_decisions: BTreeMap::new(),
             refresh_states,
+            runtime_metrics: RepairRuntimeMetrics::default(),
+            atomic_metrics: None,
         }
+    }
+
+    /// Attach thread-safe atomic metrics for concurrent external observation.
+    ///
+    /// When attached, the pipeline updates these atomics alongside the internal
+    /// `RepairRuntimeMetrics` at every instrumentation point. External consumers
+    /// (TUI dashboard, monitoring thread) can read the returned clone at any time
+    /// without blocking the scrub/recovery hot path.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: RepairPipelineMetrics) -> Self {
+        self.atomic_metrics = Some(metrics);
+        self
+    }
+
+    /// Returns a clone of the attached atomic metrics, if any.
+    #[must_use]
+    pub fn atomic_metrics(&self) -> Option<&RepairPipelineMetrics> {
+        self.atomic_metrics.as_ref()
     }
 
     /// Enable adaptive Bayesian overhead policy.
@@ -821,6 +967,12 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         eval
     }
 
+    /// JSON-friendly runtime metrics export for repair health/performance.
+    #[must_use]
+    pub fn runtime_metrics(&self) -> RepairRuntimeMetricsSnapshot {
+        self.runtime_metrics.snapshot(&self.refresh_telemetry())
+    }
+
     /// Notify the refresh policy that a write dirtied `group`.
     ///
     /// Eager/adaptive-eager policies will immediately refresh symbols.
@@ -883,6 +1035,16 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         // Scrub the entire device.
         info!("scrub_and_recover: starting full device scrub");
         let report = scrubber.scrub_all(cx)?;
+        let groups_count = u64::try_from(self.groups.len()).unwrap_or(u64::MAX);
+        self.runtime_metrics.groups_scrubbed = self
+            .runtime_metrics
+            .groups_scrubbed
+            .saturating_add(groups_count);
+        if let Some(m) = &self.atomic_metrics {
+            m.groups_scrubbed.fetch_add(groups_count, Ordering::Relaxed);
+            m.blocks_scanned
+                .fetch_add(report.blocks_scanned, Ordering::Relaxed);
+        }
         debug!(
             blocks_scanned = report.blocks_scanned,
             blocks_corrupt = report.blocks_corrupt,
@@ -891,6 +1053,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         );
         self.update_adaptive_policy(&report)?;
         self.refresh_dirty_groups_now(cx)?;
+        self.sync_atomic_staleness_gauge();
 
         if report.is_clean() {
             info!("scrub_and_recover: no corruption found");
@@ -966,6 +1129,13 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             group_cfg.source_first_block,
             u64::from(group_cfg.source_block_count),
         )?;
+        self.runtime_metrics.groups_scrubbed =
+            self.runtime_metrics.groups_scrubbed.saturating_add(1);
+        if let Some(m) = &self.atomic_metrics {
+            m.groups_scrubbed.fetch_add(1, Ordering::Relaxed);
+            m.blocks_scanned
+                .fetch_add(report.blocks_scanned, Ordering::Relaxed);
+        }
 
         let scrub_record = EvidenceRecord::from_scrub_report(group.0, &report);
         self.ledger.append(&scrub_record).map_err(|e| {
@@ -1040,7 +1210,25 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             dirty = state.dirty,
             "refresh_group_marked_dirty"
         );
+        self.sync_atomic_staleness_gauge();
         Ok(())
+    }
+
+    fn mark_group_refreshed(&mut self, group: GroupNumber) {
+        if let Some(state) = self.refresh_states.get_mut(&group.0) {
+            state.dirty = false;
+            state.dirty_since = None;
+            state.last_refresh = Instant::now();
+            state.writes_since_refresh = 0;
+        }
+        self.sync_atomic_staleness_gauge();
+    }
+
+    fn sync_atomic_staleness_gauge(&self) {
+        if let Some(metrics) = &self.atomic_metrics {
+            let telemetry = self.refresh_telemetry();
+            metrics.update_staleness_gauge(&telemetry);
+        }
     }
 
     /// Refresh all currently dirty groups using scrub-trigger semantics.
@@ -1214,12 +1402,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                 );
                 return Err(error);
             }
-            if let Some(state) = self.refresh_states.get_mut(&group.0) {
-                state.dirty = false;
-                state.dirty_since = None;
-                state.last_refresh = Instant::now();
-                state.writes_since_refresh = 0;
-            }
+            self.mark_group_refreshed(group);
         }
         Ok(())
     }
@@ -1329,6 +1512,11 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         group_cfg: &GroupConfig,
         corrupt_blocks: &[BlockNumber],
     ) -> Result<()> {
+        self.runtime_metrics.decode_attempts =
+            self.runtime_metrics.decode_attempts.saturating_add(1);
+        if let Some(m) = &self.atomic_metrics {
+            m.decode_attempts.fetch_add(1, Ordering::Relaxed);
+        }
         let attempt_detail = RepairDetail {
             generation: 0,
             corrupt_count: corrupt_blocks.len(),
@@ -1399,6 +1587,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
 
         match self.refresh_symbols(cx, group_cfg, refresh_symbol_count, RefreshMode::Recovery) {
             Ok(()) => {
+                self.mark_group_refreshed(group_num);
                 info!(
                     target: "ffs::repair::refresh",
                     group = group_num.0,
@@ -1454,6 +1643,11 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             .outcome
         {
             RecoveryOutcome::Recovered => {
+                self.runtime_metrics.decode_successes =
+                    self.runtime_metrics.decode_successes.saturating_add(1);
+                if let Some(m) = &self.atomic_metrics {
+                    m.decode_successes.fetch_add(1, Ordering::Relaxed);
+                }
                 info!(
                     group = group_num.0,
                     blocks_recovered = recovery_result.repaired_blocks.len(),
@@ -1502,6 +1696,20 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                 )
             }
         };
+        if let Some(m) = &self.atomic_metrics {
+            if recovered_count > 0 {
+                m.blocks_recovered.fetch_add(
+                    u64::try_from(recovered_count).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+            }
+            if unrecoverable_count > 0 {
+                m.blocks_unrecoverable.fetch_add(
+                    u64::try_from(unrecoverable_count).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+            }
+        }
         *total_recovered += recovered_count;
         *total_unrecoverable += unrecoverable_count;
 
@@ -1704,6 +1912,11 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         self.ledger.append(&evidence).map_err(|e| {
             FfsError::RepairFailed(format!("failed to write symbol refresh evidence: {e}"))
         })?;
+        self.runtime_metrics.symbol_refresh_count =
+            self.runtime_metrics.symbol_refresh_count.saturating_add(1);
+        if let Some(m) = &self.atomic_metrics {
+            m.symbol_refresh_count.fetch_add(1, Ordering::Relaxed);
+        }
 
         Ok(())
     }
@@ -1714,6 +1927,15 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         group: GroupNumber,
         corrupt_blocks: &[BlockNumber],
     ) -> Result<()> {
+        let corrupt_count = u64::try_from(corrupt_blocks.len()).unwrap_or(u64::MAX);
+        self.runtime_metrics.corruption_detected = self
+            .runtime_metrics
+            .corruption_detected
+            .saturating_add(corrupt_count);
+        if let Some(m) = &self.atomic_metrics {
+            m.corruption_detected
+                .fetch_add(corrupt_count, Ordering::Relaxed);
+        }
         warn!(
             group = group.0,
             corrupt_blocks = corrupt_blocks.len(),
@@ -1780,6 +2002,18 @@ impl<'a, W: Write> ScrubDaemon<'a, W> {
         &self.metrics
     }
 
+    /// Returns a reference to the attached atomic metrics, if any.
+    #[must_use]
+    pub fn atomic_metrics(&self) -> Option<&RepairPipelineMetrics> {
+        self.pipeline.atomic_metrics()
+    }
+
+    /// JSON-friendly runtime metrics export for repair pipeline activity.
+    #[must_use]
+    pub fn runtime_metrics(&self) -> RepairRuntimeMetricsSnapshot {
+        self.pipeline.runtime_metrics()
+    }
+
     /// Consume the daemon and return the inner pipeline + final metrics.
     #[must_use]
     pub fn into_parts(self) -> (ScrubWithRecovery<'a, W>, ScrubDaemonMetrics) {
@@ -1793,6 +2027,7 @@ impl<'a, W: Write> ScrubDaemon<'a, W> {
     }
 
     /// Execute one daemon tick (apply queued refreshes, then scan one group).
+    #[allow(clippy::too_many_lines)]
     pub fn run_once(&mut self, cx: &Cx) -> Result<ScrubDaemonStep> {
         if self.pipeline.groups.is_empty() {
             return Err(FfsError::RepairFailed(
@@ -1886,6 +2121,11 @@ impl<'a, W: Write> ScrubDaemon<'a, W> {
             self.next_group_index = 0;
             self.metrics.scrub_rounds_completed =
                 self.metrics.scrub_rounds_completed.saturating_add(1);
+            if let Some(m) = self.pipeline.atomic_metrics.as_ref() {
+                m.scrub_rounds_completed.fetch_add(1, Ordering::Relaxed);
+                let telemetry = self.pipeline.refresh_telemetry();
+                m.update_staleness_gauge(&telemetry);
+            }
             info!(
                 target: "ffs::repair::daemon",
                 round_number = self.round_number,
@@ -4149,6 +4389,7 @@ mod tests {
         daemon.run_one_round(&cx).expect("run one round");
         assert_eq!(daemon.metrics().scrub_rounds_completed, 1);
         assert!(daemon.metrics().blocks_scanned_total >= u64::from(source_count) * 2);
+        assert_eq!(daemon.runtime_metrics().groups_scrubbed, 2);
     }
 
     #[test]
@@ -4164,6 +4405,7 @@ mod tests {
 
         let validator = CorruptBlockValidator::new(corrupt_blocks.clone());
         let mut ledger_buf = Vec::new();
+        let expected_groups = u64::try_from(groups.len()).expect("groups len fits u64");
         let pipeline = ScrubWithRecovery::new(
             &device,
             &validator,
@@ -4190,6 +4432,16 @@ mod tests {
         assert_eq!(daemon.metrics().blocks_recovered, expected_repairs);
         assert_eq!(daemon.metrics().blocks_unrecoverable, 0);
         assert_eq!(daemon.metrics().scrub_rounds_completed, 1);
+        let runtime_metrics = daemon.runtime_metrics();
+        assert_eq!(runtime_metrics.groups_scrubbed, expected_groups);
+        assert_eq!(runtime_metrics.corruption_detected, expected_repairs);
+        assert_eq!(runtime_metrics.decode_attempts, expected_repairs);
+        assert_eq!(runtime_metrics.decode_successes, expected_repairs);
+        assert_eq!(runtime_metrics.symbol_refresh_count, expected_repairs);
+        assert!(
+            runtime_metrics.symbol_staleness_max_seconds >= 0.0,
+            "staleness gauge must be non-negative"
+        );
 
         let after_hashes = block_hashes(&cx, &device, &source_blocks);
         assert_eq!(before_hashes, after_hashes, "data mismatch after repair");
@@ -4324,6 +4576,104 @@ mod tests {
         let parsed: ScrubDaemonMetrics = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.blocks_scanned_total, 1000);
         assert_eq!(parsed.blocks_recovered, 4);
+    }
+
+    #[test]
+    fn repair_runtime_metrics_default_is_zeroed() {
+        let metrics = RepairRuntimeMetrics::default().snapshot(&RefreshTelemetry {
+            tracked_groups: 0,
+            dirty_groups: 0,
+            max_dirty_age_ms: 0,
+            groups: Vec::new(),
+        });
+        assert_eq!(metrics.groups_scrubbed, 0);
+        assert_eq!(metrics.corruption_detected, 0);
+        assert_eq!(metrics.decode_attempts, 0);
+        assert_eq!(metrics.decode_successes, 0);
+        assert_eq!(metrics.symbol_refresh_count, 0);
+        assert!(
+            (metrics.symbol_staleness_max_seconds - 0.0).abs() < f64::EPSILON,
+            "staleness gauge should default to zero"
+        );
+    }
+
+    #[test]
+    fn repair_runtime_metrics_serde_round_trip() {
+        let metrics = RepairRuntimeMetricsSnapshot {
+            groups_scrubbed: 12,
+            corruption_detected: 4,
+            decode_attempts: 4,
+            decode_successes: 3,
+            symbol_refresh_count: 5,
+            symbol_staleness_max_seconds: 7.25,
+        };
+        let json = serde_json::to_string(&metrics).expect("serialize");
+        let parsed: RepairRuntimeMetricsSnapshot =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.groups_scrubbed, 12);
+        assert_eq!(parsed.decode_successes, 3);
+        assert!(
+            (parsed.symbol_staleness_max_seconds - 7.25).abs() < f64::EPSILON,
+            "staleness gauge must survive serde round-trip"
+        );
+    }
+
+    #[test]
+    fn repair_runtime_metrics_report_max_symbol_staleness() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout0 =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout0");
+        let layout1 =
+            RepairGroupLayout::new(GroupNumber(1), BlockNumber(64), 64, 0, 4).expect("layout1");
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, BlockNumber(0), source_count);
+        write_source_blocks(&cx, &device, BlockNumber(64), source_count);
+        bootstrap_storage(&cx, &device, layout0, BlockNumber(0), source_count, 4);
+        bootstrap_storage(&cx, &device, layout1, BlockNumber(64), source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let groups = vec![
+            GroupConfig {
+                layout: layout0,
+                source_first_block: BlockNumber(0),
+                source_block_count: source_count,
+            },
+            GroupConfig {
+                layout: layout1,
+                source_first_block: BlockNumber(64),
+                source_block_count: source_count,
+            },
+        ];
+
+        let mut ledger_buf = Vec::new();
+        let mut pipeline =
+            ScrubWithRecovery::new(&device, &validator, test_uuid(), groups, &mut ledger_buf, 4);
+        let now = Instant::now();
+        pipeline
+            .refresh_states
+            .get_mut(&0)
+            .expect("group 0 state")
+            .last_refresh = now - Duration::from_secs(2);
+        pipeline
+            .refresh_states
+            .get_mut(&1)
+            .expect("group 1 state")
+            .last_refresh = now - Duration::from_secs(5);
+
+        let metrics = pipeline.runtime_metrics();
+        assert!(
+            metrics.symbol_staleness_max_seconds >= 5.0,
+            "expected max staleness >= 5s, got {}",
+            metrics.symbol_staleness_max_seconds
+        );
+        assert!(
+            metrics.symbol_staleness_max_seconds < 6.0,
+            "expected max staleness < 6s, got {}",
+            metrics.symbol_staleness_max_seconds
+        );
     }
 
     #[test]
@@ -5350,5 +5700,275 @@ mod tests {
         assert_eq!(percentile_index(10, 0.5), 5); // round(0.5 * 9) = 5
         assert_eq!(percentile_index(100, 0.95), 94); // round(0.95 * 99) = 94
         assert_eq!(percentile_index(0, 0.95), 0);
+    }
+
+    // ── RepairPipelineMetrics tests ───────────────────────────────────────
+
+    #[test]
+    fn atomic_metrics_default_is_zeroed() {
+        let metrics = RepairPipelineMetrics::new();
+        let snap = metrics.snapshot();
+        assert_eq!(snap.groups_scrubbed, 0);
+        assert_eq!(snap.corruption_detected, 0);
+        assert_eq!(snap.decode_attempts, 0);
+        assert_eq!(snap.decode_successes, 0);
+        assert_eq!(snap.symbol_refresh_count, 0);
+        assert_eq!(snap.symbol_staleness_max_seconds, 0);
+        assert_eq!(snap.blocks_scanned, 0);
+        assert_eq!(snap.blocks_recovered, 0);
+        assert_eq!(snap.blocks_unrecoverable, 0);
+        assert_eq!(snap.scrub_rounds_completed, 0);
+    }
+
+    #[test]
+    fn atomic_metrics_increment_and_snapshot() {
+        let metrics = RepairPipelineMetrics::new();
+        metrics.groups_scrubbed.fetch_add(5, Ordering::Relaxed);
+        metrics.corruption_detected.fetch_add(2, Ordering::Relaxed);
+        metrics.decode_attempts.fetch_add(3, Ordering::Relaxed);
+        metrics.decode_successes.fetch_add(1, Ordering::Relaxed);
+        metrics.symbol_refresh_count.fetch_add(4, Ordering::Relaxed);
+        metrics.blocks_scanned.fetch_add(1000, Ordering::Relaxed);
+        metrics.blocks_recovered.fetch_add(7, Ordering::Relaxed);
+        metrics.blocks_unrecoverable.fetch_add(2, Ordering::Relaxed);
+        metrics
+            .scrub_rounds_completed
+            .fetch_add(1, Ordering::Relaxed);
+        metrics
+            .symbol_staleness_max_seconds
+            .store(42, Ordering::Relaxed);
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.groups_scrubbed, 5);
+        assert_eq!(snap.corruption_detected, 2);
+        assert_eq!(snap.decode_attempts, 3);
+        assert_eq!(snap.decode_successes, 1);
+        assert_eq!(snap.symbol_refresh_count, 4);
+        assert_eq!(snap.blocks_scanned, 1000);
+        assert_eq!(snap.blocks_recovered, 7);
+        assert_eq!(snap.blocks_unrecoverable, 2);
+        assert_eq!(snap.scrub_rounds_completed, 1);
+        assert_eq!(snap.symbol_staleness_max_seconds, 42);
+    }
+
+    #[test]
+    fn atomic_metrics_serde_round_trip() {
+        let metrics = RepairPipelineMetrics::new();
+        metrics.groups_scrubbed.fetch_add(10, Ordering::Relaxed);
+        metrics.corruption_detected.fetch_add(3, Ordering::Relaxed);
+        metrics
+            .symbol_staleness_max_seconds
+            .store(15, Ordering::Relaxed);
+
+        let snap = metrics.snapshot();
+        let json = serde_json::to_string_pretty(&snap).expect("serialize");
+        let parsed: RepairMetricsSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, snap);
+    }
+
+    #[test]
+    fn atomic_metrics_concurrent_updates() {
+        let metrics = Arc::new(RepairPipelineMetrics::new());
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let m = Arc::clone(&metrics);
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        m.groups_scrubbed.fetch_add(1, Ordering::Relaxed);
+                        m.blocks_scanned.fetch_add(10, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread join");
+        }
+        let snap = metrics.snapshot();
+        assert_eq!(snap.groups_scrubbed, 400);
+        assert_eq!(snap.blocks_scanned, 4000);
+    }
+
+    #[test]
+    fn atomic_metrics_staleness_gauge_from_telemetry() {
+        let metrics = RepairPipelineMetrics::new();
+        let telemetry = RefreshTelemetry {
+            tracked_groups: 2,
+            dirty_groups: 1,
+            max_dirty_age_ms: 7500,
+            groups: vec![
+                GroupRefreshSummary {
+                    group: 0,
+                    dirty: false,
+                    dirty_age_ms: 0,
+                    policy: "eager".to_owned(),
+                    since_last_refresh_ms: 2000,
+                    writes_since_refresh: 0,
+                    block_count_threshold: 0,
+                },
+                GroupRefreshSummary {
+                    group: 1,
+                    dirty: true,
+                    dirty_age_ms: 7500,
+                    policy: "lazy(30000ms)".to_owned(),
+                    since_last_refresh_ms: 7500,
+                    writes_since_refresh: 100,
+                    block_count_threshold: 0,
+                },
+            ],
+        };
+        metrics.update_staleness_gauge(&telemetry);
+        assert_eq!(
+            metrics.symbol_staleness_max_seconds.load(Ordering::Relaxed),
+            7 // 7500ms / 1000 = 7 (integer division)
+        );
+    }
+
+    #[test]
+    fn atomic_metrics_wired_into_pipeline_scrub() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, BlockNumber(0), source_count);
+        bootstrap_storage(&cx, &device, layout, BlockNumber(0), source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let groups = vec![GroupConfig {
+            layout,
+            source_first_block: BlockNumber(0),
+            source_block_count: source_count,
+        }];
+
+        let atomic = RepairPipelineMetrics::new();
+        let atomic_clone = atomic.clone();
+
+        let mut ledger_buf = Vec::new();
+        let mut pipeline =
+            ScrubWithRecovery::new(&device, &validator, test_uuid(), groups, &mut ledger_buf, 4)
+                .with_metrics(atomic);
+
+        // Run scrub (no corruption)
+        let report = pipeline.scrub_and_recover(&cx).expect("scrub");
+        assert_eq!(report.total_corrupt, 0);
+
+        // Verify atomic metrics were updated
+        let snap = atomic_clone.snapshot();
+        assert_eq!(snap.groups_scrubbed, 1);
+        assert!(snap.blocks_scanned > 0);
+        assert_eq!(snap.corruption_detected, 0);
+        assert_eq!(snap.decode_attempts, 0);
+    }
+
+    #[test]
+    fn recovery_refresh_resets_dirty_state_and_atomic_staleness() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, BlockNumber(0), source_count);
+        bootstrap_storage(&cx, &device, layout, BlockNumber(0), source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: BlockNumber(0),
+            source_block_count: source_count,
+        };
+
+        let atomic = RepairPipelineMetrics::new();
+        let atomic_clone = atomic.clone();
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_metrics(atomic);
+
+        let now = Instant::now();
+        let state = pipeline.refresh_states.get_mut(&0).expect("group 0 state");
+        state.dirty = true;
+        state.dirty_since = Some(now - Duration::from_secs(4));
+        state.last_refresh = now - Duration::from_secs(7);
+        state.writes_since_refresh = 3;
+        pipeline.sync_atomic_staleness_gauge();
+
+        assert_eq!(
+            atomic_clone
+                .symbol_staleness_max_seconds
+                .load(Ordering::Relaxed),
+            7
+        );
+        assert!(pipeline.refresh_symbols_after_recovery(&cx, &group_cfg));
+
+        let refreshed = pipeline.refresh_states.get(&0).expect("group 0 state");
+        assert!(
+            !refreshed.dirty,
+            "recovery refresh should clear dirty state"
+        );
+        assert_eq!(
+            refreshed.dirty_since, None,
+            "recovery refresh should clear dirty age"
+        );
+        assert_eq!(
+            refreshed.writes_since_refresh, 0,
+            "recovery refresh should reset write count"
+        );
+        assert!(
+            refreshed.last_refresh >= now,
+            "recovery refresh should advance last_refresh"
+        );
+        assert_eq!(
+            atomic_clone
+                .symbol_staleness_max_seconds
+                .load(Ordering::Relaxed),
+            0,
+            "atomic staleness gauge should be refreshed after recovery symbol regeneration"
+        );
+    }
+
+    #[test]
+    fn atomic_metrics_wired_into_daemon() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_count = 8;
+
+        write_source_blocks(&cx, &device, BlockNumber(0), source_count);
+        bootstrap_storage(&cx, &device, layout, BlockNumber(0), source_count, 4);
+
+        let validator = CorruptBlockValidator::new(vec![]);
+        let groups = vec![GroupConfig {
+            layout,
+            source_first_block: BlockNumber(0),
+            source_block_count: source_count,
+        }];
+
+        let atomic = RepairPipelineMetrics::new();
+        let atomic_clone = atomic.clone();
+
+        let mut ledger_buf = Vec::new();
+        let pipeline =
+            ScrubWithRecovery::new(&device, &validator, test_uuid(), groups, &mut ledger_buf, 4)
+                .with_metrics(atomic);
+
+        let mut daemon = ScrubDaemon::new(pipeline, ScrubDaemonConfig::default());
+        daemon.run_one_round(&cx).expect("daemon round");
+
+        let snap = atomic_clone.snapshot();
+        assert_eq!(snap.groups_scrubbed, 1, "daemon round should scrub 1 group");
+        assert!(snap.blocks_scanned > 0, "should have scanned blocks");
+        assert_eq!(snap.scrub_rounds_completed, 1, "1 round completed");
     }
 }

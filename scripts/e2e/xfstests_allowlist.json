@@ -11,8 +11,8 @@
   },
   {
     "test_id": "generic/112",
-    "failure_reason": "Requires AIO + preallocation (unwritten extents via fallocate); FUSE AIO semantics and preallocation may be unsupported",
-    "status": "investigating"
+    "failure_reason": "Requires AIO + preallocation; fallocate prealloc supported, FUSE AIO supported since Linux 4.2. Needs runtime validation with built xfstests (ltp/aio-stress binary required)",
+    "status": "likely_pass"
   },
   {
     "test_id": "generic/231",

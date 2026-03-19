@@ -1496,7 +1496,12 @@ mod tests {
         let root = make_root();
 
         let result = search(&cx, &dev, &root, 0).unwrap();
-        assert_eq!(result, SearchResult::Hole { hole_len: 1_u64 << 32 });
+        assert_eq!(
+            result,
+            SearchResult::Hole {
+                hole_len: 1_u64 << 32
+            }
+        );
     }
 
     #[test]
@@ -2082,7 +2087,12 @@ mod tests {
         assert_eq!(header.entries, 0);
 
         let result = search(&cx, &dev, &root, 0).unwrap();
-        assert_eq!(result, SearchResult::Hole { hole_len: 1_u64 << 32 });
+        assert_eq!(
+            result,
+            SearchResult::Hole {
+                hole_len: 1_u64 << 32
+            }
+        );
 
         let count = walk(&cx, &dev, &root, &mut |_| Ok(())).unwrap();
         assert_eq!(count, 0);
@@ -2459,7 +2469,12 @@ mod tests {
         let root = make_root();
 
         let result = search(&cx, &dev, &root, u32::MAX).unwrap();
-        assert_eq!(result, SearchResult::Hole { hole_len: 1_u64 << 32 });
+        assert_eq!(
+            result,
+            SearchResult::Hole {
+                hole_len: 1_u64 << 32
+            }
+        );
     }
 
     #[test]
@@ -2601,8 +2616,15 @@ mod tests {
         insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
 
         // Delete starting near u32::MAX with large count — should saturate, not overflow.
-        let freed =
-            delete_range(&cx, &dev, &mut root, u32::MAX - 10, u32::MAX.into(), &mut alloc).unwrap();
+        let freed = delete_range(
+            &cx,
+            &dev,
+            &mut root,
+            u32::MAX - 10,
+            u32::MAX.into(),
+            &mut alloc,
+        )
+        .unwrap();
         assert_eq!(freed[0].physical_start, 777);
         assert_eq!(freed[0].count, 5);
     }

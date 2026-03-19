@@ -238,9 +238,12 @@ fn ext4_reference_image_opens_with_journal_replay_segments() {
         .and_then(Path::parent)
         .expect("workspace root");
     let image_path = workspace.join("conformance/golden/ext4_8mb_reference.ext4");
-    
+
     if !image_path.exists() {
-        println!("Skipping test: golden image {} not found.", image_path.display());
+        println!(
+            "Skipping test: golden image {} not found.",
+            image_path.display()
+        );
         return;
     }
 

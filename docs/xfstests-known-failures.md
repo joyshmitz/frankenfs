@@ -12,7 +12,7 @@ FUSE mount. Established 2026-03-18.
 | generic/030 | skip | known_fail | FUSE mmap + mremap ioctl |
 | generic/035 | pass | — | rename overwrite semantics |
 | generic/068 | skip | wont_fix | FIFREEZE ioctl (kernel-only) |
-| generic/112 | skip | investigating | AIO + preallocation (fallocate) |
+| generic/112 | skip | likely_pass | AIO + preallocation (fallocate) |
 | generic/231 | skip | wont_fix | Disk quotas (kernel-only) |
 | ext4/001 | skip | known_fail | fallocate zero_range + FIEMAP |
 | ext4/003 | skip | known_fail | bigalloc scratch mkfs |
@@ -20,6 +20,7 @@ FUSE mount. Established 2026-03-18.
 | ext4/013 | skip | wont_fix | debugfs raw inode corruption |
 
 **Passable: 3/11** — generic/001, generic/013, generic/035
+**Likely passable: 1/11** — generic/112 (pending runtime validation)
 
 ## Root Cause Analysis
 
@@ -74,13 +75,22 @@ currently expose through the FUSE interface.
 - This is an ext4-internal operation that modifies inode flags directly.
 - **Path to fix**: Implement EXT4_IOC_SETFLAGS ioctl passthrough in ffs-fuse.
 
-### Category 3: Under Investigation
+### Category 3: Likely Passable (Pending Runtime Validation)
 
 **generic/112 — FSX with AIO + Preallocation**
-- Runs FSX with `-x` flag (preallocation, unwritten extents) and AIO.
-- AIO over FUSE may work but preallocation semantics need verification.
-- **Path to fix**: Test with `libaio` and verify fallocate behavior through FUSE.
-- May move to known_fail or pass depending on testing results.
+- Runs FSX with `-A` (AIO) and `-x` (preallocation via fallocate) flags.
+- **AIO support**: Linux FUSE supports AIO since kernel 4.2 via `FUSE_ASYNC_DIO`.
+  FrankenFS does not need code changes for AIO — it is handled transparently
+  by the kernel FUSE layer.
+- **Preallocation support**: FrankenFS implements `fallocate(mode=0)` and
+  `FALLOC_FL_KEEP_SIZE` in both ext4 and btrfs code paths (see
+  `ffs-core::ext4_fallocate` and `ffs-core::btrfs_validate_fallocate_mode`).
+  Preallocated extents are properly marked as unwritten.
+- **Remaining blocker**: Requires `ltp/aio-stress` binary from compiled xfstests.
+  Cannot validate without building xfstests-dev and setting up the FUSE mount
+  test environment.
+- **Status**: Reclassified from `investigating` to `likely_pass` based on code
+  analysis. Needs runtime validation when xfstests build environment is available.
 
 ## Infrastructure Notes
 
@@ -106,10 +116,31 @@ export MOUNT_CMD="ffs-cli mount --read-write"
 export UMOUNT_CMD="fusermount -u"
 ```
 
+## Triage Summary (bd-m5wf.7.4)
+
+Completed 2026-03-18. All 8 known failures investigated (100%).
+
+| Test | Disposition | Fixable? | Effort | Rationale |
+|------|------------|----------|--------|-----------|
+| generic/030 | known_fail | Yes (high) | FUSE mmap + mremap support | Requires ffs-fuse writeback cache + mmap coherence |
+| generic/068 | wont_fix | No | — | FIFREEZE ioctl is kernel VFS, no FUSE path |
+| generic/112 | likely_pass | N/A | Runtime test | AIO + fallocate both supported; needs xfstests build |
+| generic/231 | wont_fix | No | — | Quota subsystem is kernel-only |
+| ext4/001 | known_fail | Yes (medium) | ZERO_RANGE + FIEMAP | Implement FALLOC_FL_ZERO_RANGE in ext4_fallocate |
+| ext4/003 | known_fail | Yes (low) | Test infra | Set up SCRATCH_DEV loop device with bigalloc |
+| ext4/005 | known_fail | Yes (medium) | EXT4_IOC_SETFLAGS | Implement chattr ioctl passthrough in ffs-fuse |
+| ext4/013 | wont_fix | No | — | Requires raw device access (debugfs -w) |
+
+**Actionable items for future work:**
+1. Build xfstests-dev and validate generic/112 (likely_pass)
+2. Implement `FALLOC_FL_ZERO_RANGE` in `ext4_fallocate` (unblocks ext4/001 partially)
+3. Set up SCRATCH_DEV loop device infrastructure (unblocks ext4/003)
+4. Implement `EXT4_IOC_SETFLAGS` ioctl passthrough (unblocks ext4/005)
+
 ### Next Steps
 
 1. Install xfstests build dependencies and compile
 2. Create proper TEST_DEV/SCRATCH_DEV loop device setup
 3. Run passable subset (generic/001, generic/013, generic/035) to validate
-4. Update baseline with actual results
-5. Triage known_fail items for FUSE ioctl support (bd-m5wf.7.4)
+4. Validate generic/112 (reclassified as likely_pass)
+5. Update baseline with actual results
