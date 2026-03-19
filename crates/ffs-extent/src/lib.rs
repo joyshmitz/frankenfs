@@ -346,7 +346,24 @@ pub fn punch_hole(
     cx_checkpoint(cx)?;
     validate_root_header("punch_hole", root_bytes)?;
 
-    let freed_ranges = {
+    let hole_end = u64::from(logical_start).saturating_add(count);
+
+    // Collect extents overlapping the hole.
+    let mut overlapping = Vec::new();
+    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
+        let ext_len = u32::from(ext.actual_len());
+        let ext_start = u64::from(ext.logical_block);
+        let ext_end = ext_start.saturating_add(u64::from(ext_len));
+
+        if ext_start < hole_end && ext_end > u64::from(logical_start) {
+            overlapping.push(*ext);
+        }
+        Ok(())
+    })?;
+
+    let mut total_freed = 0u64;
+
+    for ext in overlapping {
         let mut tree_alloc = GroupBlockAllocator {
             cx,
             dev,
@@ -355,21 +372,41 @@ pub fn punch_hole(
             hint: AllocHint::default(),
             pctx,
         };
-        ffs_btree::delete_range(cx, dev, root_bytes, logical_start, count, &mut tree_alloc)?
-    };
-    let mut total_freed = 0u64;
 
-    for f in &freed_ranges {
-        ffs_alloc::free_blocks_persist(
+        let ext_len = u32::from(ext.actual_len());
+
+        // Delete the original extent entirely to avoid splitting it in place.
+        ffs_btree::delete_range(
             cx,
             dev,
-            geo,
-            groups,
-            BlockNumber(f.physical_start),
-            u32::from(f.count),
-            pctx,
+            root_bytes,
+            ext.logical_block,
+            u64::from(ext_len),
+            &mut tree_alloc,
         )?;
-        total_freed += u64::from(f.count);
+
+        // Trim the extent against the hole.
+        let (remaining, freed) =
+            ffs_btree::trim_extents(vec![ext], u64::from(logical_start), hole_end);
+
+        // Re-insert the remaining pieces (handles node splitting naturally).
+        for r in remaining {
+            ffs_btree::insert(cx, dev, root_bytes, r, &mut tree_alloc)?;
+        }
+
+        // Free the physical blocks.
+        for f in freed {
+            ffs_alloc::free_blocks_persist(
+                cx,
+                dev,
+                geo,
+                groups,
+                BlockNumber(f.physical_start),
+                u32::from(f.count),
+                pctx,
+            )?;
+            total_freed += u64::from(f.count);
+        }
     }
 
     Ok(total_freed)
