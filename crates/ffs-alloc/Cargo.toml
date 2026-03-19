@@ -21,5 +21,9 @@ proptest = { workspace = true }
 name = "bitmap_ops"
 harness = false
 
+[[bench]]
+name = "batch_alloc"
+harness = false
+
 [lints]
 workspace = true

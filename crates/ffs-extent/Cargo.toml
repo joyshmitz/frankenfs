@@ -14,10 +14,10 @@ ffs-btree = { workspace = true }
 ffs-alloc = { workspace = true }
 ffs-ondisk = { workspace = true }
 asupersync = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-parking_lot = { workspace = true }
 proptest = { workspace = true }
 
 [[bench]]

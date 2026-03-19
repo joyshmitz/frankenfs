@@ -397,12 +397,26 @@ impl WalWriter {
 
         // ── Optional write verification ──────────────────────────────────
         if self.config.verify_writes {
-            self.verify_written_record(write_offset, &encoded, op_id)?;
+            if let Err(e) = self.verify_written_record(write_offset, &encoded, op_id) {
+                // Revert the write position and truncate the file to avoid leaving a "successful" record in the WAL
+                // that the caller will roll back in memory.
+                self.write_pos = write_offset;
+                let _ = self.file.set_len(write_offset);
+                return Err(e);
+            }
         }
 
         // ── Sync policy ──────────────────────────────────────────────────
         self.appends_since_sync += 1;
-        let synced = self.maybe_sync(op_id, commit_seq)?;
+        let synced = match self.maybe_sync(op_id, commit_seq) {
+            Ok(s) => s,
+            Err(e) => {
+                // Revert the write position and truncate the file since the sync failed and the caller will roll back.
+                self.write_pos = write_offset;
+                let _ = self.file.set_len(write_offset);
+                return Err(e);
+            }
+        };
 
         self.last_commit_seq = commit_seq;
 
@@ -482,6 +496,146 @@ impl WalWriter {
         self.last_commit_seq = seq;
     }
 
+    /// Append multiple commit records as a single coalesced write + sync.
+    ///
+    /// Encodes all commits, writes them as a single contiguous I/O, and
+    /// syncs once. This amortizes the per-commit overhead of separate
+    /// `write_all` and `fsync` calls.
+    ///
+    /// All invariants (D1 monotonicity, D8 sentinel rejection, backpressure)
+    /// are checked per-commit before any bytes are written. If any commit
+    /// fails validation, no commits are written.
+    ///
+    /// Returns one `AppendResult` per commit, all sharing the same `synced`
+    /// status.
+    pub fn append_commits_coalesced(
+        &mut self,
+        commits: &[WalCommit],
+    ) -> std::result::Result<Vec<AppendResult>, WalWriteError> {
+        if commits.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // For a single commit, delegate to the standard path.
+        if commits.len() == 1 {
+            return self.append_commit(&commits[0]).map(|r| vec![r]);
+        }
+
+        let op_id = self.next_op_id();
+
+        // ── Pre-validate all commits before encoding ──────────────────────
+        let mut prev_seq = self.last_commit_seq;
+        for commit in commits {
+            let seq = commit.commit_seq.0;
+            let txn = commit.txn_id.0;
+
+            if seq == u64::MAX || txn == u64::MAX {
+                return Err(WalWriteError::FormatViolation {
+                    detail: "reserved sentinel value (u64::MAX) in coalesced batch".to_owned(),
+                });
+            }
+            if prev_seq > 0 && seq <= prev_seq {
+                return Err(WalWriteError::FormatViolation {
+                    detail: format!(
+                        "coalesced commit_seq {seq} not strictly greater than {prev_seq}"
+                    ),
+                });
+            }
+            prev_seq = seq;
+        }
+
+        // ── Backpressure check ────────────────────────────────────────────
+        if self.config.backpressure_threshold_bytes > 0
+            && self.write_pos >= self.config.backpressure_threshold_bytes
+        {
+            return Err(WalWriteError::Backpressure {
+                wal_size: self.write_pos,
+                threshold: self.config.backpressure_threshold_bytes,
+            });
+        }
+
+        // ── Encode all commits into a single buffer ───────────────────────
+        let mut coalesced_buf = Vec::new();
+        let mut record_offsets = Vec::with_capacity(commits.len());
+
+        for commit in commits {
+            let offset_in_buf = coalesced_buf.len();
+            let encoded =
+                wal::encode_commit(commit).map_err(|e| WalWriteError::FormatViolation {
+                    detail: format!("failed to encode commit in coalesced batch: {e}"),
+                })?;
+            record_offsets.push((offset_in_buf, encoded.len()));
+            coalesced_buf.extend_from_slice(&encoded);
+        }
+
+        let total_bytes = coalesced_buf.len();
+        let base_offset = self.write_pos;
+
+        debug!(
+            operation_id = op_id,
+            num_commits = commits.len(),
+            total_bytes,
+            "wal_coalesced_append_start"
+        );
+
+        // ── Single coalesced write ────────────────────────────────────────
+        #[cfg(test)]
+        if self.fail_append {
+            return Err(WalWriteError::AppendIo {
+                source: std::io::Error::other("injected append failure"),
+                bytes_attempted: total_bytes,
+            });
+        }
+
+        self.raw_append(&coalesced_buf).map_err(|e| {
+            error!(
+                operation_id = op_id,
+                bytes_attempted = total_bytes,
+                error_class = "append_io",
+                error = %e,
+                "wal_coalesced_append_err"
+            );
+            WalWriteError::AppendIo {
+                source: e,
+                bytes_attempted: total_bytes,
+            }
+        })?;
+
+        // ── Single sync ───────────────────────────────────────────────────
+        self.appends_since_sync += commits.len() as u32;
+        let synced = match self.maybe_sync(op_id, prev_seq) {
+            Ok(s) => s,
+            Err(e) => {
+                self.write_pos = base_offset;
+                let _ = self.file.set_len(base_offset);
+                return Err(e);
+            }
+        };
+
+        self.last_commit_seq = prev_seq;
+
+        // ── Build per-commit results ──────────────────────────────────────
+        let results = record_offsets
+            .iter()
+            .map(|&(rel_offset, bytes_len)| AppendResult {
+                offset: base_offset + rel_offset as u64,
+                bytes_written: bytes_len as u64,
+                synced,
+                pending_sync_count: if synced { 0 } else { self.appends_since_sync },
+            })
+            .collect();
+
+        info!(
+            operation_id = op_id,
+            num_commits = commits.len(),
+            total_bytes,
+            synced,
+            "wal_coalesced_append_ok"
+        );
+
+        Ok(results)
+    }
+
     /// Borrow the writer configuration.
     #[must_use]
     pub fn config(&self) -> &WalWriterConfig {
@@ -498,7 +652,11 @@ impl WalWriter {
 
     fn raw_append(&mut self, data: &[u8]) -> std::io::Result<()> {
         self.file.seek(SeekFrom::Start(self.write_pos))?;
-        self.file.write_all(data)?;
+        if let Err(e) = self.file.write_all(data) {
+            // Truncate to write_pos to remove any partially written bytes.
+            let _ = self.file.set_len(self.write_pos);
+            return Err(e);
+        }
         self.write_pos += u64::try_from(data.len()).unwrap_or(u64::MAX);
         Ok(())
     }
@@ -1067,6 +1225,140 @@ mod tests {
         // But seq 101 should succeed
         w.append_commit(&make_commit(101, 2, &[]))
             .expect("monotonic after set");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Coalesced append tests ─────────────────────────────────────────
+
+    #[test]
+    fn coalesced_empty_returns_empty() {
+        let path = tmp_path();
+        let mut w = WalWriter::create(&path, WalWriterConfig::default()).unwrap();
+        let results = w.append_commits_coalesced(&[]).unwrap();
+        assert!(results.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coalesced_single_delegates() {
+        let path = tmp_path();
+        let mut w = WalWriter::create(&path, WalWriterConfig::default()).unwrap();
+        let commits = vec![make_commit(1, 1, &[(10, &[0xAA; 64])])];
+        let results = w.append_commits_coalesced(&commits).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].synced); // Immediate sync
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coalesced_multiple_writes_single_io() {
+        let path = tmp_path();
+        let cfg = WalWriterConfig {
+            sync_policy: SyncPolicy::Immediate,
+            verify_writes: false,
+            backpressure_threshold_bytes: 0,
+        };
+        let mut w = WalWriter::create(&path, cfg).unwrap();
+
+        let data = vec![0xBB_u8; 128];
+        let commits = vec![
+            make_commit(1, 1, &[(10, &data)]),
+            make_commit(2, 2, &[(20, &data)]),
+            make_commit(3, 3, &[(30, &data)]),
+        ];
+
+        let results = w.append_commits_coalesced(&commits).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Offsets should be strictly increasing.
+        assert!(results[0].offset < results[1].offset);
+        assert!(results[1].offset < results[2].offset);
+
+        // Last commit seq should be 3.
+        assert_eq!(w.last_commit_seq(), 3);
+
+        // All records should be readable from file.
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut all_data = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut all_data).unwrap();
+
+        // Verify header + 3 records are present.
+        let header = decode_header(&all_data[..HEADER_SIZE]).unwrap();
+        assert_eq!(header.version, 1);
+
+        let mut offset = HEADER_SIZE;
+        for seq in 1..=3_u64 {
+            let result = decode_commit(&all_data[offset..]);
+            match result {
+                DecodeResult::Commit(commit) => {
+                    assert_eq!(commit.commit_seq.0, seq);
+                    let size = commit_byte_size(&all_data[offset..]).unwrap();
+                    offset += size;
+                }
+                other => panic!("expected Commit, got {other:?}"),
+            }
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coalesced_rejects_non_monotonic() {
+        let path = tmp_path();
+        let mut w = WalWriter::create(&path, WalWriterConfig::default()).unwrap();
+
+        let commits = vec![
+            make_commit(1, 1, &[]),
+            make_commit(3, 2, &[]),
+            make_commit(2, 3, &[]), // Out of order!
+        ];
+
+        let err = w
+            .append_commits_coalesced(&commits)
+            .expect_err("non-monotonic");
+        assert!(err.is_fatal());
+
+        // No bytes should have been written (pre-validation).
+        assert_eq!(w.size(), HEADER_SIZE as u64);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coalesced_rejects_sentinel() {
+        let path = tmp_path();
+        let mut w = WalWriter::create(&path, WalWriterConfig::default()).unwrap();
+
+        let commits = vec![
+            make_commit(1, 1, &[]),
+            make_commit(u64::MAX, 2, &[]), // Sentinel!
+        ];
+
+        let err = w.append_commits_coalesced(&commits).expect_err("sentinel");
+        assert!(err.is_fatal());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coalesced_respects_prior_commit_seq() {
+        let path = tmp_path();
+        let mut w = WalWriter::create(&path, WalWriterConfig::default()).unwrap();
+
+        // Append a single commit first.
+        w.append_commit(&make_commit(5, 1, &[])).unwrap();
+
+        // Coalesced batch starting at seq 3 should fail (3 <= 5).
+        let commits = vec![make_commit(3, 2, &[]), make_commit(6, 3, &[])];
+        let err = w
+            .append_commits_coalesced(&commits)
+            .expect_err("non-monotonic vs prior");
+        assert!(err.is_fatal());
+
+        // Batch starting at 6 should succeed.
+        let commits = vec![make_commit(6, 2, &[]), make_commit(7, 3, &[])];
+        let results = w.append_commits_coalesced(&commits).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(w.last_commit_seq(), 7);
 
         let _ = std::fs::remove_file(&path);
     }

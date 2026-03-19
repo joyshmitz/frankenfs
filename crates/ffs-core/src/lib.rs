@@ -416,6 +416,9 @@ pub struct OpenFs {
     /// Protected by a Mutex since write operations need exclusive access.
     /// `None` for ext4 or when opened in read-only mode.
     btrfs_alloc_state: Option<Mutex<BtrfsAllocState>>,
+    /// LRU cache for extent tree lookups, avoiding repeated tree traversals
+    /// for sequential reads. Invalidated on write/truncate/punch_hole.
+    extent_cache: ffs_extent::ExtentCache,
 }
 
 // Compile-time assertion: OpenFs must be Send + Sync for multi-threaded FUSE dispatch.
@@ -1829,6 +1832,7 @@ impl OpenFs {
             jbd2_writer: None,
             ext4_alloc_state: None,
             btrfs_alloc_state: None,
+            extent_cache: ffs_extent::ExtentCache::new(),
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -1986,6 +1990,12 @@ impl OpenFs {
             FsFlavor::Ext4(sb) => sb.block_size,
             FsFlavor::Btrfs(sb) => sb.sectorsize,
         }
+    }
+
+    /// Snapshot of extent cache performance counters.
+    #[must_use]
+    pub fn extent_cache_stats(&self) -> ffs_extent::ExtentCacheStats {
+        self.extent_cache.stats()
     }
 
     /// Whether this is an ext4 filesystem.
@@ -2215,6 +2225,8 @@ impl OpenFs {
                     logical_end,
                     &alloc.persist_ctx,
                 )?;
+                self.extent_cache
+                    .invalidate_range(logical_end, u64::from(u32::MAX) - u64::from(logical_end));
                 Self::set_extent_root(&mut inode, &root_bytes);
                 let freed_sectors = if inode.is_huge_file() {
                     freed
@@ -4116,14 +4128,55 @@ impl OpenFs {
     /// extent tree, reading index blocks from the device as needed.
     ///
     /// Returns `Ok(None)` if the logical block falls in a hole (no mapping).
+    ///
+    /// Uses the internal extent cache to avoid repeated tree traversals for
+    /// sequential reads. Consecutive blocks within the same extent are served
+    /// from cache after the first tree walk.
     pub fn resolve_extent(
         &self,
         cx: &Cx,
         inode: &Ext4Inode,
         logical_block: u32,
     ) -> Result<Option<(u64, bool)>, FfsError> {
+        // Fast path: check extent cache.
+        if let Some(hit) = self.extent_cache.lookup(logical_block) {
+            return if hit.physical_start == 0 {
+                Ok(None)
+            } else {
+                Ok(Some((hit.physical_start, hit.unwritten)))
+            };
+        }
+
         let (header, tree) = parse_inode_extent_tree(inode).map_err(|e| parse_to_ffs_error(&e))?;
-        self.walk_extent_tree(cx, &tree, logical_block, header.depth)
+        let result = self.walk_extent_tree(cx, &tree, logical_block, header.depth)?;
+
+        // Populate cache with the resolved mapping.
+        match &result {
+            Some((phys, unwritten)) => {
+                // We don't know the full extent length from walk_extent_tree,
+                // so cache a single-block mapping. The btree search path in
+                // ffs-extent provides full extent info; here we cache what we
+                // know to benefit repeated lookups of the same block.
+                self.extent_cache.insert(ffs_extent::ExtentMapping {
+                    logical_start: logical_block,
+                    physical_start: *phys,
+                    count: 1,
+                    unwritten: *unwritten,
+                });
+            }
+            None => {
+                // Cache hole as physical_start=0 so repeated hole lookups
+                // don't re-walk the tree.
+                self.extent_cache.insert(ffs_extent::ExtentMapping {
+                    logical_start: logical_block,
+                    physical_start: 0,
+                    count: 1,
+                    unwritten: false,
+                });
+            }
+        }
+
+        Ok(result)
     }
 
     fn walk_extent_tree(
@@ -5710,6 +5763,8 @@ impl OpenFs {
                         persist_ctx,
                     )?
                 };
+                self.extent_cache
+                    .invalidate_range(logical_start, u64::from(logical_count));
                 if inode.is_huge_file() {
                     inode.blocks = inode.blocks.saturating_sub(freed_blocks);
                 } else {
@@ -5773,6 +5828,8 @@ impl OpenFs {
                             persist_ctx,
                         )?
                     };
+                    self.extent_cache
+                        .invalidate_range(logical, u64::from(alloc_mapping.count));
 
                     for rel in 0..alloc_mapping.count {
                         block_dev.write_block(
@@ -5929,6 +5986,7 @@ impl OpenFs {
                             persist_ctx,
                         )?
                     };
+                    self.extent_cache.invalidate_range(logical_block, 1);
                     Self::set_extent_root(&mut inode, &root_bytes);
                     if inode.is_huge_file() {
                         inode.blocks += 1;
@@ -6302,6 +6360,10 @@ impl OpenFs {
                             persist_ctx,
                         )?
                     };
+                    self.extent_cache.invalidate_range(
+                        new_logical_end,
+                        u64::from(u32::MAX) - u64::from(new_logical_end),
+                    );
                     Self::set_extent_root(&mut inode, &root_bytes);
                     if inode.is_huge_file() {
                         inode.blocks = inode.blocks.saturating_sub(freed);

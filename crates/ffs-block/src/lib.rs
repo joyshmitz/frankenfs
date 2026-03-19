@@ -2909,17 +2909,19 @@ impl<D: BlockDevice> BlockDevice for ArcCache<D> {
         let mut guard = self.state.lock();
         // Re-check: another thread may have populated this block while we
         // were reading from the device (TOCTOU race).  If so, treat as a hit
-        // and discard our redundant device read.
-        if guard.resident.contains_key(&block) {
+        // and return the data already in the cache (it might be newer).
+        let final_buf = if let Some(existing) = guard.resident.get(&block).cloned() {
             guard.on_hit(block);
+            existing
         } else {
             guard.on_miss_or_ghost_hit(block);
             guard.resident.insert(block, buf.clone_ref());
-        }
+            buf
+        };
         let pending_flush = guard.take_pending_flush();
         drop(guard);
         self.flush_pending_evictions(cx, pending_flush)?;
-        Ok(buf)
+        Ok(final_buf)
     }
 
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {

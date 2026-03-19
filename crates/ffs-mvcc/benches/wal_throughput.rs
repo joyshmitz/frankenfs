@@ -17,7 +17,7 @@ use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_mvcc::persist::{PersistOptions, PersistentMvccStore};
 use ffs_mvcc::{CompressionAlgo, CompressionPolicy, MvccStore};
-use ffs_types::BlockNumber;
+use ffs_types::{BlockNumber, CommitSeq, TxnId};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::fs;
@@ -1119,6 +1119,86 @@ fn bench_pruning_throughput(c: &mut Criterion) {
     });
 }
 
+/// Compare coalesced vs individual WAL appends.
+///
+/// Measures the throughput improvement of `append_commits_coalesced` over
+/// N individual `append_commit` calls, demonstrating I/O amortization.
+fn bench_coalesced_append(c: &mut Criterion) {
+    use ffs_mvcc::wal_writer::{SyncPolicy, WalWriter, WalWriterConfig};
+
+    let block_data = vec![0xCC_u8; 256];
+    let mut group = c.benchmark_group("wal_coalesce_20_commits");
+
+    // Individual: 20 separate append + fsync.
+    group.bench_function("individual_20", |b| {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+
+        let cfg = WalWriterConfig {
+            sync_policy: SyncPolicy::Immediate,
+            verify_writes: false,
+            backpressure_threshold_bytes: 0,
+        };
+        let mut w = WalWriter::create(&path, cfg).unwrap();
+        let mut seq = 1_u64;
+
+        b.iter(|| {
+            for _ in 0..20 {
+                let commit = ffs_mvcc::wal::WalCommit {
+                    commit_seq: CommitSeq(seq),
+                    txn_id: TxnId(seq),
+                    writes: vec![ffs_mvcc::wal::WalWrite {
+                        block: BlockNumber(seq % 1024),
+                        data: block_data.clone(),
+                    }],
+                };
+                w.append_commit(&commit).unwrap();
+                seq += 1;
+            }
+        });
+
+        let _ = std::fs::remove_file(&path);
+    });
+
+    // Coalesced: 20 commits in a single write + fsync.
+    group.bench_function("coalesced_20", |b| {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+
+        let cfg = WalWriterConfig {
+            sync_policy: SyncPolicy::Immediate,
+            verify_writes: false,
+            backpressure_threshold_bytes: 0,
+        };
+        let mut w = WalWriter::create(&path, cfg).unwrap();
+        let mut seq = 1_u64;
+
+        b.iter(|| {
+            let commits: Vec<_> = (0..20)
+                .map(|_| {
+                    let c = ffs_mvcc::wal::WalCommit {
+                        commit_seq: CommitSeq(seq),
+                        txn_id: TxnId(seq),
+                        writes: vec![ffs_mvcc::wal::WalWrite {
+                            block: BlockNumber(seq % 1024),
+                            data: block_data.clone(),
+                        }],
+                    };
+                    seq += 1;
+                    c
+                })
+                .collect();
+            w.append_commits_coalesced(&commits).unwrap();
+        });
+
+        let _ = std::fs::remove_file(&path);
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     wal_benches,
     bench_wal_commit_throughput,
@@ -1127,6 +1207,7 @@ criterion_group!(
     bench_rcu_read_throughput,
     bench_write_amplification,
     bench_mvcc_contention,
-    bench_pruning_throughput
+    bench_pruning_throughput,
+    bench_coalesced_append
 );
 criterion_main!(wal_benches);

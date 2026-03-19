@@ -816,6 +816,168 @@ pub fn free_blocks_persist(
     Ok(())
 }
 
+// ── Batch block allocator ───────────────────────────────────────────────────
+
+/// Allocate `n` independent single blocks from the same goal group, amortizing
+/// bitmap I/O and group descriptor persistence.
+///
+/// Returns exactly `n` allocations. Each block is independently placed (not
+/// necessarily contiguous) but all drawn from the same group when possible.
+/// Falls back to per-block `alloc_blocks_persist` if a single group lacks
+/// space.
+///
+/// Compared to `n` individual `alloc_blocks_persist(count=1)` calls, this
+/// function:
+/// - Reads the bitmap **once** per group
+/// - Writes the bitmap **once** per group
+/// - Persists the group descriptor **once** per group
+///
+/// This is the recommended path for callers that need many single-block
+/// allocations (B+tree node splits, directory block allocation, xattr COW).
+pub fn alloc_blocks_batch_persist(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    n: u32,
+    hint: &AllocHint,
+    pctx: &PersistCtx,
+) -> Result<Vec<BlockAlloc>> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    // For single allocation, delegate to the standard path.
+    if n == 1 {
+        return alloc_blocks_persist(cx, dev, geo, groups, 1, hint, pctx).map(|a| vec![a]);
+    }
+
+    cx_checkpoint(cx)?;
+
+    let goal_group = hint
+        .goal_group
+        .or_else(|| hint.goal_block.map(|b| geo.absolute_to_group_block(b).0))
+        .unwrap_or(GroupNumber(0));
+
+    let mut results = Vec::with_capacity(n as usize);
+    let mut remaining = n;
+
+    // Build ordered group list: goal group first, then nearby, then full scan.
+    let mut group_order = Vec::with_capacity(geo.group_count as usize);
+    group_order.push(goal_group);
+    for delta in 1..=8u32 {
+        for dir in [1i64, -1i64] {
+            let g = i64::from(goal_group.0) + dir * i64::from(delta);
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            if g >= 0 && (g as u32) < geo.group_count {
+                group_order.push(GroupNumber(g as u32));
+            }
+        }
+    }
+    for g in 0..geo.group_count {
+        let group = GroupNumber(g);
+        if !group_order.contains(&group) {
+            group_order.push(group);
+        }
+    }
+
+    for &group in &group_order {
+        if remaining == 0 {
+            break;
+        }
+
+        let gidx = group.0 as usize;
+        if gidx >= groups.len() || groups[gidx].free_blocks == 0 {
+            continue;
+        }
+
+        let allocated_in_group =
+            try_alloc_batch_in_group(cx, dev, geo, groups, group, remaining, hint, pctx)?;
+
+        remaining -= allocated_in_group.len() as u32;
+        results.extend(allocated_in_group);
+    }
+
+    if results.len() < n as usize {
+        return Err(FfsError::NoSpace);
+    }
+
+    Ok(results)
+}
+
+/// Allocate up to `max_count` single blocks from one group in a single
+/// bitmap read/write cycle.
+#[expect(clippy::too_many_arguments)]
+fn try_alloc_batch_in_group(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    group: GroupNumber,
+    max_count: u32,
+    hint: &AllocHint,
+    pctx: &PersistCtx,
+) -> Result<Vec<BlockAlloc>> {
+    let gidx = group.0 as usize;
+    if gidx >= groups.len() || groups[gidx].free_blocks == 0 {
+        return Ok(Vec::new());
+    }
+
+    let blocks_in_group = geo.blocks_in_group(group);
+    let reserved = reserved_blocks_in_group(geo, groups, group);
+
+    let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
+    let mut bitmap = bitmap_buf.as_slice().to_vec();
+
+    // Mark reserved blocks.
+    for &r in &reserved {
+        bitmap_set(&mut bitmap, r);
+    }
+
+    let start = hint.goal_block.map_or(0, |goal| {
+        let (g, off) = geo.absolute_to_group_block(goal);
+        if g == group { off } else { 0 }
+    });
+
+    let to_alloc = max_count.min(groups[gidx].free_blocks);
+    let mut allocated = Vec::with_capacity(to_alloc as usize);
+    let mut search_pos = start;
+
+    for _ in 0..to_alloc {
+        let Some(idx) = bitmap_find_free(&bitmap, blocks_in_group, search_pos) else {
+            break;
+        };
+        // Verify not reserved (belt-and-suspenders).
+        if is_reserved(&reserved, idx) {
+            // Skip past this position and continue.
+            search_pos = idx + 1;
+            continue;
+        }
+        bitmap_set(&mut bitmap, idx);
+        let abs = geo.group_block_to_absolute(group, idx);
+        allocated.push(BlockAlloc {
+            start: abs,
+            count: 1,
+        });
+        // Advance search position for locality.
+        search_pos = idx + 1;
+    }
+
+    if allocated.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Single bitmap write for all allocations in this group.
+    dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
+    let count_allocated = allocated.len() as u32;
+    groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_sub(count_allocated);
+
+    // Single GDT persist for all allocations in this group.
+    persist_group_desc(cx, dev, pctx, group, &groups[gidx])?;
+
+    Ok(allocated)
+}
+
 // ── Inode allocator (Orlov) ─────────────────────────────────────────────────
 
 /// Allocate an inode using the Orlov strategy.
@@ -3166,5 +3328,180 @@ mod tests {
             prop_assert_eq!(bitmap_find_free(&bm, count, start), None);
             prop_assert_eq!(bitmap_find_contiguous(&bm, count, 1, start), None);
         }
+    }
+
+    // ── Batch allocation tests ────────────────────────────────────────────
+
+    #[test]
+    fn batch_alloc_zero_returns_empty() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        let hint = AllocHint::default();
+
+        let result =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, 0, &hint, &pctx).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_alloc_single_delegates() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        let hint = AllocHint::default();
+
+        let result =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, 1, &hint, &pctx).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].count, 1);
+    }
+
+    #[test]
+    fn batch_alloc_multiple_returns_correct_count() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        let hint = AllocHint::default();
+
+        let n = 10;
+        let result =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, n, &hint, &pctx).unwrap();
+        assert_eq!(result.len(), n as usize);
+
+        // All allocations should be single blocks.
+        for alloc in &result {
+            assert_eq!(alloc.count, 1);
+        }
+
+        // No duplicates.
+        let mut blocks: Vec<u64> = result.iter().map(|a| a.start.0).collect();
+        blocks.sort_unstable();
+        blocks.dedup();
+        assert_eq!(blocks.len(), n as usize);
+    }
+
+    #[test]
+    fn batch_alloc_free_space_accounting() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        let hint = AllocHint::default();
+
+        let initial_free: u32 = groups.iter().map(|g| g.free_blocks).sum();
+
+        let n = 20;
+        alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, n, &hint, &pctx).unwrap();
+
+        let after_free: u32 = groups.iter().map(|g| g.free_blocks).sum();
+        assert_eq!(initial_free - after_free, n);
+    }
+
+    #[test]
+    fn batch_alloc_locality_prefers_goal_group() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        let hint = AllocHint {
+            goal_group: Some(GroupNumber(2)),
+            goal_block: None,
+        };
+
+        let result =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, 5, &hint, &pctx).unwrap();
+
+        // All blocks should be in group 2 (plenty of space).
+        for alloc in &result {
+            let (group, _) = geo.absolute_to_group_block(alloc.start);
+            assert_eq!(group, GroupNumber(2));
+        }
+    }
+
+    #[test]
+    fn batch_alloc_no_space_returns_error() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        let hint = AllocHint::default();
+
+        // Set all groups to 0 free blocks.
+        for g in &mut groups {
+            g.free_blocks = 0;
+        }
+
+        let err =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, 5, &hint, &pctx).unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace));
+    }
+
+    #[test]
+    fn batch_alloc_spills_across_groups() {
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let pctx = make_persist_ctx();
+        let hint = AllocHint::default();
+
+        // Restrict group 0 to 3 free blocks.
+        groups[0].free_blocks = 3;
+
+        let result =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups, 5, &hint, &pctx).unwrap();
+        assert_eq!(result.len(), 5);
+
+        // At least some should come from group 0, rest from other groups.
+        let from_g0 = result
+            .iter()
+            .filter(|a| geo.absolute_to_group_block(a.start).0 == GroupNumber(0))
+            .count();
+        assert!(from_g0 <= 3);
+    }
+
+    #[test]
+    fn batch_vs_single_equivalence() {
+        // Allocate N blocks via batch, then N via single, verify both produce
+        // valid non-overlapping allocations with correct free space accounting.
+        let cx = Cx::for_testing();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let hint = AllocHint::default();
+        let pctx = make_persist_ctx();
+
+        // Batch path.
+        let mut groups_batch = make_groups(&geo);
+        let batch_result =
+            alloc_blocks_batch_persist(&cx, &dev, &geo, &mut groups_batch, 10, &hint, &pctx)
+                .unwrap();
+
+        // Single path.
+        let mut groups_single = make_groups(&geo);
+        let mut single_result = Vec::new();
+        for _ in 0..10 {
+            single_result.push(
+                alloc_blocks_persist(&cx, &dev, &geo, &mut groups_single, 1, &hint, &pctx).unwrap(),
+            );
+        }
+
+        // Both should allocate exactly 10 blocks.
+        assert_eq!(batch_result.len(), 10);
+        assert_eq!(single_result.len(), 10);
+
+        // Free space delta should be identical.
+        let batch_free: u32 = groups_batch.iter().map(|g| g.free_blocks).sum();
+        let single_free: u32 = groups_single.iter().map(|g| g.free_blocks).sum();
+        assert_eq!(batch_free, single_free);
     }
 }

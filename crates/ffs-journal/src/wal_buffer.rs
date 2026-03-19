@@ -697,7 +697,7 @@ impl DurabilityNotifier {
         loop {
             // Check for failure first.
             if let Some((failed_epoch, ref msg)) = state.failed {
-                if epoch <= failed_epoch {
+                if epoch >= failed_epoch {
                     return DurabilityOutcome::Failed(msg.clone());
                 }
             }
@@ -2281,20 +2281,21 @@ mod tests {
     }
 
     #[test]
-    fn durability_notifier_failure_does_not_block_later_success() {
-        // Epoch 1 fails, but epoch 2 succeeds — waiters for epoch 2 get Durable.
+    fn durability_notifier_failure_blocks_later_epochs() {
+        // Epoch 1 fails — waiters for epoch 2 must also get Failed, because
+        // the WAL is strictly monotonic and a hole in the log is a fatal error.
         let notifier = DurabilityNotifier::new();
 
         // Epoch 1 fails.
         notifier.notify_failed(1, "disk error".to_string());
 
-        // Epoch 2 succeeds.
-        notifier.notify_durable(2);
+        // Waiter for epoch 2 gets Failed (propagated forward from epoch 1).
+        assert_eq!(
+            notifier.await_epoch(2),
+            DurabilityOutcome::Failed("disk error".to_string())
+        );
 
-        // Waiter for epoch 2 gets Durable (not the epoch 1 failure).
-        assert_eq!(notifier.await_epoch(2), DurabilityOutcome::Durable);
-
-        // Waiter for epoch 1 gets failure since epoch 1 specifically failed.
+        // Waiter for epoch 1 gets failure.
         assert_eq!(
             notifier.await_epoch(1),
             DurabilityOutcome::Failed("disk error".to_string())

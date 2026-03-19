@@ -282,11 +282,44 @@ fn replay_jbd2_inner(
         }
     }
 
+    let mut committed_sequences: Vec<u32> = committed_sequences.into_iter().collect();
+    if !committed_sequences.is_empty() {
+        // Sort by u32 value first to make finding the gap easier.
+        committed_sequences.sort_unstable();
+
+        // Find the "oldest" sequence number accounting for u32 wrap-around.
+        // We find the largest jump between consecutive elements in circular order.
+        let mut max_jump = 0_u32;
+        let mut oldest_idx = 0;
+        for i in 0..committed_sequences.len() {
+            let prev = if i == 0 {
+                committed_sequences[committed_sequences.len() - 1]
+            } else {
+                committed_sequences[i - 1]
+            };
+            let jump = committed_sequences[i].wrapping_sub(prev);
+            if jump > max_jump {
+                max_jump = jump;
+                oldest_idx = i;
+            }
+        }
+        committed_sequences.rotate_left(oldest_idx);
+    }
+
     let mut max_revoke_seq: BTreeMap<BlockNumber, u32> = BTreeMap::new();
     for &seq in &committed_sequences {
         if let Some(txn) = pending.get(&seq) {
             for &revoked_block in &txn.revoked {
-                max_revoke_seq.insert(revoked_block, seq);
+                // In JBD2, a revoke in a newer transaction overrides any
+                // previous version. We track the newest revoke sequence.
+                max_revoke_seq
+                    .entry(revoked_block)
+                    .and_modify(|existing| {
+                        if (seq.wrapping_sub(*existing) as i32) > 0 {
+                            *existing = seq;
+                        }
+                    })
+                    .or_insert(seq);
             }
         }
     }
@@ -296,8 +329,19 @@ fn replay_jbd2_inner(
     for &seq in &committed_sequences {
         if let Some(txn) = pending.get(&seq) {
             for (target, payload) in &txn.writes {
-                let revoked_seq = max_revoke_seq.get(target).copied().unwrap_or(0);
-                if seq <= revoked_seq {
+                let is_revoked = if let Some(&revoked_seq) = max_revoke_seq.get(target) {
+                    if seq == revoked_seq {
+                        true
+                    } else {
+                        // Write is revoked if it belongs to an older or same transaction
+                        // as the latest revoke.
+                        (revoked_seq.wrapping_sub(seq) as i32) >= 0
+                    }
+                } else {
+                    false
+                };
+
+                if is_revoked {
                     stats.skipped_revoked_blocks = stats.skipped_revoked_blocks.saturating_add(1);
                     continue;
                 }
@@ -318,7 +362,7 @@ fn replay_jbd2_inner(
         u64::try_from(pending.len().saturating_sub(committed_sequences.len())).unwrap_or(u64::MAX);
 
     Ok(ReplayOutcome {
-        committed_sequences: committed_sequences.into_iter().collect(),
+        committed_sequences,
         stats,
     })
 }
@@ -507,8 +551,8 @@ impl Jbd2Writer {
                 break;
             }
 
-            if header.sequence >= max_seq {
-                max_seq = header.sequence.saturating_add(1);
+            if max_seq == start_seq || (header.sequence.wrapping_sub(max_seq) as i32) >= 0 {
+                max_seq = header.sequence.wrapping_add(1);
             }
 
             match header.block_type {
@@ -1471,6 +1515,35 @@ mod tests {
         let second = replay_jbd2(&cx, &dev, region).expect("replay cleared journal");
         assert!(second.committed_sequences.is_empty());
         assert_eq!(second.stats.replayed_blocks, 0);
+    }
+
+    #[test]
+    fn replay_jbd2_sequence_wrap_around() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 16,
+        };
+
+        // Transaction 1: Seq = u32::MAX
+        // Target Block 5 -> Data 0x11
+        dev.raw_write(BlockNumber(10), descriptor_block(512, u32::MAX, &[(5, JBD2_TAG_FLAG_LAST)]));
+        dev.raw_write(BlockNumber(11), vec![0x11; 512]);
+        dev.raw_write(BlockNumber(12), commit_block(512, u32::MAX));
+
+        // Transaction 2: Seq = 0 (wrapped)
+        // Target Block 5 -> Data 0x22
+        // This is NEWER than Transaction 1.
+        dev.raw_write(BlockNumber(13), descriptor_block(512, 0, &[(5, JBD2_TAG_FLAG_LAST)]));
+        dev.raw_write(BlockNumber(14), vec![0x22; 512]);
+        dev.raw_write(BlockNumber(15), commit_block(512, 0));
+
+        let _ = replay_jbd2(&cx, &dev, region).expect("replay should succeed");
+
+        let target = dev.read_block(&cx, BlockNumber(5)).expect("read");
+        // In a correct replay, the NEWER transaction (seq 0) should win.
+        assert_eq!(target.as_slice(), &[0x22; 512], "Wrapped sequence 0 should win over u32::MAX");
     }
 
     #[test]

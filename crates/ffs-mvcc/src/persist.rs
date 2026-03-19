@@ -545,6 +545,13 @@ impl PersistentMvccStore {
         // Atomic rename
         fs::rename(&temp_path, path)?;
 
+        // Sync the parent directory to ensure the rename is durable.
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+
         // Update stats
         {
             let mut stats = self.stats.write();

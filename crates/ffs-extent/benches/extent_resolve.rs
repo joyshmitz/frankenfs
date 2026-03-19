@@ -277,11 +277,86 @@ fn bench_extent_resolve_repeated(c: &mut Criterion) {
     });
 }
 
+/// Benchmark repeated lookups WITH the ExtentCache (same logical block 10 times).
+fn bench_extent_resolve_cached_repeated(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let (dev, root) = build_depth1_tree();
+    let cache = ffs_extent::ExtentCache::new();
+
+    // Warm the cache with one lookup.
+    ffs_extent::cached_map_logical_to_physical(&cx, &dev, &root, 500, 1, &cache).expect("warm");
+
+    c.bench_function("extent_resolve_depth1_cached_repeated", |b| {
+        b.iter(|| {
+            for _ in 0..10 {
+                let result = ffs_extent::cached_map_logical_to_physical(
+                    black_box(&cx),
+                    black_box(&dev),
+                    black_box(&root),
+                    black_box(500),
+                    black_box(1),
+                    black_box(&cache),
+                )
+                .expect("resolve");
+                black_box(result);
+            }
+        });
+    });
+}
+
+/// Benchmark sequential read pattern: blocks 0..100, uncached vs cached.
+fn bench_extent_sequential_uncached(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let (dev, root) = build_depth1_tree();
+
+    c.bench_function("extent_sequential_100blocks_uncached", |b| {
+        b.iter(|| {
+            for blk in 0..100_u32 {
+                let result = ffs_extent::map_logical_to_physical(
+                    black_box(&cx),
+                    black_box(&dev),
+                    black_box(&root),
+                    black_box(blk),
+                    black_box(1),
+                )
+                .expect("resolve");
+                black_box(result);
+            }
+        });
+    });
+}
+
+fn bench_extent_sequential_cached(c: &mut Criterion) {
+    let cx = Cx::for_testing();
+    let (dev, root) = build_depth1_tree();
+    let cache = ffs_extent::ExtentCache::new();
+
+    c.bench_function("extent_sequential_100blocks_cached", |b| {
+        b.iter(|| {
+            for blk in 0..100_u32 {
+                let result = ffs_extent::cached_map_logical_to_physical(
+                    black_box(&cx),
+                    black_box(&dev),
+                    black_box(&root),
+                    black_box(blk),
+                    black_box(1),
+                    black_box(&cache),
+                )
+                .expect("resolve");
+                black_box(result);
+            }
+        });
+    });
+}
+
 criterion_group!(
     extent_resolve,
     bench_extent_resolve_depth0,
     bench_extent_resolve_depth1,
     bench_extent_resolve_range,
     bench_extent_resolve_repeated,
+    bench_extent_resolve_cached_repeated,
+    bench_extent_sequential_uncached,
+    bench_extent_sequential_cached,
 );
 criterion_main!(extent_resolve);
