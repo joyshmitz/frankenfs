@@ -683,6 +683,16 @@ pub struct CacheMetrics {
     pub capacity: usize,
     /// Current adaptive target size for T1.
     pub p: usize,
+    /// Number of ghost hits in B1 (blocks re-admitted from T1 ghost list).
+    ///
+    /// A high B1 ghost hit rate indicates T1 was undersized — the adaptive
+    /// policy will have already increased `p` in response.
+    pub b1_ghost_hits: u64,
+    /// Number of ghost hits in B2 (blocks re-admitted from T2 ghost list).
+    ///
+    /// A high B2 ghost hit rate indicates T2 was undersized — the adaptive
+    /// policy will have already decreased `p` in response.
+    pub b2_ghost_hits: u64,
 }
 
 impl CacheMetrics {
@@ -936,6 +946,10 @@ struct ArcState {
     evictions: u64,
     /// Monotonic dirty flush counter (dirty blocks written during sync/retry paths).
     dirty_flushes: u64,
+    /// Monotonic B1 ghost hit counter (re-admissions from T1 ghost list).
+    b1_ghost_hits: u64,
+    /// Monotonic B2 ghost hit counter (re-admissions from T2 ghost list).
+    b2_ghost_hits: u64,
     #[cfg(feature = "s3fifo")]
     small_capacity: usize,
     #[cfg(feature = "s3fifo")]
@@ -993,6 +1007,8 @@ impl ArcState {
             misses: 0,
             evictions: 0,
             dirty_flushes: 0,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
             #[cfg(feature = "s3fifo")]
             small_capacity,
             #[cfg(feature = "s3fifo")]
@@ -1039,6 +1055,8 @@ impl ArcState {
                     self.p
                 }
             },
+            b1_ghost_hits: self.b1_ghost_hits,
+            b2_ghost_hits: self.b2_ghost_hits,
         }
     }
 
@@ -1282,6 +1300,7 @@ impl ArcState {
             }
 
             if matches!(self.loc.get(&key), Some(ArcList::B1)) {
+                self.b1_ghost_hits += 1;
                 let b1_len = self.b1.len().max(1);
                 let b2_len = self.b2.len().max(1);
                 let delta = (b2_len / b1_len).max(1);
@@ -1294,6 +1313,7 @@ impl ArcState {
             }
 
             if matches!(self.loc.get(&key), Some(ArcList::B2)) {
+                self.b2_ghost_hits += 1;
                 let b1_len = self.b1.len().max(1);
                 let b2_len = self.b2.len().max(1);
                 let delta = (b1_len / b2_len).max(1);
@@ -5580,6 +5600,8 @@ mod tests {
             oldest_dirty_age_ticks: Some(9),
             capacity: 8,
             p: 0,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
         };
 
         let export = metrics.runtime_metrics_snapshot();
@@ -6833,6 +6855,8 @@ mod tests {
             oldest_dirty_age_ticks: None,
             capacity: 0,
             p: 0,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
         };
         assert!(
             m.hit_ratio().abs() < f64::EPSILON,
@@ -6862,6 +6886,8 @@ mod tests {
             oldest_dirty_age_ticks: Some(3),
             capacity: 0,
             p: 0,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
         };
         assert!(
             m.dirty_ratio().abs() < f64::EPSILON,
@@ -7320,6 +7346,8 @@ mod tests {
             oldest_dirty_age_ticks: None,
             capacity: 10,
             p: 5,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
         };
         assert!((m.hit_ratio() - 1.0).abs() < f64::EPSILON);
     }
@@ -7342,6 +7370,8 @@ mod tests {
             oldest_dirty_age_ticks: Some(0),
             capacity: 10,
             p: 5,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
         };
         assert!((m.dirty_ratio() - 1.0).abs() < f64::EPSILON);
     }
@@ -7856,6 +7886,7 @@ mod tests {
                 t1_len: 0, t2_len: 0, b1_len: 0, b2_len: 0,
                 resident: 0, dirty_blocks: 0, dirty_bytes: 0, writeback_queue_depth: 0,
                 oldest_dirty_age_ticks: None, capacity: 100, p: 0,
+                b1_ghost_hits: 0, b2_ghost_hits: 0,
             };
             let ratio = metrics.hit_ratio();
             prop_assert!((0.0..=1.0).contains(&ratio), "ratio {}", ratio);
@@ -7873,6 +7904,7 @@ mod tests {
                 t1_len: 0, t2_len: 0, b1_len: 0, b2_len: 0,
                 resident: 0, dirty_blocks, dirty_bytes: 0, writeback_queue_depth: 0,
                 oldest_dirty_age_ticks: None, capacity, p: 0,
+                b1_ghost_hits: 0, b2_ghost_hits: 0,
             };
             let ratio = metrics.dirty_ratio();
             prop_assert!((0.0..=1.0).contains(&ratio), "ratio {}", ratio);
@@ -8434,6 +8466,8 @@ mod tests {
             oldest_dirty_age_ticks: None,
             capacity: 10,
             p: 0,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
         };
         assert!(metrics.hit_ratio().abs() < f64::EPSILON);
         assert!(metrics.dirty_ratio().abs() < f64::EPSILON);
@@ -8457,6 +8491,8 @@ mod tests {
             oldest_dirty_age_ticks: None,
             capacity: 10,
             p: 0,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
         };
         assert!((metrics.hit_ratio() - 1.0).abs() < 1e-12);
     }
@@ -8479,6 +8515,8 @@ mod tests {
             oldest_dirty_age_ticks: Some(5),
             capacity: 10,
             p: 0,
+            b1_ghost_hits: 0,
+            b2_ghost_hits: 0,
         };
         assert!((metrics.dirty_ratio() - 1.0).abs() < 1e-12);
     }

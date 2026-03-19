@@ -126,27 +126,48 @@ impl DurabilityAutopilot {
     /// Expected-loss objective at a specific overhead fraction.
     #[must_use]
     pub fn expected_loss(&self, overhead: f64, source_block_count: u32) -> f64 {
+        self.expected_loss_custom(overhead, source_block_count, self.data_loss_cost)
+    }
+
+    /// Expected loss with a custom data loss cost (e.g. for metadata).
+    pub fn expected_loss_custom(
+        &self,
+        overhead: f64,
+        source_block_count: u32,
+        loss_cost: f64,
+    ) -> f64 {
         let bounded_overhead = overhead.clamp(0.0, 1.0);
         let risk = self.risk_bound(bounded_overhead, source_block_count);
         let redundancy_cost = self.storage_cost * bounded_overhead;
-        let corruption_cost = self.data_loss_cost * risk;
+        let corruption_cost = loss_cost * risk;
         redundancy_cost + corruption_cost
     }
 
     /// Choose optimal overhead in `[min_overhead, max_overhead]`.
     #[must_use]
     pub fn optimal_overhead(&self, source_block_count: u32) -> f64 {
+        self.optimize_overhead(source_block_count, self.data_loss_cost)
+    }
+
+    /// Choose optimal overhead for metadata-critical groups.
+    #[must_use]
+    pub fn optimal_overhead_metadata(&self, source_block_count: u32) -> f64 {
+        let metadata_cost = self.data_loss_cost * self.metadata_multiplier.max(1.0);
+        self.optimize_overhead(source_block_count, metadata_cost)
+    }
+
+    fn optimize_overhead(&self, source_block_count: u32, loss_cost: f64) -> f64 {
         let (min_overhead, max_overhead) = self.normalized_bounds();
         if self.posterior_mean() >= max_overhead {
             return max_overhead;
         }
 
         let mut best_overhead = min_overhead;
-        let mut best_loss = self.expected_loss(min_overhead, source_block_count);
+        let mut best_loss = self.expected_loss_custom(min_overhead, source_block_count, loss_cost);
         let mut candidate = min_overhead;
 
         loop {
-            let loss = self.expected_loss(candidate, source_block_count);
+            let loss = self.expected_loss_custom(candidate, source_block_count, loss_cost);
             if loss < best_loss - f64::EPSILON {
                 best_loss = loss;
                 best_overhead = candidate;
@@ -165,13 +186,6 @@ impl DurabilityAutopilot {
         best_overhead
     }
 
-    /// Choose optimal overhead for metadata-critical groups.
-    #[must_use]
-    pub fn optimal_overhead_metadata(&self, source_block_count: u32) -> f64 {
-        let scaled = self.optimal_overhead(source_block_count) * self.metadata_multiplier.max(0.0);
-        scaled.clamp(0.0, 1.0)
-    }
-
     /// Compute a full decision summary for one group.
     #[must_use]
     pub fn decision_for_group(
@@ -185,7 +199,12 @@ impl DurabilityAutopilot {
             self.optimal_overhead(source_block_count)
         };
         let risk_bound = self.risk_bound(selected_overhead, source_block_count);
-        let expected_loss = self.expected_loss(selected_overhead, source_block_count);
+        let expected_loss = if metadata_group {
+            let metadata_cost = self.data_loss_cost * self.metadata_multiplier.max(1.0);
+            self.expected_loss_custom(selected_overhead, source_block_count, metadata_cost)
+        } else {
+            self.expected_loss(selected_overhead, source_block_count)
+        };
 
         OverheadDecision {
             overhead_ratio: selected_overhead,
@@ -672,13 +691,27 @@ mod tests {
     #[test]
     fn metadata_multiplier_applies_to_optimal_overhead() {
         let mut ap = DurabilityAutopilot::default();
-        ap.update_posterior(50, 10_000);
+        // Use a small number of observations to keep the posterior broad and risk non-zero.
+        ap.update_posterior(5, 100);
 
-        let base = ap.optimal_overhead(8_192);
-        let metadata = ap.optimal_overhead_metadata(8_192);
-        let expected = (base * ap.metadata_multiplier).clamp(0.0, 1.0);
-        assert!((metadata - expected).abs() < 1e-12);
-        assert!(metadata >= base);
+        let base = ap.optimal_overhead(1024);
+        let metadata = ap.optimal_overhead_metadata(1024);
+
+        // Metadata overhead should be higher or equal to base due to higher loss cost.
+        assert!(metadata >= base - f64::EPSILON);
+
+        // It should still be bounded by the autopilot's max_overhead.
+        assert!(metadata <= ap.max_overhead + f64::EPSILON);
+
+        // In this non-zero risk scenario, doubling the cost should push metadata overhead higher.
+        if base < ap.max_overhead - 0.001 {
+            assert!(
+                metadata > base,
+                "metadata overhead {} should be higher than base {} when cost is doubled",
+                metadata,
+                base
+            );
+        }
     }
 
     proptest! {

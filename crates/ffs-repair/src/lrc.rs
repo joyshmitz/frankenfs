@@ -34,6 +34,7 @@
 //! All operations are safe Rust.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // ── GF(256) arithmetic ─────────────────────────────────────────────────────
 
@@ -78,6 +79,22 @@ mod gf256 {
         table
     };
 
+    /// Precomputed 2^i table for fast global parity coefficients.
+    const EXP2: [u8; 512] = {
+        let mut table = [0_u8; 512];
+        let mut val = 1_u32;
+        let mut i = 0;
+        while i < 512 {
+            table[i] = val as u8;
+            val <<= 1;
+            if val >= 256 {
+                val ^= 0x11B;
+            }
+            i += 1;
+        }
+        table
+    };
+
     /// Multiply two elements in GF(256).
     #[must_use]
     pub fn mul(a: u8, b: u8) -> u8 {
@@ -87,6 +104,12 @@ mod gf256 {
         let log_a = LOG[a as usize] as usize;
         let log_b = LOG[b as usize] as usize;
         EXP[log_a + log_b]
+    }
+
+    /// Compute 2^exponent in GF(256).
+    #[must_use]
+    pub fn exp2(exponent: usize) -> u8 {
+        EXP2[exponent % 255]
     }
 
     /// Compute the multiplicative inverse of `a` in GF(256).
@@ -264,7 +287,7 @@ pub fn encode_global(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
         for (i, block) in data.iter().enumerate() {
             // coefficient = alpha^((i+1)*(j+1)) where alpha = 2
             let exponent = ((i + 1) * (j + 1)) % 255;
-            let coeff = gf256_exp(exponent);
+            let coeff = gf256::exp2(exponent);
             gf256_mul_xor_into(&mut parity, block, coeff);
         }
         global_parities.push(parity);
@@ -303,6 +326,8 @@ pub struct RepairResult {
     pub blocks_repaired: u32,
     /// Indices of blocks that were repaired.
     pub repaired_indices: Vec<u32>,
+    /// Reconstructed block data, keyed by original index.
+    pub recovered_data: BTreeMap<u32, Vec<u8>>,
     /// Whether local repair was sufficient.
     pub used_local_only: bool,
     /// Whether global repair was needed.
@@ -383,6 +408,7 @@ pub fn repair_global(
             success: true,
             blocks_repaired: 0,
             repaired_indices: Vec::new(),
+            recovered_data: BTreeMap::new(),
             used_local_only: false,
             used_global: false,
         };
@@ -393,6 +419,7 @@ pub fn repair_global(
             success: false,
             blocks_repaired: 0,
             repaired_indices: Vec::new(),
+            recovered_data: BTreeMap::new(),
             used_local_only: false,
             used_global: true,
         };
@@ -411,6 +438,7 @@ pub fn repair_global(
             success: false,
             blocks_repaired: 0,
             repaired_indices: Vec::new(),
+            recovered_data: BTreeMap::new(),
             used_local_only: false,
             used_global: true,
         };
@@ -435,15 +463,15 @@ pub fn repair_global(
         // Build coefficients for missing blocks.
         for (col, &missing_i) in missing.iter().enumerate() {
             let exp = ((missing_i + 1) * (parity_j + 1)) % 255;
-            coeff_matrix[eq_idx][col] = gf256_exp(exp);
+            coeff_matrix[eq_idx][col] = gf256::exp2(exp);
         }
 
         // RHS = P_j XOR sum_{known} coeff * D_known
-        rhs[eq_idx] = parity_data[..block_size].to_vec();
+        rhs[eq_idx].copy_from_slice(&parity_data[..block_size]);
         for (i, block_opt) in availability.data.iter().enumerate() {
             if let Some(block) = block_opt {
                 let exp = ((i + 1) * (parity_j + 1)) % 255;
-                let coeff = gf256_exp(exp);
+                let coeff = gf256::exp2(exp);
                 gf256_mul_xor_into(&mut rhs[eq_idx], block, coeff);
             }
         }
@@ -460,6 +488,7 @@ pub fn repair_global(
                 success: false,
                 blocks_repaired: 0,
                 repaired_indices: Vec::new(),
+                recovered_data: BTreeMap::new(),
                 used_local_only: false,
                 used_global: true,
             };
@@ -504,14 +533,20 @@ pub fn repair_global(
     }
 
     // After elimination, rhs[i] contains the recovered block for missing[i].
-    #[expect(clippy::cast_possible_truncation)] // indices bounded by data_blocks (u32)
-    let repaired_indices: Vec<u32> = missing.iter().map(|&i| i as u32).collect();
+    let mut recovered_data = BTreeMap::new();
+    let mut repaired_indices = Vec::with_capacity(m);
+    for (i, &idx) in missing.iter().enumerate() {
+        let idx_u32 = u32::try_from(idx).unwrap_or(u32::MAX);
+        repaired_indices.push(idx_u32);
+        recovered_data.insert(idx_u32, std::mem::take(&mut rhs[i]));
+    }
 
     RepairResult {
         success: true,
         #[expect(clippy::cast_possible_truncation)]
         blocks_repaired: m as u32,
         repaired_indices,
+        recovered_data,
         used_local_only: false,
         used_global: true,
     }
@@ -539,21 +574,6 @@ fn gf256_mul_xor_into(dst: &mut [u8], src: &[u8], coeff: u8) {
         *d ^= gf256::mul(*s, coeff);
     }
 }
-
-/// Compute `EXP[exponent]` in GF(256).
-fn gf256_exp(exponent: usize) -> u8 {
-    // Use the precomputed table from the gf256 module.
-    // EXP table is 512 entries long so exponent % 255 always works.
-    // But we access it via the mul function's backing.
-    // For direct exponentiation, we reconstruct.
-    let mut val = 1_u8;
-    for _ in 0..exponent {
-        val = gf256::mul(val, 2); // alpha = 2 is our generator base
-    }
-    val
-}
-
-// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -658,6 +678,7 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.blocks_repaired, 1);
         assert_eq!(result.repaired_indices, vec![1]);
+        assert_eq!(result.recovered_data.get(&1), Some(&data[1]));
         assert!(result.used_global);
     }
 

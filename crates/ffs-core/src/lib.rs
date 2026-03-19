@@ -8607,10 +8607,9 @@ impl FsOps for OpenFs {
                 let rows = self.btrfs_readdir_entries(cx, ino)?;
                 let entries = rows
                     .into_iter()
-                    .enumerate()
-                    .filter(|(idx, _)| (*idx as u64) >= offset)
-                    .map(|(idx, (_, mut e))| {
-                        e.offset = (idx as u64) + 1;
+                    .filter(|(key, _)| *key >= offset)
+                    .map(|(key, mut e)| {
+                        e.offset = key;
                         e
                     })
                     .collect();
@@ -12859,7 +12858,7 @@ mod tests {
             1,
             256,
             BTRFS_ITEM_DIR_INDEX,
-            1,
+            2,
             dir_index_off,
             dir_index.len() as u32,
         );
@@ -13127,7 +13126,7 @@ mod tests {
             1,
             256,
             BTRFS_ITEM_DIR_INDEX,
-            1,
+            2,
             dir_index_off,
             dir_index.len() as u32,
         );
@@ -13456,7 +13455,7 @@ mod tests {
                 item_idx,
                 256,
                 BTRFS_ITEM_DIR_INDEX,
-                (i + 1) as u64,
+                (i + 2) as u64,
                 data_cursor as u32,
                 dir_entry.len() as u32,
             );

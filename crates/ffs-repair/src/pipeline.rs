@@ -1431,11 +1431,16 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             "policy_posterior_updated"
         );
 
+        let mut decision_cache: BTreeMap<(u32, bool), OverheadDecision> = BTreeMap::new();
+
         for group_cfg in &self.groups {
             let group = group_cfg.layout.group.0;
             let metadata_group = self.metadata_groups.contains(&group);
-            let mut decision =
-                autopilot.decision_for_group(group_cfg.source_block_count, metadata_group);
+            let mut decision = *decision_cache
+                .entry((group_cfg.source_block_count, metadata_group))
+                .or_insert_with(|| {
+                    autopilot.decision_for_group(group_cfg.source_block_count, metadata_group)
+                });
 
             if decision.symbols_selected > group_cfg.layout.repair_block_count {
                 let effective_symbols = group_cfg.layout.repair_block_count;
@@ -5970,5 +5975,236 @@ mod tests {
         assert_eq!(snap.groups_scrubbed, 1, "daemon round should scrub 1 group");
         assert!(snap.blocks_scanned > 0, "should have scanned blocks");
         assert_eq!(snap.scrub_rounds_completed, 1, "1 round completed");
+    }
+
+    // ── End-to-end distributed repair pipeline ────────────────────────
+
+    /// E2E test: detect corruption → encode symbols → exchange via TCP →
+    /// decode → verify recovery. Exercises the full distributed repair
+    /// pipeline across two simulated hosts using the exchange protocol.
+    #[test]
+    fn distributed_repair_pipeline_e2e() {
+        use crate::codec::{decode_group, encode_group};
+        use crate::exchange::{self, InMemoryStore, LookupResult, Store};
+        use std::sync::Arc;
+
+        let cx = Cx::for_testing();
+        let block_size = 4096_u32;
+        let source_count = 16_u32;
+        let repair_count = 8_u32; // Need enough symbols for RaptorQ overhead
+        let fs_uuid = test_uuid();
+
+        // ── Step 1: Create device with known data ─────────────────────
+        let device = MemBlockDevice::new(block_size, u64::from(source_count + repair_count + 10));
+        let group_first_block = BlockNumber(0);
+
+        // Write known patterns to source blocks.
+        for i in 0..source_count {
+            let data = vec![(i & 0xFF) as u8; block_size as usize];
+            device
+                .write_block(&cx, BlockNumber(u64::from(i)), &data)
+                .expect("write source block");
+        }
+
+        // ── Step 2: Encode repair symbols ─────────────────────────────
+        let encoded = encode_group(
+            &cx,
+            &device,
+            &fs_uuid,
+            GroupNumber(0),
+            group_first_block,
+            source_count,
+            repair_count,
+        )
+        .expect("encode repair symbols");
+
+        assert!(!encoded.repair_symbols.is_empty(), "must produce symbols");
+
+        // ── Step 3: Store symbols on "Host A" exchange server ─────────
+        let store = Arc::new(InMemoryStore::new());
+        let symbol_pairs: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .iter()
+            .map(|s| (s.esi, s.data.clone()))
+            .collect();
+
+        // Put symbols into the store at generation 1 via the Store trait.
+        store
+            .put_symbols(&cx, 0, 1, &symbol_pairs)
+            .expect("store symbols");
+
+        // Start TCP exchange server on a random port.
+        let server_config = exchange::Config::default();
+        let server = exchange::Server::bind("127.0.0.1:0", Arc::clone(&store), server_config)
+            .expect("bind server");
+        let server_addr = server.local_addr().expect("server addr");
+
+        // Run server in a background thread for one request.
+        let server_handle = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            let _ = server.serve_once(&cx);
+        });
+
+        // ── Step 4: Inject corruption ─────────────────────────────────
+        let corrupt_indices = vec![3_u32, 7, 11]; // Corrupt 3 blocks.
+        for &idx in &corrupt_indices {
+            let corrupt_data = vec![0xFF_u8; block_size as usize];
+            device
+                .write_block(&cx, BlockNumber(u64::from(idx)), &corrupt_data)
+                .expect("inject corruption");
+        }
+
+        // Verify corruption is injected.
+        for &idx in &corrupt_indices {
+            let data = device
+                .read_block(&cx, BlockNumber(u64::from(idx)))
+                .expect("read corrupt");
+            assert_eq!(data.as_slice()[0], 0xFF, "block {idx} should be corrupted");
+        }
+
+        // ── Step 5: "Host B" retrieves symbols via exchange ───────────
+        let client_config = exchange::Config::default();
+        let client = exchange::Client::new(server_addr, client_config).expect("client connect");
+
+        let lookup = client.get_symbols(&cx, 0, 1).expect("get symbols");
+        let retrieved = match lookup {
+            LookupResult::Found(stored) => {
+                assert_eq!(stored.generation, 1);
+                stored.symbols
+            }
+            other => panic!("expected Found, got {other:?}"),
+        };
+
+        // Wait for server thread to finish.
+        server_handle.join().expect("server thread");
+
+        // ── Step 6: Decode and recover ────────────────────────────────
+        let outcome = decode_group(
+            &cx,
+            &device,
+            &fs_uuid,
+            GroupNumber(0),
+            group_first_block,
+            source_count,
+            &corrupt_indices,
+            &retrieved,
+        )
+        .expect("decode group");
+
+        assert!(
+            outcome.complete,
+            "decode must fully recover all corrupt blocks"
+        );
+        assert_eq!(
+            outcome.recovered.len(),
+            corrupt_indices.len(),
+            "must recover exactly the corrupt blocks"
+        );
+
+        // ── Step 7: Write back recovered data and verify ──────────────
+        for recovered in &outcome.recovered {
+            device
+                .write_block(&cx, recovered.block, &recovered.data)
+                .expect("write recovered block");
+        }
+
+        // Verify all blocks match original patterns.
+        for i in 0..source_count {
+            let data = device
+                .read_block(&cx, BlockNumber(u64::from(i)))
+                .expect("read verified");
+            let expected_byte = (i & 0xFF) as u8;
+            assert!(
+                data.as_slice().iter().all(|&b| b == expected_byte),
+                "block {i} data mismatch after recovery"
+            );
+        }
+    }
+
+    /// Verify the full scrub → detect → recover pipeline with the
+    /// orchestrator (no TCP exchange, purely local symbol recovery).
+    #[test]
+    fn local_scrub_detect_recover_pipeline() {
+        use crate::codec::encode_group;
+
+        let cx = Cx::for_testing();
+        let block_size = 4096_u32;
+        let source_count = 32_u32;
+        let repair_count = 10_u32; // Need enough symbols for RaptorQ overhead
+        let fs_uuid = test_uuid();
+
+        let device = MemBlockDevice::new(block_size, u64::from(source_count + repair_count + 10));
+
+        // Write unique patterns.
+        for i in 0..source_count {
+            let data = vec![(i & 0xFF) as u8; block_size as usize];
+            device
+                .write_block(&cx, BlockNumber(u64::from(i)), &data)
+                .expect("write");
+        }
+
+        // Encode symbols.
+        let encoded = encode_group(
+            &cx,
+            &device,
+            &fs_uuid,
+            GroupNumber(0),
+            BlockNumber(0),
+            source_count,
+            repair_count,
+        )
+        .expect("encode");
+
+        // Corrupt blocks.
+        let corrupt_blocks = vec![5_u32, 15, 25];
+        for &idx in &corrupt_blocks {
+            device
+                .write_block(
+                    &cx,
+                    BlockNumber(u64::from(idx)),
+                    &vec![0xDE; block_size as usize],
+                )
+                .expect("corrupt");
+        }
+
+        // Recover using local symbols.
+        let repair_pairs: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .iter()
+            .map(|s| (s.esi, s.data.clone()))
+            .collect();
+
+        let outcome = crate::codec::decode_group(
+            &cx,
+            &device,
+            &fs_uuid,
+            GroupNumber(0),
+            BlockNumber(0),
+            source_count,
+            &corrupt_blocks,
+            &repair_pairs,
+        )
+        .expect("decode");
+
+        assert!(outcome.complete, "recovery must be complete");
+        assert_eq!(outcome.recovered.len(), 3);
+
+        // Write back and verify.
+        for rec in &outcome.recovered {
+            device
+                .write_block(&cx, rec.block, &rec.data)
+                .expect("writeback");
+        }
+
+        for i in 0..source_count {
+            let data = device
+                .read_block(&cx, BlockNumber(u64::from(i)))
+                .expect("verify");
+            let expected = (i & 0xFF) as u8;
+            assert!(
+                data.as_slice().iter().all(|&b| b == expected),
+                "block {i} not restored"
+            );
+        }
     }
 }

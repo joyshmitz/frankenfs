@@ -10,6 +10,7 @@ pub mod codec;
 pub mod decision;
 pub mod demo;
 pub mod evidence;
+pub mod exchange;
 pub mod lrc;
 pub mod ownership;
 pub mod pipeline;
