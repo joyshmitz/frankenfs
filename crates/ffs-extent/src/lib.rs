@@ -625,8 +625,12 @@ pub struct ExtentCache {
 }
 
 struct ExtentCacheInner {
-    /// Entries keyed by `logical_start`. Invariant: entries do not overlap.
-    entries: BTreeMap<u32, CacheEntry>,
+    /// Entries keyed by `(namespace, logical_start)`.
+    ///
+    /// The namespace is a caller-provided scope identifier (typically an inode
+    /// number) that prevents cross-scope cache pollution when a single cache
+    /// instance is shared across many objects.
+    entries: BTreeMap<(u64, u32), CacheEntry>,
     /// Maximum number of entries before eviction.
     capacity: usize,
     /// Monotonically increasing generation; bumped on bulk invalidation.
@@ -688,21 +692,25 @@ impl ExtentCache {
         }
     }
 
-    /// Look up a logical block in the cache.
+    /// Look up a logical block in the cache within the given namespace.
+    ///
+    /// The `ns` parameter scopes the lookup to a specific object (typically
+    /// an inode number). This prevents cross-inode cache pollution when a
+    /// single cache instance is shared across many objects.
     ///
     /// Returns `Some(mapping)` if a cached extent covers `logical_block`.
     /// The returned mapping is adjusted to reflect the exact position within
-    /// the extent, matching what `map_logical_to_physical` would return for
-    /// a single-block query.
-    pub fn lookup(&self, logical_block: u32) -> Option<ExtentMapping> {
+    /// the extent.
+    pub fn lookup(&self, ns: u64, logical_block: u32) -> Option<ExtentMapping> {
         let mut inner = self.inner.write();
         let current_gen = inner.generation;
 
-        // Find the last entry with logical_start <= logical_block.
+        // Find the last entry in this namespace with logical_start <= logical_block.
         let candidate = inner
             .entries
-            .range(..=logical_block)
+            .range(..=(ns, logical_block))
             .next_back()
+            .filter(|&(&(entry_ns, _), _)| entry_ns == ns)
             .map(|(&k, e)| (k, e.mapping, e.generation));
 
         let Some((key, mapping, entry_gen)) = candidate else {
@@ -738,18 +746,18 @@ impl ExtentCache {
         }
     }
 
-    /// Insert a resolved extent mapping into the cache.
+    /// Insert a resolved extent mapping into the cache within the given namespace.
     ///
     /// If the cache is at capacity, the least-recently-used entry is evicted.
-    pub fn insert(&self, mapping: ExtentMapping) {
+    pub fn insert(&self, ns: u64, mapping: ExtentMapping) {
         let mut inner = self.inner.write();
         let access_clock = inner.hits + inner.misses;
         let current_gen = inner.generation;
 
+        let key = (ns, mapping.logical_start);
+
         // Evict if at capacity and this is a new key.
-        if inner.entries.len() >= inner.capacity
-            && !inner.entries.contains_key(&mapping.logical_start)
-        {
+        if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(&key) {
             // Find entry with lowest last_access.
             if let Some((&victim_key, _)) = inner.entries.iter().min_by_key(|(_, e)| e.last_access)
             {
@@ -759,7 +767,7 @@ impl ExtentCache {
         }
 
         inner.entries.insert(
-            mapping.logical_start,
+            key,
             CacheEntry {
                 mapping,
                 generation: current_gen,
@@ -768,20 +776,24 @@ impl ExtentCache {
         );
     }
 
-    /// Invalidate all cached entries whose range overlaps
+    /// Invalidate all cached entries in the given namespace whose range overlaps
     /// `[logical_start, logical_start + count)`.
-    pub fn invalidate_range(&self, logical_start: u32, count: u64) {
+    pub fn invalidate_range(&self, ns: u64, logical_start: u32, count: u64) {
         if count == 0 {
             return;
         }
         let range_end = u64::from(logical_start).saturating_add(count);
+        let range_end_u32 = range_end.min(u64::from(u32::MAX)) as u32;
         let mut inner = self.inner.write();
 
-        // Collect keys to remove: any entry whose extent overlaps the range.
-        let to_remove: Vec<u32> = inner
+        // Collect keys to remove: entries in this namespace whose extent overlaps the range.
+        let to_remove: Vec<(u64, u32)> = inner
             .entries
-            .range(..=(range_end.min(u64::from(u32::MAX)) as u32))
-            .filter(|(_, e)| {
+            .range((ns, 0)..=(ns, range_end_u32))
+            .filter(|&(&(entry_ns, _), e)| {
+                if entry_ns != ns {
+                    return false;
+                }
                 let ext_end = u64::from(e.mapping.logical_start) + u64::from(e.mapping.count);
                 let ext_start = u64::from(e.mapping.logical_start);
                 ext_start < range_end && ext_end > u64::from(logical_start)
@@ -833,7 +845,8 @@ impl Default for ExtentCache {
 /// Cached variant of [`map_logical_to_physical`].
 ///
 /// Checks the `cache` first; on miss, performs the full tree walk and populates
-/// the cache with the resolved mappings.
+/// the cache with the resolved mappings. The `ns` parameter scopes cache
+/// entries to a specific object (typically an inode number).
 pub fn cached_map_logical_to_physical(
     cx: &Cx,
     dev: &dyn BlockDevice,
@@ -841,6 +854,7 @@ pub fn cached_map_logical_to_physical(
     logical_start: u32,
     count: u64,
     cache: &ExtentCache,
+    ns: u64,
 ) -> Result<Vec<ExtentMapping>> {
     if count == 0 {
         return Ok(Vec::new());
@@ -848,11 +862,11 @@ pub fn cached_map_logical_to_physical(
 
     // Fast path: single-block lookup that hits cache.
     if count == 1 {
-        if let Some(hit) = cache.lookup(logical_start) {
+        if let Some(hit) = cache.lookup(ns, logical_start) {
             return Ok(vec![ExtentMapping {
                 logical_start,
                 physical_start: hit.physical_start,
-                count: 1.min(hit.count),
+                count: 1,
                 unwritten: hit.unwritten,
             }]);
         }
@@ -863,7 +877,7 @@ pub fn cached_map_logical_to_physical(
 
     // Populate cache with resolved mappings.
     for m in &mappings {
-        cache.insert(*m);
+        cache.insert(ns, *m);
     }
 
     Ok(mappings)
@@ -4059,7 +4073,7 @@ mod tests {
     #[test]
     fn cache_miss_on_empty() {
         let cache = ExtentCache::new();
-        assert!(cache.lookup(42).is_none());
+        assert!(cache.lookup(0, 42).is_none());
         let stats = cache.stats();
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.hits, 0);
@@ -4074,21 +4088,21 @@ mod tests {
             count: 50,
             unwritten: false,
         };
-        cache.insert(mapping);
+        cache.insert(0, mapping);
 
         // Hit: block in the middle of the extent.
-        let hit = cache.lookup(120).unwrap();
+        let hit = cache.lookup(0, 120).unwrap();
         assert_eq!(hit.logical_start, 120);
         assert_eq!(hit.physical_start, 5020);
         assert_eq!(hit.count, 30); // remaining in extent
 
         // Hit: block at start.
-        let hit = cache.lookup(100).unwrap();
+        let hit = cache.lookup(0, 100).unwrap();
         assert_eq!(hit.logical_start, 100);
         assert_eq!(hit.physical_start, 5000);
 
         // Miss: just past the end.
-        assert!(cache.lookup(150).is_none());
+        assert!(cache.lookup(0, 150).is_none());
 
         let stats = cache.stats();
         assert_eq!(stats.hits, 2);
@@ -4099,72 +4113,90 @@ mod tests {
     fn cache_hole_mapping() {
         let cache = ExtentCache::new();
         // Hole: physical_start == 0.
-        cache.insert(ExtentMapping {
-            logical_start: 200,
-            physical_start: 0,
-            count: 10,
-            unwritten: false,
-        });
-        let hit = cache.lookup(205).unwrap();
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 200,
+                physical_start: 0,
+                count: 10,
+                unwritten: false,
+            },
+        );
+        let hit = cache.lookup(0, 205).unwrap();
         assert_eq!(hit.physical_start, 0); // Hole stays as hole.
     }
 
     #[test]
     fn cache_unwritten_flag_preserved() {
         let cache = ExtentCache::new();
-        cache.insert(ExtentMapping {
-            logical_start: 0,
-            physical_start: 1000,
-            count: 100,
-            unwritten: true,
-        });
-        let hit = cache.lookup(50).unwrap();
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 1000,
+                count: 100,
+                unwritten: true,
+            },
+        );
+        let hit = cache.lookup(0, 50).unwrap();
         assert!(hit.unwritten);
     }
 
     #[test]
     fn cache_invalidate_range_removes_overlapping() {
         let cache = ExtentCache::new();
-        cache.insert(ExtentMapping {
-            logical_start: 0,
-            physical_start: 1000,
-            count: 100,
-            unwritten: false,
-        });
-        cache.insert(ExtentMapping {
-            logical_start: 200,
-            physical_start: 2000,
-            count: 50,
-            unwritten: false,
-        });
-        cache.insert(ExtentMapping {
-            logical_start: 300,
-            physical_start: 3000,
-            count: 50,
-            unwritten: false,
-        });
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 1000,
+                count: 100,
+                unwritten: false,
+            },
+        );
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 200,
+                physical_start: 2000,
+                count: 50,
+                unwritten: false,
+            },
+        );
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 300,
+                physical_start: 3000,
+                count: 50,
+                unwritten: false,
+            },
+        );
 
         // Invalidate range [50, 210): should remove first two, keep third.
-        cache.invalidate_range(50, 160);
+        cache.invalidate_range(0, 50, 160);
 
-        assert!(cache.lookup(50).is_none());
-        assert!(cache.lookup(200).is_none());
-        assert!(cache.lookup(320).is_some()); // third extent still valid
+        assert!(cache.lookup(0, 50).is_none());
+        assert!(cache.lookup(0, 200).is_none());
+        assert!(cache.lookup(0, 320).is_some()); // third extent still valid
     }
 
     #[test]
     fn cache_invalidate_all_bumps_generation() {
         let cache = ExtentCache::new();
-        cache.insert(ExtentMapping {
-            logical_start: 0,
-            physical_start: 1000,
-            count: 100,
-            unwritten: false,
-        });
-        assert!(cache.lookup(50).is_some());
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 1000,
+                count: 100,
+                unwritten: false,
+            },
+        );
+        assert!(cache.lookup(0, 50).is_some());
 
         cache.invalidate_all();
-        assert!(cache.lookup(50).is_none());
+        assert!(cache.lookup(0, 50).is_none());
         assert_eq!(cache.stats().generation, 1);
     }
 
@@ -4172,47 +4204,56 @@ mod tests {
     fn cache_eviction_at_capacity() {
         let cache = ExtentCache::with_capacity(3);
         for i in 0..3 {
-            cache.insert(ExtentMapping {
-                logical_start: i * 100,
-                physical_start: u64::from(i) * 1000,
-                count: 50,
-                unwritten: false,
-            });
+            cache.insert(
+                0,
+                ExtentMapping {
+                    logical_start: i * 100,
+                    physical_start: u64::from(i) * 1000,
+                    count: 50,
+                    unwritten: false,
+                },
+            );
         }
         assert_eq!(cache.stats().entries, 3);
 
         // Access entry 0 and 2 to make entry 1 the LRU victim.
-        let _ = cache.lookup(0);
-        let _ = cache.lookup(200);
+        let _ = cache.lookup(0, 0);
+        let _ = cache.lookup(0, 200);
 
         // Insert a 4th entry — should evict entry 1 (lowest last_access).
-        cache.insert(ExtentMapping {
-            logical_start: 500,
-            physical_start: 9000,
-            count: 10,
-            unwritten: false,
-        });
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 500,
+                physical_start: 9000,
+                count: 10,
+                unwritten: false,
+            },
+        );
 
         assert_eq!(cache.stats().entries, 3);
         assert_eq!(cache.stats().evictions, 1);
         // Entry 1 (logical_start=100) should be evicted.
-        assert!(cache.lookup(110).is_none());
+        assert!(cache.lookup(0, 110).is_none());
         // Entry 0 and 2 should survive.
-        assert!(cache.lookup(10).is_some());
-        assert!(cache.lookup(210).is_some());
+        assert!(cache.lookup(0, 10).is_some());
+        assert!(cache.lookup(0, 210).is_some());
     }
 
     #[test]
     fn cache_stats_reset() {
         let cache = ExtentCache::new();
-        cache.insert(ExtentMapping {
-            logical_start: 0,
-            physical_start: 1000,
-            count: 10,
-            unwritten: false,
-        });
-        let _ = cache.lookup(5);
-        let _ = cache.lookup(99);
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 1000,
+                count: 10,
+                unwritten: false,
+            },
+        );
+        let _ = cache.lookup(0, 5);
+        let _ = cache.lookup(0, 99);
 
         let stats = cache.stats();
         assert_eq!(stats.hits, 1);
@@ -4258,15 +4299,18 @@ mod tests {
 
         let cache = ExtentCache::new();
         // Pre-populate cache.
-        cache.insert(ExtentMapping {
-            logical_start: 0,
-            physical_start: 5000,
-            count: 100,
-            unwritten: false,
-        });
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 5000,
+                count: 100,
+                unwritten: false,
+            },
+        );
 
         // Single-block lookup should hit cache without touching the tree.
-        let result = cached_map_logical_to_physical(&cx, &dev, &root, 50, 1, &cache).unwrap();
+        let result = cached_map_logical_to_physical(&cx, &dev, &root, 50, 1, &cache, 0).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].physical_start, 5050);
         assert_eq!(cache.stats().hits, 1);
@@ -4298,14 +4342,14 @@ mod tests {
         let cache = ExtentCache::new();
 
         // First call with count=10: miss + populates cache with full extent.
-        let result = cached_map_logical_to_physical(&cx, &dev, &root, 0, 10, &cache).unwrap();
+        let result = cached_map_logical_to_physical(&cx, &dev, &root, 0, 10, &cache, 0).unwrap();
         assert_eq!(result.len(), 1);
         assert_ne!(result[0].physical_start, 0);
         assert_eq!(cache.stats().misses, 0); // count != 1, no single-block lookup
         assert!(cache.stats().entries > 0);
 
         // Second call: single-block should hit cache.
-        let result2 = cached_map_logical_to_physical(&cx, &dev, &root, 5, 1, &cache).unwrap();
+        let result2 = cached_map_logical_to_physical(&cx, &dev, &root, 5, 1, &cache, 0).unwrap();
         assert_eq!(result2.len(), 1);
         assert_eq!(cache.stats().hits, 1);
     }
@@ -4315,33 +4359,39 @@ mod tests {
         let cache = ExtentCache::new();
 
         // Manually populate cache with a single extent covering blocks 0-19.
-        cache.insert(ExtentMapping {
-            logical_start: 0,
-            physical_start: 5000,
-            count: 20,
-            unwritten: false,
-        });
-        assert!(cache.lookup(15).is_some());
-        assert!(cache.lookup(5).is_some());
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 5000,
+                count: 20,
+                unwritten: false,
+            },
+        );
+        assert!(cache.lookup(0, 15).is_some());
+        assert!(cache.lookup(0, 5).is_some());
 
         // Invalidate the truncated range (blocks 10+).
-        cache.invalidate_range(10, u64::from(u32::MAX) - 10);
+        cache.invalidate_range(0, 10, u64::from(u32::MAX) - 10);
 
         // The original extent [0,20) overlapped [10,MAX) so it's removed entirely.
         // This is correct: the cache takes a conservative approach of removing
         // any extent that overlaps the invalidated range.
-        assert!(cache.lookup(15).is_none());
-        assert!(cache.lookup(5).is_none()); // removed because extent [0,20) overlapped
+        assert!(cache.lookup(0, 15).is_none());
+        assert!(cache.lookup(0, 5).is_none()); // removed because extent [0,20) overlapped
 
         // After re-populating just [0,10), it should work again.
-        cache.insert(ExtentMapping {
-            logical_start: 0,
-            physical_start: 5000,
-            count: 10,
-            unwritten: false,
-        });
-        assert!(cache.lookup(5).is_some());
-        assert!(cache.lookup(12).is_none());
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 5000,
+                count: 10,
+                unwritten: false,
+            },
+        );
+        assert!(cache.lookup(0, 5).is_some());
+        assert!(cache.lookup(0, 12).is_none());
     }
 
     #[test]
@@ -4358,7 +4408,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..1000 {
                     let block = (t * 1000 + i) % 500;
-                    let _ = c.lookup(block);
+                    let _ = c.lookup(0, block);
                 }
             }));
         }
@@ -4368,12 +4418,15 @@ mod tests {
             let c = Arc::clone(&cache);
             handles.push(thread::spawn(move || {
                 for i in 0u32..500 {
-                    c.insert(ExtentMapping {
-                        logical_start: t * 500 + i,
-                        physical_start: 1000 + u64::from(t * 500 + i),
-                        count: 10,
-                        unwritten: false,
-                    });
+                    c.insert(
+                        0,
+                        ExtentMapping {
+                            logical_start: t * 500 + i,
+                            physical_start: 1000 + u64::from(t * 500 + i),
+                            count: 10,
+                            unwritten: false,
+                        },
+                    );
                 }
             }));
         }
@@ -4383,7 +4436,7 @@ mod tests {
             let c = Arc::clone(&cache);
             handles.push(thread::spawn(move || {
                 for i in 0..100 {
-                    c.invalidate_range(i * 10, 10);
+                    c.invalidate_range(0, i * 10, 10);
                 }
             }));
         }

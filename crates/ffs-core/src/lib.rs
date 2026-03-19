@@ -2208,6 +2208,7 @@ impl OpenFs {
             }
 
             if inode.flags & ffs_types::EXT4_EXTENTS_FL != 0 && inode.extent_bytes.len() >= 60 {
+                let extent_ns = extent_root_namespace(&inode);
                 let mut root_bytes = Self::extent_root(&inode);
                 let logical_end_u64 = inode.size.div_ceil(u64::from(alloc.geo.block_size));
                 let logical_end = u32::try_from(logical_end_u64).map_err(|_| {
@@ -2225,8 +2226,11 @@ impl OpenFs {
                     logical_end,
                     &alloc.persist_ctx,
                 )?;
-                self.extent_cache
-                    .invalidate_range(logical_end, u64::from(u32::MAX) - u64::from(logical_end));
+                self.extent_cache.invalidate_range(
+                    extent_ns,
+                    logical_end,
+                    u64::from(u32::MAX) - u64::from(logical_end),
+                );
                 Self::set_extent_root(&mut inode, &root_bytes);
                 let freed_sectors = if inode.is_huge_file() {
                     freed
@@ -4138,8 +4142,15 @@ impl OpenFs {
         inode: &Ext4Inode,
         logical_block: u32,
     ) -> Result<Option<(u64, bool)>, FfsError> {
+        // Derive a cache namespace from the inode's extent root bytes.
+        // Different inodes have different extent trees, so the first 8 bytes
+        // of i_block (the extent header + first entry start) provide a
+        // practically unique per-inode key to prevent cross-inode cache
+        // pollution.
+        let ns = extent_root_namespace(inode);
+
         // Fast path: check extent cache.
-        if let Some(hit) = self.extent_cache.lookup(logical_block) {
+        if let Some(hit) = self.extent_cache.lookup(ns, logical_block) {
             return if hit.physical_start == 0 {
                 Ok(None)
             } else {
@@ -4153,26 +4164,26 @@ impl OpenFs {
         // Populate cache with the resolved mapping.
         match &result {
             Some((phys, unwritten)) => {
-                // We don't know the full extent length from walk_extent_tree,
-                // so cache a single-block mapping. The btree search path in
-                // ffs-extent provides full extent info; here we cache what we
-                // know to benefit repeated lookups of the same block.
-                self.extent_cache.insert(ffs_extent::ExtentMapping {
-                    logical_start: logical_block,
-                    physical_start: *phys,
-                    count: 1,
-                    unwritten: *unwritten,
-                });
+                self.extent_cache.insert(
+                    ns,
+                    ffs_extent::ExtentMapping {
+                        logical_start: logical_block,
+                        physical_start: *phys,
+                        count: 1,
+                        unwritten: *unwritten,
+                    },
+                );
             }
             None => {
-                // Cache hole as physical_start=0 so repeated hole lookups
-                // don't re-walk the tree.
-                self.extent_cache.insert(ffs_extent::ExtentMapping {
-                    logical_start: logical_block,
-                    physical_start: 0,
-                    count: 1,
-                    unwritten: false,
-                });
+                self.extent_cache.insert(
+                    ns,
+                    ffs_extent::ExtentMapping {
+                        logical_start: logical_block,
+                        physical_start: 0,
+                        count: 1,
+                        unwritten: false,
+                    },
+                );
             }
         }
 
@@ -4654,7 +4665,21 @@ impl Ext4FsOps {
     }
 }
 
-/// Convert `ParseError` to `FfsError` for runtime operations (not mount-time).
+/// Derive a cache namespace from an inode's extent root bytes.
+///
+/// Hashes the full 60-byte extent root (i_block) into a u64 namespace key.
+/// Different inodes have different extent trees, so this produces a unique
+/// key per-inode. Uses a simple FNV-1a-like hash for speed (no cryptographic
+/// strength needed — just collision avoidance).
+fn extent_root_namespace(inode: &Ext4Inode) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    for &b in &inode.extent_bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3); // FNV prime
+    }
+    h
+}
+
 fn parse_to_ffs_error(e: &ParseError) -> FfsError {
     match e {
         ParseError::InvalidField { field, reason } => {
@@ -5746,6 +5771,7 @@ impl OpenFs {
             let logical_count =
                 u32::try_from(length / block_size).map_err(|_| FfsError::NoSpace)?;
             if logical_count > 0 {
+                let extent_ns = extent_root_namespace(&inode);
                 let freed_blocks = {
                     let Ext4AllocState {
                         geo,
@@ -5763,8 +5789,11 @@ impl OpenFs {
                         persist_ctx,
                     )?
                 };
-                self.extent_cache
-                    .invalidate_range(logical_start, u64::from(logical_count));
+                self.extent_cache.invalidate_range(
+                    extent_ns,
+                    logical_start,
+                    u64::from(logical_count),
+                );
                 if inode.is_huge_file() {
                     inode.blocks = inode.blocks.saturating_sub(freed_blocks);
                 } else {
@@ -5828,8 +5857,7 @@ impl OpenFs {
                             persist_ctx,
                         )?
                     };
-                    self.extent_cache
-                        .invalidate_range(logical, u64::from(alloc_mapping.count));
+                    self.extent_cache.invalidate_all();
 
                     for rel in 0..alloc_mapping.count {
                         block_dev.write_block(
@@ -5986,7 +6014,11 @@ impl OpenFs {
                             persist_ctx,
                         )?
                     };
-                    self.extent_cache.invalidate_range(logical_block, 1);
+                    self.extent_cache.invalidate_range(
+                        extent_root_namespace(&inode),
+                        logical_block,
+                        1,
+                    );
                     Self::set_extent_root(&mut inode, &root_bytes);
                     if inode.is_huge_file() {
                         inode.blocks += 1;
@@ -6343,6 +6375,7 @@ impl OpenFs {
                             "truncation size exceeds ext4 32-bit logical block limit".into(),
                         )
                     })?;
+                    let extent_ns = extent_root_namespace(&inode);
                     let mut root_bytes = Self::extent_root(&inode);
                     let freed = {
                         let Ext4AllocState {
@@ -6361,6 +6394,7 @@ impl OpenFs {
                         )?
                     };
                     self.extent_cache.invalidate_range(
+                        extent_ns,
                         new_logical_end,
                         u64::from(u32::MAX) - u64::from(new_logical_end),
                     );

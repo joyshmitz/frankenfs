@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use tracing::{debug, info, warn};
 
@@ -19,6 +20,7 @@ const DEFAULT_LEASE_TTL_SECS: u64 = 300;
 
 /// Coordination record version.
 const RECORD_VERSION: u32 = 1;
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ── Coordination Record ────────────────────────────────────────────────────
 
@@ -223,7 +225,7 @@ impl RepairOwnership {
         let json = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
 
         // Atomic write: write to temp, then rename
-        let tmp_path = record_path.with_extension("tmp");
+        let tmp_path = temp_record_path(record_path);
         std::fs::write(&tmp_path, &json)?;
         std::fs::rename(&tmp_path, record_path)?;
 
@@ -304,7 +306,7 @@ impl RepairOwnership {
 
         guard.record.renew();
         let json = serde_json::to_string_pretty(&guard.record).map_err(std::io::Error::other)?;
-        let tmp_path = guard.record_path.with_extension("tmp");
+        let tmp_path = temp_record_path(&guard.record_path);
         std::fs::write(&tmp_path, &json)?;
         std::fs::rename(&tmp_path, &guard.record_path)?;
         debug!(
@@ -432,6 +434,11 @@ fn ymd_to_days(year: u64, month: u64, day: u64) -> u64 {
     let doy = (153 * m + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+fn temp_record_path(record_path: &Path) -> PathBuf {
+    let nonce = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    record_path.with_extension(format!("tmp-{}-{nonce}", std::process::id()))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -744,6 +751,16 @@ mod tests {
         let contents = std::fs::read_to_string(record_path).expect("record remains");
         let current: CoordinationRecord = serde_json::from_str(&contents).expect("parse");
         assert_eq!(current.host_id, "host-b");
+    }
+
+    #[test]
+    fn temp_record_path_is_unique_per_write_attempt() {
+        let record_path = PathBuf::from("/tmp/.image.img.ffs-repair-owner.json");
+        let first = temp_record_path(&record_path);
+        let second = temp_record_path(&record_path);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), record_path.parent());
+        assert_eq!(second.parent(), record_path.parent());
     }
 
     fn tempdir() -> PathBuf {

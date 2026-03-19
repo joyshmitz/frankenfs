@@ -284,7 +284,7 @@ fn bench_extent_resolve_cached_repeated(c: &mut Criterion) {
     let cache = ffs_extent::ExtentCache::new();
 
     // Warm the cache with one lookup.
-    ffs_extent::cached_map_logical_to_physical(&cx, &dev, &root, 500, 1, &cache).expect("warm");
+    ffs_extent::cached_map_logical_to_physical(&cx, &dev, &root, 500, 1, &cache, 0).expect("warm");
 
     c.bench_function("extent_resolve_depth1_cached_repeated", |b| {
         b.iter(|| {
@@ -296,6 +296,7 @@ fn bench_extent_resolve_cached_repeated(c: &mut Criterion) {
                     black_box(500),
                     black_box(1),
                     black_box(&cache),
+                    black_box(0),
                 )
                 .expect("resolve");
                 black_box(result);
@@ -341,6 +342,7 @@ fn bench_extent_sequential_cached(c: &mut Criterion) {
                     black_box(blk),
                     black_box(1),
                     black_box(&cache),
+                    black_box(0),
                 )
                 .expect("resolve");
                 black_box(result);

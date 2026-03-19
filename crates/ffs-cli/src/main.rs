@@ -5867,6 +5867,41 @@ mod tests {
     }
 
     #[test]
+    fn evidence_metrics_preset_rejects_summary_flag() {
+        let bundle = serde_json::json!({
+            "metrics": {
+                "requests_total": 1,
+                "requests_ok": 1,
+                "requests_err": 0,
+                "bytes_read": 64,
+                "requests_throttled": 0,
+                "requests_shed": 0
+            }
+        });
+
+        with_temp_image_path(
+            serde_json::to_string_pretty(&bundle)
+                .expect("serialize bundle")
+                .as_bytes(),
+            |path| {
+                let err = crate::cmd_evidence::evidence_cmd(
+                    &path,
+                    false,
+                    None,
+                    None,
+                    Some("metrics"),
+                    true,
+                )
+                .expect_err("metrics preset should reject --summary");
+                assert!(
+                    err.to_string()
+                        .contains("--summary is only supported for ledger-backed evidence presets")
+                );
+            },
+        );
+    }
+
+    #[test]
     fn evidence_summary_aggregates_correctly() {
         let ledger = concat!(
             "{\"timestamp_ns\":100,\"event_type\":\"wal_recovery\",\"block_group\":0,",

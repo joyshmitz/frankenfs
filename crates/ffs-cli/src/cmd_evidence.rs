@@ -868,6 +868,9 @@ pub fn evidence_cmd(
         if tail.is_some() {
             bail!("--tail is only supported for ledger-backed evidence presets");
         }
+        if summary {
+            bail!("--summary is only supported for ledger-backed evidence presets");
+        }
 
         let preset_name = preset.expect("metrics preset kind requires preset name");
         let report = load_metrics_report(path, preset_name)?;

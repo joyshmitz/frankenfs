@@ -13,6 +13,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 const PROTOCOL_VERSION: u32 = 1;
 const DEFAULT_TIMEOUT_SECS: u64 = 5;
@@ -355,10 +356,22 @@ impl<S: Store> Server<S> {
 
     /// Accept and handle a single connection.
     pub fn serve_once(&self, cx: &Cx) -> Result<()> {
-        let (mut stream, _) = self.accept(cx)?;
+        let (mut stream, peer_addr) = self.accept(cx)?;
         configure_stream_timeouts(cx, &mut stream, self.config.io_timeout)?;
         stream.set_nodelay(true).map_err(FfsError::from)?;
-        self.handle_connection(cx, &mut stream)
+        match self.handle_connection(cx, &mut stream) {
+            Ok(()) => Ok(()),
+            Err(FfsError::Cancelled) => Err(FfsError::Cancelled),
+            Err(err) => {
+                warn!(
+                    target: "ffs::repair::exchange",
+                    peer = %peer_addr,
+                    error = %err,
+                    "exchange_connection_failed"
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Run until the caller cancels the `Cx`.
@@ -635,6 +648,7 @@ mod tests {
     };
     use asupersync::{Budget, Cx};
     use std::io::Cursor;
+    use std::io::Write;
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::thread;
@@ -798,5 +812,50 @@ mod tests {
             .get_symbols(&cx, 1, 1)
             .expect_err("expired deadline should cancel before connect");
         assert!(matches!(err, ffs_error::FfsError::Cancelled));
+    }
+
+    #[test]
+    fn server_continues_after_malformed_client_connection() {
+        let store = Arc::new(InMemoryStore::new());
+        let seed_cx = Cx::for_testing();
+        store
+            .put_symbols(&seed_cx, 7, 3, &[(1, vec![0xaa])])
+            .expect("seed store");
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server_store = Arc::clone(&store);
+        let server_thread = thread::spawn(move || {
+            let server =
+                Server::from_listener(listener, server_store, Config::default()).expect("server");
+            let cx = Cx::for_testing_with_budget(deadline_after(Duration::from_secs(2)));
+            server
+                .serve_until_cancelled(&cx)
+                .expect("server should survive malformed client");
+        });
+
+        let mut malformed = std::net::TcpStream::connect(addr).expect("connect malformed client");
+        malformed
+            .write_all(&1_u32.to_le_bytes())
+            .expect("write malformed prefix");
+        malformed.write_all(b"{").expect("write malformed payload");
+        drop(malformed);
+
+        thread::sleep(Duration::from_millis(100));
+
+        let client = Client::new(addr, Config::default()).expect("client");
+        let cx = Cx::for_testing_with_budget(deadline_after(Duration::from_secs(2)));
+        let fetched = client
+            .get_symbols(&cx, 7, 3)
+            .expect("server should still answer valid requests");
+        assert_eq!(
+            fetched,
+            LookupResult::Found(StoredSymbols {
+                generation: 3,
+                symbols: vec![(1, vec![0xaa])],
+            })
+        );
+
+        server_thread.join().expect("server thread join");
     }
 }
