@@ -19,8 +19,9 @@ use ffs_error::{FfsError, Result as FfsResult};
 use ffs_repair::evidence::{
     ContentionSampleDetail, EvidenceRecord, MergeAppliedDetail, MergeProofCheckedDetail,
     MergeRejectedDetail, PolicySwitchedDetail, SerializationConflictDetail,
-    TransactionCommitDetail, TxnAbortReason, TxnAbortedDetail,
+    TransactionCommitDetail, TxnAbortedDetail,
 };
+pub use ffs_repair::evidence::TxnAbortReason;
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
