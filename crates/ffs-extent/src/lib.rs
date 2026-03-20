@@ -4449,4 +4449,103 @@ mod tests {
         let stats = cache.stats();
         assert!(stats.hits + stats.misses > 0);
     }
+
+    // ── Namespace isolation tests ──────────────────────────────────────
+
+    #[test]
+    fn cache_namespace_isolation_prevents_cross_inode_pollution() {
+        let cache = ExtentCache::new();
+
+        // Inode A (ns=100): block 0 maps to physical 5000.
+        cache.insert(
+            100,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 5000,
+                count: 10,
+                unwritten: false,
+            },
+        );
+
+        // Inode B (ns=200): block 0 maps to physical 9000.
+        cache.insert(
+            200,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 9000,
+                count: 10,
+                unwritten: false,
+            },
+        );
+
+        // Lookup inode A's block 0 — must return phys 5000, NOT 9000.
+        let hit_a = cache.lookup(100, 0).unwrap();
+        assert_eq!(hit_a.physical_start, 5000);
+
+        // Lookup inode B's block 0 — must return phys 9000.
+        let hit_b = cache.lookup(200, 0).unwrap();
+        assert_eq!(hit_b.physical_start, 9000);
+
+        // Lookup inode C (ns=300) — no entry, must miss.
+        assert!(cache.lookup(300, 0).is_none());
+    }
+
+    #[test]
+    fn cache_namespace_invalidation_is_scoped() {
+        let cache = ExtentCache::new();
+
+        cache.insert(
+            10,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 1000,
+                count: 50,
+                unwritten: false,
+            },
+        );
+        cache.insert(
+            20,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 2000,
+                count: 50,
+                unwritten: false,
+            },
+        );
+
+        // Invalidate ns=10 range [0, 50) — should NOT affect ns=20.
+        cache.invalidate_range(10, 0, 50);
+
+        assert!(cache.lookup(10, 25).is_none());
+        assert!(cache.lookup(20, 25).is_some());
+    }
+
+    #[test]
+    fn cache_invalidate_all_clears_all_namespaces() {
+        let cache = ExtentCache::new();
+
+        cache.insert(
+            1,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 100,
+                count: 10,
+                unwritten: false,
+            },
+        );
+        cache.insert(
+            2,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 200,
+                count: 10,
+                unwritten: false,
+            },
+        );
+
+        cache.invalidate_all();
+
+        assert!(cache.lookup(1, 0).is_none());
+        assert!(cache.lookup(2, 0).is_none());
+    }
 }
