@@ -437,10 +437,16 @@ pub fn delete_inode(
 /// Encode nanoseconds and epoch extension into the `_extra` timestamp field.
 ///
 /// Layout: bits 0-1 = epoch extension (seconds >> 32), bits 2-31 = nanoseconds.
+///
+/// Nanoseconds must be in `[0, 999_999_999]`. Values exceeding this range
+/// are clamped to prevent bit-shift overflow.
 #[must_use]
 pub fn encode_extra_timestamp(secs: u64, nsec: u32) -> u32 {
     let epoch = ((secs >> 32) & 0x3) as u32; // upper 2 bits of seconds
-    let nsec_bits = nsec << 2; // nanoseconds shifted to bits 2-31
+    // Clamp nsec to valid range to prevent bit-shift overflow.
+    // Max valid: 999_999_999 << 2 = 3_999_999_996, fits in u32.
+    let clamped_nsec = nsec.min(999_999_999);
+    let nsec_bits = clamped_nsec << 2; // nanoseconds shifted to bits 2-31
     epoch | nsec_bits
 }
 
@@ -547,6 +553,8 @@ mod tests {
             first_data_block: 0,
             group_count: 4,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         }
     }
 
@@ -3644,6 +3652,8 @@ mod tests {
             first_data_block: 0,
             group_count: 4,
             inode_size: 256,
+            desc_size: 32,
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         };
         let groups = make_groups(&geo);
         let dev = MemBlockDevice::new(128);
