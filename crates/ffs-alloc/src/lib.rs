@@ -385,7 +385,7 @@ pub fn reserved_blocks_in_group(
     add_abs(gs.inode_bitmap_block.0);
 
     // Inode table spans multiple blocks.
-    if geo.inodes_per_group > 0 && geo.inode_size > 0 {
+    if geo.inodes_per_group > 0 && geo.inode_size > 0 && geo.block_size > 0 {
         let inode_table_blocks = (u64::from(geo.inodes_per_group) * u64::from(geo.inode_size))
             .div_ceil(u64::from(geo.block_size));
         for i in 0..inode_table_blocks {
@@ -1217,6 +1217,11 @@ pub fn free_inode(
     cx_checkpoint(cx)?;
 
     // Compute group and index.
+    if geo.inodes_per_group == 0 {
+        return Err(FfsError::Format(
+            "free_inode: inodes_per_group is zero".into(),
+        ));
+    }
     let ino_zero = ino.0.checked_sub(1).ok_or_else(|| FfsError::Corruption {
         block: 0,
         detail: "inode number 0 is invalid".into(),
@@ -1264,19 +1269,25 @@ pub fn free_inode_persist(
     pctx: &PersistCtx,
 ) -> Result<()> {
     free_inode(cx, dev, geo, groups, ino)?;
+    if geo.inodes_per_group == 0 {
+        return Err(FfsError::Format(
+            "free_inode_persist: inodes_per_group is zero".into(),
+        ));
+    }
     let ino_zero = ino.0.saturating_sub(1);
     let group_idx_u64 = ino_zero / u64::from(geo.inodes_per_group);
     let group_idx = u32::try_from(group_idx_u64).map_err(|_| FfsError::Corruption {
         block: 0,
         detail: format!("free_inode_persist: group index {group_idx_u64} exceeds u32"),
     })?;
-    persist_group_desc(
-        cx,
-        dev,
-        pctx,
-        GroupNumber(group_idx),
-        &groups[group_idx as usize],
-    )?;
+    let gidx = group_idx as usize;
+    if gidx >= groups.len() {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("free_inode_persist: group {group_idx} out of range"),
+        });
+    }
+    persist_group_desc(cx, dev, pctx, GroupNumber(group_idx), &groups[gidx])?;
     Ok(())
 }
 
