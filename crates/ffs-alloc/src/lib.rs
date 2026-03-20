@@ -132,7 +132,7 @@ fn bitmap_find_contiguous_linear(bitmap: &[u8], count: u32, n: u32, start: u32) 
         // we can skip full 0xFF bytes.
         if idx % 8 == 0 && (idx + 8) <= count && run_len == 0 {
             let byte_idx = (idx / 8) as usize;
-            if bitmap[byte_idx] == 0xFF {
+            if bitmap.get(byte_idx).is_none_or(|byte| *byte == 0xFF) {
                 idx += 8;
                 run_start = idx;
                 continue;
