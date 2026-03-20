@@ -136,3 +136,6 @@ fuzz/*.log
 
 # Third-party source checkouts (xfstests-dev, etc.)
 third_party/
+
+# One-off migration/fix scripts (agent-generated)
+fix_*.py
