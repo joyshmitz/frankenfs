@@ -909,7 +909,6 @@ fn maybe_shrink_root(
 
 /// Trim/remove extents that overlap `[start, end)`.
 /// Returns (remaining_extents, freed_ranges).
-#[expect(clippy::cast_possible_truncation)]
 pub fn trim_extents(
     extents: Vec<Ext4Extent>,
     start: u64,
@@ -942,7 +941,7 @@ pub fn trim_extents(
 
         // Left portion: extent starts before the delete range.
         if ext_start < start {
-            let keep_len = (start - ext_start) as u16;
+            let keep_len = clamp_to_u16(start - ext_start);
             remaining.push(Ext4Extent {
                 logical_block: ext.logical_block,
                 raw_len: encode_len(keep_len, ext.is_unwritten()),
@@ -952,38 +951,56 @@ pub fn trim_extents(
             // The freed portion might be further trimmed by the right side.
             if ext_end > end {
                 // Delete range is in the middle: free the middle, keep right.
-                let middle_len = (end - start) as u16;
+                let middle_len = clamp_to_u16(end - start);
                 freed.push(FreedRange {
                     physical_start: ext.physical_start + freed_start,
                     count: middle_len,
                 });
                 let right_offset = end - ext_start;
                 remaining.push(Ext4Extent {
-                    logical_block: end as u32,
-                    raw_len: encode_len((ext_end - end) as u16, ext.is_unwritten()),
+                    logical_block: clamp_to_u32(end),
+                    raw_len: encode_len(clamp_to_u16(ext_end - end), ext.is_unwritten()),
                     physical_start: ext.physical_start + right_offset,
                 });
             } else {
                 freed.push(FreedRange {
                     physical_start: ext.physical_start + freed_start,
-                    count: (ext_end - start) as u16,
+                    count: clamp_to_u16(ext_end - start),
                 });
             }
         } else {
             // ext_start >= start, ext_end > end: trim from the left.
-            let trim_count = (end - ext_start) as u16;
+            let trim_count = clamp_to_u16(end - ext_start);
             freed.push(FreedRange {
                 physical_start: ext.physical_start,
                 count: trim_count,
             });
             remaining.push(Ext4Extent {
-                logical_block: end as u32,
-                raw_len: encode_len((ext_end - end) as u16, ext.is_unwritten()),
+                logical_block: clamp_to_u32(end),
+                raw_len: encode_len(clamp_to_u16(ext_end - end), ext.is_unwritten()),
                 physical_start: ext.physical_start + u64::from(trim_count),
             });
         }
     }
     (remaining, freed)
+}
+
+/// Safely clamp a u64 to u16, saturating at `u16::MAX`.
+///
+/// ext4 extent lengths are at most `2^15` (32768) blocks, so values
+/// exceeding `u16::MAX` indicate a logic error upstream. Saturating
+/// prevents silent wrap-around corruption.
+fn clamp_to_u16(val: u64) -> u16 {
+    u16::try_from(val).unwrap_or(u16::MAX)
+}
+
+/// Safely clamp a u64 to u32, saturating at `u32::MAX`.
+///
+/// ext4 logical block numbers are 32-bit. Values exceeding `u32::MAX`
+/// indicate a range that spans the 32-bit boundary; saturating prevents
+/// silent wrap-around corruption of the logical block field.
+fn clamp_to_u32(val: u64) -> u32 {
+    u32::try_from(val).unwrap_or(u32::MAX)
 }
 
 // ── Parsing helpers ─────────────────────────────────────────────────────────
