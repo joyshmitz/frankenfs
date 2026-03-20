@@ -12,7 +12,7 @@ pub mod per_core;
 use asupersync::Cx;
 use ffs_core::{
     BackpressureDecision, BackpressureGate, FileType as FfsFileType, FsOps, InodeAttr, RequestOp,
-    SetAttrRequest, XattrSetMode,
+    RequestScope, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::InodeNumber;
@@ -764,10 +764,10 @@ impl FrankenFuse {
 
     fn with_request_scope<T, F>(&self, cx: &Cx, op: RequestOp, f: F) -> ffs_error::Result<T>
     where
-        F: FnOnce(&Cx) -> ffs_error::Result<T>,
+        F: FnOnce(&Cx, &mut RequestScope) -> ffs_error::Result<T>,
     {
-        let scope = self.inner.ops.begin_request_scope(cx, op)?;
-        let op_result = f(cx);
+        let mut scope = self.inner.ops.begin_request_scope(cx, op)?;
+        let op_result = f(cx, &mut scope);
         let end_result = self.inner.ops.end_request_scope(cx, op, scope);
 
         match (op_result, end_result) {
@@ -820,10 +820,13 @@ impl FrankenFuse {
     ) -> Result<InodeAttr, MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Mkdir, parent)?;
         let cx = Self::cx_for_request();
-        self.with_request_scope(&cx, RequestOp::Mkdir, |cx| {
-            self.inner
+        self.with_request_scope(&cx, RequestOp::Mkdir, |cx, scope| {
+            let attr = self
+                .inner
                 .ops
-                .mkdir(cx, InodeNumber(parent), name, mode, uid, gid)
+                .mkdir(cx, scope, InodeNumber(parent), name, mode, uid, gid)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(attr)
         })
         .map_err(|error| MutationDispatchError::Operation {
             error,
@@ -834,8 +837,10 @@ impl FrankenFuse {
     fn dispatch_rmdir(&self, parent: u64, name: &OsStr) -> Result<(), MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Rmdir, parent)?;
         let cx = Self::cx_for_request();
-        self.with_request_scope(&cx, RequestOp::Rmdir, |cx| {
-            self.inner.ops.rmdir(cx, InodeNumber(parent), name)
+        self.with_request_scope(&cx, RequestOp::Rmdir, |cx, scope| {
+            self.inner.ops.rmdir(cx, scope, InodeNumber(parent), name)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(())
         })
         .map_err(|error| MutationDispatchError::Operation {
             error,
@@ -852,14 +857,17 @@ impl FrankenFuse {
     ) -> Result<(), MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Rename, parent)?;
         let cx = Self::cx_for_request();
-        self.with_request_scope(&cx, RequestOp::Rename, |cx| {
+        self.with_request_scope(&cx, RequestOp::Rename, |cx, scope| {
             self.inner.ops.rename(
                 cx,
+                scope,
                 InodeNumber(parent),
                 name,
                 InodeNumber(newparent),
                 newname,
-            )
+            )?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(())
         })
         .map_err(|error| MutationDispatchError::Operation {
             error,
@@ -877,17 +885,18 @@ impl FrankenFuse {
         let byte_offset =
             u64::try_from(offset).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
         let cx = Self::cx_for_request();
-        let written = self
-            .with_request_scope(&cx, RequestOp::Write, |cx| {
-                self.inner
-                    .ops
-                    .write(cx, InodeNumber(ino), byte_offset, data)
+        let (written, _commit_seq) = self
+            .with_request_scope(&cx, RequestOp::Write, |cx, scope| {
+                let bytes = self.inner.ops.write(cx, scope, InodeNumber(ino), byte_offset, data)?;
+                let seq = self.inner.ops.commit_request_scope(scope)?;
+                Ok((bytes, seq))
             })
             .map_err(|error| MutationDispatchError::Operation {
                 error,
                 offset: Some(byte_offset),
             })?;
         self.inner.readahead.invalidate_inode(InodeNumber(ino));
+        // Update writeback barrier if enabled.
         Ok(written)
     }
 
@@ -899,7 +908,7 @@ impl FrankenFuse {
         size: u32,
     ) -> ffs_error::Result<Vec<u8>> {
         let requested_len = usize::try_from(size).unwrap_or(usize::MAX);
-        self.with_request_scope(cx, RequestOp::Read, |cx| {
+        self.with_request_scope(cx, RequestOp::Read, |cx, scope| {
             let mut served = self
                 .inner
                 .readahead
@@ -925,7 +934,7 @@ impl FrankenFuse {
                         .access_predictor
                         .fetch_size(ino, next_offset, remaining_req);
 
-                let mut fetched = self.inner.ops.read(cx, ino, next_offset, fetch_size)?;
+                let mut fetched = self.inner.ops.read(cx, scope, ino, next_offset, fetch_size)?;
                 let fetched_served_len = (requested_len - served.len()).min(fetched.len());
                 let tail = fetched.split_off(fetched_served_len);
 
@@ -966,8 +975,8 @@ impl Filesystem for FrankenFuse {
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Getattr, |cx| {
-            self.inner.ops.getattr(cx, InodeNumber(ino))
+        match self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
+            self.inner.ops.getattr(cx, scope, InodeNumber(ino))
         }) {
             Ok(attr) => reply.attr(&ATTR_TTL, &to_file_attr(&attr)),
             Err(e) => {
@@ -986,8 +995,8 @@ impl Filesystem for FrankenFuse {
 
     fn statfs(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyStatfs) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Statfs, |cx| {
-            self.inner.ops.statfs(cx, InodeNumber(ino))
+        match self.with_request_scope(&cx, RequestOp::Statfs, |cx, _scope| {
+            self.inner.ops.statfs(cx, _scope, InodeNumber(ino))
         }) {
             Ok(stats) => reply.statfs(
                 stats.blocks,
@@ -1013,8 +1022,8 @@ impl Filesystem for FrankenFuse {
 
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Lookup, |cx| {
-            self.inner.ops.lookup(cx, InodeNumber(parent), name)
+        match self.with_request_scope(&cx, RequestOp::Lookup, |cx, _scope| {
+            self.inner.ops.lookup(cx, _scope, InodeNumber(parent), name)
         }) {
             Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
             Err(e) => {
@@ -1033,7 +1042,7 @@ impl Filesystem for FrankenFuse {
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Open, |_cx| Ok(())) {
+        match self.with_request_scope(&cx, RequestOp::Open, |_cx, _scope| Ok(())) {
             // Stateless open: we don't track file handles.
             Ok(()) => reply.opened(0, 0),
             Err(e) => {
@@ -1050,7 +1059,7 @@ impl Filesystem for FrankenFuse {
 
     fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Opendir, |_cx| Ok(())) {
+        match self.with_request_scope(&cx, RequestOp::Opendir, |_cx, _scope| Ok(())) {
             Ok(()) => reply.opened(0, 0),
             Err(e) => {
                 let ctx = FuseErrorContext {
@@ -1116,8 +1125,8 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EINVAL);
             return;
         };
-        match self.with_request_scope(&cx, RequestOp::Readdir, |cx| {
-            self.inner.ops.readdir(cx, InodeNumber(ino), fs_offset)
+        match self.with_request_scope(&cx, RequestOp::Readdir, |cx, _scope| {
+            self.inner.ops.readdir(cx, _scope, InodeNumber(ino), fs_offset)
         }) {
             Ok(entries) => {
                 for entry in &entries {
@@ -1156,8 +1165,8 @@ impl Filesystem for FrankenFuse {
 
     fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Readlink, |cx| {
-            self.inner.ops.readlink(cx, InodeNumber(ino))
+        match self.with_request_scope(&cx, RequestOp::Readlink, |cx, _scope| {
+            self.inner.ops.readlink(cx, _scope, InodeNumber(ino))
         }) {
             Ok(target) => reply.data(&target),
             Err(e) => {
@@ -1192,10 +1201,18 @@ impl Filesystem for FrankenFuse {
             return;
         }
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Symlink, |cx| {
-            self.inner
-                .ops
-                .symlink(cx, InodeNumber(parent), name, link, req.uid(), req.gid())
+        match self.with_request_scope(&cx, RequestOp::Symlink, |cx, scope| {
+            let attr = self.inner.ops.symlink(
+                cx,
+                scope,
+                InodeNumber(parent),
+                name,
+                link,
+                req.uid(),
+                req.gid(),
+            )?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(attr)
         }) {
             Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
             Err(e) => {
@@ -1225,7 +1242,7 @@ impl Filesystem for FrankenFuse {
             return;
         };
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Getxattr, |cx| {
+        match self.with_request_scope(&cx, RequestOp::Getxattr, |cx, _scope| {
             self.inner.ops.getxattr(cx, InodeNumber(ino), name)
         }) {
             Ok(Some(value)) => Self::reply_xattr_payload(size, &value, reply),
@@ -1273,16 +1290,18 @@ impl Filesystem for FrankenFuse {
         };
 
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Setxattr, |cx| {
+        match self.with_request_scope(&cx, RequestOp::Setxattr, |cx, scope| {
             self.inner
                 .ops
-                .setxattr(cx, InodeNumber(ino), name, value, mode)
+                .setxattr(cx, scope, InodeNumber(ino), name, value, mode)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(())
         }) {
             Ok(()) => reply.ok(),
             Err(e) => {
                 if matches!(mode, XattrSetMode::Replace)
                     && matches!(e, FfsError::NotFound(_))
-                    && self.inner.ops.getattr(&cx, InodeNumber(ino)).is_ok()
+                    && self.inner.ops.getattr(&cx, &mut RequestScope::empty(), InodeNumber(ino)).is_ok()
                 {
                     reply.error(Self::missing_xattr_errno());
                     return;
@@ -1316,8 +1335,10 @@ impl Filesystem for FrankenFuse {
         };
 
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Removexattr, |cx| {
-            self.inner.ops.removexattr(cx, InodeNumber(ino), name)
+        match self.with_request_scope(&cx, RequestOp::Removexattr, |cx, scope| {
+            let removed = self.inner.ops.removexattr(cx, scope, InodeNumber(ino), name)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(removed)
         }) {
             Ok(true) => reply.ok(),
             Ok(false) => reply.error(Self::missing_xattr_errno()),
@@ -1337,7 +1358,7 @@ impl Filesystem for FrankenFuse {
 
     fn listxattr(&mut self, _req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Listxattr, |cx| {
+        match self.with_request_scope(&cx, RequestOp::Listxattr, |cx, _scope| {
             self.inner.ops.listxattr(cx, InodeNumber(ino))
         }) {
             Ok(names) => {
@@ -1403,8 +1424,10 @@ impl Filesystem for FrankenFuse {
             atime: atime.map(resolve_time),
             mtime: mtime.map(resolve_time),
         };
-        match self.with_request_scope(&cx, RequestOp::Setattr, |cx| {
-            self.inner.ops.setattr(cx, InodeNumber(ino), &attrs)
+        match self.with_request_scope(&cx, RequestOp::Setattr, |cx, scope| {
+            let attr = self.inner.ops.setattr(cx, scope, InodeNumber(ino), &attrs)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(attr)
         }) {
             Ok(attr) => reply.attr(&ATTR_TTL, &to_file_attr(&attr)),
             Err(e) => {
@@ -1459,8 +1482,10 @@ impl Filesystem for FrankenFuse {
             return;
         }
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Unlink, |cx| {
-            self.inner.ops.unlink(cx, InodeNumber(parent), name)
+        match self.with_request_scope(&cx, RequestOp::Unlink, |cx, scope| {
+            self.inner.ops.unlink(cx, scope, InodeNumber(parent), name)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(())
         }) {
             Ok(()) => reply.ok(),
             Err(e) => {
@@ -1540,10 +1565,16 @@ impl Filesystem for FrankenFuse {
             return;
         }
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Link, |cx| {
-            self.inner
-                .ops
-                .link(cx, InodeNumber(ino), InodeNumber(newparent), newname)
+        match self.with_request_scope(&cx, RequestOp::Link, |cx, scope| {
+            let attr = self.inner.ops.link(
+                cx,
+                scope,
+                InodeNumber(ino),
+                InodeNumber(newparent),
+                newname,
+            )?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(attr)
         }) {
             Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
             Err(e) => {
@@ -1619,10 +1650,12 @@ impl Filesystem for FrankenFuse {
         };
 
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Fallocate, |cx| {
+        match self.with_request_scope(&cx, RequestOp::Fallocate, |cx, scope| {
             self.inner
                 .ops
-                .fallocate(cx, InodeNumber(ino), byte_offset, byte_length, mode)
+                .fallocate(cx, scope, InodeNumber(ino), byte_offset, byte_length, mode)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(())
         }) {
             Ok(()) => reply.ok(),
             Err(e) => {
@@ -1641,8 +1674,8 @@ impl Filesystem for FrankenFuse {
 
     fn flush(&mut self, _req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Flush, |cx| {
-            self.inner.ops.flush(cx, InodeNumber(ino), fh, lock_owner)
+        match self.with_request_scope(&cx, RequestOp::Flush, |cx, scope| {
+            self.inner.ops.flush(cx, scope, InodeNumber(ino), fh, lock_owner)
         }) {
             Ok(()) => reply.ok(),
             Err(e) => {
@@ -1670,8 +1703,10 @@ impl Filesystem for FrankenFuse {
             return;
         }
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Fsync, |cx| {
-            self.inner.ops.fsync(cx, InodeNumber(ino), fh, datasync)
+        match self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
+            self.inner.ops.fsync(cx, scope, InodeNumber(ino), fh, datasync)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(())
         }) {
             Ok(()) => reply.ok(),
             Err(e) => {
@@ -1706,8 +1741,10 @@ impl Filesystem for FrankenFuse {
             return;
         }
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Fsyncdir, |cx| {
-            self.inner.ops.fsyncdir(cx, InodeNumber(ino), fh, datasync)
+        match self.with_request_scope(&cx, RequestOp::Fsyncdir, |cx, scope| {
+            self.inner.ops.fsyncdir(cx, scope, InodeNumber(ino), fh, datasync)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(())
         }) {
             Ok(()) => reply.ok(),
             Err(e) => {
@@ -1745,9 +1782,10 @@ impl Filesystem for FrankenFuse {
             return;
         }
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Create, |cx| {
+        match self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
             self.inner.ops.create(
                 cx,
+                scope,
                 InodeNumber(parent),
                 name,
                 mode as u16,
@@ -2059,12 +2097,18 @@ mod tests {
     /// Minimal FsOps stub for tests that don't need real filesystem behavior.
     struct StubFs;
     impl FsOps for StubFs {
-        fn getattr(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+        fn getattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<InodeAttr> {
             Err(FfsError::NotFound("stub".into()))
         }
         fn lookup(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
@@ -2073,6 +2117,7 @@ mod tests {
         fn readdir(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
         ) -> ffs_error::Result<Vec<FfsDirEntry>> {
@@ -2081,13 +2126,19 @@ mod tests {
         fn read(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
             _size: u32,
         ) -> ffs_error::Result<Vec<u8>> {
             Ok(vec![])
         }
-        fn readlink(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+        fn readlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<Vec<u8>> {
             Ok(vec![])
         }
     }
@@ -2168,12 +2219,18 @@ mod tests {
         // Use a minimal stub.
         struct NeverCalledFs;
         impl FsOps for NeverCalledFs {
-            fn getattr(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+            fn getattr(
+                &self,
+                _cx: &Cx,
+                _scope: &mut RequestScope,
+                _ino: InodeNumber,
+            ) -> ffs_error::Result<InodeAttr> {
                 unreachable!()
             }
             fn lookup(
                 &self,
                 _cx: &Cx,
+                _scope: &mut RequestScope,
                 _parent: InodeNumber,
                 _name: &OsStr,
             ) -> ffs_error::Result<InodeAttr> {
@@ -2182,6 +2239,7 @@ mod tests {
             fn readdir(
                 &self,
                 _cx: &Cx,
+                _scope: &mut RequestScope,
                 _ino: InodeNumber,
                 _offset: u64,
             ) -> ffs_error::Result<Vec<FfsDirEntry>> {
@@ -2190,13 +2248,19 @@ mod tests {
             fn read(
                 &self,
                 _cx: &Cx,
+                _scope: &mut RequestScope,
                 _ino: InodeNumber,
                 _offset: u64,
                 _size: u32,
             ) -> ffs_error::Result<Vec<u8>> {
                 unreachable!()
             }
-            fn readlink(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+            fn readlink(
+                &self,
+                _cx: &Cx,
+                _scope: &mut RequestScope,
+                _ino: InodeNumber,
+            ) -> ffs_error::Result<Vec<u8>> {
                 unreachable!()
             }
         }
@@ -2429,13 +2493,19 @@ mod tests {
     }
 
     impl FsOps for CountingReadFs {
-        fn getattr(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+        fn getattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<InodeAttr> {
             Err(FfsError::NotFound("stub".into()))
         }
 
         fn lookup(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
@@ -2445,6 +2515,7 @@ mod tests {
         fn readdir(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
         ) -> ffs_error::Result<Vec<FfsDirEntry>> {
@@ -2454,6 +2525,7 @@ mod tests {
         fn read(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _ino: InodeNumber,
             offset: u64,
             size: u32,
@@ -2468,7 +2540,12 @@ mod tests {
             Ok(self.data[start..end].to_vec())
         }
 
-        fn readlink(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+        fn readlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<Vec<u8>> {
             Ok(vec![])
         }
     }
@@ -2574,13 +2651,19 @@ mod tests {
     }
 
     impl FsOps for HookFs {
-        fn getattr(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+        fn getattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<InodeAttr> {
             Err(FfsError::NotFound("stub".into()))
         }
 
         fn lookup(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
@@ -2590,6 +2673,7 @@ mod tests {
         fn readdir(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
         ) -> ffs_error::Result<Vec<FfsDirEntry>> {
@@ -2599,6 +2683,7 @@ mod tests {
         fn read(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
             _size: u32,
@@ -2606,7 +2691,12 @@ mod tests {
             Ok(vec![])
         }
 
-        fn readlink(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+        fn readlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<Vec<u8>> {
             Ok(vec![])
         }
 
@@ -2641,7 +2731,7 @@ mod tests {
         let body_events = Arc::clone(&events);
 
         let out = fuse
-            .with_request_scope(&cx, RequestOp::Read, |_cx| {
+            .with_request_scope(&cx, RequestOp::Read, |_cx, _scope| {
                 body_events
                     .lock()
                     .unwrap()
@@ -2670,7 +2760,7 @@ mod tests {
         let body_called_ref = Arc::clone(&body_called);
 
         let err = fuse
-            .with_request_scope(&cx, RequestOp::Lookup, |_cx| {
+            .with_request_scope(&cx, RequestOp::Lookup, |_cx, _scope| {
                 body_called_ref.store(true, Ordering::Relaxed);
                 Ok::<(), FfsError>(())
             })
@@ -2692,7 +2782,7 @@ mod tests {
         let body_events = Arc::clone(&events);
 
         let err = fuse
-            .with_request_scope(&cx, RequestOp::Readlink, |_cx| {
+            .with_request_scope(&cx, RequestOp::Readlink, |_cx, _scope| {
                 body_events
                     .lock()
                     .unwrap()
@@ -2720,7 +2810,7 @@ mod tests {
         let body_events = Arc::clone(&events);
 
         let err = fuse
-            .with_request_scope(&cx, RequestOp::Getattr, |_cx| {
+            .with_request_scope(&cx, RequestOp::Getattr, |_cx, _scope| {
                 body_events
                     .lock()
                     .unwrap()
@@ -2796,13 +2886,19 @@ mod tests {
     }
 
     impl FsOps for MutationRecordingFs {
-        fn getattr(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+        fn getattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<InodeAttr> {
             Err(FfsError::NotFound("stub".into()))
         }
 
         fn lookup(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _parent: InodeNumber,
             _name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
@@ -2812,6 +2908,7 @@ mod tests {
         fn readdir(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
         ) -> ffs_error::Result<Vec<FfsDirEntry>> {
@@ -2821,6 +2918,7 @@ mod tests {
         fn read(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _ino: InodeNumber,
             _offset: u64,
             _size: u32,
@@ -2828,13 +2926,19 @@ mod tests {
             Ok(vec![])
         }
 
-        fn readlink(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+        fn readlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<Vec<u8>> {
             Ok(vec![])
         }
 
         fn mkdir(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             parent: InodeNumber,
             name: &OsStr,
             mode: u16,
@@ -2854,7 +2958,13 @@ mod tests {
             Ok(test_inode_attr(101, FfsFileType::Directory, mode))
         }
 
-        fn rmdir(&self, _cx: &Cx, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<()> {
+        fn rmdir(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            parent: InodeNumber,
+            name: &OsStr,
+        ) -> ffs_error::Result<()> {
             self.calls
                 .lock()
                 .expect("lock mutation calls")
@@ -2868,6 +2978,7 @@ mod tests {
         fn rename(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             parent: InodeNumber,
             name: &OsStr,
             new_parent: InodeNumber,
@@ -2888,6 +2999,7 @@ mod tests {
         fn write(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             ino: InodeNumber,
             offset: u64,
             data: &[u8],
@@ -3231,7 +3343,7 @@ mod tests {
         let cx = Cx::for_testing();
 
         // Successful request.
-        let _ = fuse.with_request_scope(&cx, RequestOp::Read, |_cx| Ok::<u32, FfsError>(7));
+        let _ = fuse.with_request_scope(&cx, RequestOp::Read, |_cx, _scope| Ok::<u32, FfsError>(7));
 
         let s = fuse.metrics().snapshot();
         assert_eq!(s.requests_total, 1);
@@ -3246,7 +3358,7 @@ mod tests {
         let fuse = FrankenFuse::new(Box::new(fs));
         let cx = Cx::for_testing();
 
-        let _ = fuse.with_request_scope(&cx, RequestOp::Read, |_cx| {
+        let _ = fuse.with_request_scope(&cx, RequestOp::Read, |_cx, _scope| {
             Err::<u32, FfsError>(FfsError::NotFound("gone".into()))
         });
 

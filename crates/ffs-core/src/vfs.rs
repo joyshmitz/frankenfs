@@ -6,7 +6,7 @@
 
 use asupersync::Cx;
 use ffs_error::FfsError;
-use ffs_types::{InodeNumber, Snapshot, TxnId};
+use ffs_types::{CommitSeq, InodeNumber, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -194,21 +194,59 @@ impl RequestOp {
 /// MVCC scope acquired for a single VFS request.
 ///
 /// Current read-only implementations can return an empty scope. Future write
-/// implementations may attach a transaction id and snapshot captured at request
+/// implementations may attach a transaction captured at request
 /// start so that begin/end hooks can manage commit/abort semantics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RequestScope {
     pub snapshot: Option<Snapshot>,
-    pub tx: Option<TxnId>,
+    pub tx: Option<ffs_mvcc::Transaction>,
 }
 
 impl RequestScope {
     /// Create a scope with no snapshot or transaction attached.
     #[must_use]
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             snapshot: None,
             tx: None,
+        }
+    }
+
+    /// Commit the transaction if one is present.
+    ///
+    /// Returns the commit sequence on success, or an error if the commit failed.
+    /// Returns `Ok(CommitSeq(0))` if no transaction was attached.
+    pub fn commit_if_write(
+        &mut self,
+        mvcc_store: &parking_lot::RwLock<ffs_mvcc::MvccStore>,
+    ) -> ffs_error::Result<CommitSeq> {
+        if let Some(tx) = self.tx.take() {
+            let tx_id = tx.id().0;
+            mvcc_store
+                .write()
+                .commit(tx)
+                .map_err(|error| match error {
+                    ffs_mvcc::CommitError::Conflict { block, .. }
+                    | ffs_mvcc::CommitError::ChainBackpressure { block, .. } => {
+                        ffs_error::FfsError::MvccConflict {
+                            tx: tx_id,
+                            block: block.0,
+                        }
+                    }
+                    ffs_mvcc::CommitError::SsiConflict { pivot_block, .. } => {
+                        ffs_error::FfsError::MvccConflict {
+                            tx: tx_id,
+                            block: pivot_block.0,
+                        }
+                    }
+                    ffs_mvcc::CommitError::DurabilityFailure { detail } => {
+                        ffs_error::FfsError::Io(std::io::Error::other(format!(
+                            "MVCC durability failure during request-scope commit: {detail}"
+                        )))
+                    }
+                })
+        } else {
+            Ok(CommitSeq(0))
         }
     }
 }
@@ -287,14 +325,14 @@ pub trait FsOps: Send + Sync {
     ///
     /// Returns the attributes for the given inode. Returns
     /// `FfsError::NotFound` if the inode does not exist.
-    fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr>;
+    fn getattr(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<InodeAttr>;
 
     /// Look up a directory entry by name.
     ///
     /// Returns the attributes of the child inode named `name` within the
     /// directory `parent`. Returns `FfsError::NotFound` if the name does
     /// not exist, or `FfsError::NotDirectory` if `parent` is not a directory.
-    fn lookup(&self, cx: &Cx, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<InodeAttr>;
+    fn lookup(&self, cx: &Cx, scope: &mut RequestScope, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<InodeAttr>;
 
     /// List directory entries starting from `offset`.
     ///
@@ -304,24 +342,24 @@ pub trait FsOps: Send + Sync {
     /// result indicates the end of the directory.
     ///
     /// Returns `FfsError::NotDirectory` if `ino` is not a directory.
-    fn readdir(&self, cx: &Cx, ino: InodeNumber, offset: u64) -> ffs_error::Result<Vec<DirEntry>>;
+    fn readdir(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber, offset: u64) -> ffs_error::Result<Vec<DirEntry>>;
 
     /// Read file data.
     ///
     /// Returns up to `size` bytes starting at byte `offset` within the
     /// file identified by `ino`. Returns fewer bytes at EOF. Returns
     /// `FfsError::IsDirectory` if `ino` is a directory.
-    fn read(&self, cx: &Cx, ino: InodeNumber, offset: u64, size: u32)
+    fn read(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber, offset: u64, size: u32)
     -> ffs_error::Result<Vec<u8>>;
 
     /// Read the target of a symbolic link.
     ///
     /// Returns the raw bytes of the symlink target. Returns
     /// `FfsError::Format` if `ino` is not a symlink.
-    fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>>;
+    fn readlink(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<Vec<u8>>;
 
     /// Return filesystem-level capacity and free-space statistics.
-    fn statfs(&self, _cx: &Cx, _ino: InodeNumber) -> ffs_error::Result<FsStat> {
+    fn statfs(&self, _cx: &Cx, _scope: &mut RequestScope, _ino: InodeNumber) -> ffs_error::Result<FsStat> {
         Err(FfsError::UnsupportedFeature(
             "statfs is not implemented by this backend".to_owned(),
         ))
@@ -358,6 +396,7 @@ pub trait FsOps: Send + Sync {
     fn setxattr(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _ino: InodeNumber,
         _name: &str,
         _value: &[u8],
@@ -369,7 +408,13 @@ pub trait FsOps: Send + Sync {
     /// Remove one extended attribute.
     ///
     /// Returns `true` if the attribute existed and was removed.
-    fn removexattr(&self, _cx: &Cx, _ino: InodeNumber, _name: &str) -> ffs_error::Result<bool> {
+    fn removexattr(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _name: &str,
+    ) -> ffs_error::Result<bool> {
         Err(FfsError::ReadOnly)
     }
 
@@ -379,6 +424,7 @@ pub trait FsOps: Send + Sync {
     fn create(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _parent: InodeNumber,
         _name: &OsStr,
         _mode: u16,
@@ -392,6 +438,7 @@ pub trait FsOps: Send + Sync {
     fn mkdir(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _parent: InodeNumber,
         _name: &OsStr,
         _mode: u16,
@@ -402,12 +449,24 @@ pub trait FsOps: Send + Sync {
     }
 
     /// Remove a non-directory entry from `parent`.
-    fn unlink(&self, _cx: &Cx, _parent: InodeNumber, _name: &OsStr) -> ffs_error::Result<()> {
+    fn unlink(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _parent: InodeNumber,
+        _name: &OsStr,
+    ) -> ffs_error::Result<()> {
         Err(FfsError::ReadOnly)
     }
 
     /// Remove an empty directory entry from `parent`.
-    fn rmdir(&self, _cx: &Cx, _parent: InodeNumber, _name: &OsStr) -> ffs_error::Result<()> {
+    fn rmdir(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _parent: InodeNumber,
+        _name: &OsStr,
+    ) -> ffs_error::Result<()> {
         Err(FfsError::ReadOnly)
     }
 
@@ -415,6 +474,7 @@ pub trait FsOps: Send + Sync {
     fn rename(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _parent: InodeNumber,
         _name: &OsStr,
         _new_parent: InodeNumber,
@@ -427,6 +487,7 @@ pub trait FsOps: Send + Sync {
     fn write(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _ino: InodeNumber,
         _offset: u64,
         _data: &[u8],
@@ -438,6 +499,7 @@ pub trait FsOps: Send + Sync {
     fn link(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _ino: InodeNumber,
         _new_parent: InodeNumber,
         _new_name: &OsStr,
@@ -449,6 +511,7 @@ pub trait FsOps: Send + Sync {
     fn symlink(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _parent: InodeNumber,
         _name: &OsStr,
         _target: &Path,
@@ -462,6 +525,7 @@ pub trait FsOps: Send + Sync {
     fn fallocate(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _ino: InodeNumber,
         _offset: u64,
         _length: u64,
@@ -474,6 +538,7 @@ pub trait FsOps: Send + Sync {
     fn setattr(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _ino: InodeNumber,
         _attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
@@ -487,6 +552,7 @@ pub trait FsOps: Send + Sync {
     fn flush(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _ino: InodeNumber,
         _fh: u64,
         _lock_owner: u64,
@@ -500,6 +566,7 @@ pub trait FsOps: Send + Sync {
     fn fsync(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         _ino: InodeNumber,
         _fh: u64,
         _datasync: bool,
@@ -511,11 +578,12 @@ pub trait FsOps: Send + Sync {
     fn fsyncdir(
         &self,
         cx: &Cx,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         fh: u64,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        self.fsync(cx, ino, fh, datasync)
+        self.fsync(cx, scope, ino, fh, datasync)
     }
 
     // ── Request scope hooks ───────────────────────────────────────────
@@ -537,5 +605,10 @@ pub trait FsOps: Send + Sync {
         _scope: RequestScope,
     ) -> ffs_error::Result<()> {
         Ok(())
+    }
+
+    /// Commit any write transaction attached to the request scope.
+    fn commit_request_scope(&self, _scope: &mut RequestScope) -> ffs_error::Result<CommitSeq> {
+        Ok(CommitSeq(0))
     }
 }
