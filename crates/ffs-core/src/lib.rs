@@ -3881,6 +3881,14 @@ impl OpenFs {
     pub fn read_group_desc(
         &self,
         cx: &Cx,
+        group: GroupNumber,
+    ) -> Result<Ext4GroupDesc, FfsError> {
+        self.read_group_desc_with_scope(cx, &RequestScope::empty(), group)
+    }
+
+    pub fn read_group_desc_with_scope(
+        &self,
+        cx: &Cx,
         scope: &RequestScope,
         group: GroupNumber,
     ) -> Result<Ext4GroupDesc, FfsError> {
@@ -3927,6 +3935,14 @@ impl OpenFs {
     pub fn read_inode(
         &self,
         cx: &Cx,
+        ino: InodeNumber,
+    ) -> Result<Ext4Inode, FfsError> {
+        self.read_inode_with_scope(cx, &RequestScope::empty(), ino)
+    }
+
+    pub fn read_inode_with_scope(
+        &self,
+        cx: &Cx,
         scope: &RequestScope,
         ino: InodeNumber,
     ) -> Result<Ext4Inode, FfsError> {
@@ -3935,7 +3951,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
 
         let loc = sb.locate_inode(ino).map_err(|e| parse_to_ffs_error(&e))?;
-        let gd = self.read_group_desc(cx, scope, loc.group)?;
+        let gd = self.read_group_desc_with_scope(cx, scope, loc.group)?;
 
         let bs = u64::from(sb.block_size);
         let inode_table_start_byte = gd.inode_table.checked_mul(bs).ok_or_else(|| {
@@ -3968,13 +3984,21 @@ impl OpenFs {
     pub fn read_inode_attr(
         &self,
         cx: &Cx,
+        ino: InodeNumber,
+    ) -> Result<InodeAttr, FfsError> {
+        self.read_inode_attr_with_scope(cx, &RequestScope::empty(), ino)
+    }
+
+    pub fn read_inode_attr_with_scope(
+        &self,
+        cx: &Cx,
         scope: &RequestScope,
         ino: InodeNumber,
     ) -> Result<InodeAttr, FfsError> {
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let inode = self.read_inode(cx, scope, ino)?;
+        let inode = self.read_inode_with_scope(cx, scope, ino)?;
         Ok(inode_to_attr(sb, ino, &inode))
     }
 
@@ -4465,6 +4489,14 @@ impl OpenFs {
     pub fn read_dir(
         &self,
         cx: &Cx,
+        inode: &Ext4Inode,
+    ) -> Result<Vec<Ext4DirEntry>, FfsError> {
+        self.read_dir_with_scope(cx, &RequestScope::empty(), inode)
+    }
+
+    pub fn read_dir_with_scope(
+        &self,
+        cx: &Cx,
         scope: &RequestScope,
         inode: &Ext4Inode,
     ) -> Result<Vec<Ext4DirEntry>, FfsError> {
@@ -4492,6 +4524,15 @@ impl OpenFs {
     ///
     /// Returns the matching `Ext4DirEntry` if found, `None` otherwise.
     pub fn lookup_name(
+        &self,
+        cx: &Cx,
+        dir_inode: &Ext4Inode,
+        name: &[u8],
+    ) -> Result<Option<Ext4DirEntry>, FfsError> {
+        self.lookup_name_with_scope(cx, &RequestScope::empty(), dir_inode, name)
+    }
+
+    pub fn lookup_name_with_scope(
         &self,
         cx: &Cx,
         scope: &RequestScope,
@@ -4531,7 +4572,7 @@ impl OpenFs {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, FfsError> {
-        let inode = self.read_inode(cx, scope, ino)?;
+        let inode = self.read_inode_with_scope(cx, scope, ino)?;
         if inode.is_dir() {
             return Err(FfsError::IsDirectory);
         }
@@ -4565,7 +4606,7 @@ impl OpenFs {
         }
 
         let mut current_ino = InodeNumber::ROOT;
-        let mut current_inode = self.read_inode(cx, scope, current_ino)?;
+        let mut current_inode = self.read_inode_with_scope(cx, scope, current_ino)?;
 
         for component in path.split('/').filter(|c| !c.is_empty()) {
             if !current_inode.is_dir() {
@@ -4573,11 +4614,11 @@ impl OpenFs {
             }
 
             let entry = self
-                .lookup_name(cx, scope, &current_inode, component.as_bytes())?
+                .lookup_name_with_scope(cx, scope, &current_inode, component.as_bytes())?
                 .ok_or_else(|| FfsError::NotFound(component.to_owned()))?;
 
             current_ino = InodeNumber(u64::from(entry.inode));
-            current_inode = self.read_inode(cx, scope, current_ino)?;
+            current_inode = self.read_inode_with_scope(cx, scope, current_ino)?;
         }
 
         Ok((current_ino, current_inode))
@@ -8819,6 +8860,46 @@ impl OpenFs {
     ) -> ffs_error::Result<()> {
         self.with_empty_scope(|scope| <Self as FsOps>::fsyncdir(self, cx, scope, ino, fh, datasync))
     }
+
+    pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+        self.with_empty_scope(|scope| <Self as FsOps>::getattr(self, cx, scope, ino))
+    }
+
+    pub fn lookup(
+        &self,
+        cx: &Cx,
+        parent: InodeNumber,
+        name: &OsStr,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.with_empty_scope(|scope| <Self as FsOps>::lookup(self, cx, scope, parent, name))
+    }
+
+    pub fn readdir(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        offset: u64,
+    ) -> ffs_error::Result<Vec<DirEntry>> {
+        self.with_empty_scope(|scope| <Self as FsOps>::readdir(self, cx, scope, ino, offset))
+    }
+
+    pub fn read(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        offset: u64,
+        size: u32,
+    ) -> ffs_error::Result<Vec<u8>> {
+        self.with_empty_scope(|scope| <Self as FsOps>::read(self, cx, scope, ino, offset, size))
+    }
+
+    pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+        self.with_empty_scope(|scope| <Self as FsOps>::readlink(self, cx, scope, ino))
+    }
+
+    pub fn statfs(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<FsStat> {
+        self.with_empty_scope(|scope| <Self as FsOps>::statfs(self, cx, scope, ino))
+    }
 }
 
 // ── FsOps for OpenFs (device-based ext4 adapter) ──────────────────────────
@@ -8850,7 +8931,7 @@ impl FsOps for OpenFs {
 
                 let name_bytes = name.as_encoded_bytes();
                 let entry = self
-                    .lookup_name(cx, scope, &parent_inode, name_bytes)?
+                    .lookup_name_with_scope(cx, scope, &parent_inode, name_bytes)?
                     .ok_or_else(|| FfsError::NotFound(name.to_string_lossy().into_owned()))?;
 
                 let child_ino = InodeNumber(u64::from(entry.inode));
@@ -8875,7 +8956,7 @@ impl FsOps for OpenFs {
                     return Err(FfsError::NotDirectory);
                 }
 
-                let raw_entries = self.read_dir(cx, scope, &inode)?;
+                let raw_entries = self.read_dir_with_scope(cx, scope, &inode)?;
                 let entries: Vec<DirEntry> = raw_entries
                     .into_iter()
                     .enumerate()
@@ -8934,7 +9015,7 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                let inode = self.read_inode(cx, scope, Self::ext4_canonical_inode(ino))?;
+                let inode = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
                 if inode.size <= 60 {
                     // Fast symlink: data is stored directly in the inode's block field.
                     let len = inode.size as usize;
@@ -10509,6 +10590,7 @@ mod tests {
         fn lookup(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             _parent: InodeNumber,
             name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
@@ -10538,6 +10620,7 @@ mod tests {
         fn readdir(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             ino: InodeNumber,
             offset: u64,
         ) -> ffs_error::Result<Vec<DirEntry>> {
@@ -10570,6 +10653,7 @@ mod tests {
         fn read(
             &self,
             _cx: &Cx,
+            _scope: &mut RequestScope,
             ino: InodeNumber,
             offset: u64,
             size: u32,
@@ -14557,7 +14641,7 @@ mod tests {
         assert_eq!(attr.kind, FileType::RegularFile);
 
         let payload = b"FrankenFS root-alias write test!";
-        let written = fs.write(&cx, attr.ino, 0, payload).expect("write");
+        let written = fs.write(&cx, &mut RequestScope::empty(), attr.ino, 0, payload).expect("write");
         assert_eq!(written as usize, payload.len());
 
         let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read");
@@ -14954,7 +15038,7 @@ mod tests {
 
         // Write 100 bytes
         let data = vec![0x42_u8; 100];
-        fs.write(&cx, ino, 0, &data).expect("write");
+        fs.write(&cx, &mut RequestScope::empty(), ino, 0, &data).expect("write");
 
         // Verify size
         let attr = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
@@ -15386,7 +15470,7 @@ mod tests {
         let root = InodeNumber(2);
 
         let dir_attr = fs
-            .mkdir(&cx, root, OsStr::new("cant_hardlink"), 0o755, 0, 0)
+            .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("cant_hardlink"), 0o755, 0, 0)
             .expect("mkdir");
         let err = fs
             .link(&cx, dir_attr.ino, root, OsStr::new("hardlink_to_dir"))
@@ -15447,7 +15531,7 @@ mod tests {
 
         // Overwrite bytes 10..20 with 'B'
         let patch = vec![b'B'; 10];
-        fs.write(&cx, attr.ino, 10, &patch).expect("patch write");
+        fs.write(&cx, &mut RequestScope::empty(), attr.ino, 10, &patch).expect("patch write");
 
         // Read back and verify
         let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 200).expect("read");
@@ -15672,7 +15756,7 @@ mod tests {
             .create(&cx, root, OsStr::new("zero_me.txt"), 0o644, 0, 0)
             .expect("create");
         let ino = attr.ino;
-        fs.write(&cx, ino, 0, &[0xAA; 200]).expect("write");
+        fs.write(&cx, &mut RequestScope::empty(), ino, 0, &[0xAA; 200]).expect("write");
 
         let new_attr = fs
             .setattr(
@@ -16088,7 +16172,7 @@ mod tests {
 
         // Write three sequential chunks
         fs.write(&cx, ino, 0, b"aaa").expect("write1");
-        fs.write(&cx, ino, 3, b"bbb").expect("write2");
+        fs.write(&cx, &mut RequestScope::empty(), ino, 3, b"bbb").expect("write2");
         fs.write(&cx, ino, 6, b"ccc").expect("write3");
 
         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
@@ -16170,7 +16254,7 @@ mod tests {
         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga2").size, 0);
 
         // Write new data
-        fs.write(&cx, ino, 0, b"new").expect("rewrite");
+        fs.write(&cx, &mut RequestScope::empty(), ino, 0, b"new").expect("rewrite");
         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
         assert_eq!(&data[..3], b"new");
         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga3").size, 3);
@@ -16228,7 +16312,7 @@ mod tests {
         fs.mkdir(&cx, root, OsStr::new("empty_rm"), 0o755, 0, 0)
             .expect("mkdir");
 
-        fs.rmdir(&cx, root, OsStr::new("empty_rm"))
+        fs.rmdir(&cx, &mut RequestScope::empty(), root, OsStr::new("empty_rm"))
             .expect("rmdir empty");
 
         let gone = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("empty_rm"));
@@ -16338,7 +16422,7 @@ mod tests {
         let root = InodeNumber(2);
 
         let attr = fs
-            .create(&cx, root, OsStr::new("punch.txt"), 0o644, 0, 0)
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("punch.txt"), 0o644, 0, 0)
             .expect("create");
         let ino = attr.ino;
 
@@ -16448,13 +16532,13 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
         let attr = fs
-            .create(&cx, root, OsStr::new("falloc_zero.bin"), 0o644, 0, 0)
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_zero.bin"), 0o644, 0, 0)
             .expect("create");
         fs.write(&cx, attr.ino, 0, b"AAAA").expect("write");
         let before = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga before");
 
         // Zero-length fallocate should be a no-op
-        fs.fallocate(&cx, attr.ino, 0, 0, 0)
+        fs.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 0, 0)
             .expect("fallocate 0 len");
 
         let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga after");
@@ -16557,7 +16641,7 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
         let attr = fs
-            .create(&cx, root, OsStr::new("falloc_extend.bin"), 0o644, 0, 0)
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_extend.bin"), 0o644, 0, 0)
             .expect("create");
         // File starts empty (size 0)
         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga0").size, 0);
@@ -16582,7 +16666,7 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
         let attr = fs
-            .create(&cx, root, OsStr::new("falloc_ks.bin"), 0o644, 0, 0)
+            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_ks.bin"), 0o644, 0, 0)
             .expect("create");
         fs.write(&cx, attr.ino, 0, b"small").expect("write");
         let before = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga before");
