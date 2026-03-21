@@ -70,7 +70,12 @@ pub fn encode_group(
     // Read source blocks into symbol buffers.
     let mut source_symbols: Vec<Vec<u8>> = Vec::with_capacity(source_block_count as usize);
     for i in 0..u64::from(source_block_count) {
-        let block_num = BlockNumber(first_block.0 + i);
+        let block_num = BlockNumber(first_block.0.checked_add(i).ok_or_else(|| {
+            FfsError::RepairFailed(format!(
+                "encode_group: block address overflow at first_block={} + offset={i}",
+                first_block.0
+            ))
+        })?);
         let buf = device.read_block(cx, block_num)?;
         source_symbols.push(buf.as_slice().to_vec());
     }
@@ -168,7 +173,12 @@ pub fn decode_group(
         if corrupt_set.contains(&i) {
             continue;
         }
-        let block_num = BlockNumber(first_block.0 + u64::from(i));
+        let block_num = BlockNumber(first_block.0.checked_add(u64::from(i)).ok_or_else(|| {
+            FfsError::RepairFailed(format!(
+                "decode_group: block address overflow at first_block={} + offset={i}",
+                first_block.0
+            ))
+        })?);
         let buf = device.read_block(cx, block_num)?;
         received.push(ReceivedSymbol::source(i, buf.as_slice().to_vec()));
     }
@@ -191,7 +201,12 @@ pub fn decode_group(
     // Extract recovered blocks for the corrupt indices.
     let mut recovered = Vec::with_capacity(corrupt_indices.len());
     for &idx in corrupt_indices {
-        let block_num = BlockNumber(first_block.0 + u64::from(idx));
+        let block_num = BlockNumber(
+            first_block
+                .0
+                .checked_add(u64::from(idx))
+                .unwrap_or(first_block.0),
+        );
         let data = result.source.get(idx as usize).cloned().unwrap_or_else(|| {
             // Should not happen if decode succeeded, but be defensive.
             vec![0u8; block_size]

@@ -82,6 +82,9 @@ pub fn resolve_data_with<'a, T, F>(
 where
     F: Fn(&'a T) -> &'a VersionData,
 {
+    if index >= chain.len() {
+        return None;
+    }
     let mut i = index;
     loop {
         match get_data(&chain[i]) {
