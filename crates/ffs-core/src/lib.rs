@@ -619,6 +619,49 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
     }
 }
 
+/// Adapter that stages all writes into an active MVCC transaction.
+///
+/// This allows using high-level metadata helpers (like `ffs_inode::write_inode`)
+/// while preserving transactional atomicity and snapshot isolation.
+struct TransactionBlockAdapter<'a, 'tx> {
+    base: &'a ByteDeviceBlockAdapter<'a>,
+    tx: Mutex<&'tx mut Transaction>,
+}
+
+impl BlockDevice for TransactionBlockAdapter<'_, '_> {
+    fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf, FfsError> {
+        // First check staged writes in the transaction.
+        let tx = self.tx.lock();
+        if let Some(staged) = tx.staged_write(block) {
+            return Ok(BlockBuf::new(staged.to_vec()));
+        }
+        drop(tx);
+
+        // Fall back to base device.
+        self.base.read_block(cx, block)
+    }
+
+    fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
+        let mut tx = self.tx.lock();
+        tx.stage_write(block, data.to_vec());
+        Ok(())
+    }
+
+    fn block_size(&self) -> u32 {
+        self.base.block_size()
+    }
+
+    fn block_count(&self) -> u64 {
+        self.base.block_count()
+    }
+
+    fn sync(&self, _cx: &Cx) -> Result<(), FfsError> {
+        // Syncing a transactional device is a no-op at the device level;
+        // durability is handled when the transaction commits to the WAL.
+        Ok(())
+    }
+}
+
 // ── Writeback-cache epoch barrier ──────────────────────────────────────────
 //
 // Implements the commit barrier mechanism from design-writeback-cache-mvcc.md.
@@ -5363,24 +5406,8 @@ impl OpenFs {
             ffs_inode::write_inode(cx, &block_dev, geo, groups, ino, &new_inode, csum_seed)?;
         }
 
-        // Increment parent's link count (for ..)
-        let mut parent_inode = parent_inode;
-        parent_inode.links_count = parent_inode.links_count.saturating_add(1);
-        ffs_inode::touch_mtime_ctime(&mut parent_inode, tstamp_secs, tstamp_nanos);
-        {
-            let Ext4AllocState { geo, groups, .. } = &mut *alloc;
-            ffs_inode::write_inode(
-                cx,
-                &block_dev,
-                geo,
-                groups,
-                parent,
-                &parent_inode,
-                csum_seed,
-            )?;
-        }
-
         // Add directory entry to parent.
+        // This will also update parent timestamps and size if needed.
         self.ext4_add_dir_entry(
             cx,
             &block_dev,
@@ -5433,26 +5460,35 @@ impl OpenFs {
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
         let reserved_tail = self.ext4_dir_reserved_tail();
         for ext in &extents {
+            if ext.is_unwritten() {
+                continue;
+            }
             for block in Self::extent_phys_blocks(ext) {
                 let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail)
-                    .is_ok()
-                {
-                    block_dev.write_block(cx, block, &data)?;
+                match ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail) {
+                    Ok(_) => {
+                        block_dev.write_block(cx, block, &data)?;
 
-                    // Update parent mtime/ctime.
-                    let mut parent_upd = self.read_inode(cx, parent)?;
-                    ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
-                    ffs_inode::write_inode(
-                        cx,
-                        block_dev,
-                        &alloc.geo,
-                        &alloc.groups,
-                        parent,
-                        &parent_upd,
-                        csum_seed,
-                    )?;
-                    return Ok(());
+                        // Update parent metadata (timestamps and link count if it's a new directory).
+                        let mut parent_upd = parent_inode.clone();
+                        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+                        if file_type == Ext4FileType::Dir {
+                            parent_upd.links_count = parent_upd.links_count.saturating_add(1);
+                        }
+
+                        ffs_inode::write_inode(
+                            cx,
+                            block_dev,
+                            &alloc.geo,
+                            &alloc.groups,
+                            parent,
+                            &parent_upd,
+                            csum_seed,
+                        )?;
+                        return Ok(());
+                    }
+                    Err(FfsError::NoSpace) => continue,
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -5495,8 +5531,8 @@ impl OpenFs {
         )?;
         block_dev.write_block(cx, new_alloc.start, &new_block)?;
 
-        // Insert extent for the new directory block.
-        let mut parent_upd = self.read_inode(cx, parent)?;
+        // Insert extent for the new directory block and update parent metadata.
+        let mut parent_upd = parent_inode.clone();
         let logical_end = extents
             .iter()
             .map(|e| e.logical_block + u32::from(e.actual_len()))
@@ -5528,6 +5564,9 @@ impl OpenFs {
             parent_upd.blocks += 1;
         } else {
             parent_upd.blocks += u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE);
+        }
+        if file_type == Ext4FileType::Dir {
+            parent_upd.links_count = parent_upd.links_count.saturating_add(1);
         }
         ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
         ffs_inode::write_inode(
@@ -5759,6 +5798,7 @@ impl OpenFs {
     fn ext4_symlink(
         &self,
         cx: &Cx,
+        scope: &mut RequestScope,
         parent: InodeNumber,
         name: &[u8],
         target: &Path,
@@ -5848,7 +5888,7 @@ impl OpenFs {
         };
 
         if !fast_storage {
-            let _written = self.ext4_write(cx, &mut RequestScope::empty(), ino, 0, target_bytes)?;
+            let _written = self.ext4_write(cx, scope, ino, 0, target_bytes)?;
             symlink_inode = self.read_inode(cx, ino)?;
         }
 
@@ -5967,7 +6007,8 @@ impl OpenFs {
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
         } else {
-            let logical_start = (offset / block_size) as u32;
+            let logical_start =
+                u32::try_from(offset / block_size).map_err(|_| FfsError::NoSpace)?;
             let logical_end = end.div_ceil(block_size);
             let logical_count = logical_end.saturating_sub(u64::from(logical_start));
             let mappings = ffs_extent::map_logical_to_physical(
@@ -6224,15 +6265,32 @@ impl OpenFs {
             inode.size = end;
         }
         ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
-        ffs_inode::write_inode(
-            cx,
-            &block_dev,
-            &alloc.geo,
-            &alloc.groups,
-            ino,
-            &inode,
-            csum_seed,
-        )?;
+
+        if let Some(tx) = &mut scope.tx {
+            let tx_dev = TransactionBlockAdapter {
+                base: &block_dev,
+                tx: Mutex::new(tx),
+            };
+            ffs_inode::write_inode(
+                cx,
+                &tx_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &inode,
+                csum_seed,
+            )?;
+        } else {
+            ffs_inode::write_inode(
+                cx,
+                &block_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &inode,
+                csum_seed,
+            )?;
+        }
 
         trace!(
             target: "ffs::write",
@@ -9385,7 +9443,7 @@ impl FsOps for OpenFs {
     fn symlink(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         parent: InodeNumber,
         name: &OsStr,
         target: &Path,
@@ -9396,6 +9454,7 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => self
                 .ext4_symlink(
                     cx,
+                    scope,
                     Self::ext4_canonical_inode(parent),
                     name.as_encoded_bytes(),
                     target,
