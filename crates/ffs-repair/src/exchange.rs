@@ -313,7 +313,7 @@ impl Client {
             })
         })?;
 
-        configure_stream_timeouts(cx, &mut stream, self.config.io_timeout)?;
+        configure_stream_timeouts(cx, &stream, self.config.io_timeout)?;
         stream.set_nodelay(true).map_err(FfsError::from)?;
         write_envelope(
             cx,
@@ -358,7 +358,7 @@ impl<S: Store> Server<S> {
     /// Accept and handle a single connection.
     pub fn serve_once(&self, cx: &Cx) -> Result<()> {
         let (mut stream, peer_addr) = self.accept(cx)?;
-        configure_stream_timeouts(cx, &mut stream, self.config.io_timeout)?;
+        configure_stream_timeouts(cx, &stream, self.config.io_timeout)?;
         stream.set_nodelay(true).map_err(FfsError::from)?;
         match self.handle_connection(cx, &mut stream) {
             Ok(()) => Ok(()),
@@ -770,7 +770,7 @@ mod tests {
             fetched,
             LookupResult::Found(StoredSymbols {
                 generation: 7,
-                symbols: seed_symbols.clone(),
+                symbols: seed_symbols,
             })
         );
 

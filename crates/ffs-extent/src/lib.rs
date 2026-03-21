@@ -64,7 +64,9 @@ pub fn map_logical_to_physical(
 
     while pos < end {
         cx_checkpoint(cx)?;
-        let result = ffs_btree::search(cx, dev, root_bytes, pos as u32)?;
+        let logical_block =
+            u32::try_from(pos).expect("logical position stays within u32 inode block range");
+        let result = ffs_btree::search(cx, dev, root_bytes, logical_block)?;
         match result {
             SearchResult::Found {
                 extent,
@@ -81,10 +83,12 @@ pub fn map_logical_to_physical(
                         ),
                     });
                 }
+                let mapping_count =
+                    u32::try_from(to_map).expect("extent mapping chunk length fits in u32");
                 mappings.push(ExtentMapping {
-                    logical_start: pos as u32,
+                    logical_start: logical_block,
                     physical_start: extent.physical_start + u64::from(offset_in_extent),
-                    count: to_map as u32,
+                    count: mapping_count,
                     unwritten: extent.is_unwritten(),
                 });
                 pos += to_map;
@@ -99,10 +103,14 @@ pub fn map_logical_to_physical(
                         ),
                     });
                 }
+                let hole_start = u32::try_from(pos)
+                    .expect("logical position stays within u32 inode block range");
+                let hole_count =
+                    u32::try_from(to_map).expect("hole mapping chunk length fits in u32");
                 mappings.push(ExtentMapping {
-                    logical_start: pos as u32,
+                    logical_start: hole_start,
                     physical_start: 0,
-                    count: to_map as u32,
+                    count: hole_count,
                     unwritten: false,
                 });
                 pos += to_map;
@@ -171,9 +179,9 @@ pub fn allocate_extent(
     cx_checkpoint(cx)?;
 
     if count == 0 || count > u32::from(EXT_INIT_MAX_LEN) {
-        return Err(FfsError::Format(
-            format!("extent count must be 1..={EXT_INIT_MAX_LEN}").into(),
-        ));
+        return Err(FfsError::Format(format!(
+            "extent count must be 1..={EXT_INIT_MAX_LEN}"
+        )));
     }
     validate_root_header("allocate_extent", root_bytes)?;
 
@@ -662,6 +670,7 @@ pub struct ExtentCacheStats {
 
 impl ExtentCacheStats {
     /// Hit rate as a fraction in `[0.0, 1.0]`. Returns 0.0 if no lookups.
+    #[must_use]
     pub fn hit_rate(&self) -> f64 {
         let total = self.hits + self.misses;
         if total == 0 {
@@ -674,11 +683,13 @@ impl ExtentCacheStats {
 
 impl ExtentCache {
     /// Create a new cache with the default capacity (1024 entries).
+    #[must_use]
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_EXTENT_CACHE_CAPACITY)
     }
 
     /// Create a new cache with the given maximum entry count.
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: RwLock::new(ExtentCacheInner {
@@ -783,7 +794,8 @@ impl ExtentCache {
             return;
         }
         let range_end = u64::from(logical_start).saturating_add(count);
-        let range_end_u32 = range_end.min(u64::from(u32::MAX)) as u32;
+        let range_end_u32 = u32::try_from(range_end.min(u64::from(u32::MAX)))
+            .expect("range end is explicitly clamped to u32::MAX");
         let mut inner = self.inner.write();
 
         // Collect keys to remove: entries in this namespace whose extent overlaps the range.
@@ -4288,7 +4300,7 @@ mod tests {
             capacity: 1024,
             generation: 0,
         };
-        assert_eq!(empty_stats.hit_rate(), 0.0);
+        assert!(empty_stats.hit_rate().abs() <= f64::EPSILON);
     }
 
     #[test]

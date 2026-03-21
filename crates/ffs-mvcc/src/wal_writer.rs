@@ -303,6 +303,7 @@ impl WalWriter {
     ///
     /// Returns a classified [`WalWriteError`] distinguishing retryable I/O
     /// failures from fatal format/invariant violations.
+    #[expect(clippy::too_many_lines)]
     pub fn append_commit(
         &mut self,
         commit: &WalCommit,
@@ -602,7 +603,8 @@ impl WalWriter {
         })?;
 
         // ── Single sync ───────────────────────────────────────────────────
-        self.appends_since_sync += commits.len() as u32;
+        self.appends_since_sync +=
+            u32::try_from(commits.len()).expect("coalesced append count fits in u32");
         let synced = match self.maybe_sync(op_id, prev_seq) {
             Ok(s) => s,
             Err(e) => {

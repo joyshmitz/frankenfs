@@ -909,6 +909,7 @@ fn maybe_shrink_root(
 
 /// Trim/remove extents that overlap `[start, end)`.
 /// Returns (remaining_extents, freed_ranges).
+#[must_use]
 pub fn trim_extents(
     extents: Vec<Ext4Extent>,
     start: u64,

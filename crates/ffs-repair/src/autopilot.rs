@@ -708,9 +708,7 @@ mod tests {
         if base < ap.max_overhead - 0.001 {
             assert!(
                 metadata > base,
-                "metadata overhead {} should be higher than base {} when cost is doubled",
-                metadata,
-                base
+                "metadata overhead {metadata} should be higher than base {base} when cost is doubled",
             );
         }
     }

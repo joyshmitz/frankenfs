@@ -1378,6 +1378,28 @@ pub fn verify_dir_block_checksum(
     Ok(())
 }
 
+/// Stamp the CRC32C checksum into a directory block's tail entry.
+///
+/// The tail structure occupies the last 12 bytes of the block. This
+/// function recomputes the checksum over `block[0..block_size - 12]`
+/// using the same per-inode seed as [`verify_dir_block_checksum`], then
+/// writes the 4-byte result into `block[block_size - 4 .. block_size]`.
+///
+/// The caller must ensure the block has a valid tail structure (inode=0,
+/// rec_len=12, name_len=0, file_type=0xDE) before calling.
+pub fn stamp_dir_block_checksum(dir_block: &mut [u8], csum_seed: u32, ino: u32, generation: u32) {
+    let bs = dir_block.len();
+    if bs < 12 {
+        return;
+    }
+
+    let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
+    let seed = ext4_chksum(seed, &generation.to_le_bytes());
+    let coverage_end = bs - 12;
+    let computed = ext4_chksum(seed, &dir_block[..coverage_end]);
+    dir_block[bs - 4..bs].copy_from_slice(&computed.to_le_bytes());
+}
+
 /// Verify the CRC32C checksum of an extent tree block.
 ///
 /// Extent tree blocks (non-root, stored in separate blocks) have a 4-byte
@@ -1439,6 +1461,35 @@ pub fn verify_extent_block_checksum(
         });
     }
     Ok(())
+}
+
+/// Stamp the CRC32C checksum into an extent tree block's tail.
+///
+/// Mirrors the logic in [`verify_extent_block_checksum`]: the tail offset
+/// is `12 + 12 * eh_max`, and the checksum covers `block[0..tail_off]`.
+pub fn stamp_extent_block_checksum(
+    extent_block: &mut [u8],
+    csum_seed: u32,
+    ino: u32,
+    generation: u32,
+) {
+    let bs = extent_block.len();
+    if bs < 16 {
+        return;
+    }
+
+    let eh_max = u16::from_le_bytes([extent_block[4], extent_block[5]]) as usize;
+    let Some(tail_off) = 12_usize.checked_mul(eh_max).and_then(|v| v.checked_add(12)) else {
+        return;
+    };
+    if tail_off + 4 > bs {
+        return;
+    }
+
+    let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
+    let seed = ext4_chksum(seed, &generation.to_le_bytes());
+    let computed = ext4_chksum(seed, &extent_block[..tail_off]);
+    extent_block[tail_off..tail_off + 4].copy_from_slice(&computed.to_le_bytes());
 }
 
 /// Verify that an inode bitmap's free-bit count matches the group descriptor.

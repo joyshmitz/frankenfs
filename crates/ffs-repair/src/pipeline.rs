@@ -4661,12 +4661,16 @@ mod tests {
             .refresh_states
             .get_mut(&0)
             .expect("group 0 state")
-            .last_refresh = now - Duration::from_secs(2);
+            .last_refresh = now
+            .checked_sub(Duration::from_secs(2))
+            .expect("valid instant math");
         pipeline
             .refresh_states
             .get_mut(&1)
             .expect("group 1 state")
-            .last_refresh = now - Duration::from_secs(5);
+            .last_refresh = now
+            .checked_sub(Duration::from_secs(5))
+            .expect("valid instant math");
 
         let metrics = pipeline.runtime_metrics();
         assert!(
@@ -5902,8 +5906,13 @@ mod tests {
         let now = Instant::now();
         let state = pipeline.refresh_states.get_mut(&0).expect("group 0 state");
         state.dirty = true;
-        state.dirty_since = Some(now - Duration::from_secs(4));
-        state.last_refresh = now - Duration::from_secs(7);
+        state.dirty_since = Some(
+            now.checked_sub(Duration::from_secs(4))
+                .expect("valid instant math"),
+        );
+        state.last_refresh = now
+            .checked_sub(Duration::from_secs(7))
+            .expect("valid instant math");
         state.writes_since_refresh = 3;
         pipeline.sync_atomic_staleness_gauge();
 
@@ -5983,6 +5992,7 @@ mod tests {
     /// decode → verify recovery. Exercises the full distributed repair
     /// pipeline across two simulated hosts using the exchange protocol.
     #[test]
+    #[expect(clippy::too_many_lines)]
     fn distributed_repair_pipeline_e2e() {
         use crate::codec::{decode_group, encode_group};
         use crate::exchange::{self, InMemoryStore, LookupResult, Store};
