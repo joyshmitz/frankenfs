@@ -5038,10 +5038,10 @@ impl FsOps for Ext4FsOps {
         Ok(buf)
     }
 
-    fn readlink(&self, _cx: &Cx, _scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+    fn readlink(&self, _cx: &Cx, _scope: &mut RequestScope, _ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
         let inode = self
             .reader
-            .read_inode(&self.image, ino)
+            .read_inode(&self.image, _ino)
             .map_err(|e| parse_to_ffs_error(&e))?;
 
         if !inode.is_symlink() {

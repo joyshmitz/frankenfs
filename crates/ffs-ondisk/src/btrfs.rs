@@ -573,7 +573,11 @@ fn resolve_raid0_stripe(
     let num = u64::from(chunk.num_stripes);
     let stripe_idx = (offset_within / stripe_len) % num;
     let offset_in_stripe = offset_within % stripe_len;
-    let stripe_nr = offset_within / (stripe_len * num);
+    let stripe_nr = offset_within
+        / stripe_len.checked_mul(num).ok_or(ParseError::InvalidField {
+            field: "stripe_len",
+            reason: "RAID0 stripe_len * num_stripes overflow",
+        })?;
     let idx = usize::try_from(stripe_idx).unwrap_or(usize::MAX);
     let s = chunk.stripes.get(idx).ok_or(ParseError::InvalidField {
         field: "stripe_index",
@@ -603,15 +607,21 @@ fn resolve_raid10_stripes(
     }
     let stripe_idx = (offset_within / stripe_len) % data_stripes;
     let offset_in_stripe = offset_within % stripe_len;
-    let stripe_nr = offset_within / (stripe_len * data_stripes);
-    let base = usize::try_from(stripe_idx * sub).unwrap_or(usize::MAX);
+    let stripe_nr = offset_within
+        / stripe_len.checked_mul(data_stripes).ok_or(ParseError::InvalidField {
+            field: "stripe_len",
+            reason: "RAID10 stripe_len * data_stripes overflow",
+        })?;
+    let base = usize::try_from(stripe_idx.checked_mul(sub).unwrap_or(u64::MAX))
+        .unwrap_or(usize::MAX);
     let sub_usize = usize::try_from(sub).unwrap_or(0);
     Ok((0..sub_usize)
         .filter_map(|m| {
-            let s = chunk.stripes.get(base + m)?;
-            let physical = s
-                .offset
-                .checked_add(stripe_nr * stripe_len + offset_in_stripe)?;
+            let s = chunk.stripes.get(base.checked_add(m)?)?;
+            let stripe_off = stripe_nr
+                .checked_mul(stripe_len)?
+                .checked_add(offset_in_stripe)?;
+            let physical = s.offset.checked_add(stripe_off)?;
             Some(BtrfsPhysicalMapping {
                 devid: s.devid,
                 physical,
@@ -649,7 +659,11 @@ fn resolve_raid56_stripe(
     }
     let stripe_idx = (offset_within / stripe_len) % data_stripes;
     let offset_in_stripe = offset_within % stripe_len;
-    let stripe_nr = offset_within / (stripe_len * data_stripes);
+    let stripe_nr = offset_within
+        / stripe_len.checked_mul(data_stripes).ok_or(ParseError::InvalidField {
+            field: "stripe_len",
+            reason: "RAID5/6 stripe_len * data_stripes overflow",
+        })?;
 
     // Build set of parity positions for this row.
     // RAID5: P at (stripe_nr % num)
@@ -725,9 +739,16 @@ fn stripe_physical_at(
     stripe_len: u64,
     offset_in_stripe: u64,
 ) -> Result<BtrfsPhysicalMapping, ParseError> {
+    let stripe_offset = stripe_nr
+        .checked_mul(stripe_len)
+        .and_then(|v| v.checked_add(offset_in_stripe))
+        .ok_or(ParseError::InvalidField {
+            field: "stripe_offset",
+            reason: "stripe offset overflow",
+        })?;
     let physical = s
         .offset
-        .checked_add(stripe_nr * stripe_len + offset_in_stripe)
+        .checked_add(stripe_offset)
         .ok_or(ParseError::InvalidField {
             field: "stripe_offset",
             reason: "physical address overflow",

@@ -630,11 +630,21 @@ impl ShardedMvccStore {
     }
 
     /// Safe prune: use watermark from active snapshots.
+    ///
+    /// Holds the `active_snapshots` write lock while pruning to prevent a
+    /// TOCTOU race where a snapshot is registered between reading the
+    /// watermark and pruning versions older than it.
     pub fn prune_safe(&self) -> CommitSeq {
-        let wm = self
-            .watermark()
+        let active = self.active_snapshots.write();
+        let wm = active
+            .keys()
+            .next()
+            .copied()
             .unwrap_or_else(|| self.current_snapshot().high);
+        // Hold the active_snapshots lock while pruning so no new snapshot
+        // can be registered at a commit_seq that we're about to prune.
         self.prune_versions_older_than(wm);
+        drop(active);
         debug!(watermark = wm.0, "prune_safe_sharded");
         wm
     }
