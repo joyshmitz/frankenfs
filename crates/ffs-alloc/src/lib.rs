@@ -910,7 +910,9 @@ pub fn alloc_blocks_batch_persist(
         let allocated_in_group =
             try_alloc_batch_in_group(cx, dev, geo, groups, group, remaining, hint, pctx)?;
 
-        remaining -= allocated_in_group.len() as u32;
+        let allocated_in_group_len = u32::try_from(allocated_in_group.len())
+            .expect("batch allocation count is bounded by requested u32 count");
+        remaining -= allocated_in_group_len;
         results.extend(allocated_in_group);
     }
 
@@ -985,7 +987,8 @@ fn try_alloc_batch_in_group(
 
     // Single bitmap write for all allocations in this group.
     dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
-    let count_allocated = allocated.len() as u32;
+    let count_allocated =
+        u32::try_from(allocated.len()).expect("group allocation count is bounded by u32 request");
     groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_sub(count_allocated);
 
     // Single GDT persist for all allocations in this group.
