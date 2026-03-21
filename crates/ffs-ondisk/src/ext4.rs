@@ -6829,6 +6829,67 @@ mod tests {
         assert!(matches!(err, ParseError::InsufficientData { .. }));
     }
 
+    #[test]
+    fn stamp_dir_block_checksum_round_trips_with_verify() {
+        let block_size = 4096;
+        let csum_seed = 0x1234_5678_u32;
+        let ino = 42_u32;
+        let generation = 7_u32;
+
+        let mut block = vec![0_u8; block_size];
+        // Fill with some directory-like data.
+        for (i, byte) in block.iter_mut().enumerate().take(block_size - 12) {
+            *byte = (i & 0xFF) as u8;
+        }
+        // Set up the checksum tail structure.
+        let tail_off = block_size - 12;
+        // inode = 0
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        // rec_len = 12
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        // name_len = 0
+        block[tail_off + 6] = 0;
+        // file_type = 0xDE (EXT4_FT_DIR_CSUM)
+        block[tail_off + 7] = 0xDE;
+
+        // Stamp the checksum.
+        stamp_dir_block_checksum(&mut block, csum_seed, ino, generation);
+
+        // Verify should pass.
+        verify_dir_block_checksum(&block, csum_seed, ino, generation)
+            .expect("stamped checksum should verify");
+
+        // Corrupt data and verify should fail.
+        block[50] ^= 0xFF;
+        assert!(verify_dir_block_checksum(&block, csum_seed, ino, generation).is_err());
+    }
+
+    #[test]
+    fn stamp_extent_block_checksum_round_trips_with_verify() {
+        let block_size = 4096;
+        let csum_seed = 0xABCD_EF01_u32;
+        let ino = 99_u32;
+        let generation = 3_u32;
+
+        let mut block = vec![0_u8; block_size];
+        // Build a minimal extent header: magic=0xF30A, entries=2, max=340, depth=0
+        block[0..2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        block[2..4].copy_from_slice(&2_u16.to_le_bytes());
+        block[4..6].copy_from_slice(&340_u16.to_le_bytes()); // eh_max
+        block[6..8].copy_from_slice(&0_u16.to_le_bytes());
+
+        // Stamp the checksum.
+        stamp_extent_block_checksum(&mut block, csum_seed, ino, generation);
+
+        // Verify should pass.
+        verify_extent_block_checksum(&block, csum_seed, ino, generation)
+            .expect("stamped checksum should verify");
+
+        // Corrupt data and verify should fail.
+        block[20] ^= 0xFF;
+        assert!(verify_extent_block_checksum(&block, csum_seed, ino, generation).is_err());
+    }
+
     // ── Extent block checksum verification ───────────────────────────────
 
     #[test]
