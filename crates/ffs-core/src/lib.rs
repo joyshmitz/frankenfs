@@ -5564,7 +5564,7 @@ impl OpenFs {
                 return Err(FfsError::NotDirectory);
             }
             // Check directory is empty (only . and ..).
-            let entries = self.read_dir(cx, &RequestScope::empty(), &child_inode)?;
+            let entries = self.read_dir(cx, &child_inode)?;
             let real_entries = entries
                 .iter()
                 .filter(|e| e.name != b"." && e.name != b"..")
@@ -6294,7 +6294,7 @@ impl OpenFs {
                 if !child_inode.is_dir() {
                     return Err(FfsError::IsDirectory);
                 }
-                let entries = self.read_dir(cx, &RequestScope::empty(), &existing_inode)?;
+                let entries = self.read_dir(cx, &existing_inode)?;
                 let real_entries = entries
                     .iter()
                     .filter(|e| e.name != b"." && e.name != b"..")
@@ -8824,10 +8824,10 @@ impl OpenFs {
         ino: InodeNumber,
         offset: u64,
         length: u64,
-        mode: u32,
+        mode: i32,
     ) -> ffs_error::Result<()> {
         self.with_empty_scope(|scope| {
-            <Self as FsOps>::fallocate(self, cx, scope, ino, offset, length, mode.try_into().unwrap())
+            <Self as FsOps>::fallocate(self, cx, scope, ino, offset, length, mode)
         })
     }
 
@@ -8893,8 +8893,43 @@ impl OpenFs {
         self.with_empty_scope(|scope| <Self as FsOps>::read(self, cx, scope, ino, offset, size))
     }
 
+    pub fn link(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        new_parent: InodeNumber,
+        new_name: &OsStr,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.with_empty_scope(|scope| {
+            <Self as FsOps>::link(self, cx, scope, ino, new_parent, new_name)
+        })
+    }
+
+    pub fn symlink(
+        &self,
+        cx: &Cx,
+        parent: InodeNumber,
+        name: &OsStr,
+        target: &Path,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.with_empty_scope(|scope| {
+            <Self as FsOps>::symlink(self, cx, scope, parent, name, target, uid, gid)
+        })
+    }
+
     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
         self.with_empty_scope(|scope| <Self as FsOps>::readlink(self, cx, scope, ino))
+    }
+
+    pub fn setattr(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        attrs: &SetAttrRequest,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.with_empty_scope(|scope| <Self as FsOps>::setattr(self, cx, scope, ino, attrs))
     }
 
     pub fn statfs(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<FsStat> {
@@ -8905,10 +8940,10 @@ impl OpenFs {
 // ── FsOps for OpenFs (device-based ext4 adapter) ──────────────────────────
 
 impl FsOps for OpenFs {
-    fn getattr(&self, cx: &Cx, _scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+    fn getattr(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
         match &self.flavor {
             FsFlavor::Ext4(_) => self
-                .read_inode_attr(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))
+                .read_inode_attr_with_scope(cx, scope, Self::ext4_canonical_inode(ino))
                 .map(Self::ext4_present_attr),
             FsFlavor::Btrfs(_) => self.btrfs_read_inode_attr(cx, ino),
         }
@@ -8924,7 +8959,7 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let parent_ino = Self::ext4_canonical_inode(parent);
-                let parent_inode = self.read_inode(cx, parent_ino)?;
+                let parent_inode = self.read_inode_with_scope(cx, scope, parent_ino)?;
                 if !parent_inode.is_dir() {
                     return Err(FfsError::NotDirectory);
                 }
@@ -8935,7 +8970,7 @@ impl FsOps for OpenFs {
                     .ok_or_else(|| FfsError::NotFound(name.to_string_lossy().into_owned()))?;
 
                 let child_ino = InodeNumber(u64::from(entry.inode));
-                self.read_inode_attr(cx, &RequestScope::empty(), child_ino)
+                self.read_inode_attr_with_scope(cx, scope, child_ino)
                     .map(Self::ext4_present_attr)
             }
             FsFlavor::Btrfs(_) => self.btrfs_lookup_child(cx, parent, name.as_encoded_bytes()),
@@ -8951,7 +8986,7 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<Vec<DirEntry>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
+                let inode = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
                 if !inode.is_dir() {
                     return Err(FfsError::NotDirectory);
                 }
@@ -8997,7 +9032,7 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
+                let inode = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
                 let mut buf = vec![0_u8; size as usize];
                 let n = self.read_file_data(cx, scope, &inode, offset, &mut buf)?;
                 buf.truncate(n);
@@ -9287,13 +9322,13 @@ impl FsOps for OpenFs {
     fn write(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         offset: u64,
         data: &[u8],
     ) -> ffs_error::Result<u32> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => self.ext4_write(cx, &mut RequestScope::empty(), Self::ext4_canonical_inode(ino), offset, data),
+            FsFlavor::Ext4(_) => self.ext4_write(cx, scope, Self::ext4_canonical_inode(ino), offset, data),
             FsFlavor::Btrfs(_) => self.btrfs_write(cx, ino, offset, data),
         }
     }
@@ -10669,7 +10704,7 @@ mod tests {
             Ok(data[start..end].to_vec())
         }
 
-        fn readlink(&self, _cx: &Cx, __scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+        fn readlink(&self, _cx: &Cx, __scope: &mut RequestScope, _ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
             Err(FfsError::Format("not a symlink".into()))
         }
     }
@@ -12077,7 +12112,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
-        let phys = fs.resolve_extent(&cx, &inode, 0).unwrap();
+        let phys = fs.resolve_extent(&cx, &mut RequestScope::empty(), &inode, 0).unwrap();
         assert_eq!(phys, Some((13, false)));
     }
 
@@ -12090,7 +12125,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         // Logical block 1 is not mapped — should be a hole.
-        let phys = fs.resolve_extent(&cx, &inode, 1).unwrap();
+        let phys = fs.resolve_extent(&cx, &mut RequestScope::empty(), &inode, 1).unwrap();
         assert_eq!(phys, None);
     }
 
@@ -12102,7 +12137,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let inode = fs.read_inode(&cx, InodeNumber(12)).unwrap();
-        let phys = fs.resolve_extent(&cx, &inode, 0).unwrap();
+        let phys = fs.resolve_extent(&cx, &mut RequestScope::empty(), &inode, 0).unwrap();
         assert_eq!(phys, Some((15, false)));
     }
 
@@ -12117,7 +12152,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let inode = fs.read_inode(&cx, InodeNumber(12)).unwrap();
-        let err = fs.resolve_extent(&cx, &inode, 0).unwrap_err();
+        let err = fs.resolve_extent(&cx, &mut RequestScope::empty(), &inode, 0).unwrap_err();
         assert!(
             matches!(err, FfsError::Corruption { .. } | FfsError::Format(_)),
             "unexpected error variant: {err:?}"
@@ -12136,7 +12171,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
-        let err = fs.resolve_extent(&cx, &inode, 0).unwrap_err();
+        let err = fs.resolve_extent(&cx, &mut RequestScope::empty(), &inode, 0).unwrap_err();
         assert!(
             matches!(err, FfsError::Corruption { .. } | FfsError::Format(_)),
             "unexpected error variant: {err:?}"
@@ -12183,7 +12218,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         let mut buf = vec![0_u8; 14];
-        let n = fs.read_file_data(&cx, &inode, 0, &mut buf).unwrap();
+        let n = fs.read_file_data(&cx, &mut RequestScope::empty(), &inode, 0, &mut buf).unwrap();
         assert_eq!(n, 14);
         assert_eq!(&buf[..n], b"Hello, extent!");
     }
@@ -12197,7 +12232,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(12)).unwrap();
         let mut buf = vec![0_u8; 14];
-        let n = fs.read_file_data(&cx, &inode, 0, &mut buf).unwrap();
+        let n = fs.read_file_data(&cx, &mut RequestScope::empty(), &inode, 0, &mut buf).unwrap();
         assert_eq!(n, 14);
         assert_eq!(&buf[..n], b"Index extent!\n");
     }
@@ -12211,7 +12246,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         let mut buf = vec![0_u8; 100];
-        let n = fs.read_file_data(&cx, &inode, 7, &mut buf).unwrap();
+        let n = fs.read_file_data(&cx, &mut RequestScope::empty(), &inode, 7, &mut buf).unwrap();
         assert_eq!(n, 7); // 14 - 7 = 7 bytes remaining
         assert_eq!(&buf[..n], b"extent!");
     }
@@ -12225,7 +12260,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         let mut buf = vec![0_u8; 10];
-        let n = fs.read_file_data(&cx, &inode, 100, &mut buf).unwrap();
+        let n = fs.read_file_data(&cx, &mut RequestScope::empty(), &inode, 100, &mut buf).unwrap();
         assert_eq!(n, 0);
     }
 
@@ -12379,7 +12414,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        let data = fs.read_file(&cx, InodeNumber(11), 0, 100).unwrap();
+        let data = fs.read_file(&cx, &mut RequestScope::empty(), InodeNumber(11), 0, 100).unwrap();
         assert_eq!(&data, b"Hello, extent!");
     }
 
@@ -12390,7 +12425,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        let data = fs.read_file(&cx, InodeNumber(11), 7, 100).unwrap();
+        let data = fs.read_file(&cx, &mut RequestScope::empty(), InodeNumber(11), 7, 100).unwrap();
         assert_eq!(&data, b"extent!");
     }
 
@@ -12401,7 +12436,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        let err = fs.read_file(&cx, InodeNumber(2), 0, 4096).unwrap_err();
+        let err = fs.read_file(&cx, &mut RequestScope::empty(), InodeNumber(2), 0, 4096).unwrap_err();
         assert_eq!(err.to_errno(), libc::EISDIR);
     }
 
@@ -12414,7 +12449,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        let (ino, inode) = fs.resolve_path(&cx, "/").unwrap();
+        let (ino, inode) = fs.resolve_path(&cx, &mut RequestScope::empty(), "/").unwrap();
         assert_eq!(ino, InodeNumber(2));
         assert!(inode.is_dir());
     }
@@ -12426,7 +12461,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        let (ino, inode) = fs.resolve_path(&cx, "/hello.txt").unwrap();
+        let (ino, inode) = fs.resolve_path(&cx, &mut RequestScope::empty(), "/hello.txt").unwrap();
         assert_eq!(ino, InodeNumber(11));
         assert!(inode.is_regular());
     }
@@ -12438,7 +12473,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        let err = fs.resolve_path(&cx, "/missing").unwrap_err();
+        let err = fs.resolve_path(&cx, &mut RequestScope::empty(), "/missing").unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
     }
 
@@ -12450,7 +12485,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         // hello.txt is a regular file, not a directory — traversal through it fails.
-        let err = fs.resolve_path(&cx, "/hello.txt/child").unwrap_err();
+        let err = fs.resolve_path(&cx, &mut RequestScope::empty(), "/hello.txt/child").unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOTDIR);
     }
 
@@ -12461,7 +12496,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        let err = fs.resolve_path(&cx, "hello.txt").unwrap_err();
+        let err = fs.resolve_path(&cx, &mut RequestScope::empty(), "hello.txt").unwrap_err();
         assert!(matches!(err, FfsError::Format(_)));
     }
 
@@ -14497,13 +14532,13 @@ mod tests {
         let err = fs.rmdir(&cx, &mut RequestScope::empty(), root, OsStr::new("d")).unwrap_err();
         assert_eq!(err.to_errno(), libc::EROFS);
 
-        let err = fs.fsync(&cx, root, 0, false).unwrap_err();
+        let err = fs.fsync(&cx, &mut RequestScope::empty(), root, 0, false).unwrap_err();
         assert_eq!(err.to_errno(), libc::EROFS);
 
-        let err = fs.fsyncdir(&cx, root, 0, false).unwrap_err();
+        let err = fs.fsyncdir(&cx, &mut RequestScope::empty(), root, 0, false).unwrap_err();
         assert_eq!(err.to_errno(), libc::EROFS);
 
-        fs.flush(&cx, root, 0, 0).expect("flush default no-op");
+        fs.flush(&cx, &mut RequestScope::empty(), root, 0, 0).expect("flush default no-op");
 
         let err = fs
             .rename(&cx, &mut RequestScope::empty(), root, OsStr::new("a"), root, OsStr::new("b"))
@@ -14519,11 +14554,11 @@ mod tests {
         assert_eq!(err.to_errno(), libc::EROFS);
 
         let err = fs
-            .setxattr(&cx, root, "user.test", b"value", XattrSetMode::Set)
+            .setxattr(&cx, &mut RequestScope::empty(), root, "user.test", b"value", XattrSetMode::Set)
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::EROFS);
 
-        let err = fs.removexattr(&cx, root, "user.test").unwrap_err();
+        let err = fs.removexattr(&cx, &mut RequestScope::empty(), root, "user.test").unwrap_err();
         assert_eq!(err.to_errno(), libc::EROFS);
     }
 
@@ -14594,12 +14629,12 @@ mod tests {
         assert_eq!(written as usize, payload.len());
 
         // Read back
-        let readback = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+        let readback = fs.read(&cx, ino, 0, 4096).expect("read");
         assert_eq!(&readback[..payload.len()], payload);
 
         // Lookup should find it
         let looked_up = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_rw.txt"))
+            .lookup(&cx, root, OsStr::new("test_rw.txt"))
             .expect("lookup");
         assert_eq!(looked_up.ino, ino);
     }
@@ -14612,11 +14647,11 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(1); // VFS/FUSE root alias for ext4 inode 2
 
-        let root_attr = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("getattr root");
+        let root_attr = fs.getattr(&cx, root).expect("getattr root");
         assert_eq!(root_attr.ino, root);
         assert_eq!(root_attr.kind, FileType::Directory);
 
-        let root_entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir root");
+        let root_entries = fs.readdir(&cx, root, 0).expect("readdir root");
         let dot = root_entries
             .iter()
             .find(|entry| entry.name_str() == ".")
@@ -14641,14 +14676,14 @@ mod tests {
         assert_eq!(attr.kind, FileType::RegularFile);
 
         let payload = b"FrankenFS root-alias write test!";
-        let written = fs.write(&cx, &mut RequestScope::empty(), attr.ino, 0, payload).expect("write");
+        let written = fs.write(&cx, attr.ino, 0, payload).expect("write");
         assert_eq!(written as usize, payload.len());
 
-        let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read");
+        let readback = fs.read(&cx, attr.ino, 0, 4096).expect("read");
         assert_eq!(&readback[..payload.len()], payload);
 
         let looked_up = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_rw_alias.txt"))
+            .lookup(&cx, root, OsStr::new("test_rw_alias.txt"))
             .expect("lookup");
         assert_eq!(looked_up.ino, attr.ino);
     }
@@ -14668,7 +14703,7 @@ mod tests {
         assert_eq!(attr.perm, 0o755);
 
         let looked_up = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_dir"))
+            .lookup(&cx, root, OsStr::new("test_dir"))
             .expect("lookup dir");
         assert_eq!(looked_up.ino, attr.ino);
         assert_eq!(looked_up.kind, FileType::Directory);
@@ -14693,7 +14728,7 @@ mod tests {
 
         // Lookup should fail
         let err = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("to_delete.txt"))
+            .lookup(&cx, root, OsStr::new("to_delete.txt"))
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
     }
@@ -14723,13 +14758,13 @@ mod tests {
 
         // Old name gone
         let err = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("old_name.txt"))
+            .lookup(&cx, root, OsStr::new("old_name.txt"))
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
 
         // New name present with same inode
         let looked_up = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("new_name.txt"))
+            .lookup(&cx, root, OsStr::new("new_name.txt"))
             .expect("lookup new name");
         assert_eq!(looked_up.ino, ino);
     }
@@ -14815,19 +14850,19 @@ mod tests {
         .expect("rename over existing file");
 
         let err = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("rename_src.txt"))
+            .lookup(&cx, root, OsStr::new("rename_src.txt"))
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
 
         let renamed = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("rename_dst.txt"))
+            .lookup(&cx, root, OsStr::new("rename_dst.txt"))
             .expect("lookup renamed destination");
         assert_eq!(renamed.ino, src.ino);
         assert_ne!(renamed.ino, dst.ino);
 
         let read_len = u32::try_from(src_payload.len()).expect("payload length fits in u32");
         let readback = fs
-            .read(&cx, &mut RequestScope::empty(), renamed.ino, 0, read_len)
+            .read(&cx, renamed.ino, 0, read_len)
             .expect("read renamed file");
         assert_eq!(&readback, src_payload);
     }
@@ -14851,15 +14886,15 @@ mod tests {
             .expect("link");
         assert_eq!(link_attr.ino, src.ino);
 
-        let src_attr = fs.getattr(&cx, &mut RequestScope::empty(), src.ino).expect("getattr source");
+        let src_attr = fs.getattr(&cx, src.ino).expect("getattr source");
         assert_eq!(src_attr.nlink, 2);
 
         let dst_attr = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("link_dst.txt"))
+            .lookup(&cx, root, OsStr::new("link_dst.txt"))
             .expect("lookup destination");
         assert_eq!(dst_attr.ino, src.ino);
 
-        let readback = fs.read(&cx, &mut RequestScope::empty(), dst_attr.ino, 0, 64).expect("read via link");
+        let readback = fs.read(&cx, dst_attr.ino, 0, 64).expect("read via link");
         assert_eq!(&readback, b"linked-bytes");
     }
 
@@ -14939,11 +14974,11 @@ mod tests {
         assert_eq!(attr.kind, FileType::Symlink);
 
         let looked_up = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("fast_link"))
+            .lookup(&cx, root, OsStr::new("fast_link"))
             .expect("lookup fast_link");
         assert_eq!(looked_up.kind, FileType::Symlink);
 
-        let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink");
+        let target = fs.readlink(&cx, attr.ino).expect("readlink");
         assert_eq!(&target, b"hello.txt");
 
         let inode = fs.read_inode(&cx, attr.ino).expect("inode");
@@ -14971,7 +15006,7 @@ mod tests {
             .expect("symlink slow");
         assert_eq!(attr.kind, FileType::Symlink);
 
-        let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink");
+        let target = fs.readlink(&cx, attr.ino).expect("readlink");
         assert_eq!(target, long_target.as_bytes());
 
         let inode = fs.read_inode(&cx, attr.ino).expect("inode");
@@ -14991,17 +15026,17 @@ mod tests {
             .expect("create");
 
         fs.fallocate(&cx, attr.ino, 0, 8192, 0).expect("fallocate");
-        let after_alloc = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr");
+        let after_alloc = fs.getattr(&cx, attr.ino).expect("getattr");
         assert_eq!(after_alloc.size, 8192);
         assert!(after_alloc.blocks >= 16);
 
-        let zero_data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192).expect("read prealloc");
+        let zero_data = fs.read(&cx, attr.ino, 0, 8192).expect("read prealloc");
         assert_eq!(zero_data.len(), 8192);
         assert!(zero_data.iter().all(|&b| b == 0));
 
         fs.fallocate(&cx, attr.ino, 12288, 4096, libc::FALLOC_FL_KEEP_SIZE)
             .expect("fallocate keep_size");
-        let after_keep = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr keep_size");
+        let after_keep = fs.getattr(&cx, attr.ino).expect("getattr keep_size");
         assert_eq!(after_keep.size, 8192);
 
         let payload = vec![0xAB_u8; 8192];
@@ -15016,9 +15051,9 @@ mod tests {
         )
         .expect("punch hole");
 
-        let after_punch = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after punch");
+        let after_punch = fs.getattr(&cx, attr.ino).expect("getattr after punch");
         assert_eq!(after_punch.size, 8192);
-        let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192).expect("read after punch");
+        let readback = fs.read(&cx, attr.ino, 0, 8192).expect("read after punch");
         assert!(readback[..4096].iter().all(|&b| b == 0xAB));
         assert!(readback[4096..8192].iter().all(|&b| b == 0));
     }
@@ -15038,10 +15073,10 @@ mod tests {
 
         // Write 100 bytes
         let data = vec![0x42_u8; 100];
-        fs.write(&cx, &mut RequestScope::empty(), ino, 0, &data).expect("write");
+        fs.write(&cx, ino, 0, &data).expect("write");
 
         // Verify size
-        let attr = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+        let attr = fs.getattr(&cx, ino).expect("getattr");
         assert_eq!(attr.size, 100);
 
         // Truncate to 50 bytes
@@ -15049,11 +15084,11 @@ mod tests {
             size: Some(50),
             ..SetAttrRequest::default()
         };
-        let new_attr = fs.setattr(&cx, &mut RequestScope::empty(), ino, &attrs).expect("setattr truncate");
+        let new_attr = fs.setattr(&cx, ino, &attrs).expect("setattr truncate");
         assert_eq!(new_attr.size, 50);
 
         // Read should return 50 bytes
-        let readback = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read after truncate");
+        let readback = fs.read(&cx, ino, 0, 4096).expect("read after truncate");
         assert_eq!(readback.len(), 50);
         assert!(readback.iter().all(|&b| b == 0x42));
     }
@@ -15279,7 +15314,7 @@ mod tests {
             .expect("create beta");
 
         // readdir should list . .. alpha.txt beta.txt
-        let entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir");
+        let entries = fs.readdir(&cx, dir_attr.ino, 0).expect("readdir");
         let names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
         assert!(names.contains(&".".to_owned()));
         assert!(names.contains(&"..".to_owned()));
@@ -15429,7 +15464,7 @@ mod tests {
             .expect("second create");
         // Inode may or may not be reused, but the entry should resolve
         let looked_up = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("recycled.txt"))
+            .lookup(&cx, root, OsStr::new("recycled.txt"))
             .expect("lookup after recreate");
         assert_eq!(looked_up.ino, attr2.ino);
         // The original inode should no longer be referenced by this name
@@ -15470,7 +15505,7 @@ mod tests {
         let root = InodeNumber(2);
 
         let dir_attr = fs
-            .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("cant_hardlink"), 0o755, 0, 0)
+            .mkdir(&cx, root, OsStr::new("cant_hardlink"), 0o755, 0, 0)
             .expect("mkdir");
         let err = fs
             .link(&cx, dir_attr.ino, root, OsStr::new("hardlink_to_dir"))
@@ -15498,7 +15533,7 @@ mod tests {
         assert_eq!(written as usize, payload.len());
 
         // Read the hole — should return zeros.
-        let hole = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read hole");
+        let hole = fs.read(&cx, attr.ino, 0, 4096).expect("read hole");
         assert!(hole.iter().all(|&b| b == 0), "hole should be zero-filled");
 
         // Read the written region.
@@ -15531,10 +15566,10 @@ mod tests {
 
         // Overwrite bytes 10..20 with 'B'
         let patch = vec![b'B'; 10];
-        fs.write(&cx, &mut RequestScope::empty(), attr.ino, 10, &patch).expect("patch write");
+        fs.write(&cx, attr.ino, 10, &patch).expect("patch write");
 
         // Read back and verify
-        let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 200).expect("read");
+        let readback = fs.read(&cx, attr.ino, 0, 200).expect("read");
         assert!(readback.len() >= 100);
         assert!(
             readback[..10].iter().all(|&b| b == b'A'),
@@ -15564,7 +15599,7 @@ mod tests {
             created_names.push(name);
         }
 
-        let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
         let names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
         for expected in &created_names {
             assert!(
@@ -15600,7 +15635,7 @@ mod tests {
         assert_eq!(sym_attr.kind, FileType::Symlink);
 
         // Read the symlink target
-        let target = fs.readlink(&cx, &mut RequestScope::empty(), sym_attr.ino).expect("readlink");
+        let target = fs.readlink(&cx, sym_attr.ino).expect("readlink");
         assert_eq!(target, b"link_target.txt");
     }
 
@@ -15639,7 +15674,7 @@ mod tests {
             .expect("mkdir");
         fs.rmdir(&cx, root, OsStr::new("temp_dir")).expect("rmdir");
 
-        let err = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("temp_dir")).unwrap_err();
+        let err = fs.lookup(&cx, root, OsStr::new("temp_dir")).unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
     }
 
@@ -15671,7 +15706,7 @@ mod tests {
         assert_eq!(new_attr.perm, 0o755);
 
         // Verify via getattr
-        let verified = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after chmod");
+        let verified = fs.getattr(&cx, attr.ino).expect("getattr after chmod");
         assert_eq!(verified.perm, 0o755);
     }
 
@@ -15703,7 +15738,7 @@ mod tests {
         assert_eq!(new_attr.uid, 2000);
         assert_eq!(new_attr.gid, 3000);
 
-        let verified = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after chown");
+        let verified = fs.getattr(&cx, attr.ino).expect("getattr after chown");
         assert_eq!(verified.uid, 2000);
         assert_eq!(verified.gid, 3000);
     }
@@ -15722,7 +15757,7 @@ mod tests {
         let ino = attr.ino;
 
         fs.write(&cx, ino, 0, b"hello").expect("write");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 5);
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 5);
 
         // Extend to 100 bytes
         let new_attr = fs
@@ -15738,7 +15773,7 @@ mod tests {
         assert_eq!(new_attr.size, 100);
 
         // Read back: first 5 bytes should be "hello", rest should be zeroed
-        let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
         assert_eq!(data.len(), 100);
         assert_eq!(&data[..5], b"hello");
         assert!(data[5..].iter().all(|&b| b == 0));
@@ -15756,7 +15791,7 @@ mod tests {
             .create(&cx, root, OsStr::new("zero_me.txt"), 0o644, 0, 0)
             .expect("create");
         let ino = attr.ino;
-        fs.write(&cx, &mut RequestScope::empty(), ino, 0, &[0xAA; 200]).expect("write");
+        fs.write(&cx, ino, 0, &[0xAA; 200]).expect("write");
 
         let new_attr = fs
             .setattr(
@@ -15770,7 +15805,7 @@ mod tests {
             .expect("truncate to zero");
         assert_eq!(new_attr.size, 0);
 
-        let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
         assert!(data.is_empty());
     }
 
@@ -15824,7 +15859,7 @@ mod tests {
         assert_eq!(written, 0);
 
         // File should remain empty
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr").size, 0);
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("getattr").size, 0);
     }
 
     #[test]
@@ -15855,12 +15890,12 @@ mod tests {
         assert_eq!(written2, 10);
 
         // Verify file size
-        let size = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size;
+        let size = fs.getattr(&cx, ino).expect("getattr").size;
         assert_eq!(size, block_size + 10);
 
         // Read back and verify both regions
         let readback = fs
-            .read(&cx, &mut RequestScope::empty(), ino, 0, u32::try_from(block_size + 10).unwrap())
+            .read(&cx, ino, 0, u32::try_from(block_size + 10).unwrap())
             .expect("read");
         assert!(readback[..bs].iter().all(|&b| b == 0xBB));
         assert!(readback[bs..].iter().all(|&b| b == 0xCC));
@@ -15889,7 +15924,7 @@ mod tests {
 
         // Read back full data
         let readback = fs
-            .read(&cx, &mut RequestScope::empty(), ino, 0, u32::try_from(data_size).unwrap())
+            .read(&cx, ino, 0, u32::try_from(data_size).unwrap())
             .expect("read");
         assert_eq!(readback.len(), data_size);
         assert_eq!(readback, data);
@@ -15954,10 +15989,10 @@ mod tests {
 
         // Verify file still exists and data is intact
         let looked_up = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("same_name.txt"))
+            .lookup(&cx, root, OsStr::new("same_name.txt"))
             .expect("lookup after self-rename");
         assert_eq!(looked_up.ino, attr.ino);
-        let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read");
+        let data = fs.read(&cx, attr.ino, 0, 4096).expect("read");
         assert_eq!(&data[..7], b"content");
     }
 
@@ -15993,16 +16028,16 @@ mod tests {
 
         // Old location gone
         let err = fs
-            .lookup(&cx, &mut RequestScope::empty(), dir_a.ino, OsStr::new("moved.txt"))
+            .lookup(&cx, dir_a.ino, OsStr::new("moved.txt"))
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
 
         // New location exists with same data
         let arrived = fs
-            .lookup(&cx, &mut RequestScope::empty(), dir_b.ino, OsStr::new("arrived.txt"))
+            .lookup(&cx, dir_b.ino, OsStr::new("arrived.txt"))
             .expect("lookup in dir_b");
         assert_eq!(arrived.ino, file.ino);
-        let data = fs.read(&cx, &mut RequestScope::empty(), file.ino, 0, 4096).expect("read");
+        let data = fs.read(&cx, file.ino, 0, 4096).expect("read");
         assert_eq!(&data[..9], b"cross-dir");
     }
 
@@ -16110,11 +16145,11 @@ mod tests {
             )
             .expect("fast symlink");
         assert_eq!(attr.kind, FileType::Symlink);
-        let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink fast");
+        let target = fs.readlink(&cx, attr.ino).expect("readlink fast");
         assert_eq!(target, b"/etc/hosts");
 
         // Verify symlink shows in directory listing
-        let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
         assert!(
             entries
                 .iter()
@@ -16146,12 +16181,12 @@ mod tests {
         // Unlink one — nlink should go back to 1
         fs.unlink(&cx, root, OsStr::new("nlink_test.txt"))
             .expect("unlink original");
-        let after = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr after unlink");
+        let after = fs.getattr(&cx, ino).expect("getattr after unlink");
         assert_eq!(after.nlink, 1);
 
         // File should still be accessible via the link
         let linked = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("nlink_link"))
+            .lookup(&cx, root, OsStr::new("nlink_link"))
             .expect("lookup link");
         assert_eq!(linked.ino, ino);
     }
@@ -16172,12 +16207,12 @@ mod tests {
 
         // Write three sequential chunks
         fs.write(&cx, ino, 0, b"aaa").expect("write1");
-        fs.write(&cx, &mut RequestScope::empty(), ino, 3, b"bbb").expect("write2");
+        fs.write(&cx, ino, 3, b"bbb").expect("write2");
         fs.write(&cx, ino, 6, b"ccc").expect("write3");
 
-        let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
         assert_eq!(&data[..9], b"aaabbbccc");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 9);
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 9);
     }
 
     #[test]
@@ -16197,9 +16232,9 @@ mod tests {
         // Overwrite just the middle
         fs.write(&cx, ino, 5, b"XXXXX").expect("overwrite middle");
 
-        let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
         assert_eq!(&data[..15], b"AAAAAXXXXXCCCCC");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 15);
+        assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 15);
     }
 
     #[test]
@@ -16217,15 +16252,15 @@ mod tests {
         // Write at offset 8192 (past the first block), leaving a hole
         fs.write(&cx, ino, 8192, b"DATA").expect("write past hole");
 
-        let ga = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+        let ga = fs.getattr(&cx, ino).expect("getattr");
         assert_eq!(ga.size, 8196);
 
         // Read the hole — should be zeros
-        let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 8192).expect("read hole");
+        let data = fs.read(&cx, ino, 0, 8192).expect("read hole");
         assert!(data.iter().all(|&b| b == 0), "hole should be zero-filled");
 
         // Read the written data
-        let tail = fs.read(&cx, &mut RequestScope::empty(), ino, 8192, 10).expect("read past hole");
+        let tail = fs.read(&cx, ino, 8192, 10).expect("read past hole");
         assert_eq!(&tail[..4], b"DATA");
     }
 
@@ -16243,21 +16278,21 @@ mod tests {
 
         fs.write(&cx, ino, 0, b"original data here")
             .expect("first write");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga1").size, 18);
+        assert_eq!(fs.getattr(&cx, ino).expect("ga1").size, 18);
 
         // Truncate to 0
         let trunc = SetAttrRequest {
             size: Some(0),
             ..SetAttrRequest::default()
         };
-        fs.setattr(&cx, &mut RequestScope::empty(), ino, &trunc).expect("truncate");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga2").size, 0);
+        fs.setattr(&cx, ino, &trunc).expect("truncate");
+        assert_eq!(fs.getattr(&cx, ino).expect("ga2").size, 0);
 
         // Write new data
-        fs.write(&cx, &mut RequestScope::empty(), ino, 0, b"new").expect("rewrite");
-        let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+        fs.write(&cx, ino, 0, b"new").expect("rewrite");
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
         assert_eq!(&data[..3], b"new");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga3").size, 3);
+        assert_eq!(fs.getattr(&cx, ino).expect("ga3").size, 3);
     }
 
     #[test]
@@ -16289,15 +16324,15 @@ mod tests {
         .expect("rename over");
 
         // Old name should be gone
-        let gone = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("winner.txt"));
+        let gone = fs.lookup(&cx, root, OsStr::new("winner.txt"));
         assert!(gone.is_err(), "old name should not exist");
 
         // New name should have old data
         let found = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("loser.txt"))
+            .lookup(&cx, root, OsStr::new("loser.txt"))
             .expect("lookup new name");
         assert_eq!(found.ino, old.ino);
-        let data = fs.read(&cx, &mut RequestScope::empty(), found.ino, 0, 4096).expect("read");
+        let data = fs.read(&cx, found.ino, 0, 4096).expect("read");
         assert_eq!(&data[..11], b"winner_data");
     }
 
@@ -16312,10 +16347,10 @@ mod tests {
         fs.mkdir(&cx, root, OsStr::new("empty_rm"), 0o755, 0, 0)
             .expect("mkdir");
 
-        fs.rmdir(&cx, &mut RequestScope::empty(), root, OsStr::new("empty_rm"))
+        fs.rmdir(&cx, root, OsStr::new("empty_rm"))
             .expect("rmdir empty");
 
-        let gone = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("empty_rm"));
+        let gone = fs.lookup(&cx, root, OsStr::new("empty_rm"));
         assert!(gone.is_err(), "directory should be gone");
     }
 
@@ -16341,9 +16376,9 @@ mod tests {
 
         // Read via the link — should see updated data
         let linked = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("link_dst.txt"))
+            .lookup(&cx, root, OsStr::new("link_dst.txt"))
             .expect("lookup link");
-        let data = fs.read(&cx, &mut RequestScope::empty(), linked.ino, 0, 4096).expect("read via link");
+        let data = fs.read(&cx, linked.ino, 0, 4096).expect("read via link");
         assert_eq!(&data[..11], b"UPDATED_DAT");
     }
 
@@ -16376,12 +16411,12 @@ mod tests {
         .expect("rename dir across parents");
 
         // Verify child is gone from old parent
-        let gone = fs.lookup(&cx, &mut RequestScope::empty(), dir_a.ino, OsStr::new("child"));
+        let gone = fs.lookup(&cx, dir_a.ino, OsStr::new("child"));
         assert!(gone.is_err(), "child should be gone from src");
 
         // Verify child exists in new parent
         let found = fs
-            .lookup(&cx, &mut RequestScope::empty(), dir_b.ino, OsStr::new("child"))
+            .lookup(&cx, dir_b.ino, OsStr::new("child"))
             .expect("lookup in dst");
         assert_eq!(found.ino, child.ino);
     }
@@ -16406,9 +16441,9 @@ mod tests {
             mtime: Some(epoch_plus_1000),
             ..SetAttrRequest::default()
         };
-        fs.setattr(&cx, &mut RequestScope::empty(), ino, &time_attrs).expect("set times");
+        fs.setattr(&cx, ino, &time_attrs).expect("set times");
 
-        let ga = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+        let ga = fs.getattr(&cx, ino).expect("getattr");
         assert_eq!(ga.atime, epoch_plus_1000);
         assert_eq!(ga.mtime, epoch_plus_1000);
     }
@@ -16422,7 +16457,7 @@ mod tests {
         let root = InodeNumber(2);
 
         let attr = fs
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("punch.txt"), 0o644, 0, 0)
+            .create(&cx, root, OsStr::new("punch.txt"), 0o644, 0, 0)
             .expect("create");
         let ino = attr.ino;
 
@@ -16441,10 +16476,10 @@ mod tests {
         .expect("punch hole");
 
         // Size should be preserved
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga").size, 12288);
+        assert_eq!(fs.getattr(&cx, ino).expect("ga").size, 12288);
 
         // Read the punched region — should be zeros
-        let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 12288).expect("read");
+        let data = fs.read(&cx, ino, 0, 12288).expect("read");
         assert!(
             data[4096..8192].iter().all(|&b| b == 0),
             "punched region should be zeroed"
@@ -16478,7 +16513,7 @@ mod tests {
         }
 
         // Verify all files exist via readdir
-        let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
         let entry_names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
         for name in &created_names {
             assert!(
@@ -16514,7 +16549,7 @@ mod tests {
             .expect("symlink");
 
         // Readlink should return the target path
-        let readlink = fs.readlink(&cx, &mut RequestScope::empty(), link.ino).expect("readlink");
+        let readlink = fs.readlink(&cx, link.ino).expect("readlink");
         assert_eq!(readlink, b"sym_target.txt");
 
         // The symlink inode itself is not a regular file — writing to it should fail
@@ -16532,16 +16567,16 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
         let attr = fs
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_zero.bin"), 0o644, 0, 0)
+            .create(&cx, root, OsStr::new("falloc_zero.bin"), 0o644, 0, 0)
             .expect("create");
         fs.write(&cx, attr.ino, 0, b"AAAA").expect("write");
-        let before = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga before");
+        let before = fs.getattr(&cx, attr.ino).expect("ga before");
 
         // Zero-length fallocate should be a no-op
-        fs.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 0, 0)
+        fs.fallocate(&cx, attr.ino, 0, 0, 0)
             .expect("fallocate 0 len");
 
-        let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga after");
+        let after = fs.getattr(&cx, attr.ino).expect("ga after");
         assert_eq!(before.size, after.size);
         assert_eq!(before.blocks, after.blocks);
     }
@@ -16641,20 +16676,20 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
         let attr = fs
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_extend.bin"), 0o644, 0, 0)
+            .create(&cx, root, OsStr::new("falloc_extend.bin"), 0o644, 0, 0)
             .expect("create");
         // File starts empty (size 0)
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga0").size, 0);
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga0").size, 0);
 
         // fallocate without KEEP_SIZE should extend the file size
         fs.fallocate(&cx, attr.ino, 0, 16384, 0)
             .expect("fallocate extend");
-        let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga1");
+        let after = fs.getattr(&cx, attr.ino).expect("ga1");
         assert_eq!(after.size, 16384, "size should be extended to 16K");
         assert!(after.blocks > 0, "should have allocated blocks");
 
         // The preallocated region should read as zeros
-        let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16384).expect("read");
+        let data = fs.read(&cx, attr.ino, 0, 16384).expect("read");
         assert!(data.iter().all(|&b| b == 0), "prealloc should be zeroed");
     }
 
@@ -16666,15 +16701,15 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
         let attr = fs
-            .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_ks.bin"), 0o644, 0, 0)
+            .create(&cx, root, OsStr::new("falloc_ks.bin"), 0o644, 0, 0)
             .expect("create");
         fs.write(&cx, attr.ino, 0, b"small").expect("write");
-        let before = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga before");
+        let before = fs.getattr(&cx, attr.ino).expect("ga before");
 
         // KEEP_SIZE fallocate beyond EOF should not change reported size
         fs.fallocate(&cx, attr.ino, 0, 16384, libc::FALLOC_FL_KEEP_SIZE)
             .expect("fallocate keep_size");
-        let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga after");
+        let after = fs.getattr(&cx, attr.ino).expect("ga after");
         assert_eq!(after.size, before.size, "size should be unchanged");
         assert!(
             after.blocks >= before.blocks,
@@ -16706,7 +16741,7 @@ mod tests {
         };
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
-        let stat = fs.statfs(&cx, &mut RequestScope::empty(), root).expect("statfs");
+        let stat = fs.statfs(&cx, root).expect("statfs");
         assert!(stat.blocks > 0, "should have blocks");
         assert!(stat.blocks_free <= stat.blocks, "free <= total");
         assert!(stat.blocks_available <= stat.blocks_free, "avail <= free");
@@ -16732,7 +16767,7 @@ mod tests {
         // statfs should still return internally consistent values after mutations.
         // Note: ext4 statfs reads from the on-disk superblock snapshot, not the
         // live allocator state, so free counts may not decrease immediately.
-        let stat = fs.statfs(&cx, &mut RequestScope::empty(), root).expect("statfs after");
+        let stat = fs.statfs(&cx, root).expect("statfs after");
         assert!(stat.blocks > 0, "should have blocks");
         assert!(stat.blocks_free <= stat.blocks, "free <= total");
         assert!(stat.blocks_available <= stat.blocks_free, "avail <= free");
@@ -16801,7 +16836,7 @@ mod tests {
             .expect("create");
         let n = fs.write(&cx, attr.ino, 0, b"").expect("write empty");
         assert_eq!(n, 0, "empty write should return 0 bytes written");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga").size, 0);
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga").size, 0);
     }
 
     #[test]
@@ -16826,7 +16861,7 @@ mod tests {
             "expected Exists, got {err:?}"
         );
         // Verify a is still intact
-        let _ = fs.getattr(&cx, &mut RequestScope::empty(), a.ino).expect("a still ok");
+        let _ = fs.getattr(&cx, a.ino).expect("a still ok");
     }
 
     #[test]
@@ -16862,7 +16897,7 @@ mod tests {
             mode: Some(0o777),
             ..SetAttrRequest::default()
         };
-        let after = fs.setattr(&cx, &mut RequestScope::empty(), attr.ino, &req).expect("setattr");
+        let after = fs.setattr(&cx, attr.ino, &req).expect("setattr");
         // Permission bits should be 0o777
         assert_eq!(after.perm & 0o7777, 0o777, "perm should be 0o777");
         // File type must still be regular file (S_IFREG)
@@ -16889,7 +16924,7 @@ mod tests {
             .expect("unlink");
         // Lookup should fail now
         let err = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("will_die.txt"))
+            .lookup(&cx, root, OsStr::new("will_die.txt"))
             .expect_err("lookup after unlink");
         assert!(
             matches!(err, FfsError::NotFound(_)),
@@ -16913,7 +16948,7 @@ mod tests {
         }
 
         // Verify all 3 appear in readdir
-        let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
         let names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
         for i in 0..3 {
             let name = format!("life_{i}.txt");
@@ -16925,7 +16960,7 @@ mod tests {
             .expect("unlink");
 
         // Verify only 2 remain
-        let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir after");
+        let entries = fs.readdir(&cx, root, 0).expect("readdir after");
         let names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
         assert!(names.contains(&"life_0.txt".to_owned()));
         assert!(
@@ -16945,21 +16980,21 @@ mod tests {
         let attr = fs
             .create(&cx, root, OsStr::new("nlink_src.txt"), 0o644, 0, 0)
             .expect("create");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga1").nlink, 1);
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga1").nlink, 1);
 
         // Create a hard link — nlink should be 2
         fs.link(&cx, attr.ino, root, OsStr::new("nlink_lnk.txt"))
             .expect("link");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga2").nlink, 2);
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga2").nlink, 2);
 
         // Unlink the original — nlink should drop to 1
         fs.unlink(&cx, root, OsStr::new("nlink_src.txt"))
             .expect("unlink orig");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga3").nlink, 1);
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga3").nlink, 1);
 
         // Data should still be accessible via the hard link
         fs.write(&cx, attr.ino, 0, b"alive").expect("write");
-        let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 5).expect("read");
+        let data = fs.read(&cx, attr.ino, 0, 5).expect("read");
         assert_eq!(&data, b"alive");
     }
 
@@ -16980,15 +17015,15 @@ mod tests {
             size: Some(8192),
             ..SetAttrRequest::default()
         };
-        fs.setattr(&cx, &mut RequestScope::empty(), attr.ino, &req).expect("extend");
-        assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga").size, 8192);
+        fs.setattr(&cx, attr.ino, &req).expect("extend");
+        assert_eq!(fs.getattr(&cx, attr.ino).expect("ga").size, 8192);
 
         // The first 4 bytes should be "HEAD"
-        let head = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4).expect("read head");
+        let head = fs.read(&cx, attr.ino, 0, 4).expect("read head");
         assert_eq!(&head, b"HEAD");
 
         // Bytes beyond original data should read as zeros
-        let tail = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 4, 100).expect("read tail");
+        let tail = fs.read(&cx, attr.ino, 4, 100).expect("read tail");
         assert!(
             tail.iter().all(|&b| b == 0),
             "sparse extension should be zero-filled"
@@ -17017,17 +17052,17 @@ mod tests {
         .expect("rename");
 
         // Source name should be gone
-        let err = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("ren_src.txt"));
+        let err = fs.lookup(&cx, root, OsStr::new("ren_src.txt"));
         assert!(err.is_err(), "source should not exist");
 
         // Destination should resolve to the same inode
         let dst = fs
-            .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("ren_dst.txt"))
+            .lookup(&cx, root, OsStr::new("ren_dst.txt"))
             .expect("lookup dst");
         assert_eq!(dst.ino, attr.ino);
 
         // Data should be intact
-        let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 7).expect("read");
+        let data = fs.read(&cx, attr.ino, 0, 7).expect("read");
         assert_eq!(&data, b"payload");
     }
 
@@ -17038,13 +17073,13 @@ mod tests {
         };
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
-        let nlink_before = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga before").nlink;
+        let nlink_before = fs.getattr(&cx, root).expect("ga before").nlink;
 
         fs.mkdir(&cx, root, OsStr::new("subdir_nlink"), 0o755, 0, 0)
             .expect("mkdir");
 
         // Parent nlink should increase (child's ".." entry)
-        let nlink_after_mkdir = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga mid").nlink;
+        let nlink_after_mkdir = fs.getattr(&cx, root).expect("ga mid").nlink;
         assert_eq!(
             nlink_after_mkdir,
             nlink_before + 1,
@@ -17053,14 +17088,14 @@ mod tests {
 
         fs.rmdir(&cx, root, OsStr::new("subdir_nlink"))
             .expect("rmdir");
-        let nlink_after_rmdir = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga after").nlink;
+        let nlink_after_rmdir = fs.getattr(&cx, root).expect("ga after").nlink;
         assert_eq!(
             nlink_after_rmdir, nlink_before,
             "parent nlink should return to original"
         );
 
         // Child should be gone from readdir
-        let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
         assert!(
             !entries
                 .iter()
@@ -17327,7 +17362,7 @@ mod tests {
             let fs = OpenFs::open_with_options(&cx, &tmp_path, &opts).expect("reopen for verify");
 
             // Verify directory structure
-            let root_entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir root");
+            let root_entries = fs.readdir(&cx, root, 0).expect("readdir root");
             let root_names: Vec<String> = root_entries.iter().map(DirEntry::name_str).collect();
 
             for d in 0..dir_count {
@@ -17339,11 +17374,11 @@ mod tests {
 
                 // Lookup the directory
                 let dir_attr = fs
-                    .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new(&dir_name))
+                    .lookup(&cx, root, OsStr::new(&dir_name))
                     .expect("lookup dir");
 
                 // Verify files inside
-                let dir_entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir dir");
+                let dir_entries = fs.readdir(&cx, dir_attr.ino, 0).expect("readdir dir");
                 let file_names: Vec<String> = dir_entries.iter().map(DirEntry::name_str).collect();
 
                 for f in 0..files_per_dir {
@@ -17353,13 +17388,13 @@ mod tests {
 
                     // Lookup the file
                     let file_attr = fs
-                        .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&file_name))
+                        .lookup(&cx, dir_attr.ino, OsStr::new(&file_name))
                         .expect("lookup file");
 
                     // Read and verify content
                     let expected = deterministic_content(&full_name, file_size);
                     let data = fs
-                        .read(&cx, &mut RequestScope::empty(), file_attr.ino, 0, file_size)
+                        .read(&cx, file_attr.ino, 0, file_size)
                         .expect("read file");
                     assert_eq!(data, expected, "content mismatch for {full_name}");
                 }
@@ -17414,7 +17449,7 @@ mod tests {
             fs.enable_writes(&cx).expect("enable writes");
 
             let dir_attr = fs
-                .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("modify_test"))
+                .lookup(&cx, root, OsStr::new("modify_test"))
                 .expect("lookup dir");
 
             // Delete items 0-4
@@ -17428,7 +17463,7 @@ mod tests {
             for i in 10..15 {
                 let name = format!("item_{i:02}.txt");
                 let attr = fs
-                    .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+                    .lookup(&cx, dir_attr.ino, OsStr::new(&name))
                     .expect("lookup");
                 let new_content = format!("MODIFIED content {i}");
                 fs.write(&cx, attr.ino, 0, new_content.as_bytes())
@@ -17456,10 +17491,10 @@ mod tests {
             let fs = OpenFs::open_with_options(&cx, &tmp_path, &opts).expect("reopen for verify");
 
             let dir_attr = fs
-                .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("modify_test"))
+                .lookup(&cx, root, OsStr::new("modify_test"))
                 .expect("lookup dir");
 
-            let entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir");
+            let entries = fs.readdir(&cx, dir_attr.ino, 0).expect("readdir");
             let names: Vec<String> = entries.iter().map(DirEntry::name_str).collect();
 
             // Items 0-4 should be deleted
@@ -17473,9 +17508,9 @@ mod tests {
                 let name = format!("item_{i:02}.txt");
                 assert!(names.contains(&name), "{name} should exist");
                 let attr = fs
-                    .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+                    .lookup(&cx, dir_attr.ino, OsStr::new(&name))
                     .expect("lookup");
-                let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+                let data = fs.read(&cx, attr.ino, 0, 256).expect("read");
                 let expected = format!("original content {i}");
                 assert_eq!(
                     &data[..expected.len()],
@@ -17489,9 +17524,9 @@ mod tests {
                 let name = format!("item_{i:02}.txt");
                 assert!(names.contains(&name), "{name} should exist");
                 let attr = fs
-                    .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+                    .lookup(&cx, dir_attr.ino, OsStr::new(&name))
                     .expect("lookup");
-                let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+                let data = fs.read(&cx, attr.ino, 0, 256).expect("read");
                 let expected = format!("MODIFIED content {i}");
                 assert_eq!(
                     &data[..expected.len()],
@@ -17511,9 +17546,9 @@ mod tests {
                 let name = format!("item_{i:02}.txt");
                 assert!(names.contains(&name), "{name} should exist");
                 let attr = fs
-                    .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+                    .lookup(&cx, dir_attr.ino, OsStr::new(&name))
                     .expect("lookup");
-                let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+                let data = fs.read(&cx, attr.ino, 0, 256).expect("read");
                 let expected = format!("new content {i}");
                 assert_eq!(
                     &data[..expected.len()],
@@ -18571,6 +18606,7 @@ mod tests {
         let attr = ops
             .create(
                 &cx,
+                &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("newfile.txt"),
                 0o644,
@@ -18815,6 +18851,7 @@ mod tests {
 
         ops.rename(
             &cx,
+            &mut RequestScope::empty(),
             InodeNumber(1),
             OsStr::new("old.txt"),
             InodeNumber(1),
@@ -18842,6 +18879,7 @@ mod tests {
         let attr = ops
             .symlink(
                 &cx,
+                &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("link"),
                 Path::new("/tmp/target"),
@@ -18865,6 +18903,7 @@ mod tests {
         let attr = ops
             .symlink(
                 &cx,
+                &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("long-link"),
                 Path::new(&long_target),
@@ -18889,7 +18928,7 @@ mod tests {
         assert_eq!(attr.nlink, 1);
 
         let linked = ops
-            .link(&cx, attr.ino, InodeNumber(1), OsStr::new("hardlink.txt"))
+            .link(&cx, &mut RequestScope::empty(), attr.ino, InodeNumber(1), OsStr::new("hardlink.txt"))
             .unwrap();
         assert_eq!(linked.ino, attr.ino);
         assert_eq!(linked.nlink, 2);
@@ -18917,6 +18956,7 @@ mod tests {
         let new_attr = ops
             .setattr(
                 &cx,
+                &mut RequestScope::empty(),
                 attr.ino,
                 &SetAttrRequest {
                     mode: Some(0o755),
@@ -18940,6 +18980,7 @@ mod tests {
         let truncated = ops
             .setattr(
                 &cx,
+                &mut RequestScope::empty(),
                 attr.ino,
                 &SetAttrRequest {
                     size: Some(5),
@@ -19055,6 +19096,7 @@ mod tests {
 
         ops.rename(
             &cx,
+            &mut RequestScope::empty(),
             InodeNumber(1),
             OsStr::new("old.txt"),
             InodeNumber(1),
@@ -19090,7 +19132,7 @@ mod tests {
         assert_eq!(ops.getxattr(&cx, attr.ino, "user.foo").unwrap(), None);
 
         // Set an xattr.
-        ops.setxattr(&cx, attr.ino, "user.foo", b"bar", XattrSetMode::Set)
+        ops.setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.foo", b"bar", XattrSetMode::Set)
             .unwrap();
 
         // List should return the name.
@@ -19115,9 +19157,9 @@ mod tests {
             .unwrap();
 
         // Set two xattrs.
-        ops.setxattr(&cx, attr.ino, "user.alpha", b"aaa", XattrSetMode::Set)
+        ops.setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.alpha", b"aaa", XattrSetMode::Set)
             .unwrap();
-        ops.setxattr(&cx, attr.ino, "user.beta", b"bbb", XattrSetMode::Set)
+        ops.setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.beta", b"bbb", XattrSetMode::Set)
             .unwrap();
 
         let mut names = ops.listxattr(&cx, attr.ino).unwrap();
@@ -19125,7 +19167,7 @@ mod tests {
         assert_eq!(names, vec!["user.alpha", "user.beta"]);
 
         // Remove one.
-        let removed = ops.removexattr(&cx, attr.ino, "user.alpha").unwrap();
+        let removed = ops.removexattr(&cx, &mut RequestScope::empty(), attr.ino, "user.alpha").unwrap();
         assert!(removed);
 
         let names = ops.listxattr(&cx, attr.ino).unwrap();
@@ -19148,7 +19190,7 @@ mod tests {
             .create(&cx, &mut RequestScope::empty(), InodeNumber(1), OsStr::new("over.txt"), 0o644, 0, 0)
             .unwrap();
 
-        ops.setxattr(&cx, attr.ino, "user.key", b"old", XattrSetMode::Set)
+        ops.setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.key", b"old", XattrSetMode::Set)
             .unwrap();
         assert_eq!(
             ops.getxattr(&cx, attr.ino, "user.key").unwrap(),
@@ -19156,7 +19198,7 @@ mod tests {
         );
 
         // Overwrite with new value.
-        ops.setxattr(&cx, attr.ino, "user.key", b"new-value", XattrSetMode::Set)
+        ops.setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.key", b"new-value", XattrSetMode::Set)
             .unwrap();
         assert_eq!(
             ops.getxattr(&cx, attr.ino, "user.key").unwrap(),
@@ -19176,6 +19218,7 @@ mod tests {
         let attr = ops
             .create(
                 &cx,
+                &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("xattr_modes.txt"),
                 0o644,
@@ -19184,11 +19227,11 @@ mod tests {
             )
             .unwrap();
 
-        ops.setxattr(&cx, attr.ino, "user.color", b"blue", XattrSetMode::Create)
+        ops.setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.color", b"blue", XattrSetMode::Create)
             .expect("initial create");
 
         let err = ops
-            .setxattr(&cx, attr.ino, "user.color", b"green", XattrSetMode::Create)
+            .setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.color", b"green", XattrSetMode::Create)
             .expect_err("create on existing xattr should fail");
         assert_eq!(err.to_errno(), libc::EEXIST);
         assert_eq!(
@@ -19198,7 +19241,7 @@ mod tests {
         );
 
         let err = ops
-            .setxattr(&cx, attr.ino, "user.missing", b"x", XattrSetMode::Replace)
+            .setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.missing", b"x", XattrSetMode::Replace)
             .expect_err("replace on missing xattr should fail");
         assert_eq!(err.to_errno(), libc::ENOENT);
         assert_eq!(ops.getxattr(&cx, attr.ino, "user.missing").unwrap(), None);
@@ -19294,6 +19337,7 @@ mod tests {
         let err = ops
             .fallocate(
                 &cx,
+                &mut RequestScope::empty(),
                 attr.ino,
                 0,
                 4096,
@@ -19332,6 +19376,7 @@ mod tests {
         let attr = ops
             .create(
                 &cx,
+                &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("mode_bits.bin"),
                 0o644,
@@ -19394,6 +19439,7 @@ mod tests {
             let attr = ops
                 .create(
                     &cx,
+                    &mut RequestScope::empty(),
                     InodeNumber(1),
                     OsStr::new("log_success.bin"),
                     0o644,
@@ -19449,6 +19495,7 @@ mod tests {
             let attr = ops
                 .create(
                     &cx,
+                    &mut RequestScope::empty(),
                     InodeNumber(1),
                     OsStr::new("log_reject.bin"),
                     0o644,
@@ -19456,9 +19503,7 @@ mod tests {
                     0,
                 )
                 .expect("create file for fallocate rejection log test");
-            ops.fallocate(
-                &cx,
-                attr.ino,
+            ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino,
                 0,
                 4096,
                 libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
@@ -19520,6 +19565,7 @@ mod tests {
             let attr = ops
                 .create(
                     &cx,
+                    &mut RequestScope::empty(),
                     InodeNumber(1),
                     OsStr::new("log_reject_mode_bits.bin"),
                     0o644,
@@ -19582,6 +19628,7 @@ mod tests {
             let attr = ops
                 .create(
                     &cx,
+                    &mut RequestScope::empty(),
                     InodeNumber(1),
                     OsStr::new("fsync_log_success.bin"),
                     0o644,
@@ -19591,7 +19638,7 @@ mod tests {
                 .expect("create file for fsync log success test");
             ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, b"sync-me")
                 .expect("seed file before fsync");
-            ops.fsync(&cx, attr.ino, 0, false)
+            ops.fsync(&cx, &mut RequestScope::empty(), attr.ino, 0, false)
                 .expect("fsync should succeed");
         });
 
@@ -19636,7 +19683,7 @@ mod tests {
             let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
                 .expect("open read-only btrfs filesystem");
             let ops: &dyn FsOps = &fs;
-            ops.fsync(&cx, InodeNumber(1), 0, false)
+            ops.fsync(&cx, &mut RequestScope::empty(), InodeNumber(1), 0, false)
                 .expect_err("fsync should be rejected on read-only mount")
         });
         assert_eq!(err.to_errno(), libc::EROFS);
@@ -19679,7 +19726,7 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
-            ops.fsyncdir(&cx, InodeNumber(1), 0, false)
+            ops.fsyncdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0, false)
                 .expect("fsyncdir should succeed");
         });
 
@@ -20544,7 +20591,7 @@ mod tests {
             fs.enable_writes(&cx).expect("enable writes");
             let fs_ops: &dyn FsOps = &fs;
             fs_ops
-                .fsync(&cx, InodeNumber(2), 0, false)
+                .fsync(&cx, &mut RequestScope::empty(), InodeNumber(2), 0, false)
                 .expect("ext4 fsync should succeed");
         });
 
@@ -20589,7 +20636,7 @@ mod tests {
             let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
                 .expect("open read-only ext4 for fsync rejection contract");
             let ops: &dyn FsOps = &fs;
-            ops.fsync(&cx, InodeNumber(2), 0, false)
+            ops.fsync(&cx, &mut RequestScope::empty(), InodeNumber(2), 0, false)
                 .expect_err("ext4 fsync should be rejected on read-only mount")
         });
         assert_eq!(err.to_errno(), libc::EROFS);
@@ -20636,7 +20683,7 @@ mod tests {
             let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
                 .expect("open read-only ext4 for flush contract");
             let ops: &dyn FsOps = &fs;
-            ops.flush(&cx, InodeNumber(2), 7, 13)
+            ops.flush(&cx, &mut RequestScope::empty(), InodeNumber(2), 7, 13)
                 .expect("flush should succeed");
         });
 
@@ -20681,7 +20728,7 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
-            ops.flush(&cx, InodeNumber(1), 5, 11)
+            ops.flush(&cx, &mut RequestScope::empty(), InodeNumber(1), 5, 11)
                 .expect("btrfs flush should succeed");
         });
 
@@ -20720,7 +20767,7 @@ mod tests {
             .create(&cx, &mut RequestScope::empty(), InodeNumber(1), OsStr::new("doomed.txt"), 0o644, 0, 0)
             .unwrap();
         ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, b"data to purge").unwrap();
-        ops.setxattr(&cx, attr.ino, "user.tag", b"val", XattrSetMode::Set)
+        ops.setxattr(&cx, &mut RequestScope::empty(), attr.ino, "user.tag", b"val", XattrSetMode::Set)
             .unwrap();
 
         // Unlink the file.
@@ -20743,7 +20790,7 @@ mod tests {
         ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, b"shared data").unwrap();
 
         // Create a hard link.
-        ops.link(&cx, attr.ino, InodeNumber(1), OsStr::new("link.txt"))
+        ops.link(&cx, &mut RequestScope::empty(), attr.ino, InodeNumber(1), OsStr::new("link.txt"))
             .unwrap();
         let link_attr = ops
             .lookup(&cx, &mut RequestScope::empty(), InodeNumber(1), OsStr::new("link.txt"))
@@ -20785,6 +20832,7 @@ mod tests {
         // Rename winner → victim (overwrite).
         ops.rename(
             &cx,
+            &mut RequestScope::empty(),
             InodeNumber(1),
             OsStr::new("winner.txt"),
             InodeNumber(1),
@@ -20881,9 +20929,7 @@ mod tests {
         assert_eq!(data, b"hello world");
 
         // Truncate to 0.
-        ops.setattr(
-            &cx,
-            attr.ino,
+        ops.setattr(&cx, &mut RequestScope::empty(), attr.ino,
             &SetAttrRequest {
                 size: Some(0),
                 ..Default::default()
@@ -20913,9 +20959,7 @@ mod tests {
         ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, b"hello world!").unwrap();
 
         // Truncate to 5 bytes.
-        ops.setattr(
-            &cx,
-            attr.ino,
+        ops.setattr(&cx, &mut RequestScope::empty(), attr.ino,
             &SetAttrRequest {
                 size: Some(5),
                 ..Default::default()
@@ -20954,6 +20998,7 @@ mod tests {
         // Rename sub from a/ to b/.
         ops.rename(
             &cx,
+            &mut RequestScope::empty(),
             dir_a.ino,
             OsStr::new("sub"),
             dir_b.ino,
@@ -20992,6 +21037,7 @@ mod tests {
         // Rename sub from a/ to b/.
         ops.rename(
             &cx,
+            &mut RequestScope::empty(),
             dir_a.ino,
             OsStr::new("sub"),
             dir_b.ino,
@@ -21020,6 +21066,7 @@ mod tests {
         // Rename file within the same directory.
         ops.rename(
             &cx,
+            &mut RequestScope::empty(),
             InodeNumber(1),
             OsStr::new("old.txt"),
             InodeNumber(1),

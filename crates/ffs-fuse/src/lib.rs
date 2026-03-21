@@ -3383,9 +3383,9 @@ mod tests {
                     let cx = Cx::for_testing();
                     barrier.wait();
                     for _ in 0..100 {
-                        let _ = fs.getattr(&cx, InodeNumber(1));
-                        let _ = fs.readdir(&cx, InodeNumber(1), 0);
-                        let _ = fs.read(&cx, InodeNumber(1), 0, 4096);
+                        let _ = fs.getattr(&cx, &mut RequestScope::empty(), InodeNumber(1));
+                        let _ = fs.readdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0);
+                        let _ = fs.read(&cx, &mut RequestScope::empty(), InodeNumber(1), 0, 4096);
                     }
                 });
             }
@@ -3442,9 +3442,9 @@ mod tests {
                     let cx = Cx::for_testing();
                     barrier.wait();
                     for _ in 0..1000 {
-                        let _ = inner.ops.getattr(&cx, InodeNumber(2));
+                        let _ = inner.ops.getattr(&cx, &mut RequestScope::empty(), InodeNumber(2));
                         inner.metrics.record_ok();
-                        let _ = inner.ops.read(&cx, InodeNumber(2), 0, 4096);
+                        let _ = inner.ops.read(&cx, &mut RequestScope::empty(), InodeNumber(2), 0, 4096);
                         inner.metrics.record_bytes_read(4096);
                     }
                 });

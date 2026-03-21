@@ -150,7 +150,7 @@ mod tests {
         let scope = RequestScope::empty();
         assert_eq!(scope.snapshot, None);
         assert_eq!(scope.tx, None);
-        assert_eq!(scope, RequestScope::default());
+        assert_eq!(scope, RequestScope::empty());
     }
 
     #[test]

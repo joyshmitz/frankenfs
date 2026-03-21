@@ -196,7 +196,7 @@ impl RequestOp {
 /// Current read-only implementations can return an empty scope. Future write
 /// implementations may attach a transaction captured at request
 /// start so that begin/end hooks can manage commit/abort semantics.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestScope {
     pub snapshot: Option<Snapshot>,
     pub tx: Option<ffs_mvcc::Transaction>,
