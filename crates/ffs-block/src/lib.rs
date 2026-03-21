@@ -2895,12 +2895,17 @@ impl<D: BlockDevice> ArcCache<D> {
         }
 
         if let Err(err) = self.notify_repair_flush(cx, &pending_flush) {
-            self.restore_pending_flush_candidates(pending_flush);
+            // Blocks were already written to device by flush_blocks above.
+            // Do NOT restore them as dirty — just log the repair notification
+            // failure and continue. The blocks are persisted; only the repair
+            // system missed the notification.
             error!(event = "pending_flush_batch_repair_notify_failed", error = %err);
-            return Err(err);
         }
 
         let mut guard = self.state.lock();
+        for candidate in &pending_flush {
+            guard.clear_dirty(candidate.block);
+        }
         guard.dirty_flushes += pending_flush.len() as u64;
         info!(
             event = "pending_flush_batch_complete",
@@ -3158,16 +3163,16 @@ impl<D: BlockDevice> ArcCache<D> {
         }
 
         if let Err(err) = self.notify_repair_flush(cx, &flushes) {
-            let attempted_blocks = flushes.len();
-            self.restore_pending_flush_candidates(flushes);
+            // Blocks were already written to device by flush_blocks above.
+            // Do NOT restore them as dirty — the write is durable. Only
+            // the repair notification was lost; log and continue.
             error!(
                 event = "flush_batch_repair_notify_failed",
                 error = %err,
-                attempted_blocks,
+                attempted_blocks = flushes.len(),
                 duration_ms = started.elapsed().as_millis(),
                 attempted_bytes = flush_bytes
             );
-            return Err(err);
         }
 
         let mut guard = self.state.lock();
@@ -3244,13 +3249,13 @@ impl<D: BlockDevice> ArcCache<D> {
         }
 
         if let Err(err) = self.notify_repair_flush(cx, &flushes) {
-            self.restore_pending_flush_candidates(flushes);
+            // Blocks already persisted by flush_blocks. Only repair
+            // notification was lost — log and continue.
             error!(
                 event = "flush_dirty_repair_notify_failed",
                 error = %err,
                 duration_ms = started.elapsed().as_millis()
             );
-            return Err(err);
         }
 
         let mut guard = self.state.lock();
