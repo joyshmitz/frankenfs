@@ -2173,7 +2173,7 @@ impl OpenFs {
         for ino in orphans {
             stats.scanned = stats.scanned.saturating_add(1);
 
-            let mut inode = match self.read_inode(cx, &RequestScope::empty(), ino) {
+            let mut inode = match self.read_inode(cx, ino) {
                 Ok(inode) => inode,
                 Err(err) => {
                     stats.skipped = stats.skipped.saturating_add(1);
@@ -2312,7 +2312,7 @@ impl OpenFs {
             let ino = InodeNumber(u64::from(next));
             inodes.push(ino);
 
-            match self.read_inode(cx, &RequestScope::empty(), ino) {
+            match self.read_inode(cx, ino) {
                 Ok(inode) => {
                     next = inode.dtime;
                 }
@@ -2386,7 +2386,7 @@ impl OpenFs {
         }
 
         let journal_ino = InodeNumber(u64::from(journal_inum));
-        let journal_inode = self.read_inode(cx, &RequestScope::empty(), journal_ino)?;
+        let journal_inode = self.read_inode(cx, journal_ino)?;
         let extents = self.collect_extents(cx, &journal_inode)?;
         if extents.is_empty() {
             info!(
@@ -2711,7 +2711,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("ext4_geometry not available".into()))?;
 
         for g in 0..geo.group_count {
-            let gd = self.read_group_desc(cx, &RequestScope::empty(), GroupNumber(g))?;
+            let gd = self.read_group_desc(cx, GroupNumber(g))?;
             groups.push(GroupStats::from_group_desc(GroupNumber(g), &gd));
         }
 
@@ -4040,7 +4040,7 @@ impl OpenFs {
 
             let ino = InodeNumber(u64::from(next));
             inodes.push(ino);
-            let inode = self.read_inode(cx, &RequestScope::empty(), ino)?;
+            let inode = self.read_inode(cx, ino)?;
             next = inode.dtime;
         }
 
@@ -4062,7 +4062,7 @@ impl OpenFs {
         let _sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let gd = self.read_group_desc(cx, &RequestScope::empty(), group)?;
+        let gd = self.read_group_desc(cx, group)?;
 
         // Read the bitmap block
         self.read_block_vec(cx, BlockNumber(gd.block_bitmap))
@@ -4081,7 +4081,7 @@ impl OpenFs {
         let _sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let gd = self.read_group_desc(cx, &RequestScope::empty(), group)?;
+        let gd = self.read_group_desc(cx, group)?;
 
         // Read the bitmap block
         self.read_block_vec(cx, BlockNumber(gd.inode_bitmap))
@@ -4162,7 +4162,7 @@ impl OpenFs {
             total_free_inodes += u64::from(free_inodes);
 
             // Get group descriptor values for comparison
-            let gd = self.read_group_desc(cx, &RequestScope::empty(), group)?;
+            let gd = self.read_group_desc(cx, group)?;
             gd_free_blocks += u64::from(gd.free_blocks_count);
             gd_free_inodes += u64::from(gd.free_inodes_count);
         }
@@ -5160,13 +5160,13 @@ impl OpenFs {
         let csum_seed = sb.csum_seed();
 
         // Determine parent's group for locality hint.
-        let parent_inode = self.read_inode(cx, &RequestScope::empty(), parent)?;
+        let parent_inode = self.read_inode(cx, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
 
         // Check for duplicate name — POSIX requires EEXIST.
-        if self.lookup_name(cx, &RequestScope::empty(), &parent_inode, name)?.is_some() {
+        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
             return Err(FfsError::Exists);
         }
 
@@ -5247,13 +5247,13 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let parent_inode = self.read_inode(cx, &RequestScope::empty(), parent)?;
+        let parent_inode = self.read_inode(cx, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
 
         // Check for duplicate name — POSIX requires EEXIST.
-        if self.lookup_name(cx, &RequestScope::empty(), &parent_inode, name)?.is_some() {
+        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
             return Err(FfsError::Exists);
         }
 
@@ -5427,7 +5427,7 @@ impl OpenFs {
                     block_dev.write_block(cx, block, &data)?;
 
                     // Update parent mtime/ctime.
-                    let mut parent_upd = self.read_inode(cx, &RequestScope::empty(), parent)?;
+                    let mut parent_upd = self.read_inode(cx, parent)?;
                     ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
                     ffs_inode::write_inode(
                         cx,
@@ -5482,7 +5482,7 @@ impl OpenFs {
         block_dev.write_block(cx, new_alloc.start, &new_block)?;
 
         // Insert extent for the new directory block.
-        let mut parent_upd = self.read_inode(cx, &RequestScope::empty(), parent)?;
+        let mut parent_upd = self.read_inode(cx, parent)?;
         let logical_end = extents
             .iter()
             .map(|e| e.logical_block + u32::from(e.actual_len()))
@@ -5547,17 +5547,17 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let parent_inode = self.read_inode(cx, &RequestScope::empty(), parent)?;
+        let parent_inode = self.read_inode(cx, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
 
         // Look up the child to get its inode number.
         let entry = self
-            .lookup_name(cx, &RequestScope::empty(), &parent_inode, name)?
+            .lookup_name(cx, &parent_inode, name)?
             .ok_or_else(|| FfsError::NotFound(String::from_utf8_lossy(name).into_owned()))?;
         let child_ino = InodeNumber(u64::from(entry.inode));
-        let child_inode = self.read_inode(cx, &RequestScope::empty(), child_ino)?;
+        let child_inode = self.read_inode(cx, child_ino)?;
 
         if expect_dir {
             if !child_inode.is_dir() {
@@ -5636,7 +5636,7 @@ impl OpenFs {
         }
 
         // Update parent timestamps.
-        let mut parent_upd = self.read_inode(cx, &RequestScope::empty(), parent)?;
+        let mut parent_upd = self.read_inode(cx, parent)?;
         if expect_dir {
             parent_upd.links_count = parent_upd.links_count.saturating_sub(1);
         }
@@ -5681,7 +5681,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let src_inode = self.read_inode(cx, &RequestScope::empty(), ino)?;
+        let src_inode = self.read_inode(cx, ino)?;
         if src_inode.is_dir() {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(EPERM_ERRNO)));
         }
@@ -5691,11 +5691,11 @@ impl OpenFs {
             )));
         }
 
-        let new_parent_inode = self.read_inode(cx, &RequestScope::empty(), new_parent)?;
+        let new_parent_inode = self.read_inode(cx, new_parent)?;
         if !new_parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
-        if self.lookup_name(cx, &RequestScope::empty(), &new_parent_inode, new_name)?.is_some() {
+        if self.lookup_name(cx, &new_parent_inode, new_name)?.is_some() {
             return Err(FfsError::Exists);
         }
 
@@ -5762,11 +5762,11 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let parent_inode = self.read_inode(cx, &RequestScope::empty(), parent)?;
+        let parent_inode = self.read_inode(cx, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
-        if self.lookup_name(cx, &RequestScope::empty(), &parent_inode, name)?.is_some() {
+        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
             return Err(FfsError::Exists);
         }
 
@@ -5835,7 +5835,7 @@ impl OpenFs {
 
         if !fast_storage {
             let _written = self.ext4_write(cx, &mut RequestScope::empty(), ino, 0, target_bytes)?;
-            symlink_inode = self.read_inode(cx, &RequestScope::empty(), ino)?;
+            symlink_inode = self.read_inode(cx, ino)?;
         }
 
         debug!(
@@ -5900,7 +5900,7 @@ impl OpenFs {
             )));
         }
 
-        let mut inode = self.read_inode(cx, &RequestScope::empty(), ino)?;
+        let mut inode = self.read_inode(cx, ino)?;
         if inode.is_dir() {
             return Err(FfsError::IsDirectory);
         }
@@ -6097,7 +6097,7 @@ impl OpenFs {
         let block_size = sb.block_size;
         let bs = u64::from(block_size);
 
-        let mut inode = self.read_inode(cx, &RequestScope::empty(), ino)?;
+        let mut inode = self.read_inode(cx, ino)?;
         if inode.is_dir() {
             return Err(FfsError::IsDirectory);
         }
@@ -6261,17 +6261,17 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let parent_inode = self.read_inode(cx, &RequestScope::empty(), parent)?;
+        let parent_inode = self.read_inode(cx, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
 
         // Look up the source entry.
         let entry = self
-            .lookup_name(cx, &RequestScope::empty(), &parent_inode, name)?
+            .lookup_name(cx, &parent_inode, name)?
             .ok_or_else(|| FfsError::NotFound(String::from_utf8_lossy(name).into_owned()))?;
         let child_ino = InodeNumber(u64::from(entry.inode));
-        let child_inode = self.read_inode(cx, &RequestScope::empty(), child_ino)?;
+        let child_inode = self.read_inode(cx, child_ino)?;
         let ft = inode_dir_entry_file_type(&child_inode);
 
         let mut alloc = alloc_mutex.lock();
@@ -6280,15 +6280,15 @@ impl OpenFs {
         let new_parent_inode = if new_parent == parent {
             parent_inode.clone()
         } else {
-            self.read_inode(cx, &RequestScope::empty(), new_parent)?
+            self.read_inode(cx, new_parent)?
         };
         if !new_parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
 
-        if let Some(existing) = self.lookup_name(cx, &RequestScope::empty(), &new_parent_inode, new_name)? {
+        if let Some(existing) = self.lookup_name(cx, &new_parent_inode, new_name)? {
             let existing_ino = InodeNumber(u64::from(existing.inode));
-            let existing_inode = self.read_inode(cx, &RequestScope::empty(), existing_ino)?;
+            let existing_inode = self.read_inode(cx, existing_ino)?;
 
             if existing_inode.is_dir() {
                 if !child_inode.is_dir() {
@@ -6324,7 +6324,7 @@ impl OpenFs {
                 ex_upd.links_count = 0;
 
                 // Decrement the new parent's link count for the ".." backref from the deleted directory.
-                let mut new_par = self.read_inode(cx, &RequestScope::empty(), new_parent)?;
+                let mut new_par = self.read_inode(cx, new_parent)?;
                 new_par.links_count = new_par.links_count.saturating_sub(1);
                 ffs_inode::touch_mtime_ctime(&mut new_par, tstamp_secs, tstamp_nanos);
                 {
@@ -6382,7 +6382,7 @@ impl OpenFs {
         }
 
         // Add new entry to target parent.
-        let new_parent_inode_fresh = self.read_inode(cx, &RequestScope::empty(), new_parent)?;
+        let new_parent_inode_fresh = self.read_inode(cx, new_parent)?;
         self.ext4_add_dir_entry(
             cx,
             &block_dev,
@@ -6423,7 +6423,7 @@ impl OpenFs {
             }
 
             // Decrement old parent link count, increment new parent.
-            let mut old_parent = self.read_inode(cx, &RequestScope::empty(), parent)?;
+            let mut old_parent = self.read_inode(cx, parent)?;
             old_parent.links_count = old_parent.links_count.saturating_sub(1);
             ffs_inode::touch_mtime_ctime(&mut old_parent, tstamp_secs, tstamp_nanos);
             ffs_inode::write_inode(
@@ -6436,7 +6436,7 @@ impl OpenFs {
                 csum_seed,
             )?;
 
-            let mut new_par = self.read_inode(cx, &RequestScope::empty(), new_parent)?;
+            let mut new_par = self.read_inode(cx, new_parent)?;
             new_par.links_count = new_par.links_count.saturating_add(1);
             ffs_inode::touch_mtime_ctime(&mut new_par, tstamp_secs, tstamp_nanos);
             ffs_inode::write_inode(
@@ -6451,7 +6451,7 @@ impl OpenFs {
         }
 
         // Touch ctime on the moved inode.
-        let mut child_upd = self.read_inode(cx, &RequestScope::empty(), child_ino)?;
+        let mut child_upd = self.read_inode(cx, child_ino)?;
         ffs_inode::touch_ctime(&mut child_upd, tstamp_secs, tstamp_nanos);
         ffs_inode::write_inode(
             cx,
@@ -6494,7 +6494,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let mut inode = self.read_inode(cx, &RequestScope::empty(), ino)?;
+        let mut inode = self.read_inode(cx, ino)?;
 
         if let Some(mode) = attrs.mode {
             // Preserve file type bits (upper 4 bits of 16-bit mode).
@@ -6617,7 +6617,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let mut inode = self.read_inode(cx, &RequestScope::empty(), ino)?;
+        let mut inode = self.read_inode(cx, ino)?;
         let old_acl = inode.file_acl;
         let mut external_block = None;
         let mut old_refcount = 1;
@@ -6861,7 +6861,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let mut inode = self.read_inode(cx, &RequestScope::empty(), ino)?;
+        let mut inode = self.read_inode(cx, ino)?;
         let old_acl = inode.file_acl;
         let mut external_block = None;
         let mut old_refcount = 1;
@@ -8924,7 +8924,7 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let parent_ino = Self::ext4_canonical_inode(parent);
-                let parent_inode = self.read_inode(cx, &RequestScope::empty(), parent_ino)?;
+                let parent_inode = self.read_inode(cx, parent_ino)?;
                 if !parent_inode.is_dir() {
                     return Err(FfsError::NotDirectory);
                 }
@@ -8951,7 +8951,7 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<Vec<DirEntry>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                let inode = self.read_inode(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))?;
+                let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
                 if !inode.is_dir() {
                     return Err(FfsError::NotDirectory);
                 }
@@ -8997,7 +8997,7 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                let inode = self.read_inode(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))?;
+                let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
                 let mut buf = vec![0_u8; size as usize];
                 let n = self.read_file_data(cx, scope, &inode, offset, &mut buf)?;
                 buf.truncate(n);
@@ -9092,7 +9092,7 @@ impl FsOps for OpenFs {
     fn listxattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<String>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                let inode = self.read_inode(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))?;
+                let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
                 let mut xattrs =
                     ffs_ondisk::parse_ibody_xattrs(&inode).map_err(|e| parse_to_ffs_error(&e))?;
                 if inode.file_acl != 0 {
@@ -9115,7 +9115,7 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<Option<Vec<u8>>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                let inode = self.read_inode(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))?;
+                let inode = self.read_inode(cx, Self::ext4_canonical_inode(ino))?;
                 let mut xattrs =
                     ffs_ondisk::parse_ibody_xattrs(&inode).map_err(|e| parse_to_ffs_error(&e))?;
                 if inode.file_acl != 0 {
