@@ -16,12 +16,12 @@ use compression::{CompressionStats, VersionData};
 use crossbeam_epoch as epoch;
 use ffs_block::{BlockBuf, BlockDevice, FlushPinToken, MvccFlushLifecycle};
 use ffs_error::{FfsError, Result as FfsResult};
+pub use ffs_repair::evidence::TxnAbortReason;
 use ffs_repair::evidence::{
     ContentionSampleDetail, EvidenceRecord, MergeAppliedDetail, MergeProofCheckedDetail,
     MergeRejectedDetail, PolicySwitchedDetail, SerializationConflictDetail,
     TransactionCommitDetail, TxnAbortedDetail,
 };
-pub use ffs_repair::evidence::TxnAbortReason;
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};

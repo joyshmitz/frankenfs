@@ -820,6 +820,9 @@ pub fn inode_to_group(ino: InodeNumber, inodes_per_group: u32) -> GroupNumber {
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // modulo by u32 always fits in u32
 pub fn inode_index_in_group(ino: InodeNumber, inodes_per_group: u32) -> u32 {
+    if inodes_per_group == 0 {
+        return 0;
+    }
     ((ino.0.saturating_sub(1)) % u64::from(inodes_per_group)) as u32
 }
 
