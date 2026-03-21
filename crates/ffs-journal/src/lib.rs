@@ -141,6 +141,18 @@ struct PendingTxn {
     revoked: BTreeSet<BlockNumber>,
 }
 
+const JOURNAL_SEQ_HALF_RANGE: u32 = 1 << 31;
+
+#[inline]
+const fn journal_seq_is_newer(candidate: u32, current: u32) -> bool {
+    candidate != current && candidate.wrapping_sub(current) < JOURNAL_SEQ_HALF_RANGE
+}
+
+#[inline]
+const fn journal_seq_is_newer_or_equal(candidate: u32, current: u32) -> bool {
+    candidate == current || journal_seq_is_newer(candidate, current)
+}
+
 /// Replay JBD2 descriptor/commit/revoke blocks from a journal region.
 ///
 /// Behavior:
@@ -315,7 +327,7 @@ fn replay_jbd2_inner(
                 max_revoke_seq
                     .entry(revoked_block)
                     .and_modify(|existing| {
-                        if (seq.wrapping_sub(*existing) as i32) > 0 {
+                        if journal_seq_is_newer(seq, *existing) {
                             *existing = seq;
                         }
                     })
@@ -335,7 +347,7 @@ fn replay_jbd2_inner(
                     } else {
                         // Write is revoked if it belongs to an older or same transaction
                         // as the latest revoke.
-                        (revoked_seq.wrapping_sub(seq) as i32) >= 0
+                        journal_seq_is_newer_or_equal(revoked_seq, seq)
                     }
                 } else {
                     false
@@ -551,7 +563,7 @@ impl Jbd2Writer {
                 break;
             }
 
-            if max_seq == start_seq || (header.sequence.wrapping_sub(max_seq) as i32) >= 0 {
+            if max_seq == start_seq || journal_seq_is_newer_or_equal(header.sequence, max_seq) {
                 max_seq = header.sequence.wrapping_add(1);
             }
 
@@ -1528,14 +1540,20 @@ mod tests {
 
         // Transaction 1: Seq = u32::MAX
         // Target Block 5 -> Data 0x11
-        dev.raw_write(BlockNumber(10), descriptor_block(512, u32::MAX, &[(5, JBD2_TAG_FLAG_LAST)]));
+        dev.raw_write(
+            BlockNumber(10),
+            descriptor_block(512, u32::MAX, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
         dev.raw_write(BlockNumber(11), vec![0x11; 512]);
         dev.raw_write(BlockNumber(12), commit_block(512, u32::MAX));
 
         // Transaction 2: Seq = 0 (wrapped)
         // Target Block 5 -> Data 0x22
         // This is NEWER than Transaction 1.
-        dev.raw_write(BlockNumber(13), descriptor_block(512, 0, &[(5, JBD2_TAG_FLAG_LAST)]));
+        dev.raw_write(
+            BlockNumber(13),
+            descriptor_block(512, 0, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
         dev.raw_write(BlockNumber(14), vec![0x22; 512]);
         dev.raw_write(BlockNumber(15), commit_block(512, 0));
 
@@ -1543,7 +1561,11 @@ mod tests {
 
         let target = dev.read_block(&cx, BlockNumber(5)).expect("read");
         // In a correct replay, the NEWER transaction (seq 0) should win.
-        assert_eq!(target.as_slice(), &[0x22; 512], "Wrapped sequence 0 should win over u32::MAX");
+        assert_eq!(
+            target.as_slice(),
+            &[0x22; 512],
+            "Wrapped sequence 0 should win over u32::MAX"
+        );
     }
 
     #[test]

@@ -176,8 +176,7 @@ pub fn add_entry(
             return Err(FfsError::Corruption {
                 block: 0,
                 detail: format!(
-                    "directory entry name_len {} exceeds rec_len {} at offset {}",
-                    cur_name_len, rec_len, off
+                    "directory entry name_len {cur_name_len} exceeds rec_len {rec_len} at offset {off}"
                 ),
             });
         }
@@ -270,8 +269,7 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
             return Err(FfsError::Corruption {
                 block: 0,
                 detail: format!(
-                    "directory entry name_len {} exceeds rec_len {} at offset {}",
-                    cur_name_len, rec_len, off
+                    "directory entry name_len {cur_name_len} exceeds rec_len {rec_len} at offset {off}"
                 ),
             });
         }

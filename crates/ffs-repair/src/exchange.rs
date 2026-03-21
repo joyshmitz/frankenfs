@@ -199,15 +199,15 @@ impl Store for InMemoryStore {
     fn get_symbols(&self, cx: &Cx, group_id: u32, min_generation: u64) -> Result<LookupResult> {
         cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
         let groups = self.lock_groups()?;
-        let Some(stored) = groups.get(&group_id) else {
-            return Ok(LookupResult::NotFound);
-        };
-        if stored.generation < min_generation {
-            return Ok(LookupResult::Stale {
+        let result = match groups.get(&group_id) {
+            None => LookupResult::NotFound,
+            Some(stored) if stored.generation < min_generation => LookupResult::Stale {
                 current_generation: stored.generation,
-            });
-        }
-        Ok(LookupResult::Found(stored.clone()))
+            },
+            Some(stored) => LookupResult::Found(stored.clone()),
+        };
+        drop(groups);
+        Ok(result)
     }
 
     fn put_symbols(
@@ -234,6 +234,7 @@ impl Store for InMemoryStore {
                 symbols: symbols.to_vec(),
             },
         );
+        drop(groups);
 
         Ok(StoreResult::Stored {
             generation,
@@ -426,7 +427,7 @@ impl<S: Store> Server<S> {
             } => self
                 .store
                 .get_symbols(cx, group_id, generation)
-                .and_then(response_for_lookup),
+                .map(response_for_lookup),
             Request::PutSymbols {
                 group_id,
                 generation,
@@ -435,7 +436,7 @@ impl<S: Store> Server<S> {
                 let tuples = symbols.into_iter().map(Into::into).collect::<Vec<_>>();
                 self.store
                     .put_symbols(cx, group_id, generation, &tuples)
-                    .and_then(response_for_store)
+                    .map(|result| response_for_store(&result))
             }
         };
 
@@ -445,28 +446,30 @@ impl<S: Store> Server<S> {
     }
 }
 
-fn response_for_lookup(result: LookupResult) -> Result<Response> {
-    Ok(match result {
+fn response_for_lookup(result: LookupResult) -> Response {
+    match result {
         LookupResult::Found(found) => Response::Symbols {
             generation: found.generation,
             symbols: found.symbols.into_iter().map(WireSymbol::from).collect(),
         },
         LookupResult::NotFound => Response::NotFound,
         LookupResult::Stale { current_generation } => Response::Stale { current_generation },
-    })
+    }
 }
 
-fn response_for_store(result: StoreResult) -> Result<Response> {
-    Ok(match result {
+fn response_for_store(result: &StoreResult) -> Response {
+    match result {
         StoreResult::Stored {
             generation,
             symbol_count,
         } => Response::Stored {
-            generation,
-            symbol_count,
+            generation: *generation,
+            symbol_count: *symbol_count,
         },
-        StoreResult::Stale { current_generation } => Response::Stale { current_generation },
-    })
+        StoreResult::Stale { current_generation } => Response::Stale {
+            current_generation: *current_generation,
+        },
+    }
 }
 
 fn lookup_from_response(response: Response) -> Result<LookupResult> {
@@ -538,10 +541,9 @@ fn effective_timeout(cx: &Cx, fallback: Duration) -> Result<Duration> {
         return Err(FfsError::Cancelled);
     }
 
-    let timeout = match budget.remaining_time(now) {
-        Some(remaining) => remaining.min(fallback),
-        None => fallback,
-    };
+    let timeout = budget
+        .remaining_time(now)
+        .map_or(fallback, |remaining| remaining.min(fallback));
 
     if timeout.is_zero() {
         return Err(FfsError::Cancelled);
@@ -550,7 +552,7 @@ fn effective_timeout(cx: &Cx, fallback: Duration) -> Result<Duration> {
     Ok(timeout)
 }
 
-fn configure_stream_timeouts(cx: &Cx, stream: &mut TcpStream, fallback: Duration) -> Result<()> {
+fn configure_stream_timeouts(cx: &Cx, stream: &TcpStream, fallback: Duration) -> Result<()> {
     let timeout = effective_timeout(cx, fallback)?;
     stream
         .set_read_timeout(Some(timeout))
@@ -689,7 +691,7 @@ mod tests {
             generation: 8,
             symbols: symbols.clone(),
         });
-        let response = response_for_lookup(lookup).expect("response");
+        let response = response_for_lookup(lookup);
         let decoded = lookup_from_response(response).expect("lookup");
         assert_eq!(
             decoded,

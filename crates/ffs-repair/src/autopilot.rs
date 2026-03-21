@@ -130,6 +130,7 @@ impl DurabilityAutopilot {
     }
 
     /// Expected loss with a custom data loss cost (e.g. for metadata).
+    #[must_use]
     pub fn expected_loss_custom(
         &self,
         overhead: f64,

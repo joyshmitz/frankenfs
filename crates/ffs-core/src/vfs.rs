@@ -222,29 +222,26 @@ impl RequestScope {
     ) -> ffs_error::Result<CommitSeq> {
         if let Some(tx) = self.tx.take() {
             let tx_id = tx.id().0;
-            mvcc_store
-                .write()
-                .commit(tx)
-                .map_err(|error| match error {
-                    ffs_mvcc::CommitError::Conflict { block, .. }
-                    | ffs_mvcc::CommitError::ChainBackpressure { block, .. } => {
-                        ffs_error::FfsError::MvccConflict {
-                            tx: tx_id,
-                            block: block.0,
-                        }
+            mvcc_store.write().commit(tx).map_err(|error| match error {
+                ffs_mvcc::CommitError::Conflict { block, .. }
+                | ffs_mvcc::CommitError::ChainBackpressure { block, .. } => {
+                    ffs_error::FfsError::MvccConflict {
+                        tx: tx_id,
+                        block: block.0,
                     }
-                    ffs_mvcc::CommitError::SsiConflict { pivot_block, .. } => {
-                        ffs_error::FfsError::MvccConflict {
-                            tx: tx_id,
-                            block: pivot_block.0,
-                        }
+                }
+                ffs_mvcc::CommitError::SsiConflict { pivot_block, .. } => {
+                    ffs_error::FfsError::MvccConflict {
+                        tx: tx_id,
+                        block: pivot_block.0,
                     }
-                    ffs_mvcc::CommitError::DurabilityFailure { detail } => {
-                        ffs_error::FfsError::Io(std::io::Error::other(format!(
-                            "MVCC durability failure during request-scope commit: {detail}"
-                        )))
-                    }
-                })
+                }
+                ffs_mvcc::CommitError::DurabilityFailure { detail } => {
+                    ffs_error::FfsError::Io(std::io::Error::other(format!(
+                        "MVCC durability failure during request-scope commit: {detail}"
+                    )))
+                }
+            })
         } else {
             Ok(CommitSeq(0))
         }
@@ -325,14 +322,25 @@ pub trait FsOps: Send + Sync {
     ///
     /// Returns the attributes for the given inode. Returns
     /// `FfsError::NotFound` if the inode does not exist.
-    fn getattr(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<InodeAttr>;
+    fn getattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<InodeAttr>;
 
     /// Look up a directory entry by name.
     ///
     /// Returns the attributes of the child inode named `name` within the
     /// directory `parent`. Returns `FfsError::NotFound` if the name does
     /// not exist, or `FfsError::NotDirectory` if `parent` is not a directory.
-    fn lookup(&self, cx: &Cx, scope: &mut RequestScope, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<InodeAttr>;
+    fn lookup(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+    ) -> ffs_error::Result<InodeAttr>;
 
     /// List directory entries starting from `offset`.
     ///
@@ -342,24 +350,46 @@ pub trait FsOps: Send + Sync {
     /// result indicates the end of the directory.
     ///
     /// Returns `FfsError::NotDirectory` if `ino` is not a directory.
-    fn readdir(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber, offset: u64) -> ffs_error::Result<Vec<DirEntry>>;
+    fn readdir(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+    ) -> ffs_error::Result<Vec<DirEntry>>;
 
     /// Read file data.
     ///
     /// Returns up to `size` bytes starting at byte `offset` within the
     /// file identified by `ino`. Returns fewer bytes at EOF. Returns
     /// `FfsError::IsDirectory` if `ino` is a directory.
-    fn read(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber, offset: u64, size: u32)
-    -> ffs_error::Result<Vec<u8>>;
+    fn read(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+        size: u32,
+    ) -> ffs_error::Result<Vec<u8>>;
 
     /// Read the target of a symbolic link.
     ///
     /// Returns the raw bytes of the symlink target. Returns
     /// `FfsError::Format` if `ino` is not a symlink.
-    fn readlink(&self, cx: &Cx, scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<Vec<u8>>;
+    fn readlink(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<Vec<u8>>;
 
     /// Return filesystem-level capacity and free-space statistics.
-    fn statfs(&self, _cx: &Cx, _scope: &mut RequestScope, _ino: InodeNumber) -> ffs_error::Result<FsStat> {
+    fn statfs(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<FsStat> {
         Err(FfsError::UnsupportedFeature(
             "statfs is not implemented by this backend".to_owned(),
         ))

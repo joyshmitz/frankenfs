@@ -85,7 +85,7 @@ mod gf256 {
         let mut val = 1_u32;
         let mut i = 0;
         while i < 512 {
-            table[i] = val as u8;
+            table[i] = val.to_le_bytes()[0];
             val <<= 1;
             if val >= 256 {
                 val ^= 0x11B;

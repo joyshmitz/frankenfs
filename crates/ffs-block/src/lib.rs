@@ -822,6 +822,8 @@ struct FlushCandidate {
     data: BlockBuf,
     txn_id: TxnId,
     commit_seq: CommitSeq,
+    /// Internal dirty-tracker sequence number at the time this candidate was captured.
+    seq: u64,
 }
 
 /// Ordered tracking of dirty blocks with deterministic age semantics.
@@ -861,7 +863,17 @@ impl DirtyTracker {
         self.dirty_bytes = self.dirty_bytes.saturating_add(bytes);
     }
 
-    fn clear_dirty(&mut self, block: BlockNumber) {
+    fn clear_dirty(&mut self, block: BlockNumber, seq: u64) {
+        if let Some(entry) = self.by_block.get(&block).copied() {
+            if entry.seq == seq {
+                self.by_block.remove(&block);
+                let _ = self.by_age.remove(&(entry.seq, block));
+                self.dirty_bytes = self.dirty_bytes.saturating_sub(entry.bytes);
+            }
+        }
+    }
+
+    fn clear_dirty_unconditional(&mut self, block: BlockNumber) {
         if let Some(entry) = self.by_block.remove(&block) {
             let _ = self.by_age.remove(&(entry.seq, block));
             self.dirty_bytes = self.dirty_bytes.saturating_sub(entry.bytes);
@@ -1178,7 +1190,7 @@ impl ArcState {
         {
             let _ = self.access_count.remove(&victim);
         }
-        self.clear_dirty(victim);
+        self.clear_dirty_unconditional(victim);
         trace!(event = "cache_evict_clean", block = victim.0);
         true
     }
@@ -1810,8 +1822,13 @@ impl ArcState {
     }
 
     /// Clear the dirty flag for a block (after flushing to disk).
-    fn clear_dirty(&mut self, block: BlockNumber) {
-        self.dirty.clear_dirty(block);
+    fn clear_dirty(&mut self, block: BlockNumber, seq: u64) {
+        self.dirty.clear_dirty(block, seq);
+    }
+
+    /// Clear the dirty flag for a block unconditionally.
+    fn clear_dirty_unconditional(&mut self, block: BlockNumber) {
+        self.dirty.clear_dirty_unconditional(block);
     }
 
     /// Check if a block is dirty.
@@ -1903,6 +1920,7 @@ impl ArcState {
                     data,
                     txn_id: entry.txn_id,
                     commit_seq,
+                    seq: entry.seq,
                 });
                 queued.insert(block);
             }
@@ -1980,6 +1998,7 @@ impl ArcState {
                     data,
                     txn_id: entry.txn_id,
                     commit_seq,
+                    seq: entry.seq,
                 });
                 queued.insert(block);
             }
@@ -2579,7 +2598,7 @@ impl<D: BlockDevice> ArcCache<D> {
                     entry.txn_id == txn_id && matches!(entry.state, DirtyState::InFlight)
                 });
                 if is_same_txn_inflight {
-                    guard.clear_dirty(*block);
+                    guard.clear_dirty_unconditional(*block);
                     discarded.push(block.0);
                 }
             }
@@ -2904,7 +2923,7 @@ impl<D: BlockDevice> ArcCache<D> {
 
         let mut guard = self.state.lock();
         for candidate in &pending_flush {
-            guard.clear_dirty(candidate.block);
+            guard.clear_dirty(candidate.block, candidate.seq);
         }
         guard.dirty_flushes += pending_flush.len() as u64;
         info!(
@@ -2984,7 +3003,7 @@ impl<D: BlockDevice> BlockDevice for ArcCache<D> {
                 state = "committed"
             );
         } else {
-            guard.clear_dirty(block);
+            guard.clear_dirty_unconditional(block);
         }
 
         let metrics = guard.snapshot_metrics();
@@ -3060,7 +3079,7 @@ impl<D: BlockDevice> BlockDevice for ArcCache<D> {
 impl<D: BlockDevice> BlockCache for ArcCache<D> {
     fn mark_clean(&self, block: BlockNumber) {
         let mut guard = self.state.lock();
-        guard.clear_dirty(block);
+        guard.clear_dirty_unconditional(block);
         let metrics = guard.snapshot_metrics();
         drop(guard);
         trace!(
@@ -3097,7 +3116,7 @@ impl<D: BlockDevice> BlockCache for ArcCache<D> {
         removed |= ArcState::remove_from_list(&mut guard.b1, block);
         removed |= ArcState::remove_from_list(&mut guard.b2, block);
         removed |= guard.resident.remove(&block).is_some();
-        guard.clear_dirty(block);
+        guard.clear_dirty_unconditional(block);
         let _ = guard.loc.remove(&block);
 
         let evicted = if removed {
@@ -3177,7 +3196,7 @@ impl<D: BlockDevice> ArcCache<D> {
 
         let mut guard = self.state.lock();
         for candidate in &flushes {
-            guard.clear_dirty(candidate.block);
+            guard.clear_dirty(candidate.block, candidate.seq);
         }
         guard.dirty_flushes += flushes.len() as u64;
         let metrics = guard.snapshot_metrics();
@@ -3260,7 +3279,7 @@ impl<D: BlockDevice> ArcCache<D> {
 
         let mut guard = self.state.lock();
         for candidate in &flushes {
-            guard.clear_dirty(candidate.block);
+            guard.clear_dirty(candidate.block, candidate.seq);
         }
         guard.dirty_flushes += flushes.len() as u64;
         let metrics = guard.snapshot_metrics();
@@ -6791,17 +6810,45 @@ mod tests {
         assert_eq!(dt.dirty_count(), 1);
         assert_eq!(dt.dirty_bytes(), 4096);
 
-        dt.clear_dirty(BlockNumber(5));
+        dt.clear_dirty_unconditional(BlockNumber(5));
         assert!(!dt.is_dirty(BlockNumber(5)));
         assert_eq!(dt.dirty_count(), 0);
         assert_eq!(dt.dirty_bytes(), 0);
     }
 
     #[test]
-    fn dirty_tracker_clear_nonexistent_is_noop() {
+    fn dirty_tracker_clear_conditional_prevents_race() {
         let mut dt = DirtyTracker::default();
-        dt.clear_dirty(BlockNumber(999)); // should not panic
-        assert_eq!(dt.dirty_count(), 0);
+        let block = BlockNumber(1);
+
+        // 1. T1 marks block dirty (seq 0)
+        dt.mark_dirty(block, 4096, TxnId(1), None, DirtyState::Committed);
+        let entry1 = dt.entry(block).unwrap();
+        assert_eq!(entry1.seq, 0);
+
+        // 2. T2 marks block dirty again (seq 1) before T1's flush completes
+        dt.mark_dirty(block, 4096, TxnId(2), None, DirtyState::InFlight);
+        let entry2 = dt.entry(block).unwrap();
+        assert_eq!(entry2.seq, 1);
+
+        // 3. T1's flush completes and tries to clear seq 0
+        dt.clear_dirty(block, entry1.seq);
+
+        // 4. Verification: entry2 (seq 1) should STILL be there!
+        let entry_final = dt
+            .entry(block)
+            .expect("T2's dirty entry was incorrectly cleared by T1's flush completion!");
+        assert_eq!(entry_final.seq, 1);
+        assert_eq!(dt.dirty_count(), 1);
+    }
+
+    #[test]
+    fn dirty_tracker_clear_unconditional_works() {
+        let mut dt = DirtyTracker::default();
+        let block = BlockNumber(1);
+        dt.mark_dirty(block, 4096, TxnId(1), None, DirtyState::Committed);
+        dt.clear_dirty_unconditional(block);
+        assert!(!dt.is_dirty(block));
     }
 
     #[test]
@@ -7805,7 +7852,7 @@ mod tests {
             }
             let unique: HashSet<u64> = block_ids.iter().copied().collect();
             for &id in &unique {
-                tracker.clear_dirty(BlockNumber(id));
+                tracker.clear_dirty_unconditional(BlockNumber(id));
             }
             prop_assert_eq!(tracker.dirty_count(), 0);
             prop_assert_eq!(tracker.dirty_bytes(), 0);
@@ -8206,7 +8253,7 @@ mod tests {
         assert_eq!(tracker.dirty_bytes(), 4096);
         assert_eq!(tracker.state_counts(), (1, 0));
 
-        tracker.clear_dirty(BlockNumber(5));
+        tracker.clear_dirty_unconditional(BlockNumber(5));
         assert!(!tracker.is_dirty(BlockNumber(5)));
         assert_eq!(tracker.dirty_count(), 0);
         assert_eq!(tracker.dirty_bytes(), 0);
@@ -8215,7 +8262,7 @@ mod tests {
     #[test]
     fn dirty_tracker_clear_absent_block_is_noop() {
         let mut tracker = DirtyTracker::default();
-        tracker.clear_dirty(BlockNumber(99));
+        tracker.clear_dirty_unconditional(BlockNumber(99));
         assert_eq!(tracker.dirty_count(), 0);
     }
 
@@ -8250,7 +8297,7 @@ mod tests {
         assert_eq!(tracker.oldest_dirty_age_ticks(), Some(2));
 
         // Clear oldest — age gap shrinks.
-        tracker.clear_dirty(BlockNumber(0));
+        tracker.clear_dirty_unconditional(BlockNumber(0));
         assert_eq!(tracker.oldest_dirty_age_ticks(), Some(1));
     }
 
