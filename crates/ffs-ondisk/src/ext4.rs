@@ -1035,6 +1035,10 @@ pub struct Ext4GroupDesc {
     pub itable_unused: u32,
     pub flags: u16,
     pub checksum: u16,
+    /// CRC32C of the block bitmap (lo 16 bits at 0x18, hi 16 bits at 0x38).
+    pub block_bitmap_csum: u32,
+    /// CRC32C of the inode bitmap (lo 16 bits at 0x1A, hi 16 bits at 0x3A).
+    pub inode_bitmap_csum: u32,
 }
 
 impl Ext4GroupDesc {
@@ -1061,6 +1065,9 @@ impl Ext4GroupDesc {
         let free_inodes_lo = u32::from(read_le_u16(bytes, 0x0E)?);
         let used_dirs_lo = u32::from(read_le_u16(bytes, 0x10)?);
         let flags = read_le_u16(bytes, 0x12)?;
+        // Bitmap checksums (lo halves in 32-byte descriptor).
+        let block_bitmap_csum_lo = u32::from(read_le_u16(bytes, 0x18)?);
+        let inode_bitmap_csum_lo = u32::from(read_le_u16(bytes, 0x1A)?);
         let itable_unused_lo = u32::from(read_le_u16(bytes, 0x1C)?);
         let checksum = read_le_u16(bytes, 0x1E)?;
 
@@ -1073,6 +1080,9 @@ impl Ext4GroupDesc {
             let free_inodes_hi = u32::from(read_le_u16(bytes, 0x2E)?);
             let used_dirs_hi = u32::from(read_le_u16(bytes, 0x30)?);
             let itable_unused_hi = u32::from(read_le_u16(bytes, 0x32)?);
+            // Bitmap checksum hi halves in 64-byte descriptor.
+            let block_bitmap_csum_hi = u32::from(read_le_u16(bytes, 0x38)?);
+            let inode_bitmap_csum_hi = u32::from(read_le_u16(bytes, 0x3A)?);
 
             Ok(Self {
                 block_bitmap: block_bitmap_lo | (block_bitmap_hi << 32),
@@ -1084,6 +1094,8 @@ impl Ext4GroupDesc {
                 itable_unused: itable_unused_lo | (itable_unused_hi << 16),
                 flags,
                 checksum,
+                block_bitmap_csum: block_bitmap_csum_lo | (block_bitmap_csum_hi << 16),
+                inode_bitmap_csum: inode_bitmap_csum_lo | (inode_bitmap_csum_hi << 16),
             })
         } else {
             Ok(Self {
@@ -1096,6 +1108,8 @@ impl Ext4GroupDesc {
                 itable_unused: itable_unused_lo,
                 flags,
                 checksum,
+                block_bitmap_csum: block_bitmap_csum_lo,
+                inode_bitmap_csum: inode_bitmap_csum_lo,
             })
         }
     }
@@ -1130,6 +1144,8 @@ impl Ext4GroupDesc {
             write_le_u16(buf, 0x0E, self.free_inodes_count as u16);
             write_le_u16(buf, 0x10, self.used_dirs_count as u16);
             write_le_u16(buf, 0x12, self.flags);
+            write_le_u16(buf, 0x18, self.block_bitmap_csum as u16);
+            write_le_u16(buf, 0x1A, self.inode_bitmap_csum as u16);
             write_le_u16(buf, 0x1C, self.itable_unused as u16);
             write_le_u16(buf, 0x1E, self.checksum);
         }
@@ -1142,6 +1158,8 @@ impl Ext4GroupDesc {
             write_le_u16(buf, 0x2E, (self.free_inodes_count >> 16) as u16);
             write_le_u16(buf, 0x30, (self.used_dirs_count >> 16) as u16);
             write_le_u16(buf, 0x32, (self.itable_unused >> 16) as u16);
+            write_le_u16(buf, 0x38, (self.block_bitmap_csum >> 16) as u16);
+            write_le_u16(buf, 0x3A, (self.inode_bitmap_csum >> 16) as u16);
         }
 
         Ok(())
