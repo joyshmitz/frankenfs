@@ -3932,7 +3932,12 @@ impl OpenFs {
                     if *compression != 0 {
                         // Compressed extent: read entire compressed blob, decompress,
                         // then slice the decompressed result.
-                        let compressed_len = usize::try_from(*disk_num_bytes).unwrap_or(usize::MAX);
+                        let compressed_len =
+                            usize::try_from(*disk_num_bytes).map_err(|_| FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "compressed extent disk_num_bytes exceeds addressable size"
+                                    .into(),
+                            })?;
                         let mut compressed = vec![0_u8; compressed_len];
                         self.btrfs_read_logical_into(cx, *disk_bytenr, &mut compressed)?;
                         let decompressed = Self::btrfs_decompress(
@@ -3951,10 +3956,17 @@ impl OpenFs {
                                 }
                             })?;
                         let src_end = src_start + copy_len;
-                        if src_end <= decompressed.len() {
-                            out[dst_start..dst_start + copy_len]
-                                .copy_from_slice(&decompressed[src_start..src_end]);
+                        if src_end > decompressed.len() {
+                            return Err(FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: format!(
+                                    "decompressed extent too short: need {src_end} bytes, got {}",
+                                    decompressed.len()
+                                ),
+                            });
                         }
+                        out[dst_start..dst_start + copy_len]
+                            .copy_from_slice(&decompressed[src_start..src_end]);
                     } else {
                         // Uncompressed: direct read from logical address.
                         let source_logical = disk_bytenr
@@ -5020,13 +5032,23 @@ impl OpenFs {
         }
 
         // Assemble inline data: i_block (60 bytes) + xattr ibody payload.
+        //
+        // The ext4 inline data continuation is stored as the VALUE of a
+        // `system.data` xattr (name_index=7, name="data") in the ibody
+        // area. We parse the ibody xattrs and extract the system.data value.
         let mut inline_data =
             Vec::with_capacity(inode.extent_bytes.len() + inode.xattr_ibody.len());
         inline_data.extend_from_slice(&inode.extent_bytes);
-        // The xattr ibody area may contain the inline data continuation
-        // after a 4-byte xattr header (magic). Skip the magic if present.
-        if inode.xattr_ibody.len() > 4 {
-            inline_data.extend_from_slice(&inode.xattr_ibody[4..]);
+
+        // Parse ibody xattrs to find the system.data continuation.
+        if let Ok(xattrs) = ffs_ondisk::parse_ibody_xattrs(inode) {
+            for xattr in &xattrs {
+                // name_index 7 = EXT4_XATTR_INDEX_SYSTEM, name = "data"
+                if xattr.name_index == 7 && xattr.name == b"data" {
+                    inline_data.extend_from_slice(&xattr.value);
+                    break;
+                }
+            }
         }
 
         let to_read = (file_size - offset)
