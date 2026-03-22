@@ -317,7 +317,7 @@ pub fn insert(
 
         // Root is full: grow tree by one level.
         extents.insert(insert_pos, extent);
-        grow_root_leaf(cx, dev, root_bytes, &extents, alloc)?;
+        grow_root_leaf(cx, dev, root_bytes, &extents, alloc, header.generation)?;
         return Ok(());
     }
 
@@ -505,7 +505,9 @@ fn grow_root_leaf(
     root_bytes: &mut [u8; 60],
     all_extents: &[Ext4Extent],
     alloc: &mut dyn BlockAllocator,
+    original_generation: u32,
 ) -> Result<()> {
+
     let block_size = dev.block_size();
     let mid = all_extents.len() / 2;
     let left = &all_extents[..mid];
@@ -545,7 +547,7 @@ fn grow_root_leaf(
         entries: 2,
         max_entries: ROOT_MAX_ENTRIES,
         depth: 1,
-        generation: 0,
+        generation: original_generation,
     };
     write_index_root(root_bytes, &header, &indexes);
     debug!(
@@ -605,7 +607,7 @@ fn grow_root_index(
         entries: 2,
         max_entries: ROOT_MAX_ENTRIES,
         depth: header.depth + 1,
-        generation: 0,
+        generation: header.generation,
     };
     write_index_root(root_bytes, &new_header, &new_indexes);
     debug!(

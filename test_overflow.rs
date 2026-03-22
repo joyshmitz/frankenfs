@@ -32,6 +32,12 @@ fn test_punch_hole_overflow() {
         block_size: 4096,
         first_data_block: BlockNumber(0),
         group_count: 1,
+        reserved_gdt_blocks: 0,
+        feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+        feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
+        feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+        log_groups_per_flex: 0,
+        backup_bgs: [0, 0],
     };
     let mut groups = vec![GroupStats::default()];
     let mut root_bytes = [0u8; 60];

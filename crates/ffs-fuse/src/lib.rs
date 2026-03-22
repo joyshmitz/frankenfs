@@ -473,6 +473,11 @@ impl ReadaheadManager {
             }
         };
         let mut cached = guard.map.remove(&(ino.0, offset))?;
+        // Remove from FIFO to avoid zombies.
+        if let Some(pos) = guard.fifo.iter().position(|&k| k == (ino.0, offset)) {
+            guard.fifo.remove(pos);
+        }
+
         if cached.len() <= requested_len {
             drop(guard);
             return Some(cached);

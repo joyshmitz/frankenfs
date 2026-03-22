@@ -1820,6 +1820,7 @@ impl OpenFs {
             FsFlavor::Ext4(sb) => {
                 if !options.skip_validation {
                     sb.validate_v1().map_err(|e| parse_error_to_ffs(&e))?;
+                    validate_ext4_mmp(cx, &*dev, sb)?;
                 }
                 let geom = Ext4Geometry {
                     block_size: sb.block_size,
@@ -3941,7 +3942,11 @@ impl OpenFs {
 
         let bs = u64::from(sb.block_size);
         let block_num = BlockNumber(offset / bs);
-        let offset_in_block = (offset % bs) as usize;
+        let offset_in_block = usize::try_from(offset % bs).map_err(|_| {
+            FfsError::InvalidGeometry(
+                "group desc offset within block exceeds addressable range".into(),
+            )
+        })?;
         let desc_len = usize::from(desc_size);
 
         let block_data = self.read_block_with_scope(cx, scope, block_num)?;
@@ -4001,7 +4006,9 @@ impl OpenFs {
         let abs_offset = inode_table_start_byte + inode_offset_in_table;
 
         let block_num = BlockNumber(abs_offset / bs);
-        let offset_in_block = (abs_offset % bs) as usize;
+        let offset_in_block = usize::try_from(abs_offset % bs).map_err(|_| {
+            FfsError::InvalidGeometry("inode offset within block exceeds addressable range".into())
+        })?;
         let inode_size = usize::from(sb.inode_size);
 
         let block_data = self.read_block_with_scope(cx, scope, block_num)?;
@@ -4091,13 +4098,24 @@ impl OpenFs {
     ///
     /// Returns `FfsError::Format` if this is not an ext4 filesystem.
     pub fn read_block_bitmap(&self, cx: &Cx, group: GroupNumber) -> Result<Vec<u8>, FfsError> {
-        let _sb = self
+        let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let gd = self.read_group_desc(cx, group)?;
 
         // Read the bitmap block
-        self.read_block_vec(cx, BlockNumber(gd.block_bitmap))
+        let bitmap = self.read_block_vec(cx, BlockNumber(gd.block_bitmap))?;
+        if sb.has_metadata_csum() {
+            ffs_ondisk::ext4::verify_block_bitmap_checksum(
+                &bitmap,
+                sb.csum_seed(),
+                group.0,
+                &gd,
+                sb.group_desc_size(),
+            )
+            .map_err(|e| parse_to_ffs_error(&e))?;
+        }
+        Ok(bitmap)
     }
 
     /// Read the inode allocation bitmap for a group.
@@ -4110,13 +4128,24 @@ impl OpenFs {
     ///
     /// Returns `FfsError::Format` if this is not an ext4 filesystem.
     pub fn read_inode_bitmap(&self, cx: &Cx, group: GroupNumber) -> Result<Vec<u8>, FfsError> {
-        let _sb = self
+        let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let gd = self.read_group_desc(cx, group)?;
 
         // Read the bitmap block
-        self.read_block_vec(cx, BlockNumber(gd.inode_bitmap))
+        let bitmap = self.read_block_vec(cx, BlockNumber(gd.inode_bitmap))?;
+        if sb.has_metadata_csum() {
+            ffs_ondisk::ext4::verify_inode_bitmap_checksum(
+                &bitmap,
+                sb.csum_seed(),
+                group.0,
+                &gd,
+                sb.group_desc_size(),
+            )
+            .map_err(|e| parse_to_ffs_error(&e))?;
+        }
+        Ok(bitmap)
     }
 
     /// Count free blocks in a specific group by reading and analyzing the bitmap.
@@ -4727,6 +4756,44 @@ fn validate_btrfs_superblock(sb: &BtrfsSuperblock) -> Result<(), FfsError> {
         )));
     }
     Ok(())
+}
+
+fn validate_ext4_mmp(cx: &Cx, dev: &dyn ByteDevice, sb: &Ext4Superblock) -> Result<(), FfsError> {
+    let Some(mmp_block) = sb.mmp_block_number() else {
+        return Ok(());
+    };
+    let block_size = usize::try_from(sb.block_size)
+        .map_err(|_| FfsError::InvalidGeometry("ext4 block size does not fit usize".into()))?;
+    if block_size < ffs_types::EXT4_SUPERBLOCK_SIZE {
+        return Err(FfsError::InvalidGeometry(format!(
+            "ext4 MMP requires block size >= {}, got {}",
+            ffs_types::EXT4_SUPERBLOCK_SIZE,
+            sb.block_size
+        )));
+    }
+    let offset = mmp_block
+        .checked_mul(u64::from(sb.block_size))
+        .ok_or_else(|| FfsError::InvalidGeometry("ext4 MMP block offset overflow".into()))?;
+    let mut raw = vec![0_u8; block_size];
+    dev.read_exact_at(cx, ByteOffset(offset), &mut raw)?;
+    let mmp = ffs_ondisk::ext4::Ext4MmpBlock::parse_from_bytes(&raw)
+        .map_err(|e| parse_error_to_ffs(&e))?;
+    if sb.has_metadata_csum() {
+        mmp.validate_checksum(&raw, sb.csum_seed())
+            .map_err(|e| parse_error_to_ffs(&e))?;
+    }
+    match mmp.status() {
+        ffs_ondisk::ext4::Ext4MmpStatus::Clean => Ok(()),
+        ffs_ondisk::ext4::Ext4MmpStatus::Fsck => Err(FfsError::UnsupportedFeature(
+            "ext4 MMP block reports fsck in progress; refusing mount".into(),
+        )),
+        ffs_ondisk::ext4::Ext4MmpStatus::Active(seq) => Err(FfsError::UnsupportedFeature(format!(
+            "ext4 MMP sequence 0x{seq:08X} indicates another writer may be active; write-participating MMP is not implemented"
+        ))),
+        ffs_ondisk::ext4::Ext4MmpStatus::UnsafeUnknown(seq) => Err(FfsError::UnsupportedFeature(
+            format!("ext4 MMP sequence 0x{seq:08X} is unsafe/unknown; refusing mount"),
+        )),
+    }
 }
 
 /// Convert a mount-time `ParseError` into the appropriate `FfsError` variant.
@@ -7278,7 +7345,10 @@ impl OpenFs {
         let end = offset
             .checked_add(data_len_u64)
             .ok_or_else(|| FfsError::InvalidGeometry("offset + length overflow".into()))?;
-        let sectorsize = u64::from(alloc.nodesize.min(4096));
+        let sb = self
+            .btrfs_superblock()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+        let sectorsize = u64::from(sb.sectorsize);
 
         // For simplicity in V1, write data as an inline extent if small enough,
         // otherwise allocate a data extent and write through the device.
@@ -7484,10 +7554,13 @@ impl OpenFs {
             }
 
             let extent_bytes = extent.to_bytes();
+            // Delete any existing extent at this exact offset to avoid duplicates
+            // in the tree (btrfs requirement). Note: this doesn't handle partial
+            // overlaps or splitting existing extents yet.
+            let _ = alloc.fs_tree.delete(&extent_key);
             alloc
                 .fs_tree
-                .update(&extent_key, &extent_bytes)
-                .or_else(|_| alloc.fs_tree.insert(extent_key, &extent_bytes))
+                .insert(extent_key, &extent_bytes)
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
 
@@ -7495,7 +7568,28 @@ impl OpenFs {
         if end > inode.size {
             inode.size = end;
         }
-        inode.nbytes = inode.size;
+
+        // Recompute nbytes (total physical space used by regular extents).
+        let mut total_nbytes = 0_u64;
+        let ext_start = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let ext_end = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        if let Ok(extents) = alloc.fs_tree.range(&ext_start, &ext_end) {
+            for (_, edata) in extents {
+                if let Ok(BtrfsExtentData::Regular { num_bytes, .. }) = parse_extent_data(&edata) {
+                    total_nbytes = total_nbytes.saturating_add(num_bytes);
+                }
+            }
+        }
+        inode.nbytes = total_nbytes;
+
         let (secs, nanos) = Self::btrfs_now_timestamp();
         inode.mtime_sec = secs;
         inode.mtime_nsec = nanos;

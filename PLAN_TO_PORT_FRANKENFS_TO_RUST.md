@@ -57,11 +57,12 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` complete.
 
 ### 0.4 `ffs-ondisk` ext4 (Parsing + Validation)
 
-- [x] Expand `Ext4Superblock` parsing toward full on-disk layout (~30 fields: geometry, identity, revision, features, state/errors, timestamps, journal, htree hash seed, flex BG, checksums)
+- [x] Expand `Ext4Superblock` parsing toward full on-disk layout (~30+ fields: geometry, identity, revision, features, state/errors, timestamps, journal, htree hash seed, flex BG, MMP, sparse_super2 backup groups, checksums)
 - [x] Implement ext4 feature flag decoding (compat / ro_compat / incompat) — `has_compat`, `has_incompat`, `has_ro_compat`, `is_64bit`, `has_metadata_csum` landed
 - [x] Implement superblock validation helpers — `validate_v1` (block size, features), `validate_geometry` (blocks_per_group, inodes_per_group, inode_size, first_data_block), `validate_checksum` (CRC32C), `csum_seed`
-- [x] Implement group descriptor parsing (32/64 byte descriptors; 64-bit fields; checksum hooks) — `Ext4GroupDesc` parsing, `verify_group_desc_checksum`, `stamp_group_desc_checksum` all implemented and wired into ffs-core read/validation pipeline
+- [x] Implement group descriptor parsing (32/64 byte descriptors; 64-bit fields; checksum hooks) — `Ext4GroupDesc` parsing, descriptor checksum hooks, bitmap checksum fields, and bitmap checksum verification/stamping are implemented and wired into `ffs-core` / allocator persistence paths
 - [x] Implement inode location math — `inode_to_group`, `inode_index_in_group` in ffs-types; `Ext4Superblock::inode_table_offset` and `group_desc_offset` in ffs-ondisk
+- [x] Implement ext4 sparse/flex/MMP read-side helpers — sparse_super/sparse_super2 backup-superblock awareness, flex-group helpers, allocator reservation of backup metadata blocks, and conservative MMP mount validation
 
 ### 0.5 `ffs-ondisk` btrfs (Parsing + Mapping + Tree Primitives)
 

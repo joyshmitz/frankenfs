@@ -61,6 +61,8 @@ pub struct ShardedMvccStore {
     shard_count: usize,
     next_txn: AtomicU64,
     next_commit: AtomicU64,
+    /// Latest commit sequence number that has completed installation.
+    completed_commit: AtomicU64,
     /// Inline snapshot tracking (for callers who don't use SnapshotRegistry).
     active_snapshots: RwLock<BTreeMap<CommitSeq, u32>>,
     /// Compression policy for version chains.
@@ -95,6 +97,7 @@ impl ShardedMvccStore {
             shard_count,
             next_txn: AtomicU64::new(1),
             next_commit: AtomicU64::new(1),
+            completed_commit: AtomicU64::new(0),
             active_snapshots: RwLock::new(BTreeMap::new()),
             compression_policy: policy,
             conflict_policy: RwLock::new(ConflictPolicy::default()),
@@ -351,12 +354,17 @@ impl ShardedMvccStore {
             ctx.dedup_enabled,
             block,
         );
-        shard.versions.entry(block).or_default().push(BlockVersion {
-            block,
-            commit_seq: ctx.commit_seq,
-            writer: ctx.txn_id,
-            data: version_data,
-        });
+        let versions = shard.versions.entry(block).or_default();
+        let pos = versions.partition_point(|v| v.commit_seq < ctx.commit_seq);
+        versions.insert(
+            pos,
+            BlockVersion {
+                block,
+                commit_seq: ctx.commit_seq,
+                writer: ctx.txn_id,
+                data: version_data,
+            },
+        );
     }
 
     fn ssi_shards_for_txn(&self, txn: &Transaction) -> Vec<usize> {
@@ -411,7 +419,7 @@ impl ShardedMvccStore {
     /// The current snapshot (latest committed version).
     #[must_use]
     pub fn current_snapshot(&self) -> Snapshot {
-        let high = self.next_commit.load(Ordering::SeqCst).saturating_sub(1);
+        let high = self.completed_commit.load(Ordering::Acquire);
         Snapshot {
             high: CommitSeq(high),
         }
@@ -500,6 +508,12 @@ impl ShardedMvccStore {
             );
         }
 
+        // Wait for previous transactions to complete before publishing our commit_seq.
+        while self.completed_commit.load(Ordering::Acquire) != commit_seq.0.saturating_sub(1) {
+            std::thread::yield_now();
+        }
+        self.completed_commit.store(commit_seq.0, Ordering::Release);
+
         Ok(commit_seq)
     }
 
@@ -558,6 +572,12 @@ impl ShardedMvccStore {
             read_set,
         };
         Self::append_ssi_record_locked(&mut shard_guards, &ssi_record);
+
+        // Wait for previous transactions to complete before publishing our commit_seq.
+        while self.completed_commit.load(Ordering::Acquire) != commit_seq.0.saturating_sub(1) {
+            std::thread::yield_now();
+        }
+        self.completed_commit.store(commit_seq.0, Ordering::Release);
 
         Ok(commit_seq)
     }

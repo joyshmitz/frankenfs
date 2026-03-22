@@ -3479,8 +3479,8 @@ larger values are treated as unsupported until explicitly implemented.
 **Incompatible (`s_feature_incompat` at `0x60`) -- unknown = mount MUST fail:**
 
 REQUIRED: `FILETYPE`(0x0002), `EXTENTS`(0x0040).
-Supported: `RECOVER`(0x0004), `META_BG`(0x0010), `64BIT`(0x0080), `FLEX_BG`(0x0200), `EA_INODE`(0x0400), `CSUM_SEED`(0x2000), `LARGEDIR`(0x4000).
-Ignored: `MMP`(0x0100, warn), `DIRDATA`(0x1000).
+Supported: `RECOVER`(0x0004), `META_BG`(0x0010), `64BIT`(0x0080), `MMP`(0x0100, validated read-side), `FLEX_BG`(0x0200), `EA_INODE`(0x0400), `CSUM_SEED`(0x2000), `LARGEDIR`(0x4000).
+Ignored: `DIRDATA`(0x1000).
 REJECTED: `COMPRESSION`(0x0001), `JOURNAL_DEV`(0x0008), `INLINE_DATA`(0x8000), `ENCRYPT`(0x10000), `CASEFOLD`(0x20000).
 
 **Compatible (`s_feature_compat` at `0x5C`) -- advisory, safe to ignore:**
@@ -4643,14 +4643,13 @@ block-based allocation is sufficient for target workloads.
 
 ### 15.17 MMP (Multi-Mount Protection)
 
-**Excluded.** `INCOMPAT_MMP` (0x0100). Prevents simultaneous mounting of a
-filesystem on multiple hosts (shared storage). Uses a magic block
-(`s_mmp_block`) updated every `s_mmp_interval` seconds with hostname and
-timestamp. Requires active polling and network-aware timeout logic (~1K LOC).
-FrankenFS is a single-host FUSE filesystem; shared storage protection is
-handled by the storage layer (SAN locking, cluster manager). The
-`INCOMPAT_MMP` flag is ignored with a warning at mount time (flag is set but
-check is not enforced).
+**Partially supported (read-side validation).** `INCOMPAT_MMP` (0x0100).
+FrankenFS now parses `s_mmp_update_interval`, `s_mmp_block`, and the on-disk
+MMP structure, verifies the MMP magic/checksum, and refuses mount when the MMP
+state indicates `fsck`, an active writer sequence, or an unsafe unknown
+sequence. FrankenFS still does **not** participate in the full kernel MMP
+protocol (periodic sequence updates / live writer heartbeats), so safe support
+is currently conservative: clean MMP state mounts, unsafe states are rejected.
 
 ### 15.18 Compression
 

@@ -568,6 +568,8 @@ mod tests {
             flags: 0,
             itable_unused: 0,
             checksum: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
         };
         assert_eq!(gd.block_bitmap, 100);
         assert_eq!(gd.free_blocks_count, 500);
@@ -1149,6 +1151,8 @@ mod tests {
             flags: 0x0004,
             itable_unused: 50,
             checksum: 0xABCD,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
         };
 
         let mut buf = vec![0_u8; 32];
@@ -1177,6 +1181,8 @@ mod tests {
             flags: 0,
             itable_unused: 0x0001_0032,
             checksum: 0x1234,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
         };
 
         let mut buf = vec![0_u8; 64];
@@ -1202,6 +1208,8 @@ mod tests {
             flags: 0,
             itable_unused: 0,
             checksum: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
         };
         let mut buf = vec![0_u8; 20];
         assert!(gd.write_to_bytes(&mut buf, 32).is_err());
@@ -1221,6 +1229,8 @@ mod tests {
             flags: 0,
             itable_unused: 0,
             checksum: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
         };
 
         let mut buf = vec![0_u8; 32];
@@ -1739,6 +1749,8 @@ mod tests {
             inode_size: 256,
             first_ino: 11,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             magic: 0xEF53,
             uuid: [0; 16],
             volume_name: String::new(),
@@ -1772,6 +1784,9 @@ mod tests {
             hash_seed: [0x1234, 0x5678, 0x9ABC, 0xDEF0],
             def_hash_version: 1,
             log_groups_per_flex: 4,
+            mmp_update_interval: 0,
+            mmp_block: 0,
+            backup_bgs: [0; 2],
             checksum_type: 0,
             checksum_seed: 0,
             checksum: 0,

@@ -2620,18 +2620,20 @@ impl BtrfsExtentAllocator {
             "alloc_search_start"
         );
 
-        // Find a gap in this block group by scanning extent items in range.
+        // Find a gap in this block group by scanning allocation items in range.
+        // We must include both EXTENT_ITEM (168) and METADATA_ITEM (169)
+        // as both represent physical space allocations.
         let bg = &self.block_groups[&bg_start];
         let bg_end = bg.start + bg.item.total_bytes;
 
         let range_start = BtrfsKey {
             objectid: bg.start,
-            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            item_type: BTRFS_ITEM_EXTENT_ITEM, // 168
             offset: 0,
         };
         let range_end = BtrfsKey {
             objectid: bg_end,
-            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            item_type: BTRFS_ITEM_METADATA_ITEM, // 169
             offset: u64::MAX,
         };
 

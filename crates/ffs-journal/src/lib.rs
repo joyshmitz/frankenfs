@@ -17,10 +17,16 @@ use std::collections::{BTreeMap, BTreeSet};
 const JBD2_MAGIC: u32 = 0xC03B_3998;
 const JBD2_BLOCKTYPE_DESCRIPTOR: u32 = 1;
 const JBD2_BLOCKTYPE_COMMIT: u32 = 2;
+const JBD2_BLOCKTYPE_SUPERBLOCK_V1: u32 = 3;
+const JBD2_BLOCKTYPE_SUPERBLOCK_V2: u32 = 4;
 const JBD2_BLOCKTYPE_REVOKE: u32 = 5;
+
 const JBD2_HEADER_SIZE: usize = 12;
 const JBD2_REVOKE_HEADER_SIZE: usize = 16; // journal header (12) + r_count (4)
 const JBD2_TAG_SIZE: usize = 8;
+
+const JBD2_TAG_FLAG_ESCAPE: u32 = 0x0000_0001;
+const JBD2_TAG_FLAG_SAME_UUID: u32 = 0x0000_0002;
 const JBD2_TAG_FLAG_LAST: u32 = 0x0000_0008;
 
 const COW_MAGIC: u32 = 0x4A53_4646; // "FFSJ" in little-endian payload.
@@ -28,6 +34,37 @@ const COW_VERSION: u16 = 1;
 const COW_RECORD_WRITE: u16 = 1;
 const COW_RECORD_COMMIT: u16 = 2;
 const COW_HEADER_SIZE: usize = 32;
+
+/// JBD2 superblock structure (subset of fields needed for replay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Jbd2Superblock {
+    pub block_size: u32,
+    pub max_len: u32,
+    pub first_log_block: u32,
+    pub start_sequence: u32,
+    pub start_block: u32,
+}
+
+impl Jbd2Superblock {
+    #[must_use]
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let header = Jbd2Header::parse(bytes)?;
+        if header.magic != JBD2_MAGIC
+            || (header.block_type != JBD2_BLOCKTYPE_SUPERBLOCK_V1
+                && header.block_type != JBD2_BLOCKTYPE_SUPERBLOCK_V2)
+        {
+            return None;
+        }
+
+        Some(Self {
+            block_size: read_be_u32(bytes, 12)?,
+            max_len: read_be_u32(bytes, 16)?,
+            first_log_block: read_be_u32(bytes, 20)?,
+            start_sequence: read_be_u32(bytes, 24)?,
+            start_block: read_be_u32(bytes, 28)?,
+        })
+    }
+}
 
 /// Journal region expressed in block coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,11 +170,27 @@ impl DescriptorTag {
     fn is_last(self) -> bool {
         (self.flags & JBD2_TAG_FLAG_LAST) != 0
     }
+
+    #[must_use]
+    fn is_escaped(self) -> bool {
+        (self.flags & JBD2_TAG_FLAG_ESCAPE) != 0
+    }
+
+    #[must_use]
+    fn has_uuid(self) -> bool {
+        (self.flags & JBD2_TAG_FLAG_SAME_UUID) == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StagedWrite {
+    journal_idx: u64,
+    escaped: bool,
 }
 
 #[derive(Debug, Default)]
 struct PendingTxn {
-    writes: Vec<(BlockNumber, Vec<u8>)>,
+    writes: Vec<(BlockNumber, StagedWrite)>,
     revoked: BTreeSet<BlockNumber>,
 }
 
@@ -218,19 +271,53 @@ fn replay_jbd2_inner(
     let mut committed_sequences = BTreeSet::new();
 
     let mut idx = 0_u64;
-    while idx < total_blocks {
-        let absolute = resolve_block(idx)?;
+    let mut expected_seq = None;
+
+    // Try to find JBD2 superblock at the beginning of the journal.
+    if total_blocks > 0 {
+        let first_abs = resolve_block(0)?;
+        let first_raw = dev.read_block(cx, first_abs)?;
+        if let Some(sb) = Jbd2Superblock::parse(first_raw.as_slice()) {
+            idx = u64::from(sb.start_block);
+            expected_seq = Some(sb.start_sequence);
+            tracing::info!(
+                target: "ffs::journal",
+                start_block = sb.start_block,
+                start_sequence = sb.start_sequence,
+                "jbd2_superblock_found"
+            );
+        }
+    }
+
+    let mut blocks_scanned = 0_u64;
+    while blocks_scanned < total_blocks {
+        let current_idx = idx % total_blocks;
+        let absolute = resolve_block(current_idx)?;
         let raw = dev.read_block(cx, absolute)?;
         stats.scanned_blocks = stats.scanned_blocks.saturating_add(1);
+        blocks_scanned = blocks_scanned.saturating_add(1);
 
         let Some(header) = Jbd2Header::parse(raw.as_slice()) else {
+            if expected_seq.is_some() {
+                break;
+            }
             idx = idx.saturating_add(1);
             continue;
         };
 
         if header.magic != JBD2_MAGIC {
+            if expected_seq.is_some() {
+                break;
+            }
             idx = idx.saturating_add(1);
             continue;
+        }
+
+        // Check sequence if following guided scan.
+        if let Some(expected) = expected_seq {
+            if header.sequence != expected && header.sequence != expected.wrapping_add(1) {
+                break;
+            }
         }
 
         match header.block_type {
@@ -242,11 +329,8 @@ fn replay_jbd2_inner(
                     .saturating_add(u64::try_from(tags.len()).unwrap_or(u64::MAX));
 
                 // Check if all data blocks fit within the journal region.
-                // A truncated descriptor (e.g. from power loss) means this
-                // transaction is incomplete — stop scanning.
                 let tag_count = u64::try_from(tags.len()).unwrap_or(u64::MAX);
-                let last_data_idx = idx.checked_add(tag_count);
-                if last_data_idx.is_none_or(|ld| ld >= total_blocks) {
+                if tag_count >= total_blocks {
                     break;
                 }
 
@@ -257,21 +341,31 @@ fn replay_jbd2_inner(
                             FfsError::Format("descriptor tag index does not fit in u64".to_owned())
                         })?
                         .saturating_add(1);
-                    let data_index = idx.checked_add(offset_from_descriptor).ok_or_else(|| {
-                        FfsError::Format("journal descriptor data index overflow".to_owned())
-                    })?;
-                    let data_block = resolve_block(data_index)?;
-                    let data = dev.read_block(cx, data_block)?.as_slice().to_vec();
-                    staged.push((tag.target, data));
+                    let data_idx = (idx.saturating_add(offset_from_descriptor)) % total_blocks;
+                    staged.push((
+                        tag.target,
+                        StagedWrite {
+                            journal_idx: data_idx,
+                            escaped: tag.is_escaped(),
+                        },
+                    ));
                 }
 
                 let txn = pending.entry(header.sequence).or_default();
                 txn.writes.extend(staged);
 
-                idx = idx.saturating_add(1).saturating_add(
-                    u64::try_from(tags.len())
-                        .map_err(|_| FfsError::Format("descriptor length overflow".to_owned()))?,
-                );
+                idx = idx.saturating_add(1).saturating_add(tag_count);
+                blocks_scanned = blocks_scanned.saturating_add(tag_count);
+            }
+            JBD2_BLOCKTYPE_COMMIT => {
+                stats.commit_blocks = stats.commit_blocks.saturating_add(1);
+                committed_sequences.insert(header.sequence);
+                if let Some(expected) = expected_seq {
+                    if header.sequence == expected {
+                        expected_seq = Some(expected.wrapping_add(1));
+                    }
+                }
+                idx = idx.saturating_add(1);
             }
             JBD2_BLOCKTYPE_REVOKE => {
                 stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
@@ -281,11 +375,6 @@ fn replay_jbd2_inner(
                     .saturating_add(u64::try_from(revokes.len()).unwrap_or(u64::MAX));
                 let txn = pending.entry(header.sequence).or_default();
                 txn.revoked.extend(revokes);
-                idx = idx.saturating_add(1);
-            }
-            JBD2_BLOCKTYPE_COMMIT => {
-                stats.commit_blocks = stats.commit_blocks.saturating_add(1);
-                committed_sequences.insert(header.sequence);
                 idx = idx.saturating_add(1);
             }
             _ => {
@@ -336,17 +425,15 @@ fn replay_jbd2_inner(
         }
     }
 
-    let mut final_writes: BTreeMap<BlockNumber, Vec<u8>> = BTreeMap::new();
+    let mut final_writes: BTreeMap<BlockNumber, StagedWrite> = BTreeMap::new();
 
     for &seq in &committed_sequences {
         if let Some(txn) = pending.get(&seq) {
-            for (target, payload) in &txn.writes {
+            for (target, staged) in &txn.writes {
                 let is_revoked = if let Some(&revoked_seq) = max_revoke_seq.get(target) {
                     if seq == revoked_seq {
                         true
                     } else {
-                        // Write is revoked if it belongs to an older or same transaction
-                        // as the latest revoke.
                         journal_seq_is_newer_or_equal(revoked_seq, seq)
                     }
                 } else {
@@ -358,16 +445,28 @@ fn replay_jbd2_inner(
                     continue;
                 }
 
-                final_writes.insert(*target, payload.clone());
-                stats.replayed_blocks = stats.replayed_blocks.saturating_add(1);
+                final_writes.insert(*target, *staged);
             }
         } else {
             stats.orphaned_commit_blocks = stats.orphaned_commit_blocks.saturating_add(1);
         }
     }
 
-    for (target, payload) in final_writes {
-        dev.write_block(cx, target, &payload)?;
+    stats.replayed_blocks = u64::try_from(final_writes.len()).unwrap_or(u64::MAX);
+
+    for (target, staged) in final_writes {
+        let absolute = resolve_block(staged.journal_idx)?;
+        let mut data = dev.read_block(cx, absolute)?.as_slice().to_vec();
+        if staged.escaped {
+            if data.len() >= 4 {
+                data[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+            } else {
+                return Err(FfsError::Format(
+                    "escaped data block too small to restore magic".to_owned(),
+                ));
+            }
+        }
+        dev.write_block(cx, target, &data)?;
     }
 
     stats.incomplete_transactions =
@@ -675,16 +774,26 @@ impl Jbd2Writer {
             encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, seq);
 
             let mut off = JBD2_HEADER_SIZE;
-            for (i, (target, _)) in chunk.iter().enumerate() {
+            for (i, (target, payload)) in chunk.iter().enumerate() {
                 let target_u32 = u32::try_from(target.0).map_err(|_| {
                     FfsError::Format(format!("target block {} exceeds u32 range", target.0))
                 })?;
                 let is_last_in_desc = i == chunk.len() - 1;
-                let flags = if is_last_in_desc {
+                let mut flags = if is_last_in_desc {
                     JBD2_TAG_FLAG_LAST
                 } else {
                     0
                 };
+
+                // Escaping: if payload starts with JBD2_MAGIC, set flag.
+                let magic_be = JBD2_MAGIC.to_be_bytes();
+                if payload.len() >= 4 && payload[0..4] == magic_be {
+                    flags |= JBD2_TAG_FLAG_ESCAPE;
+                }
+
+                // Always set SAME_UUID since we don't support multi-UUID journals yet.
+                flags |= JBD2_TAG_FLAG_SAME_UUID;
+
                 desc[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
                 desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
                 off += JBD2_TAG_SIZE;
@@ -699,6 +808,13 @@ impl Jbd2Writer {
                 let mut padded = vec![0_u8; bs];
                 let copy_len = payload.len().min(bs);
                 padded[..copy_len].copy_from_slice(&payload[..copy_len]);
+
+                // Apply escaping: zero out the magic if it was escaped.
+                let magic_be = JBD2_MAGIC.to_be_bytes();
+                if padded.len() >= 4 && padded[0..4] == magic_be {
+                    padded[0..4].copy_from_slice(&[0u8; 4]);
+                }
+
                 dev.write_block(cx, data_block, &padded)?;
                 stats.data_blocks = stats.data_blocks.saturating_add(1);
             }
@@ -1005,6 +1121,9 @@ fn parse_descriptor_tags(block: &[u8]) -> Vec<DescriptorTag> {
         };
         tags.push(tag);
         offset = offset.saturating_add(JBD2_TAG_SIZE);
+        if tag.has_uuid() {
+            offset = offset.saturating_add(16);
+        }
 
         if tag.is_last() {
             break;

@@ -37,6 +37,11 @@ pub const EXT4_VALID_FS: u16 = 0x0001;
 pub const EXT4_ERROR_FS: u16 = 0x0002;
 /// Filesystem is being recovered from an orphan list.
 pub const EXT4_ORPHAN_FS: u16 = 0x0004;
+pub const EXT4_MMP_MAGIC: u32 = 0x004D_4D50;
+pub const EXT4_MMP_SEQ_CLEAN: u32 = 0xFF4D_4D50;
+pub const EXT4_MMP_SEQ_FSCK: u32 = 0xE24D_4D50;
+pub const EXT4_MMP_SEQ_MAX: u32 = 0xE24D_4D4F;
+const EXT4_MMP_CHECKSUM_OFFSET: usize = 0x3FC;
 
 // ── ext4 feature flags ─────────────────────────────────────────────────────
 
@@ -417,6 +422,8 @@ pub struct Ext4Superblock {
     pub inode_size: u16,
     pub first_ino: u32,
     pub desc_size: u16,
+    pub reserved_gdt_blocks: u16,
+    pub first_meta_bg: u32,
 
     // ── Identity ─────────────────────────────────────────────────────────
     pub magic: u16,
@@ -462,6 +469,9 @@ pub struct Ext4Superblock {
 
     // ── Flex BG ──────────────────────────────────────────────────────────
     pub log_groups_per_flex: u8,
+    pub mmp_update_interval: u16,
+    pub mmp_block: u64,
+    pub backup_bgs: [u32; 2],
 
     // ── Checksums ────────────────────────────────────────────────────────
     pub checksum_type: u8,
@@ -471,6 +481,7 @@ pub struct Ext4Superblock {
 
 impl Ext4Superblock {
     /// Parse an ext4 superblock from a 1024-byte superblock region.
+    #[expect(clippy::too_many_lines)]
     pub fn parse_superblock_region(region: &[u8]) -> Result<Self, ParseError> {
         if region.len() < EXT4_SUPERBLOCK_SIZE {
             return Err(ParseError::InsufficientData {
@@ -541,6 +552,8 @@ impl Ext4Superblock {
             inode_size: read_le_u16(region, 0x58)?,
             first_ino: read_le_u32(region, 0x54)?,
             desc_size: read_le_u16(region, 0xFE)?,
+            reserved_gdt_blocks: read_le_u16(region, 0xCE)?,
+            first_meta_bg: read_le_u32(region, 0x104)?,
 
             // Identity
             magic,
@@ -591,6 +604,10 @@ impl Ext4Superblock {
 
             // Flex BG
             log_groups_per_flex,
+            mmp_update_interval: read_le_u16(region, 0x166)?,
+            mmp_block: u64::from(read_le_u32(region, 0x168)?)
+                | (u64::from(read_le_u32(region, 0x16C)?) << 32),
+            backup_bgs: [read_le_u32(region, 0x24C)?, read_le_u32(region, 0x250)?],
 
             // Checksums
             checksum_type,
@@ -669,6 +686,72 @@ impl Ext4Superblock {
     #[must_use]
     pub fn has_metadata_csum(&self) -> bool {
         self.has_ro_compat(Ext4RoCompatFeatures::METADATA_CSUM)
+    }
+
+    #[must_use]
+    pub fn groups_per_flex(&self) -> u32 {
+        if !self.has_incompat(Ext4IncompatFeatures::FLEX_BG) || self.log_groups_per_flex >= 32 {
+            return 1;
+        }
+        1_u32 << self.log_groups_per_flex
+    }
+
+    #[must_use]
+    pub fn flex_group_index(&self, group: GroupNumber) -> u32 {
+        let groups_per_flex = self.groups_per_flex();
+        if groups_per_flex == 0 {
+            return 0;
+        }
+        group.0 / groups_per_flex
+    }
+
+    #[must_use]
+    pub fn mmp_enabled(&self) -> bool {
+        self.has_incompat(Ext4IncompatFeatures::MMP)
+    }
+
+    #[must_use]
+    pub fn mmp_block_number(&self) -> Option<u64> {
+        self.mmp_enabled()
+            .then_some(self.mmp_block)
+            .filter(|block| *block != 0)
+    }
+
+    #[must_use]
+    pub fn has_backup_superblock(&self, group: GroupNumber) -> bool {
+        let group = group.0;
+        if group == 0 {
+            return true;
+        }
+        if self.has_compat(Ext4CompatFeatures::SPARSE_SUPER2) {
+            return group == self.backup_bgs[0] || group == self.backup_bgs[1];
+        }
+        if group <= 1 || !self.has_ro_compat(Ext4RoCompatFeatures::SPARSE_SUPER) {
+            return true;
+        }
+        if group & 1 == 0 {
+            return false;
+        }
+        is_power_of(group, 3) || is_power_of(group, 5) || is_power_of(group, 7)
+    }
+
+    #[must_use]
+    pub fn group_desc_blocks_count(&self) -> u32 {
+        let desc_per_block = self.block_size / u32::from(self.group_desc_size());
+        if desc_per_block == 0 {
+            return 0;
+        }
+        self.groups_count().div_ceil(desc_per_block)
+    }
+
+    #[must_use]
+    pub fn base_meta_blocks_in_group(&self, group: GroupNumber) -> u32 {
+        if !self.has_backup_superblock(group) {
+            return 0;
+        }
+        1_u32
+            .saturating_add(self.group_desc_blocks_count())
+            .saturating_add(u32::from(self.reserved_gdt_blocks))
     }
 
     /// Compute the crc32c checksum seed used for metadata checksums.
@@ -1010,6 +1093,50 @@ impl Ext4Superblock {
                 reason: "overflow computing absolute inode offset",
             })
     }
+
+    /// Return the list of block group numbers that contain superblock backups.
+    ///
+    /// The standard ext4 sparse superblock pattern places backups in groups
+    /// 0, 1, and every group whose number is a power of 3, 5, or 7.
+    ///
+    /// When `SPARSE_SUPER2` is set, backups exist ONLY in the two groups
+    /// listed in `s_backup_bgs[0]` and `s_backup_bgs[1]` (plus group 0).
+    #[must_use]
+    pub fn backup_superblock_groups(&self, group_count: u32) -> Vec<u32> {
+        let gc = group_count;
+        if gc == 0 {
+            return Vec::new();
+        }
+
+        let mut groups = vec![0_u32]; // Group 0 always has the primary superblock.
+
+        if self.has_compat(Ext4CompatFeatures::SPARSE_SUPER2) {
+            for &g in &self.backup_bgs {
+                if g > 0 && g < gc {
+                    groups.push(g);
+                }
+            }
+        } else {
+            // Standard sparse pattern: groups 1, and powers of 3, 5, 7.
+            if gc > 1 {
+                groups.push(1);
+            }
+            for &base in &[3_u32, 5, 7] {
+                let mut g = base;
+                while g < gc {
+                    groups.push(g);
+                    g = match g.checked_mul(base) {
+                        Some(v) => v,
+                        None => break,
+                    };
+                }
+            }
+        }
+
+        groups.sort_unstable();
+        groups.dedup();
+        groups
+    }
 }
 
 /// Result of [`Ext4Superblock::locate_inode`]: which block group and where
@@ -1022,6 +1149,17 @@ pub struct InodeLocation {
     pub index: u32,
     /// Byte offset from the start of the group's inode table.
     pub offset_in_table: u64,
+}
+
+fn is_power_of(mut value: u32, factor: u32) -> bool {
+    while value >= factor {
+        let rem = value % factor;
+        if rem != 0 {
+            return false;
+        }
+        value /= factor;
+    }
+    value == 1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1113,6 +1251,90 @@ impl Ext4GroupDesc {
             })
         }
     }
+}
+
+fn ext4_bitmap_checksum(raw_bitmap: &[u8], csum_seed: u32, group_number: u32) -> u32 {
+    let mut csum = ext4_chksum(csum_seed, &group_number.to_le_bytes());
+    csum = ext4_chksum(csum, raw_bitmap);
+    csum
+}
+
+#[must_use]
+pub fn block_bitmap_checksum_value(
+    raw_bitmap: &[u8],
+    csum_seed: u32,
+    group_number: u32,
+    desc_size: u16,
+) -> u32 {
+    let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, group_number);
+    if desc_size >= 64 { csum } else { csum & 0xFFFF }
+}
+
+#[must_use]
+pub fn inode_bitmap_checksum_value(
+    raw_bitmap: &[u8],
+    csum_seed: u32,
+    group_number: u32,
+    desc_size: u16,
+) -> u32 {
+    let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, group_number);
+    if desc_size >= 64 { csum } else { csum & 0xFFFF }
+}
+
+pub fn verify_block_bitmap_checksum(
+    raw_bitmap: &[u8],
+    csum_seed: u32,
+    group_number: u32,
+    gd: &Ext4GroupDesc,
+    desc_size: u16,
+) -> Result<(), ParseError> {
+    let expected = block_bitmap_checksum_value(raw_bitmap, csum_seed, group_number, desc_size);
+    if expected != gd.block_bitmap_csum {
+        return Err(ParseError::InvalidField {
+            field: "bg_block_bitmap_csum",
+            reason: "block bitmap CRC32C mismatch",
+        });
+    }
+    Ok(())
+}
+
+pub fn verify_inode_bitmap_checksum(
+    raw_bitmap: &[u8],
+    csum_seed: u32,
+    group_number: u32,
+    gd: &Ext4GroupDesc,
+    desc_size: u16,
+) -> Result<(), ParseError> {
+    let expected = inode_bitmap_checksum_value(raw_bitmap, csum_seed, group_number, desc_size);
+    if expected != gd.inode_bitmap_csum {
+        return Err(ParseError::InvalidField {
+            field: "bg_inode_bitmap_csum",
+            reason: "inode bitmap CRC32C mismatch",
+        });
+    }
+    Ok(())
+}
+
+pub fn stamp_block_bitmap_checksum(
+    raw_bitmap: &[u8],
+    csum_seed: u32,
+    group_number: u32,
+    gd: &mut Ext4GroupDesc,
+    desc_size: u16,
+) {
+    gd.block_bitmap_csum =
+        block_bitmap_checksum_value(raw_bitmap, csum_seed, group_number, desc_size);
+}
+
+pub fn stamp_inode_bitmap_checksum(
+    raw_bitmap: &[u8],
+    csum_seed: u32,
+    group_number: u32,
+    gd: &mut Ext4GroupDesc,
+    desc_size: u16,
+) {
+    gd.inode_bitmap_csum =
+        inode_bitmap_checksum_value(raw_bitmap, csum_seed, group_number, desc_size);
 }
 
 impl Ext4GroupDesc {
@@ -1510,6 +1732,43 @@ pub fn stamp_extent_block_checksum(
     extent_block[tail_off..tail_off + 4].copy_from_slice(&computed.to_le_bytes());
 }
 
+/// Compute the CRC32C checksum of a block or inode bitmap.
+///
+/// The ext4 bitmap checksum algorithm seeds with `csum_seed XOR group_number`
+/// (both as u32), then CRC32Cs the raw bitmap bytes.
+///
+/// Returns the full 32-bit checksum. The caller stores the lower 16 bits in
+/// `bg_block_bitmap_csum_lo` (or `bg_inode_bitmap_csum_lo`) and, for 64-byte
+/// descriptors, the upper 16 bits in `bg_block_bitmap_csum_hi`.
+#[must_use]
+pub fn compute_bitmap_checksum(csum_seed: u32, group: u32, bitmap: &[u8]) -> u32 {
+    let seed = csum_seed ^ group;
+    ext4_chksum(seed, bitmap)
+}
+
+/// Verify a bitmap's CRC32C checksum against the stored value.
+///
+/// `stored_csum` is the 32-bit value assembled from the group descriptor's
+/// `bg_*_bitmap_csum_lo` (and `_hi` for 64-byte descriptors).
+pub fn verify_bitmap_checksum(
+    csum_seed: u32,
+    group: u32,
+    bitmap: &[u8],
+    stored_csum: u32,
+    desc_size: u16,
+) -> Result<(), ParseError> {
+    let computed = compute_bitmap_checksum(csum_seed, group, bitmap);
+    // For 32-byte descriptors, only the lower 16 bits are stored.
+    let mask = if desc_size < 64 { 0xFFFF } else { 0xFFFF_FFFF };
+    if (computed & mask) != (stored_csum & mask) {
+        return Err(ParseError::InvalidField {
+            field: "bitmap_checksum",
+            reason: "bitmap CRC32C mismatch",
+        });
+    }
+    Ok(())
+}
+
 /// Verify that an inode bitmap's free-bit count matches the group descriptor.
 ///
 /// `inodes_per_group` is `s_inodes_per_group` from the superblock.
@@ -1591,6 +1850,82 @@ fn verify_bitmap_free_count(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ext4MmpStatus {
+    Clean,
+    Fsck,
+    Active(u32),
+    UnsafeUnknown(u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ext4MmpBlock {
+    pub magic: u32,
+    pub seq: u32,
+    pub time: u64,
+    pub nodename: String,
+    pub bdevname: String,
+    pub check_interval: u16,
+    pub checksum: u32,
+}
+
+impl Ext4MmpBlock {
+    pub fn parse_from_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
+        if bytes.len() < EXT4_SUPERBLOCK_SIZE {
+            return Err(ParseError::InsufficientData {
+                needed: EXT4_SUPERBLOCK_SIZE,
+                offset: 0,
+                actual: bytes.len(),
+            });
+        }
+        let magic = read_le_u32(bytes, 0x00)?;
+        if magic != EXT4_MMP_MAGIC {
+            return Err(ParseError::InvalidField {
+                field: "mmp_magic",
+                reason: "invalid MMP magic",
+            });
+        }
+        Ok(Self {
+            magic,
+            seq: read_le_u32(bytes, 0x04)?,
+            time: u64::from(read_le_u32(bytes, 0x08)?)
+                | (u64::from(read_le_u32(bytes, 0x0C)?) << 32),
+            nodename: trim_nul_padded(&read_fixed::<64>(bytes, 0x10)?),
+            bdevname: trim_nul_padded(&read_fixed::<32>(bytes, 0x50)?),
+            check_interval: read_le_u16(bytes, 0x70)?,
+            checksum: read_le_u32(bytes, EXT4_MMP_CHECKSUM_OFFSET)?,
+        })
+    }
+
+    #[must_use]
+    pub fn status(&self) -> Ext4MmpStatus {
+        match self.seq {
+            EXT4_MMP_SEQ_CLEAN => Ext4MmpStatus::Clean,
+            EXT4_MMP_SEQ_FSCK => Ext4MmpStatus::Fsck,
+            1..=EXT4_MMP_SEQ_MAX => Ext4MmpStatus::Active(self.seq),
+            other => Ext4MmpStatus::UnsafeUnknown(other),
+        }
+    }
+
+    pub fn validate_checksum(&self, raw_block: &[u8], csum_seed: u32) -> Result<(), ParseError> {
+        if raw_block.len() < EXT4_SUPERBLOCK_SIZE {
+            return Err(ParseError::InsufficientData {
+                needed: EXT4_SUPERBLOCK_SIZE,
+                offset: 0,
+                actual: raw_block.len(),
+            });
+        }
+        let computed = ext4_chksum(csum_seed, &raw_block[..EXT4_MMP_CHECKSUM_OFFSET]);
+        if computed != self.checksum {
+            return Err(ParseError::InvalidField {
+                field: "mmp_checksum",
+                reason: "MMP CRC32C mismatch",
+            });
+        }
+        Ok(())
+    }
 }
 
 // EXT4_HUGE_FILE_FL imported from ffs_types
@@ -3560,7 +3895,8 @@ fn parse_dx_entries(
         });
     }
 
-    // dx_countlimit is 4 bytes: limit(u16), count(u16).
+    // dx_countlimit is 8 bytes total: limit(u16), count(u16), block(u32).
+    // It doubles as the first entry (hash 0).
     let limit = usize::from(read_le_u16(data, count_limit_offset)?);
     let count = usize::from(read_le_u16(data, count_limit_offset + 2)?);
     if count > limit {
@@ -3569,13 +3905,22 @@ fn parse_dx_entries(
             reason: "count exceeds limit",
         });
     }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
 
-    // Entries start immediately after dx_countlimit.
-    let mut off = count_limit_offset + 4;
-    let max_entries_in_block = data.len().saturating_sub(off) / 8;
-    let mut entries = Vec::with_capacity(count.min(max_entries_in_block));
+    let mut entries = Vec::with_capacity(count);
 
-    for _ in 0..count {
+    // Entry 0: hash is implicitly 0, block is at offset +4.
+    let first_block = read_le_u32(data, count_limit_offset + 4)?;
+    entries.push(Ext4DxEntry {
+        hash: 0,
+        block: first_block,
+    });
+
+    // Subsequent entries start at offset +8.
+    let mut off = count_limit_offset + 8;
+    for _ in 1..count {
         if off + 8 > data.len() {
             break;
         }
@@ -4328,6 +4673,8 @@ mod tests {
     #[test]
     fn superblock_new_fields_parse() {
         let mut sb = make_valid_sb();
+        sb[0xCE..0xD0].copy_from_slice(&7_u16.to_le_bytes()); // reserved_gdt_blocks
+        sb[0x104..0x108].copy_from_slice(&3_u32.to_le_bytes()); // first_meta_bg
         sb[0x2C..0x30].copy_from_slice(&1_700_000_000_u32.to_le_bytes()); // mtime
         sb[0x3A..0x3C].copy_from_slice(&1_u16.to_le_bytes()); // state=clean
         sb[0x4C..0x50].copy_from_slice(&1_u32.to_le_bytes()); // rev_level=DYNAMIC
@@ -4337,9 +4684,15 @@ mod tests {
         sb[0xEC..0xF0].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes()); // hash_seed[0]
         sb[0xFC] = 1; // def_hash_version=HalfMD4
         sb[0x174] = 4; // log_groups_per_flex
+        sb[0x166..0x168].copy_from_slice(&5_u16.to_le_bytes()); // mmp_update_interval
+        sb[0x168..0x170].copy_from_slice(&1234_u64.to_le_bytes()); // mmp_block
+        sb[0x24C..0x250].copy_from_slice(&7_u32.to_le_bytes()); // backup_bgs[0]
+        sb[0x250..0x254].copy_from_slice(&11_u32.to_le_bytes()); // backup_bgs[1]
         sb[0x175] = 1; // checksum_type=crc32c
 
         let parsed = Ext4Superblock::parse_superblock_region(&sb).unwrap();
+        assert_eq!(parsed.reserved_gdt_blocks, 7);
+        assert_eq!(parsed.first_meta_bg, 3);
         assert_eq!(parsed.mtime, 1_700_000_000);
         assert_eq!(parsed.state, 1);
         assert_eq!(parsed.rev_level, 1);
@@ -4349,6 +4702,9 @@ mod tests {
         assert_eq!(parsed.hash_seed[0], 0xDEAD_BEEF);
         assert_eq!(parsed.def_hash_version, 1);
         assert_eq!(parsed.log_groups_per_flex, 4);
+        assert_eq!(parsed.mmp_update_interval, 5);
+        assert_eq!(parsed.mmp_block, 1234);
+        assert_eq!(parsed.backup_bgs, [7, 11]);
         assert_eq!(parsed.checksum_type, 1);
         assert_eq!(parsed.groups_count(), 1);
     }
@@ -4400,6 +4756,8 @@ mod tests {
         gd32[0x0E..0x10].copy_from_slice(&11_u16.to_le_bytes());
         gd32[0x10..0x12].copy_from_slice(&12_u16.to_le_bytes());
         gd32[0x12..0x14].copy_from_slice(&0xAA55_u16.to_le_bytes());
+        gd32[0x18..0x1A].copy_from_slice(&0xBEEF_u16.to_le_bytes());
+        gd32[0x1A..0x1C].copy_from_slice(&0xCAFE_u16.to_le_bytes());
         gd32[0x1C..0x1E].copy_from_slice(&99_u16.to_le_bytes());
         gd32[0x1E..0x20].copy_from_slice(&0x1234_u16.to_le_bytes());
 
@@ -4411,6 +4769,8 @@ mod tests {
         assert_eq!(parsed32.itable_unused, 99);
         assert_eq!(parsed32.flags, 0xAA55);
         assert_eq!(parsed32.checksum, 0x1234);
+        assert_eq!(parsed32.block_bitmap_csum, 0xBEEF);
+        assert_eq!(parsed32.inode_bitmap_csum, 0xCAFE);
 
         let mut gd64 = [0_u8; 64];
         gd64[..32].copy_from_slice(&gd32);
@@ -4421,6 +4781,8 @@ mod tests {
         gd64[0x2E..0x30].copy_from_slice(&5_u16.to_le_bytes());
         gd64[0x30..0x32].copy_from_slice(&6_u16.to_le_bytes());
         gd64[0x32..0x34].copy_from_slice(&7_u16.to_le_bytes());
+        gd64[0x38..0x3A].copy_from_slice(&0x0102_u16.to_le_bytes());
+        gd64[0x3A..0x3C].copy_from_slice(&0x0304_u16.to_le_bytes());
 
         let parsed64 = Ext4GroupDesc::parse_from_bytes(&gd64, 64).expect("gd64");
         assert_eq!(parsed64.block_bitmap, (1_u64 << 32) | 0x007b_u64);
@@ -4430,6 +4792,8 @@ mod tests {
         assert_eq!(parsed64.free_inodes_count, 0x000b_u32 | (5_u32 << 16));
         assert_eq!(parsed64.used_dirs_count, 0x000c_u32 | (6_u32 << 16));
         assert_eq!(parsed64.itable_unused, 0x0063_u32 | (7_u32 << 16));
+        assert_eq!(parsed64.block_bitmap_csum, 0x0102_BEEF);
+        assert_eq!(parsed64.inode_bitmap_csum, 0x0304_CAFE);
     }
 
     #[test]
@@ -4444,6 +4808,8 @@ mod tests {
             itable_unused: 99,
             flags: 0x0003,
             checksum: 0xABCD,
+            block_bitmap_csum: 0x1234,
+            inode_bitmap_csum: 0x5678,
         };
         let mut buf = [0_u8; 32];
         gd.write_to_bytes(&mut buf, 32).unwrap();
@@ -4457,6 +4823,8 @@ mod tests {
         assert_eq!(parsed.itable_unused, gd.itable_unused);
         assert_eq!(parsed.flags, gd.flags);
         assert_eq!(parsed.checksum, gd.checksum);
+        assert_eq!(parsed.block_bitmap_csum, gd.block_bitmap_csum);
+        assert_eq!(parsed.inode_bitmap_csum, gd.inode_bitmap_csum);
     }
 
     #[test]
@@ -4471,6 +4839,8 @@ mod tests {
             itable_unused: (7 << 16) | 0x63,
             flags: 0x0003,
             checksum: 0xABCD,
+            block_bitmap_csum: 0x1234_5678,
+            inode_bitmap_csum: 0x9ABC_DEF0,
         };
         let mut buf = [0_u8; 64];
         gd.write_to_bytes(&mut buf, 64).unwrap();
@@ -4482,6 +4852,85 @@ mod tests {
         assert_eq!(parsed.free_inodes_count, gd.free_inodes_count);
         assert_eq!(parsed.used_dirs_count, gd.used_dirs_count);
         assert_eq!(parsed.itable_unused, gd.itable_unused);
+        assert_eq!(parsed.block_bitmap_csum, gd.block_bitmap_csum);
+        assert_eq!(parsed.inode_bitmap_csum, gd.inode_bitmap_csum);
+    }
+
+    #[test]
+    fn bitmap_checksum_helpers_roundtrip() {
+        let raw_bitmap = vec![0xA5_u8; 4096];
+        let csum_seed = 0x1234_5678;
+        let group = 7_u32;
+        let mut gd32 = Ext4GroupDesc {
+            block_bitmap: 0,
+            inode_bitmap: 0,
+            inode_table: 0,
+            free_blocks_count: 0,
+            free_inodes_count: 0,
+            used_dirs_count: 0,
+            itable_unused: 0,
+            flags: 0,
+            checksum: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
+        };
+        stamp_block_bitmap_checksum(&raw_bitmap, csum_seed, group, &mut gd32, 32);
+        stamp_inode_bitmap_checksum(&raw_bitmap, csum_seed, group, &mut gd32, 32);
+        assert!(verify_block_bitmap_checksum(&raw_bitmap, csum_seed, group, &gd32, 32).is_ok());
+        assert!(verify_inode_bitmap_checksum(&raw_bitmap, csum_seed, group, &gd32, 32).is_ok());
+        assert_eq!(gd32.block_bitmap_csum >> 16, 0);
+        assert_eq!(gd32.inode_bitmap_csum >> 16, 0);
+
+        let mut gd64 = gd32.clone();
+        stamp_block_bitmap_checksum(&raw_bitmap, csum_seed, group, &mut gd64, 64);
+        stamp_inode_bitmap_checksum(&raw_bitmap, csum_seed, group, &mut gd64, 64);
+        assert!(verify_block_bitmap_checksum(&raw_bitmap, csum_seed, group, &gd64, 64).is_ok());
+        assert!(verify_inode_bitmap_checksum(&raw_bitmap, csum_seed, group, &gd64, 64).is_ok());
+        assert_ne!(gd64.block_bitmap_csum, gd32.block_bitmap_csum);
+        assert_ne!(gd64.inode_bitmap_csum, gd32.inode_bitmap_csum);
+    }
+
+    #[test]
+    fn sparse_super2_and_flex_helpers_follow_superblock_fields() {
+        let mut sb = make_valid_sb();
+        sb[0x5C..0x60].copy_from_slice(&Ext4CompatFeatures::SPARSE_SUPER2.0.to_le_bytes());
+        sb[0x60..0x64].copy_from_slice(
+            &(Ext4IncompatFeatures::FILETYPE.0
+                | Ext4IncompatFeatures::EXTENTS.0
+                | Ext4IncompatFeatures::FLEX_BG.0)
+                .to_le_bytes(),
+        );
+        sb[0x174] = 3;
+        sb[0x24C..0x250].copy_from_slice(&7_u32.to_le_bytes());
+        sb[0x250..0x254].copy_from_slice(&19_u32.to_le_bytes());
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).unwrap();
+        assert_eq!(parsed.groups_per_flex(), 8);
+        assert_eq!(parsed.flex_group_index(GroupNumber(15)), 1);
+        assert!(parsed.has_backup_superblock(GroupNumber(0)));
+        assert!(parsed.has_backup_superblock(GroupNumber(7)));
+        assert!(parsed.has_backup_superblock(GroupNumber(19)));
+        assert!(!parsed.has_backup_superblock(GroupNumber(1)));
+        assert!(!parsed.has_backup_superblock(GroupNumber(9)));
+    }
+
+    #[test]
+    fn mmp_block_parse_and_checksum_roundtrip() {
+        let mut raw = vec![0_u8; 4096];
+        raw[0x00..0x04].copy_from_slice(&EXT4_MMP_MAGIC.to_le_bytes());
+        raw[0x04..0x08].copy_from_slice(&EXT4_MMP_SEQ_CLEAN.to_le_bytes());
+        raw[0x08..0x10].copy_from_slice(&123_u64.to_le_bytes());
+        raw[0x10..0x1A].copy_from_slice(b"node-a\0\0\0\0");
+        raw[0x50..0x58].copy_from_slice(b"/dev/vda");
+        raw[0x70..0x72].copy_from_slice(&5_u16.to_le_bytes());
+        let seed = 0xAABB_CCDD;
+        let csum = ext4_chksum(seed, &raw[..EXT4_MMP_CHECKSUM_OFFSET]);
+        raw[EXT4_MMP_CHECKSUM_OFFSET..EXT4_MMP_CHECKSUM_OFFSET + 4]
+            .copy_from_slice(&csum.to_le_bytes());
+        let parsed = Ext4MmpBlock::parse_from_bytes(&raw).unwrap();
+        assert_eq!(parsed.status(), Ext4MmpStatus::Clean);
+        assert_eq!(parsed.nodename, "node-a");
+        assert_eq!(parsed.bdevname, "/dev/vda");
+        assert!(parsed.validate_checksum(&raw, seed).is_ok());
     }
 
     #[test]
@@ -4496,6 +4945,8 @@ mod tests {
             itable_unused: 0,
             flags: 0,
             checksum: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
         };
         let mut buf = [0_u8; 32];
         gd.write_to_bytes(&mut buf, 32).unwrap();
@@ -6857,7 +7308,7 @@ mod tests {
         let mut block = vec![0_u8; block_size];
         // Fill with some directory-like data.
         for (i, byte) in block.iter_mut().enumerate().take(block_size - 12) {
-            *byte = (i & 0xFF) as u8;
+            *byte = i.to_le_bytes()[0];
         }
         // Set up the checksum tail structure.
         let tail_off = block_size - 12;
@@ -6906,6 +7357,45 @@ mod tests {
         // Corrupt data and verify should fail.
         block[20] ^= 0xFF;
         assert!(verify_extent_block_checksum(&block, csum_seed, ino, generation).is_err());
+    }
+
+    // ── Bitmap checksum ───────────────────────────────────────────────
+
+    #[test]
+    fn compute_bitmap_checksum_round_trips_with_verify() {
+        let csum_seed = 0x1234_5678_u32;
+        let group = 3_u32;
+
+        // Create a realistic bitmap (4096 bytes = 32768 bits).
+        let mut bitmap = vec![0xFF_u8; 4096];
+        // Free some blocks.
+        bitmap[0] = 0xF0;
+        bitmap[100] = 0x00;
+
+        let csum = compute_bitmap_checksum(csum_seed, group, &bitmap);
+
+        // 64-byte descriptor: full 32-bit compare.
+        verify_bitmap_checksum(csum_seed, group, &bitmap, csum, 64)
+            .expect("64-byte desc bitmap checksum should verify");
+
+        // 32-byte descriptor: only lower 16 bits.
+        verify_bitmap_checksum(csum_seed, group, &bitmap, csum & 0xFFFF, 32)
+            .expect("32-byte desc bitmap checksum should verify");
+
+        // Corrupt bitmap → should fail.
+        bitmap[50] ^= 0xFF;
+        assert!(verify_bitmap_checksum(csum_seed, group, &bitmap, csum, 64).is_err());
+    }
+
+    #[test]
+    fn bitmap_checksum_differs_per_group() {
+        let csum_seed = 0xABCD_u32;
+        let bitmap = vec![0xAA_u8; 4096];
+
+        let csum_g0 = compute_bitmap_checksum(csum_seed, 0, &bitmap);
+        let csum_g1 = compute_bitmap_checksum(csum_seed, 1, &bitmap);
+        // Same bitmap content, different group → different checksum.
+        assert_ne!(csum_g0, csum_g1);
     }
 
     // ── Extent block checksum verification ───────────────────────────────
@@ -8075,6 +8565,8 @@ mod tests {
                 itable_unused: u32::from(itable_unused),
                 flags,
                 checksum,
+                block_bitmap_csum: 0,
+                inode_bitmap_csum: 0,
             };
             let mut buf = vec![0u8; 32];
             gd.write_to_bytes(&mut buf, 32).expect("write 32-byte GD");
@@ -8112,6 +8604,8 @@ mod tests {
                 itable_unused,
                 flags,
                 checksum,
+                block_bitmap_csum: 0,
+                inode_bitmap_csum: 0,
             };
             let mut buf = vec![0u8; 64];
             gd.write_to_bytes(&mut buf, 64).expect("write 64-byte GD");

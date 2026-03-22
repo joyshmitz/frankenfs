@@ -554,7 +554,12 @@ mod tests {
             group_count: 4,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         }
     }
 
@@ -569,6 +574,8 @@ mod tests {
                 inode_bitmap_block: BlockNumber(u64::from(g) * 100 + 2),
                 inode_table_block: BlockNumber(u64::from(g) * 100 + 3),
                 flags: 0,
+                block_bitmap_csum: 0,
+                inode_bitmap_csum: 0,
             })
             .collect()
     }
@@ -3653,7 +3660,12 @@ mod tests {
             group_count: 4,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         };
         let groups = make_groups(&geo);
         let dev = MemBlockDevice::new(128);

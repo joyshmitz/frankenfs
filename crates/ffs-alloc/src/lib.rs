@@ -167,6 +167,10 @@ pub struct GroupStats {
     pub inode_bitmap_block: BlockNumber,
     pub inode_table_block: BlockNumber,
     pub flags: u16,
+    /// CRC32C of the block bitmap (updated on allocation/free when metadata_csum enabled).
+    pub block_bitmap_csum: u32,
+    /// CRC32C of the inode bitmap (updated on inode allocation/free when metadata_csum enabled).
+    pub inode_bitmap_csum: u32,
 }
 
 impl GroupStats {
@@ -178,6 +182,8 @@ impl GroupStats {
             free_blocks: gd.free_blocks_count,
             free_inodes: gd.free_inodes_count,
             used_dirs: gd.used_dirs_count,
+            block_bitmap_csum: gd.block_bitmap_csum,
+            inode_bitmap_csum: gd.inode_bitmap_csum,
             block_bitmap_block: BlockNumber(gd.block_bitmap),
             inode_bitmap_block: BlockNumber(gd.inode_bitmap),
             inode_table_block: BlockNumber(gd.inode_table),
@@ -243,7 +249,12 @@ pub struct FsGeometry {
     pub group_count: u32,
     pub inode_size: u16,
     pub desc_size: u16,
+    pub reserved_gdt_blocks: u16,
+    pub feature_compat: ffs_ondisk::Ext4CompatFeatures,
+    pub feature_incompat: ffs_ondisk::Ext4IncompatFeatures,
     pub feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures,
+    pub log_groups_per_flex: u8,
+    pub backup_bgs: [u32; 2],
 }
 
 impl FsGeometry {
@@ -270,9 +281,63 @@ impl FsGeometry {
             first_data_block: sb.first_data_block,
             group_count,
             inode_size: sb.inode_size,
-            desc_size: sb.desc_size,
+            desc_size: sb.group_desc_size(),
+            reserved_gdt_blocks: sb.reserved_gdt_blocks,
+            feature_compat: sb.feature_compat,
+            feature_incompat: sb.feature_incompat,
             feature_ro_compat: sb.feature_ro_compat,
+            log_groups_per_flex: sb.log_groups_per_flex,
+            backup_bgs: sb.backup_bgs,
         }
+    }
+
+    #[must_use]
+    pub fn groups_per_flex(&self) -> u32 {
+        if self.feature_incompat.0 & ffs_ondisk::Ext4IncompatFeatures::FLEX_BG.0 == 0
+            || self.log_groups_per_flex >= 32
+        {
+            return 1;
+        }
+        1_u32 << self.log_groups_per_flex
+    }
+
+    #[must_use]
+    pub fn has_backup_superblock(&self, group: GroupNumber) -> bool {
+        let group = group.0;
+        if group == 0 {
+            return true;
+        }
+        if self.feature_compat.0 & ffs_ondisk::Ext4CompatFeatures::SPARSE_SUPER2.0 != 0 {
+            return group == self.backup_bgs[0] || group == self.backup_bgs[1];
+        }
+        if group <= 1
+            || self.feature_ro_compat.0 & ffs_ondisk::Ext4RoCompatFeatures::SPARSE_SUPER.0 == 0
+        {
+            return true;
+        }
+        if group & 1 == 0 {
+            return false;
+        }
+        is_power_of(group, 3) || is_power_of(group, 5) || is_power_of(group, 7)
+    }
+
+    #[must_use]
+    pub fn gdt_blocks_count(&self) -> u32 {
+        let desc_per_block = self.block_size / u32::from(self.desc_size);
+        if desc_per_block == 0 {
+            return 0;
+        }
+        self.group_count.div_ceil(desc_per_block)
+    }
+
+    #[must_use]
+    pub fn base_meta_blocks_in_group(&self, group: GroupNumber) -> u32 {
+        if !self.has_backup_superblock(group) {
+            return 0;
+        }
+        1_u32
+            .saturating_add(self.gdt_blocks_count())
+            .saturating_add(u32::from(self.reserved_gdt_blocks))
     }
 
     /// Number of blocks in a specific group (last group may be shorter).
@@ -345,6 +410,17 @@ pub struct PersistCtx {
     pub csum_seed: u32,
 }
 
+fn is_power_of(mut value: u32, factor: u32) -> bool {
+    while value >= factor {
+        let rem = value % factor;
+        if rem != 0 {
+            return false;
+        }
+        value /= factor;
+    }
+    value == 1
+}
+
 /// Determine which relative block offsets within a group are reserved metadata
 /// and must never be allocated as data blocks.
 ///
@@ -370,7 +446,7 @@ pub fn reserved_blocks_in_group(
 
     // Helper: convert absolute block to relative offset in this group,
     // and add to reserved if it falls within the group.
-    let mut add_abs = |abs: u64| {
+    let add_abs = |reserved: &mut Vec<u32>, abs: u64| {
         if abs >= group_start {
             let rel = abs - group_start;
             if rel < u64::from(blocks_in_group) {
@@ -380,16 +456,38 @@ pub fn reserved_blocks_in_group(
         }
     };
 
+    let base_meta_blocks = geo.base_meta_blocks_in_group(group).min(blocks_in_group);
+    for rel in 0..base_meta_blocks {
+        reserved.push(rel);
+    }
+
     // Block bitmap, inode bitmap.
-    add_abs(gs.block_bitmap_block.0);
-    add_abs(gs.inode_bitmap_block.0);
+    add_abs(&mut reserved, gs.block_bitmap_block.0);
+    add_abs(&mut reserved, gs.inode_bitmap_block.0);
 
     // Inode table spans multiple blocks.
-    if geo.inodes_per_group > 0 && geo.inode_size > 0 && geo.block_size > 0 {
-        let inode_table_blocks = (u64::from(geo.inodes_per_group) * u64::from(geo.inode_size))
-            .div_ceil(u64::from(geo.block_size));
+    let inode_table_blocks = if geo.inodes_per_group > 0 && geo.inode_size > 0 && geo.block_size > 0
+    {
+        (u64::from(geo.inodes_per_group) * u64::from(geo.inode_size))
+            .div_ceil(u64::from(geo.block_size))
+    } else {
+        0
+    };
+    for i in 0..inode_table_blocks {
+        add_abs(&mut reserved, gs.inode_table_block.0 + i);
+    }
+
+    // FLEX_BG support: other groups' metadata (bitmaps, inode tables) may
+    // reside within THIS group. Check all groups and mark any foreign
+    // metadata blocks that fall in our address range as reserved.
+    for other_gs in groups {
+        if other_gs.group == group {
+            continue; // Already handled above.
+        }
+        add_abs(&mut reserved, other_gs.block_bitmap_block.0);
+        add_abs(&mut reserved, other_gs.inode_bitmap_block.0);
         for i in 0..inode_table_blocks {
-            add_abs(gs.inode_table_block.0 + i);
+            add_abs(&mut reserved, other_gs.inode_table_block.0 + i);
         }
     }
 
@@ -434,12 +532,31 @@ fn persist_group_desc(
     let existing = Ext4GroupDesc::parse_from_bytes(&buf[offset_in_block..], pctx.desc_size)
         .map_err(|e| FfsError::Format(format!("GDT parse: {e}")))?;
 
-    let updated = Ext4GroupDesc {
+    let mut updated = Ext4GroupDesc {
         free_blocks_count: stats.free_blocks,
         free_inodes_count: stats.free_inodes,
         used_dirs_count: stats.used_dirs,
         ..existing
     };
+
+    if pctx.has_metadata_csum {
+        let block_bitmap = dev.read_block(cx, stats.block_bitmap_block)?;
+        let inode_bitmap = dev.read_block(cx, stats.inode_bitmap_block)?;
+        ffs_ondisk::ext4::stamp_block_bitmap_checksum(
+            block_bitmap.as_slice(),
+            pctx.csum_seed,
+            group.0,
+            &mut updated,
+            pctx.desc_size,
+        );
+        ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
+            inode_bitmap.as_slice(),
+            pctx.csum_seed,
+            group.0,
+            &mut updated,
+            pctx.desc_size,
+        );
+    }
 
     updated
         .write_to_bytes(&mut buf[offset_in_block..], pctx.desc_size)
@@ -748,7 +865,7 @@ fn try_alloc_safe(
         dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
         groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_sub(alloc_count);
 
-        // Persist group descriptor.
+        // Persist group descriptor (includes bitmap checksum stamping if metadata_csum).
         persist_group_desc(cx, dev, pctx, group, &groups[gidx])?;
 
         let abs_start = geo.group_block_to_absolute(group, rel_start);
@@ -1367,23 +1484,47 @@ mod tests {
             group_count: 4,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         }
     }
 
     fn make_groups(geo: &FsGeometry) -> Vec<GroupStats> {
+        let bpg = u64::from(geo.blocks_per_group);
         (0..geo.group_count)
-            .map(|g| GroupStats {
-                group: GroupNumber(g),
-                free_blocks: geo.blocks_per_group,
-                free_inodes: geo.inodes_per_group,
-                used_dirs: 0,
-                block_bitmap_block: BlockNumber(u64::from(g) * 100 + 1),
-                inode_bitmap_block: BlockNumber(u64::from(g) * 100 + 2),
-                inode_table_block: BlockNumber(u64::from(g) * 100 + 3),
-                flags: 0,
+            .map(|g| {
+                // Place metadata within each group's own block range so that
+                // FLEX_BG cross-group checks don't create spurious reservations.
+                let group_start = u64::from(g) * bpg;
+                GroupStats {
+                    group: GroupNumber(g),
+                    free_blocks: geo.blocks_per_group,
+                    free_inodes: geo.inodes_per_group,
+                    used_dirs: 0,
+                    block_bitmap_block: BlockNumber(group_start + 1),
+                    inode_bitmap_block: BlockNumber(group_start + 2),
+                    inode_table_block: BlockNumber(group_start + 3),
+                    flags: 0,
+                    block_bitmap_csum: 0,
+                    inode_bitmap_csum: 0,
+                }
             })
             .collect()
+    }
+
+    fn first_non_reserved_block(
+        geo: &FsGeometry,
+        groups: &[GroupStats],
+        group: GroupNumber,
+    ) -> u32 {
+        let reserved = reserved_blocks_in_group(geo, groups, group);
+        (0..geo.blocks_in_group(group))
+            .find(|rel| !is_reserved(&reserved, *rel))
+            .expect("test geometry should expose at least one allocatable block")
     }
 
     // ── Bitmap tests ────────────────────────────────────────────────────
@@ -1643,12 +1784,17 @@ mod tests {
         let geo = make_geometry();
         let groups = make_groups(&geo);
 
-        // Group 0: bitmap at relative 1, inode bitmap at 2, inode table at 3.
+        // Group 0: base metadata at rel 0..1, block bitmap at 1, inode bitmap at 2,
+        // inode table at 3.
         // Inode table: 2048 inodes * 256 bytes / 4096 bytes = 128 blocks.
         let reserved = reserved_blocks_in_group(&geo, &groups, GroupNumber(0));
 
-        // Should contain bitmap block (rel 1), inode bitmap (rel 2),
-        // and inode table blocks (rel 3..3+128).
+        // Should contain base metadata block 0, bitmap block 1, inode bitmap 2,
+        // and inode table blocks 3..130.
+        assert!(
+            reserved.contains(&0),
+            "superblock/GDT block should be reserved"
+        );
         assert!(reserved.contains(&1), "block bitmap should be reserved");
         assert!(reserved.contains(&2), "inode bitmap should be reserved");
         assert!(
@@ -1663,8 +1809,8 @@ mod tests {
             !reserved.contains(&131),
             "block after inode table should NOT be reserved"
         );
-        // Total: 1 (block bitmap) + 1 (inode bitmap) + 128 (inode table) = 130
-        assert_eq!(reserved.len(), 130);
+        // Total: 2 (superblock+GDT) + 1 (inode bitmap beyond dedup) + 128 (inode table) = 131
+        assert_eq!(reserved.len(), 131);
     }
 
     // ── Persistent allocator tests ─────────────────────────────────────
@@ -1698,6 +1844,8 @@ mod tests {
                 itable_unused: 0,
                 flags: gs.flags,
                 checksum: 0,
+                block_bitmap_csum: 0,
+                inode_bitmap_csum: 0,
             };
             gd.write_to_bytes(&mut buf[offset..], pctx.desc_size)
                 .unwrap();
@@ -1726,10 +1874,11 @@ mod tests {
         )
         .unwrap();
 
-        // The first non-reserved block in group 0 should be allocated.
-        // Reserved blocks: 1,2,3..130 (bitmap+inode bitmap+inode table).
-        // Block 0 is free and not reserved, so it should be allocated first.
-        assert_eq!(alloc.start, BlockNumber(0));
+        let expected_rel = first_non_reserved_block(&geo, &groups, GroupNumber(0));
+        assert_eq!(
+            alloc.start,
+            geo.group_block_to_absolute(GroupNumber(0), expected_rel)
+        );
 
         // In-memory stats should be decremented.
         assert_eq!(groups[0].free_blocks, 8191);
@@ -1749,10 +1898,11 @@ mod tests {
         let pctx = make_persist_ctx();
         seed_gdt_block(&dev, &pctx, &groups);
 
-        // Pre-mark block 0 as allocated in the bitmap so the allocator
-        // must skip it and find the next non-reserved free block.
+        // Pre-mark the first allocatable data block so the allocator must
+        // move forward without ever returning reserved metadata.
+        let first_allocatable = first_non_reserved_block(&geo, &groups, GroupNumber(0));
         let mut bitmap = vec![0u8; 4096];
-        bitmap_set(&mut bitmap, 0);
+        bitmap_set(&mut bitmap, first_allocatable);
         dev.write_block(&cx, groups[0].block_bitmap_block, &bitmap)
             .unwrap();
 
@@ -1777,7 +1927,13 @@ mod tests {
             alloc.start.0,
             rel
         );
-        assert_eq!(rel, 131, "should allocate first non-reserved free block");
+        let expected_rel = ((first_allocatable + 1)..geo.blocks_in_group(GroupNumber(0)))
+            .find(|candidate| !is_reserved(&reserved, *candidate))
+            .expect("test geometry should expose a second allocatable block");
+        assert_eq!(
+            rel, expected_rel,
+            "should allocate next non-reserved free block"
+        );
     }
 
     #[test]
@@ -1998,8 +2154,13 @@ mod tests {
         let groups = make_groups(&geo);
 
         let reserved = reserved_blocks_in_group(&geo, &groups, GroupNumber(0));
-        // Group 0 has block_bitmap at 1, inode_bitmap at 2, inode_table at 3..130.
+        // Group 0 has base metadata at 0..1, block_bitmap at 1,
+        // inode_bitmap at 2, inode_table at 3..130.
         // (2048 inodes * 256 bytes / 4096 block_size = 128 blocks for inode table)
+        assert!(
+            reserved.contains(&0),
+            "superblock/GDT block should be reserved, got: {reserved:?}"
+        );
         assert!(
             reserved.contains(&1),
             "block bitmap should be reserved, got: {reserved:?}"
@@ -2019,6 +2180,11 @@ mod tests {
         assert!(
             !reserved.contains(&131),
             "block past inode table should not be reserved"
+        );
+        assert_eq!(
+            reserved.len(),
+            131,
+            "group 0 should reserve 131 metadata blocks"
         );
     }
 
@@ -2205,7 +2371,12 @@ mod tests {
             group_count: 4,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         };
 
         assert_eq!(geo.blocks_in_group(GroupNumber(0)), 8192);
@@ -2227,7 +2398,12 @@ mod tests {
             group_count: 4,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         };
 
         // Block 1 should be in group 0, relative 0.
@@ -2253,7 +2429,12 @@ mod tests {
             total_inodes: 0,
             group_count: u32::MAX,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         };
         // Block number large enough that group index exceeds u32.
         let huge_block = BlockNumber(u64::from(u32::MAX) * 8192 + 8193);
@@ -2294,6 +2475,8 @@ mod tests {
             inode_bitmap_block: BlockNumber(2),
             inode_table_block: BlockNumber(3),
             flags: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
         };
         assert!(!gs.block_bitmap_uninit());
         assert!(!gs.inode_bitmap_uninit());
@@ -2323,7 +2506,12 @@ mod tests {
             group_count: 4,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         };
         // Group 0, rel 0 -> absolute = first_data_block + 0 = 1
         let abs = geo.group_block_to_absolute(GroupNumber(0), 0);
@@ -2353,7 +2541,12 @@ mod tests {
             group_count: 3,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         };
         assert_eq!(geo.inodes_in_group(GroupNumber(0)), 2048);
         assert_eq!(geo.inodes_in_group(GroupNumber(1)), 2048);
@@ -2449,7 +2642,12 @@ mod tests {
             group_count: 0,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         };
         assert_eq!(geo.group_count, 0);
     }
@@ -2516,6 +2714,49 @@ mod tests {
     }
 
     #[test]
+    fn reserved_blocks_include_backup_super_and_gdt_for_sparse_super2() {
+        let mut geo = make_geometry();
+        geo.feature_compat =
+            ffs_ondisk::Ext4CompatFeatures(ffs_ondisk::Ext4CompatFeatures::SPARSE_SUPER2.0);
+        geo.backup_bgs = [2, 0];
+        geo.reserved_gdt_blocks = 2;
+        let groups = make_groups(&geo);
+        let reserved = reserved_blocks_in_group(&geo, &groups, GroupNumber(2));
+        assert!(
+            reserved.contains(&0),
+            "backup superblock should reserve rel block 0"
+        );
+        assert!(
+            reserved.contains(&1),
+            "backup GDT should reserve rel block 1"
+        );
+        assert!(
+            reserved.contains(&2),
+            "reserved GDT block should reserve rel block 2"
+        );
+    }
+
+    #[test]
+    fn reserved_blocks_only_mark_flex_metadata_when_it_lives_in_group() {
+        let mut geo = make_geometry();
+        geo.feature_incompat =
+            ffs_ondisk::Ext4IncompatFeatures(ffs_ondisk::Ext4IncompatFeatures::FLEX_BG.0);
+        geo.log_groups_per_flex = 2;
+        let mut groups = make_groups(&geo);
+        groups[1].block_bitmap_block = geo.group_block_to_absolute(GroupNumber(0), 200);
+        groups[1].inode_bitmap_block = geo.group_block_to_absolute(GroupNumber(1), 60);
+        let reserved = reserved_blocks_in_group(&geo, &groups, GroupNumber(1));
+        assert!(
+            !reserved.contains(&200),
+            "metadata in another flex group member must not reserve this group's block 200"
+        );
+        assert!(
+            reserved.contains(&60),
+            "metadata stored inside the current group must still be reserved"
+        );
+    }
+
+    #[test]
     fn bitmap_get_out_of_bounds_returns_true() {
         let bitmap = [0xFF_u8; 1]; // 8 bits all set
         assert!(bitmap_get(&bitmap, 0));
@@ -2562,7 +2803,12 @@ mod tests {
             group_count: 4,
             inode_size: 256,
             desc_size: 32,
+            reserved_gdt_blocks: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
         };
         // Group 0, rel 0 → absolute 1 (first_data_block).
         assert_eq!(
@@ -2598,6 +2844,8 @@ mod tests {
             itable_unused: 0,
             flags: GD_FLAG_INODE_UNINIT | GD_FLAG_BLOCK_UNINIT,
             checksum: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
         };
         let gs = GroupStats::from_group_desc(GroupNumber(3), &gd);
         assert_eq!(gs.group, GroupNumber(3));
@@ -2884,6 +3132,8 @@ mod tests {
                 inode_bitmap_block: BlockNumber(2),
                 inode_table_block: BlockNumber(3),
                 flags,
+                block_bitmap_csum: 0,
+                inode_bitmap_csum: 0,
             };
             prop_assert_eq!(gs.block_bitmap_uninit(), flags & GD_FLAG_BLOCK_UNINIT != 0);
             prop_assert_eq!(gs.inode_bitmap_uninit(), flags & GD_FLAG_INODE_UNINIT != 0);
@@ -2907,7 +3157,10 @@ mod tests {
                     inode_bitmap_block: BlockNumber(u64::from(g) * 100 + 2),
                     inode_table_block: BlockNumber(u64::from(g) * 100 + 3),
                     flags: 0,
-                })
+                    block_bitmap_csum: 0,
+                    inode_bitmap_csum: 0,
+                    })
+
                 .collect();
 
             let result = alloc_blocks(
@@ -2932,7 +3185,10 @@ mod tests {
                     inode_bitmap_block: BlockNumber(u64::from(g) * 100 + 2),
                     inode_table_block: BlockNumber(u64::from(g) * 100 + 3),
                     flags: 0,
-                })
+                    block_bitmap_csum: 0,
+                    inode_bitmap_csum: 0,
+                    })
+
                 .collect();
 
             let result = alloc_inode(
@@ -3051,7 +3307,12 @@ mod tests {
                 group_count: gc,
                 inode_size: 256,
                 desc_size: 32,
+                reserved_gdt_blocks: 0,
+                feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+                feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
                 feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+                log_groups_per_flex: 0,
+                backup_bgs: [0, 0],
             };
             let sum: u64 = (0..gc).map(|g| u64::from(geo.blocks_in_group(GroupNumber(g)))).sum();
             prop_assert_eq!(sum, total_blocks);
