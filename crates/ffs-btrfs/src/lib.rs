@@ -4379,6 +4379,7 @@ mod tests {
         let data = b"Hello, btrfs inline extent!".to_vec();
         let original = BtrfsExtentData::Inline {
             generation: 0,
+            ram_bytes: data.len() as u64,
             compression: 0,
             data: data.clone(),
         };
@@ -4392,6 +4393,7 @@ mod tests {
     fn extent_data_regular_round_trip() {
         let original = BtrfsExtentData::Regular {
             generation: 1,
+            ram_bytes: 3500,
             extent_type: BTRFS_FILE_EXTENT_REG,
             compression: 0,
             disk_bytenr: 0x10_0000,
@@ -4409,6 +4411,7 @@ mod tests {
     fn extent_data_prealloc_round_trip() {
         let original = BtrfsExtentData::Regular {
             generation: 1,
+            ram_bytes: 7680,
             extent_type: BTRFS_FILE_EXTENT_PREALLOC,
             compression: 0,
             disk_bytenr: 0x20_0000,
@@ -4481,6 +4484,7 @@ mod tests {
     fn extent_data_inline_empty() {
         let original = BtrfsExtentData::Inline {
             generation: 1,
+            ram_bytes: 0,
             compression: 0,
             data: vec![],
         };

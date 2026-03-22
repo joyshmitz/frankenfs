@@ -255,6 +255,11 @@ pub struct FsGeometry {
     pub feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures,
     pub log_groups_per_flex: u8,
     pub backup_bgs: [u32; 2],
+    /// Cluster-to-block ratio for bigalloc filesystems.
+    ///
+    /// For non-bigalloc: 1 (extent lengths are in blocks).
+    /// For bigalloc: `cluster_size / block_size` (extent lengths are in clusters).
+    pub cluster_ratio: u32,
 }
 
 impl FsGeometry {
@@ -288,6 +293,16 @@ impl FsGeometry {
             feature_ro_compat: sb.feature_ro_compat,
             log_groups_per_flex: sb.log_groups_per_flex,
             backup_bgs: sb.backup_bgs,
+            cluster_ratio: if sb
+                .feature_ro_compat
+                .contains(ffs_ondisk::Ext4RoCompatFeatures::BIGALLOC)
+                && sb.cluster_size > 0
+                && sb.block_size > 0
+            {
+                sb.cluster_size / sb.block_size
+            } else {
+                1
+            },
         }
     }
 
@@ -1490,6 +1505,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            cluster_ratio: 1,
         }
     }
 
@@ -2377,6 +2393,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            cluster_ratio: 1,
         };
 
         assert_eq!(geo.blocks_in_group(GroupNumber(0)), 8192);
@@ -2404,6 +2421,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            cluster_ratio: 1,
         };
 
         // Block 1 should be in group 0, relative 0.
@@ -2435,6 +2453,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            cluster_ratio: 1,
         };
         // Block number large enough that group index exceeds u32.
         let huge_block = BlockNumber(u64::from(u32::MAX) * 8192 + 8193);
@@ -2512,6 +2531,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            cluster_ratio: 1,
         };
         // Group 0, rel 0 -> absolute = first_data_block + 0 = 1
         let abs = geo.group_block_to_absolute(GroupNumber(0), 0);
@@ -2547,6 +2567,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            cluster_ratio: 1,
         };
         assert_eq!(geo.inodes_in_group(GroupNumber(0)), 2048);
         assert_eq!(geo.inodes_in_group(GroupNumber(1)), 2048);
@@ -2648,6 +2669,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            cluster_ratio: 1,
         };
         assert_eq!(geo.group_count, 0);
     }
@@ -2809,6 +2831,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            cluster_ratio: 1,
         };
         // Group 0, rel 0 → absolute 1 (first_data_block).
         assert_eq!(
@@ -3313,6 +3336,7 @@ mod tests {
                 feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
                 log_groups_per_flex: 0,
                 backup_bgs: [0, 0],
+                cluster_ratio: 1,
             };
             let sum: u64 = (0..gc).map(|g| u64::from(geo.blocks_in_group(GroupNumber(g)))).sum();
             prop_assert_eq!(sum, total_blocks);

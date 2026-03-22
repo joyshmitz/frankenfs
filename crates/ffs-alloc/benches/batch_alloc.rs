@@ -76,6 +76,7 @@ fn make_geometry() -> FsGeometry {
         feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
         log_groups_per_flex: 0,
         backup_bgs: [0, 0],
+        cluster_ratio: 1,
     }
 }
 

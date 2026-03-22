@@ -150,13 +150,8 @@ impl Ext4IncompatFeatures {
     );
 
     /// Bits FrankenFS v1 explicitly rejects.
-    pub const REJECTED_V1: Self = Self(
-        Self::COMPRESSION.0
-            | Self::JOURNAL_DEV.0
-            | Self::INLINE_DATA.0
-            | Self::ENCRYPT.0
-            | Self::CASEFOLD.0,
-    );
+    pub const REJECTED_V1: Self =
+        Self(Self::COMPRESSION.0 | Self::JOURNAL_DEV.0 | Self::ENCRYPT.0 | Self::CASEFOLD.0);
 
     /// All known incompat flags for iteration.
     const KNOWN: &[(u32, &'static str)] = &[
@@ -968,7 +963,7 @@ impl Ext4Superblock {
         if (self.feature_incompat.0 & Ext4IncompatFeatures::REJECTED_V1.0) != 0 {
             return Err(ParseError::InvalidField {
                 field: "feature_incompat",
-                reason: "unsupported features present (COMPRESSION/JOURNAL_DEV/INLINE_DATA/ENCRYPT/CASEFOLD rejected)",
+                reason: "unsupported features present (COMPRESSION/JOURNAL_DEV/ENCRYPT/CASEFOLD rejected)",
             });
         }
 

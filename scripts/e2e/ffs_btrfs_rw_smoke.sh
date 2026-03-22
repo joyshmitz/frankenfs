@@ -716,10 +716,9 @@ prepare_btrfs_images() {
     run_case "image_copy_work" cp "$base_image" "$work_image"
 }
 
-check_punch_hole_eopnotsupp() {
+check_punch_hole_zeroes_range() {
     local path="$1"
     python3 - "$path" <<'PY'
-import errno
 import fcntl
 import os
 import sys
@@ -730,23 +729,19 @@ try:
     if not hasattr(fcntl, "fallocate"):
         raise SystemExit("python fcntl.fallocate is unavailable")
     before_size = os.fstat(fd).st_size
-    before_data = os.pread(fd, min(before_size, 8192), 0)
+    before_data = os.pread(fd, before_size, 0)
     mode = fcntl.FALLOC_FL_KEEP_SIZE | fcntl.FALLOC_FL_PUNCH_HOLE
-    try:
-        fcntl.fallocate(fd, mode, 0, 4096)
-    except OSError as exc:  # expected path
-        if exc.errno == errno.EOPNOTSUPP:
-            after_size = os.fstat(fd).st_size
-            after_data = os.pread(fd, min(after_size, 8192), 0)
-            if after_size != before_size:
-                raise SystemExit(
-                    f"unsupported punch-hole changed file size: before={before_size} after={after_size}"
-                )
-            if after_data != before_data:
-                raise SystemExit("unsupported punch-hole mutated file bytes before rejection")
-            raise SystemExit(0)
-        raise SystemExit(f"expected errno {errno.EOPNOTSUPP}, got {exc.errno}: {exc}")
-    raise SystemExit("expected punch-hole fallocate to fail with EOPNOTSUPP, but it succeeded")
+    fcntl.fallocate(fd, mode, 0, 4096)
+    after_size = os.fstat(fd).st_size
+    after_data = os.pread(fd, after_size, 0)
+    if after_size != before_size:
+        raise SystemExit(
+            f"punch-hole changed file size under KEEP_SIZE: before={before_size} after={after_size}"
+        )
+    if any(after_data[:4096]):
+        raise SystemExit("punch-hole range was not zeroed")
+    if after_data[4096:] != before_data[4096:]:
+        raise SystemExit("punch-hole mutated file bytes outside the requested range")
 finally:
     os.close(fd)
 PY
@@ -820,7 +815,7 @@ run_case_shell "file_append" "printf 'append-line\\n' >> '$MOUNT_RW/small.txt' &
 
 run_case_shell "file_truncate_extend_2mb" "truncate -s 2097152 '$MOUNT_RW/large.bin'"
 run_case_shell "file_truncate_shrink_256b" "truncate -s 256 '$MOUNT_RW/large.bin' && test \"$(stat -c '%s' '$MOUNT_RW/large.bin')\" -eq 256"
-run_case "unsupported_fallocate_punch_hole_errno_eopnotsupp" check_punch_hole_eopnotsupp "$MOUNT_RW/medium.bin"
+run_case "fallocate_punch_hole_keep_size_zeroes_range" check_punch_hole_zeroes_range "$MOUNT_RW/medium.bin"
 run_case "unsupported_fallocate_mode_bits_errno_eopnotsupp" check_unsupported_mode_bits_eopnotsupp "$MOUNT_RW/medium.bin"
 
 run_case "dir_mkdir_single" mkdir "$MOUNT_RW/single_dir"
