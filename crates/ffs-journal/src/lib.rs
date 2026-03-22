@@ -21,9 +21,12 @@ const JBD2_BLOCKTYPE_SUPERBLOCK_V1: u32 = 3;
 const JBD2_BLOCKTYPE_SUPERBLOCK_V2: u32 = 4;
 const JBD2_BLOCKTYPE_REVOKE: u32 = 5;
 
+const JBD2_FEATURE_INCOMPAT_64BIT: u32 = 0x0000_0002;
+
 const JBD2_HEADER_SIZE: usize = 12;
 const JBD2_REVOKE_HEADER_SIZE: usize = 16; // journal header (12) + r_count (4)
-const JBD2_TAG_SIZE: usize = 8;
+const JBD2_TAG_SIZE_32: usize = 8;
+const JBD2_TAG_SIZE_64: usize = 12;
 
 const JBD2_TAG_FLAG_ESCAPE: u32 = 0x0000_0001;
 const JBD2_TAG_FLAG_SAME_UUID: u32 = 0x0000_0002;
@@ -43,6 +46,9 @@ pub struct Jbd2Superblock {
     pub first_log_block: u32,
     pub start_sequence: u32,
     pub start_block: u32,
+    pub feature_compat: u32,
+    pub feature_incompat: u32,
+    pub feature_ro_compat: u32,
 }
 
 impl Jbd2Superblock {
@@ -62,7 +68,15 @@ impl Jbd2Superblock {
             first_log_block: read_be_u32(bytes, 20)?,
             start_sequence: read_be_u32(bytes, 24)?,
             start_block: read_be_u32(bytes, 28)?,
+            feature_compat: read_be_u32(bytes, 36).unwrap_or(0),
+            feature_incompat: read_be_u32(bytes, 40).unwrap_or(0),
+            feature_ro_compat: read_be_u32(bytes, 44).unwrap_or(0),
         })
+    }
+
+    #[must_use]
+    pub fn is_64bit(&self) -> bool {
+        (self.feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT) != 0
     }
 }
 
@@ -272,6 +286,7 @@ fn replay_jbd2_inner(
 
     let mut idx = 0_u64;
     let mut expected_seq = None;
+    let mut is_64bit = false;
 
     // Try to find JBD2 superblock at the beginning of the journal.
     if total_blocks > 0 {
@@ -280,10 +295,12 @@ fn replay_jbd2_inner(
         if let Some(sb) = Jbd2Superblock::parse(first_raw.as_slice()) {
             idx = u64::from(sb.start_block);
             expected_seq = Some(sb.start_sequence);
+            is_64bit = sb.is_64bit();
             tracing::info!(
                 target: "ffs::journal",
                 start_block = sb.start_block,
                 start_sequence = sb.start_sequence,
+                is_64bit,
                 "jbd2_superblock_found"
             );
         }
@@ -323,7 +340,7 @@ fn replay_jbd2_inner(
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
                 stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
-                let tags = parse_descriptor_tags(raw.as_slice());
+                let tags = parse_descriptor_tags(raw.as_slice(), is_64bit);
                 stats.descriptor_tags = stats
                     .descriptor_tags
                     .saturating_add(u64::try_from(tags.len()).unwrap_or(u64::MAX));
@@ -369,7 +386,7 @@ fn replay_jbd2_inner(
             }
             JBD2_BLOCKTYPE_REVOKE => {
                 stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
-                let revokes = parse_revoke_entries(raw.as_slice());
+                let revokes = parse_revoke_entries(raw.as_slice(), is_64bit);
                 stats.revoke_entries = stats
                     .revoke_entries
                     .saturating_add(u64::try_from(revokes.len()).unwrap_or(u64::MAX));
@@ -624,6 +641,8 @@ pub struct Jbd2Writer {
     head: u64,
     /// Next sequence number for a new transaction.
     next_seq: u32,
+    /// Whether to use 64-bit block number format.
+    is_64bit: bool,
 }
 
 impl Jbd2Writer {
@@ -634,7 +653,13 @@ impl Jbd2Writer {
             region,
             head: 0,
             next_seq: start_seq,
+            is_64bit: false,
         }
+    }
+
+    /// Set whether to use 64-bit block number format.
+    pub fn set_64bit(&mut self, enabled: bool) {
+        self.is_64bit = enabled;
     }
 
     /// Open an existing journal region, scanning forward to discover the tail.
@@ -650,10 +675,19 @@ impl Jbd2Writer {
     ) -> Result<Self> {
         let mut head = 0_u64;
         let mut max_seq = start_seq;
+        let mut is_64bit = false;
 
         while head < region.blocks {
             let block = resolve_region_block(region, head)?;
             let raw = dev.read_block(cx, block)?;
+
+            if head == 0 {
+                if let Some(sb) = Jbd2Superblock::parse(raw.as_slice()) {
+                    is_64bit = sb.is_64bit();
+                    head = head.saturating_add(1);
+                    continue;
+                }
+            }
 
             let Some(header) = Jbd2Header::parse(raw.as_slice()) else {
                 break;
@@ -668,7 +702,7 @@ impl Jbd2Writer {
 
             match header.block_type {
                 JBD2_BLOCKTYPE_DESCRIPTOR => {
-                    let tags = parse_descriptor_tags(raw.as_slice());
+                    let tags = parse_descriptor_tags(raw.as_slice(), is_64bit);
                     // Advance past descriptor + its data blocks.
                     head = head
                         .saturating_add(1)
@@ -684,6 +718,7 @@ impl Jbd2Writer {
             region,
             head,
             next_seq: max_seq,
+            is_64bit,
         })
     }
 
@@ -719,10 +754,10 @@ impl Jbd2Writer {
     /// Compute how many journal blocks a transaction with `writes` data blocks
     /// and `revokes` revoke entries will consume.
     #[must_use]
-    pub fn blocks_needed(block_size: u32, writes: usize, revokes: usize) -> u64 {
+    pub fn blocks_needed(block_size: u32, writes: usize, revokes: usize, is_64bit: bool) -> u64 {
         let bs = block_size as usize;
-        let tags_per_desc = max_tags_per_descriptor(bs);
-        let entries_per_revoke = max_revoke_entries(bs);
+        let tags_per_desc = max_tags_per_descriptor(bs, is_64bit);
+        let entries_per_revoke = max_revoke_entries(bs, is_64bit);
 
         let mut total = 0_u64;
         if writes > 0 {
@@ -755,7 +790,12 @@ impl Jbd2Writer {
         let bs = usize::try_from(dev.block_size())
             .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
 
-        let needed = Self::blocks_needed(dev.block_size(), txn.writes.len(), txn.revokes.len());
+        let needed = Self::blocks_needed(
+            dev.block_size(),
+            txn.writes.len(),
+            txn.revokes.len(),
+            self.is_64bit,
+        );
         if needed > self.free_blocks() {
             return Err(FfsError::NoSpace);
         }
@@ -764,7 +804,12 @@ impl Jbd2Writer {
         let seq = txn.sequence;
 
         // --- Phase 1: descriptor + data blocks ---
-        let tags_per_desc = max_tags_per_descriptor(bs);
+        let tags_per_desc = max_tags_per_descriptor(bs, self.is_64bit);
+        let tag_size = if self.is_64bit {
+            JBD2_TAG_SIZE_64
+        } else {
+            JBD2_TAG_SIZE_32
+        };
         let mut write_idx = 0;
         while write_idx < txn.writes.len() {
             let chunk_end = (write_idx + tags_per_desc).min(txn.writes.len());
@@ -775,9 +820,6 @@ impl Jbd2Writer {
 
             let mut off = JBD2_HEADER_SIZE;
             for (i, (target, payload)) in chunk.iter().enumerate() {
-                let target_u32 = u32::try_from(target.0).map_err(|_| {
-                    FfsError::Format(format!("target block {} exceeds u32 range", target.0))
-                })?;
                 let is_last_in_desc = i == chunk.len() - 1;
                 let mut flags = if is_last_in_desc {
                     JBD2_TAG_FLAG_LAST
@@ -794,9 +836,20 @@ impl Jbd2Writer {
                 // Always set SAME_UUID since we don't support multi-UUID journals yet.
                 flags |= JBD2_TAG_FLAG_SAME_UUID;
 
-                desc[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
-                desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
-                off += JBD2_TAG_SIZE;
+                if self.is_64bit {
+                    let target_low = (target.0 & 0xFFFF_FFFF) as u32;
+                    let target_high = (target.0 >> 32) as u32;
+                    desc[off..off + 4].copy_from_slice(&target_low.to_be_bytes());
+                    desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
+                    desc[off + 8..off + 12].copy_from_slice(&target_high.to_be_bytes());
+                } else {
+                    let target_u32 = u32::try_from(target.0).map_err(|_| {
+                        FfsError::Format(format!("target block {} exceeds u32 range", target.0))
+                    })?;
+                    desc[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
+                    desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
+                }
+                off += tag_size;
             }
 
             let desc_block = self.alloc_block()?;
@@ -824,7 +877,8 @@ impl Jbd2Writer {
 
         // --- Phase 2: revoke blocks ---
         if !txn.revokes.is_empty() {
-            let entries_per_revoke = max_revoke_entries(bs);
+            let entries_per_revoke = max_revoke_entries(bs, self.is_64bit);
+            let entry_size = if self.is_64bit { 8 } else { 4 };
             let mut revoke_idx = 0;
 
             while revoke_idx < txn.revokes.len() {
@@ -834,17 +888,24 @@ impl Jbd2Writer {
                 let mut revoke = vec![0_u8; bs];
                 encode_jbd2_header(&mut revoke, JBD2_BLOCKTYPE_REVOKE, seq);
 
-                let r_count = u32::try_from(JBD2_REVOKE_HEADER_SIZE + chunk.len() * 4)
+                let r_count = u32::try_from(JBD2_REVOKE_HEADER_SIZE + chunk.len() * entry_size)
                     .map_err(|_| FfsError::Format("revoke r_count overflow".to_owned()))?;
                 revoke[12..16].copy_from_slice(&r_count.to_be_bytes());
 
                 let mut off = JBD2_REVOKE_HEADER_SIZE;
                 for target in chunk {
-                    let target_u32 = u32::try_from(target.0).map_err(|_| {
-                        FfsError::Format(format!("revoke target {} exceeds u32 range", target.0))
-                    })?;
-                    revoke[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
-                    off += 4;
+                    if self.is_64bit {
+                        let high = (target.0 >> 32) as u32;
+                        let low = (target.0 & 0xFFFF_FFFF) as u32;
+                        revoke[off..off + 4].copy_from_slice(&high.to_be_bytes());
+                        revoke[off + 4..off + 8].copy_from_slice(&low.to_be_bytes());
+                    } else {
+                        let target_u32 = u32::try_from(target.0).map_err(|_| {
+                            FfsError::Format(format!("revoke target {} exceeds u32 range", target.0))
+                        })?;
+                        revoke[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
+                    }
+                    off += entry_size;
                 }
 
                 let rev_block = self.alloc_block()?;
@@ -894,13 +955,19 @@ fn encode_jbd2_header(buf: &mut [u8], block_type: u32, sequence: u32) {
 }
 
 #[must_use]
-fn max_tags_per_descriptor(block_size: usize) -> usize {
-    (block_size.saturating_sub(JBD2_HEADER_SIZE)) / JBD2_TAG_SIZE
+fn max_tags_per_descriptor(block_size: usize, is_64bit: bool) -> usize {
+    let tag_size = if is_64bit {
+        JBD2_TAG_SIZE_64
+    } else {
+        JBD2_TAG_SIZE_32
+    };
+    (block_size.saturating_sub(JBD2_HEADER_SIZE)) / tag_size
 }
 
 #[must_use]
-fn max_revoke_entries(block_size: usize) -> usize {
-    (block_size.saturating_sub(JBD2_REVOKE_HEADER_SIZE)) / 4
+fn max_revoke_entries(block_size: usize, is_64bit: bool) -> usize {
+    let entry_size = if is_64bit { 8 } else { 4 };
+    (block_size.saturating_sub(JBD2_REVOKE_HEADER_SIZE)) / entry_size
 }
 
 /// A single recovered native COW write operation.
@@ -1103,24 +1170,36 @@ fn resolve_segment_block(
 }
 
 #[must_use]
-fn parse_descriptor_tags(block: &[u8]) -> Vec<DescriptorTag> {
+fn parse_descriptor_tags(block: &[u8], is_64bit: bool) -> Vec<DescriptorTag> {
     let mut tags = Vec::new();
     let mut offset = JBD2_HEADER_SIZE;
+    let tag_size = if is_64bit {
+        JBD2_TAG_SIZE_64
+    } else {
+        JBD2_TAG_SIZE_32
+    };
 
-    while offset.saturating_add(JBD2_TAG_SIZE) <= block.len() {
-        let Some(target) = read_be_u32(block, offset) else {
+    while offset.saturating_add(tag_size) <= block.len() {
+        let Some(target_low) = read_be_u32(block, offset) else {
             break;
         };
         let Some(flags) = read_be_u32(block, offset.saturating_add(4)) else {
             break;
         };
 
+        let mut target = u64::from(target_low);
+        if is_64bit {
+            if let Some(target_high) = read_be_u32(block, offset.saturating_add(8)) {
+                target |= u64::from(target_high) << 32;
+            }
+        }
+
         let tag = DescriptorTag {
-            target: BlockNumber(u64::from(target)),
+            target: BlockNumber(target),
             flags,
         };
         tags.push(tag);
-        offset = offset.saturating_add(JBD2_TAG_SIZE);
+        offset = offset.saturating_add(tag_size);
         if tag.has_uuid() {
             offset = offset.saturating_add(16);
         }
@@ -1134,20 +1213,29 @@ fn parse_descriptor_tags(block: &[u8]) -> Vec<DescriptorTag> {
 }
 
 #[must_use]
-fn parse_revoke_entries(block: &[u8]) -> Vec<BlockNumber> {
+fn parse_revoke_entries(block: &[u8], is_64bit: bool) -> Vec<BlockNumber> {
     let mut out = Vec::new();
     let Some(r_count) = read_be_u32(block, 12) else {
         return out;
     };
     let limit = (r_count as usize).min(block.len());
     let mut offset = JBD2_REVOKE_HEADER_SIZE;
+    let entry_size = if is_64bit { 8 } else { 4 };
 
-    while offset.saturating_add(4) <= limit {
-        let Some(raw) = read_be_u32(block, offset) else {
+    while offset.saturating_add(entry_size) <= limit {
+        if is_64bit {
+            if let Some(high) = read_be_u32(block, offset) {
+                if let Some(low) = read_be_u32(block, offset + 4) {
+                    let full = (u64::from(high) << 32) | u64::from(low);
+                    out.push(BlockNumber(full));
+                }
+            }
+        } else if let Some(raw) = read_be_u32(block, offset) {
+            out.push(BlockNumber(u64::from(raw)));
+        } else {
             break;
-        };
-        out.push(BlockNumber(u64::from(raw)));
-        offset = offset.saturating_add(4);
+        }
+        offset = offset.saturating_add(entry_size);
     }
 
     out
@@ -1428,9 +1516,10 @@ mod tests {
         out[0..JBD2_HEADER_SIZE].copy_from_slice(&jbd2_header(JBD2_BLOCKTYPE_DESCRIPTOR, seq));
         let mut off = JBD2_HEADER_SIZE;
         for (target, flags) in tags {
+            let final_flags = *flags | JBD2_TAG_FLAG_SAME_UUID;
             out[off..off + 4].copy_from_slice(&target.to_be_bytes());
-            out[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
-            off += JBD2_TAG_SIZE;
+            out[off + 4..off + 8].copy_from_slice(&final_flags.to_be_bytes());
+            off += JBD2_TAG_SIZE_32;
         }
         out
     }
@@ -2026,7 +2115,7 @@ mod tests {
         assert_eq!(header.block_type, JBD2_BLOCKTYPE_DESCRIPTOR);
         assert_eq!(header.sequence, 42);
 
-        let tags = parse_descriptor_tags(desc_raw.as_slice());
+        let tags = parse_descriptor_tags(desc_raw.as_slice(), false);
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0].target, BlockNumber(7));
         assert_eq!(tags[0].flags & JBD2_TAG_FLAG_LAST, 0); // Not last.
@@ -2037,15 +2126,15 @@ mod tests {
     #[test]
     fn jbd2_writer_blocks_needed_calculation() {
         // 512-byte blocks: (512-12)/8 = 62 tags per desc, (512-16)/4 = 124 entries per revoke.
-        assert_eq!(Jbd2Writer::blocks_needed(512, 0, 0), 1); // Just commit.
-        assert_eq!(Jbd2Writer::blocks_needed(512, 1, 0), 3); // desc + data + commit.
-        assert_eq!(Jbd2Writer::blocks_needed(512, 3, 0), 5); // desc + 3 data + commit.
-        assert_eq!(Jbd2Writer::blocks_needed(512, 0, 1), 2); // revoke + commit.
-        assert_eq!(Jbd2Writer::blocks_needed(512, 1, 1), 4); // desc + data + revoke + commit.
+        assert_eq!(Jbd2Writer::blocks_needed(512, 0, 0, false), 1); // Just commit.
+        assert_eq!(Jbd2Writer::blocks_needed(512, 1, 0, false), 3); // desc + data + commit.
+        assert_eq!(Jbd2Writer::blocks_needed(512, 3, 0, false), 5); // desc + 3 data + commit.
+        assert_eq!(Jbd2Writer::blocks_needed(512, 0, 1, false), 2); // revoke + commit.
+        assert_eq!(Jbd2Writer::blocks_needed(512, 1, 1, false), 4); // desc + data + revoke + commit.
         // 62 writes: fits in one descriptor.
-        assert_eq!(Jbd2Writer::blocks_needed(512, 62, 0), 64); // 1 desc + 62 data + commit.
+        assert_eq!(Jbd2Writer::blocks_needed(512, 62, 0, false), 64); // 1 desc + 62 data + commit.
         // 63 writes: needs two descriptors.
-        assert_eq!(Jbd2Writer::blocks_needed(512, 63, 0), 66); // 2 desc + 63 data + commit.
+        assert_eq!(Jbd2Writer::blocks_needed(512, 63, 0, false), 66); // 2 desc + 63 data + commit.
     }
 
     #[test]
@@ -2246,7 +2335,9 @@ mod tests {
             "later sequence (21) should overwrite earlier sequence (20)"
         );
         assert_eq!(out.committed_sequences, vec![20, 21]);
-        assert_eq!(out.stats.replayed_blocks, 2);
+        // Replayed blocks is 1 because both transactions write to the SAME block (6),
+        // and our implementation deduplicates to only write the final state.
+        assert_eq!(out.stats.replayed_blocks, 1);
     }
 
     #[test]
@@ -2922,6 +3013,11 @@ mod tests {
 
         let mut desc = vec![0_u8; 512];
         encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, 1);
+        // Set SAME_UUID for all tags in the buffer so they are parsed as 8-byte tags.
+        for i in 0..62 {
+            let off = 12 + i * 8 + 4;
+            desc[off..off + 4].copy_from_slice(&JBD2_TAG_FLAG_SAME_UUID.to_be_bytes());
+        }
         dev.raw_write(BlockNumber(10), desc);
         dev.raw_write(BlockNumber(11), commit_block(512, 1));
 
@@ -3097,7 +3193,7 @@ mod tests {
         };
 
         // Maximum tags that fit: (block_size - HEADER_SIZE) / TAG_SIZE
-        let max_tags = (block_size - JBD2_HEADER_SIZE) / JBD2_TAG_SIZE;
+        let max_tags = (block_size - JBD2_HEADER_SIZE) / JBD2_TAG_SIZE_32;
         let mut tags: Vec<(u32, u32)> = (0..max_tags)
             .map(|i| {
                 let target = u32::try_from(i).unwrap();
@@ -3552,19 +3648,19 @@ mod tests {
     #[test]
     fn jbd2_writer_blocks_needed_zero_writes_and_revokes() {
         // Zero writes, zero revokes: just the commit block.
-        assert_eq!(Jbd2Writer::blocks_needed(4096, 0, 0), 1);
+        assert_eq!(Jbd2Writer::blocks_needed(4096, 0, 0, false), 1);
     }
 
     #[test]
     fn jbd2_writer_blocks_needed_single_write() {
         // 1 write: descriptor(1) + data(1) + commit(1) = 3
-        assert_eq!(Jbd2Writer::blocks_needed(4096, 1, 0), 3);
+        assert_eq!(Jbd2Writer::blocks_needed(4096, 1, 0, false), 3);
     }
 
     #[test]
     fn jbd2_writer_blocks_needed_with_revokes() {
         // revokes add revoke block(s) before commit
-        let needed = Jbd2Writer::blocks_needed(4096, 0, 1);
+        let needed = Jbd2Writer::blocks_needed(4096, 0, 1, false);
         // 0 writes → no descriptor; 1 revoke → 1 revoke block; 1 commit = 2
         assert_eq!(needed, 2);
     }
@@ -3572,9 +3668,9 @@ mod tests {
     #[test]
     fn jbd2_writer_blocks_needed_monotonic() {
         // More writes should need more blocks.
-        let a = Jbd2Writer::blocks_needed(4096, 1, 0);
-        let b = Jbd2Writer::blocks_needed(4096, 5, 0);
-        let c = Jbd2Writer::blocks_needed(4096, 10, 0);
+        let a = Jbd2Writer::blocks_needed(4096, 1, 0, false);
+        let b = Jbd2Writer::blocks_needed(4096, 5, 0, false);
+        let c = Jbd2Writer::blocks_needed(4096, 10, 0, false);
         assert!(a <= b);
         assert!(b <= c);
     }
@@ -3652,7 +3748,7 @@ mod tests {
         assert_eq!(JBD2_BLOCKTYPE_REVOKE, 5);
         assert_eq!(JBD2_HEADER_SIZE, 12);
         assert_eq!(JBD2_REVOKE_HEADER_SIZE, 16);
-        assert_eq!(JBD2_TAG_SIZE, 8);
+        assert_eq!(JBD2_TAG_SIZE_32, 8);
         assert_eq!(JBD2_TAG_FLAG_LAST, 0x0000_0008);
     }
 
@@ -3822,11 +3918,11 @@ mod tests {
     #[test]
     fn max_revoke_entries_scales_with_block_size() {
         // 4096 block: (4096 - 16) / 4 = 1020.
-        assert_eq!(max_revoke_entries(4096), 1020);
+        assert_eq!(max_revoke_entries(4096, false), 1020);
         // 1024 block: (1024 - 16) / 4 = 252.
-        assert_eq!(max_revoke_entries(1024), 252);
+        assert_eq!(max_revoke_entries(1024, false), 252);
         // Block size smaller than header: saturating_sub returns 0.
-        assert_eq!(max_revoke_entries(8), 0);
+        assert_eq!(max_revoke_entries(8, false), 0);
     }
 
     // ── Property-based tests (proptest) ────────────────────────────────
@@ -3951,7 +4047,7 @@ mod tests {
                 blocks: 256,
             };
 
-            let predicted = Jbd2Writer::blocks_needed(512, num_writes, num_revokes);
+            let predicted = Jbd2Writer::blocks_needed(512, num_writes, num_revokes, false);
 
             let mut writer = Jbd2Writer::new(region, 1);
             let head_before = writer.head();
@@ -4021,7 +4117,7 @@ mod tests {
         fn proptest_parse_descriptor_tags_no_panic(
             data in prop::collection::vec(any::<u8>(), 0..1024),
         ) {
-            let _ = parse_descriptor_tags(&data);
+            let _ = parse_descriptor_tags(&data, false);
         }
 
         /// parse_revoke_entries never panics on arbitrary byte input.
@@ -4029,7 +4125,7 @@ mod tests {
         fn proptest_parse_revoke_entries_no_panic(
             data in prop::collection::vec(any::<u8>(), 0..1024),
         ) {
-            let _ = parse_revoke_entries(&data);
+            let _ = parse_revoke_entries(&data, false);
         }
 
         /// Native COW write → recover roundtrip: committed writes are recovered.

@@ -255,6 +255,8 @@ pub struct FsGeometry {
     pub feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures,
     pub log_groups_per_flex: u8,
     pub backup_bgs: [u32; 2],
+    /// First non-reserved inode number (s_first_ino).
+    pub first_inode: u32,
     /// Cluster-to-block ratio for bigalloc filesystems.
     ///
     /// For non-bigalloc: 1 (extent lengths are in blocks).
@@ -293,13 +295,14 @@ impl FsGeometry {
             feature_ro_compat: sb.feature_ro_compat,
             log_groups_per_flex: sb.log_groups_per_flex,
             backup_bgs: sb.backup_bgs,
+            first_inode: sb.first_ino,
             cluster_ratio: if sb
                 .feature_ro_compat
                 .contains(ffs_ondisk::Ext4RoCompatFeatures::BIGALLOC)
                 && sb.cluster_size > 0
                 && sb.block_size > 0
             {
-                sb.cluster_size / sb.block_size
+                (sb.cluster_size / sb.block_size).max(1)
             } else {
                 1
             },
@@ -426,6 +429,9 @@ pub struct PersistCtx {
 }
 
 fn is_power_of(mut value: u32, factor: u32) -> bool {
+    if factor <= 1 {
+        return value == 1;
+    }
     while value >= factor {
         let rem = value % factor;
         if rem != 0 {
@@ -493,16 +499,26 @@ pub fn reserved_blocks_in_group(
     }
 
     // FLEX_BG support: other groups' metadata (bitmaps, inode tables) may
-    // reside within THIS group. Check all groups and mark any foreign
-    // metadata blocks that fall in our address range as reserved.
-    for other_gs in groups {
-        if other_gs.group == group {
-            continue; // Already handled above.
-        }
-        add_abs(&mut reserved, other_gs.block_bitmap_block.0);
-        add_abs(&mut reserved, other_gs.inode_bitmap_block.0);
-        for i in 0..inode_table_blocks {
-            add_abs(&mut reserved, other_gs.inode_table_block.0 + i);
+    // reside within THIS group.
+    let gpf = geo.groups_per_flex();
+    if gpf > 1 {
+        // Only check groups in the same flex group. Metadata for group G
+        // is always stored within the same flex group F where F = G / gpf.
+        let flex_index = group.0 / gpf;
+        let first_group = flex_index.saturating_mul(gpf);
+        let last_group = first_group.saturating_add(gpf).min(geo.group_count);
+
+        for g in first_group..last_group {
+            if g == group.0 {
+                continue; // Already handled above.
+            }
+            if let Some(other_gs) = groups.get(g as usize) {
+                add_abs(&mut reserved, other_gs.block_bitmap_block.0);
+                add_abs(&mut reserved, other_gs.inode_bitmap_block.0);
+                for i in 0..inode_table_blocks {
+                    add_abs(&mut reserved, other_gs.inode_table_block.0 + i);
+                }
+            }
         }
     }
 
@@ -515,6 +531,28 @@ pub fn reserved_blocks_in_group(
 #[must_use]
 fn is_reserved(reserved: &[u32], rel_block: u32) -> bool {
     reserved.binary_search(&rel_block).is_ok()
+}
+
+/// Determine which relative inode offsets within a group are reserved
+/// and must never be allocated.
+///
+/// In ext4, inodes 1 through `s_first_ino - 1` are reserved and always
+/// reside in group 0.
+#[must_use]
+pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32> {
+    if group.0 != 0 {
+        return Vec::new();
+    }
+    let mut reserved = Vec::new();
+    // s_first_ino is 1-based. Reserved are [1, first_inode).
+    // Bitmap indices are 0-based: [0, first_inode - 1).
+    let limit = geo.first_inode.saturating_sub(1);
+    for i in 0..limit {
+        if i < geo.inodes_per_group {
+            reserved.push(i);
+        }
+    }
+    reserved
 }
 
 /// Persist a group descriptor's counter fields back to the on-disk GDT.
@@ -1253,6 +1291,12 @@ fn try_alloc_inode_in_group(
     let bitmap_buf = dev.read_block(cx, gs.inode_bitmap_block)?;
     let mut bitmap = bitmap_buf.as_slice().to_vec();
 
+    // Mark reserved inodes as allocated.
+    let reserved = reserved_inodes_in_group(geo, group);
+    for &r in &reserved {
+        bitmap_set(&mut bitmap, r);
+    }
+
     let found = bitmap_find_free(&bitmap, geo.inodes_per_group, 0);
     if let Some(idx) = found {
         bitmap_set(&mut bitmap, idx);
@@ -1388,6 +1432,14 @@ pub fn free_inode(
         });
     }
 
+    let reserved = reserved_inodes_in_group(geo, GroupNumber(group_idx));
+    if is_reserved(&reserved, bit_idx) {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("attempt to free reserved inode {}", ino.0),
+        });
+    }
+
     bitmap_clear(&mut bitmap, bit_idx);
     dev.write_block(cx, gs.inode_bitmap_block, &bitmap)?;
     groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_add(1);
@@ -1505,6 +1557,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_inode: 11,
             cluster_ratio: 1,
         }
     }
@@ -1728,7 +1781,7 @@ mod tests {
         let mut groups = make_groups(&geo);
 
         let result = alloc_inode(&cx, &dev, &geo, &mut groups, GroupNumber(0), false).unwrap();
-        assert_eq!(result.ino, InodeNumber(1));
+        assert_eq!(result.ino, InodeNumber(11));
         assert_eq!(result.group, GroupNumber(0));
         assert_eq!(groups[0].free_inodes, 2047);
     }
@@ -2393,6 +2446,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_inode: 11,
             cluster_ratio: 1,
         };
 
@@ -2421,6 +2475,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_inode: 11,
             cluster_ratio: 1,
         };
 
@@ -2453,6 +2508,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_inode: 11,
             cluster_ratio: 1,
         };
         // Block number large enough that group index exceeds u32.
@@ -2531,6 +2587,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_inode: 11,
             cluster_ratio: 1,
         };
         // Group 0, rel 0 -> absolute = first_data_block + 0 = 1
@@ -2567,6 +2624,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_inode: 11,
             cluster_ratio: 1,
         };
         assert_eq!(geo.inodes_in_group(GroupNumber(0)), 2048);
@@ -2669,6 +2727,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_inode: 11,
             cluster_ratio: 1,
         };
         assert_eq!(geo.group_count, 0);
@@ -2831,6 +2890,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_inode: 11,
             cluster_ratio: 1,
         };
         // Group 0, rel 0 → absolute 1 (first_data_block).
@@ -3336,6 +3396,7 @@ mod tests {
                 feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
                 log_groups_per_flex: 0,
                 backup_bgs: [0, 0],
+                first_inode: 11,
                 cluster_ratio: 1,
             };
             let sum: u64 = (0..gc).map(|g| u64::from(geo.blocks_in_group(GroupNumber(g)))).sum();

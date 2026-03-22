@@ -212,6 +212,15 @@ impl RequestScope {
         }
     }
 
+    /// Create a scope tied to a specific MVCC snapshot.
+    #[must_use]
+    pub fn with_snapshot(snapshot: Snapshot) -> Self {
+        Self {
+            snapshot: Some(snapshot),
+            tx: None,
+        }
+    }
+
     /// Commit the transaction if one is present.
     ///
     /// Returns the commit sequence on success, or an error if the commit failed.

@@ -6,12 +6,12 @@
 
 | Domain | Implemented | Total Tracked | Coverage |
 |--------|-------------|---------------|----------|
-| ext4 metadata parsing | 19 | 19 | 100.0% |
-| btrfs metadata parsing | 20 | 20 | 100.0% |
+| ext4 metadata parsing | 22 | 22 | 100.0% |
+| btrfs metadata parsing | 22 | 22 | 100.0% |
 | MVCC/COW core | 14 | 14 | 100.0% |
 | FUSE surface | 12 | 12 | 100.0% |
 | self-healing durability policy | 10 | 10 | 100.0% |
-| **Overall** | **75** | **75** | **100.0%** |
+| **Overall** | **80** | **80** | **100.0%** |
 
 > **Canonical source:** This Coverage Summary table in `FEATURE_PARITY.md` is the
 > single source of truth for implemented/total counts. `ParityReport::current()`
@@ -46,6 +46,11 @@
 | btrfs transaction parity | `fs/btrfs/transaction.c` | ✅ | Transaction begin/commit/abort semantics and integration paths are implemented with coverage in unit + E2E suites. |
 | btrfs delayed refs parity | `fs/btrfs/delayed-ref.c` | ✅ | `DelayedRefQueue` + `BtrfsRef` model + bounded flush/refcount tracking in `ffs-btrfs::BtrfsExtentAllocator`, with queue/refcount/stress tests |
 | btrfs scrub parity | `fs/btrfs/scrub.c` | ✅ | Scrub validation and repair-path coverage are implemented in the current test matrix. |
+| btrfs transparent decompression (ZLIB/ZSTD) | `fs/btrfs/compression.c` | ✅ | `btrfs_decompress()` in `ffs-core` with flate2 (ZLIB) and zstd crates; LZO deferred. Inline + regular extent decompression wired into read path. |
+| btrfs subvolume mount | `fs/btrfs/ioctl.c` | ✅ | `BtrfsContext::subvol_objectid` configurable; `walk_btrfs_fs_tree` resolves correct subvolume root. |
+| ext4 inline data read | `fs/ext4/inline.c` | ✅ | `read_ext4_inline_data()` reads from inode extent_bytes + system.data xattr. `INLINE_DATA` removed from rejected features. |
+| ext4 indirect block addressing | `fs/ext4/inode.c` | ✅ | `resolve_indirect_block()` handles direct + single/double/triple indirect pointers. `EXTENTS` no longer required at mount. |
+| ext4 FALLOC_FL_ZERO_RANGE | `fs/ext4/extents.c` | ✅ | ZERO_RANGE mode (0x10) zeroes allocated blocks in range via write path. |
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

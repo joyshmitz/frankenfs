@@ -36,7 +36,7 @@ use ffs_journal::{
 };
 use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal_replay::{ReplayOutcome as MvccReplayOutcome, TailPolicy, WalReplayEngine};
-use ffs_mvcc::{CommitError, MvccStore, Transaction};
+use ffs_mvcc::{CommitError, MvccBlockDevice, MvccStore, Transaction};
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
     Ext4Extent, Ext4FileType, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock, Ext4Xattr,
@@ -626,7 +626,7 @@ impl BlockDevice for ByteDeviceBlockAdapter<'_> {
 /// This allows using high-level metadata helpers (like `ffs_inode::write_inode`)
 /// while preserving transactional atomicity and snapshot isolation.
 struct TransactionBlockAdapter<'a, 'tx> {
-    base: &'a ByteDeviceBlockAdapter<'a>,
+    base: &'a dyn BlockDevice,
     tx: Mutex<&'tx mut Transaction>,
 }
 
@@ -2213,98 +2213,100 @@ impl OpenFs {
         );
 
         let mut alloc = self.load_ext4_alloc_state(cx)?;
-        let block_dev = self.block_device_adapter();
         let orphans = self.collect_ext4_orphan_list_lenient(cx, head, inodes_count)?;
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
         let mut stats = Ext4OrphanRecoveryStats::default();
 
-        for ino in orphans {
-            stats.scanned = stats.scanned.saturating_add(1);
+        {
+            let block_dev = self.block_device_adapter();
+            for ino in orphans {
+                stats.scanned = stats.scanned.saturating_add(1);
 
-            let mut inode = match self.read_inode(cx, ino) {
-                Ok(inode) => inode,
-                Err(err) => {
-                    stats.skipped = stats.skipped.saturating_add(1);
-                    warn!(
+                let mut inode = match self.read_inode(cx, ino) {
+                    Ok(inode) => inode,
+                    Err(err) => {
+                        stats.skipped = stats.skipped.saturating_add(1);
+                        warn!(
+                            orphan_inode = ino.0,
+                            error = %err,
+                            "ext4 orphan recovery skipped unreadable inode"
+                        );
+                        continue;
+                    }
+                };
+
+                if inode.links_count == 0 {
+                    ffs_inode::delete_inode(
+                        cx,
+                        &block_dev,
+                        &alloc.geo,
+                        &mut alloc.groups,
+                        ino,
+                        &mut inode,
+                        csum_seed,
+                        tstamp_secs,
+                        &alloc.persist_ctx,
+                    )?;
+                    stats.deleted = stats.deleted.saturating_add(1);
+                    info!(
                         orphan_inode = ino.0,
-                        error = %err,
-                        "ext4 orphan recovery skipped unreadable inode"
+                        action = "deleted",
+                        "ext4 orphan recovered"
                     );
                     continue;
                 }
-            };
 
-            if inode.links_count == 0 {
-                ffs_inode::delete_inode(
+                if inode.flags & ffs_types::EXT4_EXTENTS_FL != 0 && inode.extent_bytes.len() >= 60 {
+                    let extent_ns = extent_root_namespace(&inode);
+                    let mut root_bytes = Self::extent_root(&inode);
+                    let logical_end_u64 = inode.size.div_ceil(u64::from(alloc.geo.block_size));
+                    let logical_end = u32::try_from(logical_end_u64).map_err(|_| {
+                        FfsError::InvalidGeometry(format!(
+                            "inode {} logical end {} does not fit u32",
+                            ino.0, logical_end_u64
+                        ))
+                    })?;
+                    let freed = ffs_extent::truncate_extents(
+                        cx,
+                        &block_dev,
+                        &mut root_bytes,
+                        &alloc.geo,
+                        &mut alloc.groups,
+                        logical_end,
+                        &alloc.persist_ctx,
+                    )?;
+                    self.extent_cache.invalidate_range(
+                        extent_ns,
+                        logical_end,
+                        u64::from(u32::MAX) - u64::from(logical_end),
+                    );
+                    Self::set_extent_root(&mut inode, &root_bytes);
+                    let freed_sectors = if inode.is_huge_file() {
+                        freed
+                    } else {
+                        freed.saturating_mul(u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE))
+                    };
+                    inode.blocks = inode.blocks.saturating_sub(freed_sectors);
+                }
+
+                inode.dtime = 0;
+                ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
+                ffs_inode::write_inode(
                     cx,
                     &block_dev,
                     &alloc.geo,
-                    &mut alloc.groups,
+                    &alloc.groups,
                     ino,
-                    &mut inode,
+                    &inode,
                     csum_seed,
-                    tstamp_secs,
-                    &alloc.persist_ctx,
                 )?;
-                stats.deleted = stats.deleted.saturating_add(1);
+                stats.truncated = stats.truncated.saturating_add(1);
                 info!(
                     orphan_inode = ino.0,
-                    action = "deleted",
+                    action = "truncated",
                     "ext4 orphan recovered"
                 );
-                continue;
             }
-
-            if inode.flags & ffs_types::EXT4_EXTENTS_FL != 0 && inode.extent_bytes.len() >= 60 {
-                let extent_ns = extent_root_namespace(&inode);
-                let mut root_bytes = Self::extent_root(&inode);
-                let logical_end_u64 = inode.size.div_ceil(u64::from(alloc.geo.block_size));
-                let logical_end = u32::try_from(logical_end_u64).map_err(|_| {
-                    FfsError::InvalidGeometry(format!(
-                        "inode {} logical end {} does not fit u32",
-                        ino.0, logical_end_u64
-                    ))
-                })?;
-                let freed = ffs_extent::truncate_extents(
-                    cx,
-                    &block_dev,
-                    &mut root_bytes,
-                    &alloc.geo,
-                    &mut alloc.groups,
-                    logical_end,
-                    &alloc.persist_ctx,
-                )?;
-                self.extent_cache.invalidate_range(
-                    extent_ns,
-                    logical_end,
-                    u64::from(u32::MAX) - u64::from(logical_end),
-                );
-                Self::set_extent_root(&mut inode, &root_bytes);
-                let freed_sectors = if inode.is_huge_file() {
-                    freed
-                } else {
-                    freed.saturating_mul(u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE))
-                };
-                inode.blocks = inode.blocks.saturating_sub(freed_sectors);
-            }
-
-            inode.dtime = 0;
-            ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
-            ffs_inode::write_inode(
-                cx,
-                &block_dev,
-                &alloc.geo,
-                &alloc.groups,
-                ino,
-                &inode,
-                csum_seed,
-            )?;
-            stats.truncated = stats.truncated.saturating_add(1);
-            info!(
-                orphan_inode = ino.0,
-                action = "truncated",
-                "ext4 orphan recovered"
-            );
         }
 
         self.clear_ext4_orphan_state(cx)?;
@@ -2379,16 +2381,25 @@ impl OpenFs {
     }
 
     fn clear_ext4_orphan_state(&mut self, cx: &Cx) -> Result<(), FfsError> {
-        let mut sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
-        let old_state = u16::from_le_bytes([sb_region[0x3A], sb_region[0x3B]]);
+        let sb_block = BlockNumber(0); // ext4 superblock is in block 0 (offset 1024)
+        
+        // Phase 1: Read the current superblock.
+        let mut block_data = {
+            let block_dev = self.block_device_adapter();
+            block_dev.read_block(cx, sb_block)?.as_slice().to_vec()
+        };
+        
+        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET as usize;
+        let old_state = u16::from_le_bytes([block_data[sb_off + 0x3A], block_data[sb_off + 0x3B]]);
         let new_state = old_state & !EXT4_ORPHAN_FS;
-        sb_region[0x3A..0x3C].copy_from_slice(&new_state.to_le_bytes());
-        sb_region[0xE8..0xEC].copy_from_slice(&0_u32.to_le_bytes());
+        block_data[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&new_state.to_le_bytes());
+        block_data[sb_off + 0xE8..sb_off + 0xEC].copy_from_slice(&0_u32.to_le_bytes());
 
+        // Phase 2: Update in-memory flavor cache.
         if let FsFlavor::Ext4(sb) = &mut self.flavor {
             if sb.has_metadata_csum() {
-                let csum = ffs_ondisk::ext4_chksum(!0u32, &sb_region[..EXT4_SB_CHECKSUM_OFFSET]);
-                sb_region[EXT4_SB_CHECKSUM_OFFSET..EXT4_SB_CHECKSUM_OFFSET + 4]
+                let csum = ffs_ondisk::ext4_chksum(!0u32, &block_data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET]);
+                block_data[sb_off + EXT4_SB_CHECKSUM_OFFSET..sb_off + EXT4_SB_CHECKSUM_OFFSET + 4]
                     .copy_from_slice(&csum.to_le_bytes());
                 sb.checksum = csum;
             }
@@ -2396,16 +2407,17 @@ impl OpenFs {
             sb.last_orphan = 0;
         }
 
-        let sb_offset = u64::try_from(ffs_types::EXT4_SUPERBLOCK_OFFSET)
-            .map_err(|_| FfsError::Format("ext4 superblock offset does not fit u64".to_owned()))?;
-        self.dev
-            .write_all_at(cx, ByteOffset(sb_offset), &sb_region)?;
+        // Phase 3: Write back the updated superblock.
+        {
+            let block_dev = self.block_device_adapter();
+            block_dev.write_block(cx, sb_block, &block_data)?;
+        }
 
         Ok(())
     }
 
     fn maybe_replay_ext4_journal(
-        &self,
+        &mut self,
         cx: &Cx,
         mode: Ext4JournalReplayMode,
     ) -> Result<Option<ReplayOutcome>, FfsError> {
@@ -2466,6 +2478,7 @@ impl OpenFs {
             return Ok(None);
         }
 
+        // Always use unversioned device adapter for journal replay.
         let block_dev = ByteDeviceBlockAdapter {
             dev: &*self.dev,
             block_size,
@@ -2482,6 +2495,15 @@ impl OpenFs {
             "ext4 journal replay start"
         );
         let outcome = replay_jbd2_segments(cx, &block_dev, &segments)?;
+        
+        // After successful replay, the superblock on disk might have been updated
+        // (e.g. s_state cleared). Re-read it into our flavor cache.
+        let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
+        if let FsFlavor::Ext4(sb) = &mut self.flavor {
+            *sb = Ext4Superblock::parse_superblock_region(&sb_region)
+                .map_err(|e| parse_to_ffs_error(&e))?;
+        }
+
         info!(
             journal_inum,
             scanned_blocks = outcome.stats.scanned_blocks,
@@ -3238,8 +3260,7 @@ impl OpenFs {
         let fs_tree_root = root_items
             .iter()
             .find(|item| {
-                item.key.objectid == subvol_id
-                    && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
+                item.key.objectid == subvol_id && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
             })
             .ok_or_else(|| {
                 FfsError::NotFound(format!(
@@ -3587,6 +3608,70 @@ impl OpenFs {
         })
     }
 
+    fn btrfs_write_logical(
+        &self,
+        cx: &Cx,
+        mut logical: u64,
+        data: &[u8],
+    ) -> Result<(), FfsError> {
+        let ctx = self
+            .btrfs_context()
+            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+        let block_size = u64::from(self.block_size());
+        let bs_usize = block_size as usize;
+        let block_dev = self.block_device_adapter();
+
+        let mut data_remaining = data;
+        while !data_remaining.is_empty() {
+            let mapping = map_logical_to_physical(&ctx.chunks, logical)
+                .map_err(|e| {
+                    warn!(
+                        logical,
+                        reason = %e,
+                        "btrfs chunk_map_failed: parse error while mapping logical address"
+                    );
+                    parse_to_ffs_error(&e)
+                })?
+                .ok_or_else(|| FfsError::Corruption {
+                    block: logical,
+                    detail: "logical bytenr not covered by any btrfs chunk".into(),
+                })?;
+
+            let chunk_end = self.btrfs_logical_chunk_end(logical)?;
+            let available_in_chunk = chunk_end.saturating_sub(logical);
+            let to_write = (data_remaining.len() as u64).min(available_in_chunk);
+            let to_write_usize = to_write as usize;
+
+            let physical_offset = mapping.physical; 
+            
+            // Handle unaligned start/end via read-modify-write.
+            let mut pos = 0_usize;
+            while pos < to_write_usize {
+                let current_phys = physical_offset.saturating_add(pos as u64);
+                let block_num = BlockNumber(current_phys / block_size);
+                let block_offset = (current_phys % block_size) as usize;
+                let chunk_in_block = (to_write_usize - pos).min(bs_usize - block_offset);
+
+                if block_offset == 0 && chunk_in_block == bs_usize {
+                    // Full block overwrite.
+                    block_dev.write_block(cx, block_num, &data_remaining[pos..pos + bs_usize])?;
+                } else {
+                    // Partial block overwrite: read-modify-write.
+                    let mut block_data = block_dev.read_block(cx, block_num)?.as_slice().to_vec();
+                    block_data[block_offset..block_offset + chunk_in_block]
+                        .copy_from_slice(&data_remaining[pos..pos + chunk_in_block]);
+                    block_dev.write_block(cx, block_num, &block_data)?;
+                }
+                pos += chunk_in_block;
+            }
+
+            logical = logical.saturating_add(to_write);
+            data_remaining = &data_remaining[to_write_usize..];
+        }
+
+        Ok(())
+    }
+
     fn btrfs_read_logical_into(
         &self,
         cx: &Cx,
@@ -3596,6 +3681,9 @@ impl OpenFs {
         let ctx = self
             .btrfs_context()
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
+        let block_size = u64::from(self.block_size());
+        let bs_usize = block_size as usize;
+        let block_dev = self.block_device_adapter();
 
         while !out.is_empty() {
             let mapping = map_logical_to_physical(&ctx.chunks, logical)
@@ -3609,35 +3697,34 @@ impl OpenFs {
                 })?
                 .ok_or_else(|| FfsError::Corruption {
                     block: logical,
-                    detail: "logical bytenr not mapped to physical bytenr".into(),
+                    detail: "logical bytenr not covered by any btrfs chunk".into(),
                 })?;
+
             let chunk_end = self.btrfs_logical_chunk_end(logical)?;
-            let span_u64 = chunk_end.saturating_sub(logical);
-            let span = usize::try_from(span_u64)
-                .unwrap_or(usize::MAX)
-                .min(out.len());
+            let available_in_chunk = chunk_end.saturating_sub(logical);
+            let to_read = (out.len() as u64).min(available_in_chunk);
+            let to_read_usize = to_read as usize;
 
-            trace!(
-                logical_start = logical,
-                physical_start = mapping.physical,
-                span,
-                "btrfs chunk_map"
-            );
+            let physical_offset = mapping.physical; 
+            
+            // Handle unaligned start/end via block reads.
+            let mut pos = 0_usize;
+            while pos < to_read_usize {
+                let current_phys = physical_offset.saturating_add(pos as u64);
+                let block_num = BlockNumber(current_phys / block_size);
+                let block_offset = (current_phys % block_size) as usize;
+                let chunk_in_block = (to_read_usize - pos).min(bs_usize - block_offset);
 
-            let (head, tail) = out.split_at_mut(span);
-            if let Err(err) = self
-                .dev
-                .read_exact_at(cx, ByteOffset(mapping.physical), head)
-            {
-                warn!(
-                    physical_start = mapping.physical,
-                    reason = %err,
-                    "btrfs io_error: failed to read mapped physical range"
+                let block_data = block_dev.read_block(cx, block_num)?;
+                out[pos..pos + chunk_in_block].copy_from_slice(
+                    &block_data.as_slice()[block_offset..block_offset + chunk_in_block],
                 );
-                return Err(err);
+                pos += chunk_in_block;
             }
-            logical = logical.saturating_add(span as u64);
-            out = tail;
+
+            logical = logical.saturating_add(to_read);
+            let next_out = &mut out[to_read_usize..];
+            out = next_out;
         }
 
         Ok(())
@@ -4079,7 +4166,7 @@ impl OpenFs {
 
     /// Read an ext4 inode by number via the device, respecting MVCC isolation.
     pub fn read_inode(&self, cx: &Cx, ino: InodeNumber) -> Result<Ext4Inode, FfsError> {
-        self.read_inode_with_scope(cx, &RequestScope::empty(), ino)
+        self.with_latest_scope(|scope| self.read_inode_with_scope(cx, scope, ino))
     }
 
     pub fn read_inode_with_scope(
@@ -5595,12 +5682,15 @@ impl OpenFs {
         BlockNumber(ext.physical_start + u64::from(ext.actual_len()))
     }
 
-    /// Get a block device adapter for the underlying byte device.
-    fn block_device_adapter(&self) -> ByteDeviceBlockAdapter<'_> {
-        ByteDeviceBlockAdapter {
+    /// Get a block device adapter for the underlying byte device, wrapped
+    /// in MVCC versioning logic at the current latest snapshot.
+    fn block_device_adapter(&self) -> MvccBlockDevice<ByteDeviceBlockAdapter<'_>> {
+        let base = ByteDeviceBlockAdapter {
             dev: self.dev.as_ref(),
             block_size: self.block_size(),
-        }
+        };
+        let snapshot = self.mvcc_store.read().current_snapshot();
+        MvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
     }
 
     /// Get current wall-clock timestamp as (seconds-since-epoch, nanoseconds).
@@ -5864,7 +5954,7 @@ impl OpenFs {
     fn ext4_add_dir_entry(
         &self,
         cx: &Cx,
-        block_dev: &ByteDeviceBlockAdapter<'_>,
+        block_dev: &dyn BlockDevice,
         alloc: &mut Ext4AllocState,
         parent: InodeNumber,
         parent_inode: &Ext4Inode,
@@ -7559,15 +7649,18 @@ impl OpenFs {
     fn btrfs_extent_logical_len(extent: &BtrfsExtentData) -> ffs_error::Result<u64> {
         match extent {
             BtrfsExtentData::Inline {
-                compression, data, ..
+                compression,
+                data,
+                ram_bytes,
+                ..
             } => {
                 if *compression != 0 {
-                    return Err(FfsError::UnsupportedFeature(format!(
-                        "btrfs compression type {compression}"
-                    )));
+                    Ok(*ram_bytes)
+                } else {
+                    u64::try_from(data.len()).map_err(|_| {
+                        FfsError::InvalidGeometry("inline extent length overflow".into())
+                    })
                 }
-                u64::try_from(data.len())
-                    .map_err(|_| FfsError::InvalidGeometry("inline extent length overflow".into()))
             }
             BtrfsExtentData::Regular { num_bytes, .. } => Ok(*num_bytes),
         }
@@ -7603,19 +7696,15 @@ impl OpenFs {
                 disk_bytenr,
                 extent_offset,
                 num_bytes,
+                disk_num_bytes,
+                ram_bytes,
                 ..
             } => {
-                if *compression != 0 {
-                    return Err(FfsError::UnsupportedFeature(format!(
-                        "btrfs compression type {compression}"
-                    )));
-                }
-                let mut buf = vec![
-                    0_u8;
-                    usize::try_from(*num_bytes).map_err(|_| {
-                        FfsError::InvalidGeometry("extent length does not fit usize".into())
-                    })?
-                ];
+                let copy_len = usize::try_from(*num_bytes).map_err(|_| {
+                    FfsError::InvalidGeometry("extent length does not fit usize".into())
+                })?;
+                let mut buf = vec![0_u8; copy_len];
+
                 if *extent_type == BTRFS_FILE_EXTENT_PREALLOC || *disk_bytenr == 0 {
                     return Ok(buf);
                 }
@@ -7624,10 +7713,41 @@ impl OpenFs {
                         "unsupported btrfs extent type {extent_type}"
                     )));
                 }
+
+                if *compression != 0 {
+                    let compressed_len = usize::try_from(*disk_num_bytes).map_err(|_| {
+                        FfsError::InvalidGeometry("compressed extent length overflow".into())
+                    })?;
+                    let mut compressed = vec![0_u8; compressed_len];
+                    self.btrfs_read_logical_into(cx, *disk_bytenr, &mut compressed)?;
+                    let decompressed = Self::btrfs_decompress(
+                        &compressed,
+                        *compression,
+                        usize::try_from(*ram_bytes).map_err(|_| {
+                            FfsError::InvalidGeometry("compressed extent ram_bytes overflow".into())
+                        })?,
+                    )?;
+                    let src_start = usize::try_from(*extent_offset).map_err(|_| {
+                        FfsError::InvalidGeometry("compressed extent source offset overflow".into())
+                    })?;
+                    let src_end = src_start.saturating_add(copy_len);
+                    if src_end > decompressed.len() {
+                        return Err(FfsError::Corruption {
+                            block: *disk_bytenr,
+                            detail: format!(
+                                "decompressed extent too short: need {src_end} bytes, got {}",
+                                decompressed.len()
+                            ),
+                        });
+                    }
+                    buf.copy_from_slice(&decompressed[src_start..src_end]);
+                    return Ok(buf);
+                }
+
                 let source = disk_bytenr
                     .checked_add(*extent_offset)
                     .ok_or_else(|| FfsError::InvalidGeometry("extent source overflow".into()))?;
-                self.dev.read_exact_at(cx, ByteOffset(source), &mut buf)?;
+                self.btrfs_read_logical_into(cx, source, &mut buf)?;
                 Ok(buf)
             }
         }
@@ -8028,11 +8148,7 @@ impl OpenFs {
                                 .extent_alloc
                                 .alloc_data(prev_alloc_size)
                                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                            self.dev.write_all_at(
-                                cx,
-                                ByteOffset(prev_allocation.bytenr),
-                                &prev_data,
-                            )?;
+                            self.btrfs_write_logical(cx, prev_allocation.bytenr, &prev_data)?;
                             let prev_extent = BtrfsExtentData::Regular {
                                 generation: alloc.generation,
                                 ram_bytes: prev_data_len,
@@ -8065,11 +8181,8 @@ impl OpenFs {
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
             let disk_bytenr = allocation.bytenr;
 
-            // Write data to the allocated physical region.
-            // For single-device, the logical address is the physical address
-            // (the data block group we create maps 1:1).
-            self.dev
-                .write_all_at(cx, ByteOffset(disk_bytenr), data_to_write)?;
+            // Write data to the allocated logical region.
+            self.btrfs_write_logical(cx, disk_bytenr, data_to_write)?;
 
             // Insert the EXTENT_DATA item.
             let extent = BtrfsExtentData::Regular {
@@ -8800,11 +8913,6 @@ impl OpenFs {
                 let middle_start = left_len;
                 let middle_end = right_start;
 
-                if zero_range && middle_start < middle_end {
-                    let materialized_mut = &mut materialized[left_len..right_start];
-                    materialized_mut.fill(0);
-                }
-
                 self.btrfs_insert_regular_extent_segment(
                     cx,
                     &mut alloc,
@@ -8812,6 +8920,19 @@ impl OpenFs {
                     key.offset,
                     &materialized[..left_len],
                 )?;
+
+                if zero_range && middle_start < middle_end {
+                    let mut materialized_mut = materialized[left_len..right_start].to_vec();
+                    materialized_mut.fill(0);
+                    self.btrfs_insert_regular_extent_segment(
+                        cx,
+                        &mut alloc,
+                        canonical,
+                        key.offset.saturating_add(left_len as u64),
+                        &materialized_mut,
+                    )?;
+                }
+
                 self.btrfs_insert_regular_extent_segment(
                     cx,
                     &mut alloc,
@@ -9552,12 +9673,12 @@ impl OpenFs {
         0
     }
 
-    #[expect(clippy::unused_self)]
-    fn with_empty_scope<T>(
+    fn with_latest_scope<T>(
         &self,
         f: impl FnOnce(&mut RequestScope) -> ffs_error::Result<T>,
     ) -> ffs_error::Result<T> {
-        let mut scope = RequestScope::empty();
+        let snapshot = self.mvcc_store.read().current_snapshot();
+        let mut scope = RequestScope::with_snapshot(snapshot);
         f(&mut scope)
     }
 
@@ -9570,7 +9691,7 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_empty_scope(|scope| {
+        self.with_latest_scope(|scope| {
             <Self as FsOps>::create(self, cx, scope, parent, name, mode, uid, gid)
         })
     }
@@ -9584,17 +9705,17 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_empty_scope(|scope| {
+        self.with_latest_scope(|scope| {
             <Self as FsOps>::mkdir(self, cx, scope, parent, name, mode, uid, gid)
         })
     }
 
     pub fn unlink(&self, cx: &Cx, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<()> {
-        self.with_empty_scope(|scope| <Self as FsOps>::unlink(self, cx, scope, parent, name))
+        self.with_latest_scope(|scope| <Self as FsOps>::unlink(self, cx, scope, parent, name))
     }
 
     pub fn rmdir(&self, cx: &Cx, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<()> {
-        self.with_empty_scope(|scope| <Self as FsOps>::rmdir(self, cx, scope, parent, name))
+        self.with_latest_scope(|scope| <Self as FsOps>::rmdir(self, cx, scope, parent, name))
     }
 
     pub fn rename(
@@ -9605,7 +9726,7 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &OsStr,
     ) -> ffs_error::Result<()> {
-        self.with_empty_scope(|scope| {
+        self.with_latest_scope(|scope| {
             <Self as FsOps>::rename(self, cx, scope, parent, name, new_parent, new_name)
         })
     }
@@ -9617,7 +9738,7 @@ impl OpenFs {
         offset: u64,
         data: &[u8],
     ) -> ffs_error::Result<u32> {
-        self.with_empty_scope(|scope| <Self as FsOps>::write(self, cx, scope, ino, offset, data))
+        self.with_latest_scope(|scope| <Self as FsOps>::write(self, cx, scope, ino, offset, data))
     }
 
     pub fn setxattr(
@@ -9628,13 +9749,13 @@ impl OpenFs {
         value: &[u8],
         mode: XattrSetMode,
     ) -> ffs_error::Result<()> {
-        self.with_empty_scope(|scope| {
+        self.with_latest_scope(|scope| {
             <Self as FsOps>::setxattr(self, cx, scope, ino, name, value, mode)
         })
     }
 
     pub fn removexattr(&self, cx: &Cx, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
-        self.with_empty_scope(|scope| <Self as FsOps>::removexattr(self, cx, scope, ino, name))
+        self.with_latest_scope(|scope| <Self as FsOps>::removexattr(self, cx, scope, ino, name))
     }
 
     pub fn fallocate(
@@ -9645,7 +9766,7 @@ impl OpenFs {
         length: u64,
         mode: i32,
     ) -> ffs_error::Result<()> {
-        self.with_empty_scope(|scope| {
+        self.with_latest_scope(|scope| {
             <Self as FsOps>::fallocate(self, cx, scope, ino, offset, length, mode)
         })
     }
@@ -9657,7 +9778,7 @@ impl OpenFs {
         fh: u64,
         lock_owner: u64,
     ) -> ffs_error::Result<()> {
-        self.with_empty_scope(|scope| <Self as FsOps>::flush(self, cx, scope, ino, fh, lock_owner))
+        self.with_latest_scope(|scope| <Self as FsOps>::flush(self, cx, scope, ino, fh, lock_owner))
     }
 
     pub fn fsync(
@@ -9667,7 +9788,7 @@ impl OpenFs {
         fh: u64,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        self.with_empty_scope(|scope| <Self as FsOps>::fsync(self, cx, scope, ino, fh, datasync))
+        self.with_latest_scope(|scope| <Self as FsOps>::fsync(self, cx, scope, ino, fh, datasync))
     }
 
     pub fn fsyncdir(
@@ -9677,11 +9798,11 @@ impl OpenFs {
         fh: u64,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        self.with_empty_scope(|scope| <Self as FsOps>::fsyncdir(self, cx, scope, ino, fh, datasync))
+        self.with_latest_scope(|scope| <Self as FsOps>::fsyncdir(self, cx, scope, ino, fh, datasync))
     }
 
     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
-        self.with_empty_scope(|scope| <Self as FsOps>::getattr(self, cx, scope, ino))
+        self.with_latest_scope(|scope| <Self as FsOps>::getattr(self, cx, scope, ino))
     }
 
     pub fn lookup(
@@ -9690,7 +9811,7 @@ impl OpenFs {
         parent: InodeNumber,
         name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_empty_scope(|scope| <Self as FsOps>::lookup(self, cx, scope, parent, name))
+        self.with_latest_scope(|scope| <Self as FsOps>::lookup(self, cx, scope, parent, name))
     }
 
     pub fn readdir(
@@ -9699,7 +9820,7 @@ impl OpenFs {
         ino: InodeNumber,
         offset: u64,
     ) -> ffs_error::Result<Vec<DirEntry>> {
-        self.with_empty_scope(|scope| <Self as FsOps>::readdir(self, cx, scope, ino, offset))
+        self.with_latest_scope(|scope| <Self as FsOps>::readdir(self, cx, scope, ino, offset))
     }
 
     pub fn read(
@@ -9709,7 +9830,7 @@ impl OpenFs {
         offset: u64,
         size: u32,
     ) -> ffs_error::Result<Vec<u8>> {
-        self.with_empty_scope(|scope| <Self as FsOps>::read(self, cx, scope, ino, offset, size))
+        self.with_latest_scope(|scope| <Self as FsOps>::read(self, cx, scope, ino, offset, size))
     }
 
     pub fn link(
@@ -9719,7 +9840,7 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_empty_scope(|scope| {
+        self.with_latest_scope(|scope| {
             <Self as FsOps>::link(self, cx, scope, ino, new_parent, new_name)
         })
     }
@@ -9733,13 +9854,13 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_empty_scope(|scope| {
+        self.with_latest_scope(|scope| {
             <Self as FsOps>::symlink(self, cx, scope, parent, name, target, uid, gid)
         })
     }
 
     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
-        self.with_empty_scope(|scope| <Self as FsOps>::readlink(self, cx, scope, ino))
+        self.with_latest_scope(|scope| <Self as FsOps>::readlink(self, cx, scope, ino))
     }
 
     pub fn setattr(
@@ -9748,11 +9869,11 @@ impl OpenFs {
         ino: InodeNumber,
         attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_empty_scope(|scope| <Self as FsOps>::setattr(self, cx, scope, ino, attrs))
+        self.with_latest_scope(|scope| <Self as FsOps>::setattr(self, cx, scope, ino, attrs))
     }
 
     pub fn statfs(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<FsStat> {
-        self.with_empty_scope(|scope| <Self as FsOps>::statfs(self, cx, scope, ino))
+        self.with_latest_scope(|scope| <Self as FsOps>::statfs(self, cx, scope, ino))
     }
 }
 
@@ -21169,6 +21290,59 @@ mod tests {
             )
             .expect_err("punch-hole without KEEP_SIZE should be rejected");
         assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_rejection_log_contract() {
+        let _guard = fallocate_log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_env_filter(EnvFilter::new("info"))
+            .with_writer(buffer.clone())
+            .finish();
+        let subscriber = Arc::new(subscriber);
+
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = tracing::subscriber::with_default(Arc::clone(&subscriber), || {
+            ops.create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("reject_log.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file for rejection log test")
+        });
+
+        // Mode 0x02 is PUNCH_HOLE. Without KEEP_SIZE (0x01), it should be rejected.
+        let err = tracing::subscriber::with_default(Arc::clone(&subscriber), || {
+            ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x02)
+                .expect_err("punch-hole without KEEP_SIZE should be rejected")
+        });
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let logs = parse_json_logs(&buffer);
+        let rejected = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("btrfs_fallocate_rejected")
+                    && entry.get("error_class").and_then(Value::as_str)
+                        == Some("invalid_punch_hole_mode")
+            })
+            .expect("expected btrfs_fallocate_rejected log for invalid punch-hole mode");
+
+        assert_eq!(
+            rejected.get("outcome").and_then(Value::as_str),
+            Some("rejected")
+        );
     }
 
     #[test]

@@ -723,20 +723,20 @@ mod tests {
 
     #[test]
     fn incompat_features_describe_missing_required_v1() {
-        // No FILETYPE or EXTENTS set
+        // No FILETYPE set (EXTENTS is optional)
         let features = Ext4IncompatFeatures(0);
         let missing = features.describe_missing_required_v1();
         assert!(missing.contains(&"FILETYPE"));
-        assert!(missing.contains(&"EXTENTS"));
+        assert!(!missing.contains(&"EXTENTS"));
     }
 
     #[test]
     fn incompat_features_describe_missing_required_v1_partial() {
-        // Only FILETYPE set, EXTENTS missing
+        // FILETYPE set, nothing missing
         let features = Ext4IncompatFeatures(0x0002);
         let missing = features.describe_missing_required_v1();
         assert!(!missing.contains(&"FILETYPE"));
-        assert!(missing.contains(&"EXTENTS"));
+        assert!(!missing.contains(&"EXTENTS"));
     }
 
     #[test]
@@ -2100,10 +2100,10 @@ mod tests {
     }
 
     #[test]
-    fn superblock_validate_v1_rejects_missing_extents() {
+    fn superblock_validate_v1_allows_missing_extents() {
         let mut sb = make_superblock();
         sb.feature_incompat = Ext4IncompatFeatures(Ext4IncompatFeatures::FILETYPE.0);
-        assert!(sb.validate_v1().is_err());
+        assert!(sb.validate_v1().is_ok());
     }
 
     #[test]
@@ -2162,7 +2162,7 @@ mod tests {
         let diag = sb.feature_diagnostics_v1();
         assert!(!diag.is_ok());
         assert!(diag.missing_required.contains(&"FILETYPE"));
-        assert!(diag.missing_required.contains(&"EXTENTS"));
+        assert!(!diag.missing_required.contains(&"EXTENTS"));
     }
 
     #[test]
