@@ -298,6 +298,8 @@ pub struct BtrfsContext {
     pub chunks: Vec<BtrfsChunkEntry>,
     /// Tree node size in bytes.
     pub nodesize: u32,
+    /// Root objectid of the mounted subvolume (default: `BTRFS_FS_TREE_OBJECTID` = 5).
+    pub subvol_objectid: u64,
 }
 
 /// Mutable ext4 allocation state for write operations.
@@ -1846,6 +1848,7 @@ impl OpenFs {
                 let ctx = BtrfsContext {
                     chunks,
                     nodesize: sb.nodesize,
+                    subvol_objectid: BTRFS_FS_TREE_OBJECTID,
                 };
                 (None, Some(ctx))
             }
@@ -3227,16 +3230,20 @@ impl OpenFs {
 
     /// Resolve and walk the default filesystem tree (`FS_TREE`).
     fn walk_btrfs_fs_tree(&self, cx: &Cx) -> Result<Vec<BtrfsLeafEntry>, FfsError> {
+        let subvol_id = self
+            .btrfs_context
+            .as_ref()
+            .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
         let root_items = self.walk_btrfs_root_tree(cx)?;
         let fs_tree_root = root_items
             .iter()
             .find(|item| {
-                item.key.objectid == BTRFS_FS_TREE_OBJECTID
+                item.key.objectid == subvol_id
                     && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
             })
             .ok_or_else(|| {
                 FfsError::NotFound(format!(
-                    "btrfs ROOT_ITEM for FS_TREE objectid {BTRFS_FS_TREE_OBJECTID}"
+                    "btrfs ROOT_ITEM for subvolume objectid {subvol_id}"
                 ))
             })?;
 
@@ -5069,6 +5076,199 @@ impl OpenFs {
             out.resize(to_read_usize, 0);
             out
         }
+    }
+
+    /// Read file data using indirect block pointers (non-extent inodes).
+    fn read_ext4_indirect(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, FfsError> {
+        let bs = u64::from(self.block_size());
+        let bs_usize = self.block_size() as usize;
+        let file_size = inode.size;
+        if offset >= file_size {
+            return Ok(Vec::new());
+        }
+        let to_read = (file_size - offset).min(u64::from(size)) as usize;
+        let mut buf = vec![0_u8; to_read];
+        let mut bytes_read = 0;
+        while bytes_read < to_read {
+            let current_offset = offset + bytes_read as u64;
+            let logical_block =
+                u32::try_from(current_offset / bs).map_err(|_| FfsError::Corruption {
+                    block: 0,
+                    detail: "indirect: logical block number overflow".into(),
+                })?;
+            let offset_in_block = (current_offset % bs) as usize;
+            let remaining_in_block = bs_usize - offset_in_block;
+            let chunk_size = remaining_in_block.min(to_read - bytes_read);
+
+            match self.resolve_indirect_block(cx, scope, inode, logical_block)? {
+                Some(phys_block) => {
+                    let block_data =
+                        self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
+                    buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
+                        &block_data[offset_in_block..offset_in_block + chunk_size],
+                    );
+                }
+                None => {
+                    // Hole — already zeroed.
+                }
+            }
+            bytes_read += chunk_size;
+        }
+        Ok(buf)
+    }
+
+    /// Resolve a logical block number via indirect block pointers.
+    ///
+    /// For inodes WITHOUT `EXT4_EXTENTS_FL`, `extent_bytes` holds 15 × u32
+    /// block pointers: 12 direct, 1 indirect, 1 double-indirect, 1 triple-indirect.
+    fn resolve_indirect_block(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+        logical_block: u32,
+    ) -> Result<Option<u64>, FfsError> {
+        let bs = self.block_size();
+        let ptrs_per_block = u64::from(bs) / 4; // each pointer is 4 bytes (u32)
+
+        // Parse the 15 u32 block pointers from extent_bytes.
+        let raw = &inode.extent_bytes;
+        let read_ptr = |idx: usize| -> u64 {
+            let off = idx * 4;
+            if off + 4 <= raw.len() {
+                u64::from(u32::from_le_bytes([
+                    raw[off],
+                    raw[off + 1],
+                    raw[off + 2],
+                    raw[off + 3],
+                ]))
+            } else {
+                0
+            }
+        };
+
+        let lb = u64::from(logical_block);
+
+        // Direct blocks: i_block[0..11]
+        if lb < 12 {
+            let phys = read_ptr(lb as usize);
+            return Ok(if phys == 0 { None } else { Some(phys) });
+        }
+
+        // Single indirect: i_block[12] points to a block of u32 pointers.
+        let lb_indirect = lb - 12;
+        if lb_indirect < ptrs_per_block {
+            let ind_block = read_ptr(12);
+            if ind_block == 0 {
+                return Ok(None);
+            }
+            let data = self.read_block_with_scope(cx, scope, BlockNumber(ind_block))?;
+            let off = (lb_indirect as usize) * 4;
+            if off + 4 > data.len() {
+                return Ok(None);
+            }
+            let phys = u64::from(u32::from_le_bytes([
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+            ]));
+            return Ok(if phys == 0 { None } else { Some(phys) });
+        }
+
+        // Double indirect: i_block[13] -> indirect block -> data block.
+        let lb_dind = lb_indirect - ptrs_per_block;
+        if lb_dind < ptrs_per_block * ptrs_per_block {
+            let dind_block = read_ptr(13);
+            if dind_block == 0 {
+                return Ok(None);
+            }
+            let dind_data = self.read_block_with_scope(cx, scope, BlockNumber(dind_block))?;
+            let idx1 = (lb_dind / ptrs_per_block) as usize;
+            let off1 = idx1 * 4;
+            if off1 + 4 > dind_data.len() {
+                return Ok(None);
+            }
+            let ind_block = u64::from(u32::from_le_bytes([
+                dind_data[off1],
+                dind_data[off1 + 1],
+                dind_data[off1 + 2],
+                dind_data[off1 + 3],
+            ]));
+            if ind_block == 0 {
+                return Ok(None);
+            }
+            let ind_data = self.read_block_with_scope(cx, scope, BlockNumber(ind_block))?;
+            let idx2 = (lb_dind % ptrs_per_block) as usize;
+            let off2 = idx2 * 4;
+            if off2 + 4 > ind_data.len() {
+                return Ok(None);
+            }
+            let phys = u64::from(u32::from_le_bytes([
+                ind_data[off2],
+                ind_data[off2 + 1],
+                ind_data[off2 + 2],
+                ind_data[off2 + 3],
+            ]));
+            return Ok(if phys == 0 { None } else { Some(phys) });
+        }
+
+        // Triple indirect: i_block[14] -> dind -> ind -> data.
+        let lb_tind = lb_dind - ptrs_per_block * ptrs_per_block;
+        let tind_block = read_ptr(14);
+        if tind_block == 0 {
+            return Ok(None);
+        }
+        let tind_data = self.read_block_with_scope(cx, scope, BlockNumber(tind_block))?;
+        let idx1 = (lb_tind / (ptrs_per_block * ptrs_per_block)) as usize;
+        let off1 = idx1 * 4;
+        if off1 + 4 > tind_data.len() {
+            return Ok(None);
+        }
+        let dind_block = u64::from(u32::from_le_bytes([
+            tind_data[off1],
+            tind_data[off1 + 1],
+            tind_data[off1 + 2],
+            tind_data[off1 + 3],
+        ]));
+        if dind_block == 0 {
+            return Ok(None);
+        }
+        let dind_data = self.read_block_with_scope(cx, scope, BlockNumber(dind_block))?;
+        let idx2 = ((lb_tind / ptrs_per_block) % ptrs_per_block) as usize;
+        let off2 = idx2 * 4;
+        if off2 + 4 > dind_data.len() {
+            return Ok(None);
+        }
+        let ind_block = u64::from(u32::from_le_bytes([
+            dind_data[off2],
+            dind_data[off2 + 1],
+            dind_data[off2 + 2],
+            dind_data[off2 + 3],
+        ]));
+        if ind_block == 0 {
+            return Ok(None);
+        }
+        let ind_data = self.read_block_with_scope(cx, scope, BlockNumber(ind_block))?;
+        let idx3 = (lb_tind % ptrs_per_block) as usize;
+        let off3 = idx3 * 4;
+        if off3 + 4 > ind_data.len() {
+            return Ok(None);
+        }
+        let phys = u64::from(u32::from_le_bytes([
+            ind_data[off3],
+            ind_data[off3 + 1],
+            ind_data[off3 + 2],
+            ind_data[off3 + 3],
+        ]));
+        Ok(if phys == 0 { None } else { Some(phys) })
     }
 }
 
@@ -8572,7 +8772,7 @@ impl OpenFs {
                     continue;
                 }
 
-                let materialized = self.btrfs_materialize_extent(cx, &extent)?;
+                let mut materialized = self.btrfs_materialize_extent(cx, &extent)?;
                 alloc
                     .fs_tree
                     .delete(&key)
@@ -9666,6 +9866,11 @@ impl FsOps for OpenFs {
                 // Inline data: file content stored directly in inode's i_block area.
                 if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
                     return Ok(Self::read_ext4_inline_data(&inode, offset, size));
+                }
+
+                // Indirect block addressing (legacy pre-extent inodes).
+                if inode.flags & ffs_types::EXT4_EXTENTS_FL == 0 {
+                    return self.read_ext4_indirect(cx, scope, &inode, offset, size);
                 }
 
                 let mut buf = vec![0_u8; size as usize];

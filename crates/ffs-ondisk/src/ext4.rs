@@ -132,7 +132,8 @@ impl Ext4IncompatFeatures {
     pub const CASEFOLD: Self = Self(0x20000);
 
     /// Features required for FrankenFS v1 ext4 parsing.
-    pub const REQUIRED_V1: Self = Self(Self::FILETYPE.0 | Self::EXTENTS.0);
+    /// EXTENTS is no longer required since indirect block addressing is supported.
+    pub const REQUIRED_V1: Self = Self(Self::FILETYPE.0);
 
     /// Bits FrankenFS v1 can parse/understand without failing mount validation.
     pub const ALLOWED_V1: Self = Self(
@@ -961,7 +962,7 @@ impl Ext4Superblock {
         {
             return Err(ParseError::InvalidField {
                 field: "feature_incompat",
-                reason: "missing required features (need FILETYPE+EXTENTS)",
+                reason: "missing required features (need FILETYPE)",
             });
         }
 
