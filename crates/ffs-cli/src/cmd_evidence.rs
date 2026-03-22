@@ -185,10 +185,9 @@ pub struct RepairLiveMetricsReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[expect(clippy::large_enum_variant)]
 #[serde(untagged)]
 pub enum MetricsPresetReport {
-    Aggregate(MetricsAggregateReport),
+    Aggregate(Box<MetricsAggregateReport>),
     Cache(CacheMetricsReport),
     Mvcc(MvccMetricsReport),
     RepairLive(RepairLiveMetricsReport),
@@ -208,6 +207,7 @@ pub struct EvidenceHistogramSnapshot {
     pub count: u64,
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceMvccRuntimeMetricsSnapshot {
     pub active_snapshots: usize,
@@ -580,14 +580,14 @@ fn metrics_report_from_bundle(bundle: EvidenceMetricsBundle) -> MetricsPresetRep
         repair_freshness: bundle.repair_live.as_ref().map(repair_freshness),
     };
 
-    MetricsPresetReport::Aggregate(MetricsAggregateReport {
+    MetricsPresetReport::Aggregate(Box::new(MetricsAggregateReport {
         preset: PRESET_METRICS.to_owned(),
         analyses,
         metrics: bundle.metrics,
         cache: bundle.cache,
         mvcc: bundle.mvcc,
         repair_live: bundle.repair_live,
-    })
+    }))
 }
 
 fn cache_report(snapshot: CacheRuntimeMetricsSnapshot) -> MetricsPresetReport {
@@ -628,192 +628,309 @@ fn repair_live_report(snapshot: RepairRuntimeMetricsSnapshot) -> MetricsPresetRe
 fn load_metrics_report(path: &PathBuf, preset: &str) -> Result<MetricsPresetReport> {
     match preset {
         PRESET_METRICS => Ok(metrics_report_from_bundle(load_metrics_bundle(path)?)),
-        PRESET_CACHE => {
-            let bundle = load_metrics_bundle(path);
-            match bundle {
-                Ok(bundle) => match bundle.cache {
-                    Some(snapshot) => Ok(cache_report(snapshot)),
-                    None => Ok(cache_report(load_direct_metrics(path, "cache")?)),
-                },
-                _ => Ok(cache_report(load_direct_metrics(path, "cache")?)),
-            }
-        }
-        PRESET_MVCC => {
-            let bundle = load_metrics_bundle(path);
-            match bundle {
-                Ok(bundle) => match bundle.mvcc {
-                    Some(snapshot) => Ok(mvcc_report(snapshot)),
-                    None => Ok(mvcc_report(load_direct_metrics(path, "MVCC")?)),
-                },
-                _ => Ok(mvcc_report(load_direct_metrics(path, "MVCC")?)),
-            }
-        }
-        PRESET_REPAIR_LIVE => {
-            let bundle = load_metrics_bundle(path);
-            match bundle {
-                Ok(bundle) => match bundle.repair_live {
-                    Some(snapshot) => Ok(repair_live_report(snapshot)),
-                    None => Ok(repair_live_report(load_direct_metrics(
-                        path,
-                        "repair-live",
-                    )?)),
-                },
-                _ => Ok(repair_live_report(load_direct_metrics(
-                    path,
-                    "repair-live",
-                )?)),
-            }
-        }
+        PRESET_CACHE => load_metrics_bundle(path).map_or_else(
+            |_| load_direct_metrics(path, "cache").map(cache_report),
+            |bundle| {
+                bundle
+                    .cache
+                    .map_or_else(|| load_direct_metrics(path, "cache"), Ok)
+                    .map(cache_report)
+            },
+        ),
+        PRESET_MVCC => load_metrics_bundle(path).map_or_else(
+            |_| load_direct_metrics(path, "MVCC").map(mvcc_report),
+            |bundle| {
+                bundle
+                    .mvcc
+                    .map_or_else(|| load_direct_metrics(path, "MVCC"), Ok)
+                    .map(mvcc_report)
+            },
+        ),
+        PRESET_REPAIR_LIVE => load_metrics_bundle(path).map_or_else(
+            |_| load_direct_metrics(path, "repair-live").map(repair_live_report),
+            |bundle| {
+                bundle
+                    .repair_live
+                    .map_or_else(|| load_direct_metrics(path, "repair-live"), Ok)
+                    .map(repair_live_report)
+            },
+        ),
         _ => bail!("metrics report requested for unsupported preset '{preset}'"),
     }
 }
 
-#[expect(clippy::too_many_lines)]
+fn print_metrics_header(preset: &str) {
+    println!("FrankenFS Evidence Metrics");
+    println!("  Preset: {preset}");
+}
+
+fn print_aggregate_metrics_report(report: &MetricsAggregateReport) {
+    print_metrics_header(&report.preset);
+    if let Some(snapshot) = report.metrics {
+        println!("  FUSE request metrics:");
+        println!(
+            "    total={} ok={} err={} bytes_read={}",
+            snapshot.requests_total,
+            snapshot.requests_ok,
+            snapshot.requests_err,
+            snapshot.bytes_read
+        );
+        println!(
+            "    throttled={} shed={} error_rate={:.3}",
+            snapshot.requests_throttled, snapshot.requests_shed, report.analyses.request_error_rate
+        );
+    }
+    if let Some(snapshot) = report.cache {
+        println!("  Cache metrics:");
+        println!(
+            "    hits={} misses={} evictions={} hit_rate={:.3}",
+            snapshot.cache_hits, snapshot.cache_misses, snapshot.cache_evictions, snapshot.hit_rate
+        );
+        println!(
+            "    dirty_count={} writeback_depth={} pressure={}",
+            snapshot.cache_dirty_count,
+            snapshot.writeback_queue_depth,
+            report
+                .analyses
+                .cache_dirty_pressure
+                .as_deref()
+                .unwrap_or("unknown")
+        );
+    }
+    if let Some(snapshot) = report.mvcc.as_ref() {
+        println!("  MVCC metrics:");
+        println!(
+            "    active_snapshots={} commits={} successes={} conflicts={} aborts={}",
+            snapshot.active_snapshots,
+            snapshot.commit_attempts_total,
+            snapshot.commit_successes_total,
+            snapshot.conflicts_total,
+            snapshot.aborts_total
+        );
+        println!(
+            "    contention={} prune_throughput={:.3}/s version_chain_max={}",
+            report
+                .analyses
+                .mvcc_contention_level
+                .as_deref()
+                .unwrap_or("unknown"),
+            snapshot.prune_throughput,
+            snapshot.version_chain_max_length
+        );
+    }
+    if let Some(snapshot) = report.repair_live.as_ref() {
+        println!("  Repair-live metrics:");
+        println!(
+            "    groups_scrubbed={} corruption_detected={} decode_attempts={} decode_successes={}",
+            snapshot.groups_scrubbed,
+            snapshot.corruption_detected,
+            snapshot.decode_attempts,
+            snapshot.decode_successes
+        );
+        println!(
+            "    symbol_refresh_count={} freshness={} max_staleness_s={:.3}",
+            snapshot.symbol_refresh_count,
+            report
+                .analyses
+                .repair_freshness
+                .as_deref()
+                .unwrap_or("unknown"),
+            snapshot.symbol_staleness_max_seconds
+        );
+    }
+}
+
+fn print_cache_metrics_report(report: &CacheMetricsReport) {
+    print_metrics_header(&report.preset);
+    println!(
+        "  hits={} misses={} total_accesses={} hit_rate={:.3} miss_rate={:.3}",
+        report.snapshot.cache_hits,
+        report.snapshot.cache_misses,
+        report.total_accesses,
+        report.snapshot.hit_rate,
+        report.miss_rate
+    );
+    println!(
+        "  evictions={} dirty_count={} dirty_pressure={} writeback_depth={} writeback_pressure={}",
+        report.snapshot.cache_evictions,
+        report.snapshot.cache_dirty_count,
+        report.dirty_pressure,
+        report.snapshot.writeback_queue_depth,
+        report.writeback_pressure
+    );
+}
+
+fn print_mvcc_metrics_report(report: &MvccMetricsReport) {
+    print_metrics_header(&report.preset);
+    println!(
+        "  active_snapshots={} commits={} successes={} commit_success_rate={:.3}",
+        report.snapshot.active_snapshots,
+        report.snapshot.commit_attempts_total,
+        report.snapshot.commit_successes_total,
+        report.commit_success_rate
+    );
+    println!(
+        "  conflicts={} aborts={} contention={} version_chain_max={}",
+        report.snapshot.conflicts_total,
+        report.snapshot.aborts_total,
+        report.contention_level,
+        report.snapshot.version_chain_max_length
+    );
+}
+
+fn print_repair_live_metrics_report(report: &RepairLiveMetricsReport) {
+    print_metrics_header(&report.preset);
+    println!(
+        "  groups_scrubbed={} corruption_detected={} decode_attempts={} decode_successes={}",
+        report.snapshot.groups_scrubbed,
+        report.snapshot.corruption_detected,
+        report.snapshot.decode_attempts,
+        report.snapshot.decode_successes
+    );
+    println!(
+        "  decode_success_rate={:.3} freshness={} symbol_refresh_count={} max_staleness_s={:.3}",
+        report.decode_success_rate,
+        report.freshness,
+        report.snapshot.symbol_refresh_count,
+        report.snapshot.symbol_staleness_max_seconds
+    );
+}
+
 fn print_metrics_report(report: &MetricsPresetReport) {
     match report {
-        MetricsPresetReport::Aggregate(report) => {
-            println!("FrankenFS Evidence Metrics");
-            println!("  Preset: {}", report.preset);
-            if let Some(snapshot) = report.metrics {
-                println!("  FUSE request metrics:");
-                println!(
-                    "    total={} ok={} err={} bytes_read={}",
-                    snapshot.requests_total,
-                    snapshot.requests_ok,
-                    snapshot.requests_err,
-                    snapshot.bytes_read
-                );
-                println!(
-                    "    throttled={} shed={} error_rate={:.3}",
-                    snapshot.requests_throttled,
-                    snapshot.requests_shed,
-                    report.analyses.request_error_rate
-                );
-            }
-            if let Some(snapshot) = report.cache {
-                println!("  Cache metrics:");
-                println!(
-                    "    hits={} misses={} evictions={} hit_rate={:.3}",
-                    snapshot.cache_hits,
-                    snapshot.cache_misses,
-                    snapshot.cache_evictions,
-                    snapshot.hit_rate
-                );
-                println!(
-                    "    dirty_count={} writeback_depth={} pressure={}",
-                    snapshot.cache_dirty_count,
-                    snapshot.writeback_queue_depth,
-                    report
-                        .analyses
-                        .cache_dirty_pressure
-                        .as_deref()
-                        .unwrap_or("unknown")
-                );
-            }
-            if let Some(snapshot) = report.mvcc.as_ref() {
-                println!("  MVCC metrics:");
-                println!(
-                    "    active_snapshots={} commits={} successes={} conflicts={} aborts={}",
-                    snapshot.active_snapshots,
-                    snapshot.commit_attempts_total,
-                    snapshot.commit_successes_total,
-                    snapshot.conflicts_total,
-                    snapshot.aborts_total
-                );
-                println!(
-                    "    contention={} prune_throughput={:.3}/s version_chain_max={}",
-                    report
-                        .analyses
-                        .mvcc_contention_level
-                        .as_deref()
-                        .unwrap_or("unknown"),
-                    snapshot.prune_throughput,
-                    snapshot.version_chain_max_length
-                );
-            }
-            if let Some(snapshot) = report.repair_live.as_ref() {
-                println!("  Repair-live metrics:");
-                println!(
-                    "    groups_scrubbed={} corruption_detected={} decode_attempts={} decode_successes={}",
-                    snapshot.groups_scrubbed,
-                    snapshot.corruption_detected,
-                    snapshot.decode_attempts,
-                    snapshot.decode_successes
-                );
-                println!(
-                    "    symbol_refresh_count={} freshness={} max_staleness_s={:.3}",
-                    snapshot.symbol_refresh_count,
-                    report
-                        .analyses
-                        .repair_freshness
-                        .as_deref()
-                        .unwrap_or("unknown"),
-                    snapshot.symbol_staleness_max_seconds
-                );
-            }
-        }
-        MetricsPresetReport::Cache(report) => {
-            println!("FrankenFS Evidence Metrics");
-            println!("  Preset: {}", report.preset);
-            println!(
-                "  hits={} misses={} total_accesses={} hit_rate={:.3} miss_rate={:.3}",
-                report.snapshot.cache_hits,
-                report.snapshot.cache_misses,
-                report.total_accesses,
-                report.snapshot.hit_rate,
-                report.miss_rate
-            );
-            println!(
-                "  evictions={} dirty_count={} dirty_pressure={} writeback_depth={} writeback_pressure={}",
-                report.snapshot.cache_evictions,
-                report.snapshot.cache_dirty_count,
-                report.dirty_pressure,
-                report.snapshot.writeback_queue_depth,
-                report.writeback_pressure
-            );
-        }
-        MetricsPresetReport::Mvcc(report) => {
-            println!("FrankenFS Evidence Metrics");
-            println!("  Preset: {}", report.preset);
-            println!(
-                "  active_snapshots={} commits={} successes={} commit_success_rate={:.3}",
-                report.snapshot.active_snapshots,
-                report.snapshot.commit_attempts_total,
-                report.snapshot.commit_successes_total,
-                report.commit_success_rate
-            );
-            println!(
-                "  conflicts={} aborts={} contention={} version_chain_max={}",
-                report.snapshot.conflicts_total,
-                report.snapshot.aborts_total,
-                report.contention_level,
-                report.snapshot.version_chain_max_length
-            );
-        }
-        MetricsPresetReport::RepairLive(report) => {
-            println!("FrankenFS Evidence Metrics");
-            println!("  Preset: {}", report.preset);
-            println!(
-                "  groups_scrubbed={} corruption_detected={} decode_attempts={} decode_successes={}",
-                report.snapshot.groups_scrubbed,
-                report.snapshot.corruption_detected,
-                report.snapshot.decode_attempts,
-                report.snapshot.decode_successes
-            );
-            println!(
-                "  decode_success_rate={:.3} freshness={} symbol_refresh_count={} max_staleness_s={:.3}",
-                report.decode_success_rate,
-                report.freshness,
-                report.snapshot.symbol_refresh_count,
-                report.snapshot.symbol_staleness_max_seconds
-            );
-        }
+        MetricsPresetReport::Aggregate(report) => print_aggregate_metrics_report(report),
+        MetricsPresetReport::Cache(report) => print_cache_metrics_report(report),
+        MetricsPresetReport::Mvcc(report) => print_mvcc_metrics_report(report),
+        MetricsPresetReport::RepairLive(report) => print_repair_live_metrics_report(report),
     }
 }
 
 // ── Main command ───────────────────────────────────────────────────────────
 
-#[expect(clippy::too_many_lines)]
+fn validate_evidence_args(
+    preset: Option<&str>,
+    event_type_filter: Option<&str>,
+    tail: Option<usize>,
+    summary: bool,
+) -> Result<Option<PresetMode>> {
+    let preset_kind = if let Some(preset_name) = preset {
+        let kind = preset_mode(preset_name);
+        if kind.is_none() {
+            warn!(
+                target: "ffs::cli::evidence",
+                preset = preset_name,
+                outcome = "rejected",
+                error_class = "invalid_preset",
+                "evidence_preset_rejected"
+            );
+            bail!(
+                "unknown preset '{preset_name}'. Valid presets: {}",
+                KNOWN_PRESETS.join(", ")
+            );
+        }
+        kind
+    } else {
+        None
+    };
+
+    if preset.is_some() && event_type_filter.is_some() {
+        bail!("--preset and --event-type are mutually exclusive");
+    }
+
+    if matches!(preset_kind, Some(PresetMode::Metrics)) {
+        if tail.is_some() {
+            bail!("--tail is only supported for ledger-backed evidence presets");
+        }
+        if summary {
+            bail!("--summary is only supported for ledger-backed evidence presets");
+        }
+    }
+
+    Ok(preset_kind)
+}
+
+fn run_metrics_evidence(path: &PathBuf, json: bool, preset_name: &str) -> Result<()> {
+    let report = load_metrics_report(path, preset_name)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).context("serialize metrics report")?
+        );
+    } else {
+        print_metrics_report(&report);
+    }
+    Ok(())
+}
+
+fn emit_ledger_output(
+    records: &[EvidenceRecord],
+    json: bool,
+    preset: Option<&str>,
+    summary: bool,
+) -> Result<()> {
+    if summary {
+        let report = build_summary(records, preset);
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).context("serialize evidence summary")?
+            );
+        } else {
+            print_summary(&report);
+        }
+    } else if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(records).context("serialize evidence records")?
+        );
+    } else if records.is_empty() {
+        println!("No evidence records found.");
+    } else {
+        if let Some(preset_name) = preset {
+            println!(
+                "FrankenFS Evidence Ledger — preset: {preset_name} ({} records)",
+                records.len()
+            );
+        } else {
+            println!("FrankenFS Evidence Ledger ({} records)", records.len());
+        }
+        println!();
+        for record in records {
+            print_evidence_record(record);
+        }
+    }
+
+    Ok(())
+}
+
+fn log_metrics_completion(started: Instant, preset_name: &str, summary: bool) {
+    info!(
+        target: "ffs::cli::evidence",
+        preset = preset_name,
+        summary = summary,
+        outcome = "success",
+        duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        "evidence_metrics_complete"
+    );
+}
+
+fn log_ledger_completion(
+    started: Instant,
+    records: &[EvidenceRecord],
+    preset: Option<&str>,
+    summary: bool,
+) {
+    info!(
+        target: "ffs::cli::evidence",
+        record_count = records.len(),
+        preset = preset.unwrap_or(""),
+        summary = summary,
+        outcome = "success",
+        duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        "evidence_complete"
+    );
+}
+
 pub fn evidence_cmd(
     path: &PathBuf,
     json: bool,
@@ -837,105 +954,17 @@ pub fn evidence_cmd(
     let started = Instant::now();
     info!(target: "ffs::cli::evidence", "evidence_start");
 
-    let preset_kind = if let Some(preset_name) = preset {
-        let kind = preset_mode(preset_name);
-        if kind.is_none() {
-            warn!(
-                target: "ffs::cli::evidence",
-                preset = preset_name,
-                outcome = "rejected",
-                error_class = "invalid_preset",
-                "evidence_preset_rejected"
-            );
-            bail!(
-                "unknown preset '{preset_name}'. Valid presets: {}",
-                KNOWN_PRESETS.join(", ")
-            );
-        }
-        kind
-    } else {
-        None
-    };
-
-    // Preset and event_type are mutually exclusive.
-    if preset.is_some() && event_type_filter.is_some() {
-        bail!("--preset and --event-type are mutually exclusive");
-    }
-
+    let preset_kind = validate_evidence_args(preset, event_type_filter, tail, summary)?;
     if matches!(preset_kind, Some(PresetMode::Metrics)) {
-        if tail.is_some() {
-            bail!("--tail is only supported for ledger-backed evidence presets");
-        }
-        if summary {
-            bail!("--summary is only supported for ledger-backed evidence presets");
-        }
-
         let preset_name = preset.expect("metrics preset kind requires preset name");
-        let report = load_metrics_report(path, preset_name)?;
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&report).context("serialize metrics report")?
-            );
-        } else {
-            print_metrics_report(&report);
-        }
-
-        info!(
-            target: "ffs::cli::evidence",
-            preset = preset_name,
-            summary = summary,
-            outcome = "success",
-            duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-            "evidence_metrics_complete"
-        );
+        run_metrics_evidence(path, json, preset_name)?;
+        log_metrics_completion(started, preset_name, summary);
         return Ok(());
     }
 
     let records = load_evidence_records(path, event_type_filter, tail, preset)?;
-
-    if summary {
-        let s = build_summary(&records, preset);
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&s).context("serialize evidence summary")?
-            );
-        } else {
-            print_summary(&s);
-        }
-    } else if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&records).context("serialize evidence records")?
-        );
-    } else if records.is_empty() {
-        println!("No evidence records found.");
-    } else {
-        if let Some(preset_name) = preset {
-            println!(
-                "FrankenFS Evidence Ledger — preset: {preset_name} ({} records)",
-                records.len()
-            );
-        } else {
-            println!("FrankenFS Evidence Ledger ({} records)", records.len());
-        }
-        println!();
-        for record in &records {
-            print_evidence_record(record);
-        }
-    }
-
-    info!(
-        target: "ffs::cli::evidence",
-        record_count = records.len(),
-        preset = preset.unwrap_or(""),
-        summary = summary,
-        outcome = "success",
-        duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-        "evidence_complete"
-    );
-
+    emit_ledger_output(&records, json, preset, summary)?;
+    log_ledger_completion(started, &records, preset, summary);
     Ok(())
 }
 

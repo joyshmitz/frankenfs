@@ -3636,6 +3636,56 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Decompress btrfs extent data based on the compression type field.
+    ///
+    /// - 0 = none (unreachable, caller should not call for uncompressed)
+    /// - 1 = ZLIB (deflate)
+    /// - 2 = LZO
+    /// - 3 = ZSTD
+    fn btrfs_decompress(
+        compressed: &[u8],
+        compression_type: u8,
+        uncompressed_size: usize,
+    ) -> Result<Vec<u8>, FfsError> {
+        match compression_type {
+            1 => {
+                // ZLIB (deflate)
+                use flate2::read::ZlibDecoder;
+                use std::io::Read;
+                let mut decoder = ZlibDecoder::new(compressed);
+                let mut out = Vec::with_capacity(uncompressed_size);
+                decoder.read_to_end(&mut out).map_err(|e| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: format!("btrfs zlib decompression failed: {e}"),
+                    }
+                })?;
+                Ok(out)
+            }
+            2 => {
+                // LZO — btrfs uses a custom framing format:
+                // [total_len: u32 LE] then segments of [seg_len: u32 LE][compressed_data]
+                // For now, return an error until we add an LZO decompressor.
+                Err(FfsError::UnsupportedFeature(
+                    "btrfs LZO decompression not yet implemented".into(),
+                ))
+            }
+            3 => {
+                // ZSTD
+                let out = zstd::decode_all(compressed).map_err(|e| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: format!("btrfs zstd decompression failed: {e}"),
+                    }
+                })?;
+                Ok(out)
+            }
+            other => Err(FfsError::UnsupportedFeature(format!(
+                "btrfs compression type {other} not supported"
+            ))),
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn btrfs_read_file(
         &self,
@@ -3739,31 +3789,42 @@ impl OpenFs {
         for (logical_start, extent) in &extents {
             match extent {
                 BtrfsExtentData::Inline {
-                    compression, data, ..
+                    compression,
+                    data,
+                    ram_bytes,
+                    ..
                 } => {
-                    if *compression != 0 {
-                        info!(
+                    // Decompress inline extent if compressed.
+                    let effective_data: std::borrow::Cow<'_, [u8]> = if *compression != 0 {
+                        trace!(
                             inode = canonical,
                             compression_type = *compression,
-                            "btrfs compressed_unsupported"
+                            ram_bytes,
+                            "btrfs inline_decompress"
                         );
-                        return Err(FfsError::UnsupportedFeature(format!(
-                            "btrfs compression type {compression}"
-                        )));
-                    }
+                        let decompressed = Self::btrfs_decompress(
+                            data,
+                            *compression,
+                            *ram_bytes as usize,
+                        )?;
+                        std::borrow::Cow::Owned(decompressed)
+                    } else {
+                        std::borrow::Cow::Borrowed(data.as_slice())
+                    };
 
                     trace!(
                         inode = canonical,
                         file_offset = logical_start,
-                        data_len = data.len(),
+                        data_len = effective_data.len(),
                         "btrfs extent_lookup inline"
                     );
 
-                    let extent_len =
-                        u64::try_from(data.len()).map_err(|_| FfsError::Corruption {
+                    let extent_len = u64::try_from(effective_data.len()).map_err(|_| {
+                        FfsError::Corruption {
                             block: 0,
                             detail: "inline extent length overflow".into(),
-                        })?;
+                        }
+                    })?;
                     let extent_end = logical_start.saturating_add(extent_len);
                     let overlap_start = (*logical_start).max(offset);
                     let overlap_end = extent_end.min(read_end);
@@ -3800,7 +3861,7 @@ impl OpenFs {
                         }
                     })?;
                     out[dst_start..dst_start + copy_len]
-                        .copy_from_slice(&data[src_start..src_start + copy_len]);
+                        .copy_from_slice(&effective_data[src_start..src_start + copy_len]);
                     covered_until = covered_until.max(overlap_end);
                 }
                 BtrfsExtentData::Regular {
