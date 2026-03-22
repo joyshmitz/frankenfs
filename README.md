@@ -1345,6 +1345,7 @@ See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [P
 | Core mutations (`create`, `mkdir`, `unlink`, `rmdir`, `rename`, `write`, `setattr`, `link`, `symlink`, xattrs) | Supported (experimental) | Deterministic success/error behavior under `ffs-core` + FUSE tests, including explicit xattr mode semantics (`Create`/`Replace`) |
 | `fallocate` (`mode=0`, `FALLOC_FL_KEEP_SIZE`) | Partially supported | Preallocation paths are supported and validated |
 | `fallocate` (`FALLOC_FL_PUNCH_HOLE\|FALLOC_FL_KEEP_SIZE`) | Supported (experimental) | Success path zero-fills the requested range while preserving file size and unaffected bytes |
+| `fallocate` (`FALLOC_FL_ZERO_RANGE`, optional `FALLOC_FL_KEEP_SIZE`) | Supported (experimental) | Success path zero-fills the requested range; `KEEP_SIZE` preserves EOF while non-`KEEP_SIZE` can extend file size |
 | `fallocate` (unknown/extra mode bits) | Unsupported | Must return `EOPNOTSUPP` (`FfsError::UnsupportedFeature`) with no partial data/size mutation before rejection |
 | Unsupported-path observability | Required | Structured logs include `operation_id`, `scenario_id`, `outcome`, and `error_class` |
 

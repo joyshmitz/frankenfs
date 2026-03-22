@@ -150,8 +150,13 @@ impl Ext4IncompatFeatures {
     );
 
     /// Bits FrankenFS v1 explicitly rejects.
-    pub const REJECTED_V1: Self =
-        Self(Self::COMPRESSION.0 | Self::JOURNAL_DEV.0 | Self::ENCRYPT.0 | Self::CASEFOLD.0);
+    pub const REJECTED_V1: Self = Self(
+        Self::COMPRESSION.0
+            | Self::JOURNAL_DEV.0
+            | Self::ENCRYPT.0
+            | Self::CASEFOLD.0
+            | Self::INLINE_DATA.0,
+    );
 
     /// All known incompat flags for iteration.
     const KNOWN: &[(u32, &'static str)] = &[

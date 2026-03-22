@@ -784,7 +784,7 @@ mod tests {
         let t = NamedTempFile::new().expect("temp file");
         let p = t.path().to_path_buf();
         std::fs::remove_file(&p).ok();
-        std::mem::forget(t); // prevent auto-delete
+        let _ = t.into_temp_path().keep().expect("keep temp file"); // prevent auto-delete
         p
     }
 

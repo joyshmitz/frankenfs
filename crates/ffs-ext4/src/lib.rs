@@ -1342,22 +1342,28 @@ mod tests {
         block[0x1C] = 2; // hash_version = TEA
         block[0x1D] = 8; // info_length = 8
         block[0x1E] = 0; // indirect_levels = 0
-        // dx_countlimit at 0x20: limit=10, count=2
+        // dx_countlimit at 0x20: limit=10, count=3
         block[0x20..0x22].copy_from_slice(&10_u16.to_le_bytes());
-        block[0x22..0x24].copy_from_slice(&2_u16.to_le_bytes());
-        // Entry 0 at 0x24: hash=0x1000, block=5
-        block[0x24..0x28].copy_from_slice(&0x1000_u32.to_le_bytes());
-        block[0x28..0x2C].copy_from_slice(&5_u32.to_le_bytes());
-        // Entry 1 at 0x2C: hash=0x2000, block=10
-        block[0x2C..0x30].copy_from_slice(&0x2000_u32.to_le_bytes());
-        block[0x30..0x34].copy_from_slice(&10_u32.to_le_bytes());
+        block[0x22..0x24].copy_from_slice(&3_u16.to_le_bytes());
+        // Entry 0 (implicit hash 0) block at 0x24
+        block[0x24..0x28].copy_from_slice(&5_u32.to_le_bytes());
 
-        let root = parse_dx_root(&block).expect("valid dx root");
-        assert_eq!(root.entries.len(), 2);
-        assert_eq!(root.entries[0].hash, 0x1000);
+        // Entry 1 at 0x28: hash=0x1000, block=10
+        block[0x28..0x2C].copy_from_slice(&0x1000_u32.to_le_bytes());
+        block[0x2C..0x30].copy_from_slice(&10_u32.to_le_bytes());
+
+        // Entry 2 at 0x30: hash=0x2000, block=15
+        block[0x30..0x34].copy_from_slice(&0x2000_u32.to_le_bytes());
+        block[0x34..0x38].copy_from_slice(&15_u32.to_le_bytes());
+
+        let root = ffs_ondisk::parse_dx_root(&block).expect("valid dx root");
+        assert_eq!(root.entries.len(), 3);
+        assert_eq!(root.entries[0].hash, 0);
         assert_eq!(root.entries[0].block, 5);
-        assert_eq!(root.entries[1].hash, 0x2000);
+        assert_eq!(root.entries[1].hash, 0x1000);
         assert_eq!(root.entries[1].block, 10);
+        assert_eq!(root.entries[2].hash, 0x2000);
+        assert_eq!(root.entries[2].block, 15);
     }
 
     // ── parse_inode_extent_tree tests ───────────────────────────────────

@@ -3291,7 +3291,7 @@ mod tests {
                 ino: 42,
                 offset: None,
             };
-            assert_eq!(ctx.log_and_errno(), *expected, "wrong errno for {error:?}",);
+            assert_eq!(ctx.log_and_errno(), *expected, "wrong errno for {error:?}");
         }
     }
 
@@ -3728,7 +3728,7 @@ mod tests {
                 ino: 99,
                 offset: Some(0),
             };
-            assert_eq!(ctx.log_and_errno(), *expected, "wrong errno for {error:?}",);
+            assert_eq!(ctx.log_and_errno(), *expected, "wrong errno for {error:?}");
         }
     }
 

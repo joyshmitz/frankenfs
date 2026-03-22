@@ -5021,14 +5021,10 @@ impl OpenFs {
     ///    (after the `system.data` xattr header, 4 bytes overhead)
     ///
     /// The total inline capacity is typically ~60 + (inode_size - 128 - extra_isize - 4) bytes.
-    fn read_ext4_inline_data(
-        inode: &Ext4Inode,
-        offset: u64,
-        size: u32,
-    ) -> Result<Vec<u8>, FfsError> {
+    fn read_ext4_inline_data(inode: &Ext4Inode, offset: u64, size: u32) -> Vec<u8> {
         let file_size = inode.size;
         if offset >= file_size {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         // Assemble inline data: i_block (60 bytes) + xattr ibody payload.
@@ -5054,17 +5050,24 @@ impl OpenFs {
         let to_read = (file_size - offset)
             .min(u64::from(size))
             .min(inline_data.len() as u64);
-        let start = offset as usize;
-        let end = start + to_read as usize;
+
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        let to_read_usize = usize::try_from(to_read).unwrap_or(0);
+        let end = start.saturating_add(to_read_usize);
+
+        if start >= inline_data.len() {
+            return Vec::new();
+        }
+
         if end <= inline_data.len() {
-            Ok(inline_data[start..end].to_vec())
+            inline_data[start..end].to_vec()
         } else {
             // File claims more data than is inline — return what we have.
             let available_end = inline_data.len().min(end);
             let mut out = inline_data[start..available_end].to_vec();
             // Pad with zeros if file_size extends beyond inline capacity.
-            out.resize(to_read as usize, 0);
-            Ok(out)
+            out.resize(to_read_usize, 0);
+            out
         }
     }
 }
@@ -7269,27 +7272,33 @@ impl OpenFs {
     const BTRFS_RW_SCENARIO_FALLOCATE_UNSUPPORTED_MODE_BITS: &str =
         "btrfs_rw_fallocate_unsupported_mode_bits";
     const BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE: &str = "btrfs_rw_fallocate_punch_hole";
+    const BTRFS_RW_SCENARIO_FALLOCATE_ZERO_RANGE: &str = "btrfs_rw_fallocate_zero_range";
     const BTRFS_RW_SCENARIO_FLUSH: &str = "btrfs_rw_flush";
     const BTRFS_RW_SCENARIO_FSYNC: &str = "btrfs_rw_fsync";
     const BTRFS_RW_SCENARIO_FSYNCDIR: &str = "btrfs_rw_fsyncdir";
     const BTRFS_FALLOC_FL_KEEP_SIZE: i32 = 0x01;
     const BTRFS_FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+    const BTRFS_FALLOC_FL_ZERO_RANGE: i32 = 0x10;
 
-    fn btrfs_fallocate_flags(mode: i32) -> (bool, bool, i32) {
+    fn btrfs_fallocate_flags(mode: i32) -> (bool, bool, bool, i32) {
         let keep_size = (mode & Self::BTRFS_FALLOC_FL_KEEP_SIZE) != 0;
         let punch_hole = (mode & Self::BTRFS_FALLOC_FL_PUNCH_HOLE) != 0;
-        let unsupported_bits =
-            mode & !(Self::BTRFS_FALLOC_FL_KEEP_SIZE | Self::BTRFS_FALLOC_FL_PUNCH_HOLE);
-        (keep_size, punch_hole, unsupported_bits)
+        let zero_range = (mode & Self::BTRFS_FALLOC_FL_ZERO_RANGE) != 0;
+        let unsupported_bits = mode
+            & !(Self::BTRFS_FALLOC_FL_KEEP_SIZE
+                | Self::BTRFS_FALLOC_FL_PUNCH_HOLE
+                | Self::BTRFS_FALLOC_FL_ZERO_RANGE);
+        (keep_size, punch_hole, zero_range, unsupported_bits)
     }
 
     fn btrfs_validate_fallocate_mode(
         mode: i32,
         operation_id: &str,
         scenario_id: &str,
-    ) -> ffs_error::Result<(bool, bool)> {
+    ) -> ffs_error::Result<(bool, bool, bool)> {
         const EINVAL_ERRNO: i32 = 22;
-        let (keep_size, punch_hole, unsupported_bits) = Self::btrfs_fallocate_flags(mode);
+        let (keep_size, punch_hole, zero_range, unsupported_bits) =
+            Self::btrfs_fallocate_flags(mode);
         if unsupported_bits != 0 {
             let unsupported_bits_hex = format!("0x{unsupported_bits:08x}");
             warn!(
@@ -7318,16 +7327,19 @@ impl OpenFs {
                 EINVAL_ERRNO,
             )));
         }
-        Ok((keep_size, punch_hole))
+        Ok((keep_size, punch_hole, zero_range))
     }
 
     fn btrfs_fallocate_scenario_id(mode: i32) -> &'static str {
-        let (keep_size, punch_hole, unsupported_bits) = Self::btrfs_fallocate_flags(mode);
+        let (keep_size, punch_hole, zero_range, unsupported_bits) =
+            Self::btrfs_fallocate_flags(mode);
 
         if unsupported_bits != 0 {
             Self::BTRFS_RW_SCENARIO_FALLOCATE_UNSUPPORTED_MODE_BITS
         } else if punch_hole {
             Self::BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE
+        } else if zero_range {
+            Self::BTRFS_RW_SCENARIO_FALLOCATE_ZERO_RANGE
         } else if keep_size {
             Self::BTRFS_RW_SCENARIO_FALLOCATE_KEEP_SIZE
         } else {
@@ -8515,7 +8527,7 @@ impl OpenFs {
             return Ok(());
         }
 
-        let (keep_size, punch_hole) =
+        let (keep_size, punch_hole, zero_range) =
             Self::btrfs_validate_fallocate_mode(mode, &operation_id, scenario_id)?;
 
         let alloc_mutex = self.require_btrfs_alloc_state()?;
@@ -8531,7 +8543,7 @@ impl OpenFs {
             return Err(FfsError::IsDirectory);
         }
 
-        if punch_hole {
+        if punch_hole || zero_range {
             let ext_start = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -8585,6 +8597,13 @@ impl OpenFs {
                 let right_start = usize::try_from(overlap_end - key.offset).map_err(|_| {
                     FfsError::InvalidGeometry("right segment offset overflow".into())
                 })?;
+                let middle_start = left_len;
+                let middle_end = right_start;
+
+                if zero_range && middle_start < middle_end {
+                    let materialized_mut = &mut materialized[left_len..right_start];
+                    materialized_mut.fill(0);
+                }
 
                 self.btrfs_insert_regular_extent_segment(
                     cx,
@@ -8738,6 +8757,7 @@ impl OpenFs {
             length,
             keep_size,
             punch_hole,
+            zero_range,
             "btrfs_fallocate_applied"
         );
         drop(alloc);
@@ -9645,7 +9665,7 @@ impl FsOps for OpenFs {
 
                 // Inline data: file content stored directly in inode's i_block area.
                 if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
-                    return Self::read_ext4_inline_data(&inode, offset, size);
+                    return Ok(Self::read_ext4_inline_data(&inode, offset, size));
                 }
 
                 let mut buf = vec![0_u8; size as usize];
@@ -11198,6 +11218,13 @@ mod tests {
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .collect()
+    }
+
+    fn fallocate_log_contract_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("fallocate log-contract lock poisoned")
     }
 
     #[test]
@@ -20705,6 +20732,92 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_fallocate_zero_range_zeroes_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("zero_range.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let mut original = vec![b'A'; 4096];
+        original.extend(vec![b'B'; 4096]);
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &original)
+            .expect("seed file before zero range");
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            2048,
+            4096,
+            libc::FALLOC_FL_ZERO_RANGE,
+        )
+        .expect("zero-range mode should succeed for btrfs");
+
+        let after_attr = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after zero range");
+        let after_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192)
+            .expect("read after zero range");
+        assert_eq!(after_attr.size, 8192);
+        assert_eq!(&after_data[..2048], &original[..2048]);
+        assert!(after_data[2048..6144].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            &after_data[6144..],
+            &original[6144..],
+            "zero range must preserve data outside the requested range"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_zero_range_keep_size_does_not_extend_file() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("zero_keep.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, b"existing")
+            .expect("seed file before keep-size zero range");
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            4096,
+            4096,
+            libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_ZERO_RANGE,
+        )
+        .expect("keep-size zero-range mode should succeed for btrfs");
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after keep-size zero range");
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
+            .expect("read after keep-size zero range");
+        assert_eq!(after.size, 8);
+        assert_eq!(&data[..8], b"existing");
+    }
+
+    #[test]
     fn btrfs_write_fallocate_unsupported_mode_bits_rejected() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -20760,6 +20873,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_success_log_contract() {
+        let _guard = fallocate_log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -20793,9 +20907,15 @@ mod tests {
         let applied = logs
             .iter()
             .find(|entry| {
-                entry.get("message").and_then(Value::as_str) == Some("btrfs_fallocate_applied")
+                entry.get("scenario_id").and_then(Value::as_str)
+                    == Some("btrfs_rw_fallocate_prealloc")
+                    && entry.get("outcome").and_then(Value::as_str) == Some("applied")
+                    && entry
+                        .get("operation_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.starts_with("btrfs-fallocate-"))
             })
-            .expect("expected btrfs_fallocate_applied log event");
+            .unwrap_or_else(|| panic!("expected btrfs fallocate success log event: {logs:?}"));
 
         assert_eq!(
             applied.get("scenario_id").and_then(Value::as_str),
@@ -20848,6 +20968,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_unsupported_mode_bits_log_contract() {
+        let _guard = fallocate_log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()

@@ -1744,7 +1744,7 @@ mod tests {
             sizes.push(store.wal_stats().wal_size_bytes - prev_size);
         }
         // Prevent NamedTempFile from being dropped (which would delete the file).
-        std::mem::forget(tmp);
+        let _ = tmp.into_temp_path().keep().expect("keep temp file");
         (path, sizes)
     }
 

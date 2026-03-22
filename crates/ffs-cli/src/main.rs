@@ -5480,13 +5480,15 @@ mod tests {
     }
 
     fn with_temp_image_path<T>(image: &[u8], f: impl FnOnce(PathBuf) -> T) -> T {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut path = std::env::temp_dir();
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be monotonic")
             .as_nanos();
         path.push(format!(
-            "ffs-cli-fsck-force-{}-{ts}.img",
+            "ffs-cli-fsck-force-{}-{ts}-{count}.img",
             std::process::id()
         ));
         write_sparse_test_image(&path, image).expect("write test filesystem image");
@@ -6289,7 +6291,7 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("warn"))
+            .with_env_filter(EnvFilter::new("info"))
             .with_writer(buffer.clone())
             .finish();
 

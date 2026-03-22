@@ -83,7 +83,7 @@ fi
 e2e_step "Scenario 2: Btrfs write unit test coverage"
 
 HAPPY_PATH=$(grep -c "fn btrfs_write_create_file\|fn btrfs_write_mkdir\|fn btrfs_write_unlink\|fn btrfs_write_rename\|fn btrfs_write_symlink\|fn btrfs_write_hard_link" "$CORE_SRC" || echo "0")
-ERROR_PATH=$(grep -c "fn btrfs_write_fallocate_punch_hole_zeroes_data\|fn btrfs_write_fallocate_unsupported_mode_bits_rejected" "$CORE_SRC" || echo "0")
+ERROR_PATH=$(grep -c "fn btrfs_write_fallocate_punch_hole_zeroes_data\|fn btrfs_write_fallocate_zero_range_zeroes_data\|fn btrfs_write_fallocate_unsupported_mode_bits_rejected" "$CORE_SRC" || echo "0")
 GUARDRAIL=$(grep -c "fn btrfs_write_enable_writes_sets_writable" "$CORE_SRC" || echo "0")
 
 TOTAL_WRITE_TESTS=$(grep -c "fn btrfs_write" "$CORE_SRC" || echo "0")

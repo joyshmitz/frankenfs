@@ -747,6 +747,38 @@ finally:
 PY
 }
 
+check_zero_range_zeroes_range() {
+    local path="$1"
+    python3 - "$path" <<'PY'
+import fcntl
+import os
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDWR)
+try:
+    if not hasattr(fcntl, "fallocate"):
+        raise SystemExit("python fcntl.fallocate is unavailable")
+    if not hasattr(fcntl, "FALLOC_FL_ZERO_RANGE"):
+        raise SystemExit("python fcntl.FALLOC_FL_ZERO_RANGE is unavailable")
+    before_size = os.fstat(fd).st_size
+    before_data = os.pread(fd, before_size, 0)
+    fcntl.fallocate(fd, fcntl.FALLOC_FL_ZERO_RANGE, 0, 4096)
+    after_size = os.fstat(fd).st_size
+    after_data = os.pread(fd, after_size, 0)
+    if after_size != before_size:
+        raise SystemExit(
+            f"zero-range unexpectedly changed file size: before={before_size} after={after_size}"
+        )
+    if any(after_data[:4096]):
+        raise SystemExit("zero-range did not zero the requested range")
+    if after_data[4096:] != before_data[4096:]:
+        raise SystemExit("zero-range mutated file bytes outside the requested range")
+finally:
+    os.close(fd)
+PY
+}
+
 check_unsupported_mode_bits_eopnotsupp() {
     local path="$1"
     python3 - "$path" <<'PY'
@@ -815,6 +847,7 @@ run_case_shell "file_append" "printf 'append-line\\n' >> '$MOUNT_RW/small.txt' &
 
 run_case_shell "file_truncate_extend_2mb" "truncate -s 2097152 '$MOUNT_RW/large.bin'"
 run_case_shell "file_truncate_shrink_256b" "truncate -s 256 '$MOUNT_RW/large.bin' && test \"$(stat -c '%s' '$MOUNT_RW/large.bin')\" -eq 256"
+run_case "fallocate_zero_range_zeroes_range" check_zero_range_zeroes_range "$MOUNT_RW/medium.bin"
 run_case "fallocate_punch_hole_keep_size_zeroes_range" check_punch_hole_zeroes_range "$MOUNT_RW/medium.bin"
 run_case "unsupported_fallocate_mode_bits_errno_eopnotsupp" check_unsupported_mode_bits_eopnotsupp "$MOUNT_RW/medium.bin"
 

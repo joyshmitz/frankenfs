@@ -548,6 +548,7 @@ mod tests {
             blocks_per_group: 8192,
             inodes_per_group: 2048,
             block_size: 4096,
+            cluster_ratio: 1,
             total_blocks: 32768,
             total_inodes: 8192,
             first_data_block: 0,
@@ -3654,6 +3655,7 @@ mod tests {
             blocks_per_group: 8192,
             inodes_per_group: 2048,
             block_size: 128, // Tiny block — inode (256 bytes) won't fit.
+            cluster_ratio: 1,
             total_blocks: 32768,
             total_inodes: 8192,
             first_data_block: 0,
