@@ -338,6 +338,7 @@ pub enum BtrfsExtentData {
     /// Inline extent payload bytes.
     Inline {
         generation: u64,
+        ram_bytes: u64,
         compression: u8,
         data: Vec<u8>,
     },
@@ -346,6 +347,7 @@ pub enum BtrfsExtentData {
     /// `disk_bytenr` is a logical bytenr in btrfs address space.
     Regular {
         generation: u64,
+        ram_bytes: u64,
         extent_type: u8,
         compression: u8,
         disk_bytenr: u64,
@@ -367,13 +369,13 @@ impl BtrfsExtentData {
         match self {
             Self::Inline {
                 generation,
+                ram_bytes,
                 compression,
                 data,
             } => {
                 let mut buf = vec![0u8; 21 + data.len()];
                 buf[0..8].copy_from_slice(&generation.to_le_bytes());
-                // ram_bytes at 8..16 — set to data length
-                buf[8..16].copy_from_slice(&(data.len() as u64).to_le_bytes());
+                buf[8..16].copy_from_slice(&ram_bytes.to_le_bytes());
                 buf[16] = *compression;
                 // encryption at 17 (zero)
                 // other_encoding at 18..20 (zero)
@@ -383,6 +385,7 @@ impl BtrfsExtentData {
             }
             Self::Regular {
                 generation,
+                ram_bytes,
                 extent_type,
                 compression,
                 disk_bytenr,
@@ -392,7 +395,7 @@ impl BtrfsExtentData {
             } => {
                 let mut buf = vec![0u8; 53];
                 buf[0..8].copy_from_slice(&generation.to_le_bytes());
-                buf[8..16].copy_from_slice(&disk_num_bytes.to_le_bytes()); // ram_bytes
+                buf[8..16].copy_from_slice(&ram_bytes.to_le_bytes());
                 buf[16] = *compression;
                 // encryption at 17 (zero)
                 // other_encoding at 18..20 (zero)
@@ -828,11 +831,13 @@ pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
     }
 
     let generation = read_u64(data, 0, "extent_data.generation")?;
+    let ram_bytes = read_u64(data, 8, "extent_data.ram_bytes")?;
     let compression = data[16];
     let extent_type = data[20];
     match extent_type {
         BTRFS_FILE_EXTENT_INLINE => Ok(BtrfsExtentData::Inline {
             generation,
+            ram_bytes,
             compression,
             data: data[FIXED..].to_vec(),
         }),
@@ -847,6 +852,7 @@ pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
             }
             Ok(BtrfsExtentData::Regular {
                 generation,
+                ram_bytes,
                 extent_type,
                 compression,
                 disk_bytenr: read_u64(data, 21, "extent_data.disk_bytenr")?,
