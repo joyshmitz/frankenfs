@@ -3924,7 +3924,7 @@ impl OpenFs {
     ///
     /// Returns `FfsError::Format` if this is not an ext4 filesystem.
     pub fn read_group_desc(&self, cx: &Cx, group: GroupNumber) -> Result<Ext4GroupDesc, FfsError> {
-        self.read_group_desc_with_scope(cx, &mut RequestScope::empty(), group)
+        self.read_group_desc_with_scope(cx, &RequestScope::empty(), group)
     }
 
     pub fn read_group_desc_with_scope(
@@ -3978,7 +3978,7 @@ impl OpenFs {
 
     /// Read an ext4 inode by number via the device, respecting MVCC isolation.
     pub fn read_inode(&self, cx: &Cx, ino: InodeNumber) -> Result<Ext4Inode, FfsError> {
-        self.read_inode_with_scope(cx, &mut RequestScope::empty(), ino)
+        self.read_inode_with_scope(cx, &RequestScope::empty(), ino)
     }
 
     pub fn read_inode_with_scope(
@@ -4026,7 +4026,7 @@ impl OpenFs {
 
     /// Read an ext4 inode and return its VFS attributes, respecting MVCC isolation.
     pub fn read_inode_attr(&self, cx: &Cx, ino: InodeNumber) -> Result<InodeAttr, FfsError> {
-        self.read_inode_attr_with_scope(cx, &mut RequestScope::empty(), ino)
+        self.read_inode_attr_with_scope(cx, &RequestScope::empty(), ino)
     }
 
     pub fn read_inode_attr_with_scope(
@@ -4247,7 +4247,7 @@ impl OpenFs {
     /// Read a full filesystem block from the device.
     #[allow(clippy::cast_possible_truncation)] // block_size is u32, always fits usize
     pub fn read_block_vec(&self, cx: &Cx, block: BlockNumber) -> Result<Vec<u8>, FfsError> {
-        self.read_block_with_scope(cx, &mut RequestScope::empty(), block)
+        self.read_block_with_scope(cx, &RequestScope::empty(), block)
     }
 
     /// Read a full filesystem block from the device, respecting MVCC isolation if a scope is provided.
@@ -4420,7 +4420,7 @@ impl OpenFs {
     ///
     /// Returns extents in tree-traversal order (sorted by logical block).
     pub fn collect_extents(&self, cx: &Cx, inode: &Ext4Inode) -> Result<Vec<Ext4Extent>, FfsError> {
-        self.collect_extents_with_scope(cx, &mut RequestScope::empty(), inode)
+        self.collect_extents_with_scope(cx, &RequestScope::empty(), inode)
     }
 
     /// Collect all leaf extents for an inode, flattening multi-level trees.
@@ -4556,7 +4556,7 @@ impl OpenFs {
     /// Iterates over the inode's data blocks via extent mapping, reading
     /// each block from the device and parsing directory entries.
     pub fn read_dir(&self, cx: &Cx, inode: &Ext4Inode) -> Result<Vec<Ext4DirEntry>, FfsError> {
-        self.read_dir_with_scope(cx, &mut RequestScope::empty(), inode)
+        self.read_dir_with_scope(cx, &RequestScope::empty(), inode)
     }
 
     pub fn read_dir_with_scope(
@@ -4594,7 +4594,7 @@ impl OpenFs {
         dir_inode: &Ext4Inode,
         name: &[u8],
     ) -> Result<Option<Ext4DirEntry>, FfsError> {
-        self.lookup_name_with_scope(cx, &mut RequestScope::empty(), dir_inode, name)
+        self.lookup_name_with_scope(cx, &RequestScope::empty(), dir_inode, name)
     }
 
     pub fn lookup_name_with_scope(
@@ -5556,7 +5556,7 @@ impl OpenFs {
                         )?;
                         return Ok(());
                     }
-                    Err(FfsError::NoSpace) => {},
+                    Err(FfsError::NoSpace) => {}
                     Err(e) => return Err(e),
                 }
             }
@@ -10645,7 +10645,6 @@ impl FrankenFsEngine {
 }
 
 #[cfg(test)]
-#[expect(clippy::needless_pass_by_ref_mut)]
 mod tests {
     use super::*;
     use asupersync::SystemPressure;
@@ -12339,7 +12338,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         let phys = fs
-            .resolve_extent(&cx, &mut RequestScope::empty(), &inode, 0)
+            .resolve_extent(&cx, &RequestScope::empty(), &inode, 0)
             .unwrap();
         assert_eq!(phys, Some((13, false)));
     }
@@ -12354,7 +12353,7 @@ mod tests {
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         // Logical block 1 is not mapped — should be a hole.
         let phys = fs
-            .resolve_extent(&cx, &mut RequestScope::empty(), &inode, 1)
+            .resolve_extent(&cx, &RequestScope::empty(), &inode, 1)
             .unwrap();
         assert_eq!(phys, None);
     }
@@ -12368,7 +12367,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(12)).unwrap();
         let phys = fs
-            .resolve_extent(&cx, &mut RequestScope::empty(), &inode, 0)
+            .resolve_extent(&cx, &RequestScope::empty(), &inode, 0)
             .unwrap();
         assert_eq!(phys, Some((15, false)));
     }
@@ -12385,7 +12384,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(12)).unwrap();
         let err = fs
-            .resolve_extent(&cx, &mut RequestScope::empty(), &inode, 0)
+            .resolve_extent(&cx, &RequestScope::empty(), &inode, 0)
             .unwrap_err();
         assert!(
             matches!(err, FfsError::Corruption { .. } | FfsError::Format(_)),
@@ -12406,7 +12405,7 @@ mod tests {
 
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         let err = fs
-            .resolve_extent(&cx, &mut RequestScope::empty(), &inode, 0)
+            .resolve_extent(&cx, &RequestScope::empty(), &inode, 0)
             .unwrap_err();
         assert!(
             matches!(err, FfsError::Corruption { .. } | FfsError::Format(_)),
@@ -12455,7 +12454,7 @@ mod tests {
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         let mut buf = vec![0_u8; 14];
         let n = fs
-            .read_file_data(&cx, &mut RequestScope::empty(), &inode, 0, &mut buf)
+            .read_file_data(&cx, &RequestScope::empty(), &inode, 0, &mut buf)
             .unwrap();
         assert_eq!(n, 14);
         assert_eq!(&buf[..n], b"Hello, extent!");
@@ -12471,7 +12470,7 @@ mod tests {
         let inode = fs.read_inode(&cx, InodeNumber(12)).unwrap();
         let mut buf = vec![0_u8; 14];
         let n = fs
-            .read_file_data(&cx, &mut RequestScope::empty(), &inode, 0, &mut buf)
+            .read_file_data(&cx, &RequestScope::empty(), &inode, 0, &mut buf)
             .unwrap();
         assert_eq!(n, 14);
         assert_eq!(&buf[..n], b"Index extent!\n");
@@ -12487,7 +12486,7 @@ mod tests {
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         let mut buf = vec![0_u8; 100];
         let n = fs
-            .read_file_data(&cx, &mut RequestScope::empty(), &inode, 7, &mut buf)
+            .read_file_data(&cx, &RequestScope::empty(), &inode, 7, &mut buf)
             .unwrap();
         assert_eq!(n, 7); // 14 - 7 = 7 bytes remaining
         assert_eq!(&buf[..n], b"extent!");
@@ -12503,7 +12502,7 @@ mod tests {
         let inode = fs.read_inode(&cx, InodeNumber(11)).unwrap();
         let mut buf = vec![0_u8; 10];
         let n = fs
-            .read_file_data(&cx, &mut RequestScope::empty(), &inode, 100, &mut buf)
+            .read_file_data(&cx, &RequestScope::empty(), &inode, 100, &mut buf)
             .unwrap();
         assert_eq!(n, 0);
     }
@@ -12659,7 +12658,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let data = fs
-            .read_file(&cx, &mut RequestScope::empty(), InodeNumber(11), 0, 100)
+            .read_file(&cx, &RequestScope::empty(), InodeNumber(11), 0, 100)
             .unwrap();
         assert_eq!(&data, b"Hello, extent!");
     }
@@ -12672,7 +12671,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let data = fs
-            .read_file(&cx, &mut RequestScope::empty(), InodeNumber(11), 7, 100)
+            .read_file(&cx, &RequestScope::empty(), InodeNumber(11), 7, 100)
             .unwrap();
         assert_eq!(&data, b"extent!");
     }
@@ -12685,7 +12684,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let err = fs
-            .read_file(&cx, &mut RequestScope::empty(), InodeNumber(2), 0, 4096)
+            .read_file(&cx, &RequestScope::empty(), InodeNumber(2), 0, 4096)
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::EISDIR);
     }
@@ -12699,9 +12698,7 @@ mod tests {
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
-        let (ino, inode) = fs
-            .resolve_path(&cx, &mut RequestScope::empty(), "/")
-            .unwrap();
+        let (ino, inode) = fs.resolve_path(&cx, &RequestScope::empty(), "/").unwrap();
         assert_eq!(ino, InodeNumber(2));
         assert!(inode.is_dir());
     }
@@ -12714,7 +12711,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let (ino, inode) = fs
-            .resolve_path(&cx, &mut RequestScope::empty(), "/hello.txt")
+            .resolve_path(&cx, &RequestScope::empty(), "/hello.txt")
             .unwrap();
         assert_eq!(ino, InodeNumber(11));
         assert!(inode.is_regular());
@@ -12728,7 +12725,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let err = fs
-            .resolve_path(&cx, &mut RequestScope::empty(), "/missing")
+            .resolve_path(&cx, &RequestScope::empty(), "/missing")
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
     }
@@ -12742,7 +12739,7 @@ mod tests {
 
         // hello.txt is a regular file, not a directory — traversal through it fails.
         let err = fs
-            .resolve_path(&cx, &mut RequestScope::empty(), "/hello.txt/child")
+            .resolve_path(&cx, &RequestScope::empty(), "/hello.txt/child")
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOTDIR);
     }
@@ -12755,7 +12752,7 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
 
         let err = fs
-            .resolve_path(&cx, &mut RequestScope::empty(), "hello.txt")
+            .resolve_path(&cx, &RequestScope::empty(), "hello.txt")
             .unwrap_err();
         assert!(matches!(err, FfsError::Format(_)));
     }

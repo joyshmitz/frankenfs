@@ -73,7 +73,11 @@ impl SparklineHistory {
             .skip(skip)
             .map(|&v| {
                 let normalized = (v / max_val).clamp(0.0, 1.0);
-                let idx = (normalized * (SPARKLINE_CHARS.len() - 1) as f64).round() as usize;
+                let max_idx = SPARKLINE_CHARS.len() - 1;
+                let scaled = normalized * max_idx as f64;
+                let idx = (0..max_idx)
+                    .take_while(|level| scaled >= (*level as f64 + 0.5))
+                    .count();
                 SPARKLINE_CHARS[idx.min(SPARKLINE_CHARS.len() - 1)]
             })
             .collect()
@@ -233,7 +237,7 @@ pub enum DashboardMsg {
     /// Terminal input event.
     Input(Event),
     /// New metrics arrived.
-    MetricsUpdated(DashboardSnapshot),
+    MetricsUpdated(Box<DashboardSnapshot>),
 }
 
 impl From<Event> for DashboardMsg {
@@ -297,7 +301,7 @@ impl Model for Dashboard {
                 Cmd::none()
             }
             DashboardMsg::MetricsUpdated(snap) => {
-                self.snapshot = snap;
+                self.snapshot = *snap;
                 Cmd::none()
             }
             DashboardMsg::Input(_) => Cmd::none(),
@@ -706,7 +710,7 @@ mod tests {
             scrub_blocks_scanned: 1000,
             ..Default::default()
         };
-        let cmd = dash.update(DashboardMsg::MetricsUpdated(snap));
+        let cmd = dash.update(DashboardMsg::MetricsUpdated(Box::new(snap)));
         assert!(matches!(cmd, Cmd::None));
         assert_eq!(dash.snapshot().scrub_blocks_scanned, 1000);
     }

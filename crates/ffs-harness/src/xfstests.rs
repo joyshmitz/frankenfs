@@ -113,6 +113,7 @@ pub fn load_baseline(path: &Path) -> Result<Vec<XfstestsBaselineEntry>> {
     serde_json::from_str(&text).with_context(|| format!("invalid baseline json {}", path.display()))
 }
 
+#[must_use]
 pub fn parse_check_output(
     selected: &[String],
     check_log: &str,

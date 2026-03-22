@@ -185,6 +185,7 @@ pub struct RepairLiveMetricsReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[expect(clippy::large_enum_variant)]
 #[serde(untagged)]
 pub enum MetricsPresetReport {
     Aggregate(MetricsAggregateReport),
@@ -193,13 +194,13 @@ pub enum MetricsPresetReport {
     RepairLive(RepairLiveMetricsReport),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceHistogramBucket {
     pub le: u64,
     pub count: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceHistogramSnapshot {
     pub buckets: Vec<EvidenceHistogramBucket>,
     pub inf_count: u64,
@@ -630,38 +631,33 @@ fn load_metrics_report(path: &PathBuf, preset: &str) -> Result<MetricsPresetRepo
         PRESET_CACHE => {
             let bundle = load_metrics_bundle(path);
             match bundle {
-                Ok(bundle) => bundle
-                    .cache
-                    .map(cache_report)
-                    .map(Ok)
-                    .unwrap_or_else(|| Ok(cache_report(load_direct_metrics(path, "cache")?))),
+                Ok(bundle) => match bundle.cache {
+                    Some(snapshot) => Ok(cache_report(snapshot)),
+                    None => Ok(cache_report(load_direct_metrics(path, "cache")?)),
+                },
                 _ => Ok(cache_report(load_direct_metrics(path, "cache")?)),
             }
         }
         PRESET_MVCC => {
             let bundle = load_metrics_bundle(path);
             match bundle {
-                Ok(bundle) => bundle
-                    .mvcc
-                    .map(mvcc_report)
-                    .map(Ok)
-                    .unwrap_or_else(|| Ok(mvcc_report(load_direct_metrics(path, "MVCC")?))),
+                Ok(bundle) => match bundle.mvcc {
+                    Some(snapshot) => Ok(mvcc_report(snapshot)),
+                    None => Ok(mvcc_report(load_direct_metrics(path, "MVCC")?)),
+                },
                 _ => Ok(mvcc_report(load_direct_metrics(path, "MVCC")?)),
             }
         }
         PRESET_REPAIR_LIVE => {
             let bundle = load_metrics_bundle(path);
             match bundle {
-                Ok(bundle) => bundle
-                    .repair_live
-                    .map(repair_live_report)
-                    .map(Ok)
-                    .unwrap_or_else(|| {
-                        Ok(repair_live_report(load_direct_metrics(
-                            path,
-                            "repair-live",
-                        )?))
-                    }),
+                Ok(bundle) => match bundle.repair_live {
+                    Some(snapshot) => Ok(repair_live_report(snapshot)),
+                    None => Ok(repair_live_report(load_direct_metrics(
+                        path,
+                        "repair-live",
+                    )?)),
+                },
                 _ => Ok(repair_live_report(load_direct_metrics(
                     path,
                     "repair-live",
@@ -672,6 +668,7 @@ fn load_metrics_report(path: &PathBuf, preset: &str) -> Result<MetricsPresetRepo
     }
 }
 
+#[expect(clippy::too_many_lines)]
 fn print_metrics_report(report: &MetricsPresetReport) {
     match report {
         MetricsPresetReport::Aggregate(report) => {
@@ -816,6 +813,7 @@ fn print_metrics_report(report: &MetricsPresetReport) {
 
 // ── Main command ───────────────────────────────────────────────────────────
 
+#[expect(clippy::too_many_lines)]
 pub fn evidence_cmd(
     path: &PathBuf,
     json: bool,

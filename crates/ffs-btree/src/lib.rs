@@ -507,7 +507,6 @@ fn grow_root_leaf(
     alloc: &mut dyn BlockAllocator,
     original_generation: u32,
 ) -> Result<()> {
-
     let block_size = dev.block_size();
     let mid = all_extents.len() / 2;
     let left = &all_extents[..mid];

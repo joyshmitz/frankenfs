@@ -1006,8 +1006,8 @@ impl Filesystem for FrankenFuse {
 
     fn statfs(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyStatfs) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Statfs, |cx, _scope| {
-            self.inner.ops.statfs(cx, _scope, InodeNumber(ino))
+        match self.with_request_scope(&cx, RequestOp::Statfs, |cx, scope| {
+            self.inner.ops.statfs(cx, scope, InodeNumber(ino))
         }) {
             Ok(stats) => reply.statfs(
                 stats.blocks,
@@ -1033,8 +1033,8 @@ impl Filesystem for FrankenFuse {
 
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Lookup, |cx, _scope| {
-            self.inner.ops.lookup(cx, _scope, InodeNumber(parent), name)
+        match self.with_request_scope(&cx, RequestOp::Lookup, |cx, scope| {
+            self.inner.ops.lookup(cx, scope, InodeNumber(parent), name)
         }) {
             Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
             Err(e) => {
@@ -1136,10 +1136,10 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EINVAL);
             return;
         };
-        match self.with_request_scope(&cx, RequestOp::Readdir, |cx, _scope| {
+        match self.with_request_scope(&cx, RequestOp::Readdir, |cx, scope| {
             self.inner
                 .ops
-                .readdir(cx, _scope, InodeNumber(ino), fs_offset)
+                .readdir(cx, scope, InodeNumber(ino), fs_offset)
         }) {
             Ok(entries) => {
                 for entry in &entries {
@@ -1178,8 +1178,8 @@ impl Filesystem for FrankenFuse {
 
     fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Readlink, |cx, _scope| {
-            self.inner.ops.readlink(cx, _scope, InodeNumber(ino))
+        match self.with_request_scope(&cx, RequestOp::Readlink, |cx, scope| {
+            self.inner.ops.readlink(cx, scope, InodeNumber(ino))
         }) {
             Ok(target) => reply.data(&target),
             Err(e) => {
