@@ -6840,21 +6840,21 @@ mod tests {
         block[0x1E] = 0; // indirect_levels = 0
         block[0x1F] = 0; // unused_flags
 
-        // count/limit at 0x20 (limit first, then count)
+        // dx_countlimit at 0x20: overlaps with entry[0] (hash is implicit 0).
+        // Layout: [limit(u16), count(u16), entry0_block(u32), entry1_hash, entry1_block, ...]
         block[0x20..0x22].copy_from_slice(&100_u16.to_le_bytes()); // limit=100
         block[0x22..0x24].copy_from_slice(&3_u16.to_le_bytes()); // count=3
 
-        // Entry 0 (sentinel): hash=0, block=1
-        block[0x24..0x28].copy_from_slice(&0_u32.to_le_bytes());
-        block[0x28..0x2C].copy_from_slice(&1_u32.to_le_bytes());
+        // Entry 0 (sentinel): hash is implicitly 0 (from countlimit bytes), block=1
+        block[0x24..0x28].copy_from_slice(&1_u32.to_le_bytes());
 
         // Entry 1: hash=0x1000, block=2
-        block[0x2C..0x30].copy_from_slice(&0x1000_u32.to_le_bytes());
-        block[0x30..0x34].copy_from_slice(&2_u32.to_le_bytes());
+        block[0x28..0x2C].copy_from_slice(&0x1000_u32.to_le_bytes());
+        block[0x2C..0x30].copy_from_slice(&2_u32.to_le_bytes());
 
         // Entry 2: hash=0x8000, block=3
-        block[0x34..0x38].copy_from_slice(&0x8000_u32.to_le_bytes());
-        block[0x38..0x3C].copy_from_slice(&3_u32.to_le_bytes());
+        block[0x30..0x34].copy_from_slice(&0x8000_u32.to_le_bytes());
+        block[0x34..0x38].copy_from_slice(&3_u32.to_le_bytes());
 
         let root = parse_dx_root(&block).unwrap();
         assert_eq!(root.hash_version, 1);
@@ -8759,13 +8759,19 @@ mod tests {
         fn ext4_proptest_parse_dx_entries_count_limit_and_truncation(
             limit in 0_u16..=64,
             count in 0_u16..=64,
-            pairs in proptest::collection::vec((any::<u32>(), any::<u32>()), 0..=64),
+            first_block in any::<u32>(),
+            rest_pairs in proptest::collection::vec((any::<u32>(), any::<u32>()), 0..=63),
         ) {
-            let mut data = vec![0_u8; 4 + pairs.len() * 8];
+            // Build data matching the actual dx_entry layout:
+            // [limit(2), count(2), entry0_block(4), entry1_hash(4), entry1_block(4), ...]
+            // Entry 0's hash is implicit 0 (countlimit overlaps).
+            let data_len = 4 + 4 + rest_pairs.len() * 8; // countlimit(4) + entry0_block(4) + rest entries
+            let mut data = vec![0_u8; data_len];
             data[0..2].copy_from_slice(&limit.to_le_bytes());
             data[2..4].copy_from_slice(&count.to_le_bytes());
-            for (idx, (hash, block)) in pairs.iter().copied().enumerate() {
-                let off = 4 + idx * 8;
+            data[4..8].copy_from_slice(&first_block.to_le_bytes());
+            for (idx, (hash, block)) in rest_pairs.iter().copied().enumerate() {
+                let off = 8 + idx * 8;
                 data[off..off + 4].copy_from_slice(&hash.to_le_bytes());
                 data[off + 4..off + 8].copy_from_slice(&block.to_le_bytes());
             }
@@ -8779,13 +8785,20 @@ mod tests {
                         reason: "count exceeds limit",
                     }
                 );
+            } else if count == 0 {
+                let parsed = parse_dx_entries(&data, 0).expect("count 0 should parse");
+                prop_assert_eq!(parsed.len(), 0);
             } else {
                 let parsed = parse_dx_entries(&data, 0).expect("count <= limit should parse");
-                let expected_len = usize::from(count).min(pairs.len());
-                prop_assert_eq!(parsed.len(), expected_len);
-                for (idx, entry) in parsed.iter().enumerate() {
-                    prop_assert_eq!(entry.hash, pairs[idx].0);
-                    prop_assert_eq!(entry.block, pairs[idx].1);
+                // Entry 0 always has hash=0 (implicit), block=first_block.
+                // Remaining entries come from rest_pairs, capped by count-1 and available data.
+                let rest_count = usize::from(count).saturating_sub(1).min(rest_pairs.len());
+                prop_assert_eq!(parsed.len(), 1 + rest_count);
+                prop_assert_eq!(parsed[0].hash, 0);
+                prop_assert_eq!(parsed[0].block, first_block);
+                for (idx, entry) in parsed[1..].iter().enumerate() {
+                    prop_assert_eq!(entry.hash, rest_pairs[idx].0);
+                    prop_assert_eq!(entry.block, rest_pairs[idx].1);
                 }
             }
         }
