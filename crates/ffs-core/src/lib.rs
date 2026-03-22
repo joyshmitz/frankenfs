@@ -9208,6 +9208,9 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => {
                 let inode =
                     self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                if inode.is_dir() {
+                    return Err(FfsError::IsDirectory);
+                }
                 let mut buf = vec![0_u8; size as usize];
                 let n = self.read_file_data(cx, scope, &inode, offset, &mut buf)?;
                 buf.truncate(n);
