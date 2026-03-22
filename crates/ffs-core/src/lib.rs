@@ -3867,22 +3867,13 @@ impl OpenFs {
                 BtrfsExtentData::Regular {
                     extent_type,
                     compression,
+                    ram_bytes,
                     disk_bytenr,
+                    disk_num_bytes,
                     extent_offset,
                     num_bytes,
                     ..
                 } => {
-                    if *compression != 0 {
-                        info!(
-                            inode = canonical,
-                            compression_type = *compression,
-                            "btrfs compressed_unsupported"
-                        );
-                        return Err(FfsError::UnsupportedFeature(format!(
-                            "btrfs compression type {compression}"
-                        )));
-                    }
-
                     let extent_end = logical_start.saturating_add(*num_bytes);
                     let overlap_start = (*logical_start).max(offset);
                     let overlap_end = extent_end.min(read_end);
@@ -3925,13 +3916,6 @@ impl OpenFs {
                     );
 
                     let extent_delta = overlap_start - logical_start;
-                    let source_logical = disk_bytenr
-                        .checked_add(*extent_offset)
-                        .and_then(|x| x.checked_add(extent_delta))
-                        .ok_or_else(|| FfsError::Corruption {
-                            block: *disk_bytenr,
-                            detail: "extent source logical overflow".into(),
-                        })?;
                     let dst_start = usize::try_from(overlap_start - offset).map_err(|_| {
                         FfsError::Corruption {
                             block: 0,
@@ -3944,11 +3928,43 @@ impl OpenFs {
                             detail: "extent copy length overflow".into(),
                         }
                     })?;
-                    self.btrfs_read_logical_into(
-                        cx,
-                        source_logical,
-                        &mut out[dst_start..dst_start + copy_len],
-                    )?;
+
+                    if *compression != 0 {
+                        // Compressed extent: read entire compressed blob, decompress,
+                        // then slice the decompressed result.
+                        let compressed_len = usize::try_from(*disk_num_bytes).unwrap_or(usize::MAX);
+                        let mut compressed = vec![0_u8; compressed_len];
+                        self.btrfs_read_logical_into(cx, *disk_bytenr, &mut compressed)?;
+                        let decompressed = Self::btrfs_decompress(
+                            &compressed,
+                            *compression,
+                            *ram_bytes as usize,
+                        )?;
+                        let src_start = usize::try_from(*extent_offset + extent_delta)
+                            .map_err(|_| FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "compressed extent source offset overflow".into(),
+                            })?;
+                        let src_end = src_start + copy_len;
+                        if src_end <= decompressed.len() {
+                            out[dst_start..dst_start + copy_len]
+                                .copy_from_slice(&decompressed[src_start..src_end]);
+                        }
+                    } else {
+                        // Uncompressed: direct read from logical address.
+                        let source_logical = disk_bytenr
+                            .checked_add(*extent_offset)
+                            .and_then(|x| x.checked_add(extent_delta))
+                            .ok_or_else(|| FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "extent source logical overflow".into(),
+                            })?;
+                        self.btrfs_read_logical_into(
+                            cx,
+                            source_logical,
+                            &mut out[dst_start..dst_start + copy_len],
+                        )?;
+                    }
                     covered_until = covered_until.max(overlap_end);
                 }
             }
