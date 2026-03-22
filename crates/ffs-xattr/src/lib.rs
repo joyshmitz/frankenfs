@@ -84,9 +84,10 @@ fn encode_entries_region(region_capacity: usize, entries: &[Ext4Xattr]) -> Resul
                 .checked_add(entry.name.len())
                 .ok_or_else(|| FfsError::Format("xattr entry length overflow".to_owned()))?,
         );
-        let value_start = value_tail
+        let unaligned_start = value_tail
             .checked_sub(entry.value.len())
             .ok_or(FfsError::NoSpace)?;
+        let value_start = unaligned_start & !3; // Align down to 4-byte boundary
 
         let entry_end = next_entry
             .checked_add(entry_len)
@@ -98,7 +99,7 @@ fn encode_entries_region(region_capacity: usize, entries: &[Ext4Xattr]) -> Resul
             return Err(FfsError::NoSpace);
         }
 
-        data[value_start..value_tail].copy_from_slice(&entry.value);
+        data[value_start..value_start + entry.value.len()].copy_from_slice(&entry.value);
         value_tail = value_start;
 
         data[next_entry] = u8::try_from(entry.name.len()).map_err(|_| FfsError::NameTooLong)?;

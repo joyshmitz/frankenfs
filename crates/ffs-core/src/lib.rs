@@ -644,6 +644,7 @@ impl BlockDevice for TransactionBlockAdapter<'_, '_> {
     fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
         let mut tx = self.tx.lock();
         tx.stage_write(block, data.to_vec());
+        drop(tx);
         Ok(())
     }
 
@@ -3923,7 +3924,7 @@ impl OpenFs {
     ///
     /// Returns `FfsError::Format` if this is not an ext4 filesystem.
     pub fn read_group_desc(&self, cx: &Cx, group: GroupNumber) -> Result<Ext4GroupDesc, FfsError> {
-        self.read_group_desc_with_scope(cx, &RequestScope::empty(), group)
+        self.read_group_desc_with_scope(cx, &mut RequestScope::empty(), group)
     }
 
     pub fn read_group_desc_with_scope(
@@ -3977,7 +3978,7 @@ impl OpenFs {
 
     /// Read an ext4 inode by number via the device, respecting MVCC isolation.
     pub fn read_inode(&self, cx: &Cx, ino: InodeNumber) -> Result<Ext4Inode, FfsError> {
-        self.read_inode_with_scope(cx, &RequestScope::empty(), ino)
+        self.read_inode_with_scope(cx, &mut RequestScope::empty(), ino)
     }
 
     pub fn read_inode_with_scope(
@@ -4025,7 +4026,7 @@ impl OpenFs {
 
     /// Read an ext4 inode and return its VFS attributes, respecting MVCC isolation.
     pub fn read_inode_attr(&self, cx: &Cx, ino: InodeNumber) -> Result<InodeAttr, FfsError> {
-        self.read_inode_attr_with_scope(cx, &RequestScope::empty(), ino)
+        self.read_inode_attr_with_scope(cx, &mut RequestScope::empty(), ino)
     }
 
     pub fn read_inode_attr_with_scope(
@@ -4246,7 +4247,7 @@ impl OpenFs {
     /// Read a full filesystem block from the device.
     #[allow(clippy::cast_possible_truncation)] // block_size is u32, always fits usize
     pub fn read_block_vec(&self, cx: &Cx, block: BlockNumber) -> Result<Vec<u8>, FfsError> {
-        self.read_block_with_scope(cx, &RequestScope::empty(), block)
+        self.read_block_with_scope(cx, &mut RequestScope::empty(), block)
     }
 
     /// Read a full filesystem block from the device, respecting MVCC isolation if a scope is provided.
@@ -4419,7 +4420,7 @@ impl OpenFs {
     ///
     /// Returns extents in tree-traversal order (sorted by logical block).
     pub fn collect_extents(&self, cx: &Cx, inode: &Ext4Inode) -> Result<Vec<Ext4Extent>, FfsError> {
-        self.collect_extents_with_scope(cx, &RequestScope::empty(), inode)
+        self.collect_extents_with_scope(cx, &mut RequestScope::empty(), inode)
     }
 
     /// Collect all leaf extents for an inode, flattening multi-level trees.
@@ -4555,7 +4556,7 @@ impl OpenFs {
     /// Iterates over the inode's data blocks via extent mapping, reading
     /// each block from the device and parsing directory entries.
     pub fn read_dir(&self, cx: &Cx, inode: &Ext4Inode) -> Result<Vec<Ext4DirEntry>, FfsError> {
-        self.read_dir_with_scope(cx, &RequestScope::empty(), inode)
+        self.read_dir_with_scope(cx, &mut RequestScope::empty(), inode)
     }
 
     pub fn read_dir_with_scope(
@@ -4593,7 +4594,7 @@ impl OpenFs {
         dir_inode: &Ext4Inode,
         name: &[u8],
     ) -> Result<Option<Ext4DirEntry>, FfsError> {
-        self.lookup_name_with_scope(cx, &RequestScope::empty(), dir_inode, name)
+        self.lookup_name_with_scope(cx, &mut RequestScope::empty(), dir_inode, name)
     }
 
     pub fn lookup_name_with_scope(
@@ -5161,11 +5162,11 @@ impl FsOps for Ext4FsOps {
         &self,
         _cx: &Cx,
         _scope: &mut RequestScope,
-        _ino: InodeNumber,
+        ino: InodeNumber,
     ) -> ffs_error::Result<Vec<u8>> {
         let inode = self
             .reader
-            .read_inode(&self.image, _ino)
+            .read_inode(&self.image, ino)
             .map_err(|e| parse_to_ffs_error(&e))?;
 
         if !inode.is_symlink() {
@@ -5505,6 +5506,7 @@ impl OpenFs {
 
     /// Add a directory entry by scanning existing dir blocks, or allocating a new one.
     #[allow(clippy::too_many_arguments, clippy::significant_drop_tightening)]
+    #[expect(clippy::too_many_lines)]
     fn ext4_add_dir_entry(
         &self,
         cx: &Cx,
@@ -5554,7 +5556,7 @@ impl OpenFs {
                         )?;
                         return Ok(());
                     }
-                    Err(FfsError::NoSpace) => continue,
+                    Err(FfsError::NoSpace) => {},
                     Err(e) => return Err(e),
                 }
             }
@@ -5862,6 +5864,7 @@ impl OpenFs {
 
     /// Create a symbolic link inode and directory entry.
     #[allow(clippy::significant_drop_tightening)]
+    #[expect(clippy::too_many_arguments)]
     fn ext4_symlink(
         &self,
         cx: &Cx,
@@ -6305,8 +6308,7 @@ impl OpenFs {
             let mut block_data = if block_offset == 0 && chunk_len == bs_usize {
                 vec![0u8; bs_usize]
             } else {
-                let buf = self.read_block_with_scope(cx, scope, phys_block)?;
-                buf
+                self.read_block_with_scope(cx, scope, phys_block)?
             };
             let data_start = usize::try_from(pos - offset)
                 .map_err(|_| FfsError::Format("write offset does not fit usize".into()))?;
@@ -8899,6 +8901,7 @@ impl OpenFs {
         0
     }
 
+    #[expect(clippy::unused_self)]
     fn with_empty_scope<T>(
         &self,
         f: impl FnOnce(&mut RequestScope) -> ffs_error::Result<T>,
@@ -9226,10 +9229,12 @@ impl FsOps for OpenFs {
                     self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
                 if inode.size <= 60 {
                     // Fast symlink: data is stored directly in the inode's block field.
+                    #[expect(clippy::cast_possible_truncation)]
                     let len = inode.size as usize;
                     Ok(inode.extent_bytes[..len].to_vec())
                 } else {
                     // Slow symlink: data is stored in separate blocks.
+                    #[expect(clippy::cast_possible_truncation)]
                     let mut buf = vec![0_u8; inode.size as usize];
                     let n = self.read_file_data(cx, scope, &inode, 0, &mut buf)?;
                     buf.truncate(n);
@@ -9720,6 +9725,7 @@ impl FsOps for OpenFs {
             // Write operations must use a transaction for isolation and atomicity.
             let mut store = self.mvcc_store.write();
             let txn = store.begin();
+            drop(store);
             tx = Some(txn);
             trace!(
                 target: "ffs::mvcc",
@@ -10639,6 +10645,7 @@ impl FrankenFsEngine {
 }
 
 #[cfg(test)]
+#[expect(clippy::needless_pass_by_ref_mut)]
 mod tests {
     use super::*;
     use asupersync::SystemPressure;

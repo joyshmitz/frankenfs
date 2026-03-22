@@ -196,7 +196,7 @@ impl RequestOp {
 /// Current read-only implementations can return an empty scope. Future write
 /// implementations may attach a transaction captured at request
 /// start so that begin/end hooks can manage commit/abort semantics.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestScope {
     pub snapshot: Option<Snapshot>,
     pub tx: Option<ffs_mvcc::Transaction>,
@@ -220,7 +220,7 @@ impl RequestScope {
         &mut self,
         mvcc_store: &parking_lot::RwLock<ffs_mvcc::MvccStore>,
     ) -> ffs_error::Result<CommitSeq> {
-        if let Some(tx) = self.tx.take() {
+        self.tx.take().map_or(Ok(CommitSeq(0)), |tx| {
             let tx_id = tx.id().0;
             mvcc_store.write().commit(tx).map_err(|error| match error {
                 ffs_mvcc::CommitError::Conflict { block, .. }
@@ -242,9 +242,7 @@ impl RequestScope {
                     )))
                 }
             })
-        } else {
-            Ok(CommitSeq(0))
-        }
+        })
     }
 }
 
@@ -451,6 +449,7 @@ pub trait FsOps: Send + Sync {
     /// Create a regular file in directory `parent` with name `name`.
     ///
     /// Returns attributes of the newly created inode.
+    #[allow(clippy::too_many_arguments)]
     fn create(
         &self,
         _cx: &Cx,
@@ -465,6 +464,7 @@ pub trait FsOps: Send + Sync {
     }
 
     /// Create a directory in `parent` with name `name`.
+    #[allow(clippy::too_many_arguments)]
     fn mkdir(
         &self,
         _cx: &Cx,
@@ -538,6 +538,7 @@ pub trait FsOps: Send + Sync {
     }
 
     /// Create a symlink in `parent` named `name` targeting `target`.
+    #[allow(clippy::too_many_arguments)]
     fn symlink(
         &self,
         _cx: &Cx,

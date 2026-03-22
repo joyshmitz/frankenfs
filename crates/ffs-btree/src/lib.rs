@@ -626,7 +626,7 @@ fn grow_root_index(
 /// Extents that partially overlap the range are trimmed. Extents fully within
 /// the range are removed entirely. Returns the list of physical block ranges
 /// that were freed (the caller is responsible for deallocating them).
-#[expect(clippy::cast_possible_truncation)]
+#[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
 pub fn delete_range(
     cx: &Cx,
     dev: &dyn BlockDevice,
@@ -670,6 +670,22 @@ pub fn delete_range(
 
     let mut idx_pos = 0;
     while idx_pos < indexes.len() {
+        let child_start = u64::from(indexes[idx_pos].logical_block);
+        let child_end = if idx_pos + 1 < indexes.len() {
+            u64::from(indexes[idx_pos + 1].logical_block)
+        } else {
+            u64::MAX
+        };
+
+        if logical_end <= child_start {
+            break;
+        }
+
+        if u64::from(logical_start) >= child_end {
+            idx_pos += 1;
+            continue;
+        }
+
         let child_block = indexes[idx_pos].leaf_block;
         let child_result = delete_range_subtree(
             cx,
@@ -789,6 +805,22 @@ fn delete_range_subtree(
         let mut empty_children = Vec::new();
         let mut idx_pos = 0;
         while idx_pos < indexes.len() {
+            let child_start = u64::from(indexes[idx_pos].logical_block);
+            let child_end = if idx_pos + 1 < indexes.len() {
+                u64::from(indexes[idx_pos + 1].logical_block)
+            } else {
+                u64::MAX
+            };
+
+            if logical_end <= child_start {
+                break;
+            }
+
+            if logical_start >= child_end {
+                idx_pos += 1;
+                continue;
+            }
+
             let child_block = indexes[idx_pos].leaf_block;
             let child_result = delete_range_subtree(
                 cx,

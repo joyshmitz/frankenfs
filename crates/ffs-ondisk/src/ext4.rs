@@ -3748,13 +3748,17 @@ fn parse_xattr_entries(data: &[u8], value_base: &[u8]) -> Result<Vec<Ext4Xattr>,
                 usize::try_from(value_size).map_err(|_| ParseError::IntegerConversion {
                     field: "xattr_value_size",
                 })?;
-            if v_off + v_size > value_base.len() {
+            let v_end = v_off.checked_add(v_size).ok_or(ParseError::InvalidField {
+                field: "xattr_value",
+                reason: "value extends past data boundary",
+            })?;
+            if v_end > value_base.len() {
                 return Err(ParseError::InvalidField {
                     field: "xattr_value",
                     reason: "value extends past data boundary",
                 });
             }
-            value_base[v_off..v_off + v_size].to_vec()
+            value_base[v_off..v_end].to_vec()
         } else {
             Vec::new()
         };
