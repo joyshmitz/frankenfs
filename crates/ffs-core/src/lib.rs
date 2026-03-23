@@ -21240,7 +21240,11 @@ mod tests {
             .with_writer(buffer.clone())
             .finish();
 
-        tracing::subscriber::with_default(subscriber, || {
+        // Use set_default (not with_default) so ALL threads use this subscriber,
+        // not just the test thread. This prevents flaky failures where background
+        // tasks log to a different subscriber.
+        let _default_guard = tracing::subscriber::set_default(subscriber);
+        {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
 
@@ -21257,7 +21261,8 @@ mod tests {
                 .expect("create file for fallocate success log test");
             ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0)
                 .expect("fallocate should succeed");
-        });
+        }
+        drop(_default_guard);
 
         let logs = parse_json_logs(&buffer);
         let applied = logs
@@ -21388,7 +21393,8 @@ mod tests {
             .with_writer(buffer.clone())
             .finish();
 
-        let err = tracing::subscriber::with_default(subscriber, || {
+        let _default_guard = tracing::subscriber::set_default(subscriber);
+        let err = {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
 
@@ -21405,7 +21411,8 @@ mod tests {
                 .expect("create file for unsupported-mode-bits log test");
             ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x40)
                 .expect_err("unsupported mode bits should be rejected")
-        });
+        };
+        drop(_default_guard);
         assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
 
         let logs = parse_json_logs(&buffer);
