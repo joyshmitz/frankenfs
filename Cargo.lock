@@ -809,8 +809,11 @@ dependencies = [
  "ffs-block",
  "ffs-error",
  "ffs-types",
+ "hex",
  "parking_lot",
  "proptest",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 

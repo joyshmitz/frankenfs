@@ -1,0 +1,13 @@
+{
+  "scenario_id": "ext4_fast_commit_fallback_missing_tail",
+  "description": "Committed-looking fast-commit tag stream truncated before TAIL; parser must discard pending operations and force fallback to full journal replay.",
+  "fast_commit_hex": "0a00100000000000000000000000000000000000070004002a000000030010002a000000640000000a0000008813000005000f00020000000b000000050068656c6c6f",
+  "expected": {
+    "transactions_found": 0,
+    "last_tid": 0,
+    "blocks_scanned": 1,
+    "incomplete_transactions": 1,
+    "fallback_required": true,
+    "operations": []
+  }
+}

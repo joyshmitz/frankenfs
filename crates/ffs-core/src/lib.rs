@@ -40,8 +40,8 @@ use ffs_mvcc::{CommitError, MvccBlockDevice, MvccStore, Transaction};
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
     Ext4Extent, Ext4FileType, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock, Ext4Xattr,
-    ExtentTree, lookup_in_dir_block, parse_dir_block, parse_extent_tree, parse_inode_extent_tree,
-    parse_sys_chunk_array,
+    ExtentTree, lookup_in_dir_block, lookup_in_dir_block_casefold, parse_dir_block,
+    parse_extent_tree, parse_inode_extent_tree, parse_sys_chunk_array,
 };
 use ffs_types::{
     BlockNumber, ByteOffset, CommitSeq, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET, EXT4_SECTOR_SIZE,
@@ -1845,6 +1845,40 @@ impl OpenFs {
                 }
                 let chunks = parse_sys_chunk_array(&sb.sys_chunk_array)
                     .map_err(|e| parse_to_ffs_error(&e))?;
+                // Attempt tree-log replay if log_root is set.
+                if sb.log_root != 0 {
+                    let nodesize = sb.nodesize;
+                    let chunks_ref = &chunks;
+                    let mut read_phys = |logical: u64| -> std::result::Result<Vec<u8>, ParseError> {
+                        let mapping = ffs_ondisk::map_logical_to_physical(chunks_ref, logical)?
+                            .ok_or(ParseError::InvalidField {
+                                field: "tree_log",
+                                reason: "logical address not mapped in chunk table",
+                            })?;
+                        let byte_off = mapping.physical;
+                        let mut buf = vec![0u8; nodesize as usize];
+                        dev.read_exact_at(cx, ByteOffset(byte_off), &mut buf)
+                            .map_err(|_| ParseError::InvalidField {
+                                field: "tree_log",
+                                reason: "failed to read tree-log block",
+                            })?;
+                        Ok(buf)
+                    };
+                    match ffs_btrfs::replay_tree_log(&mut read_phys, &sb, chunks_ref) {
+                        Ok(result) if result.replayed => {
+                            info!(
+                                items = result.items_count,
+                                "btrfs tree-log detected ({} items, not applied in read-only mode)",
+                                result.items_count
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!(error = %err, "btrfs tree-log replay failed");
+                        }
+                    }
+                }
+
                 let ctx = BtrfsContext {
                     chunks,
                     nodesize: sb.nodesize,
@@ -1886,6 +1920,13 @@ impl OpenFs {
         if fs.is_ext4() && !options.skip_validation {
             fs.ext4_journal_replay =
                 fs.maybe_replay_ext4_journal(cx, options.ext4_journal_replay_mode)?;
+            // Fast commit replay: the replay_fast_commit() engine exists in
+            // ffs-journal and can parse FC tag streams. Full mount-time wiring
+            // requires extracting the FC region from the journal device, which
+            // depends on the journal layout (inline vs external, FC block count).
+            // For V1: FC operations are detected but NOT applied during mount.
+            // JBD2 replay already recovers the last consistent state.
+
             fs.crash_recovery = fs.detect_and_recover_crash();
             if options.ext4_journal_replay_mode != Ext4JournalReplayMode::Skip {
                 match fs.maybe_recover_ext4_orphans(cx) {
@@ -4839,7 +4880,12 @@ impl OpenFs {
                     continue;
                 }
                 let block_data = self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
-                if let Some(entry) = lookup_in_dir_block(&block_data, self.block_size(), name) {
+                let found = if dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
+                    lookup_in_dir_block_casefold(&block_data, self.block_size(), name)
+                } else {
+                    lookup_in_dir_block(&block_data, self.block_size(), name)
+                };
+                if let Some(entry) = found {
                     return Ok(Some(entry));
                 }
             }

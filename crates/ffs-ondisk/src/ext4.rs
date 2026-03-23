@@ -151,8 +151,9 @@ impl Ext4IncompatFeatures {
     );
 
     /// Bits FrankenFS v1 explicitly rejects.
-    pub const REJECTED_V1: Self =
-        Self(Self::COMPRESSION.0 | Self::JOURNAL_DEV.0 | Self::ENCRYPT.0);
+    /// Only COMPRESSION and JOURNAL_DEV remain — all other features now supported
+    /// (at least for read-only mount with encrypted names shown as nokey digests).
+    pub const REJECTED_V1: Self = Self(Self::COMPRESSION.0 | Self::JOURNAL_DEV.0);
 
     /// All known incompat flags for iteration.
     const KNOWN: &[(u32, &'static str)] = &[
@@ -5264,6 +5265,30 @@ mod tests {
         assert_eq!(found.unwrap().inode, 42);
 
         let not_found = lookup_in_dir_block(&block, block_size, b"missing");
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn lookup_in_dir_block_casefold_finds_case_variant() {
+        let block_size = 4096_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 12);
+        write_dir_entry(&mut block, 12, 2, 2, b"..", 12);
+        let remaining = block_size as u16 - 24;
+        write_dir_entry(&mut block, 24, 42, 1, b"MyFile.TXT", remaining);
+
+        // Case-insensitive: should find "myfile.txt" matching "MyFile.TXT"
+        let found = lookup_in_dir_block_casefold(&block, block_size, b"myfile.txt");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().inode, 42);
+
+        // Exact case also works
+        let found2 = lookup_in_dir_block_casefold(&block, block_size, b"MyFile.TXT");
+        assert!(found2.is_some());
+
+        // Completely different name doesn't match
+        let not_found = lookup_in_dir_block_casefold(&block, block_size, b"other.txt");
         assert!(not_found.is_none());
     }
 

@@ -1079,6 +1079,95 @@ pub struct FcReplayResult {
     pub blocks_scanned: u64,
     /// Number of FC transactions found.
     pub transactions_found: u64,
+    /// Number of incomplete FC transactions discarded during replay.
+    pub incomplete_transactions: u64,
+    /// Whether the caller should fall back to full journal replay.
+    pub fallback_required: bool,
+}
+
+#[derive(Debug, Default)]
+struct PendingFcTransaction {
+    active: bool,
+    operations: Vec<FcOperation>,
+}
+
+impl PendingFcTransaction {
+    fn has_pending_work(&self) -> bool {
+        self.active || !self.operations.is_empty()
+    }
+}
+
+fn discard_pending_fc_transaction(result: &mut FcReplayResult, pending: &mut PendingFcTransaction) {
+    if pending.has_pending_work() {
+        result.incomplete_transactions += 1;
+        result.fallback_required = true;
+        pending.active = false;
+        pending.operations.clear();
+    }
+}
+
+fn parse_fc_operation(tag: FcTag, payload: &[u8]) -> Option<FcOperation> {
+    match tag {
+        FcTag::Inode => (payload.len() >= 4).then(|| {
+            let ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            FcOperation::InodeUpdate(ino)
+        }),
+        FcTag::AddRange => (payload.len() >= 16).then(|| {
+            FcOperation::AddRange(FcExtentRange {
+                ino: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+                logical_block: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+                len: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
+                physical_block: u32::from_le_bytes([
+                    payload[12],
+                    payload[13],
+                    payload[14],
+                    payload[15],
+                ]),
+            })
+        }),
+        FcTag::DelRange => (payload.len() >= 12).then(|| {
+            FcOperation::DelRange(FcDelRange {
+                ino: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+                logical_block: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+                len: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
+            })
+        }),
+        FcTag::Creat | FcTag::Link => (payload.len() >= 10).then(|| {
+            let parent_ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let ino = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let name_len = payload[8] as usize;
+            let name = if 10 + name_len <= payload.len() {
+                payload[10..10 + name_len].to_vec()
+            } else {
+                payload[10..].to_vec()
+            };
+            let dentry = FcDentry {
+                parent_ino,
+                ino,
+                name,
+            };
+            if tag == FcTag::Creat {
+                FcOperation::Create(dentry)
+            } else {
+                FcOperation::Link(dentry)
+            }
+        }),
+        FcTag::Unlink => (payload.len() >= 6).then(|| {
+            let parent_ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let name_len = payload[4] as usize;
+            let name = if 6 + name_len <= payload.len() {
+                payload[6..6 + name_len].to_vec()
+            } else {
+                payload[6..].to_vec()
+            };
+            FcOperation::Unlink(FcDentry {
+                parent_ino,
+                ino: 0,
+                name,
+            })
+        }),
+        FcTag::Head | FcTag::Tail | FcTag::Pad => None,
+    }
 }
 
 /// Replay fast commit blocks from the journal region.
@@ -1092,6 +1181,7 @@ pub struct FcReplayResult {
 pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
     let mut result = FcReplayResult::default();
     let mut pos = 0;
+    let mut pending = PendingFcTransaction::default();
 
     while pos + 4 <= data.len() {
         // Parse tag header: tag_type (u16 LE), tag_len (u16 LE).
@@ -1100,7 +1190,8 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
         pos += 4;
 
         if pos + tag_len > data.len() {
-            break; // Truncated tag — stop scanning.
+            discard_pending_fc_transaction(&mut result, &mut pending);
+            break; // Truncated tag — stop scanning and force fallback.
         }
 
         let payload = &data[pos..pos + tag_len];
@@ -1112,95 +1203,37 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
 
         match tag {
             FcTag::Head => {
+                discard_pending_fc_transaction(&mut result, &mut pending);
+                pending.active = true;
                 result.blocks_scanned += 1;
             }
             FcTag::Tail => {
+                if !pending.active {
+                    result.fallback_required = true;
+                    continue;
+                }
                 if payload.len() >= 4 {
                     result.last_tid =
                         u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 }
                 result.transactions_found += 1;
+                result.operations.append(&mut pending.operations);
+                pending.active = false;
             }
-            FcTag::Inode => {
-                if payload.len() >= 4 {
-                    let ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    result.operations.push(FcOperation::InodeUpdate(ino));
+            FcTag::Pad => {}
+            _ => {
+                if !pending.active {
+                    result.fallback_required = true;
+                    continue;
                 }
-            }
-            FcTag::AddRange => {
-                if payload.len() >= 16 {
-                    result.operations.push(FcOperation::AddRange(FcExtentRange {
-                        ino: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
-                        logical_block: u32::from_le_bytes([
-                            payload[4], payload[5], payload[6], payload[7],
-                        ]),
-                        len: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
-                        physical_block: u32::from_le_bytes([
-                            payload[12],
-                            payload[13],
-                            payload[14],
-                            payload[15],
-                        ]),
-                    }));
+                if let Some(operation) = parse_fc_operation(tag, payload) {
+                    pending.operations.push(operation);
                 }
-            }
-            FcTag::DelRange => {
-                if payload.len() >= 12 {
-                    result.operations.push(FcOperation::DelRange(FcDelRange {
-                        ino: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
-                        logical_block: u32::from_le_bytes([
-                            payload[4], payload[5], payload[6], payload[7],
-                        ]),
-                        len: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
-                    }));
-                }
-            }
-            FcTag::Creat | FcTag::Link => {
-                if payload.len() >= 10 {
-                    let parent_ino =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let ino = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                    let name_len = payload[8] as usize;
-                    let name = if 10 + name_len <= payload.len() {
-                        payload[10..10 + name_len].to_vec()
-                    } else {
-                        payload[10..].to_vec()
-                    };
-                    let dentry = FcDentry {
-                        parent_ino,
-                        ino,
-                        name,
-                    };
-                    if tag == FcTag::Creat {
-                        result.operations.push(FcOperation::Create(dentry));
-                    } else {
-                        result.operations.push(FcOperation::Link(dentry));
-                    }
-                }
-            }
-            FcTag::Unlink => {
-                if payload.len() >= 6 {
-                    let parent_ino =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let name_len = payload[4] as usize;
-                    let name = if 6 + name_len <= payload.len() {
-                        payload[6..6 + name_len].to_vec()
-                    } else {
-                        payload[6..].to_vec()
-                    };
-                    result.operations.push(FcOperation::Unlink(FcDentry {
-                        parent_ino,
-                        ino: 0,
-                        name,
-                    }));
-                }
-            }
-            FcTag::Pad => {
-                // Skip padding.
             }
         }
     }
 
+    discard_pending_fc_transaction(&mut result, &mut pending);
     Ok(result)
 }
 
@@ -1223,17 +1256,21 @@ mod fc_tests {
         let result = replay_fast_commit(&[]).unwrap();
         assert!(result.operations.is_empty());
         assert_eq!(result.transactions_found, 0);
+        assert_eq!(result.incomplete_transactions, 0);
+        assert!(!result.fallback_required);
     }
 
     #[test]
     fn replay_add_range() {
         let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
         let mut payload = Vec::new();
         payload.extend_from_slice(&42_u32.to_le_bytes()); // ino
         payload.extend_from_slice(&100_u32.to_le_bytes()); // logical_block
         payload.extend_from_slice(&10_u32.to_le_bytes()); // len
         payload.extend_from_slice(&5000_u32.to_le_bytes()); // physical_block
         data.extend(build_fc_tag(0x03, &payload)); // ADD_RANGE
+        data.extend(build_fc_tag(0x09, &1_u32.to_le_bytes())); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
@@ -1284,11 +1321,13 @@ mod fc_tests {
     #[test]
     fn replay_del_range() {
         let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
         let mut payload = Vec::new();
         payload.extend_from_slice(&99_u32.to_le_bytes());
         payload.extend_from_slice(&50_u32.to_le_bytes());
         payload.extend_from_slice(&20_u32.to_le_bytes());
         data.extend(build_fc_tag(0x04, &payload));
+        data.extend(build_fc_tag(0x09, &2_u32.to_le_bytes())); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
@@ -1305,8 +1344,10 @@ mod fc_tests {
     #[test]
     fn replay_unknown_tags_skipped() {
         let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
         data.extend(build_fc_tag(0xFF, &[1, 2, 3])); // unknown tag
         data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &3_u32.to_le_bytes())); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
@@ -1317,11 +1358,35 @@ mod fc_tests {
     }
 
     #[test]
+    fn replay_operation_without_head_requires_fallback() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE without HEAD
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert!(result.operations.is_empty());
+        assert!(result.fallback_required);
+    }
+
+    #[test]
     fn replay_truncated_tag_stops() {
         let mut data = Vec::new();
         data.extend(build_fc_tag(0x03, &[1, 2, 3])); // ADD_RANGE with payload too short
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty()); // Payload < 16 bytes, skipped
+        assert!(result.fallback_required);
+    }
+
+    #[test]
+    fn replay_incomplete_transaction_requires_fallback() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert!(result.operations.is_empty());
+        assert_eq!(result.transactions_found, 0);
+        assert_eq!(result.incomplete_transactions, 1);
+        assert!(result.fallback_required);
     }
 }
 

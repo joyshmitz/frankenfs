@@ -15,6 +15,7 @@ tests/fixtures/
 │   └── btrfs_large.img      # 1024 MiB
 ├── golden/                  # Expected outputs (committed)
 │   ├── ext4_*.json          # ffs inspect output
+│   ├── ext4_fast_commit_*.json # Fast-commit corpus oracles for replay tests
 │   ├── btrfs_*.json         # ffs inspect output
 │   ├── checksums.txt        # SHA-256 verification
 │   └── *.log                # Generation logs
@@ -35,6 +36,11 @@ This script:
 3. Populates with known content via `debugfs` (no sudo required)
 4. Generates golden JSON outputs using `ffs inspect`
 5. Creates SHA-256 checksums for verification
+
+Fast-commit replay corpus fixtures are committed as text JSON under
+`tests/fixtures/golden/ext4_fast_commit_*.json`. They are small, deterministic
+tag-stream oracles used by `ffs-journal` integration tests and do not rely on
+large `.img` artifacts.
 
 ### btrfs
 
