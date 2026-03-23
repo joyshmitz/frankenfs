@@ -4626,7 +4626,11 @@ parser-side fast-commit replay surface in `ffs-journal` that decodes the FC tag
 stream, emits ordered logical operations only after a committed `TAIL`, and
 forces fallback when the FC stream is truncated or incomplete. Deterministic
 parser corpus coverage lives under `tests/fixtures/golden/ext4_fast_commit_*.json`
-and `crates/ffs-journal/tests/ext4_fast_commit_corpus.rs`.
+and `crates/ffs-journal/tests/ext4_fast_commit_corpus.rs`. `OpenFs` also
+collects mount-time fast-commit evidence from internal JBD2 journals that
+advertise `s_num_fc_blocks`, exposing the parsed tail stream via
+`ext4_fast_commit_replay()` with synthetic crash-image coverage for both clean
+replay and truncated fallback cases.
 
 The remaining gap is mount-time integration: extracting the FC region from the
 journal device and applying the parsed operations during ext4 open/recovery is

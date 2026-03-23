@@ -40,7 +40,10 @@ This script:
 Fast-commit replay corpus fixtures are committed as text JSON under
 `tests/fixtures/golden/ext4_fast_commit_*.json`. They are small, deterministic
 tag-stream oracles used by `ffs-journal` integration tests and do not rely on
-large `.img` artifacts.
+large `.img` artifacts. Mount-path coverage for the same feature also uses
+synthetic ext4 images built inline in `crates/ffs-core/src/lib.rs`, which lets
+the test suite exercise journal-superblock `s_num_fc_blocks` handling and
+truncated fast-commit crash envelopes without committing large binary images.
 
 ### btrfs
 

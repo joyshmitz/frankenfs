@@ -22,6 +22,7 @@ const JBD2_BLOCKTYPE_SUPERBLOCK_V2: u32 = 4;
 const JBD2_BLOCKTYPE_REVOKE: u32 = 5;
 
 const JBD2_FEATURE_INCOMPAT_64BIT: u32 = 0x0000_0002;
+const JBD2_FEATURE_INCOMPAT_FAST_COMMIT: u32 = 0x0000_0020;
 
 const JBD2_HEADER_SIZE: usize = 12;
 const JBD2_REVOKE_HEADER_SIZE: usize = 16; // journal header (12) + r_count (4)
@@ -46,6 +47,7 @@ pub struct Jbd2Superblock {
     pub first_log_block: u32,
     pub start_sequence: u32,
     pub start_block: u32,
+    pub num_fc_blocks: u32,
     pub feature_compat: u32,
     pub feature_incompat: u32,
     pub feature_ro_compat: u32,
@@ -71,12 +73,18 @@ impl Jbd2Superblock {
             feature_compat: read_be_u32(bytes, 36).unwrap_or(0),
             feature_incompat: read_be_u32(bytes, 40).unwrap_or(0),
             feature_ro_compat: read_be_u32(bytes, 44).unwrap_or(0),
+            num_fc_blocks: read_be_u32(bytes, 84).unwrap_or(0),
         })
     }
 
     #[must_use]
     pub fn is_64bit(&self) -> bool {
         (self.feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT) != 0
+    }
+
+    #[must_use]
+    pub fn has_fast_commit(self) -> bool {
+        (self.feature_incompat & JBD2_FEATURE_INCOMPAT_FAST_COMMIT) != 0 && self.num_fc_blocks > 0
     }
 }
 
@@ -1069,7 +1077,7 @@ pub enum FcOperation {
 }
 
 /// Result of replaying fast commit blocks from the journal.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FcReplayResult {
     /// Ordered list of operations to apply.
     pub operations: Vec<FcOperation>,
@@ -1187,6 +1195,9 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
         // Parse tag header: tag_type (u16 LE), tag_len (u16 LE).
         let tag_type = u16::from_le_bytes([data[pos], data[pos + 1]]);
         let tag_len = u16::from_le_bytes([data[pos + 2], data[pos + 3]]) as usize;
+        if tag_type == 0 && tag_len == 0 {
+            break;
+        }
         pos += 4;
 
         if pos + tag_len > data.len() {
@@ -1392,6 +1403,22 @@ mod fc_tests {
         assert_eq!(result.transactions_found, 0);
         assert_eq!(result.incomplete_transactions, 1);
         assert!(result.fallback_required);
+    }
+
+    #[test]
+    fn replay_zero_padding_after_tail_stops_cleanly() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &3_u32.to_le_bytes())); // TAIL
+        data.extend_from_slice(&[0_u8; 64]); // zero-filled unused tail space
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert_eq!(result.transactions_found, 1);
+        assert_eq!(result.last_tid, 3);
+        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42)]);
+        assert_eq!(result.incomplete_transactions, 0);
+        assert!(!result.fallback_required);
     }
 }
 

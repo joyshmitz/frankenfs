@@ -40,6 +40,9 @@ pub const BTRFS_ITEM_METADATA_ITEM: u8 = 169;
 pub const BTRFS_ITEM_BLOCK_GROUP_ITEM: u8 = 192;
 pub const BTRFS_ITEM_DEV_ITEM: u8 = 216;
 pub const BTRFS_ITEM_CHUNK: u8 = 228;
+pub const BTRFS_ITEM_FREE_SPACE_INFO: u8 = 198;
+pub const BTRFS_ITEM_FREE_SPACE_EXTENT: u8 = 199;
+pub const BTRFS_ITEM_FREE_SPACE_BITMAP: u8 = 200;
 
 /// Well-known tree objectids.
 pub const BTRFS_EXTENT_TREE_OBJECTID: u64 = 2;
@@ -2971,7 +2974,16 @@ fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry,
         stripes.push(ffs_ondisk::BtrfsStripe {
             devid: read_le_u64(data, off)?,
             offset: read_le_u64(data, off + 8)?,
-            dev_uuid: ffs_ondisk::btrfs::read_fixed::<16>(data, off + 16)?,
+            dev_uuid: {
+                let uuid_off = off + 16;
+                if uuid_off + 16 > data.len() {
+                    [0u8; 16]
+                } else {
+                    let mut uuid = [0u8; 16];
+                    uuid.copy_from_slice(&data[uuid_off..uuid_off + 16]);
+                    uuid
+                }
+            },
         });
         off += STRIPE_SIZE;
     }
@@ -3031,14 +3043,16 @@ pub fn walk_chunk_tree(
 
 /// Walk the device tree to discover all physical devices.
 ///
-/// Returns a list of (devid, device_info) pairs for all devices in the filesystem.
-/// Used to build the `BtrfsDeviceSet` for multi-device reads.
+/// The `dev_root_bytenr` is the logical address of the DEV_TREE root node,
+/// obtained by looking up objectid 4 (`BTRFS_DEV_TREE_OBJECTID`) in the
+/// ROOT_TREE. Returns all leaf items in the device tree.
 pub fn walk_device_tree(
     read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
-    sb: &BtrfsSuperblock,
+    dev_root_bytenr: u64,
     chunks: &[BtrfsChunkEntry],
+    nodesize: u32,
 ) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
-    walk_tree(read_physical, chunks, sb.dev_root, sb.nodesize)
+    walk_tree(read_physical, chunks, dev_root_bytenr, nodesize)
 }
 
 /// Each device is identified by its `devid` (from `DEV_ITEM` in the device tree).

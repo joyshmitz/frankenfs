@@ -276,15 +276,9 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
 
         if cur_ino != 0 && &block[off + DIR_ENTRY_HEADER_LEN..name_end] == name {
             if let Some(prev_off) = prev_off_opt {
-                let prev_len = usize::from(read_u16_le(block, prev_off + 4).ok_or_else(|| {
-                    FfsError::Corruption {
-                        block: 0,
-                        detail: "unable to read previous directory entry rec_len".to_owned(),
-                    }
-                })?);
-                let merged = prev_len
-                    .checked_add(rec_len)
-                    .ok_or_else(|| FfsError::Format("merged rec_len overflow".to_owned()))?;
+                let merged = (off + rec_len)
+                    .checked_sub(prev_off)
+                    .ok_or_else(|| FfsError::Format("merged rec_len underflow".to_owned()))?;
                 let merged_u16 = u16::try_from(merged)
                     .map_err(|_| FfsError::Format("merged rec_len exceeds u16".to_owned()))?;
                 write_u16_le(block, prev_off + 4, merged_u16)?;
@@ -640,5 +634,24 @@ mod tests {
 
         let err = remove_entry(&mut block, b"x", 0).unwrap_err();
         assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn test_remove_entry_overlap_bug() {
+        let mut block = vec![0u8; 256];
+        write_entry(&mut block, 0, 10, 12, Ext4FileType::RegFile, b"a").unwrap();
+        write_entry(&mut block, 12, 0, 12, Ext4FileType::Unknown, b"x").unwrap();
+        write_entry(&mut block, 24, 11, 100, Ext4FileType::RegFile, b"b").unwrap();
+        write_entry(&mut block, 124, 12, 132, Ext4FileType::RegFile, b"c").unwrap();
+
+        let removed = remove_entry(&mut block, b"b", 0).unwrap();
+        assert!(removed);
+        
+        let rec_len_0 = read_u16_le(&block, 4).unwrap();
+        
+        let (entries, _) = ffs_ondisk::parse_dir_block(&block, 256).unwrap();
+        assert_eq!(entries.len(), 2, "Expected 2 entries left (a and c)");
+        assert_eq!(entries[0].name, b"a".to_vec());
+        assert_eq!(entries[1].name, b"c".to_vec());
     }
 }

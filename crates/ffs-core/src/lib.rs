@@ -32,7 +32,8 @@ use ffs_btrfs::{
 };
 use ffs_error::FfsError;
 use ffs_journal::{
-    Jbd2WriteStats, Jbd2Writer, JournalSegment, ReplayOutcome, replay_jbd2_segments,
+    FcReplayResult, Jbd2Superblock, Jbd2WriteStats, Jbd2Writer, JournalSegment, ReplayOutcome,
+    replay_fast_commit, replay_jbd2_segments,
 };
 use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal_replay::{ReplayOutcome as MvccReplayOutcome, TailPolicy, WalReplayEngine};
@@ -367,6 +368,22 @@ impl CrashRecoveryOutcome {
     }
 }
 
+/// Mount-time ext4 fast-commit evidence extracted from the journal tail.
+///
+/// This is intentionally an evidence surface, not the final metadata-apply
+/// engine. The filesystem still relies on full JBD2 replay for correctness;
+/// fast-commit parsing here records what the journal tail advertised so tests
+/// and diagnostics can reason about real crash-state images.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ext4FastCommitReplayEvidence {
+    /// Number of fast-commit blocks reserved in the journal superblock.
+    pub reserved_fc_blocks: u32,
+    /// Number of bytes gathered from the fast-commit tail region.
+    pub bytes_collected: u64,
+    /// Parsed replay result for the collected region.
+    pub replay: FcReplayResult,
+}
+
 /// An opened filesystem image, ready for VFS operations.
 ///
 /// `OpenFs` bundles a validated superblock, pre-computed geometry, and the
@@ -389,6 +406,8 @@ pub struct OpenFs {
     pub btrfs_context: Option<BtrfsContext>,
     /// Mount-time JBD2 replay outcome for ext4 images with an internal journal.
     pub ext4_journal_replay: Option<ReplayOutcome>,
+    /// Mount-time ext4 fast-commit evidence when the journal advertises FC blocks.
+    pub ext4_fast_commit_replay: Option<Ext4FastCommitReplayEvidence>,
     /// Crash recovery outcome, if the filesystem required recovery on mount.
     pub crash_recovery: Option<CrashRecoveryOutcome>,
     /// MVCC WAL recovery report, if a WAL was replayed at open time.
@@ -437,6 +456,7 @@ impl std::fmt::Debug for OpenFs {
             .field("ext4_geometry", &self.ext4_geometry)
             .field("btrfs_context", &self.btrfs_context)
             .field("ext4_journal_replay", &self.ext4_journal_replay)
+            .field("ext4_fast_commit_replay", &self.ext4_fast_commit_replay)
             .field("crash_recovery", &self.crash_recovery)
             .field("mvcc_wal_recovery", &self.mvcc_wal_recovery)
             .field("dev_len", &self.dev.len_bytes())
@@ -460,6 +480,28 @@ impl ByteDeviceBlockAdapter<'_> {
             .0
             .checked_mul(u64::from(self.block_size))
             .ok_or_else(|| FfsError::Format("block offset overflow".to_owned()))
+    }
+}
+
+fn resolve_segment_block_number(segments: &[JournalSegment], index: u64) -> Option<BlockNumber> {
+    let mut base = 0_u64;
+    for segment in segments {
+        let end = base.checked_add(segment.blocks)?;
+        if index < end {
+            return segment.resolve(index - base);
+        }
+        base = end;
+    }
+    None
+}
+
+fn trim_trailing_zero_blocks(bytes: &mut Vec<u8>, block_len: usize) {
+    while bytes.len() >= block_len
+        && bytes[bytes.len() - block_len..]
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        bytes.truncate(bytes.len() - block_len);
     }
 }
 
@@ -1906,6 +1948,7 @@ impl OpenFs {
             ext4_geometry,
             btrfs_context,
             ext4_journal_replay: None,
+            ext4_fast_commit_replay: None,
             crash_recovery: None,
             mvcc_wal_recovery,
             mount_mode: options.mount_mode,
@@ -1920,12 +1963,7 @@ impl OpenFs {
         if fs.is_ext4() && !options.skip_validation {
             fs.ext4_journal_replay =
                 fs.maybe_replay_ext4_journal(cx, options.ext4_journal_replay_mode)?;
-            // Fast commit replay: the replay_fast_commit() engine exists in
-            // ffs-journal and can parse FC tag streams. Full mount-time wiring
-            // requires extracting the FC region from the journal device, which
-            // depends on the journal layout (inline vs external, FC block count).
-            // For V1: FC operations are detected but NOT applied during mount.
-            // JBD2 replay already recovers the last consistent state.
+            fs.ext4_fast_commit_replay = fs.maybe_collect_ext4_fast_commit_evidence(cx)?;
 
             fs.crash_recovery = fs.detect_and_recover_crash();
             if options.ext4_journal_replay_mode != Ext4JournalReplayMode::Skip {
@@ -2133,6 +2171,12 @@ impl OpenFs {
     #[must_use]
     pub fn ext4_journal_replay(&self) -> Option<&ReplayOutcome> {
         self.ext4_journal_replay.as_ref()
+    }
+
+    /// Return ext4 mount-time fast-commit evidence when available.
+    #[must_use]
+    pub fn ext4_fast_commit_replay(&self) -> Option<&Ext4FastCommitReplayEvidence> {
+        self.ext4_fast_commit_replay.as_ref()
     }
 
     /// Return crash recovery outcome if the filesystem was not cleanly mounted.
@@ -2562,6 +2606,155 @@ impl OpenFs {
             "ext4 journal replay completed"
         );
         Ok(Some(outcome))
+    }
+
+    fn maybe_collect_ext4_fast_commit_evidence(
+        &self,
+        cx: &Cx,
+    ) -> Result<Option<Ext4FastCommitReplayEvidence>, FfsError> {
+        let (block_size, journal_inum, journal_dev) = match self.ext4_superblock() {
+            Some(sb) => (sb.block_size, sb.journal_inum, sb.journal_dev),
+            None => return Ok(None),
+        };
+
+        if journal_inum == 0 || journal_dev != 0 {
+            return Ok(None);
+        }
+
+        let journal_inode = self.read_inode(cx, InodeNumber(u64::from(journal_inum)))?;
+        let segments = self.collect_ext4_journal_segments(cx, &journal_inode)?;
+        if segments.is_empty() {
+            return Ok(None);
+        }
+
+        let journal_sb = self.read_ext4_journal_superblock(cx, block_size, &segments)?;
+        let Some(journal_sb) = journal_sb else {
+            return Ok(None);
+        };
+        if !journal_sb.has_fast_commit() {
+            return Ok(None);
+        }
+
+        let fc_bytes = self.read_ext4_fast_commit_tail(cx, block_size, &segments, journal_sb)?;
+        if fc_bytes.is_empty() {
+            return Ok(None);
+        }
+
+        let replay = replay_fast_commit(&fc_bytes)?;
+        let evidence = Ext4FastCommitReplayEvidence {
+            reserved_fc_blocks: journal_sb.num_fc_blocks,
+            bytes_collected: u64::try_from(fc_bytes.len()).unwrap_or(u64::MAX),
+            replay,
+        };
+
+        info!(
+            journal_inum,
+            reserved_fc_blocks = evidence.reserved_fc_blocks,
+            fc_bytes = evidence.bytes_collected,
+            fc_transactions = evidence.replay.transactions_found,
+            fc_incomplete_transactions = evidence.replay.incomplete_transactions,
+            fc_fallback_required = evidence.replay.fallback_required,
+            "ext4 fast-commit evidence collected"
+        );
+
+        Ok(Some(evidence))
+    }
+
+    fn collect_ext4_journal_segments(
+        &self,
+        cx: &Cx,
+        journal_inode: &Ext4Inode,
+    ) -> Result<Vec<JournalSegment>, FfsError> {
+        let extents = self.collect_extents(cx, journal_inode)?;
+        let mut segments = Vec::with_capacity(extents.len());
+        for ext in extents {
+            let blocks = u64::from(ext.actual_len());
+            if blocks == 0 {
+                return Err(FfsError::Corruption {
+                    block: ext.physical_start,
+                    detail: "ext4 journal extent has zero length".to_owned(),
+                });
+            }
+            segments.push(JournalSegment {
+                start: BlockNumber(ext.physical_start),
+                blocks,
+            });
+        }
+        Ok(segments)
+    }
+
+    fn read_ext4_journal_superblock(
+        &self,
+        cx: &Cx,
+        block_size: u32,
+        segments: &[JournalSegment],
+    ) -> Result<Option<Jbd2Superblock>, FfsError> {
+        let Some(block) = resolve_segment_block_number(segments, 0) else {
+            return Ok(None);
+        };
+        let mut raw = vec![
+            0_u8;
+            usize::try_from(block_size).map_err(|_| FfsError::Format(
+                "block size does not fit usize".to_owned()
+            ))?
+        ];
+        let offset = block
+            .0
+            .checked_mul(u64::from(block_size))
+            .ok_or_else(|| FfsError::Format("journal superblock offset overflow".to_owned()))?;
+        self.dev.read_exact_at(cx, ByteOffset(offset), &mut raw)?;
+        Ok(Jbd2Superblock::parse(&raw))
+    }
+
+    fn read_ext4_fast_commit_tail(
+        &self,
+        cx: &Cx,
+        block_size: u32,
+        segments: &[JournalSegment],
+        journal_sb: Jbd2Superblock,
+    ) -> Result<Vec<u8>, FfsError> {
+        let total_blocks = segments.iter().try_fold(0_u64, |acc, segment| {
+            acc.checked_add(segment.blocks)
+                .ok_or_else(|| FfsError::Format("journal segment length overflow".to_owned()))
+        })?;
+        let journal_blocks = total_blocks.min(u64::from(journal_sb.max_len));
+        let first_log_block = u64::from(journal_sb.first_log_block);
+        if journal_blocks <= first_log_block {
+            return Ok(Vec::new());
+        }
+
+        let fc_blocks = u64::from(journal_sb.num_fc_blocks).min(journal_blocks - first_log_block);
+        if fc_blocks == 0 {
+            return Ok(Vec::new());
+        }
+
+        let fc_start = journal_blocks - fc_blocks;
+        let block_len = usize::try_from(block_size)
+            .map_err(|_| FfsError::Format("block size does not fit usize".to_owned()))?;
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(fc_blocks)
+                .unwrap_or(0)
+                .saturating_mul(block_len),
+        );
+
+        for journal_idx in fc_start..journal_blocks {
+            let block = resolve_segment_block_number(segments, journal_idx).ok_or_else(|| {
+                FfsError::Corruption {
+                    block: journal_idx,
+                    detail: "fast-commit block index falls outside journal extents".to_owned(),
+                }
+            })?;
+            let mut raw = vec![0_u8; block_len];
+            let offset = block
+                .0
+                .checked_mul(u64::from(block_size))
+                .ok_or_else(|| FfsError::Format("fast-commit block offset overflow".to_owned()))?;
+            self.dev.read_exact_at(cx, ByteOffset(offset), &mut raw)?;
+            bytes.extend_from_slice(&raw);
+        }
+
+        trim_trailing_zero_blocks(&mut bytes, block_len);
+        Ok(bytes)
     }
 
     // ── MVCC transaction API ─────────────────────────────────────────
@@ -12327,6 +12520,59 @@ mod tests {
     }
 
     #[test]
+    fn open_fs_collects_fast_commit_replay_evidence() {
+        let image = build_ext4_image_with_fast_commit_evidence();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let replay = fs
+            .ext4_journal_replay()
+            .expect("journal replay outcome should be present");
+        let fc = fs
+            .ext4_fast_commit_replay()
+            .expect("fast-commit evidence should be present");
+
+        assert_eq!(replay.committed_sequences, vec![1]);
+        assert_eq!(replay.stats.replayed_blocks, 1);
+        assert_eq!(fc.reserved_fc_blocks, 2);
+        assert!(fc.bytes_collected >= 32);
+        assert_eq!(fc.replay.transactions_found, 1);
+        assert_eq!(fc.replay.last_tid, 1);
+        assert_eq!(fc.replay.operations.len(), 1);
+        assert_eq!(fc.replay.incomplete_transactions, 0);
+        assert!(!fc.replay.fallback_required);
+        assert_eq!(fc.replay.blocks_scanned, 1);
+        assert_eq!(
+            fc.replay.operations,
+            vec![ffs_journal::FcOperation::InodeUpdate(42)]
+        );
+
+        let target = fs.read_block_vec(&cx, BlockNumber(15)).unwrap();
+        assert_eq!(&target[..16], b"JBD2-REPLAY-TEST");
+    }
+
+    #[test]
+    fn open_fs_collects_fast_commit_fallback_evidence_for_truncated_stream() {
+        let image = build_ext4_image_with_truncated_fast_commit_evidence();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let fc = fs
+            .ext4_fast_commit_replay()
+            .expect("fast-commit evidence should be present");
+
+        assert_eq!(fc.reserved_fc_blocks, 2);
+        assert_eq!(fc.replay.transactions_found, 0);
+        assert_eq!(fc.replay.last_tid, 0);
+        assert_eq!(fc.replay.operations.len(), 0);
+        assert_eq!(fc.replay.incomplete_transactions, 1);
+        assert!(fc.replay.fallback_required);
+        assert_eq!(fc.replay.blocks_scanned, 1);
+    }
+
+    #[test]
     fn read_ext4_orphan_list_traverses_chain() {
         let image = build_ext4_image_with_orphan_chain(&[11, 12, 13]);
         let dev = TestDevice::from_vec(image);
@@ -12818,6 +13064,39 @@ mod tests {
         block[8..12].copy_from_slice(&sequence.to_be_bytes());
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn write_jbd2_superblock_v2(
+        block: &mut [u8],
+        block_size: u32,
+        max_len: u32,
+        first_log_block: u32,
+        start_sequence: u32,
+        start_block: u32,
+        num_fc_blocks: u32,
+        feature_incompat: u32,
+    ) {
+        write_jbd2_header(block, 4, 0);
+        block[12..16].copy_from_slice(&block_size.to_be_bytes());
+        block[16..20].copy_from_slice(&max_len.to_be_bytes());
+        block[20..24].copy_from_slice(&first_log_block.to_be_bytes());
+        block[24..28].copy_from_slice(&start_sequence.to_be_bytes());
+        block[28..32].copy_from_slice(&start_block.to_be_bytes());
+        block[40..44].copy_from_slice(&feature_incompat.to_be_bytes());
+        block[84..88].copy_from_slice(&num_fc_blocks.to_be_bytes());
+    }
+
+    fn build_fc_tag(tag_type: u16, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(4 + payload.len());
+        bytes.extend_from_slice(&tag_type.to_le_bytes());
+        bytes.extend_from_slice(
+            &u16::try_from(payload.len())
+                .expect("fast-commit payload length should fit")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
     /// Build an ext4 image with an internal journal inode and one committed
     /// JBD2 transaction that rewrites block 15.
     #[allow(clippy::cast_possible_truncation)]
@@ -12930,6 +13209,87 @@ mod tests {
         let j_commit = 40 * 4096;
         write_jbd2_header(&mut image[j_commit..j_commit + 4096], 2, 1);
 
+        image
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_ext4_image_with_fast_commit_evidence() -> Vec<u8> {
+        const JBD2_FEATURE_INCOMPAT_FAST_COMMIT: u32 = 0x0000_0020;
+        const EXT4_COMPAT_FAST_COMMIT: u32 = 0x0000_0400;
+
+        let mut image = build_ext4_image_with_extents();
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+        let compat = u32::from_le_bytes([
+            image[sb_off + 0x5C],
+            image[sb_off + 0x5D],
+            image[sb_off + 0x5E],
+            image[sb_off + 0x5F],
+        ]);
+        image[sb_off + 0x5C..sb_off + 0x60]
+            .copy_from_slice(&(compat | 0x0004 | EXT4_COMPAT_FAST_COMMIT).to_le_bytes());
+        image[sb_off + 0xE0..sb_off + 0xE4].copy_from_slice(&8_u32.to_le_bytes());
+
+        // Inode #8 -> journal extent [20..=25].
+        let ino8_off: usize = 4 * 4096 + 7 * 256;
+        image[ino8_off..ino8_off + 2].copy_from_slice(&0o100_600_u16.to_le_bytes());
+        image[ino8_off + 4..ino8_off + 8].copy_from_slice(&(6_u32 * 4096).to_le_bytes());
+        image[ino8_off + 0x1A..ino8_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        image[ino8_off + 0x20..ino8_off + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+        image[ino8_off + 0x80..ino8_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        let e = ino8_off + 0x28;
+        image[e..e + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[e + 2..e + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[e + 4..e + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[e + 6..e + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[e + 12..e + 16].copy_from_slice(&0_u32.to_le_bytes());
+        image[e + 16..e + 18].copy_from_slice(&6_u16.to_le_bytes());
+        image[e + 18..e + 20].copy_from_slice(&0_u16.to_le_bytes());
+        image[e + 20..e + 24].copy_from_slice(&20_u32.to_le_bytes());
+
+        let journal_sb = 20 * 4096;
+        write_jbd2_superblock_v2(
+            &mut image[journal_sb..journal_sb + 4096],
+            4096,
+            6,
+            1,
+            1,
+            1,
+            2,
+            JBD2_FEATURE_INCOMPAT_FAST_COMMIT,
+        );
+
+        let j_desc = 21 * 4096;
+        write_jbd2_header(&mut image[j_desc..j_desc + 4096], 1, 1);
+        image[j_desc + 12..j_desc + 16].copy_from_slice(&15_u32.to_be_bytes());
+        image[j_desc + 16..j_desc + 20].copy_from_slice(&0x0000_0008_u32.to_be_bytes());
+
+        let j_data = 22 * 4096;
+        image[j_data..j_data + 16].copy_from_slice(b"JBD2-REPLAY-TEST");
+
+        let j_commit = 23 * 4096;
+        write_jbd2_header(&mut image[j_commit..j_commit + 4096], 2, 1);
+
+        let mut fc_payload = Vec::new();
+        fc_payload.extend(build_fc_tag(0x0A, &[0; 16]));
+        fc_payload.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
+        fc_payload.extend(build_fc_tag(0x09, &1_u32.to_le_bytes()));
+        let fc_block = 24 * 4096;
+        image[fc_block..fc_block + fc_payload.len()].copy_from_slice(&fc_payload);
+
+        image
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_ext4_image_with_truncated_fast_commit_evidence() -> Vec<u8> {
+        let mut image = build_ext4_image_with_fast_commit_evidence();
+        let fc_block = 24 * 4096;
+        let mut truncated = Vec::new();
+        truncated.extend(build_fc_tag(0x0A, &[0; 16]));
+        truncated.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
+        image[fc_block..fc_block + 4096].fill(0);
+        image[fc_block..fc_block + truncated.len()].copy_from_slice(&truncated);
         image
     }
 
