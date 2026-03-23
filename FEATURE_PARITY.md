@@ -6,12 +6,12 @@
 
 | Domain | Implemented | Total Tracked | Coverage |
 |--------|-------------|---------------|----------|
-| ext4 metadata parsing | 23 | 23 | 100.0% |
+| ext4 metadata parsing | 25 | 25 | 100.0% |
 | btrfs metadata parsing | 23 | 23 | 100.0% |
 | MVCC/COW core | 14 | 14 | 100.0% |
 | FUSE surface | 12 | 12 | 100.0% |
 | self-healing durability policy | 10 | 10 | 100.0% |
-| **Overall** | **82** | **82** | **100.0%** |
+| **Overall** | **84** | **84** | **100.0%** |
 
 > **Canonical source:** This Coverage Summary table in `FEATURE_PARITY.md` is the
 > single source of truth for implemented/total counts. `ParityReport::current()`
@@ -52,7 +52,9 @@
 | ext4 indirect block addressing | `fs/ext4/inode.c` | ✅ | `resolve_indirect_block()` handles direct + single/double/triple indirect pointers. `EXTENTS` no longer required at mount. |
 | ext4 FALLOC_FL_ZERO_RANGE | `fs/ext4/extents.c` | ✅ | ZERO_RANGE mode (0x10) zeroes allocated blocks in range via write path. |
 | ext4 fast commit replay | `fs/ext4/fast_commit.c` | ✅ | `replay_fast_commit()` in ffs-journal parses FC tag stream (HEAD/TAIL/INODE/ADD_RANGE/DEL_RANGE/CREAT/LINK/UNLINK/PAD). Returns ordered operation list for caller to apply. |
-| btrfs tree-log replay | `fs/btrfs/tree-log.c` | ✅ | `replay_tree_log()` in ffs-btrfs walks tree-log tree when `log_root != 0`, returns items for FS tree merge. |
+| btrfs tree-log replay | `fs/btrfs/tree-log.c` | ✅ | `replay_tree_log()` in ffs-btrfs walks tree-log tree when `log_root != 0`, returns items for FS tree merge. Wired into mount path. |
+| ext4 casefold (case-insensitive dirs) | `fs/ext4/namei.c` | ✅ | `lookup_in_dir_block_casefold()` with Unicode lowercase comparison. CASEFOLD removed from rejected features. |
+| ext4 fscrypt (nokey read-only mode) | `fs/ext4/crypto.c` | ✅ | ENCRYPT removed from rejected features. Encrypted filenames shown as raw bytes (nokey mode). Full decryption requires key management not in V1. |
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 
