@@ -2928,6 +2928,62 @@ impl BtrfsExtentAllocator {
     }
 }
 
+// ── btrfs tree-log replay ─────────────────────────────────────────────────
+
+/// Result of scanning the btrfs tree-log.
+///
+/// The tree-log is a per-subvolume journal used for efficient fsync. When
+/// present (superblock `log_root != 0`), it contains items that were fsynced
+/// but not yet committed in a full transaction. On mount, the tree-log must
+/// be replayed to bring the FS tree to the state of the last fsync.
+#[derive(Debug, Clone, Default)]
+pub struct TreeLogReplayResult {
+    /// Items extracted from the tree-log, in key order.
+    pub items: Vec<BtrfsLeafEntry>,
+    /// Number of items replayed.
+    pub items_count: usize,
+    /// Whether a valid tree-log was found and replayed.
+    pub replayed: bool,
+}
+
+/// Replay the btrfs tree-log if present.
+///
+/// Checks the superblock for a non-zero `log_root`. If present, walks the
+/// tree-log tree and returns all items found. The caller is responsible for
+/// merging these items into the FS tree (applying inode updates, directory
+/// entries, and extent mappings).
+///
+/// The `read_physical` closure reads a physical byte range from the device.
+/// If `log_root` is 0, returns an empty result (no tree-log to replay).
+pub fn replay_tree_log(
+    read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
+    sb: &BtrfsSuperblock,
+    chunks: &[BtrfsChunkEntry],
+) -> Result<TreeLogReplayResult, ParseError> {
+    if sb.log_root == 0 {
+        return Ok(TreeLogReplayResult::default());
+    }
+
+    tracing::info!(
+        log_root = sb.log_root,
+        log_root_level = sb.log_root_level,
+        "btrfs tree-log replay start"
+    );
+
+    let items = walk_tree(read_physical, chunks, sb.log_root, sb.nodesize)?;
+
+    tracing::info!(
+        items_replayed = items.len(),
+        "btrfs tree-log replay complete"
+    );
+
+    Ok(TreeLogReplayResult {
+        items_count: items.len(),
+        items,
+        replayed: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

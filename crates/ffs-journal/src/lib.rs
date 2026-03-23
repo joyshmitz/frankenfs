@@ -902,7 +902,10 @@ impl Jbd2Writer {
                         revoke[off + 4..off + 8].copy_from_slice(&low.to_be_bytes());
                     } else {
                         let target_u32 = u32::try_from(target.0).map_err(|_| {
-                            FfsError::Format(format!("revoke target {} exceeds u32 range", target.0))
+                            FfsError::Format(format!(
+                                "revoke target {} exceeds u32 range",
+                                target.0
+                            ))
                         })?;
                         revoke[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
                     }
@@ -983,6 +986,343 @@ pub struct CowWrite {
 pub struct RecoveredCommit {
     pub commit_seq: CommitSeq,
     pub writes: Vec<CowWrite>,
+}
+
+// ── Fast Commit (FC) replay ───────────────────────────────────────────────
+
+/// ext4 fast commit tag types.
+///
+/// Fast commit logs logical operations (not physical blocks) for low-latency
+/// fsync. The replay engine applies these operations to bring the filesystem
+/// to the state of the last fsync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum FcTag {
+    Link = 0x01,
+    Unlink = 0x02,
+    AddRange = 0x03,
+    DelRange = 0x04,
+    Creat = 0x05,
+    Inode = 0x07,
+    Pad = 0x08,
+    Tail = 0x09,
+    Head = 0x0A,
+}
+
+impl FcTag {
+    fn from_u16(val: u16) -> Option<Self> {
+        match val {
+            0x01 => Some(Self::Link),
+            0x02 => Some(Self::Unlink),
+            0x03 => Some(Self::AddRange),
+            0x04 => Some(Self::DelRange),
+            0x05 => Some(Self::Creat),
+            0x07 => Some(Self::Inode),
+            0x08 => Some(Self::Pad),
+            0x09 => Some(Self::Tail),
+            0x0A => Some(Self::Head),
+            _ => None,
+        }
+    }
+}
+
+/// A parsed fast commit directory entry operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FcDentry {
+    pub parent_ino: u32,
+    pub ino: u32,
+    pub name: Vec<u8>,
+}
+
+/// A parsed fast commit extent operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FcExtentRange {
+    pub ino: u32,
+    pub logical_block: u32,
+    pub len: u32,
+    pub physical_block: u32,
+}
+
+/// A parsed fast commit truncate/punch operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FcDelRange {
+    pub ino: u32,
+    pub logical_block: u32,
+    pub len: u32,
+}
+
+/// A single fast commit operation extracted from the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FcOperation {
+    /// Create a directory entry and the inode it references.
+    Create(FcDentry),
+    /// Add a hard link (directory entry pointing to existing inode).
+    Link(FcDentry),
+    /// Remove a directory entry.
+    Unlink(FcDentry),
+    /// Map logical blocks to physical blocks.
+    AddRange(FcExtentRange),
+    /// Remove extent mapping (truncate/punch).
+    DelRange(FcDelRange),
+    /// Mark an inode as modified (triggers re-read from disk).
+    InodeUpdate(u32),
+}
+
+/// Result of replaying fast commit blocks from the journal.
+#[derive(Debug, Clone, Default)]
+pub struct FcReplayResult {
+    /// Ordered list of operations to apply.
+    pub operations: Vec<FcOperation>,
+    /// Transaction ID of the last committed FC transaction.
+    pub last_tid: u32,
+    /// Number of FC blocks scanned.
+    pub blocks_scanned: u64,
+    /// Number of FC transactions found.
+    pub transactions_found: u64,
+}
+
+/// Replay fast commit blocks from the journal region.
+///
+/// Scans the given data for fast commit tag records, extracts the operations,
+/// and returns them in order. The caller is responsible for applying the
+/// operations to the filesystem state.
+///
+/// Returns `Ok(FcReplayResult)` with the extracted operations, or `Err` if
+/// the fast commit region is corrupted beyond recovery.
+pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
+    let mut result = FcReplayResult::default();
+    let mut pos = 0;
+
+    while pos + 4 <= data.len() {
+        // Parse tag header: tag_type (u16 LE), tag_len (u16 LE).
+        let tag_type = u16::from_le_bytes([data[pos], data[pos + 1]]);
+        let tag_len = u16::from_le_bytes([data[pos + 2], data[pos + 3]]) as usize;
+        pos += 4;
+
+        if pos + tag_len > data.len() {
+            break; // Truncated tag — stop scanning.
+        }
+
+        let payload = &data[pos..pos + tag_len];
+        pos += tag_len;
+
+        let Some(tag) = FcTag::from_u16(tag_type) else {
+            continue; // Unknown tag — skip for forward compatibility.
+        };
+
+        match tag {
+            FcTag::Head => {
+                result.blocks_scanned += 1;
+            }
+            FcTag::Tail => {
+                if payload.len() >= 4 {
+                    result.last_tid =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                }
+                result.transactions_found += 1;
+            }
+            FcTag::Inode => {
+                if payload.len() >= 4 {
+                    let ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    result.operations.push(FcOperation::InodeUpdate(ino));
+                }
+            }
+            FcTag::AddRange => {
+                if payload.len() >= 16 {
+                    result.operations.push(FcOperation::AddRange(FcExtentRange {
+                        ino: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+                        logical_block: u32::from_le_bytes([
+                            payload[4], payload[5], payload[6], payload[7],
+                        ]),
+                        len: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
+                        physical_block: u32::from_le_bytes([
+                            payload[12],
+                            payload[13],
+                            payload[14],
+                            payload[15],
+                        ]),
+                    }));
+                }
+            }
+            FcTag::DelRange => {
+                if payload.len() >= 12 {
+                    result.operations.push(FcOperation::DelRange(FcDelRange {
+                        ino: u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+                        logical_block: u32::from_le_bytes([
+                            payload[4], payload[5], payload[6], payload[7],
+                        ]),
+                        len: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
+                    }));
+                }
+            }
+            FcTag::Creat | FcTag::Link => {
+                if payload.len() >= 10 {
+                    let parent_ino =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let ino = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let name_len = payload[8] as usize;
+                    let name = if 10 + name_len <= payload.len() {
+                        payload[10..10 + name_len].to_vec()
+                    } else {
+                        payload[10..].to_vec()
+                    };
+                    let dentry = FcDentry {
+                        parent_ino,
+                        ino,
+                        name,
+                    };
+                    if tag == FcTag::Creat {
+                        result.operations.push(FcOperation::Create(dentry));
+                    } else {
+                        result.operations.push(FcOperation::Link(dentry));
+                    }
+                }
+            }
+            FcTag::Unlink => {
+                if payload.len() >= 6 {
+                    let parent_ino =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let name_len = payload[4] as usize;
+                    let name = if 6 + name_len <= payload.len() {
+                        payload[6..6 + name_len].to_vec()
+                    } else {
+                        payload[6..].to_vec()
+                    };
+                    result.operations.push(FcOperation::Unlink(FcDentry {
+                        parent_ino,
+                        ino: 0,
+                        name,
+                    }));
+                }
+            }
+            FcTag::Pad => {
+                // Skip padding.
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+// ── Fast Commit tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod fc_tests {
+    use super::*;
+
+    fn build_fc_tag(tag_type: u16, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&tag_type.to_le_bytes());
+        buf.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    #[test]
+    fn replay_empty_data() {
+        let result = replay_fast_commit(&[]).unwrap();
+        assert!(result.operations.is_empty());
+        assert_eq!(result.transactions_found, 0);
+    }
+
+    #[test]
+    fn replay_add_range() {
+        let mut data = Vec::new();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&42_u32.to_le_bytes()); // ino
+        payload.extend_from_slice(&100_u32.to_le_bytes()); // logical_block
+        payload.extend_from_slice(&10_u32.to_le_bytes()); // len
+        payload.extend_from_slice(&5000_u32.to_le_bytes()); // physical_block
+        data.extend(build_fc_tag(0x03, &payload)); // ADD_RANGE
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            FcOperation::AddRange(r) => {
+                assert_eq!(r.ino, 42);
+                assert_eq!(r.logical_block, 100);
+                assert_eq!(r.len, 10);
+                assert_eq!(r.physical_block, 5000);
+            }
+            other => panic!("expected AddRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_create_with_tail() {
+        let mut data = Vec::new();
+        // HEAD tag
+        data.extend(build_fc_tag(0x0A, &[0; 16]));
+        // CREAT tag
+        let mut creat = Vec::new();
+        creat.extend_from_slice(&2_u32.to_le_bytes()); // parent_ino
+        creat.extend_from_slice(&11_u32.to_le_bytes()); // ino
+        creat.push(5); // name_len
+        creat.push(0); // padding
+        creat.extend_from_slice(b"hello");
+        data.extend(build_fc_tag(0x05, &creat));
+        // TAIL tag
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&7_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail));
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert_eq!(result.transactions_found, 1);
+        assert_eq!(result.last_tid, 7);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            FcOperation::Create(d) => {
+                assert_eq!(d.parent_ino, 2);
+                assert_eq!(d.ino, 11);
+                assert_eq!(d.name, b"hello");
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_del_range() {
+        let mut data = Vec::new();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&99_u32.to_le_bytes());
+        payload.extend_from_slice(&50_u32.to_le_bytes());
+        payload.extend_from_slice(&20_u32.to_le_bytes());
+        data.extend(build_fc_tag(0x04, &payload));
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            FcOperation::DelRange(r) => {
+                assert_eq!(r.ino, 99);
+                assert_eq!(r.logical_block, 50);
+                assert_eq!(r.len, 20);
+            }
+            other => panic!("expected DelRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_unknown_tags_skipped() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0xFF, &[1, 2, 3])); // unknown tag
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert_eq!(result.operations.len(), 1);
+        assert!(matches!(
+            &result.operations[0],
+            FcOperation::InodeUpdate(42)
+        ));
+    }
+
+    #[test]
+    fn replay_truncated_tag_stops() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x03, &[1, 2, 3])); // ADD_RANGE with payload too short
+        let result = replay_fast_commit(&data).unwrap();
+        assert!(result.operations.is_empty()); // Payload < 16 bytes, skipped
+    }
 }
 
 /// Native COW append-only journal writer.
