@@ -4621,15 +4621,19 @@ case-insensitive lookup via `readdir + casefold compare`.
 
 ### 15.15 Fast Commit
 
-**Excluded.** `COMPAT_FAST_COMMIT` (0x0400). Lightweight journal extension
-that logs logical operations (create inode, add to directory, extend file)
-rather than physical blocks, reducing journal write amplification by 2-3x
-for metadata-heavy workloads. Adds a parallel log stream alongside JBD2 with
-its own replay logic (~3K LOC in kernel). Interacts with MVCC (fast commit
-entries must be reconciled with version chains). FrankenFS's MVCC-native mode
-already eliminates journal write amplification by using COW version chains
-instead of journaling. JBD2-compat mode uses traditional physical journaling
-for simplicity and correctness.
+**Partially implemented.** `COMPAT_FAST_COMMIT` (0x0400). FrankenFS now has a
+parser-side fast-commit replay surface in `ffs-journal` that decodes the FC tag
+stream, emits ordered logical operations only after a committed `TAIL`, and
+forces fallback when the FC stream is truncated or incomplete. Deterministic
+parser corpus coverage lives under `tests/fixtures/golden/ext4_fast_commit_*.json`
+and `crates/ffs-journal/tests/ext4_fast_commit_corpus.rs`.
+
+The remaining gap is mount-time integration: extracting the FC region from the
+journal device and applying the parsed operations during ext4 open/recovery is
+still tracked work. Until that wiring lands, FrankenFS relies on traditional
+JBD2 replay for the last fully consistent state, and the fast-commit support
+present today should be understood as parser/evidence capability rather than
+end-to-end mount recovery parity.
 
 ### 15.16 Bigalloc (Cluster-Based Allocation)
 

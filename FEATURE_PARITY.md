@@ -7,11 +7,11 @@
 | Domain | Implemented | Total Tracked | Coverage |
 |--------|-------------|---------------|----------|
 | ext4 metadata parsing | 25 | 25 | 100.0% |
-| btrfs metadata parsing | 23 | 23 | 100.0% |
+| btrfs metadata parsing | 25 | 25 | 100.0% |
 | MVCC/COW core | 14 | 14 | 100.0% |
 | FUSE surface | 12 | 12 | 100.0% |
 | self-healing durability policy | 10 | 10 | 100.0% |
-| **Overall** | **84** | **84** | **100.0%** |
+| **Overall** | **86** | **86** | **100.0%** |
 
 > **Canonical source:** This Coverage Summary table in `FEATURE_PARITY.md` is the
 > single source of truth for implemented/total counts. `ParityReport::current()`
@@ -51,10 +51,12 @@
 | ext4 inline data read | `fs/ext4/inline.c` | ✅ | `read_ext4_inline_data()` reads from inode extent_bytes + system.data xattr. `INLINE_DATA` removed from rejected features. |
 | ext4 indirect block addressing | `fs/ext4/inode.c` | ✅ | `resolve_indirect_block()` handles direct + single/double/triple indirect pointers. `EXTENTS` no longer required at mount. |
 | ext4 FALLOC_FL_ZERO_RANGE | `fs/ext4/extents.c` | ✅ | ZERO_RANGE mode (0x10) zeroes allocated blocks in range via write path. |
-| ext4 fast commit replay | `fs/ext4/fast_commit.c` | ✅ | `replay_fast_commit()` in ffs-journal parses FC tag stream (HEAD/TAIL/INODE/ADD_RANGE/DEL_RANGE/CREAT/LINK/UNLINK/PAD). Returns ordered operation list for caller to apply. |
+| ext4 fast commit replay | `fs/ext4/fast_commit.c` | ✅ | `replay_fast_commit()` in `ffs-journal` parses FC tag streams (HEAD/TAIL/INODE/ADD_RANGE/DEL_RANGE/CREAT/LINK/UNLINK/PAD), buffers operations until commit `TAIL`, and forces fallback when the stream is truncated or incomplete. Parser-side corpus coverage lives in `crates/ffs-journal/tests/ext4_fast_commit_corpus.rs`; mount-time extraction and application of the FC region are still tracked separately from this parser/evidence surface. |
 | btrfs tree-log replay | `fs/btrfs/tree-log.c` | ✅ | `replay_tree_log()` in ffs-btrfs walks tree-log tree when `log_root != 0`, returns items for FS tree merge. Wired into mount path. |
 | ext4 casefold (case-insensitive dirs) | `fs/ext4/namei.c` | ✅ | `lookup_in_dir_block_casefold()` with Unicode lowercase comparison. CASEFOLD removed from rejected features. |
 | ext4 fscrypt (nokey read-only mode) | `fs/ext4/crypto.c` | ✅ | ENCRYPT removed from rejected features. Encrypted filenames shown as raw bytes (nokey mode). Full decryption requires key management not in V1. |
+| btrfs multi-device RAID | `fs/btrfs/volumes.c` | ✅ | `BtrfsDeviceSet` in ffs-btrfs with multi-device read dispatch and stripe fallback. `read_logical()` resolves via `map_logical_to_stripes` with RAID0/1/5/6/10/DUP support. |
+| btrfs send/receive streams | `fs/btrfs/send.c` | ✅ | `parse_send_stream()` in ffs-btrfs parses the btrfs send stream format (magic, version, 22 command types, attribute TLV encoding). 3 parser tests. |
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

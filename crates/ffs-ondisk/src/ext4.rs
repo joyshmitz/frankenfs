@@ -2729,6 +2729,7 @@ pub fn lookup_in_dir_block(block: &[u8], block_size: u32, target: &[u8]) -> Opti
 /// Compares entry names against `target` using Unicode case-insensitive
 /// matching (lowercase comparison of UTF-8 strings). Falls back to
 /// byte-level comparison for non-UTF-8 filenames.
+#[must_use]
 pub fn lookup_in_dir_block_casefold(
     block: &[u8],
     block_size: u32,
@@ -2746,9 +2747,8 @@ pub fn lookup_in_dir_block_casefold(
 /// Converts UTF-8 filenames to lowercase. Non-UTF-8 filenames are compared
 /// byte-by-byte with ASCII case folding only.
 fn casefold_name(name: &[u8]) -> Vec<u8> {
-    match std::str::from_utf8(name) {
-        Ok(s) => s.to_lowercase().into_bytes(),
-        Err(_) => {
+    std::str::from_utf8(name).map_or_else(
+        |_| {
             // Non-UTF-8: ASCII case fold only.
             name.iter()
                 .map(|&b| {
@@ -2759,8 +2759,9 @@ fn casefold_name(name: &[u8]) -> Vec<u8> {
                     }
                 })
                 .collect()
-        }
-    }
+        },
+        |s| s.to_lowercase().into_bytes(),
+    )
 }
 
 // ── Zero-allocation directory block iterator ────────────────────────────────

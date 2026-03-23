@@ -1864,7 +1864,7 @@ impl OpenFs {
                             })?;
                         Ok(buf)
                     };
-                    match ffs_btrfs::replay_tree_log(&mut read_phys, &sb, chunks_ref) {
+                    match ffs_btrfs::replay_tree_log(&mut read_phys, sb, chunks_ref) {
                         Ok(result) if result.replayed => {
                             info!(
                                 items = result.items_count,
@@ -2430,7 +2430,7 @@ impl OpenFs {
             block_dev.read_block(cx, sb_block)?.as_slice().to_vec()
         };
 
-        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET as usize;
+        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
         let old_state = u16::from_le_bytes([block_data[sb_off + 0x3A], block_data[sb_off + 0x3B]]);
         let new_state = old_state & !EXT4_ORPHAN_FS;
         block_data[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&new_state.to_le_bytes());
@@ -3652,6 +3652,7 @@ impl OpenFs {
         })
     }
 
+    #[expect(clippy::cast_possible_truncation)]
     fn btrfs_write_logical(&self, cx: &Cx, mut logical: u64, data: &[u8]) -> Result<(), FfsError> {
         let ctx = self
             .btrfs_context()
@@ -3711,6 +3712,7 @@ impl OpenFs {
         Ok(())
     }
 
+    #[expect(clippy::cast_possible_truncation)]
     fn btrfs_read_logical_into(
         &self,
         cx: &Cx,
@@ -5248,6 +5250,7 @@ impl OpenFs {
     }
 
     /// Read file data using indirect block pointers (non-extent inodes).
+    #[expect(clippy::cast_possible_truncation)]
     fn read_ext4_indirect(
         &self,
         cx: &Cx,
@@ -5276,18 +5279,14 @@ impl OpenFs {
             let remaining_in_block = bs_usize - offset_in_block;
             let chunk_size = remaining_in_block.min(to_read - bytes_read);
 
-            match self.resolve_indirect_block(cx, scope, inode, logical_block)? {
-                Some(phys_block) => {
-                    let block_data =
-                        self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
-                    buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
-                        &block_data[offset_in_block..offset_in_block + chunk_size],
-                    );
-                }
-                None => {
-                    // Hole — already zeroed.
-                }
+            if let Some(phys_block) =
+                self.resolve_indirect_block(cx, scope, inode, logical_block)?
+            {
+                let block_data = self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
+                buf[bytes_read..bytes_read + chunk_size]
+                    .copy_from_slice(&block_data[offset_in_block..offset_in_block + chunk_size]);
             }
+            // else: Hole — already zeroed.
             bytes_read += chunk_size;
         }
         Ok(buf)
@@ -5297,6 +5296,7 @@ impl OpenFs {
     ///
     /// For inodes WITHOUT `EXT4_EXTENTS_FL`, `extent_bytes` holds 15 × u32
     /// block pointers: 12 direct, 1 indirect, 1 double-indirect, 1 triple-indirect.
+    #[expect(clippy::too_many_lines, clippy::cast_possible_truncation)]
     fn resolve_indirect_block(
         &self,
         cx: &Cx,
@@ -5390,13 +5390,13 @@ impl OpenFs {
         }
 
         // Triple indirect: i_block[14] -> dind -> ind -> data.
-        let lb_tind = lb_dind - ptrs_per_block * ptrs_per_block;
+        let lb_triple = lb_dind - ptrs_per_block * ptrs_per_block;
         let tind_block = read_ptr(14);
         if tind_block == 0 {
             return Ok(None);
         }
         let tind_data = self.read_block_with_scope(cx, scope, BlockNumber(tind_block))?;
-        let idx1 = (lb_tind / (ptrs_per_block * ptrs_per_block)) as usize;
+        let idx1 = (lb_triple / (ptrs_per_block * ptrs_per_block)) as usize;
         let off1 = idx1 * 4;
         if off1 + 4 > tind_data.len() {
             return Ok(None);
@@ -5411,7 +5411,7 @@ impl OpenFs {
             return Ok(None);
         }
         let dind_data = self.read_block_with_scope(cx, scope, BlockNumber(dind_block))?;
-        let idx2 = ((lb_tind / ptrs_per_block) % ptrs_per_block) as usize;
+        let idx2 = ((lb_triple / ptrs_per_block) % ptrs_per_block) as usize;
         let off2 = idx2 * 4;
         if off2 + 4 > dind_data.len() {
             return Ok(None);
@@ -5426,7 +5426,7 @@ impl OpenFs {
             return Ok(None);
         }
         let ind_data = self.read_block_with_scope(cx, scope, BlockNumber(ind_block))?;
-        let idx3 = (lb_tind % ptrs_per_block) as usize;
+        let idx3 = (lb_triple % ptrs_per_block) as usize;
         let off3 = idx3 * 4;
         if off3 + 4 > ind_data.len() {
             return Ok(None);
@@ -8967,7 +8967,7 @@ impl OpenFs {
                     continue;
                 }
 
-                let mut materialized = self.btrfs_materialize_extent(cx, &extent)?;
+                let materialized = self.btrfs_materialize_extent(cx, &extent)?;
                 alloc
                     .fs_tree
                     .delete(&key)

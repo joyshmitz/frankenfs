@@ -2928,6 +2928,297 @@ impl BtrfsExtentAllocator {
     }
 }
 
+// ── btrfs multi-device support ─────────────────────────────────────────────
+
+/// A set of physical devices backing a btrfs filesystem.
+///
+/// Each device is identified by its `devid` (from `DEV_ITEM` in the device tree).
+/// The `read_physical` method dispatches reads to the correct device based on the
+/// stripe mapping returned by `map_logical_to_stripes`.
+/// Device reader: reads `len` bytes from physical offset, returns data or error.
+type DeviceReader = Box<dyn Fn(u64, usize) -> Result<Vec<u8>, ffs_types::ParseError> + Send + Sync>;
+
+pub struct BtrfsDeviceSet {
+    /// Map from devid → device read closure.
+    devices: std::collections::BTreeMap<u64, DeviceReader>,
+}
+
+impl BtrfsDeviceSet {
+    /// Create an empty device set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            devices: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Register a device with the given devid.
+    pub fn add_device(
+        &mut self,
+        devid: u64,
+        reader: Box<dyn Fn(u64, usize) -> Result<Vec<u8>, ffs_types::ParseError> + Send + Sync>,
+    ) {
+        self.devices.insert(devid, reader);
+    }
+
+    /// Number of registered devices.
+    #[must_use]
+    pub fn device_count(&self) -> usize {
+        self.devices.len()
+    }
+
+    /// Read `len` bytes from the device identified by `devid` at `physical_offset`.
+    pub fn read_physical(
+        &self,
+        devid: u64,
+        physical_offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, ffs_types::ParseError> {
+        let reader = self
+            .devices
+            .get(&devid)
+            .ok_or(ffs_types::ParseError::InvalidField {
+                field: "devid",
+                reason: "device not found in device set",
+            })?;
+        reader(physical_offset, len)
+    }
+
+    /// Read a logical block using the chunk map and stripe resolution.
+    ///
+    /// Resolves the logical address to physical stripes via `map_logical_to_stripes`,
+    /// then reads from the first available stripe's device. For mirrored profiles
+    /// (RAID1/10), this reads from the first mirror; fallback to other mirrors on
+    /// error could be added in the future.
+    pub fn read_logical(
+        &self,
+        chunks: &[ffs_ondisk::BtrfsChunkEntry],
+        logical: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, ffs_types::ParseError> {
+        let mapping = ffs_ondisk::map_logical_to_stripes(chunks, logical)?.ok_or(
+            ffs_types::ParseError::InvalidField {
+                field: "logical_address",
+                reason: "address not mapped in chunk table",
+            },
+        )?;
+
+        // Try each stripe until one succeeds (redundancy for mirrored profiles).
+        for stripe in &mapping.stripes {
+            match self.read_physical(stripe.devid, stripe.physical, len) {
+                Ok(data) => return Ok(data),
+                Err(_) if mapping.stripes.len() > 1 => {} // Try next mirror.
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(ffs_types::ParseError::InvalidField {
+            field: "stripe",
+            reason: "all mirrors failed to read",
+        })
+    }
+}
+
+impl std::fmt::Debug for BtrfsDeviceSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BtrfsDeviceSet")
+            .field("device_count", &self.devices.len())
+            .field("devids", &self.devices.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl Default for BtrfsDeviceSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── btrfs send/receive stream ──────────────────────────────────────────────
+
+/// btrfs send stream magic ("btrfs-stream\0").
+pub const BTRFS_SEND_STREAM_MAGIC: &[u8; 13] = b"btrfs-stream\0";
+
+/// btrfs send stream version.
+pub const BTRFS_SEND_STREAM_VERSION: u32 = 1;
+
+/// Send stream command types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum SendCommand {
+    Unspec = 0,
+    Subvol = 1,
+    Snapshot = 2,
+    Mkfile = 3,
+    Mkdir = 4,
+    Mknod = 5,
+    Mkfifo = 6,
+    Mksock = 7,
+    Symlink = 8,
+    Rename = 9,
+    Link = 10,
+    Unlink = 11,
+    Rmdir = 12,
+    SetXattr = 13,
+    RemoveXattr = 14,
+    Write = 15,
+    Clone = 16,
+    Truncate = 17,
+    Chmod = 18,
+    Chown = 19,
+    Utimes = 20,
+    End = 21,
+    UpdateExtent = 22,
+}
+
+impl SendCommand {
+    fn from_u16(val: u16) -> Option<Self> {
+        match val {
+            0 => Some(Self::Unspec),
+            1 => Some(Self::Subvol),
+            2 => Some(Self::Snapshot),
+            3 => Some(Self::Mkfile),
+            4 => Some(Self::Mkdir),
+            5 => Some(Self::Mknod),
+            6 => Some(Self::Mkfifo),
+            7 => Some(Self::Mksock),
+            8 => Some(Self::Symlink),
+            9 => Some(Self::Rename),
+            10 => Some(Self::Link),
+            11 => Some(Self::Unlink),
+            12 => Some(Self::Rmdir),
+            13 => Some(Self::SetXattr),
+            14 => Some(Self::RemoveXattr),
+            15 => Some(Self::Write),
+            16 => Some(Self::Clone),
+            17 => Some(Self::Truncate),
+            18 => Some(Self::Chmod),
+            19 => Some(Self::Chown),
+            20 => Some(Self::Utimes),
+            21 => Some(Self::End),
+            22 => Some(Self::UpdateExtent),
+            _ => None,
+        }
+    }
+}
+
+/// Send stream attribute types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum SendAttr {
+    Unspec = 0,
+    Uuid = 1,
+    Ctransid = 2,
+    Ino = 3,
+    Size = 4,
+    Mode = 5,
+    Uid = 6,
+    Gid = 7,
+    Rdev = 8,
+    Ctime = 9,
+    Mtime = 10,
+    Atime = 11,
+    Otime = 12,
+    XattrName = 13,
+    XattrData = 14,
+    Path = 15,
+    PathTo = 16,
+    PathLink = 17,
+    FileOffset = 18,
+    Data = 19,
+    CloneUuid = 20,
+    CloneCtransid = 21,
+    ClonePath = 22,
+    CloneOffset = 23,
+    CloneLen = 24,
+}
+
+/// A parsed command from a btrfs send stream.
+#[derive(Debug, Clone)]
+pub struct SendStreamCommand {
+    pub cmd: SendCommand,
+    pub attrs: Vec<(u16, Vec<u8>)>,
+}
+
+/// Result of parsing a btrfs send stream.
+#[derive(Debug, Clone, Default)]
+pub struct SendStreamParseResult {
+    pub version: u32,
+    pub commands: Vec<SendStreamCommand>,
+}
+
+/// Parse a btrfs send stream from raw bytes.
+///
+/// The send stream format is:
+/// - 13-byte magic ("btrfs-stream\0")
+/// - 4-byte version (u32 LE)
+/// - Commands: each is [len(u32 LE), cmd(u16 LE), crc32(u32 LE), attrs...]
+/// - Attributes: each is [type(u16 LE), len(u16 LE), data(len bytes)]
+pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types::ParseError> {
+    if data.len() < 17 {
+        return Err(ffs_types::ParseError::InsufficientData {
+            needed: 17,
+            offset: 0,
+            actual: data.len(),
+        });
+    }
+
+    if &data[..13] != BTRFS_SEND_STREAM_MAGIC {
+        return Err(ffs_types::ParseError::InvalidMagic {
+            expected: 0,
+            actual: 0,
+        });
+    }
+
+    let version = u32::from_le_bytes([data[13], data[14], data[15], data[16]]);
+    let mut pos = 17;
+    let mut commands = Vec::new();
+
+    while pos + 10 <= data.len() {
+        // Command header: len(u32), cmd(u16), crc32(u32)
+        let cmd_len =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let cmd_type = u16::from_le_bytes([data[pos + 4], data[pos + 5]]);
+        // Skip crc32 at pos+6..pos+10
+        pos += 10;
+
+        if pos + cmd_len > data.len() {
+            break;
+        }
+
+        let cmd_data = &data[pos..pos + cmd_len];
+        pos += cmd_len;
+
+        let cmd = SendCommand::from_u16(cmd_type).unwrap_or(SendCommand::Unspec);
+        if cmd == SendCommand::End {
+            commands.push(SendStreamCommand {
+                cmd,
+                attrs: Vec::new(),
+            });
+            break;
+        }
+
+        // Parse attributes within command data.
+        let mut attrs = Vec::new();
+        let mut attr_pos = 0;
+        while attr_pos + 4 <= cmd_data.len() {
+            let attr_type = u16::from_le_bytes([cmd_data[attr_pos], cmd_data[attr_pos + 1]]);
+            let attr_len =
+                u16::from_le_bytes([cmd_data[attr_pos + 2], cmd_data[attr_pos + 3]]) as usize;
+            attr_pos += 4;
+            if attr_pos + attr_len > cmd_data.len() {
+                break;
+            }
+            attrs.push((attr_type, cmd_data[attr_pos..attr_pos + attr_len].to_vec()));
+            attr_pos += attr_len;
+        }
+
+        commands.push(SendStreamCommand { cmd, attrs });
+    }
+
+    Ok(SendStreamParseResult { version, commands })
+}
+
 // ── btrfs tree-log replay ─────────────────────────────────────────────────
 
 /// Result of scanning the btrfs tree-log.
@@ -6702,5 +6993,61 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(r2.stripes[0].devid, 3, "data stripe 1 should be dev 3");
+    }
+
+    // ── Send stream tests ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_send_stream_minimal() {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&1_u32.to_le_bytes()); // version 1
+        // END command: len=0, cmd=21, crc=0
+        data.extend_from_slice(&0_u32.to_le_bytes()); // len
+        data.extend_from_slice(&21_u16.to_le_bytes()); // cmd = End
+        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
+
+        let result = parse_send_stream(&data).unwrap();
+        assert_eq!(result.version, 1);
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].cmd, SendCommand::End);
+    }
+
+    #[test]
+    fn parse_send_stream_with_mkdir() {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&1_u32.to_le_bytes()); // version 1
+
+        // MKDIR command with path attribute
+        let path = b"/testdir";
+        let attr_data_len = 4 + path.len(); // attr header (4) + path bytes
+        // Command header
+        data.extend_from_slice(&(attr_data_len as u32).to_le_bytes()); // len
+        data.extend_from_slice(&4_u16.to_le_bytes()); // cmd = Mkdir
+        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
+        // Path attribute: type=15 (Path), len=8
+        data.extend_from_slice(&15_u16.to_le_bytes());
+        data.extend_from_slice(&(path.len() as u16).to_le_bytes());
+        data.extend_from_slice(path);
+
+        // END command
+        data.extend_from_slice(&0_u32.to_le_bytes());
+        data.extend_from_slice(&21_u16.to_le_bytes());
+        data.extend_from_slice(&0_u32.to_le_bytes());
+
+        let result = parse_send_stream(&data).unwrap();
+        assert_eq!(result.commands.len(), 2);
+        assert_eq!(result.commands[0].cmd, SendCommand::Mkdir);
+        assert_eq!(result.commands[0].attrs.len(), 1);
+        assert_eq!(result.commands[0].attrs[0].0, 15); // Path attr
+        assert_eq!(result.commands[0].attrs[0].1, path);
+        assert_eq!(result.commands[1].cmd, SendCommand::End);
+    }
+
+    #[test]
+    fn parse_send_stream_rejects_bad_magic() {
+        let data = b"not-btrfs-magic\x01\x00\x00\x00";
+        assert!(parse_send_stream(data).is_err());
     }
 }

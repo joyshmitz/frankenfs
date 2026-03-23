@@ -1246,7 +1246,8 @@ mod fc_tests {
     fn build_fc_tag(tag_type: u16, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&tag_type.to_le_bytes());
-        buf.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        let payload_len = u16::try_from(payload.len()).expect("test payload length fits in u16");
+        buf.extend_from_slice(&payload_len.to_le_bytes());
         buf.extend_from_slice(payload);
         buf
     }
