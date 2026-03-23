@@ -8239,34 +8239,77 @@ impl OpenFs {
 
         if can_be_inline {
             // Inline extent: store data directly in the tree item.
+            let existing_key = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            let existing_inline = alloc
+                .fs_tree
+                .range(&existing_key, &existing_key)
+                .ok()
+                .and_then(|existing| existing.first().cloned())
+                .and_then(|(_, edata)| parse_extent_data(&edata).ok());
+            let existing_inline_len = match &existing_inline {
+                Some(BtrfsExtentData::Inline {
+                    compression,
+                    data,
+                    ram_bytes,
+                    ..
+                }) => {
+                    if *compression != 0 {
+                        usize::try_from(*ram_bytes).map_err(|_| {
+                            FfsError::InvalidGeometry(
+                                "inline extent ram_bytes does not fit usize".into(),
+                            )
+                        })?
+                    } else {
+                        data.len()
+                    }
+                }
+                _ => 0,
+            };
+            let inline_len = usize::try_from(end.max(inode.size))
+                .map_err(|_| FfsError::InvalidGeometry("end offset does not fit usize".into()))?
+                .max(existing_inline_len);
             let extent = BtrfsExtentData::Inline {
                 generation: alloc.generation,
-                ram_bytes: end,
+                ram_bytes: u64::try_from(inline_len).map_err(|_| {
+                    FfsError::InvalidGeometry("inline extent length does not fit u64".into())
+                })?,
                 compression: 0,
                 data: {
-                    // Build the full file content up to `end`.
-                    let end_usize = usize::try_from(end).map_err(|_| {
-                        FfsError::InvalidGeometry("end offset does not fit usize".into())
-                    })?;
-                    let mut content = vec![0u8; end_usize];
+                    // Build the full file content, preserving any existing tail.
+                    let mut content = vec![0u8; inline_len];
                     // Read any existing inline data.
-                    let existing_key = BtrfsKey {
-                        objectid: canonical,
-                        item_type: BTRFS_ITEM_EXTENT_DATA,
-                        offset: 0,
-                    };
-                    if let Ok(existing) = alloc.fs_tree.range(&existing_key, &existing_key) {
-                        if let Some((_, edata)) = existing.first() {
-                            if let Ok(BtrfsExtentData::Inline { data: prev, .. }) =
-                                parse_extent_data(edata)
-                            {
-                                let copy_len = prev.len().min(content.len());
-                                content[..copy_len].copy_from_slice(&prev[..copy_len]);
-                            }
-                        }
+                    if let Some(BtrfsExtentData::Inline {
+                        compression,
+                        data: prev,
+                        ram_bytes,
+                        ..
+                    }) = existing_inline
+                    {
+                        let prev_bytes = if compression != 0 {
+                            Self::btrfs_decompress(
+                                &prev,
+                                compression,
+                                usize::try_from(ram_bytes).map_err(|_| {
+                                    FfsError::InvalidGeometry(
+                                        "inline extent ram_bytes does not fit usize".into(),
+                                    )
+                                })?,
+                            )?
+                        } else {
+                            prev
+                        };
+                        let copy_len = prev_bytes.len().min(content.len());
+                        content[..copy_len].copy_from_slice(&prev_bytes[..copy_len]);
                     }
                     let offset_usize = usize::try_from(offset).map_err(|_| {
                         FfsError::InvalidGeometry("offset does not fit usize".into())
+                    })?;
+                    let end_usize = offset_usize.checked_add(data.len()).ok_or_else(|| {
+                        FfsError::InvalidGeometry("inline write end overflow".into())
                     })?;
                     content[offset_usize..end_usize].copy_from_slice(data);
                     content
@@ -20204,6 +20247,45 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_inline_overwrite_preserves_tail() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("inline-tail.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            b"Hello inline tail",
+        )
+        .expect("seed inline file");
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 6, b"Rust")
+            .expect("overwrite inside inline file");
+
+        let after = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 100)
+            .expect("read after inline overwrite");
+        assert_eq!(&after, b"Hello Rustne tail");
+
+        let updated = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after inline overwrite");
+        assert_eq!(updated.size, 17);
+    }
+
+    #[test]
     fn btrfs_write_partial_overwrite_regular_extent_preserves_surrounding_data() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -21338,7 +21420,7 @@ mod tests {
         // Use set_default (not with_default) so ALL threads use this subscriber,
         // not just the test thread. This prevents flaky failures where background
         // tasks log to a different subscriber.
-        let _default_guard = tracing::subscriber::set_default(subscriber);
+        let default_guard = tracing::subscriber::set_default(subscriber);
         {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
@@ -21357,7 +21439,7 @@ mod tests {
             ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0)
                 .expect("fallocate should succeed");
         }
-        drop(_default_guard);
+        drop(default_guard);
 
         let logs = parse_json_logs(&buffer);
         let applied = logs
@@ -21488,7 +21570,7 @@ mod tests {
             .with_writer(buffer.clone())
             .finish();
 
-        let _default_guard = tracing::subscriber::set_default(subscriber);
+        let default_guard = tracing::subscriber::set_default(subscriber);
         let err = {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
@@ -21507,7 +21589,7 @@ mod tests {
             ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x40)
                 .expect_err("unsupported mode bits should be rejected")
         };
-        drop(_default_guard);
+        drop(default_guard);
         assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
 
         let logs = parse_json_logs(&buffer);

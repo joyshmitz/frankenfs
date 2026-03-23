@@ -38,6 +38,8 @@ pub const BTRFS_ITEM_ROOT_ITEM: u8 = 132;
 pub const BTRFS_ITEM_EXTENT_ITEM: u8 = 168;
 pub const BTRFS_ITEM_METADATA_ITEM: u8 = 169;
 pub const BTRFS_ITEM_BLOCK_GROUP_ITEM: u8 = 192;
+pub const BTRFS_ITEM_DEV_ITEM: u8 = 216;
+pub const BTRFS_ITEM_CHUNK: u8 = 228;
 
 /// Well-known tree objectids.
 pub const BTRFS_EXTENT_TREE_OBJECTID: u64 = 2;
@@ -2932,6 +2934,113 @@ impl BtrfsExtentAllocator {
 
 /// A set of physical devices backing a btrfs filesystem.
 ///
+/// Parse a single chunk item from its raw on-disk data.
+///
+/// The `logical_offset` is the chunk's key.offset (logical start address).
+/// The data contains the fixed chunk header (48 bytes) + stripe entries.
+fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry, ParseError> {
+    use ffs_types::{read_le_u16, read_le_u32, read_le_u64};
+    const CHUNK_FIXED: usize = 48;
+    const STRIPE_SIZE: usize = 32;
+
+    if data.len() < CHUNK_FIXED {
+        return Err(ParseError::InsufficientData {
+            needed: CHUNK_FIXED,
+            offset: 0,
+            actual: data.len(),
+        });
+    }
+
+    let length = read_le_u64(data, 0)?;
+    let owner = read_le_u64(data, 8)?;
+    let stripe_len = read_le_u64(data, 16)?;
+    let chunk_type = read_le_u64(data, 24)?;
+    let io_align = read_le_u32(data, 32)?;
+    let io_width = read_le_u32(data, 36)?;
+    let sector_size = read_le_u32(data, 40)?;
+    let num_stripes = read_le_u16(data, 44)?;
+    let sub_stripes = read_le_u16(data, 46)?;
+
+    let stripe_count = usize::from(num_stripes);
+    let mut stripes = Vec::with_capacity(stripe_count);
+    let mut off = CHUNK_FIXED;
+    for _ in 0..stripe_count {
+        if off + STRIPE_SIZE > data.len() {
+            break;
+        }
+        stripes.push(ffs_ondisk::BtrfsStripe {
+            devid: read_le_u64(data, off)?,
+            offset: read_le_u64(data, off + 8)?,
+            dev_uuid: ffs_ondisk::btrfs::read_fixed::<16>(data, off + 16)?,
+        });
+        off += STRIPE_SIZE;
+    }
+
+    Ok(BtrfsChunkEntry {
+        key: BtrfsKey {
+            objectid: BTRFS_CHUNK_TREE_OBJECTID,
+            item_type: BTRFS_ITEM_CHUNK,
+            offset: logical_offset,
+        },
+        length,
+        owner,
+        stripe_len,
+        chunk_type,
+        io_align,
+        io_width,
+        sector_size,
+        num_stripes,
+        sub_stripes,
+        stripes,
+    })
+}
+
+/// Walk the chunk tree to build a complete chunk map.
+///
+/// The `sys_chunk_array` in the superblock provides bootstrap chunks needed to
+/// locate the chunk tree itself. This function walks the chunk tree (rooted at
+/// `sb.chunk_root`) using the bootstrap chunks, and returns ALL chunk entries
+/// including those not in `sys_chunk_array`.
+///
+/// For single-device filesystems, the `sys_chunk_array` usually contains all
+/// chunks. Multi-device or large filesystems may have additional chunks only
+/// in the chunk tree.
+pub fn walk_chunk_tree(
+    read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
+    sb: &BtrfsSuperblock,
+    bootstrap_chunks: &[BtrfsChunkEntry],
+) -> Result<Vec<BtrfsChunkEntry>, ParseError> {
+    let items = walk_tree(read_physical, bootstrap_chunks, sb.chunk_root, sb.nodesize)?;
+
+    let mut chunks = bootstrap_chunks.to_vec();
+    for item in &items {
+        if item.key.item_type == BTRFS_ITEM_CHUNK {
+            if let Ok(chunk) = parse_chunk_item(&item.data, item.key.offset) {
+                // Only add if not already in bootstrap set (avoid duplicates).
+                if !chunks.iter().any(|c| c.key.offset == chunk.key.offset) {
+                    chunks.push(chunk);
+                }
+            }
+        }
+    }
+
+    // Sort by logical offset for efficient lookup.
+    chunks.sort_by_key(|c| c.key.offset);
+    Ok(chunks)
+}
+
+/// Walk the device tree to discover all physical devices.
+///
+/// Returns a list of (devid, device_info) pairs for all devices in the filesystem.
+/// Used to build the `BtrfsDeviceSet` for multi-device reads.
+pub fn walk_device_tree(
+    read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
+    sb: &BtrfsSuperblock,
+    chunks: &[BtrfsChunkEntry],
+) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
+    walk_tree(read_physical, chunks, sb.dev_root, sb.nodesize)
+}
+
 /// Each device is identified by its `devid` (from `DEV_ITEM` in the device tree).
 /// The `read_physical` method dispatches reads to the correct device based on the
 /// stripe mapping returned by `map_logical_to_stripes`.
