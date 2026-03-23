@@ -51,6 +51,9 @@ pub struct Jbd2Superblock {
     pub feature_compat: u32,
     pub feature_incompat: u32,
     pub feature_ro_compat: u32,
+    /// Journal UUID (16 bytes at offset 48 in the JBD2 superblock).
+    /// Used for pairing external journal devices with their data filesystem.
+    pub uuid: [u8; 16],
 }
 
 impl Jbd2Superblock {
@@ -64,6 +67,15 @@ impl Jbd2Superblock {
             return None;
         }
 
+        // JBD2 UUID is at offset 48, 16 bytes.
+        let uuid = if bytes.len() >= 64 {
+            let mut u = [0u8; 16];
+            u.copy_from_slice(&bytes[48..64]);
+            u
+        } else {
+            [0u8; 16]
+        };
+
         Some(Self {
             block_size: read_be_u32(bytes, 12)?,
             max_len: read_be_u32(bytes, 16)?,
@@ -74,6 +86,7 @@ impl Jbd2Superblock {
             feature_incompat: read_be_u32(bytes, 40).unwrap_or(0),
             feature_ro_compat: read_be_u32(bytes, 44).unwrap_or(0),
             num_fc_blocks: read_be_u32(bytes, 84).unwrap_or(0),
+            uuid,
         })
     }
 

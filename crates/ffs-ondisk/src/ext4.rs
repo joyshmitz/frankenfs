@@ -137,23 +137,30 @@ impl Ext4IncompatFeatures {
 
     /// Bits FrankenFS v1 can parse/understand without failing mount validation.
     pub const ALLOWED_V1: Self = Self(
-        Self::FILETYPE.0
-            | Self::EXTENTS.0
+        Self::COMPRESSION.0
+            | Self::FILETYPE.0
             | Self::RECOVER.0
+            | Self::JOURNAL_DEV.0
             | Self::META_BG.0
+            | Self::EXTENTS.0
             | Self::BIT64.0
             | Self::MMP.0
             | Self::FLEX_BG.0
             | Self::EA_INODE.0
             | Self::DIRDATA.0
             | Self::CSUM_SEED.0
-            | Self::LARGEDIR.0,
+            | Self::LARGEDIR.0
+            | Self::INLINE_DATA.0
+            | Self::ENCRYPT.0
+            | Self::CASEFOLD.0,
     );
 
     /// Bits FrankenFS v1 explicitly rejects.
-    /// Only COMPRESSION and JOURNAL_DEV remain — all other features now supported
-    /// (at least for read-only mount with encrypted names shown as nokey digests).
-    pub const REJECTED_V1: Self = Self(Self::COMPRESSION.0 | Self::JOURNAL_DEV.0);
+    /// Empty — all incompat features are now accepted at mount time.
+    /// COMPRESSION: accepted at FS level; individual compressed inodes produce
+    /// clear `UnsupportedFeature` errors at read time (legacy ext2 dead format).
+    /// JOURNAL_DEV: detected at mount; paired-open with external journal supported.
+    pub const REJECTED_V1: Self = Self(0);
 
     /// All known incompat flags for iteration.
     const KNOWN: &[(u32, &'static str)] = &[
@@ -962,12 +969,8 @@ impl Ext4Superblock {
             });
         }
 
-        if (self.feature_incompat.0 & Ext4IncompatFeatures::REJECTED_V1.0) != 0 {
-            return Err(ParseError::InvalidField {
-                field: "feature_incompat",
-                reason: "unsupported features present (COMPRESSION/JOURNAL_DEV/ENCRYPT/CASEFOLD rejected)",
-            });
-        }
+        // REJECTED_V1 is empty — all known incompat features are accepted.
+        // The unknown-bits check below catches any truly unrecognized flags.
 
         if (self.feature_incompat.0 & !Ext4IncompatFeatures::ALLOWED_V1.0) != 0 {
             return Err(ParseError::InvalidField {
@@ -7017,14 +7020,15 @@ mod tests {
     }
 
     #[test]
-    fn incompat_describe_rejected_v1() {
+    fn incompat_describe_rejected_v1_is_empty() {
+        // All features are now allowed — REJECTED_V1 is empty.
         let flags = Ext4IncompatFeatures(
             Ext4IncompatFeatures::FILETYPE.0
                 | Ext4IncompatFeatures::EXTENTS.0
                 | Ext4IncompatFeatures::ENCRYPT.0,
         );
         let rejected = flags.describe_rejected_v1();
-        assert_eq!(rejected, vec!["ENCRYPT"]);
+        assert!(rejected.is_empty());
     }
 
     #[test]
@@ -7073,9 +7077,9 @@ mod tests {
     }
 
     #[test]
-    fn feature_diagnostics_detects_missing_and_rejected() {
+    fn feature_diagnostics_detects_missing_required() {
         let mut sb = make_valid_sb();
-        // Only EXTENTS (missing FILETYPE) + ENCRYPT (rejected).
+        // Only EXTENTS (missing FILETYPE) + ENCRYPT (now allowed, not rejected).
         let incompat =
             (Ext4IncompatFeatures::EXTENTS.0 | Ext4IncompatFeatures::ENCRYPT.0).to_le_bytes();
         sb[0x60..0x64].copy_from_slice(&incompat);
@@ -7084,7 +7088,8 @@ mod tests {
         let diag = parsed.feature_diagnostics_v1();
         assert!(!diag.is_ok());
         assert_eq!(diag.missing_required, vec!["FILETYPE"]);
-        assert_eq!(diag.rejected_present, vec!["ENCRYPT"]);
+        // ENCRYPT is now allowed, so rejected_present should be empty.
+        assert!(diag.rejected_present.is_empty());
     }
 
     #[test]
@@ -7102,7 +7107,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_v1_rejects_encrypt_with_actionable_reason() {
+    fn validate_v1_accepts_encrypt() {
+        // ENCRYPT is now in ALLOWED_V1 — should pass validation.
         let mut sb = make_valid_sb();
         let incompat = (Ext4IncompatFeatures::FILETYPE.0
             | Ext4IncompatFeatures::EXTENTS.0
@@ -7111,13 +7117,7 @@ mod tests {
         sb[0x60..0x64].copy_from_slice(&incompat);
 
         let parsed = Ext4Superblock::parse_superblock_region(&sb).unwrap();
-        let err = parsed.validate_v1().unwrap_err();
-        // Verify the error reason names the rejected features.
-        let reason = format!("{err}");
-        assert!(
-            reason.contains("ENCRYPT") || reason.contains("unsupported"),
-            "expected actionable error, got: {reason}",
-        );
+        assert!(parsed.validate_v1().is_ok());
     }
 
     // ── Inode parsing edge-case tests ───────────────────────────────────
@@ -9580,7 +9580,7 @@ mod tests {
             prop_assert!(parsed.validate_geometry().is_ok());
         }
 
-        /// validate_v1 accepts FILETYPE+EXTENTS, rejects without.
+        /// validate_v1 requires FILETYPE; EXTENTS is optional.
         #[test]
         fn ext4_proptest_superblock_validate_v1_requires_flags(
             has_filetype in any::<bool>(),
@@ -9594,7 +9594,7 @@ mod tests {
             );
             let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse sb");
             let result = parsed.validate_v1();
-            if has_filetype && has_extents {
+            if has_filetype {
                 prop_assert!(result.is_ok());
             } else {
                 prop_assert!(result.is_err());

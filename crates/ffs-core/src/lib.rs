@@ -45,7 +45,8 @@ use ffs_ondisk::{
     parse_extent_tree, parse_inode_extent_tree, parse_sys_chunk_array,
 };
 use ffs_types::{
-    BlockNumber, ByteOffset, CommitSeq, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET, EXT4_SECTOR_SIZE,
+    BlockNumber, ByteOffset, CommitSeq, EXT4_COMPR_FL, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET,
+    EXT4_SECTOR_SIZE,
     GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
 };
 use ffs_xattr::XattrWriteAccess;
@@ -233,6 +234,12 @@ pub struct OpenOptions {
     /// Controls whether corrupt or truncated WAL tails are silently truncated
     /// (`TruncateToLastGood`, default) or cause an immediate error (`FailFast`).
     pub mvcc_replay_policy: TailPolicy,
+    /// Optional path to an external ext4 journal device image.
+    ///
+    /// When the data filesystem's superblock has `journal_dev != 0`, journal
+    /// blocks live on a separate device. Provide the external journal image path
+    /// here so FrankenFS can validate UUID pairing and replay the journal.
+    pub external_journal_path: Option<std::path::PathBuf>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -244,6 +251,7 @@ impl Default for OpenOptions {
             mount_mode: MountMode::Compat,
             mvcc_wal_path: None,
             mvcc_replay_policy: TailPolicy::default(),
+            external_journal_path: None,
         }
     }
 }
@@ -384,6 +392,25 @@ pub struct Ext4FastCommitReplayEvidence {
     pub replay: FcReplayResult,
 }
 
+/// Diagnostic information about an external journal device pairing.
+///
+/// When a data filesystem references an external journal (`journal_dev != 0`)
+/// and the user supplies the external journal path, this struct captures
+/// the pairing validation result and journal metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalJournalInfo {
+    /// UUID from the data filesystem's `journal_uuid` field.
+    pub data_fs_journal_uuid: [u8; 16],
+    /// UUID read from the external journal device's JBD2 superblock.
+    pub journal_device_uuid: [u8; 16],
+    /// Whether the two UUIDs match (required for safe replay).
+    pub uuid_match: bool,
+    /// JBD2 superblock block size on the journal device.
+    pub journal_block_size: u32,
+    /// Maximum journal length in blocks.
+    pub journal_max_len: u32,
+}
+
 /// An opened filesystem image, ready for VFS operations.
 ///
 /// `OpenFs` bundles a validated superblock, pre-computed geometry, and the
@@ -412,6 +439,8 @@ pub struct OpenFs {
     pub crash_recovery: Option<CrashRecoveryOutcome>,
     /// MVCC WAL recovery report, if a WAL was replayed at open time.
     pub mvcc_wal_recovery: Option<WalRecoveryReport>,
+    /// External journal device pairing info, if an external journal was provided.
+    pub external_journal_info: Option<ExternalJournalInfo>,
     /// Active mount mode (compat or native).
     pub mount_mode: MountMode,
     /// Block device for I/O operations.
@@ -459,6 +488,7 @@ impl std::fmt::Debug for OpenFs {
             .field("ext4_fast_commit_replay", &self.ext4_fast_commit_replay)
             .field("crash_recovery", &self.crash_recovery)
             .field("mvcc_wal_recovery", &self.mvcc_wal_recovery)
+            .field("external_journal_info", &self.external_journal_info)
             .field("dev_len", &self.dev.len_bytes())
             .field("mvcc_version_count", &mvcc_guard.version_count())
             .field("mvcc_active_snapshots", &mvcc_guard.active_snapshot_count())
@@ -1863,6 +1893,19 @@ impl OpenFs {
 
         let (ext4_geometry, btrfs_context) = match &flavor {
             FsFlavor::Ext4(sb) => {
+                // Detect standalone journal device: image IS a journal, not a data FS.
+                if (sb.feature_incompat.0
+                    & ffs_ondisk::Ext4IncompatFeatures::JOURNAL_DEV.0)
+                    != 0
+                {
+                    return Err(FfsError::UnsupportedFeature(
+                        "image is a standalone ext4 journal device (JOURNAL_DEV incompat flag set). \
+                         To use this journal, mount the data filesystem with \
+                         --external-journal pointing to this image"
+                            .to_owned(),
+                    ));
+                }
+
                 if !options.skip_validation {
                     sb.validate_v1().map_err(|e| parse_error_to_ffs(&e))?;
                     validate_ext4_mmp(cx, &*dev, sb)?;
@@ -1951,6 +1994,7 @@ impl OpenFs {
             ext4_fast_commit_replay: None,
             crash_recovery: None,
             mvcc_wal_recovery,
+            external_journal_info: None,
             mount_mode: options.mount_mode,
             dev,
             mvcc_store,
@@ -1964,6 +2008,10 @@ impl OpenFs {
             fs.ext4_journal_replay =
                 fs.maybe_replay_ext4_journal(cx, options.ext4_journal_replay_mode)?;
             fs.ext4_fast_commit_replay = fs.maybe_collect_ext4_fast_commit_evidence(cx)?;
+
+            // External journal device pairing, if provided.
+            fs.external_journal_info =
+                fs.maybe_probe_external_journal(cx, options.external_journal_path.as_deref())?;
 
             fs.crash_recovery = fs.detect_and_recover_crash();
             if options.ext4_journal_replay_mode != Ext4JournalReplayMode::Skip {
@@ -2504,6 +2552,76 @@ impl OpenFs {
         Ok(())
     }
 
+    /// Probe an external journal device image for UUID pairing validation.
+    ///
+    /// When the data filesystem's `journal_dev` is non-zero, journal blocks live
+    /// on a separate device. If the user provided an external journal path, we
+    /// open it, parse its JBD2 superblock, and validate that the journal UUID
+    /// matches the data filesystem's `journal_uuid` field.
+    fn maybe_probe_external_journal(
+        &self,
+        cx: &Cx,
+        external_path: Option<&Path>,
+    ) -> Result<Option<ExternalJournalInfo>, FfsError> {
+        let Some(sb) = self.ext4_superblock() else {
+            return Ok(None);
+        };
+
+        // Only relevant if the data FS references an external journal device.
+        if sb.journal_dev == 0 {
+            return Ok(None);
+        }
+
+        let Some(path) = external_path else {
+            info!(
+                journal_dev = sb.journal_dev,
+                "ext4 data filesystem references external journal device but \
+                 no --external-journal path was provided; journal replay skipped"
+            );
+            return Ok(None);
+        };
+
+        // Open the journal device image and read its first block to parse
+        // the JBD2 superblock.
+        let journal_dev = FileByteDevice::open(path)?;
+        let journal_block_size = sb.block_size;
+
+        // Read the first block — JBD2 superblock is at the start of the journal.
+        let mut jbd2_buf = vec![0u8; journal_block_size as usize];
+        journal_dev.read_exact_at(cx, ByteOffset(0), &mut jbd2_buf)?;
+
+        let journal_sb = Jbd2Superblock::parse(&jbd2_buf).ok_or_else(|| {
+            FfsError::Format(
+                "external journal device does not contain a valid JBD2 superblock".to_owned(),
+            )
+        })?;
+
+        let uuid_match = sb.journal_uuid == journal_sb.uuid;
+        if uuid_match {
+            info!(
+                uuid = ?journal_sb.uuid,
+                block_size = journal_sb.block_size,
+                max_len = journal_sb.max_len,
+                "external journal device paired successfully"
+            );
+        } else {
+            warn!(
+                data_uuid = ?sb.journal_uuid,
+                journal_uuid = ?journal_sb.uuid,
+                "external journal UUID does not match data filesystem's journal_uuid — \
+                 journal replay will not be performed"
+            );
+        }
+
+        Ok(Some(ExternalJournalInfo {
+            data_fs_journal_uuid: sb.journal_uuid,
+            journal_device_uuid: journal_sb.uuid,
+            uuid_match,
+            journal_block_size: journal_sb.block_size,
+            journal_max_len: journal_sb.max_len,
+        }))
+    }
+
     fn maybe_replay_ext4_journal(
         &mut self,
         cx: &Cx,
@@ -2520,9 +2638,12 @@ impl OpenFs {
         }
 
         if journal_dev != 0 {
-            return Err(FfsError::UnsupportedFeature(format!(
-                "external ext4 journal device {journal_dev} is not supported"
-            )));
+            info!(
+                journal_dev,
+                "ext4 filesystem uses external journal device — \
+                 internal journal replay skipped (use external_journal_path for paired replay)"
+            );
+            return Ok(None);
         }
 
         if mode == Ext4JournalReplayMode::Skip {
@@ -10308,6 +10429,17 @@ impl FsOps for OpenFs {
                     return Err(FfsError::IsDirectory);
                 }
 
+                // Legacy ext2 compressed inode — format is dead/undocumented.
+                // We accept COMPRESSION at the FS level but refuse individual
+                // compressed inodes with a clear error.
+                if inode.flags & EXT4_COMPR_FL != 0 {
+                    return Err(FfsError::UnsupportedFeature(
+                        "ext2/ext4 compressed inode (EXT4_COMPR_FL): legacy cluster compression \
+                         format is not implemented — no modern kernel supports this"
+                            .to_owned(),
+                    ));
+                }
+
                 // Inline data: file content stored directly in inode's i_block area.
                 if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
                     return Ok(Self::read_ext4_inline_data(&inode, offset, size));
@@ -12425,11 +12557,11 @@ mod tests {
 
     #[test]
     fn open_fs_skip_validation() {
-        // Build an image with bad features (should fail validation but pass with skip)
+        // Build an image with unknown incompat features (should fail validation but pass with skip)
         let mut image = build_ext4_image(2);
         let sb_off = EXT4_SUPERBLOCK_OFFSET;
-        // Set unsupported incompat feature (COMPRESSION = 0x0001)
-        let bad_incompat: u32 = 0x0002 | 0x0040 | 0x0001; // FILETYPE | EXTENTS | COMPRESSION
+        // Set an unknown incompat feature bit (0x8000_0000 is not in ALLOWED_V1)
+        let bad_incompat: u32 = 0x0002 | 0x0040 | 0x8000_0000; // FILETYPE | EXTENTS | unknown
         image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&bad_incompat.to_le_bytes());
 
         let dev = TestDevice::from_vec(image.clone());
@@ -12753,11 +12885,31 @@ mod tests {
     }
 
     #[test]
-    fn open_fs_rejects_external_journal_device() {
+    fn open_fs_with_external_journal_dev_succeeds_without_path() {
+        // When journal_dev is non-zero but no external journal path is provided,
+        // mount succeeds but journal replay is skipped.
         let mut image = build_ext4_image_with_inode();
         let sb_off = EXT4_SUPERBLOCK_OFFSET;
         image[sb_off + 0xE0..sb_off + 0xE4].copy_from_slice(&8_u32.to_le_bytes()); // journal_inum
         image[sb_off + 0xE4..sb_off + 0xE8].copy_from_slice(&1_u32.to_le_bytes()); // journal_dev
+
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        assert!(fs.is_ext4());
+        // No external journal info since no path was provided.
+        assert!(fs.external_journal_info.is_none());
+    }
+
+    #[test]
+    fn open_fs_rejects_standalone_journal_device() {
+        // An image with JOURNAL_DEV incompat flag is a standalone journal device,
+        // not a data filesystem — should be rejected.
+        let mut image = build_ext4_image(2);
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        // Set JOURNAL_DEV (0x0008) | FILETYPE (0x0002) incompat flags.
+        let incompat: u32 = 0x0002 | 0x0008;
+        image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
 
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();

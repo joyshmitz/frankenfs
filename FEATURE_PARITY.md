@@ -6,12 +6,12 @@
 
 | Domain | Implemented | Total Tracked | Coverage |
 |--------|-------------|---------------|----------|
-| ext4 metadata parsing | 25 | 25 | 100.0% |
+| ext4 metadata parsing | 27 | 27 | 100.0% |
 | btrfs metadata parsing | 27 | 27 | 100.0% |
 | MVCC/COW core | 14 | 14 | 100.0% |
 | FUSE surface | 12 | 12 | 100.0% |
 | self-healing durability policy | 10 | 10 | 100.0% |
-| **Overall** | **88** | **88** | **100.0%** |
+| **Overall** | **90** | **90** | **100.0%** |
 
 > **Canonical source:** This Coverage Summary table in `FEATURE_PARITY.md` is the
 > single source of truth for implemented/total counts. `ParityReport::current()`
@@ -59,6 +59,8 @@
 | btrfs send/receive streams | `fs/btrfs/send.c` | ✅ | `parse_send_stream()` in ffs-btrfs parses the btrfs send stream format (magic, version, 22 command types, attribute TLV encoding). 3 parser tests. |
 | btrfs chunk tree walking | `fs/btrfs/volumes.c` | ✅ | `walk_chunk_tree()` in ffs-btrfs walks chunk tree beyond sys_chunk_array for complete chunk map. `parse_chunk_item()` parses individual chunk items. |
 | btrfs device tree discovery | `fs/btrfs/volumes.c` | ✅ | `walk_device_tree()` in ffs-btrfs walks device tree to enumerate all physical devices. |
+| ext4 COMPRESSION detection | `fs/ext4/inode.c` | ✅ | FS-level COMPRESSION incompat flag accepted at mount. Per-inode `EXT4_COMPR_FL` detected in read path with clear `UnsupportedFeature` error (legacy ext2 dead format — no modern kernel supports this). |
+| ext4 JOURNAL_DEV paired-open | `fs/ext4/super.c` | ✅ | Standalone journal device detection (JOURNAL_DEV incompat flag → clear error with guidance). External journal pairing via `OpenOptions::external_journal_path`: UUID validation between data FS `journal_uuid` and JBD2 superblock UUID, journal metadata extraction. Data FS with non-zero `journal_dev` mounts without external journal (journal replay skipped with info log). |
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

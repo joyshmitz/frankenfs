@@ -740,16 +740,15 @@ mod tests {
     }
 
     #[test]
-    fn incompat_features_describe_rejected_v1() {
+    fn incompat_features_describe_rejected_v1_all_allowed() {
+        // All known features are now allowed — REJECTED_V1 is empty.
         let features = Ext4IncompatFeatures(
             Ext4IncompatFeatures::ENCRYPT.0
                 | Ext4IncompatFeatures::INLINE_DATA.0
                 | Ext4IncompatFeatures::CASEFOLD.0,
         );
         let rejected = features.describe_rejected_v1();
-        assert!(rejected.contains(&"ENCRYPT"));
-        assert!(rejected.contains(&"INLINE_DATA"));
-        assert!(rejected.contains(&"CASEFOLD"));
+        assert!(rejected.is_empty());
     }
 
     #[test]
@@ -2107,24 +2106,24 @@ mod tests {
     }
 
     #[test]
-    fn superblock_validate_v1_rejects_encrypt() {
+    fn superblock_validate_v1_accepts_encrypt() {
         let mut sb = make_superblock();
         sb.feature_incompat.0 |= Ext4IncompatFeatures::ENCRYPT.0;
-        assert!(sb.validate_v1().is_err());
+        assert!(sb.validate_v1().is_ok());
     }
 
     #[test]
-    fn superblock_validate_v1_rejects_inline_data() {
+    fn superblock_validate_v1_accepts_inline_data() {
         let mut sb = make_superblock();
         sb.feature_incompat.0 |= Ext4IncompatFeatures::INLINE_DATA.0;
-        assert!(sb.validate_v1().is_err());
+        assert!(sb.validate_v1().is_ok());
     }
 
     #[test]
-    fn superblock_validate_v1_rejects_casefold() {
+    fn superblock_validate_v1_accepts_casefold() {
         let mut sb = make_superblock();
         sb.feature_incompat.0 |= Ext4IncompatFeatures::CASEFOLD.0;
-        assert!(sb.validate_v1().is_err());
+        assert!(sb.validate_v1().is_ok());
     }
 
     #[test]
@@ -2166,11 +2165,12 @@ mod tests {
     }
 
     #[test]
-    fn superblock_feature_diagnostics_v1_reports_rejected() {
+    fn superblock_feature_diagnostics_v1_no_rejected() {
+        // All known features are now allowed — REJECTED_V1 is empty.
         let mut sb = make_superblock();
         sb.feature_incompat.0 |= Ext4IncompatFeatures::ENCRYPT.0;
         let diag = sb.feature_diagnostics_v1();
-        assert!(diag.rejected_present.contains(&"ENCRYPT"));
+        assert!(diag.rejected_present.is_empty());
     }
 
     #[test]

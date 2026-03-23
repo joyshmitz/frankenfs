@@ -3478,10 +3478,10 @@ larger values are treated as unsupported until explicitly implemented.
 
 **Incompatible (`s_feature_incompat` at `0x60`) -- unknown = mount MUST fail:**
 
-REQUIRED: `FILETYPE`(0x0002), `EXTENTS`(0x0040).
-Supported: `RECOVER`(0x0004), `META_BG`(0x0010), `64BIT`(0x0080), `MMP`(0x0100, validated read-side), `FLEX_BG`(0x0200), `EA_INODE`(0x0400), `CSUM_SEED`(0x2000), `LARGEDIR`(0x4000).
+REQUIRED: `FILETYPE`(0x0002).
+Supported: `COMPRESSION`(0x0001, FS-level accepted; per-inode compressed data returns clear error — legacy ext2 dead format), `RECOVER`(0x0004), `JOURNAL_DEV`(0x0008, standalone journal device detection + paired-open), `META_BG`(0x0010), `EXTENTS`(0x0040), `64BIT`(0x0080), `MMP`(0x0100, validated read-side), `FLEX_BG`(0x0200), `EA_INODE`(0x0400), `CSUM_SEED`(0x2000), `LARGEDIR`(0x4000), `INLINE_DATA`(0x8000), `ENCRYPT`(0x10000, nokey mode — encrypted names shown as raw bytes), `CASEFOLD`(0x20000, case-insensitive directory lookup via Unicode lowercase).
 Ignored: `DIRDATA`(0x1000).
-REJECTED: `COMPRESSION`(0x0001), `JOURNAL_DEV`(0x0008), `INLINE_DATA`(0x8000), `ENCRYPT`(0x10000), `CASEFOLD`(0x20000).
+REJECTED: (none — all known incompat features are accepted at mount time).
 
 **Compatible (`s_feature_compat` at `0x5C`) -- advisory, safe to ignore:**
 
