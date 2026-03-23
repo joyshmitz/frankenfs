@@ -77,6 +77,7 @@ fn make_geometry() -> FsGeometry {
         log_groups_per_flex: 0,
         backup_bgs: [0, 0],
         cluster_ratio: 1,
+        first_inode: 11,
     }
 }
 

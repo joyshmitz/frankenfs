@@ -781,6 +781,7 @@ impl Jbd2Writer {
     /// 3. One commit block.
     ///
     /// Returns `(sequence_number, write_stats)`.
+    #[expect(clippy::too_many_lines)]
     pub fn commit_transaction(
         &mut self,
         cx: &Cx,
