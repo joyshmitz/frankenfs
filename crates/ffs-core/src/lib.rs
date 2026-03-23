@@ -3781,7 +3781,7 @@ impl OpenFs {
                         compressed[pos + 3],
                     ]) as usize;
                     pos += 4;
-                    if pos + seg_len > data_end {
+                    if seg_len == 0 || pos + seg_len > data_end {
                         break;
                     }
                     let seg_data = &compressed[pos..pos + seg_len];
@@ -5142,8 +5142,6 @@ impl Ext4FsOps {
     }
 }
 
-/// Derive a cache namespace from an inode's extent root bytes.
-///
 impl OpenFs {
     /// Read inline data from an ext4 inode's i_block area + xattr ibody.
     ///
