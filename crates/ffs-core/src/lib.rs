@@ -13081,12 +13081,15 @@ mod tests {
         let incompat: u32 = 0x0002 | 0x0040; // FILETYPE | EXTENTS
         image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
         image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes()); // first_ino
+        image[sb_off + 0xFE..sb_off + 0x100].copy_from_slice(&32_u16.to_le_bytes()); // s_desc_size
 
         // ── Group descriptor at block 1 ──
         let gd_off: usize = 4096;
         image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes()); // block_bitmap
         image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes()); // inode_bitmap
         image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes()); // inode_table
+        image[gd_off + 0x0C..gd_off + 0x0E].copy_from_slice(&64_u16.to_le_bytes()); // free_blocks_count
+        image[gd_off + 0x0E..gd_off + 0x10].copy_from_slice(&128_u16.to_le_bytes()); // free_inodes_count
 
         // ── Inode #11 (index 10): regular file with leaf extent ──
         let ino11_off: usize = 4 * 4096 + 10 * 256;

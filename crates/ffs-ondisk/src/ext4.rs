@@ -151,13 +151,8 @@ impl Ext4IncompatFeatures {
     );
 
     /// Bits FrankenFS v1 explicitly rejects.
-    pub const REJECTED_V1: Self = Self(
-        Self::COMPRESSION.0
-            | Self::JOURNAL_DEV.0
-            | Self::ENCRYPT.0
-            | Self::CASEFOLD.0
-            | Self::INLINE_DATA.0,
-    );
+    pub const REJECTED_V1: Self =
+        Self(Self::COMPRESSION.0 | Self::JOURNAL_DEV.0 | Self::ENCRYPT.0);
 
     /// All known incompat flags for iteration.
     const KNOWN: &[(u32, &'static str)] = &[
@@ -2726,6 +2721,45 @@ pub fn parse_dir_block(
 pub fn lookup_in_dir_block(block: &[u8], block_size: u32, target: &[u8]) -> Option<Ext4DirEntry> {
     let (entries, _) = parse_dir_block(block, block_size).ok()?;
     entries.into_iter().find(|e| e.name == target)
+}
+
+/// Case-insensitive directory entry lookup for casefold directories.
+///
+/// Compares entry names against `target` using Unicode case-insensitive
+/// matching (lowercase comparison of UTF-8 strings). Falls back to
+/// byte-level comparison for non-UTF-8 filenames.
+pub fn lookup_in_dir_block_casefold(
+    block: &[u8],
+    block_size: u32,
+    target: &[u8],
+) -> Option<Ext4DirEntry> {
+    let (entries, _) = parse_dir_block(block, block_size).ok()?;
+    let target_lower = casefold_name(target);
+    entries
+        .into_iter()
+        .find(|e| casefold_name(&e.name) == target_lower)
+}
+
+/// Apply Unicode casefold to a filename for case-insensitive comparison.
+///
+/// Converts UTF-8 filenames to lowercase. Non-UTF-8 filenames are compared
+/// byte-by-byte with ASCII case folding only.
+fn casefold_name(name: &[u8]) -> Vec<u8> {
+    match std::str::from_utf8(name) {
+        Ok(s) => s.to_lowercase().into_bytes(),
+        Err(_) => {
+            // Non-UTF-8: ASCII case fold only.
+            name.iter()
+                .map(|&b| {
+                    if b.is_ascii_uppercase() {
+                        b.to_ascii_lowercase()
+                    } else {
+                        b
+                    }
+                })
+                .collect()
+        }
+    }
 }
 
 // ── Zero-allocation directory block iterator ────────────────────────────────
