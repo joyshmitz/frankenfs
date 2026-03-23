@@ -198,6 +198,23 @@ impl WalReplayEngine {
 
                     // D1: Enforce strict monotonicity.
                     if commit.commit_seq.0 <= last_replayed_seq {
+                        let record_offset_u64 = u64::try_from(record_offset).unwrap_or(u64::MAX);
+
+                        if self.tail_policy == TailPolicy::FailFast {
+                            warn!(
+                                operation_id,
+                                offset = record_offset,
+                                violating_seq = commit.commit_seq.0,
+                                expected_after = last_replayed_seq,
+                                "wal_replay_monotonicity_fail_fast"
+                            );
+                            return Err(FfsError::Format(format!(
+                                "WAL replay: monotonicity violation at offset {record_offset_u64} \
+                                 (seq {} <= {}); FailFast policy in effect",
+                                commit.commit_seq.0, last_replayed_seq
+                            )));
+                        }
+
                         warn!(
                             operation_id,
                             offset = record_offset,
@@ -215,6 +232,22 @@ impl WalReplayEngine {
 
                     // D8: Reject sentinel values.
                     if commit.commit_seq.0 == u64::MAX || commit.txn_id.0 == u64::MAX {
+                        let record_offset_u64 = u64::try_from(record_offset).unwrap_or(u64::MAX);
+
+                        if self.tail_policy == TailPolicy::FailFast {
+                            warn!(
+                                operation_id,
+                                offset = record_offset,
+                                commit_seq = commit.commit_seq.0,
+                                txn_id = commit.txn_id.0,
+                                "wal_replay_sentinel_fail_fast"
+                            );
+                            return Err(FfsError::Format(format!(
+                                "WAL replay: sentinel value at offset {record_offset_u64}; \
+                                 FailFast policy in effect"
+                            )));
+                        }
+
                         warn!(
                             operation_id,
                             offset = record_offset,
@@ -225,7 +258,7 @@ impl WalReplayEngine {
                         records_discarded += 1;
                         outcome = ReplayOutcome::CorruptTail {
                             records_discarded,
-                            first_corrupt_offset: u64::try_from(record_offset).unwrap_or(u64::MAX),
+                            first_corrupt_offset: record_offset_u64,
                         };
                         break;
                     }

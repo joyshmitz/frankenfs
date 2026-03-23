@@ -3164,9 +3164,9 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
     }
 
     if &data[..13] != BTRFS_SEND_STREAM_MAGIC {
-        return Err(ffs_types::ParseError::InvalidMagic {
-            expected: 0,
-            actual: 0,
+        return Err(ffs_types::ParseError::InvalidField {
+            field: "send_stream_magic",
+            reason: "not a btrfs send stream (magic mismatch)",
         });
     }
 

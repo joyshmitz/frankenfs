@@ -27,6 +27,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use tracing::{debug, error, info, warn};
 
+type CoalescedRecordOffsets = Vec<(usize, usize)>;
+type EncodedCoalescedBatch = (Vec<u8>, CoalescedRecordOffsets);
+
 // ── Error types ──────────────────────────────────────────────────────────────
 
 /// Classified error for WAL write operations.
@@ -408,15 +411,11 @@ impl WalWriter {
         }
 
         // ── Sync policy ──────────────────────────────────────────────────
+        let pending_before = self.appends_since_sync;
         self.appends_since_sync += 1;
         let synced = match self.maybe_sync(op_id, commit_seq) {
             Ok(s) => s,
-            Err(e) => {
-                // Revert the write position and truncate the file since the sync failed and the caller will roll back.
-                self.write_pos = write_offset;
-                let _ = self.file.set_len(write_offset);
-                return Err(e);
-            }
+            Err(e) => return Err(self.rollback_failed_append(write_offset, pending_before, e)),
         };
 
         self.last_commit_seq = commit_seq;
@@ -524,26 +523,7 @@ impl WalWriter {
 
         let op_id = self.next_op_id();
 
-        // ── Pre-validate all commits before encoding ──────────────────────
-        let mut prev_seq = self.last_commit_seq;
-        for commit in commits {
-            let seq = commit.commit_seq.0;
-            let txn = commit.txn_id.0;
-
-            if seq == u64::MAX || txn == u64::MAX {
-                return Err(WalWriteError::FormatViolation {
-                    detail: "reserved sentinel value (u64::MAX) in coalesced batch".to_owned(),
-                });
-            }
-            if prev_seq > 0 && seq <= prev_seq {
-                return Err(WalWriteError::FormatViolation {
-                    detail: format!(
-                        "coalesced commit_seq {seq} not strictly greater than {prev_seq}"
-                    ),
-                });
-            }
-            prev_seq = seq;
-        }
+        let prev_seq = self.validate_coalesced_commits(commits)?;
 
         // ── Backpressure check ────────────────────────────────────────────
         if self.config.backpressure_threshold_bytes > 0
@@ -555,19 +535,7 @@ impl WalWriter {
             });
         }
 
-        // ── Encode all commits into a single buffer ───────────────────────
-        let mut coalesced_buf = Vec::new();
-        let mut record_offsets = Vec::with_capacity(commits.len());
-
-        for commit in commits {
-            let offset_in_buf = coalesced_buf.len();
-            let encoded =
-                wal::encode_commit(commit).map_err(|e| WalWriteError::FormatViolation {
-                    detail: format!("failed to encode commit in coalesced batch: {e}"),
-                })?;
-            record_offsets.push((offset_in_buf, encoded.len()));
-            coalesced_buf.extend_from_slice(&encoded);
-        }
+        let (coalesced_buf, record_offsets) = Self::encode_coalesced_commits(commits)?;
 
         let total_bytes = coalesced_buf.len();
         let base_offset = self.write_pos;
@@ -602,16 +570,15 @@ impl WalWriter {
             }
         })?;
 
+        self.verify_or_rollback_coalesced_write(base_offset, &coalesced_buf, op_id)?;
+
         // ── Single sync ───────────────────────────────────────────────────
+        let pending_before = self.appends_since_sync;
         self.appends_since_sync +=
             u32::try_from(commits.len()).expect("coalesced append count fits in u32");
         let synced = match self.maybe_sync(op_id, prev_seq) {
             Ok(s) => s,
-            Err(e) => {
-                self.write_pos = base_offset;
-                let _ = self.file.set_len(base_offset);
-                return Err(e);
-            }
+            Err(e) => return Err(self.rollback_failed_append(base_offset, pending_before, e)),
         };
 
         self.last_commit_seq = prev_seq;
@@ -650,6 +617,89 @@ impl WalWriter {
         let id = self.next_operation_id;
         self.next_operation_id += 1;
         id
+    }
+
+    fn rollback_failed_append(
+        &mut self,
+        write_offset: u64,
+        pending_before: u32,
+        error: WalWriteError,
+    ) -> WalWriteError {
+        self.write_pos = write_offset;
+        let _ = self.file.set_len(write_offset);
+        self.appends_since_sync = pending_before;
+        error
+    }
+
+    fn validate_coalesced_commits(
+        &self,
+        commits: &[WalCommit],
+    ) -> std::result::Result<u64, WalWriteError> {
+        let mut prev_seq = self.last_commit_seq;
+        for commit in commits {
+            let seq = commit.commit_seq.0;
+            let txn = commit.txn_id.0;
+
+            if seq == u64::MAX || txn == u64::MAX {
+                return Err(WalWriteError::FormatViolation {
+                    detail: "reserved sentinel value (u64::MAX) in coalesced batch".to_owned(),
+                });
+            }
+            if prev_seq > 0 && seq <= prev_seq {
+                return Err(WalWriteError::FormatViolation {
+                    detail: format!(
+                        "coalesced commit_seq {seq} not strictly greater than {prev_seq}"
+                    ),
+                });
+            }
+            prev_seq = seq;
+        }
+        Ok(prev_seq)
+    }
+
+    fn encode_coalesced_commits(
+        commits: &[WalCommit],
+    ) -> std::result::Result<EncodedCoalescedBatch, WalWriteError> {
+        let mut coalesced_buf = Vec::new();
+        let mut record_offsets = CoalescedRecordOffsets::with_capacity(commits.len());
+
+        for commit in commits {
+            let offset_in_buf = coalesced_buf.len();
+            let encoded =
+                wal::encode_commit(commit).map_err(|e| WalWriteError::FormatViolation {
+                    detail: format!("failed to encode commit in coalesced batch: {e}"),
+                })?;
+            record_offsets.push((offset_in_buf, encoded.len()));
+            coalesced_buf.extend_from_slice(&encoded);
+        }
+
+        Ok((coalesced_buf, record_offsets))
+    }
+
+    fn verify_or_rollback_coalesced_write(
+        &mut self,
+        base_offset: u64,
+        coalesced_buf: &[u8],
+        op_id: u64,
+    ) -> std::result::Result<(), WalWriteError> {
+        if let Err(error) = self.maybe_verify_coalesced_write(base_offset, coalesced_buf, op_id) {
+            self.write_pos = base_offset;
+            let _ = self.file.set_len(base_offset);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn maybe_verify_coalesced_write(
+        &mut self,
+        base_offset: u64,
+        coalesced_buf: &[u8],
+        op_id: u64,
+    ) -> std::result::Result<(), WalWriteError> {
+        if self.config.verify_writes {
+            self.verify_written_record(base_offset, coalesced_buf, op_id)?;
+        }
+        Ok(())
     }
 
     fn raw_append(&mut self, data: &[u8]) -> std::io::Result<()> {
@@ -1052,6 +1102,21 @@ mod tests {
         assert!(!err.is_retryable());
         assert!(!err.is_fatal());
         assert!(matches!(err, WalWriteError::SyncIo { .. }));
+        assert_eq!(
+            w.pending_sync_count(),
+            0,
+            "failed sync must not leave phantom pending appends"
+        );
+        assert_eq!(
+            w.size(),
+            HEADER_SIZE as u64,
+            "failed sync must roll back WAL size"
+        );
+        assert_eq!(
+            w.last_commit_seq(),
+            0,
+            "failed sync must not advance commit sequence"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -1361,6 +1426,36 @@ mod tests {
         let results = w.append_commits_coalesced(&commits).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(w.last_commit_seq(), 7);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coalesced_sync_failure_rolls_back_pending_state() {
+        let path = tmp_path();
+        let mut w = WalWriter::create(&path, WalWriterConfig::default()).unwrap();
+        let commits = vec![make_commit(1, 1, &[]), make_commit(2, 2, &[])];
+
+        w.fail_sync = true;
+        let err = w
+            .append_commits_coalesced(&commits)
+            .expect_err("injected coalesced sync failure");
+        assert!(matches!(err, WalWriteError::SyncIo { .. }));
+        assert_eq!(
+            w.pending_sync_count(),
+            0,
+            "failed coalesced sync must not leave phantom pending appends"
+        );
+        assert_eq!(
+            w.size(),
+            HEADER_SIZE as u64,
+            "failed coalesced sync must roll back WAL size"
+        );
+        assert_eq!(
+            w.last_commit_seq(),
+            0,
+            "failed coalesced sync must not advance commit sequence"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

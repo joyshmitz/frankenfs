@@ -1198,7 +1198,12 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
         pos += tag_len;
 
         let Some(tag) = FcTag::from_u16(tag_type) else {
-            continue; // Unknown tag — skip for forward compatibility.
+            // Unknown tags mean we cannot safely replay this stream without
+            // understanding the omitted semantics. Force the caller to fall
+            // back to full recovery instead of applying a partial transaction.
+            discard_pending_fc_transaction(&mut result, &mut pending);
+            result.fallback_required = true;
+            break;
         };
 
         match tag {
@@ -1343,7 +1348,7 @@ mod fc_tests {
     }
 
     #[test]
-    fn replay_unknown_tags_skipped() {
+    fn replay_unknown_tags_require_fallback() {
         let mut data = Vec::new();
         data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
         data.extend(build_fc_tag(0xFF, &[1, 2, 3])); // unknown tag
@@ -1351,11 +1356,10 @@ mod fc_tests {
         data.extend(build_fc_tag(0x09, &3_u32.to_le_bytes())); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
-        assert_eq!(result.operations.len(), 1);
-        assert!(matches!(
-            &result.operations[0],
-            FcOperation::InodeUpdate(42)
-        ));
+        assert!(result.operations.is_empty());
+        assert_eq!(result.transactions_found, 0);
+        assert_eq!(result.incomplete_transactions, 1);
+        assert!(result.fallback_required);
     }
 
     #[test]

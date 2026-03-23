@@ -2259,7 +2259,7 @@ impl OpenFs {
         let mut stats = Ext4OrphanRecoveryStats::default();
 
         {
-            let block_dev = self.block_device_adapter();
+            let block_dev = self.direct_block_device_adapter();
             for ino in orphans {
                 stats.scanned = stats.scanned.saturating_add(1);
 
@@ -2426,7 +2426,7 @@ impl OpenFs {
 
         // Phase 1: Read the current superblock.
         let mut block_data = {
-            let block_dev = self.block_device_adapter();
+            let block_dev = self.direct_block_device_adapter();
             block_dev.read_block(cx, sb_block)?.as_slice().to_vec()
         };
 
@@ -2453,7 +2453,7 @@ impl OpenFs {
 
         // Phase 3: Write back the updated superblock.
         {
-            let block_dev = self.block_device_adapter();
+            let block_dev = self.direct_block_device_adapter();
             block_dev.write_block(cx, sb_block, &block_data)?;
         }
 
@@ -5775,6 +5775,18 @@ impl OpenFs {
         MvccBlockDevice::new(base, Arc::clone(&self.mvcc_store), snapshot)
     }
 
+    /// Get a direct block adapter over the underlying byte device.
+    ///
+    /// Mount-time recovery must persist to the image or replay overlay itself,
+    /// not to the runtime MVCC version store, because recovery establishes the
+    /// baseline state later readers consume.
+    fn direct_block_device_adapter(&self) -> ByteDeviceBlockAdapter<'_> {
+        ByteDeviceBlockAdapter {
+            dev: self.dev.as_ref(),
+            block_size: self.block_size(),
+        }
+    }
+
     /// Get current wall-clock timestamp as (seconds-since-epoch, nanoseconds).
     ///
     /// Returns full 64-bit seconds to support ext4 34-bit timestamps (epoch
@@ -7882,6 +7894,89 @@ impl OpenFs {
         Ok(())
     }
 
+    fn btrfs_remove_overlapping_extent_data(
+        &self,
+        cx: &Cx,
+        alloc: &mut BtrfsAllocState,
+        canonical: u64,
+        range_start: u64,
+        range_end: u64,
+    ) -> ffs_error::Result<()> {
+        if range_start >= range_end {
+            return Ok(());
+        }
+
+        let ext_start = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let ext_end = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        let extents = alloc
+            .fs_tree
+            .range(&ext_start, &ext_end)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        for (key, extent_bytes) in extents {
+            let extent = parse_extent_data(&extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
+            let logical_len = Self::btrfs_extent_logical_len(&extent)?;
+            let logical_end = key
+                .offset
+                .checked_add(logical_len)
+                .ok_or_else(|| FfsError::InvalidGeometry("extent logical end overflow".into()))?;
+            let overlap_start = key.offset.max(range_start);
+            let overlap_end = logical_end.min(range_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            let materialized = self.btrfs_materialize_extent(cx, &extent)?;
+            alloc
+                .fs_tree
+                .delete(&key)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            if let BtrfsExtentData::Regular {
+                disk_bytenr,
+                disk_num_bytes,
+                ..
+            } = extent
+            {
+                if disk_bytenr > 0 {
+                    alloc
+                        .extent_alloc
+                        .free_extent(disk_bytenr, disk_num_bytes, false)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                }
+            }
+
+            let left_len = usize::try_from(overlap_start - key.offset)
+                .map_err(|_| FfsError::InvalidGeometry("left segment length overflow".into()))?;
+            let right_start = usize::try_from(overlap_end - key.offset)
+                .map_err(|_| FfsError::InvalidGeometry("right segment offset overflow".into()))?;
+
+            self.btrfs_insert_regular_extent_segment(
+                cx,
+                alloc,
+                canonical,
+                key.offset,
+                &materialized[..left_len],
+            )?;
+            self.btrfs_insert_regular_extent_segment(
+                cx,
+                alloc,
+                canonical,
+                overlap_end,
+                &materialized[right_start..],
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn btrfs_recompute_inode_nbytes(
         alloc: &BtrfsAllocState,
         canonical: u64,
@@ -8189,72 +8284,10 @@ impl OpenFs {
                 .or_else(|_| alloc.fs_tree.insert(extent_key, &extent_bytes))
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         } else {
-            // If there's an existing inline extent at offset 0, convert it
-            // to a regular extent to preserve its data before writing the
-            // new regular extent at the (possibly non-zero) write offset.
-            let inline_key = BtrfsKey {
-                objectid: canonical,
-                item_type: BTRFS_ITEM_EXTENT_DATA,
-                offset: 0,
-            };
-            let mut merged_data = None;
-
-            if let Ok(existing) = alloc.fs_tree.range(&inline_key, &inline_key) {
-                if let Some((_, edata)) = existing.first() {
-                    if let Ok(BtrfsExtentData::Inline {
-                        data: prev_data, ..
-                    }) = parse_extent_data(edata)
-                    {
-                        alloc
-                            .fs_tree
-                            .delete(&inline_key)
-                            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-
-                        if offset == 0 && data.len() < prev_data.len() {
-                            // Partial overwrite at offset 0: merge new data into old
-                            // inline extent to preserve the tail before converting.
-                            let mut merged = prev_data;
-                            merged[..data.len()].copy_from_slice(data);
-                            merged_data = Some(merged);
-                        } else if !prev_data.is_empty() && offset > 0 {
-                            // Persist the old inline data as a regular extent at
-                            // offset 0 so reads in [0, prev_data.len()) still work.
-                            let prev_data_len = u64::try_from(prev_data.len()).map_err(|_| {
-                                FfsError::InvalidGeometry(
-                                    "existing inline extent length does not fit u64".into(),
-                                )
-                            })?;
-                            let prev_alloc_size =
-                                prev_data_len.saturating_add(sectorsize - 1) & !(sectorsize - 1);
-                            let prev_allocation = alloc
-                                .extent_alloc
-                                .alloc_data(prev_alloc_size)
-                                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                            self.btrfs_write_logical(cx, prev_allocation.bytenr, &prev_data)?;
-                            let prev_extent = BtrfsExtentData::Regular {
-                                generation: alloc.generation,
-                                ram_bytes: prev_data_len,
-                                extent_type: BTRFS_FILE_EXTENT_REG,
-                                compression: 0,
-                                disk_bytenr: prev_allocation.bytenr,
-                                disk_num_bytes: prev_alloc_size,
-                                extent_offset: 0,
-                                num_bytes: prev_data_len,
-                            };
-                            alloc
-                                .fs_tree
-                                .insert(inline_key, &prev_extent.to_bytes())
-                                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                        }
-                    }
-                }
-            }
-
-            let data_to_write = merged_data.as_deref().unwrap_or(data);
-            let write_len = data_to_write.len();
+            self.btrfs_remove_overlapping_extent_data(cx, &mut alloc, canonical, offset, end)?;
 
             // Allocate a data extent and write through the device.
-            let write_len_u64 = u64::try_from(write_len)
+            let write_len_u64 = u64::try_from(data.len())
                 .map_err(|_| FfsError::InvalidGeometry("write length does not fit u64".into()))?;
             let alloc_size = write_len_u64.saturating_add(sectorsize - 1) & !(sectorsize - 1);
             let allocation = alloc
@@ -8264,7 +8297,7 @@ impl OpenFs {
             let disk_bytenr = allocation.bytenr;
 
             // Write data to the allocated logical region.
-            self.btrfs_write_logical(cx, disk_bytenr, data_to_write)?;
+            self.btrfs_write_logical(cx, disk_bytenr, data)?;
 
             // Insert the EXTENT_DATA item.
             let extent = BtrfsExtentData::Regular {
@@ -8282,36 +8315,7 @@ impl OpenFs {
                 item_type: BTRFS_ITEM_EXTENT_DATA,
                 offset,
             };
-
-            // Free the old physical extent if we are overwriting an existing regular extent
-            if let Ok(existing) = alloc.fs_tree.range(&extent_key, &extent_key) {
-                if let Some((_, edata)) = existing.first() {
-                    if let Ok(BtrfsExtentData::Regular {
-                        disk_bytenr: old_bytenr,
-                        disk_num_bytes: old_num_bytes,
-                        ..
-                    }) = parse_extent_data(edata)
-                    {
-                        if old_bytenr > 0 {
-                            if let Err(e) =
-                                alloc
-                                    .extent_alloc
-                                    .free_extent(old_bytenr, old_num_bytes, false)
-                            {
-                                warn!(
-                                    "btrfs_write: failed to free overwritten extent at {old_bytenr}: {e:?}"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
             let extent_bytes = extent.to_bytes();
-            // Delete any existing extent at this exact offset to avoid duplicates
-            // in the tree (btrfs requirement). Note: this doesn't handle partial
-            // overlaps or splitting existing extents yet.
-            let _ = alloc.fs_tree.delete(&extent_key);
             alloc
                 .fs_tree
                 .insert(extent_key, &extent_bytes)
@@ -20197,6 +20201,48 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 100)
             .unwrap();
         assert_eq!(&data, b"Hello World");
+    }
+
+    #[test]
+    fn btrfs_write_partial_overwrite_regular_extent_preserves_surrounding_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("regular-overlap.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        let original = vec![b'A'; 4096];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &original)
+            .expect("seed regular extent");
+
+        let patch = vec![b'B'; 512];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 1536, &patch)
+            .expect("partial overwrite inside regular extent");
+
+        let after = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
+            .expect("read after partial overwrite");
+        assert_eq!(&after[..1536], &original[..1536]);
+        assert_eq!(&after[1536..2048], &patch);
+        assert_eq!(&after[2048..], &original[2048..]);
+
+        let updated = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after partial overwrite");
+        assert_eq!(updated.size, 4096);
+        assert_eq!(
+            updated.blocks, 8,
+            "partial overwrite must not double-count logical bytes via overlapping extents"
+        );
     }
 
     #[test]

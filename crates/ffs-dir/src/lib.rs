@@ -297,7 +297,9 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
             return Ok(true);
         }
 
-        prev_off_opt = Some(off);
+        if cur_ino != 0 {
+            prev_off_opt = Some(off);
+        }
         off = end;
     }
 
@@ -464,6 +466,21 @@ mod tests {
         assert!(removed);
         let merged = read_u16_le(&block, 4).unwrap();
         assert_eq!(merged, 24);
+    }
+
+    #[test]
+    fn remove_entry_coalesces_into_previous_live_entry_after_deleted_slot() {
+        let mut block = vec![0u8; 64];
+        write_entry(&mut block, 0, 10, 12, Ext4FileType::RegFile, b"a").unwrap();
+        write_entry(&mut block, 12, 0, 12, Ext4FileType::Unknown, b"x").unwrap();
+        write_entry(&mut block, 24, 11, 12, Ext4FileType::RegFile, b"b").unwrap();
+        write_entry(&mut block, 36, 12, 28, Ext4FileType::RegFile, b"c").unwrap();
+
+        let removed = remove_entry(&mut block, b"b", 0).unwrap();
+        assert!(removed);
+        assert_eq!(read_u16_le(&block, 4).unwrap(), 24);
+        assert_eq!(read_u32_le(&block, 12).unwrap(), 0);
+        assert_eq!(read_u16_le(&block, 16).unwrap(), 12);
     }
 
     #[test]

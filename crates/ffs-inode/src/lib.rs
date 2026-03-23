@@ -119,6 +119,12 @@ pub fn write_inode(
     // Read the block, patch the inode bytes, write back.
     let buf = dev.read_block(cx, loc.block)?;
     let mut block_data = buf.as_slice().to_vec();
+    if loc.byte_offset + inode_size > block_data.len() {
+        return Err(FfsError::Corruption {
+            block: loc.block.0,
+            detail: "inode extends beyond block boundary".into(),
+        });
+    }
     block_data[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(&raw);
     dev.write_block(cx, loc.block, &block_data)?;
 
@@ -707,7 +713,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(ino, InodeNumber(1));
+        assert_eq!(ino, InodeNumber(u64::from(geo.first_inode)));
         assert_eq!(created.mode, 0o100_644);
         assert_eq!(created.uid, 1000);
         assert_eq!(created.links_count, 1);
@@ -1581,6 +1587,62 @@ mod tests {
         assert!(
             result.is_err(),
             "write_inode to out-of-range inode should fail"
+        );
+    }
+
+    #[test]
+    fn write_inode_crossing_block_boundary_returns_error() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(1024);
+        let geo = FsGeometry {
+            block_size: 1024,
+            inode_size: 768,
+            ..make_geometry()
+        };
+        let groups = vec![GroupStats {
+            group: GroupNumber(0),
+            free_blocks: geo.blocks_per_group,
+            free_inodes: geo.inodes_per_group,
+            used_dirs: 0,
+            block_bitmap_block: BlockNumber(1),
+            inode_bitmap_block: BlockNumber(2),
+            // Place the inode table block at the very end of the device so the
+            // computed slot starts partway into the final readable block.
+            inode_table_block: BlockNumber(dev.block_count() - 1),
+            flags: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
+        }];
+        let inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            projid: 0,
+            extent_bytes: vec![0u8; 60],
+            xattr_ibody: Vec::new(),
+        };
+
+        let result = write_inode(&cx, &dev, &geo, &groups, InodeNumber(14), &inode, 0);
+        assert!(
+            matches!(result, Err(FfsError::Corruption { .. })),
+            "write_inode should reject inode slots that cross a block boundary"
         );
     }
 
