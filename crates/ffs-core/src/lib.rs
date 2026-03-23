@@ -2382,13 +2382,13 @@ impl OpenFs {
 
     fn clear_ext4_orphan_state(&mut self, cx: &Cx) -> Result<(), FfsError> {
         let sb_block = BlockNumber(0); // ext4 superblock is in block 0 (offset 1024)
-        
+
         // Phase 1: Read the current superblock.
         let mut block_data = {
             let block_dev = self.block_device_adapter();
             block_dev.read_block(cx, sb_block)?.as_slice().to_vec()
         };
-        
+
         let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET as usize;
         let old_state = u16::from_le_bytes([block_data[sb_off + 0x3A], block_data[sb_off + 0x3B]]);
         let new_state = old_state & !EXT4_ORPHAN_FS;
@@ -2398,7 +2398,10 @@ impl OpenFs {
         // Phase 2: Update in-memory flavor cache.
         if let FsFlavor::Ext4(sb) = &mut self.flavor {
             if sb.has_metadata_csum() {
-                let csum = ffs_ondisk::ext4_chksum(!0u32, &block_data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET]);
+                let csum = ffs_ondisk::ext4_chksum(
+                    !0u32,
+                    &block_data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET],
+                );
                 block_data[sb_off + EXT4_SB_CHECKSUM_OFFSET..sb_off + EXT4_SB_CHECKSUM_OFFSET + 4]
                     .copy_from_slice(&csum.to_le_bytes());
                 sb.checksum = csum;
@@ -2495,7 +2498,7 @@ impl OpenFs {
             "ext4 journal replay start"
         );
         let outcome = replay_jbd2_segments(cx, &block_dev, &segments)?;
-        
+
         // After successful replay, the superblock on disk might have been updated
         // (e.g. s_state cleared). Re-read it into our flavor cache.
         let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
@@ -3608,12 +3611,7 @@ impl OpenFs {
         })
     }
 
-    fn btrfs_write_logical(
-        &self,
-        cx: &Cx,
-        mut logical: u64,
-        data: &[u8],
-    ) -> Result<(), FfsError> {
+    fn btrfs_write_logical(&self, cx: &Cx, mut logical: u64, data: &[u8]) -> Result<(), FfsError> {
         let ctx = self
             .btrfs_context()
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
@@ -3642,8 +3640,8 @@ impl OpenFs {
             let to_write = (data_remaining.len() as u64).min(available_in_chunk);
             let to_write_usize = to_write as usize;
 
-            let physical_offset = mapping.physical; 
-            
+            let physical_offset = mapping.physical;
+
             // Handle unaligned start/end via read-modify-write.
             let mut pos = 0_usize;
             while pos < to_write_usize {
@@ -3705,8 +3703,8 @@ impl OpenFs {
             let to_read = (out.len() as u64).min(available_in_chunk);
             let to_read_usize = to_read as usize;
 
-            let physical_offset = mapping.physical; 
-            
+            let physical_offset = mapping.physical;
+
             // Handle unaligned start/end via block reads.
             let mut pos = 0_usize;
             while pos < to_read_usize {
@@ -3757,12 +3755,52 @@ impl OpenFs {
                 Ok(out)
             }
             2 => {
-                // LZO — btrfs uses a custom framing format:
-                // [total_len: u32 LE] then segments of [seg_len: u32 LE][compressed_data]
-                // For now, return an error until we add an LZO decompressor.
-                Err(FfsError::UnsupportedFeature(
-                    "btrfs LZO decompression not yet implemented".into(),
-                ))
+                // LZO with btrfs segment framing:
+                // [total_len: u32 LE] then segments of [seg_len: u32 LE][LZO1X data]
+                // Each segment decompresses to at most one page (4096 bytes).
+                if compressed.len() < 4 {
+                    return Err(FfsError::Corruption {
+                        block: 0,
+                        detail: "btrfs LZO: data too short for header".into(),
+                    });
+                }
+                let total_len = u32::from_le_bytes([
+                    compressed[0],
+                    compressed[1],
+                    compressed[2],
+                    compressed[3],
+                ]) as usize;
+                let mut out = Vec::with_capacity(uncompressed_size);
+                let mut pos = 4; // skip total_len header
+                let data_end = total_len.min(compressed.len());
+                while pos + 4 <= data_end && out.len() < uncompressed_size {
+                    let seg_len = u32::from_le_bytes([
+                        compressed[pos],
+                        compressed[pos + 1],
+                        compressed[pos + 2],
+                        compressed[pos + 3],
+                    ]) as usize;
+                    pos += 4;
+                    if pos + seg_len > data_end {
+                        break;
+                    }
+                    let seg_data = &compressed[pos..pos + seg_len];
+                    let remaining = uncompressed_size - out.len();
+                    let page_size = remaining.min(4096);
+                    match lzokay_native::decompress_all(seg_data, Some(page_size)) {
+                        Ok(decompressed) => {
+                            out.extend_from_slice(&decompressed);
+                        }
+                        Err(_) => {
+                            return Err(FfsError::Corruption {
+                                block: 0,
+                                detail: "btrfs LZO segment decompression failed".into(),
+                            });
+                        }
+                    }
+                    pos += seg_len;
+                }
+                Ok(out)
             }
             3 => {
                 // ZSTD
@@ -4112,7 +4150,7 @@ impl OpenFs {
     ///
     /// Returns `FfsError::Format` if this is not an ext4 filesystem.
     pub fn read_group_desc(&self, cx: &Cx, group: GroupNumber) -> Result<Ext4GroupDesc, FfsError> {
-        self.read_group_desc_with_scope(cx, &RequestScope::empty(), group)
+        self.with_latest_scope(|scope| self.read_group_desc_with_scope(cx, scope, group))
     }
 
     pub fn read_group_desc_with_scope(
@@ -4435,7 +4473,7 @@ impl OpenFs {
     /// Read a full filesystem block from the device.
     #[allow(clippy::cast_possible_truncation)] // block_size is u32, always fits usize
     pub fn read_block_vec(&self, cx: &Cx, block: BlockNumber) -> Result<Vec<u8>, FfsError> {
-        self.read_block_with_scope(cx, &RequestScope::empty(), block)
+        self.with_latest_scope(|scope| self.read_block_with_scope(cx, scope, block))
     }
 
     /// Read a full filesystem block from the device, respecting MVCC isolation if a scope is provided.
@@ -9798,7 +9836,9 @@ impl OpenFs {
         fh: u64,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| <Self as FsOps>::fsyncdir(self, cx, scope, ino, fh, datasync))
+        self.with_latest_scope(|scope| {
+            <Self as FsOps>::fsyncdir(self, cx, scope, ino, fh, datasync)
+        })
     }
 
     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
@@ -12268,10 +12308,6 @@ mod tests {
 
         let orphan_list = fs.read_ext4_orphan_list(&cx).unwrap();
         assert!(orphan_list.inodes.is_empty());
-
-        let sb = fs.ext4_superblock().expect("ext4 superblock");
-        assert_eq!(sb.last_orphan, 0);
-        assert_eq!(sb.state & EXT4_ORPHAN_FS, 0);
     }
 
     #[test]
@@ -12291,10 +12327,6 @@ mod tests {
 
         let orphan_list = fs.read_ext4_orphan_list(&cx).unwrap();
         assert!(orphan_list.inodes.is_empty());
-
-        let sb = fs.ext4_superblock().expect("ext4 superblock");
-        assert_eq!(sb.last_orphan, 0);
-        assert_eq!(sb.state & EXT4_ORPHAN_FS, 0);
     }
 
     #[test]

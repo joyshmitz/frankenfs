@@ -26,6 +26,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 flate2 = { workspace = true }
+lzokay-native = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]

@@ -76,6 +76,7 @@ fuser = "0.16.0"
 zstd = "0.13"
 brotli = "6.0"
 flate2 = "1.0"
+lzokay-native = "0.1"
 
 # Sibling project dependencies (crates.io; local path overrides via [patch] if needed)
 asupersync = "0.2.5"
