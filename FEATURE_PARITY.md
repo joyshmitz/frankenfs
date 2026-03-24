@@ -59,8 +59,8 @@
 | btrfs send/receive streams | `fs/btrfs/send.c` | ✅ | `parse_send_stream()` in ffs-btrfs parses the btrfs send stream format (magic, version, 22 command types, attribute TLV encoding). 3 parser tests. |
 | btrfs chunk tree walking | `fs/btrfs/volumes.c` | ✅ | `walk_chunk_tree()` in ffs-btrfs walks chunk tree beyond sys_chunk_array for complete chunk map. `parse_chunk_item()` parses individual chunk items. |
 | btrfs device tree discovery | `fs/btrfs/volumes.c` | ✅ | `walk_device_tree()` in ffs-btrfs walks device tree to enumerate all physical devices. |
-| ext4 COMPRESSION detection | `fs/ext4/inode.c` | ✅ | FS-level COMPRESSION incompat flag accepted at mount. Per-inode `EXT4_COMPR_FL` detected in read path with clear `UnsupportedFeature` error (legacy ext2 dead format — no modern kernel supports this). |
-| ext4 JOURNAL_DEV paired-open | `fs/ext4/super.c` | ✅ | Standalone journal device detection (JOURNAL_DEV incompat flag → clear error with guidance). External journal pairing via `OpenOptions::external_journal_path`: UUID validation between data FS `journal_uuid` and JBD2 superblock UUID, journal metadata extraction. Data FS with non-zero `journal_dev` mounts without external journal (journal replay skipped with info log). |
+| ext4 COMPRESSION detection | `fs/ext4/inode.c` | ✅ | FS-level COMPRESSION incompat flag is accepted at mount so mixed-feature filesystems remain inspectable, but per-inode `EXT4_COMPR_FL` still returns a clear `UnsupportedFeature` error because the legacy ext2 compressed-data format is not implemented. |
+| ext4 JOURNAL_DEV paired-open | `fs/ext4/super.c` | ✅ | Standalone journal device detection (JOURNAL_DEV incompat flag → clear error with guidance). Data filesystems with non-zero `journal_dev` now support paired-open replay through `OpenOptions::external_journal_path`: UUID and block-size validation, external JBD2 replay into the data device, and deterministic refusal when crash recovery is required but the external journal is missing or mismatched. |
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

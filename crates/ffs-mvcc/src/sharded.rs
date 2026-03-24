@@ -508,6 +508,11 @@ impl ShardedMvccStore {
             );
         }
 
+        // Release shard locks before the ordering spin-wait to avoid holding
+        // write locks while yielding. All version data is already installed;
+        // the spin-wait only gates the commit_seq publication order.
+        drop(shard_guards);
+
         // Wait for previous transactions to complete before publishing our commit_seq.
         while self.completed_commit.load(Ordering::Acquire) != commit_seq.0.saturating_sub(1) {
             std::thread::yield_now();
@@ -572,6 +577,11 @@ impl ShardedMvccStore {
             read_set,
         };
         Self::append_ssi_record_locked(&mut shard_guards, &ssi_record);
+
+        // Release shard locks before the ordering spin-wait to avoid holding
+        // write locks while yielding. All version data and SSI records are
+        // already installed; the spin-wait only gates commit_seq publication.
+        drop(shard_guards);
 
         // Wait for previous transactions to complete before publishing our commit_seq.
         while self.completed_commit.load(Ordering::Acquire) != commit_seq.0.saturating_sub(1) {
@@ -670,11 +680,18 @@ impl ShardedMvccStore {
     }
 
     /// Safe prune using an external [`SnapshotRegistry`].
+    ///
+    /// Holds the registry's read lock while pruning to prevent a TOCTOU race
+    /// where a snapshot is registered between reading the watermark and
+    /// pruning versions older than it.
     pub fn prune_safe_with_registry(&self, registry: &SnapshotRegistry) -> CommitSeq {
-        let wm = registry
-            .watermark()
-            .unwrap_or_else(|| self.current_snapshot().high);
-        self.prune_versions_older_than(wm);
+        let wm = registry.watermark_under_guard(|wm_opt| {
+            let wm = wm_opt.unwrap_or_else(|| self.current_snapshot().high);
+            // Prune while the registry's internal lock is still held,
+            // preventing concurrent snapshot registration below the watermark.
+            self.prune_versions_older_than(wm);
+            wm
+        });
         debug!(watermark = wm.0, "prune_safe_registry");
         wm
     }

@@ -2918,6 +2918,18 @@ impl SnapshotRegistry {
         self.active.read().keys().next().copied()
     }
 
+    /// Execute a closure while holding the registry's read lock, passing
+    /// the current watermark. This prevents concurrent `register()` calls
+    /// from inserting a snapshot below the watermark during pruning.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn watermark_under_guard<R>(&self, f: impl FnOnce(Option<CommitSeq>) -> R) -> R {
+        let active = self.active.read();
+        let wm = active.keys().next().copied();
+        // Intentionally hold `active` (read lock) during `f` to prevent
+        // concurrent snapshot registration below the watermark.
+        f(wm)
+    }
+
     /// Lock-free watermark query via RCU-style atomic.
     ///
     /// Returns the oldest active snapshot commit sequence, or `None` if no

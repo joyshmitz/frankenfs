@@ -1203,11 +1203,20 @@ fn actual_len(raw_len: u16) -> u16 {
 }
 
 /// Encode length with optional unwritten flag.
+///
+/// ext4 extent lengths must be in `[1, EXT_INIT_MAX_LEN]`. The unwritten
+/// flag is encoded by adding `EXT_INIT_MAX_LEN` (0x8000) to the length.
+/// We cap `len` to prevent overflow.
 fn encode_len(len: u16, unwritten: bool) -> u16 {
-    if unwritten {
-        len + EXT_INIT_MAX_LEN
+    let capped = if len > EXT_INIT_MAX_LEN {
+        EXT_INIT_MAX_LEN
     } else {
         len
+    };
+    if unwritten {
+        capped.saturating_add(EXT_INIT_MAX_LEN)
+    } else {
+        capped
     }
 }
 

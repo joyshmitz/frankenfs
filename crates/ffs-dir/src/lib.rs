@@ -464,6 +464,9 @@ mod tests {
 
     #[test]
     fn remove_entry_coalesces_into_previous_live_entry_after_deleted_slot() {
+        // Layout: [a(live)][x(deleted)][b(live)][c(live)]
+        // Removing "b" should coalesce "a" through the deleted "x" and removed "b",
+        // giving "a" a rec_len that spans from offset 0 to offset 36 (where "c" starts).
         let mut block = vec![0u8; 64];
         write_entry(&mut block, 0, 10, 12, Ext4FileType::RegFile, b"a").unwrap();
         write_entry(&mut block, 12, 0, 12, Ext4FileType::Unknown, b"x").unwrap();
@@ -472,9 +475,13 @@ mod tests {
 
         let removed = remove_entry(&mut block, b"b", 0).unwrap();
         assert!(removed);
-        assert_eq!(read_u16_le(&block, 4).unwrap(), 24);
-        assert_eq!(read_u32_le(&block, 12).unwrap(), 0);
-        assert_eq!(read_u16_le(&block, 16).unwrap(), 12);
+        // "a" at offset 0 absorbs deleted "x" (12 bytes) + removed "b" (12 bytes) = 36 total.
+        assert_eq!(read_u16_le(&block, 4).unwrap(), 36);
+        // "b" at offset 24 has inode zeroed.
+        assert_eq!(read_u32_le(&block, 24).unwrap(), 0);
+        // "c" at offset 36 is untouched.
+        assert_eq!(read_u32_le(&block, 36).unwrap(), 12);
+        assert_eq!(read_u16_le(&block, 40).unwrap(), 28);
     }
 
     #[test]
@@ -646,9 +653,9 @@ mod tests {
 
         let removed = remove_entry(&mut block, b"b", 0).unwrap();
         assert!(removed);
-        
+
         let rec_len_0 = read_u16_le(&block, 4).unwrap();
-        
+
         let (entries, _) = ffs_ondisk::parse_dir_block(&block, 256).unwrap();
         assert_eq!(entries.len(), 2, "Expected 2 entries left (a and c)");
         assert_eq!(entries[0].name, b"a".to_vec());
