@@ -7068,6 +7068,12 @@ impl OpenFs {
             persist_ctx,
         )?;
 
+        // Re-acquire the block device adapter so that subsequent reads (e.g. for the parent inode
+        // in ext4_add_dir_entry) will see the newly committed snapshot from create_inode.
+        // Otherwise, if the parent inode and new inode share the same inode table block,
+        // writing the parent inode would read the old block and overwrite the new inode.
+        let block_dev = self.block_device_adapter();
+
         // Add directory entry to parent.
         self.ext4_add_dir_entry(
             cx,
