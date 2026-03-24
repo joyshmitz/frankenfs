@@ -5535,7 +5535,14 @@ mod tests {
         let block_size = 1024_u32;
         let mut block = vec![0_u8; block_size as usize];
 
-        write_dir_entry(&mut block, 0, 11, 2, b"only_entry", u16::try_from(block_size).unwrap());
+        write_dir_entry(
+            &mut block,
+            0,
+            11,
+            2,
+            b"only_entry",
+            u16::try_from(block_size).unwrap(),
+        );
 
         let entries: Vec<_> = iter_dir_block(&block, block_size)
             .collect::<Result<Vec<_>, _>>()
