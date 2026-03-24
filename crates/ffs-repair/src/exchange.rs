@@ -324,6 +324,7 @@ impl Client {
         let response: Envelope<Response> =
             read_envelope(cx, &mut stream, self.config.max_frame_bytes)?;
         validate_version(response.version)?;
+        let _ = stream.shutdown(std::net::Shutdown::Both);
         Ok(response.message)
     }
 }
@@ -360,7 +361,9 @@ impl<S: Store> Server<S> {
         let (mut stream, peer_addr) = self.accept(cx)?;
         configure_stream_timeouts(cx, &stream, self.config.io_timeout)?;
         stream.set_nodelay(true).map_err(FfsError::from)?;
-        match self.handle_connection(cx, &mut stream) {
+        let result = self.handle_connection(cx, &mut stream);
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        match result {
             Ok(()) => Ok(()),
             Err(FfsError::Cancelled) => Err(FfsError::Cancelled),
             Err(err) => {
