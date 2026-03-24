@@ -157,8 +157,7 @@ impl Ext4IncompatFeatures {
 
     /// Bits FrankenFS v1 explicitly rejects.
     /// Empty — all incompat features are now accepted at mount time.
-    /// COMPRESSION: accepted at FS level; individual compressed inodes produce
-    /// clear `UnsupportedFeature` errors at read time (legacy ext2 dead format).
+    /// COMPRESSION: full e2compr read/write support (gzip, LZO).
     /// JOURNAL_DEV: detected at mount; paired-open with external journal supported.
     pub const REJECTED_V1: Self = Self(0);
 

@@ -45,8 +45,8 @@ use ffs_ondisk::{
     parse_extent_tree, parse_inode_extent_tree, parse_sys_chunk_array,
 };
 use ffs_types::{
-    BlockNumber, ByteOffset, CommitSeq, EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL,
-    EXT4_SB_CHECKSUM_OFFSET, EXT4_SECTOR_SIZE, GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
+    BlockNumber, ByteOffset, CommitSeq, EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET,
+    EXT4_SECTOR_SIZE, GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
 };
 use ffs_xattr::XattrWriteAccess;
 use parking_lot::{Mutex, RwLock};
@@ -5792,7 +5792,7 @@ impl OpenFs {
     /// compressed and its data starts with a 16-byte cluster header (magic
     /// `0x8EC7`, method, holemap, checksum, ulen, clen) followed by the
     /// compressed payload.
-    #[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    #[expect(clippy::cast_possible_truncation)]
     fn read_ext4_compressed(
         &self,
         cx: &Cx,
@@ -5810,13 +5810,11 @@ impl OpenFs {
         let to_read = (file_size - offset).min(u64::from(size)) as usize;
 
         // Extract cluster parameters from i_flags bits 23-25.
-        let cluster_shift = ((inode.flags >> 23) & 0x7) as u32;
-        if cluster_shift < 2 || cluster_shift > 5 {
+        let cluster_shift = (inode.flags >> 23) & 0x7;
+        if !(2..=5).contains(&cluster_shift) {
             return Err(FfsError::Corruption {
                 block: 0,
-                detail: format!(
-                    "e2compr: invalid cluster shift {cluster_shift} (expected 2-5)"
-                ),
+                detail: format!("e2compr: invalid cluster shift {cluster_shift} (expected 2-5)"),
             });
         }
         let cluster_nblocks: u32 = 1 << cluster_shift;
@@ -5845,8 +5843,13 @@ impl OpenFs {
 
             if last_ptr == ffs_types::EXT2_COMPRESSED_BLKADDR {
                 // Compressed cluster: read all allocated blocks, decompress.
-                let decompressed =
-                    self.decompress_e2compr_cluster(cx, scope, inode, cluster_start, cluster_nblocks)?;
+                let decompressed = self.decompress_e2compr_cluster(
+                    cx,
+                    scope,
+                    inode,
+                    cluster_start,
+                    cluster_nblocks,
+                )?;
 
                 // Copy the requested portion from the decompressed cluster.
                 let cluster_file_offset = u64::from(cluster_start) * bs;
@@ -5854,8 +5857,9 @@ impl OpenFs {
                 let avail = decompressed.len().saturating_sub(offset_in_cluster);
                 let chunk = avail.min(to_read - bytes_read);
                 if chunk > 0 {
-                    buf[bytes_read..bytes_read + chunk]
-                        .copy_from_slice(&decompressed[offset_in_cluster..offset_in_cluster + chunk]);
+                    buf[bytes_read..bytes_read + chunk].copy_from_slice(
+                        &decompressed[offset_in_cluster..offset_in_cluster + chunk],
+                    );
                 }
                 // Advance to the end of this cluster.
                 let remaining_in_cluster = cluster_bytes - (current_offset - cluster_file_offset);
@@ -5871,8 +5875,9 @@ impl OpenFs {
                 {
                     let block_data =
                         self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
-                    buf[bytes_read..bytes_read + chunk_size]
-                        .copy_from_slice(&block_data[offset_in_block..offset_in_block + chunk_size]);
+                    buf[bytes_read..bytes_read + chunk_size].copy_from_slice(
+                        &block_data[offset_in_block..offset_in_block + chunk_size],
+                    );
                 }
                 bytes_read += chunk_size;
             }
@@ -5881,7 +5886,6 @@ impl OpenFs {
     }
 
     /// Decompress a single e2compr cluster given its starting logical block.
-    #[expect(clippy::cast_possible_truncation)]
     fn decompress_e2compr_cluster(
         &self,
         cx: &Cx,
@@ -5929,10 +5933,10 @@ impl OpenFs {
             });
         }
 
-        let ulen = u32::from_le_bytes([raw_data[8], raw_data[9], raw_data[10], raw_data[11]])
-            as usize;
-        let clen = u32::from_le_bytes([raw_data[12], raw_data[13], raw_data[14], raw_data[15]])
-            as usize;
+        let ulen =
+            u32::from_le_bytes([raw_data[8], raw_data[9], raw_data[10], raw_data[11]]) as usize;
+        let clen =
+            u32::from_le_bytes([raw_data[12], raw_data[13], raw_data[14], raw_data[15]]) as usize;
 
         let data_start = 16 + holemap_nbytes;
         let data_end = data_start + clen;
@@ -6004,12 +6008,12 @@ impl OpenFs {
         // Method table: index → (algorithm_id, xarg).
         // We only need algorithm_id for decompression.
         let alg_id = match method_idx {
-            0 => 0,             // lzv1
-            1..=3 => 5,         // auto/defer/never → none
-            4 => 3,             // bzip2
-            8 => 1,             // lzrw3a
-            10 => 4,            // lzo1x_1
-            16..=24 => 2,       // gzip1-gzip9
+            0 => 0,       // lzv1
+            1..=3 => 5,   // auto/defer/never → none
+            4 => 3,       // bzip2
+            8 => 1,       // lzrw3a
+            10 => 4,      // lzo1x_1
+            16..=24 => 2, // gzip1-gzip9
             _ => {
                 return Err(FfsError::UnsupportedFeature(format!(
                     "e2compr: unsupported method index {method_idx}"
@@ -6024,22 +6028,23 @@ impl OpenFs {
                 use std::io::Read;
                 let mut decoder = ZlibDecoder::new(compressed);
                 let mut output = Vec::with_capacity(ulen);
-                decoder.read_to_end(&mut output).map_err(|e| {
-                    FfsError::Corruption {
+                decoder
+                    .read_to_end(&mut output)
+                    .map_err(|e| FfsError::Corruption {
                         block: 0,
                         detail: format!("e2compr gzip decompress failed: {e}"),
-                    }
-                })?;
+                    })?;
                 Ok(output)
             }
             4 => {
                 // LZO: lzokay-native.
-                let output = lzokay_native::decompress_all(compressed, Some(ulen)).map_err(
-                    |e| FfsError::Corruption {
-                        block: 0,
-                        detail: format!("e2compr LZO decompress failed: {e}"),
-                    },
-                )?;
+                let output =
+                    lzokay_native::decompress_all(compressed, Some(ulen)).map_err(|e| {
+                        FfsError::Corruption {
+                            block: 0,
+                            detail: format!("e2compr LZO decompress failed: {e}"),
+                        }
+                    })?;
                 Ok(output)
             }
             5 => {
@@ -6244,18 +6249,21 @@ impl OpenFs {
     }
 
     /// Write a u32 block pointer at a given logical block position in the
-    /// inode's indirect block table. Only handles direct blocks (0..11) for
-    /// now; single/double/triple indirect writes are deferred until needed.
-    #[expect(clippy::cast_possible_truncation)]
+    /// inode's direct block table (i_block[0..11]).
+    ///
+    /// e2compr compressed clusters must fit within the 12 direct block entries.
+    /// Entries 12-14 are reserved for indirect/double-indirect/triple-indirect
+    /// pointers and must not be overwritten with data block pointers.
     fn set_indirect_block_ptr(
         inode: &mut Ext4Inode,
         logical_block: u32,
         phys: u32,
     ) -> Result<(), FfsError> {
         let lb = logical_block as usize;
-        if lb >= 15 {
+        if lb >= 12 {
             return Err(FfsError::UnsupportedFeature(
-                "e2compr: writing to indirect/double-indirect block pointers not yet supported"
+                "e2compr: compressed clusters beyond direct block range (block >= 12) \
+                 not yet supported — would overwrite indirect block pointers"
                     .into(),
             ));
         }
@@ -6263,11 +6271,62 @@ impl OpenFs {
         if off + 4 > inode.extent_bytes.len() {
             return Err(FfsError::Corruption {
                 block: 0,
-                detail: "inode extent_bytes too small for indirect block pointer".into(),
+                detail: "inode extent_bytes too small for direct block pointer".into(),
             });
         }
         inode.extent_bytes[off..off + 4].copy_from_slice(&phys.to_le_bytes());
         Ok(())
+    }
+
+    /// Free previously allocated blocks for a cluster range before rewriting.
+    ///
+    /// Reads the current block pointers from the inode's direct block table,
+    /// frees any non-zero, non-sentinel blocks back to the allocator, and
+    /// returns the number of physical blocks released.
+    fn free_old_cluster_blocks(
+        &self,
+        cx: &Cx,
+        inode: &Ext4Inode,
+        alloc: &mut Ext4AllocState,
+        cluster_start: u32,
+        cluster_nblocks: u32,
+    ) -> Result<u32, FfsError> {
+        const COMPRESSED_BLOCKADDR_U32: u32 = u32::MAX;
+
+        let block_dev = self.block_device_adapter();
+        let raw = &inode.extent_bytes;
+        let mut freed_blocks = 0_u32;
+
+        for i in 0..cluster_nblocks {
+            let lb = (cluster_start + i) as usize;
+            if lb >= 12 {
+                break; // Only direct blocks
+            }
+            let off = lb * 4;
+            if off + 4 > raw.len() {
+                break;
+            }
+            let ptr = u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
+            if ptr != 0 && ptr != COMPRESSED_BLOCKADDR_U32 {
+                let Ext4AllocState {
+                    geo,
+                    groups,
+                    persist_ctx,
+                } = &mut *alloc;
+                ffs_alloc::free_blocks_persist(
+                    cx,
+                    &block_dev,
+                    geo,
+                    groups,
+                    BlockNumber(u64::from(ptr)),
+                    1,
+                    persist_ctx,
+                )?;
+                freed_blocks = freed_blocks.saturating_add(1);
+            }
+        }
+
+        Ok(freed_blocks)
     }
 
     /// Compress data into an e2compr cluster and write it to disk.
@@ -6275,7 +6334,11 @@ impl OpenFs {
     /// Allocates physical blocks for the compressed data, writes the cluster
     /// header + compressed payload, sets block pointers (data blocks + holes +
     /// sentinel), and returns the number of physical blocks used.
-    #[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines,
+        clippy::too_many_arguments
+    )]
     fn write_ext4_compressed_cluster(
         &self,
         cx: &Cx,
@@ -6289,6 +6352,11 @@ impl OpenFs {
     ) -> Result<u32, FfsError> {
         let bs_usize = self.block_size() as usize;
         let block_dev = self.block_device_adapter();
+        let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
+
+        // Free old blocks for this cluster before allocating new ones.
+        let freed_blocks =
+            self.free_old_cluster_blocks(cx, inode, alloc, cluster_start, cluster_nblocks)?;
 
         // Build holemap: scan for blocks that are entirely zero (holes).
         let mut holemap_bits = 0_u32;
@@ -6318,7 +6386,13 @@ impl OpenFs {
         // If compression didn't help, write uncompressed.
         if compressed.len() >= non_hole_data.len() {
             return self.write_ext4_uncompressed_cluster(
-                cx, scope, inode, alloc, cluster_start, cluster_nblocks, data,
+                cx,
+                scope,
+                inode,
+                alloc,
+                cluster_start,
+                cluster_nblocks,
+                data,
             );
         }
 
@@ -6341,13 +6415,18 @@ impl OpenFs {
         // Build cluster header.
         let header_total = 16 + holemap_nbytes as usize;
         let total_payload = header_total + compressed.len();
-        let blocks_needed =
-            u32::try_from((total_payload + bs_usize - 1) / bs_usize).unwrap_or(u32::MAX);
+        let blocks_needed = u32::try_from(total_payload.div_ceil(bs_usize)).unwrap_or(u32::MAX);
 
         if blocks_needed >= cluster_nblocks {
             // Compressed data doesn't fit in fewer blocks — write uncompressed.
             return self.write_ext4_uncompressed_cluster(
-                cx, scope, inode, alloc, cluster_start, cluster_nblocks, data,
+                cx,
+                scope,
+                inode,
+                alloc,
+                cluster_start,
+                cluster_nblocks,
+                data,
             );
         }
 
@@ -6369,11 +6448,15 @@ impl OpenFs {
             cluster_raw[16 + i] = (holemap_bits >> (i * 8)) as u8;
         }
         // Compressed data.
-        cluster_raw[header_total..header_total + compressed.len()]
-            .copy_from_slice(&compressed);
+        cluster_raw[header_total..header_total + compressed.len()].copy_from_slice(&compressed);
 
         // Compute Adler-32 checksum: seeded with first 4 bytes, covers bytes 8..end.
-        let seed = u32::from_le_bytes([cluster_raw[0], cluster_raw[1], cluster_raw[2], cluster_raw[3]]);
+        let seed = u32::from_le_bytes([
+            cluster_raw[0],
+            cluster_raw[1],
+            cluster_raw[2],
+            cluster_raw[3],
+        ]);
         let checksum = adler32_seeded(seed, &cluster_raw[8..header_total + compressed.len()]);
         cluster_raw[4..8].copy_from_slice(&checksum.to_le_bytes());
 
@@ -6388,7 +6471,15 @@ impl OpenFs {
                 groups,
                 persist_ctx,
             } = &mut *alloc;
-            let alloc_result = ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
+            let alloc_result = ffs_alloc::alloc_blocks_persist(
+                cx,
+                &block_dev,
+                geo,
+                groups,
+                1,
+                &hint,
+                persist_ctx,
+            )?;
             let phys_block = alloc_result.start;
 
             let start = i as usize * bs_usize;
@@ -6410,13 +6501,31 @@ impl OpenFs {
         }
 
         // Set sentinel on the last block pointer.
-        Self::set_indirect_block_ptr(inode, cluster_start + cluster_nblocks - 1, 0xFFFF_FFFF)?;
+        Self::set_indirect_block_ptr(
+            inode,
+            cluster_start + cluster_nblocks - 1,
+            ffs_types::EXT2_COMPRESSED_BLKADDR as u32,
+        )?;
+
+        let blocks_needed_u64 = u64::from(blocks_needed);
+        let freed_blocks_u64 = u64::from(freed_blocks);
+        if inode.is_huge_file() {
+            inode.blocks = inode
+                .blocks
+                .saturating_sub(freed_blocks_u64)
+                .saturating_add(blocks_needed_u64);
+        } else {
+            inode.blocks = inode
+                .blocks
+                .saturating_sub(freed_blocks_u64.saturating_mul(sectors_per_block))
+                .saturating_add(blocks_needed_u64.saturating_mul(sectors_per_block));
+        }
 
         Ok(blocks_needed)
     }
 
     /// Write an uncompressed cluster (fallback when compression doesn't help).
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(clippy::too_many_arguments)]
     fn write_ext4_uncompressed_cluster(
         &self,
         cx: &Cx,
@@ -6429,6 +6538,11 @@ impl OpenFs {
     ) -> Result<u32, FfsError> {
         let bs_usize = self.block_size() as usize;
         let block_dev = self.block_device_adapter();
+        let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
+
+        // Free old blocks for this cluster before allocating new ones.
+        let freed_blocks =
+            self.free_old_cluster_blocks(cx, inode, alloc, cluster_start, cluster_nblocks)?;
 
         let mut blocks_written = 0_u32;
         for i in 0..cluster_nblocks {
@@ -6451,7 +6565,15 @@ impl OpenFs {
                 groups,
                 persist_ctx,
             } = &mut *alloc;
-            let alloc_result = ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
+            let alloc_result = ffs_alloc::alloc_blocks_persist(
+                cx,
+                &block_dev,
+                geo,
+                groups,
+                1,
+                &hint,
+                persist_ctx,
+            )?;
             let phys_block = alloc_result.start;
 
             if let Some(tx) = &mut scope.tx {
@@ -6463,6 +6585,20 @@ impl OpenFs {
             #[expect(clippy::cast_possible_truncation)]
             Self::set_indirect_block_ptr(inode, cluster_start + i, phys_block.0 as u32)?;
             blocks_written += 1;
+        }
+
+        let blocks_written_u64 = u64::from(blocks_written);
+        let freed_blocks_u64 = u64::from(freed_blocks);
+        if inode.is_huge_file() {
+            inode.blocks = inode
+                .blocks
+                .saturating_sub(freed_blocks_u64)
+                .saturating_add(blocks_written_u64);
+        } else {
+            inode.blocks = inode
+                .blocks
+                .saturating_sub(freed_blocks_u64.saturating_mul(sectors_per_block))
+                .saturating_add(blocks_written_u64.saturating_mul(sectors_per_block));
         }
 
         Ok(blocks_written)
@@ -6487,8 +6623,8 @@ impl OpenFs {
         match alg_id {
             2 => {
                 // GZIP: raw deflate via flate2.
-                use flate2::write::ZlibEncoder;
                 use flate2::Compression;
+                use flate2::write::ZlibEncoder;
                 use std::io::Write;
                 let level = match method_idx {
                     16 => 1,
@@ -6501,8 +6637,7 @@ impl OpenFs {
                     24 => 9,
                     _ => 6, // default (method 21 = gzip6)
                 };
-                let mut encoder =
-                    ZlibEncoder::new(Vec::new(), Compression::new(level));
+                let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
                 encoder.write_all(data).map_err(|e| FfsError::Corruption {
                     block: 0,
                     detail: format!("e2compr gzip compress failed: {e}"),
@@ -6528,7 +6663,6 @@ impl OpenFs {
             ))),
         }
     }
-
 }
 
 /// Different inodes have different extent trees, so this produces a unique
@@ -7897,8 +8031,17 @@ impl OpenFs {
         // e2compr compressed write: route to cluster-based write path.
         if inode.flags & ffs_types::EXT4_COMPR_FL != 0 {
             return self.ext4_write_compressed(
-                cx, scope, ino, &mut inode, offset, data, &alloc_mutex,
-                block_size, csum_seed, tstamp_secs, tstamp_nanos,
+                cx,
+                scope,
+                ino,
+                &mut inode,
+                offset,
+                data,
+                alloc_mutex,
+                block_size,
+                csum_seed,
+                tstamp_secs,
+                tstamp_nanos,
             );
         }
 
@@ -8069,13 +8212,15 @@ impl OpenFs {
         let bs = u64::from(block_size);
         let bs_usize = block_size as usize;
 
-        // Extract cluster parameters.
-        let cluster_shift = ((inode.flags >> 23) & 0x7) as u32;
-        let cluster_nblocks: u32 = if cluster_shift >= 2 && cluster_shift <= 5 {
-            1 << cluster_shift
-        } else {
-            8 // Default: 8 blocks per cluster.
-        };
+        // Extract cluster parameters from i_flags bits 23-25.
+        let cluster_shift = (inode.flags >> 23) & 0x7;
+        if !(2..=5).contains(&cluster_shift) {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!("e2compr: invalid cluster shift {cluster_shift} (expected 2-5)"),
+            });
+        }
+        let cluster_nblocks: u32 = 1 << cluster_shift;
         let cluster_bytes = cluster_nblocks as usize * bs_usize;
 
         // Extract compression method from i_flags bits 26-30.
@@ -8102,7 +8247,7 @@ impl OpenFs {
                 let existing_len = (existing_end - cluster_file_offset) as usize;
                 let existing = self.read_ext4_compressed(
                     cx,
-                    &RequestScope::empty(),
+                    scope,
                     inode,
                     cluster_file_offset,
                     existing_len as u32,
@@ -8114,8 +8259,7 @@ impl OpenFs {
             // Overlay the new data.
             let write_start_in_cluster = (pos - cluster_file_offset) as usize;
             let data_offset = (pos - offset) as usize;
-            let write_end_in_cluster =
-                ((end - cluster_file_offset) as usize).min(cluster_bytes);
+            let write_end_in_cluster = ((end - cluster_file_offset) as usize).min(cluster_bytes);
             let write_len = write_end_in_cluster - write_start_in_cluster;
             cluster_data[write_start_in_cluster..write_end_in_cluster]
                 .copy_from_slice(&data[data_offset..data_offset + write_len]);
@@ -8155,10 +8299,24 @@ impl OpenFs {
                 base: &block_dev,
                 tx: Mutex::new(tx),
             };
-            ffs_inode::write_inode(cx, &tx_dev, &alloc.geo, &alloc.groups, ino, inode, csum_seed)?;
+            ffs_inode::write_inode(
+                cx,
+                &tx_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                inode,
+                csum_seed,
+            )?;
         } else {
             ffs_inode::write_inode(
-                cx, &block_dev, &alloc.geo, &alloc.groups, ino, inode, csum_seed,
+                cx,
+                &block_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                inode,
+                csum_seed,
             )?;
         }
         drop(alloc);
@@ -13918,8 +14076,8 @@ mod tests {
 
     #[test]
     fn e2compr_decompress_gzip() {
-        use flate2::write::ZlibEncoder;
         use flate2::Compression;
+        use flate2::write::ZlibEncoder;
         use std::io::Write;
 
         let original = b"Hello e2compr compressed world! This is test data.";
@@ -13927,8 +14085,7 @@ mod tests {
         encoder.write_all(original).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        let result =
-            OpenFs::e2compr_decompress(16, &compressed, original.len()).unwrap(); // method 16 = gzip1
+        let result = OpenFs::e2compr_decompress(16, &compressed, original.len()).unwrap(); // method 16 = gzip1
         assert_eq!(result, original);
     }
 
@@ -13937,8 +14094,7 @@ mod tests {
         let original = b"LZO compressed data for e2compr cluster decompression test";
         let compressed = lzokay_native::compress(original).unwrap();
 
-        let result =
-            OpenFs::e2compr_decompress(10, &compressed, original.len()).unwrap(); // method 10 = lzo1x_1
+        let result = OpenFs::e2compr_decompress(10, &compressed, original.len()).unwrap(); // method 10 = lzo1x_1
         assert_eq!(result, original);
     }
 
@@ -13959,14 +14115,18 @@ mod tests {
     fn e2compr_compress_decompress_roundtrip_gzip() {
         let original = b"Hello e2compr! This data should survive compression and decompression roundtrip intact.";
         let compressed = OpenFs::e2compr_compress(20, original).unwrap(); // method 20 = gzip5
-        assert!(compressed.len() < original.len(), "compression should reduce size");
+        assert!(
+            compressed.len() < original.len(),
+            "compression should reduce size"
+        );
         let decompressed = OpenFs::e2compr_decompress(20, &compressed, original.len()).unwrap();
         assert_eq!(decompressed, original);
     }
 
     #[test]
     fn e2compr_compress_decompress_roundtrip_lzo() {
-        let original = b"LZO roundtrip test data -- repeated patterns help compression: aaaaaabbbbbbcccccc";
+        let original =
+            b"LZO roundtrip test data -- repeated patterns help compression: aaaaaabbbbbbcccccc";
         let compressed = OpenFs::e2compr_compress(10, original).unwrap(); // method 10 = lzo1x_1
         let decompressed = OpenFs::e2compr_decompress(10, &compressed, original.len()).unwrap();
         assert_eq!(decompressed, original);
@@ -17575,6 +17735,36 @@ mod tests {
         Some(fs)
     }
 
+    fn enable_e2compr_for_inode(
+        fs: &OpenFs,
+        cx: &Cx,
+        ino: InodeNumber,
+        cluster_shift: u32,
+        method_idx: u8,
+    ) {
+        let mut inode = fs.read_inode(cx, ino).expect("read inode for e2compr");
+        inode.flags |= ffs_types::EXT4_COMPR_FL;
+        inode.flags &= !((0x7_u32 << 23) | (0x1F_u32 << 26));
+        inode.flags |= (cluster_shift & 0x7) << 23;
+        inode.flags |= u32::from(method_idx & 0x1F) << 26;
+
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let csum_seed = sb.csum_seed();
+        let block_dev = fs.block_device_adapter();
+        let alloc_mutex = fs.require_alloc_state().expect("alloc state");
+        let alloc = alloc_mutex.lock();
+        ffs_inode::write_inode(
+            cx,
+            &block_dev,
+            &alloc.geo,
+            &alloc.groups,
+            ino,
+            &inode,
+            csum_seed,
+        )
+        .expect("persist e2compr inode flags");
+    }
+
     #[test]
     fn write_create_and_read_roundtrip() {
         let Some(fs) = open_writable_ext4() else {
@@ -18549,6 +18739,64 @@ mod tests {
             readback[20..100].iter().all(|&b| b == b'A'),
             "suffix preserved"
         );
+    }
+
+    #[test]
+    fn write_compressed_overwrite_reuses_blocks_and_preserves_i_blocks() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("e2compr_rewrite.bin"), 0o644, 0, 0)
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+
+        let baseline = fs.free_space_summary(&cx).expect("baseline free space");
+
+        let first = vec![b'A'; 4096];
+        fs.write(&cx, attr.ino, 0, &first)
+            .expect("first compressed write");
+
+        let after_first_summary = fs.free_space_summary(&cx).expect("after first write");
+        let inode_after_first = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after first write");
+        assert!(
+            inode_after_first.flags & ffs_types::EXT4_COMPRBLK_FL != 0,
+            "compressed write should mark COMPRBLK"
+        );
+        assert!(
+            after_first_summary.free_blocks_total < baseline.free_blocks_total,
+            "first compressed write should consume at least one block"
+        );
+        assert!(
+            inode_after_first.blocks > 0,
+            "compressed write should update i_blocks"
+        );
+
+        let second = vec![b'B'; 4096];
+        fs.write(&cx, attr.ino, 0, &second)
+            .expect("second compressed write");
+
+        let after_second_summary = fs.free_space_summary(&cx).expect("after rewrite");
+        let inode_after_second = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after second write");
+        let readback = fs.read(&cx, attr.ino, 0, 4096).expect("readback");
+
+        assert_eq!(
+            after_second_summary.free_blocks_total,
+            after_first_summary.free_blocks_total
+        );
+        assert_eq!(
+            after_second_summary.gd_free_blocks_total,
+            after_first_summary.gd_free_blocks_total
+        );
+        assert_eq!(inode_after_second.blocks, inode_after_first.blocks);
+        assert_eq!(&readback[..second.len()], second.as_slice());
     }
 
     #[test]
