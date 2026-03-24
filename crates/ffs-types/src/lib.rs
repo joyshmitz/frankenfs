@@ -592,8 +592,18 @@ pub const S_IFSOCK: u16 = 0o140_000;
 pub const EXT4_SECRM_FL: u32 = 0x0000_0001;
 /// Undelete (not implemented).
 pub const EXT4_UNRM_FL: u32 = 0x0000_0002;
-/// Compressed file.
+/// Compressed file (e2compr: may be set on new writes).
 pub const EXT4_COMPR_FL: u32 = 0x0000_0004;
+/// One or more compressed clusters (e2compr: file contains compressed data).
+pub const EXT4_COMPRBLK_FL: u32 = 0x0000_0200;
+/// Access raw compressed data (e2compr: bypass decompression).
+pub const EXT4_NOCOMPR_FL: u32 = 0x0000_0400;
+/// Compression error (e2compr: file became read-only due to error).
+pub const EXT4_ECOMPR_FL: u32 = 0x0000_0800;
+/// Sentinel block address marking compressed cluster tail.
+pub const EXT2_COMPRESSED_BLKADDR: u64 = 0xFFFF_FFFF;
+/// Magic number at the start of a compressed cluster header.
+pub const EXT2_COMPRESS_MAGIC: u16 = 0x8EC7;
 /// Synchronous updates.
 pub const EXT4_SYNC_FL: u32 = 0x0000_0008;
 /// Immutable file.

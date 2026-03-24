@@ -45,8 +45,8 @@ use ffs_ondisk::{
     parse_extent_tree, parse_inode_extent_tree, parse_sys_chunk_array,
 };
 use ffs_types::{
-    BlockNumber, ByteOffset, CommitSeq, EXT4_COMPR_FL, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET,
-    EXT4_SECTOR_SIZE, GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
+    BlockNumber, ByteOffset, CommitSeq, EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL,
+    EXT4_SB_CHECKSUM_OFFSET, EXT4_SECTOR_SIZE, GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
 };
 use ffs_xattr::XattrWriteAccess;
 use parking_lot::{Mutex, RwLock};
@@ -5770,6 +5770,273 @@ impl OpenFs {
         }
     }
 
+    /// Read file data from an ext2/ext4 inode with compressed clusters (e2compr).
+    ///
+    /// Compressed files use indirect block addressing. For each cluster of
+    /// blocks, if the last block pointer equals `0xFFFFFFFF`, the cluster is
+    /// compressed and its data starts with a 16-byte cluster header (magic
+    /// `0x8EC7`, method, holemap, checksum, ulen, clen) followed by the
+    /// compressed payload.
+    #[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    fn read_ext4_compressed(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, FfsError> {
+        let bs = u64::from(self.block_size());
+        let bs_usize = self.block_size() as usize;
+        let file_size = inode.size;
+        if offset >= file_size {
+            return Ok(Vec::new());
+        }
+        let to_read = (file_size - offset).min(u64::from(size)) as usize;
+
+        // Extract cluster parameters from i_flags bits 23-25.
+        let cluster_shift = ((inode.flags >> 23) & 0x7) as u32;
+        if cluster_shift < 2 || cluster_shift > 5 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "e2compr: invalid cluster shift {cluster_shift} (expected 2-5)"
+                ),
+            });
+        }
+        let cluster_nblocks: u32 = 1 << cluster_shift;
+        let cluster_bytes = u64::from(cluster_nblocks) * bs;
+
+        // Build the full decompressed file image for the requested range.
+        let mut buf = vec![0_u8; to_read];
+        let mut bytes_read = 0_usize;
+
+        while bytes_read < to_read {
+            let current_offset = offset + bytes_read as u64;
+            let logical_block =
+                u32::try_from(current_offset / bs).map_err(|_| FfsError::Corruption {
+                    block: 0,
+                    detail: "e2compr: logical block number overflow".into(),
+                })?;
+
+            // Determine which cluster this logical block belongs to.
+            let cluster_start = logical_block - (logical_block % cluster_nblocks);
+            let cluster_end = cluster_start + cluster_nblocks;
+
+            // Check if this cluster is compressed by examining the last block pointer.
+            let last_ptr = self
+                .resolve_indirect_block(cx, scope, inode, cluster_end - 1)?
+                .unwrap_or(0);
+
+            if last_ptr == ffs_types::EXT2_COMPRESSED_BLKADDR {
+                // Compressed cluster: read all allocated blocks, decompress.
+                let decompressed =
+                    self.decompress_e2compr_cluster(cx, scope, inode, cluster_start, cluster_nblocks)?;
+
+                // Copy the requested portion from the decompressed cluster.
+                let cluster_file_offset = u64::from(cluster_start) * bs;
+                let offset_in_cluster = (current_offset - cluster_file_offset) as usize;
+                let avail = decompressed.len().saturating_sub(offset_in_cluster);
+                let chunk = avail.min(to_read - bytes_read);
+                if chunk > 0 {
+                    buf[bytes_read..bytes_read + chunk]
+                        .copy_from_slice(&decompressed[offset_in_cluster..offset_in_cluster + chunk]);
+                }
+                // Advance to the end of this cluster.
+                let remaining_in_cluster = cluster_bytes - (current_offset - cluster_file_offset);
+                bytes_read += remaining_in_cluster.min((to_read - bytes_read) as u64) as usize;
+            } else {
+                // Uncompressed block: read normally.
+                let offset_in_block = (current_offset % bs) as usize;
+                let remaining_in_block = bs_usize - offset_in_block;
+                let chunk_size = remaining_in_block.min(to_read - bytes_read);
+
+                if let Some(phys_block) =
+                    self.resolve_indirect_block(cx, scope, inode, logical_block)?
+                {
+                    let block_data =
+                        self.read_block_with_scope(cx, scope, BlockNumber(phys_block))?;
+                    buf[bytes_read..bytes_read + chunk_size]
+                        .copy_from_slice(&block_data[offset_in_block..offset_in_block + chunk_size]);
+                }
+                bytes_read += chunk_size;
+            }
+        }
+        Ok(buf)
+    }
+
+    /// Decompress a single e2compr cluster given its starting logical block.
+    #[expect(clippy::cast_possible_truncation)]
+    fn decompress_e2compr_cluster(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+        cluster_start: u32,
+        cluster_nblocks: u32,
+    ) -> Result<Vec<u8>, FfsError> {
+        let bs_usize = self.block_size() as usize;
+
+        // Gather all non-zero, non-sentinel block pointers from the cluster range.
+        let mut raw_data = Vec::with_capacity(bs_usize * cluster_nblocks as usize);
+        for i in 0..cluster_nblocks {
+            let ptr = self
+                .resolve_indirect_block(cx, scope, inode, cluster_start + i)?
+                .unwrap_or(0);
+            if ptr != 0 && ptr != ffs_types::EXT2_COMPRESSED_BLKADDR {
+                let block_data = self.read_block_with_scope(cx, scope, BlockNumber(ptr))?;
+                raw_data.extend_from_slice(&block_data);
+            }
+        }
+
+        if raw_data.len() < 16 {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: "e2compr: compressed cluster too small for header".into(),
+            });
+        }
+
+        // Parse cluster header.
+        let magic = u16::from_le_bytes([raw_data[0], raw_data[1]]);
+        if magic != ffs_types::EXT2_COMPRESS_MAGIC {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!("e2compr: bad cluster magic 0x{magic:04X}, expected 0x8EC7"),
+            });
+        }
+
+        let method_idx = raw_data[2];
+        let holemap_nbytes = raw_data[3] as usize;
+        if holemap_nbytes > 4 {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!("e2compr: invalid holemap_nbytes {holemap_nbytes}"),
+            });
+        }
+
+        let ulen = u32::from_le_bytes([raw_data[8], raw_data[9], raw_data[10], raw_data[11]])
+            as usize;
+        let clen = u32::from_le_bytes([raw_data[12], raw_data[13], raw_data[14], raw_data[15]])
+            as usize;
+
+        let data_start = 16 + holemap_nbytes;
+        let data_end = data_start + clen;
+        if data_end > raw_data.len() {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!(
+                    "e2compr: clen {clen} + header {data_start} exceeds available data {}",
+                    raw_data.len()
+                ),
+            });
+        }
+
+        // Read holemap.
+        let holemap = &raw_data[16..16 + holemap_nbytes];
+
+        // Decompress based on method table.
+        let compressed = &raw_data[data_start..data_end];
+        let decompressed = Self::e2compr_decompress(method_idx, compressed, ulen)?;
+
+        if decompressed.len() != ulen {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!(
+                    "e2compr: decompressed {} bytes but expected {ulen}",
+                    decompressed.len()
+                ),
+            });
+        }
+
+        // Unpack via holemap: distribute decompressed data into block-sized slots.
+        let cluster_full_size = bs_usize * cluster_nblocks as usize;
+        let mut output = vec![0_u8; cluster_full_size];
+        let mut src_off = 0_usize;
+
+        for block_idx in 0..cluster_nblocks as usize {
+            let is_hole = if block_idx < holemap_nbytes * 8 {
+                let byte = holemap[block_idx / 8];
+                (byte >> (block_idx % 8)) & 1 == 1
+            } else {
+                false
+            };
+
+            if is_hole {
+                // Hole: leave zeros.
+            } else if src_off + bs_usize <= decompressed.len() {
+                output[block_idx * bs_usize..(block_idx + 1) * bs_usize]
+                    .copy_from_slice(&decompressed[src_off..src_off + bs_usize]);
+                src_off += bs_usize;
+            } else if src_off < decompressed.len() {
+                // Partial last block.
+                let remaining = decompressed.len() - src_off;
+                output[block_idx * bs_usize..block_idx * bs_usize + remaining]
+                    .copy_from_slice(&decompressed[src_off..]);
+                src_off += remaining;
+            }
+            // else: beyond decompressed data, leave zeros (tail of cluster).
+        }
+
+        Ok(output)
+    }
+
+    /// Dispatch e2compr decompression based on method table index.
+    fn e2compr_decompress(
+        method_idx: u8,
+        compressed: &[u8],
+        ulen: usize,
+    ) -> Result<Vec<u8>, FfsError> {
+        // Method table: index → (algorithm_id, xarg).
+        // We only need algorithm_id for decompression.
+        let alg_id = match method_idx {
+            0 => 0,             // lzv1
+            1..=3 => 5,         // auto/defer/never → none
+            4 => 3,             // bzip2
+            8 => 1,             // lzrw3a
+            10 => 4,            // lzo1x_1
+            16..=24 => 2,       // gzip1-gzip9
+            _ => {
+                return Err(FfsError::UnsupportedFeature(format!(
+                    "e2compr: unsupported method index {method_idx}"
+                )));
+            }
+        };
+
+        match alg_id {
+            2 => {
+                // GZIP: raw deflate via flate2.
+                use flate2::read::ZlibDecoder;
+                use std::io::Read;
+                let mut decoder = ZlibDecoder::new(compressed);
+                let mut output = Vec::with_capacity(ulen);
+                decoder.read_to_end(&mut output).map_err(|e| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: format!("e2compr gzip decompress failed: {e}"),
+                    }
+                })?;
+                Ok(output)
+            }
+            4 => {
+                // LZO: lzokay-native.
+                let output = lzokay_native::decompress_all(compressed, Some(ulen)).map_err(
+                    |e| FfsError::Corruption {
+                        block: 0,
+                        detail: format!("e2compr LZO decompress failed: {e}"),
+                    },
+                )?;
+                Ok(output)
+            }
+            5 => {
+                // None: uncompressed (method auto/defer/never).
+                Ok(compressed.to_vec())
+            }
+            other => Err(FfsError::UnsupportedFeature(format!(
+                "e2compr: algorithm {other} not implemented (lzv1/lzrw3a/bzip2 are rare legacy formats)"
+            ))),
+        }
+    }
+
     /// Read file data using indirect block pointers (non-extent inodes).
     #[expect(clippy::cast_possible_truncation)]
     fn read_ext4_indirect(
@@ -10636,15 +10903,12 @@ impl FsOps for OpenFs {
                     return Err(FfsError::IsDirectory);
                 }
 
-                // Legacy ext2 compressed inode — format is dead/undocumented.
-                // We accept COMPRESSION at the FS level but refuse individual
-                // compressed inodes with a clear error.
-                if inode.flags & EXT4_COMPR_FL != 0 {
-                    return Err(FfsError::UnsupportedFeature(
-                        "ext2/ext4 compressed inode (EXT4_COMPR_FL): legacy cluster compression \
-                         format is not implemented — no modern kernel supports this"
-                            .to_owned(),
-                    ));
+                // e2compr compressed inode: if COMPRBLK_FL is set, the file
+                // contains at least one compressed cluster. Route to the
+                // compressed read path which handles mixed compressed/
+                // uncompressed clusters transparently.
+                if inode.flags & EXT4_COMPRBLK_FL != 0 {
+                    return self.read_ext4_compressed(cx, scope, &inode, offset, size);
                 }
 
                 // Inline data: file content stored directly in inode's i_block area.
@@ -13093,12 +13357,14 @@ mod tests {
 
     #[test]
     fn open_fs_with_external_journal_dev_succeeds_without_path() {
-        // When journal_dev is non-zero but no external journal path is provided,
-        // mount succeeds but journal replay is skipped.
+        // When journal_dev is non-zero but no external journal path is provided
+        // and the FS is clean, mount succeeds but journal replay is skipped.
         let mut image = build_ext4_image_with_inode();
         let sb_off = EXT4_SUPERBLOCK_OFFSET;
         image[sb_off + 0xE0..sb_off + 0xE4].copy_from_slice(&8_u32.to_le_bytes()); // journal_inum
         image[sb_off + 0xE4..sb_off + 0xE8].copy_from_slice(&1_u32.to_le_bytes()); // journal_dev
+        // Mark as clean so crash recovery is not required.
+        image[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&EXT4_VALID_FS.to_le_bytes());
 
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();
@@ -13210,6 +13476,47 @@ mod tests {
         let cx = Cx::for_testing();
         let err = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap_err();
         assert!(matches!(err, FfsError::UnsupportedFeature(_)));
+    }
+
+    // ── e2compr decompression tests ─────────────────────────────────────
+
+    #[test]
+    fn e2compr_decompress_gzip() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let original = b"Hello e2compr compressed world! This is test data.";
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(original).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result =
+            OpenFs::e2compr_decompress(16, &compressed, original.len()).unwrap(); // method 16 = gzip1
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn e2compr_decompress_lzo() {
+        let original = b"LZO compressed data for e2compr cluster decompression test";
+        let compressed = lzokay_native::compress(original).unwrap();
+
+        let result =
+            OpenFs::e2compr_decompress(10, &compressed, original.len()).unwrap(); // method 10 = lzo1x_1
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn e2compr_decompress_none() {
+        let data = b"uncompressed passthrough data";
+        let result = OpenFs::e2compr_decompress(1, data, data.len()).unwrap(); // method 1 = auto (none)
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn e2compr_decompress_unsupported_method() {
+        let result = OpenFs::e2compr_decompress(31, b"data", 4);
+        assert!(result.is_err());
     }
 
     #[test]
