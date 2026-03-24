@@ -78,6 +78,11 @@ fn adler32_seeded(seed: u32, data: &[u8]) -> u32 {
     (s2 << 16) | s1
 }
 
+#[derive(Debug)]
+struct Ext4CompressedClusterWrite {
+    old_blocks: Vec<BlockNumber>,
+}
+
 /// Detected filesystem type with the parsed superblock embedded.
 ///
 /// Returned by [`detect_filesystem`] and stored in [`OpenFs::flavor`].
@@ -6278,24 +6283,22 @@ impl OpenFs {
         Ok(())
     }
 
-    /// Free previously allocated blocks for a cluster range before rewriting.
+    /// Collect previously allocated blocks for a cluster range before rewriting.
     ///
     /// Reads the current block pointers from the inode's direct block table,
-    /// frees any non-zero, non-sentinel blocks back to the allocator, and
-    /// returns the number of physical blocks released.
-    fn free_old_cluster_blocks(
+    /// returning any non-zero, non-sentinel physical blocks that should be
+    /// released only after the replacement inode state is persisted.
+    #[allow(clippy::unused_self)]
+    fn collect_old_cluster_blocks(
         &self,
-        cx: &Cx,
         inode: &Ext4Inode,
-        alloc: &mut Ext4AllocState,
         cluster_start: u32,
         cluster_nblocks: u32,
-    ) -> Result<u32, FfsError> {
+    ) -> Vec<BlockNumber> {
         const COMPRESSED_BLOCKADDR_U32: u32 = u32::MAX;
 
-        let block_dev = self.block_device_adapter();
         let raw = &inode.extent_bytes;
-        let mut freed_blocks = 0_u32;
+        let mut old_blocks = Vec::new();
 
         for i in 0..cluster_nblocks {
             let lb = (cluster_start + i) as usize;
@@ -6308,25 +6311,11 @@ impl OpenFs {
             }
             let ptr = u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
             if ptr != 0 && ptr != COMPRESSED_BLOCKADDR_U32 {
-                let Ext4AllocState {
-                    geo,
-                    groups,
-                    persist_ctx,
-                } = &mut *alloc;
-                ffs_alloc::free_blocks_persist(
-                    cx,
-                    &block_dev,
-                    geo,
-                    groups,
-                    BlockNumber(u64::from(ptr)),
-                    1,
-                    persist_ctx,
-                )?;
-                freed_blocks = freed_blocks.saturating_add(1);
+                old_blocks.push(BlockNumber(u64::from(ptr)));
             }
         }
 
-        Ok(freed_blocks)
+        old_blocks
     }
 
     /// Compress data into an e2compr cluster and write it to disk.
@@ -6349,14 +6338,12 @@ impl OpenFs {
         cluster_nblocks: u32,
         method_idx: u8,
         data: &[u8],
-    ) -> Result<u32, FfsError> {
+    ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
         let block_dev = self.block_device_adapter();
         let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
-        // Free old blocks for this cluster before allocating new ones.
-        let freed_blocks =
-            self.free_old_cluster_blocks(cx, inode, alloc, cluster_start, cluster_nblocks)?;
+        let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
 
         // Build holemap: scan for blocks that are entirely zero (holes).
         let mut holemap_bits = 0_u32;
@@ -6508,7 +6495,7 @@ impl OpenFs {
         )?;
 
         let blocks_needed_u64 = u64::from(blocks_needed);
-        let freed_blocks_u64 = u64::from(freed_blocks);
+        let freed_blocks_u64 = u64::try_from(old_blocks.len()).unwrap_or(u64::MAX);
         if inode.is_huge_file() {
             inode.blocks = inode
                 .blocks
@@ -6521,7 +6508,7 @@ impl OpenFs {
                 .saturating_add(blocks_needed_u64.saturating_mul(sectors_per_block));
         }
 
-        Ok(blocks_needed)
+        Ok(Ext4CompressedClusterWrite { old_blocks })
     }
 
     /// Write an uncompressed cluster (fallback when compression doesn't help).
@@ -6535,14 +6522,12 @@ impl OpenFs {
         cluster_start: u32,
         cluster_nblocks: u32,
         data: &[u8],
-    ) -> Result<u32, FfsError> {
+    ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
         let block_dev = self.block_device_adapter();
         let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
-        // Free old blocks for this cluster before allocating new ones.
-        let freed_blocks =
-            self.free_old_cluster_blocks(cx, inode, alloc, cluster_start, cluster_nblocks)?;
+        let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
 
         let mut blocks_written = 0_u32;
         for i in 0..cluster_nblocks {
@@ -6588,7 +6573,7 @@ impl OpenFs {
         }
 
         let blocks_written_u64 = u64::from(blocks_written);
-        let freed_blocks_u64 = u64::from(freed_blocks);
+        let freed_blocks_u64 = u64::try_from(old_blocks.len()).unwrap_or(u64::MAX);
         if inode.is_huge_file() {
             inode.blocks = inode
                 .blocks
@@ -6601,7 +6586,7 @@ impl OpenFs {
                 .saturating_add(blocks_written_u64.saturating_mul(sectors_per_block));
         }
 
-        Ok(blocks_written)
+        Ok(Ext4CompressedClusterWrite { old_blocks })
     }
 
     /// Compress data using the e2compr method table.
@@ -8194,7 +8179,11 @@ impl OpenFs {
 
     /// Compressed ext4 write: accumulates data into cluster-sized buffers,
     /// compresses each cluster, and writes with the e2compr format.
-    #[expect(clippy::too_many_arguments, clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines
+    )]
     fn ext4_write_compressed(
         &self,
         cx: &Cx,
@@ -8229,6 +8218,7 @@ impl OpenFs {
         let block_dev = self.block_device_adapter();
         let end = offset + data.len() as u64;
         let mut bytes_written = 0_u32;
+        let mut pending_frees = Vec::new();
 
         // Process data cluster-by-cluster.
         let mut pos = offset;
@@ -8266,7 +8256,7 @@ impl OpenFs {
 
             // Compress and write the cluster.
             let mut alloc = alloc_mutex.lock();
-            let _blocks_used = self.write_ext4_compressed_cluster(
+            let write_result = self.write_ext4_compressed_cluster(
                 cx,
                 scope,
                 inode,
@@ -8276,6 +8266,7 @@ impl OpenFs {
                 method_idx,
                 &cluster_data,
             )?;
+            pending_frees.extend(write_result.old_blocks);
             drop(alloc);
 
             // Ensure COMPRBLK_FL is set.
@@ -8292,8 +8283,8 @@ impl OpenFs {
         }
         ffs_inode::touch_mtime_ctime(inode, tstamp_secs, tstamp_nanos);
 
-        // Write updated inode.
-        let alloc = alloc_mutex.lock();
+        // Write updated inode and free superseded cluster blocks.
+        let mut alloc = alloc_mutex.lock();
         if let Some(tx) = &mut scope.tx {
             let tx_dev = TransactionBlockAdapter {
                 base: &block_dev,
@@ -8318,6 +8309,23 @@ impl OpenFs {
                 inode,
                 csum_seed,
             )?;
+        }
+
+        for block in pending_frees {
+            let Ext4AllocState {
+                geo,
+                groups,
+                persist_ctx,
+            } = &mut *alloc;
+            if let Err(error) =
+                ffs_alloc::free_blocks_persist(cx, &block_dev, geo, groups, block, 1, persist_ctx)
+            {
+                warn!(
+                    block = block.0,
+                    error = %error,
+                    "e2compr: failed to release superseded cluster block after inode update"
+                );
+            }
         }
         drop(alloc);
 

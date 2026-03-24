@@ -1153,15 +1153,11 @@ fn parse_fc_operation(tag: FcTag, payload: &[u8]) -> Option<FcOperation> {
                 len: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
             })
         }),
-        FcTag::Creat | FcTag::Link => (payload.len() >= 10).then(|| {
+        FcTag::Creat | FcTag::Link => (payload.len() >= 8).then(|| {
+            // ext4_fc_dentry_info: parent_ino(4) + ino(4) + dname[](rest)
             let parent_ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let ino = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-            let name_len = payload[8] as usize;
-            let name = if 10 + name_len <= payload.len() {
-                payload[10..10 + name_len].to_vec()
-            } else {
-                payload[10..].to_vec()
-            };
+            let name = payload[8..].to_vec();
             let dentry = FcDentry {
                 parent_ino,
                 ino,
@@ -1173,17 +1169,14 @@ fn parse_fc_operation(tag: FcTag, payload: &[u8]) -> Option<FcOperation> {
                 FcOperation::Link(dentry)
             }
         }),
-        FcTag::Unlink => (payload.len() >= 6).then(|| {
+        FcTag::Unlink => (payload.len() >= 8).then(|| {
+            // ext4_fc_dentry_info: parent_ino(4) + ino(4) + dname[](rest)
             let parent_ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-            let name_len = payload[4] as usize;
-            let name = if 6 + name_len <= payload.len() {
-                payload[6..6 + name_len].to_vec()
-            } else {
-                payload[6..].to_vec()
-            };
+            let ino = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let name = payload[8..].to_vec();
             FcOperation::Unlink(FcDentry {
                 parent_ino,
-                ino: 0,
+                ino,
                 name,
             })
         }),
@@ -1320,13 +1313,11 @@ mod fc_tests {
         let mut data = Vec::new();
         // HEAD tag
         data.extend(build_fc_tag(0x0A, &[0; 16]));
-        // CREAT tag
+        // CREAT tag: ext4_fc_dentry_info = parent_ino(4) + ino(4) + dname[]
         let mut creat = Vec::new();
         creat.extend_from_slice(&2_u32.to_le_bytes()); // parent_ino
         creat.extend_from_slice(&11_u32.to_le_bytes()); // ino
-        creat.push(5); // name_len
-        creat.push(0); // padding
-        creat.extend_from_slice(b"hello");
+        creat.extend_from_slice(b"hello"); // name (no length prefix — length from tag)
         data.extend(build_fc_tag(0x05, &creat));
         // TAIL tag
         let mut tail = Vec::new();

@@ -201,17 +201,13 @@ pub fn decode_group(
     // Extract recovered blocks for the corrupt indices.
     let mut recovered = Vec::with_capacity(corrupt_indices.len());
     for &idx in corrupt_indices {
-        let block_num = BlockNumber(
-            first_block
-                .0
-                .checked_add(u64::from(idx))
-                .ok_or_else(|| {
-                    FfsError::RepairFailed(format!(
-                        "decode_group: block address overflow at first_block={} + corrupt_idx={idx}",
-                        first_block.0
-                    ))
-                })?,
-        );
+        let block_num =
+            BlockNumber(first_block.0.checked_add(u64::from(idx)).ok_or_else(|| {
+                FfsError::RepairFailed(format!(
+                    "decode_group: block address overflow at first_block={} + corrupt_idx={idx}",
+                    first_block.0
+                ))
+            })?);
         if idx as usize >= result.source.len() {
             return Err(FfsError::RepairFailed(format!(
                 "decode_group: corrupt index {idx} out of range (source has {} blocks)",
