@@ -654,7 +654,7 @@ mod tests {
         let removed = remove_entry(&mut block, b"b", 0).unwrap();
         assert!(removed);
 
-        let rec_len_0 = read_u16_le(&block, 4).unwrap();
+        let _rec_len_0 = read_u16_le(&block, 4).unwrap();
 
         let (entries, _) = ffs_ondisk::parse_dir_block(&block, 256).unwrap();
         assert_eq!(entries.len(), 2, "Expected 2 entries left (a and c)");

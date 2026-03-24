@@ -7137,6 +7137,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
     fn parse_send_stream_with_mkdir() {
         let mut data = Vec::new();
         data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);

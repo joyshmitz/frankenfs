@@ -600,6 +600,8 @@ mod tests {
             links_count: 0,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -613,6 +615,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 0,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),
@@ -686,6 +690,7 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags,
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -699,6 +704,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 0,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0; 60],
             xattr_ibody: Vec::new(),

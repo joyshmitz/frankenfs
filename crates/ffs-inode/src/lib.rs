@@ -158,6 +158,8 @@ fn serialize_inode(inode: &Ext4Inode, inode_size: usize) -> Vec<u8> {
     buf[0x1C..0x20].copy_from_slice(&(inode.blocks as u32).to_le_bytes());
     // Flags (0x20).
     buf[0x20..0x24].copy_from_slice(&inode.flags.to_le_bytes());
+    // i_osd1 / l_i_version (0x24) — NFS change attribute low 32 bits.
+    buf[0x24..0x28].copy_from_slice(&inode.version.to_le_bytes());
     // i_block / extent bytes (0x28, 60 bytes).
     let copy_len = inode.extent_bytes.len().min(60);
     buf[0x28..0x28 + copy_len].copy_from_slice(&inode.extent_bytes[..copy_len]);
@@ -196,6 +198,10 @@ fn serialize_inode(inode: &Ext4Inode, inode_size: usize) -> Vec<u8> {
         if inode_size >= 0x98 {
             buf[0x90..0x94].copy_from_slice(&inode.crtime.to_le_bytes());
             buf[0x94..0x98].copy_from_slice(&inode.crtime_extra.to_le_bytes());
+        }
+        if inode_size >= 0x9C {
+            // i_version_hi (0x98) — NFS change attribute high 32 bits.
+            buf[0x98..0x9C].copy_from_slice(&inode.version_hi.to_le_bytes());
         }
         if inode_size >= 0xA0 {
             buf[0x9C..0xA0].copy_from_slice(&inode.projid.to_le_bytes());
@@ -331,6 +337,7 @@ pub fn create_inode(
         links_count: if is_dir { 2 } else { 1 },
         blocks: 0,
         flags: EXT4_EXTENTS_FL,
+        version: 0,
         generation: {
             let new_gen = old_generation.wrapping_add(1);
             debug!(
@@ -354,6 +361,7 @@ pub fn create_inode(
         crtime_extra: extra_time,
         extra_isize: 32,
         checksum: 0,
+        version_hi: 0,
         projid: 0,
         extent_bytes,
         xattr_ibody: Vec::new(),
@@ -619,6 +627,8 @@ mod tests {
             links_count: 1,
             blocks: 8,
             flags: EXT4_EXTENTS_FL,
+
+            version: 0,
             generation: 42,
             file_acl: 0,
             atime: 1_700_000_000,
@@ -632,6 +642,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -664,6 +676,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: EXT4_EXTENTS_FL,
+
+            version: 0,
             generation: 1,
             file_acl: 0,
             atime: 0,
@@ -677,6 +691,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -840,6 +856,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -853,6 +871,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -918,6 +938,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -931,6 +953,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -953,6 +977,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -966,6 +992,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -987,6 +1015,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -1000,6 +1030,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: xattr_data.clone(),
@@ -1275,6 +1307,8 @@ mod tests {
             links_count: 1,
             blocks: 0x1_2345_6789, // needs high bits
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0x2_0000_0000, // needs file_acl high bits
             atime: 0,
@@ -1288,6 +1322,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -1565,6 +1601,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -1578,6 +1616,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -1621,6 +1661,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -1634,6 +1676,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -1657,6 +1701,8 @@ mod tests {
             links_count: 1,
             blocks: 8,
             flags: EXT4_EXTENTS_FL,
+
+            version: 0,
             generation: 42,
             file_acl: 0,
             atime: 1_700_000_000,
@@ -1670,6 +1716,8 @@ mod tests {
             crtime_extra: 0xFACE,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0x1234,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![0xAA; 10],
@@ -1701,6 +1749,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 99,
             file_acl: 0,
             atime: 0,
@@ -1714,6 +1764,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 0,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -1739,6 +1791,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -1752,6 +1806,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0xABCD_1234,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -1775,6 +1831,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -1788,6 +1846,8 @@ mod tests {
             crtime_extra: 0xDEAD_BEEF,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -1938,6 +1998,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: EXT4_EXTENTS_FL,
+
+            version: 0,
             generation: 0xDEAD_BEEF,
             file_acl: 0,
             atime: 0,
@@ -1951,6 +2013,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -1970,6 +2034,8 @@ mod tests {
             links_count: 1,
             blocks: 8,
             flags: EXT4_EXTENTS_FL,
+
+            version: 0,
             generation: 7,
             file_acl: 0,
             atime: 1_700_000_000,
@@ -1983,6 +2049,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -2004,6 +2072,8 @@ mod tests {
             links_count: 1,
             blocks: 8,
             flags: 0,
+
+            version: 0,
             generation: 99,
             file_acl: 0,
             atime: 0,
@@ -2017,6 +2087,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -2040,6 +2112,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 55,
             file_acl: 0,
             atime: 1000,
@@ -2053,6 +2127,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -2152,6 +2228,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0x0001_0000_0064, // block 100 with high bits set
             atime: 0,
@@ -2165,6 +2243,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -2231,11 +2311,11 @@ mod tests {
         ) {
             let mut inode = Ext4Inode {
                 mode: 0o100_644, uid: 0, gid: 0, size: 0,
-                links_count: 1, blocks: 0, flags: 0, generation: 0,
+                links_count: 1, blocks: 0, flags: 0, version: 0, generation: 0,
                 file_acl: 0, atime: 100, ctime: 200, mtime: 300, dtime: 0,
                 atime_extra: 0, ctime_extra: 999, mtime_extra: 888,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
 
@@ -2261,11 +2341,11 @@ mod tests {
         ) {
             let mut inode = Ext4Inode {
                 mode: 0o100_644, uid: 0, gid: 0, size: 0,
-                links_count: 1, blocks: 0, flags: 0, generation: 0,
+                links_count: 1, blocks: 0, flags: 0, version: 0, generation: 0,
                 file_acl: 0, atime: 100, ctime: 0, mtime: 0, dtime: 0,
                 atime_extra: 42, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
 
@@ -2295,11 +2375,11 @@ mod tests {
             // Use S_IFREG so size_hi is parsed back correctly.
             let mode = 0o100_000 | mode_bits;
             let inode = Ext4Inode {
-                mode, uid, gid, size, links_count, blocks, flags, generation,
+                mode, uid, gid, size, links_count, blocks, flags, version: 0, generation,
                 file_acl: 0, atime: 0, ctime: 0, mtime: 0, dtime: 0,
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
 
@@ -2355,11 +2435,11 @@ mod tests {
         ) {
             let mut inode = Ext4Inode {
                 mode, uid: u32::from(uid_lo), gid: 0, size: 0,
-                links_count: 1, blocks: 0, flags: 0, generation,
+                links_count: 1, blocks: 0, flags: 0, version: 0, generation,
                 file_acl: 0, atime: 0, ctime: 0, mtime: 0, dtime: 0,
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
             // Ensure generation matches what will be in the raw buffer.
@@ -2389,11 +2469,11 @@ mod tests {
             let mode = 0o100_000 | mode_bits;
 
             let inode = Ext4Inode {
-                mode, uid, gid, size, links_count, blocks: 0, flags: 0, generation,
+                mode, uid, gid, size, links_count, blocks: 0, flags: 0, version: 0, generation,
                 file_acl: 0, atime: atime_val, ctime: 0, mtime: mtime_val, dtime: 0,
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
 
@@ -2425,11 +2505,11 @@ mod tests {
         ) {
             let inode = Ext4Inode {
                 mode: 0o100_644, uid: 0, gid: 0, size: 0,
-                links_count: 1, blocks: 0, flags: 0, generation: 0,
+                links_count: 1, blocks: 0, flags: 0, version: 0, generation: 0,
                 file_acl: 0, atime, ctime, mtime, dtime,
                 atime_extra, ctime_extra, mtime_extra,
                 crtime, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
 
@@ -2458,11 +2538,11 @@ mod tests {
         ) {
             let mut inode = Ext4Inode {
                 mode: 0o100_644, uid: 0, gid: 0, size: 0,
-                links_count: 1, blocks: 0, flags: 0, generation: 0,
+                links_count: 1, blocks: 0, flags: 0, version: 0, generation: 0,
                 file_acl: 0, atime: init_atime, ctime: 0, mtime: init_mtime, dtime: 0,
                 atime_extra: init_atime_extra, ctime_extra: 0, mtime_extra: init_mtime_extra,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
 
@@ -2483,11 +2563,11 @@ mod tests {
         ) {
             let inode = Ext4Inode {
                 mode: 0o100_644, uid: 0, gid: 0, size: 0,
-                links_count: 1, blocks: 0, flags: 0, generation: 0,
+                links_count: 1, blocks: 0, flags: 0, version: 0, generation: 0,
                 file_acl, atime: 0, ctime: 0, mtime: 0, dtime: 0,
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
 
@@ -2511,12 +2591,12 @@ mod tests {
         ) {
             let inode = Ext4Inode {
                 mode: 0o100_644, uid: 1000, gid: 1000, size: 4096,
-                links_count: 1, blocks: 8, flags: EXT4_EXTENTS_FL, generation: 42,
+                links_count: 1, blocks: 8, flags: EXT4_EXTENTS_FL, version: 0, generation: 42,
                 file_acl: 0, atime: 1_700_000_000, ctime: 1_700_000_000,
                 mtime: 1_700_000_000, dtime: 0,
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 1_700_000_000, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
             };
 
@@ -2545,11 +2625,11 @@ mod tests {
             let xattr_data = vec![fill_byte; xattr_len];
             let inode = Ext4Inode {
                 mode: 0o100_644, uid: 0, gid: 0, size: 0,
-                links_count: 1, blocks: 0, flags: 0, generation: 0,
+                links_count: 1, blocks: 0, flags: 0, version: 0, generation: 0,
                 file_acl: 0, atime: 0, ctime: 0, mtime: 0, dtime: 0,
                 atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
                 crtime: 0, crtime_extra: 0, extra_isize: 32,
-                checksum: 0, projid: 0,
+                checksum: 0, version_hi: 0, projid: 0,
                 extent_bytes: vec![0u8; 60], xattr_ibody: xattr_data.clone(),
             };
 
@@ -2618,6 +2698,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -2631,6 +2713,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -2650,6 +2734,7 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: EXT4_EXTENTS_FL | 0x0000_0010, // extents + append
+            version: 0,
             generation: 42,
             file_acl: 0,
             atime: 0,
@@ -2663,6 +2748,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -2716,6 +2803,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 100,
@@ -2729,6 +2818,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -2752,6 +2843,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 100,
@@ -2765,6 +2858,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -2827,6 +2922,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -2840,6 +2937,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0xAB; 100], // larger than 60
             xattr_ibody: vec![],
@@ -2862,6 +2961,8 @@ mod tests {
             links_count: 0,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -2875,6 +2976,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -2894,6 +2997,8 @@ mod tests {
             links_count: 42,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -2907,6 +3012,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -3123,6 +3230,8 @@ mod tests {
             links_count: 1,
             blocks: 8,
             flags: 0,
+
+            version: 0,
             generation: 1,
             file_acl: 0,
             atime: 1000,
@@ -3136,6 +3245,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -3158,6 +3269,8 @@ mod tests {
             links_count: 1,
             blocks: 8,
             flags: 0,
+
+            version: 0,
             generation: 1,
             file_acl: 0,
             atime: 1000,
@@ -3171,6 +3284,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -3282,6 +3397,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -3295,6 +3412,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0xCC; 10], // shorter than 60
             xattr_ibody: vec![],
@@ -3317,6 +3436,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -3330,6 +3451,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -3352,6 +3475,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -3365,6 +3490,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -3471,6 +3598,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -3484,6 +3613,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -3510,6 +3641,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 42,
@@ -3523,6 +3656,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![],
@@ -3550,6 +3685,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: EXT4_EXTENTS_FL,
+
+            version: 0,
             generation: 1,
             file_acl: 0,
             atime: 1_700_000_000,
@@ -3563,6 +3700,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -3598,6 +3737,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: EXT4_EXTENTS_FL,
+
+            version: 0,
             generation: 1,
             file_acl: 0,
             atime: 0,
@@ -3611,6 +3752,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 32,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: Vec::new(),
@@ -3687,6 +3830,8 @@ mod tests {
             links_count: 1,
             blocks: 0,
             flags: 0,
+
+            version: 0,
             generation: 0,
             file_acl: 0,
             atime: 0,
@@ -3700,6 +3845,8 @@ mod tests {
             crtime_extra: 0,
             extra_isize: 0,
             checksum: 0,
+
+            version_hi: 0,
             projid: 0,
             extent_bytes: vec![0u8; 60],
             xattr_ibody: vec![0xAA; 128],

@@ -1939,6 +1939,9 @@ pub struct Ext4Inode {
     pub links_count: u16,
     pub blocks: u64,
     pub flags: u32,
+    /// i_osd1 / l_i_version (offset 0x24): NFS change attribute (low 32 bits).
+    /// Preserved opaquely across read-modify-write cycles.
+    pub version: u32,
     pub generation: u32,
     pub file_acl: u64,
 
@@ -1958,6 +1961,9 @@ pub struct Ext4Inode {
     // ── Extended area ────────────────────────────────────────────────────
     pub extra_isize: u16,
     pub checksum: u32,
+    /// i_version_hi (offset 0x98): NFS change attribute (high 32 bits).
+    /// Preserved opaquely across read-modify-write cycles.
+    pub version_hi: u32,
     pub projid: u32,
 
     // ── Extent / inline data ─────────────────────────────────────────────
@@ -2001,6 +2007,7 @@ impl Ext4Inode {
 
         let blocks_lo = u64::from(read_le_u32(bytes, 0x1C)?);
         let flags = read_le_u32(bytes, 0x20)?;
+        let version = read_le_u32(bytes, 0x24)?;
         let generation = read_le_u32(bytes, 0x64)?;
         let file_acl_lo = u64::from(read_le_u32(bytes, 0x68)?);
 
@@ -2038,6 +2045,7 @@ impl Ext4Inode {
             mtime_extra,
             crtime,
             crtime_extra,
+            version_hi,
             projid,
         ) = if bytes.len() >= 0x82 {
             let extra_isize = read_le_u16(bytes, 0x80)?;
@@ -2080,6 +2088,11 @@ impl Ext4Inode {
             } else {
                 0
             };
+            let version_hi = if extra_end >= 0x9C && bytes.len() >= 0x9C {
+                read_le_u32(bytes, 0x98)?
+            } else {
+                0
+            };
             let projid = if extra_end >= 0xA0 && bytes.len() >= 0xA0 {
                 read_le_u32(bytes, 0x9C)?
             } else {
@@ -2093,10 +2106,11 @@ impl Ext4Inode {
                 mtime_extra,
                 crtime,
                 crtime_extra,
+                version_hi,
                 projid,
             )
         } else {
-            (0, 0, 0, 0, 0, 0, 0, 0)
+            (0, 0, 0, 0, 0, 0, 0, 0, 0)
         };
 
         Ok(Self {
@@ -2107,6 +2121,7 @@ impl Ext4Inode {
             links_count: read_le_u16(bytes, 0x1A)?,
             blocks,
             flags,
+            version,
             generation,
             file_acl: file_acl_lo | (file_acl_hi << 32),
 
@@ -2123,6 +2138,7 @@ impl Ext4Inode {
 
             extra_isize,
             checksum: checksum_lo | (checksum_hi << 16),
+            version_hi,
             projid,
 
             extent_bytes,
@@ -5187,7 +5203,7 @@ mod tests {
         // Entry 2: ".." → inode 2, type=dir, rec_len=12
         write_dir_entry(&mut block, 12, 2, 2, b"..", 12);
         // Entry 3: "hello.txt" → inode 12, type=regular, rec_len fills rest of block
-        let remaining = block_size as u16 - 24;
+        let remaining = u16::try_from(block_size).unwrap() - 24;
         write_dir_entry(&mut block, 24, 12, 1, b"hello.txt", remaining);
 
         let (entries, tail) = parse_dir_block(&block, block_size).unwrap();
@@ -5213,7 +5229,7 @@ mod tests {
         let mut block = vec![0_u8; block_size as usize];
 
         // Single entry: "." that spans almost the whole block, leaving 12 bytes for tail
-        let entry_rec_len = block_size as u16 - 12;
+        let entry_rec_len = u16::try_from(block_size).unwrap() - 12;
         write_dir_entry(&mut block, 0, 2, 2, b".", entry_rec_len);
 
         // Checksum tail at end of block (last 12 bytes)
@@ -5243,7 +5259,7 @@ mod tests {
         // Entry 2: deleted (inode=0), rec_len=12
         write_dir_entry(&mut block, 12, 0, 0, b"", 12);
         // Entry 3: "b" → inode 6, rec_len fills rest
-        let remaining = block_size as u16 - 24;
+        let remaining = u16::try_from(block_size).unwrap() - 24;
         write_dir_entry(&mut block, 24, 6, 1, b"b", remaining);
 
         let (entries, _) = parse_dir_block(&block, block_size).unwrap();
@@ -5260,7 +5276,7 @@ mod tests {
 
         write_dir_entry(&mut block, 0, 2, 2, b".", 12);
         write_dir_entry(&mut block, 12, 2, 2, b"..", 12);
-        let remaining = block_size as u16 - 24;
+        let remaining = u16::try_from(block_size).unwrap() - 24;
         write_dir_entry(&mut block, 24, 42, 1, b"myfile", remaining);
 
         let found = lookup_in_dir_block(&block, block_size, b"myfile");
@@ -5278,7 +5294,7 @@ mod tests {
 
         write_dir_entry(&mut block, 0, 2, 2, b".", 12);
         write_dir_entry(&mut block, 12, 2, 2, b"..", 12);
-        let remaining = block_size as u16 - 24;
+        let remaining = u16::try_from(block_size).unwrap() - 24;
         write_dir_entry(&mut block, 24, 42, 1, b"MyFile.TXT", remaining);
 
         // Case-insensitive: should find "myfile.txt" matching "MyFile.TXT"
@@ -5314,7 +5330,7 @@ mod tests {
 
         write_dir_entry(&mut block, 0, 2, 2, b".", 12);
         write_dir_entry(&mut block, 12, 2, 2, b"..", 12);
-        let remaining = block_size as u16 - 24;
+        let remaining = u16::try_from(block_size).unwrap() - 24;
         write_dir_entry(&mut block, 24, 12, 1, b"hello.txt", remaining);
 
         let mut iter = iter_dir_block(&block, block_size);
@@ -5340,7 +5356,7 @@ mod tests {
         let block_size = 4096_u32;
         let mut block = vec![0_u8; block_size as usize];
 
-        let entry_rec_len = block_size as u16 - 12;
+        let entry_rec_len = u16::try_from(block_size).unwrap() - 12;
         write_dir_entry(&mut block, 0, 2, 2, b".", entry_rec_len);
 
         // Checksum tail
@@ -5486,7 +5502,7 @@ mod tests {
 
         write_dir_entry(&mut block, 0, 5, 1, b"a", 12);
         write_dir_entry(&mut block, 12, 0, 0, b"", 12);
-        let remaining = block_size as u16 - 24;
+        let remaining = u16::try_from(block_size).unwrap() - 24;
         write_dir_entry(&mut block, 24, 6, 1, b"b", remaining);
 
         let entries: Vec<_> = iter_dir_block(&block, block_size)
@@ -5503,7 +5519,7 @@ mod tests {
         let block_size = 4096_u32;
         let mut block = vec![0_u8; block_size as usize];
 
-        let remaining = block_size as u16;
+        let remaining = u16::try_from(block_size).unwrap();
         write_dir_entry(&mut block, 0, 42, 1, b"testfile", remaining);
 
         let entry_ref = iter_dir_block(&block, block_size).next().unwrap().unwrap();
@@ -5519,7 +5535,7 @@ mod tests {
         let block_size = 1024_u32;
         let mut block = vec![0_u8; block_size as usize];
 
-        write_dir_entry(&mut block, 0, 11, 2, b"only_entry", block_size as u16);
+        write_dir_entry(&mut block, 0, 11, 2, b"only_entry", u16::try_from(block_size).unwrap());
 
         let entries: Vec<_> = iter_dir_block(&block, block_size)
             .collect::<Result<Vec<_>, _>>()
@@ -9142,6 +9158,7 @@ mod tests {
                 links_count: 1,
                 blocks: 0,
                 flags: 0,
+                version: 0,
                 generation: 0,
                 file_acl: 0,
                 atime: 0,
@@ -9155,6 +9172,7 @@ mod tests {
                 crtime_extra: 0,
                 extra_isize: 32,
                 checksum: 0,
+                version_hi: 0,
                 projid: 0,
                 extent_bytes: vec![0; 60],
                 xattr_ibody,
