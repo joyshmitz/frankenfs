@@ -205,12 +205,20 @@ pub fn decode_group(
             first_block
                 .0
                 .checked_add(u64::from(idx))
-                .unwrap_or(first_block.0),
+                .ok_or_else(|| {
+                    FfsError::RepairFailed(format!(
+                        "decode_group: block address overflow at first_block={} + corrupt_idx={idx}",
+                        first_block.0
+                    ))
+                })?,
         );
-        let data = result.source.get(idx as usize).cloned().unwrap_or_else(|| {
-            // Should not happen if decode succeeded, but be defensive.
-            vec![0u8; block_size]
-        });
+        if idx as usize >= result.source.len() {
+            return Err(FfsError::RepairFailed(format!(
+                "decode_group: corrupt index {idx} out of range (source has {} blocks)",
+                result.source.len()
+            )));
+        }
+        let data = result.source[idx as usize].clone();
         recovered.push(RecoveredBlock {
             block: block_num,
             data,
