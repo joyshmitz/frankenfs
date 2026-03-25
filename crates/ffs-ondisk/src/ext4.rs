@@ -1743,43 +1743,6 @@ pub fn stamp_extent_block_checksum(
     extent_block[tail_off..tail_off + 4].copy_from_slice(&computed.to_le_bytes());
 }
 
-/// Compute the CRC32C checksum of a block or inode bitmap.
-///
-/// The ext4 bitmap checksum algorithm seeds with `csum_seed XOR group_number`
-/// (both as u32), then CRC32Cs the raw bitmap bytes.
-///
-/// Returns the full 32-bit checksum. The caller stores the lower 16 bits in
-/// `bg_block_bitmap_csum_lo` (or `bg_inode_bitmap_csum_lo`) and, for 64-byte
-/// descriptors, the upper 16 bits in `bg_block_bitmap_csum_hi`.
-#[must_use]
-pub fn compute_bitmap_checksum(csum_seed: u32, group: u32, bitmap: &[u8]) -> u32 {
-    let seed = csum_seed ^ group;
-    ext4_chksum(seed, bitmap)
-}
-
-/// Verify a bitmap's CRC32C checksum against the stored value.
-///
-/// `stored_csum` is the 32-bit value assembled from the group descriptor's
-/// `bg_*_bitmap_csum_lo` (and `_hi` for 64-byte descriptors).
-pub fn verify_bitmap_checksum(
-    csum_seed: u32,
-    group: u32,
-    bitmap: &[u8],
-    stored_csum: u32,
-    desc_size: u16,
-) -> Result<(), ParseError> {
-    let computed = compute_bitmap_checksum(csum_seed, group, bitmap);
-    // For 32-byte descriptors, only the lower 16 bits are stored.
-    let mask = if desc_size < 64 { 0xFFFF } else { 0xFFFF_FFFF };
-    if (computed & mask) != (stored_csum & mask) {
-        return Err(ParseError::InvalidField {
-            field: "bitmap_checksum",
-            reason: "bitmap CRC32C mismatch",
-        });
-    }
-    Ok(())
-}
-
 /// Verify that an inode bitmap's free-bit count matches the group descriptor.
 ///
 /// `inodes_per_group` is `s_inodes_per_group` from the superblock.
@@ -7462,40 +7425,42 @@ mod tests {
     // ── Bitmap checksum ───────────────────────────────────────────────
 
     #[test]
-    fn compute_bitmap_checksum_round_trips_with_verify() {
+    fn block_bitmap_checksum_round_trips_with_verify() {
         let csum_seed = 0x1234_5678_u32;
-        let group = 3_u32;
+        let blocks_per_group = 32768_u32;
 
-        // Create a realistic bitmap (4096 bytes = 32768 bits).
         let mut bitmap = vec![0xFF_u8; 4096];
-        // Free some blocks.
         bitmap[0] = 0xF0;
         bitmap[100] = 0x00;
 
-        let csum = compute_bitmap_checksum(csum_seed, group, &bitmap);
+        let csum = block_bitmap_checksum_value(&bitmap, csum_seed, blocks_per_group, 64);
 
-        // 64-byte descriptor: full 32-bit compare.
-        verify_bitmap_checksum(csum_seed, group, &bitmap, csum, 64)
-            .expect("64-byte desc bitmap checksum should verify");
-
-        // 32-byte descriptor: only lower 16 bits.
-        verify_bitmap_checksum(csum_seed, group, &bitmap, csum & 0xFFFF, 32)
-            .expect("32-byte desc bitmap checksum should verify");
+        // Build a GDT entry with the computed checksum.
+        let mut gd = Ext4GroupDesc {
+            block_bitmap: 0, inode_bitmap: 0, inode_table: 0,
+            free_blocks_count: 0, free_inodes_count: 0, used_dirs_count: 0,
+            itable_unused: 0, flags: 0, checksum: 0,
+            block_bitmap_csum: csum, inode_bitmap_csum: 0,
+        };
+        assert!(verify_block_bitmap_checksum(&bitmap, csum_seed, blocks_per_group, &gd, 64).is_ok());
 
         // Corrupt bitmap → should fail.
         bitmap[50] ^= 0xFF;
-        assert!(verify_bitmap_checksum(csum_seed, group, &bitmap, csum, 64).is_err());
+        assert!(verify_block_bitmap_checksum(&bitmap, csum_seed, blocks_per_group, &gd, 64).is_err());
     }
 
     #[test]
-    fn bitmap_checksum_differs_per_group() {
+    fn inode_bitmap_checksum_uses_correct_length() {
         let csum_seed = 0xABCD_u32;
         let bitmap = vec![0xAA_u8; 4096];
 
-        let csum_g0 = compute_bitmap_checksum(csum_seed, 0, &bitmap);
-        let csum_g1 = compute_bitmap_checksum(csum_seed, 1, &bitmap);
-        // Same bitmap content, different group → different checksum.
-        assert_ne!(csum_g0, csum_g1);
+        // With 2048 inodes/group, checksum covers only 256 bytes.
+        let csum_2048 = inode_bitmap_checksum_value(&bitmap, csum_seed, 2048, 64);
+        // With 32768 inodes/group (unusual), checksum covers 4096 bytes.
+        let csum_32768 = inode_bitmap_checksum_value(&bitmap, csum_seed, 32768, 64);
+        // Different lengths → different checksums (unless data is uniform, which it is here).
+        // Both portions are 0xAA, but the CRC state after 256 bytes differs from after 4096.
+        assert_ne!(csum_2048, csum_32768);
     }
 
     // ── Extent block checksum verification ───────────────────────────────
