@@ -23,13 +23,13 @@ use ffs_block::{
 use ffs_btrfs::{
     BTRFS_BLOCK_GROUP_DATA, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
     BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV,
-    BTRFS_FT_DIR, BTRFS_FT_FIFO,
-    BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
-    BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
-    BTRFS_ITEM_XATTR_ITEM, BtrfsBTree, BtrfsBlockGroupItem, BtrfsDirItem, BtrfsExtentAllocator,
-    BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry, BtrfsMutationError, BtrfsTreeItem,
-    InMemoryCowBtrfsTree, map_logical_to_physical, parse_dir_items, parse_extent_data,
-    parse_inode_item, parse_root_item, parse_xattr_items, walk_tree,
+    BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK,
+    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM,
+    BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM, BtrfsBTree,
+    BtrfsBlockGroupItem, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem,
+    BtrfsKey, BtrfsLeafEntry, BtrfsMutationError, BtrfsTreeItem, InMemoryCowBtrfsTree,
+    map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
+    parse_xattr_items, walk_tree,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -4320,7 +4320,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
         let block_size = u64::from(self.block_size());
         let bs_usize = block_size as usize;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
 
         let mut data_remaining = data;
         while !data_remaining.is_empty() {
@@ -6433,8 +6433,15 @@ impl OpenFs {
                     groups,
                     persist_ctx,
                 } = &mut *alloc;
-                let alloc_result =
-                    ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
+                let alloc_result = ffs_alloc::alloc_blocks_persist(
+                    cx,
+                    &block_dev,
+                    geo,
+                    groups,
+                    1,
+                    &hint,
+                    persist_ctx,
+                )?;
                 let new_block = alloc_result.start;
                 // Zero-fill the new indirect block.
                 let zeros = vec![0_u8; bs as usize];
@@ -6452,8 +6459,8 @@ impl OpenFs {
                 BlockNumber(u64::from(current_ind))
             };
 
-            // Read-modify-write the indirect block.
-            let mut ind_data = self.read_block_with_scope(cx, &RequestScope::empty(), ind_block_num)?;
+            // Read-modify-write the indirect block (read through scope to see staged writes).
+            let mut ind_data = self.read_block_with_scope(cx, scope, ind_block_num)?;
             let off = lb_indirect * 4;
             if off + 4 > ind_data.len() {
                 return Err(FfsError::Corruption {
@@ -6482,13 +6489,11 @@ impl OpenFs {
 
             // Ensure the level-1 indirect block exists.
             let idx1 = lb_dind / ptrs_per_block;
-            let level1 = self.ensure_pointer_in_block(
-                cx, scope, alloc, dind_root, idx1,
-            )?;
+            let level1 = self.ensure_pointer_in_block(cx, scope, alloc, dind_root, idx1)?;
 
-            // Write the final pointer in the level-2 block.
+            // Write the final pointer in the level-2 block (read through scope).
             let idx2 = lb_dind % ptrs_per_block;
-            let mut data = self.read_block_with_scope(cx, &RequestScope::empty(), level1)?;
+            let mut data = self.read_block_with_scope(cx, scope, level1)?;
             let off = idx2 * 4;
             data[off..off + 4].copy_from_slice(&phys.to_le_bytes());
             if let Some(tx) = &mut scope.tx {
@@ -6511,7 +6516,7 @@ impl OpenFs {
             let ind_block = self.ensure_pointer_in_block(cx, scope, alloc, dind_block, idx2)?;
             let idx3 = lb_triple % ptrs_per_block;
 
-            let mut data = self.read_block_with_scope(cx, &RequestScope::empty(), ind_block)?;
+            let mut data = self.read_block_with_scope(cx, scope, ind_block)?;
             let off = idx3 * 4;
             data[off..off + 4].copy_from_slice(&phys.to_le_bytes());
             if let Some(tx) = &mut scope.tx {
@@ -6546,9 +6551,18 @@ impl OpenFs {
         }
         let block_dev = self.block_device_adapter();
         let bs = self.block_size();
-        let hint = AllocHint { goal_group: None, goal_block: None };
-        let Ext4AllocState { geo, groups, persist_ctx, .. } = &mut *alloc;
-        let result = ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
+        let hint = AllocHint {
+            goal_group: None,
+            goal_block: None,
+        };
+        let Ext4AllocState {
+            geo,
+            groups,
+            persist_ctx,
+            ..
+        } = &mut *alloc;
+        let result =
+            ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
         let new_block = result.start;
         let zeros = vec![0_u8; bs as usize];
         if let Some(tx) = &mut scope.tx {
@@ -6574,7 +6588,9 @@ impl OpenFs {
     ) -> Result<BlockNumber, FfsError> {
         let block_dev = self.block_device_adapter();
         let bs = self.block_size();
-        let mut data = self.read_block_with_scope(cx, &RequestScope::empty(), parent_block)?;
+        // Read through the active scope so we see any staged writes (e.g., a
+        // freshly allocated zero-filled indirect block that hasn't hit disk yet).
+        let mut data = self.read_block_with_scope(cx, scope, parent_block)?;
         let off = index * 4;
         if off + 4 > data.len() {
             return Err(FfsError::Corruption {
@@ -6586,9 +6602,18 @@ impl OpenFs {
         if current != 0 {
             return Ok(BlockNumber(u64::from(current)));
         }
-        let hint = AllocHint { goal_group: None, goal_block: None };
-        let Ext4AllocState { geo, groups, persist_ctx, .. } = &mut *alloc;
-        let result = ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
+        let hint = AllocHint {
+            goal_group: None,
+            goal_block: None,
+        };
+        let Ext4AllocState {
+            geo,
+            groups,
+            persist_ctx,
+            ..
+        } = &mut *alloc;
+        let result =
+            ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
         let new_block = result.start;
         let zeros = vec![0_u8; bs as usize];
         if let Some(tx) = &mut scope.tx {
@@ -6826,7 +6851,14 @@ impl OpenFs {
             }
 
             #[expect(clippy::cast_possible_truncation)]
-            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_block.0 as u32)?;
+            self.write_block_ptr(
+                cx,
+                scope,
+                inode,
+                alloc,
+                cluster_start + i,
+                phys_block.0 as u32,
+            )?;
         }
 
         // Set remaining block pointers in the cluster to 0 (holes).
@@ -6837,7 +6869,10 @@ impl OpenFs {
         // Set sentinel on the last block pointer.
         #[expect(clippy::cast_possible_truncation)]
         self.write_block_ptr(
-            cx, scope, inode, alloc,
+            cx,
+            scope,
+            inode,
+            alloc,
             cluster_start + cluster_nblocks - 1,
             ffs_types::EXT2_COMPRESSED_BLKADDR as u32,
         )?;
@@ -6916,7 +6951,14 @@ impl OpenFs {
             }
 
             #[expect(clippy::cast_possible_truncation)]
-            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_block.0 as u32)?;
+            self.write_block_ptr(
+                cx,
+                scope,
+                inode,
+                alloc,
+                cluster_start + i,
+                phys_block.0 as u32,
+            )?;
             blocks_written += 1;
         }
 
@@ -7509,6 +7551,10 @@ impl OpenFs {
                 persist_ctx,
             )?
         };
+
+        // Re-acquire the block device adapter so subsequent metadata reads and writes observe
+        // the newly committed inode-table state from create_inode().
+        block_dev = self.block_device_adapter();
 
         // Allocate a data block for the directory and initialize with . and ..
         let hint = AllocHint {
@@ -9956,9 +10002,8 @@ impl OpenFs {
         // btrfs inline extent overhead: BTRFS_HEADER_SIZE(101) + BTRFS_ITEM_SIZE(25)
         // + BTRFS_FILE_EXTENT_INLINE_DATA_START(21) = 147 bytes per item slot.
         // Use 160 to leave room for the dir item and inode item in the same leaf.
-        let mut can_be_inline =
-            end.max(inode.size) <= u64::from(nodesize).saturating_sub(160)
-                && u64::try_from(data.len()).unwrap_or(u64::MAX) <= max_inline;
+        let mut can_be_inline = end.max(inode.size) <= u64::from(nodesize).saturating_sub(160)
+            && u64::try_from(data.len()).unwrap_or(u64::MAX) <= max_inline;
 
         if can_be_inline {
             let ext_start = BtrfsKey {
