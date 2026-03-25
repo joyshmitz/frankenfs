@@ -4028,11 +4028,12 @@ pub fn choose_btrfs_scrub_block_size(
         bail!("invalid btrfs nodesize={nodesize}; expected non-zero power-of-two");
     }
 
-    // Btrfs superblock region is 4 KiB; scrub block size must hold it.
+    // Btrfs superblock region must fit; scrub block size must hold it.
+    let super_info_size = ffs_types::BTRFS_SUPER_INFO_SIZE as u32;
     let min_block_size = if sectorsize.is_power_of_two() {
-        sectorsize.max(4096)
+        sectorsize.max(super_info_size)
     } else {
-        4096
+        super_info_size
     };
 
     if min_block_size > nodesize {

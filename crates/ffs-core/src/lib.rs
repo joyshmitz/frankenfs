@@ -22,7 +22,8 @@ use ffs_block::{
 };
 use ffs_btrfs::{
     BTRFS_BLOCK_GROUP_DATA, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
-    BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO,
+    BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV,
+    BTRFS_FT_DIR, BTRFS_FT_FIFO,
     BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM,
     BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM,
     BTRFS_ITEM_XATTR_ITEM, BtrfsBTree, BtrfsBlockGroupItem, BtrfsDirItem, BtrfsExtentAllocator,
@@ -359,6 +360,8 @@ struct BtrfsAllocState {
     generation: u64,
     /// Node size in bytes (copied from superblock for convenience).
     nodesize: u32,
+    /// Sector size in bytes (copied from superblock for convenience).
+    sectorsize: u32,
 }
 
 /// Outcome of crash recovery performed at mount time.
@@ -3401,17 +3404,19 @@ impl OpenFs {
             }
         };
         let nodesize = sb.nodesize;
+        let sectorsize = sb.sectorsize;
         let generation = sb.generation;
 
         // Walk the FS tree to populate the in-memory COW tree.
         let items = self.walk_btrfs_fs_tree(cx)?;
-        let max_items_per_node = (nodesize as usize - 101) / 25; // header=101, item=25
+        // btrfs leaf: header (BTRFS_HEADER_SIZE=101 bytes) + N items (BTRFS_ITEM_SIZE=25 bytes each)
+        let max_items_per_node = (nodesize as usize).saturating_sub(101) / 25;
         let max_items = max_items_per_node.max(3);
         let mut fs_tree =
             InMemoryCowBtrfsTree::new(max_items).map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
         // Find the highest objectid in use so we can mint new ones.
-        let mut max_objectid = 256_u64; // btrfs reserves objectids below 256
+        let mut max_objectid = BTRFS_FIRST_FREE_OBJECTID;
         for item in &items {
             if item.key.objectid > max_objectid {
                 max_objectid = item.key.objectid;
@@ -3478,6 +3483,7 @@ impl OpenFs {
             next_objectid: max_objectid + 1,
             generation,
             nodesize,
+            sectorsize,
         })
     }
 
@@ -4370,6 +4376,9 @@ impl OpenFs {
                     }
                     let seg_data = &compressed[pos..pos + seg_len];
                     let remaining = uncompressed_size - out.len();
+                    // btrfs LZO segments decompress to at most 4096 bytes (PAGE_SIZE
+                    // in the kernel). This is baked into the on-disk format, not the
+                    // runtime system page size.
                     let page_size = remaining.min(4096);
                     match lzokay_native::decompress_all(seg_data, Some(page_size)) {
                         Ok(decompressed) => {
@@ -9255,7 +9264,7 @@ impl OpenFs {
             return Ok(());
         }
 
-        let sectorsize = u64::from(alloc.nodesize.min(4096));
+        let sectorsize = u64::from(alloc.sectorsize);
         let data_len = u64::try_from(data.len())
             .map_err(|_| FfsError::InvalidGeometry("segment length does not fit u64".into()))?;
         let alloc_size = data_len
@@ -9602,8 +9611,15 @@ impl OpenFs {
         // For simplicity in V1, write data as an inline extent if small enough,
         // otherwise allocate a data extent and write through the device.
         let nodesize = alloc.nodesize;
+        // Max inline data size — matches the kernel's BTRFS_MAX_INLINE_DATA_SIZE
+        // (nodesize / 2, capped to avoid leaf overflow with other items).
+        let max_inline = u64::from(nodesize) / 2;
+        // btrfs inline extent overhead: BTRFS_HEADER_SIZE(101) + BTRFS_ITEM_SIZE(25)
+        // + BTRFS_FILE_EXTENT_INLINE_DATA_START(21) = 147 bytes per item slot.
+        // Use 160 to leave room for the dir item and inode item in the same leaf.
         let mut can_be_inline =
-            end.max(inode.size) <= u64::from(nodesize) - 200 && data.len() <= 2048;
+            end.max(inode.size) <= u64::from(nodesize).saturating_sub(160)
+                && u64::try_from(data.len()).unwrap_or(u64::MAX) <= max_inline;
 
         if can_be_inline {
             let ext_start = BtrfsKey {
@@ -10509,7 +10525,7 @@ impl OpenFs {
                                 .fs_tree
                                 .delete(&inline_key)
                                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                            let sectorsize = u64::from(alloc.nodesize.min(4096));
+                            let sectorsize = u64::from(alloc.sectorsize);
                             if !prev_data.is_empty() {
                                 let prev_data_len =
                                     u64::try_from(prev_data.len()).map_err(|_| {
@@ -10547,7 +10563,7 @@ impl OpenFs {
                     }
                 }
 
-                let sectorsize = u64::from(alloc.nodesize.min(4096));
+                let sectorsize = u64::from(alloc.sectorsize);
                 let alloc_size = length
                     .checked_add(sectorsize - 1)
                     .ok_or_else(|| FfsError::InvalidGeometry("offset + length overflow".into()))?
