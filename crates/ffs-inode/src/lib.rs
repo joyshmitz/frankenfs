@@ -471,20 +471,35 @@ pub fn touch_atime(inode: &mut Ext4Inode, secs: u64, nsec: u32) {
     inode.atime_extra = encode_extra_timestamp(secs, nsec);
 }
 
-/// Touch mtime and ctime on an inode.
+/// Touch mtime and ctime on an inode, and bump the NFS version counter.
 #[allow(clippy::cast_possible_truncation)]
 pub fn touch_mtime_ctime(inode: &mut Ext4Inode, secs: u64, nsec: u32) {
     inode.mtime = secs as u32;
     inode.mtime_extra = encode_extra_timestamp(secs, nsec);
     inode.ctime = secs as u32;
     inode.ctime_extra = encode_extra_timestamp(secs, nsec);
+    bump_inode_version(inode);
 }
 
-/// Touch ctime only on an inode (e.g., for chmod, chown).
+/// Increment the 64-bit NFS inode version counter (i_version + i_version_hi).
+///
+/// Used by NFSv4 for cache coherence (the NFS change attribute) and by
+/// statx(2) via `STATX_CHANGE_COOKIE`. The kernel increments this on every
+/// inode metadata or data change.
+#[allow(clippy::cast_possible_truncation)]
+pub fn bump_inode_version(inode: &mut Ext4Inode) {
+    let current = u64::from(inode.version) | (u64::from(inode.version_hi) << 32);
+    let next = current.wrapping_add(1);
+    inode.version = next as u32;
+    inode.version_hi = (next >> 32) as u32;
+}
+
+/// Touch ctime only on an inode (e.g., for chmod, chown), and bump version.
 #[allow(clippy::cast_possible_truncation)]
 pub fn touch_ctime(inode: &mut Ext4Inode, secs: u64, nsec: u32) {
     inode.ctime = secs as u32;
     inode.ctime_extra = encode_extra_timestamp(secs, nsec);
+    bump_inode_version(inode);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
