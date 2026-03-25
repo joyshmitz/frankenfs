@@ -6387,7 +6387,7 @@ impl OpenFs {
     /// Handles direct blocks (0..11) inline, and single-indirect blocks
     /// (12..12+ptrs_per_block) via read-modify-write of the indirect block.
     /// Allocates the indirect block on first use.
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
     fn write_block_ptr(
         &self,
         cx: &Cx,
@@ -6470,10 +6470,141 @@ impl OpenFs {
             return Ok(());
         }
 
-        // Double/triple indirect not yet supported.
-        Err(FfsError::UnsupportedFeature(
-            "e2compr: compressed clusters beyond single-indirect range not yet supported".into(),
-        ))
+        // Double indirect: i_block[13] -> indirect block -> pointer block -> data
+        let lb_dind = lb_indirect - ptrs_per_block;
+        if lb_dind < ptrs_per_block * ptrs_per_block {
+            let block_dev = self.block_device_adapter();
+
+            // Ensure i_block[13] (double-indirect root) exists.
+            let dind_root = self.ensure_indirect_block(
+                cx, scope, inode, alloc, 13, // i_block[13]
+            )?;
+
+            // Ensure the level-1 indirect block exists.
+            let idx1 = lb_dind / ptrs_per_block;
+            let level1 = self.ensure_pointer_in_block(
+                cx, scope, alloc, dind_root, idx1,
+            )?;
+
+            // Write the final pointer in the level-2 block.
+            let idx2 = lb_dind % ptrs_per_block;
+            let mut data = self.read_block_with_scope(cx, &RequestScope::empty(), level1)?;
+            let off = idx2 * 4;
+            data[off..off + 4].copy_from_slice(&phys.to_le_bytes());
+            if let Some(tx) = &mut scope.tx {
+                tx.stage_write(level1, data);
+            } else {
+                block_dev.write_block(cx, level1, &data)?;
+            }
+            return Ok(());
+        }
+
+        // Triple indirect: i_block[14] -> dind -> ind -> data
+        let lb_triple = lb_dind - ptrs_per_block * ptrs_per_block;
+        {
+            let block_dev = self.block_device_adapter();
+
+            let tind_root = self.ensure_indirect_block(cx, scope, inode, alloc, 14)?;
+            let idx1 = lb_triple / (ptrs_per_block * ptrs_per_block);
+            let dind_block = self.ensure_pointer_in_block(cx, scope, alloc, tind_root, idx1)?;
+            let idx2 = (lb_triple / ptrs_per_block) % ptrs_per_block;
+            let ind_block = self.ensure_pointer_in_block(cx, scope, alloc, dind_block, idx2)?;
+            let idx3 = lb_triple % ptrs_per_block;
+
+            let mut data = self.read_block_with_scope(cx, &RequestScope::empty(), ind_block)?;
+            let off = idx3 * 4;
+            data[off..off + 4].copy_from_slice(&phys.to_le_bytes());
+            if let Some(tx) = &mut scope.tx {
+                tx.stage_write(ind_block, data);
+            } else {
+                block_dev.write_block(cx, ind_block, &data)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Ensure i_block[idx] points to an allocated indirect block.
+    /// If zero, allocates a new zero-filled block and stores the pointer.
+    #[expect(clippy::cast_possible_truncation)]
+    fn ensure_indirect_block(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        inode: &mut Ext4Inode,
+        alloc: &mut Ext4AllocState,
+        iblock_idx: usize,
+    ) -> Result<BlockNumber, FfsError> {
+        let off = iblock_idx * 4;
+        let raw = &inode.extent_bytes;
+        let current = if off + 4 <= raw.len() {
+            u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]])
+        } else {
+            0
+        };
+        if current != 0 {
+            return Ok(BlockNumber(u64::from(current)));
+        }
+        let block_dev = self.block_device_adapter();
+        let bs = self.block_size();
+        let hint = AllocHint { goal_group: None, goal_block: None };
+        let Ext4AllocState { geo, groups, persist_ctx, .. } = &mut *alloc;
+        let result = ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
+        let new_block = result.start;
+        let zeros = vec![0_u8; bs as usize];
+        if let Some(tx) = &mut scope.tx {
+            tx.stage_write(new_block, zeros);
+        } else {
+            block_dev.write_block(cx, new_block, &zeros)?;
+        }
+        let ptr = new_block.0 as u32;
+        inode.extent_bytes[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
+        Ok(new_block)
+    }
+
+    /// Ensure a pointer at `index` within an indirect block is allocated.
+    /// If zero, allocates a new zero-filled block and stores the pointer.
+    #[expect(clippy::cast_possible_truncation)]
+    fn ensure_pointer_in_block(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        alloc: &mut Ext4AllocState,
+        parent_block: BlockNumber,
+        index: usize,
+    ) -> Result<BlockNumber, FfsError> {
+        let block_dev = self.block_device_adapter();
+        let bs = self.block_size();
+        let mut data = self.read_block_with_scope(cx, &RequestScope::empty(), parent_block)?;
+        let off = index * 4;
+        if off + 4 > data.len() {
+            return Err(FfsError::Corruption {
+                block: parent_block.0,
+                detail: "indirect block too small for pointer".into(),
+            });
+        }
+        let current = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+        if current != 0 {
+            return Ok(BlockNumber(u64::from(current)));
+        }
+        let hint = AllocHint { goal_group: None, goal_block: None };
+        let Ext4AllocState { geo, groups, persist_ctx, .. } = &mut *alloc;
+        let result = ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
+        let new_block = result.start;
+        let zeros = vec![0_u8; bs as usize];
+        if let Some(tx) = &mut scope.tx {
+            tx.stage_write(new_block, zeros);
+        } else {
+            let z = vec![0_u8; bs as usize];
+            block_dev.write_block(cx, new_block, &z)?;
+        }
+        let ptr = new_block.0 as u32;
+        data[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
+        if let Some(tx) = &mut scope.tx {
+            tx.stage_write(parent_block, data);
+        } else {
+            block_dev.write_block(cx, parent_block, &data)?;
+        }
+        Ok(new_block)
     }
 
     /// Write a u32 block pointer in the inode's direct block table (i_block[0..11]).
