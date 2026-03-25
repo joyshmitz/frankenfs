@@ -99,6 +99,27 @@ impl Jbd2Superblock {
     pub fn has_fast_commit(self) -> bool {
         (self.feature_incompat & JBD2_FEATURE_INCOMPAT_FAST_COMMIT) != 0 && self.num_fc_blocks > 0
     }
+
+    /// Compute the journal segment for an external journal device.
+    ///
+    /// An external journal device's JBD2 superblock occupies block 0 (or
+    /// `first_log_block - 1` for journal block-size alignment). The usable
+    /// journal area spans from `first_log_block` through `max_len` blocks.
+    /// This returns a single `JournalSegment` covering that range.
+    #[must_use]
+    pub fn external_journal_segment(&self) -> JournalSegment {
+        let start_block = if self.first_log_block > 0 {
+            u64::from(self.first_log_block)
+        } else {
+            1 // Default: skip block 0 (superblock)
+        };
+        let total_blocks = u64::from(self.max_len);
+        let usable = total_blocks.saturating_sub(start_block);
+        JournalSegment {
+            start: BlockNumber(start_block),
+            blocks: usable,
+        }
+    }
 }
 
 /// Journal region expressed in block coordinates.
