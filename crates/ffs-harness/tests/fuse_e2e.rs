@@ -985,6 +985,7 @@ fn statfs_snapshot(path: &Path) -> StatFsSnapshot {
 
 #[test]
 fn fuse_write_large_file() {
+    let _ = tracing_subscriber::fmt::try_init();
     with_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
         // Write 64 KiB of patterned data (crosses multiple blocks).

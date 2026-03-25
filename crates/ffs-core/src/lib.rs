@@ -831,15 +831,18 @@ impl BlockDevice for TransactionBlockAdapter<'_, '_> {
         // First check staged writes in the transaction.
         let tx = self.tx.lock();
         if let Some(staged) = tx.staged_write(block) {
+            tracing::error!("TransactionBlockAdapter::read_block FOUND block {} in tx", block.0);
             return Ok(BlockBuf::new(staged.to_vec()));
         }
         drop(tx);
 
+        tracing::error!("TransactionBlockAdapter::read_block falling back to base for block {}", block.0);
         // Fall back to base device.
         self.base.read_block(cx, block)
     }
 
     fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
+        tracing::error!("TransactionBlockAdapter::write_block STAGING block {} to tx", block.0);
         let mut tx = self.tx.lock();
         tx.stage_write(block, data.to_vec());
         drop(tx);
@@ -8419,7 +8422,7 @@ impl OpenFs {
         }
 
         let alloc_mutex = self.require_alloc_state()?;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
@@ -8473,7 +8476,7 @@ impl OpenFs {
             let chunk_len = (bs_usize - block_offset).min(remaining);
 
             // Resolve or allocate the physical block.
-            let extents = self.collect_extents(cx, &inode)?;
+            let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
             let phys = extents.iter().find_map(|e| {
                 if logical_block >= e.logical_block
                     && logical_block < e.logical_block + u32::from(e.actual_len())
@@ -8495,7 +8498,28 @@ impl OpenFs {
                         goal_block: extents.last().map(Self::extent_end_hint),
                     };
                     let mut root_bytes = Self::extent_root(&inode);
-                    let mapping = {
+                    let mapping = if let Some(tx) = &mut scope.tx {
+                        let tx_dev = TransactionBlockAdapter {
+                            base: &block_dev,
+                            tx: Mutex::new(tx),
+                        };
+                        let Ext4AllocState {
+                            geo,
+                            groups,
+                            persist_ctx,
+                        } = &mut *alloc;
+                        ffs_extent::allocate_extent(
+                            cx,
+                            &tx_dev,
+                            &mut root_bytes,
+                            geo,
+                            groups,
+                            logical_block,
+                            1,
+                            &hint,
+                            persist_ctx,
+                        )?
+                    } else {
                         let Ext4AllocState {
                             geo,
                             groups,
@@ -8513,6 +8537,8 @@ impl OpenFs {
                             persist_ctx,
                         )?
                     };
+                    // Re-acquire block_dev so subsequent bitmap reads see the allocation (if not staged)!
+                    block_dev = self.block_device_adapter();
                     self.extent_cache.invalidate_range(
                         extent_root_namespace(&inode),
                         logical_block,
@@ -9023,6 +9049,7 @@ impl OpenFs {
     fn ext4_setattr(
         &self,
         cx: &Cx,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
@@ -9035,7 +9062,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let mut inode = self.read_inode(cx, ino)?;
+        let mut inode = self.read_inode_with_scope(cx, scope, ino)?;
 
         if let Some(mode) = attrs.mode {
             // Preserve file type bits (upper 4 bits of 16-bit mode).
@@ -9073,7 +9100,26 @@ impl OpenFs {
                     })?;
                     let extent_ns = extent_root_namespace(&inode);
                     let mut root_bytes = Self::extent_root(&inode);
-                    let freed = {
+                    let freed = if let Some(tx) = &mut scope.tx {
+                        let tx_dev = TransactionBlockAdapter {
+                            base: &block_dev,
+                            tx: Mutex::new(tx),
+                        };
+                        let Ext4AllocState {
+                            geo,
+                            groups,
+                            persist_ctx,
+                        } = &mut *alloc;
+                        ffs_extent::truncate_extents(
+                            cx,
+                            &tx_dev,
+                            &mut root_bytes,
+                            geo,
+                            groups,
+                            new_logical_end,
+                            persist_ctx,
+                        )?
+                    } else {
                         let Ext4AllocState {
                             geo,
                             groups,
@@ -9112,7 +9158,22 @@ impl OpenFs {
 
         ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
 
-        {
+        if let Some(tx) = &mut scope.tx {
+            let tx_dev = TransactionBlockAdapter {
+                base: &block_dev,
+                tx: Mutex::new(tx),
+            };
+            let alloc = alloc_mutex.lock();
+            ffs_inode::write_inode(
+                cx,
+                &tx_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &inode,
+                csum_seed,
+            )?;
+        } else {
             let alloc = alloc_mutex.lock();
             ffs_inode::write_inode(
                 cx,
@@ -12340,13 +12401,13 @@ impl FsOps for OpenFs {
     fn setattr(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
         match &self.flavor {
             FsFlavor::Ext4(_) => self
-                .ext4_setattr(cx, Self::ext4_canonical_inode(ino), attrs)
+                .ext4_setattr(cx, scope, Self::ext4_canonical_inode(ino), attrs)
                 .map(Self::ext4_present_attr),
             FsFlavor::Btrfs(_) => self.btrfs_setattr(cx, ino, attrs),
         }
