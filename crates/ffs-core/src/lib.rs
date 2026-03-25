@@ -6270,6 +6270,101 @@ impl OpenFs {
     /// e2compr compressed clusters must fit within the 12 direct block entries.
     /// Entries 12-14 are reserved for indirect/double-indirect/triple-indirect
     /// pointers and must not be overwritten with data block pointers.
+    /// Write a block pointer for a logical block.
+    ///
+    /// Handles direct blocks (0..11) inline, and single-indirect blocks
+    /// (12..12+ptrs_per_block) via read-modify-write of the indirect block.
+    /// Allocates the indirect block on first use.
+    #[expect(clippy::cast_possible_truncation)]
+    fn write_block_ptr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        inode: &mut Ext4Inode,
+        alloc: &mut Ext4AllocState,
+        logical_block: u32,
+        phys: u32,
+    ) -> Result<(), FfsError> {
+        let lb = logical_block as usize;
+        if lb < 12 {
+            return Self::set_indirect_block_ptr(inode, logical_block, phys);
+        }
+
+        let bs = self.block_size();
+        let ptrs_per_block = bs as usize / 4;
+        let lb_indirect = lb - 12;
+
+        if lb_indirect < ptrs_per_block {
+            // Single indirect: i_block[12] -> pointer block -> data
+            let block_dev = self.block_device_adapter();
+            let raw = &inode.extent_bytes;
+            let ind_ptr_off = 12 * 4; // i_block[12] offset
+            let current_ind = if ind_ptr_off + 4 <= raw.len() {
+                u32::from_le_bytes([
+                    raw[ind_ptr_off],
+                    raw[ind_ptr_off + 1],
+                    raw[ind_ptr_off + 2],
+                    raw[ind_ptr_off + 3],
+                ])
+            } else {
+                0
+            };
+
+            let ind_block_num = if current_ind == 0 {
+                // Allocate a new indirect block.
+                let hint = AllocHint {
+                    goal_group: None,
+                    goal_block: None,
+                };
+                let Ext4AllocState {
+                    geo,
+                    groups,
+                    persist_ctx,
+                } = &mut *alloc;
+                let alloc_result =
+                    ffs_alloc::alloc_blocks_persist(cx, &block_dev, geo, groups, 1, &hint, persist_ctx)?;
+                let new_block = alloc_result.start;
+                // Zero-fill the new indirect block.
+                let zeros = vec![0_u8; bs as usize];
+                if let Some(tx) = &mut scope.tx {
+                    tx.stage_write(new_block, zeros);
+                } else {
+                    block_dev.write_block(cx, new_block, &zeros)?;
+                }
+                // Store in i_block[12].
+                let new_ptr = new_block.0 as u32;
+                inode.extent_bytes[ind_ptr_off..ind_ptr_off + 4]
+                    .copy_from_slice(&new_ptr.to_le_bytes());
+                new_block
+            } else {
+                BlockNumber(u64::from(current_ind))
+            };
+
+            // Read-modify-write the indirect block.
+            let mut ind_data = self.read_block_with_scope(cx, &RequestScope::empty(), ind_block_num)?;
+            let off = lb_indirect * 4;
+            if off + 4 > ind_data.len() {
+                return Err(FfsError::Corruption {
+                    block: ind_block_num.0,
+                    detail: "indirect block too small for pointer write".into(),
+                });
+            }
+            ind_data[off..off + 4].copy_from_slice(&phys.to_le_bytes());
+            if let Some(tx) = &mut scope.tx {
+                tx.stage_write(ind_block_num, ind_data);
+            } else {
+                block_dev.write_block(cx, ind_block_num, &ind_data)?;
+            }
+            return Ok(());
+        }
+
+        // Double/triple indirect not yet supported.
+        Err(FfsError::UnsupportedFeature(
+            "e2compr: compressed clusters beyond single-indirect range not yet supported".into(),
+        ))
+    }
+
+    /// Write a u32 block pointer in the inode's direct block table (i_block[0..11]).
     fn set_indirect_block_ptr(
         inode: &mut Ext4Inode,
         logical_block: u32,
@@ -6278,9 +6373,7 @@ impl OpenFs {
         let lb = logical_block as usize;
         if lb >= 12 {
             return Err(FfsError::UnsupportedFeature(
-                "e2compr: compressed clusters beyond direct block range (block >= 12) \
-                 not yet supported — would overwrite indirect block pointers"
-                    .into(),
+                "e2compr: direct block pointer write out of range (block >= 12)".into(),
             ));
         }
         let off = lb * 4;
@@ -6490,17 +6583,18 @@ impl OpenFs {
             }
 
             #[expect(clippy::cast_possible_truncation)]
-            Self::set_indirect_block_ptr(inode, cluster_start + i, phys_block.0 as u32)?;
+            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_block.0 as u32)?;
         }
 
         // Set remaining block pointers in the cluster to 0 (holes).
         for i in blocks_needed..cluster_nblocks - 1 {
-            Self::set_indirect_block_ptr(inode, cluster_start + i, 0)?;
+            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, 0)?;
         }
 
         // Set sentinel on the last block pointer.
-        Self::set_indirect_block_ptr(
-            inode,
+        #[expect(clippy::cast_possible_truncation)]
+        self.write_block_ptr(
+            cx, scope, inode, alloc,
             cluster_start + cluster_nblocks - 1,
             ffs_types::EXT2_COMPRESSED_BLKADDR as u32,
         )?;
@@ -6545,7 +6639,7 @@ impl OpenFs {
             let start = i as usize * bs_usize;
             if start >= data.len() {
                 // Beyond file data — set remaining as holes.
-                Self::set_indirect_block_ptr(inode, cluster_start + i, 0)?;
+                self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, 0)?;
                 continue;
             }
             let end = (start + bs_usize).min(data.len());
@@ -6579,7 +6673,7 @@ impl OpenFs {
             }
 
             #[expect(clippy::cast_possible_truncation)]
-            Self::set_indirect_block_ptr(inode, cluster_start + i, phys_block.0 as u32)?;
+            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_block.0 as u32)?;
             blocks_written += 1;
         }
 
