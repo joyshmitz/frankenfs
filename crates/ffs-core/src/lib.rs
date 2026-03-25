@@ -7983,6 +7983,10 @@ impl OpenFs {
             tstamp_nanos,
         )?;
 
+        // Re-acquire the block device adapter so that updating the source inode's link count sees
+        // the parent inode-table block as modified by ext4_add_dir_entry().
+        block_dev = self.block_device_adapter();
+
         src_upd.links_count = src_upd.links_count.saturating_add(1);
         ffs_inode::touch_ctime(&mut src_upd, tstamp_secs, tstamp_nanos);
         ffs_inode::write_inode(
@@ -8022,7 +8026,7 @@ impl OpenFs {
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
         let alloc_mutex = self.require_alloc_state()?;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
         let target_bytes = target.as_os_str().as_encoded_bytes();
         let fast_storage = target_bytes.len() <= ffs_types::EXT4_FAST_SYMLINK_MAX;
@@ -8067,6 +8071,10 @@ impl OpenFs {
                     persist_ctx,
                 )?
             };
+
+            // Re-acquire the block device adapter so subsequent writes observe the inode-table
+            // block committed by create_inode().
+            block_dev = self.block_device_adapter();
 
             if fast_storage {
                 inode.flags &= !EXT4_EXTENTS_FL;

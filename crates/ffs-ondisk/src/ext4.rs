@@ -7449,7 +7449,7 @@ mod tests {
         let csum = block_bitmap_checksum_value(&bitmap, csum_seed, blocks_per_group, 64);
 
         // Build a GDT entry with the computed checksum.
-        let mut gd = Ext4GroupDesc {
+        let gd = Ext4GroupDesc {
             block_bitmap: 0,
             inode_bitmap: 0,
             inode_table: 0,

@@ -4029,7 +4029,8 @@ pub fn choose_btrfs_scrub_block_size(
     }
 
     // Btrfs superblock region must fit; scrub block size must hold it.
-    let super_info_size = ffs_types::BTRFS_SUPER_INFO_SIZE as u32;
+    let super_info_size = u32::try_from(ffs_types::BTRFS_SUPER_INFO_SIZE)
+        .map_err(|_| anyhow::anyhow!("btrfs superblock size does not fit in u32"))?;
     let min_block_size = if sectorsize.is_power_of_two() {
         sectorsize.max(super_info_size)
     } else {
