@@ -77,7 +77,7 @@ pub fn map_logical_to_physical(
             } => {
                 let actual_len = u32::from(extent.actual_len());
                 let remaining_in_extent = u64::from(actual_len.saturating_sub(offset_in_extent));
-                let to_map = remaining_in_extent.min(end - pos);
+                let to_map = remaining_in_extent.min(end - pos).min(u64::from(u32::MAX));
                 if to_map == 0 {
                     return Err(FfsError::Corruption {
                         block: 0,
@@ -100,7 +100,7 @@ pub fn map_logical_to_physical(
                 pos += to_map;
             }
             SearchResult::Hole { hole_len } => {
-                let to_map = hole_len.min(end - pos);
+                let to_map = hole_len.min(end - pos).min(u64::from(u32::MAX));
                 if to_map == 0 {
                     return Err(FfsError::Corruption {
                         block: 0,
