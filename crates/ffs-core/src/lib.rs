@@ -7506,7 +7506,7 @@ impl OpenFs {
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
         let alloc_mutex = self.require_alloc_state()?;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
