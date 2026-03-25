@@ -16,7 +16,7 @@
   <a href="https://github.com/Dicklesworthstone/frankenfs/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg" alt="MIT+Rider License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-nightly%202024-orange.svg" alt="Rust Nightly"></a>
   <img src="https://img.shields.io/badge/parity-100%25-brightgreen" alt="Parity 100%">
-  <img src="https://img.shields.io/badge/tests-2146%20passing-brightgreen" alt="2146 Tests">
+  <img src="https://img.shields.io/badge/tests-3591%20passing-brightgreen" alt="3591 Tests">
   <img src="https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg" alt="Unsafe Forbidden">
   <img src="https://img.shields.io/badge/status-early%20development-yellow.svg" alt="Early Development">
 </p>
@@ -423,7 +423,7 @@ These metrics also drive the `PolicySwitched` event when the adaptive policy cha
 
 ## Testing Philosophy
 
-FrankenFS uses a multi-layered testing strategy with 2,146 tests across 21 crates.
+FrankenFS uses a multi-layered testing strategy with 3,591+ tests across 21 crates.
 
 ### Test Categories
 
@@ -1145,8 +1145,9 @@ Every I/O operation requires an explicit `&Cx` capability. Code that doesn't hav
 
 On mount, FrankenFS validates the image against a strict compatibility contract:
 
-- Required feature flags must be present (`FILETYPE` + `EXTENTS` for ext4)
-- Excluded feature flags must be absent (`ENCRYPT`, `CASEFOLD`, `INLINE_DATA`, etc.)
+- Required feature flags must be present (`FILETYPE` for ext4)
+- All known incompat feature flags are accepted (COMPRESSION, JOURNAL_DEV, ENCRYPT, CASEFOLD, INLINE_DATA, etc.)
+- Unknown incompat bits cause rejection
 - Geometry parameters must be within supported ranges
 - Superblock checksum must validate (ext4 CRC32c)
 
@@ -1185,7 +1186,7 @@ cd frankenfs
 # 2. Build
 cargo build --workspace
 
-# 3. Run tests (2146 tests across 21 crates)
+# 3. Run tests (3591+ tests across 21 crates)
 cargo test --workspace
 
 # 4. Inspect a filesystem image
@@ -1302,12 +1303,12 @@ FrankenFS is in **early development**. The tracked V1 parity matrix is complete 
 
 | Domain | Coverage |
 |--------|----------|
-| ext4 metadata parsing | 100.0% (19/19) |
-| btrfs metadata parsing | 100.0% (20/20) |
+| ext4 metadata parsing | 100.0% (27/27) |
+| btrfs metadata parsing | 100.0% (27/27) |
 | MVCC/COW core | 100.0% (14/14) |
 | FUSE surface | 100.0% (12/12) |
 | self-healing durability policy | 100.0% (10/10) |
-| **Overall** | **100.0% (75/75)** |
+| **Overall** | **100.0% (90/90)** |
 
 ### What Works Today
 
@@ -1318,7 +1319,7 @@ FrankenFS is in **early development**. The tracked V1 parity matrix is complete 
 - **Writeback-cache:** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, 12-scenario crash consistency proof, benchmark framework for barrier overhead measurement
 - **Observability:** Evidence ledger (23 event types, 5 presets), contention metrics (EMA conflict/merge/abort rates), policy-switch detection, structured logging across all subsystems
 - **CLI:** `inspect`, `mvcc-stats`, `info`, `dump`, `fsck`, `repair`, `mount`, `scrub`, `parity`, `evidence`, `mkfs`
-- **Testing:** 2,146 tests across 21 crates, including property-based tests, crash matrices, 120-writer stress tests, and verification gates
+- **Testing:** 3,591+ tests across 21 crates, including property-based tests, crash matrices, 120-writer stress tests, and verification gates
 
 ### What's Next
 
