@@ -138,7 +138,7 @@ impl Default for CompressionPolicy {
         Self {
             dedup_identical: true,
             max_chain_length: Some(64),
-            algo: CompressionAlgo::None,
+            algo: CompressionAlgo::Zstd { level: 0 },
         }
     }
 }

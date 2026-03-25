@@ -1628,6 +1628,7 @@ impl Filesystem for FrankenFuse {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
+        tracing::error!("FUSE write offset {} len {}", offset, data.len());
         match self.dispatch_write(ino, offset, data) {
             Ok(written) => reply.written(written),
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),

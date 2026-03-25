@@ -7479,9 +7479,7 @@ impl OpenFs {
         // Add directory entry to parent.
         self.ext4_add_dir_entry(
             cx,
-            &block_dev,
-            &mut alloc,
-            parent,
+            &mut alloc,            parent,
             &parent_inode,
             name,
             ino,
@@ -7600,6 +7598,7 @@ impl OpenFs {
             physical_start: dir_alloc.start.0,
         };
         let mut root_bytes = Self::extent_root(&new_inode);
+        block_dev = self.block_device_adapter();
         {
             let Ext4AllocState {
                 geo,
@@ -7636,9 +7635,7 @@ impl OpenFs {
         // This will also update parent timestamps and size if needed.
         self.ext4_add_dir_entry(
             cx,
-            &block_dev,
-            &mut alloc,
-            parent,
+            &mut alloc,            parent,
             &parent_inode,
             name,
             ino,
@@ -7668,7 +7665,6 @@ impl OpenFs {
     fn ext4_add_dir_entry(
         &self,
         cx: &Cx,
-        block_dev: &dyn BlockDevice,
         alloc: &mut Ext4AllocState,
         parent: InodeNumber,
         parent_inode: &Ext4Inode,
@@ -7679,6 +7675,8 @@ impl OpenFs {
         tstamp_secs: u64,
         tstamp_nanos: u32,
     ) -> ffs_error::Result<()> {
+        let mut block_dev = self.block_device_adapter();
+
         // Collect existing directory extents.
         let extents = self.collect_extents(cx, parent_inode)?;
 
@@ -7705,9 +7703,8 @@ impl OpenFs {
 
                         ffs_inode::write_inode(
                             cx,
-                            block_dev,
-                            &alloc.geo,
-                            &alloc.groups,
+                            &block_dev,
+                            &alloc.geo,                            &alloc.groups,
                             parent,
                             &parent_upd,
                             csum_seed,
@@ -7727,7 +7724,7 @@ impl OpenFs {
         };
         let new_alloc = ffs_alloc::alloc_blocks_persist(
             cx,
-            block_dev,
+            &block_dev,
             &alloc.geo,
             &mut alloc.groups,
             1,
@@ -7758,6 +7755,10 @@ impl OpenFs {
         )?;
         block_dev.write_block(cx, new_alloc.start, &new_block)?;
 
+        // Re-acquire block_dev to ensure subsequent index block allocations
+        // read the updated block bitmap.
+        block_dev = self.block_device_adapter();
+
         // Insert extent for the new directory block and update parent metadata.
         let mut parent_upd = parent_inode.clone();
         let logical_end = extents
@@ -7777,13 +7778,13 @@ impl OpenFs {
         };
         let mut tree_alloc = ffs_extent::GroupBlockAllocator {
             cx,
-            dev: block_dev,
+            dev: &block_dev,
             geo: &alloc.geo,
             groups: &mut alloc.groups,
             hint: tree_hint,
             pctx: &alloc.persist_ctx,
         };
-        ffs_btree::insert(cx, block_dev, &mut root_bytes, extent, &mut tree_alloc)?;
+        ffs_btree::insert(cx, &block_dev, &mut root_bytes, extent, &mut tree_alloc)?;
         Self::set_extent_root(&mut parent_upd, &root_bytes);
 
         parent_upd.size += u64::from(alloc.geo.block_size);
@@ -7798,7 +7799,7 @@ impl OpenFs {
         ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
         ffs_inode::write_inode(
             cx,
-            block_dev,
+            &block_dev,
             &alloc.geo,
             &alloc.groups,
             parent,
@@ -7987,9 +7988,7 @@ impl OpenFs {
         let mut alloc = alloc_mutex.lock();
         self.ext4_add_dir_entry(
             cx,
-            &block_dev,
-            &mut alloc,
-            new_parent,
+            &mut alloc,            new_parent,
             &new_parent_inode,
             new_name,
             ino,
@@ -8112,7 +8111,6 @@ impl OpenFs {
 
             self.ext4_add_dir_entry(
                 cx,
-                &block_dev,
                 &mut alloc,
                 parent,
                 &parent_inode,
@@ -8946,9 +8944,7 @@ impl OpenFs {
         let new_parent_inode_fresh = self.read_inode(cx, new_parent)?;
         self.ext4_add_dir_entry(
             cx,
-            &block_dev,
-            &mut alloc,
-            new_parent,
+            &mut alloc,            new_parent,
             &new_parent_inode_fresh,
             new_name,
             child_ino,
@@ -12540,6 +12536,7 @@ impl FsOps for OpenFs {
             let mut store = self.mvcc_store.write();
             let txn = store.begin();
             drop(store);
+            snapshot = Some(txn.snapshot);
             tx = Some(txn);
             trace!(
                 target: "ffs::mvcc",

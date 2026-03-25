@@ -133,6 +133,41 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         String::from_utf8_lossy(&out.stderr)
     );
 
+    let uid_out = Command::new("id").arg("-u").output().unwrap();
+    let uid = String::from_utf8_lossy(&uid_out.stdout).trim().to_string();
+    let gid_out = Command::new("id").arg("-g").output().unwrap();
+    let gid = String::from_utf8_lossy(&gid_out.stdout).trim().to_string();
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &format!("set_inode_field hello.txt uid {}", uid),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &format!("set_inode_field hello.txt gid {}", gid),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            "set_inode_field hello.txt mode 0100777",
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
     // Write nested.txt
     let out = Command::new("debugfs")
         .args([
@@ -148,6 +183,37 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         "debugfs write nested.txt failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &format!("set_inode_field testdir/nested.txt uid {}", uid),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &format!("set_inode_field testdir/nested.txt gid {}", gid),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            "set_inode_field testdir/nested.txt mode 0100777",
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
 
     image
 }
@@ -1387,6 +1453,7 @@ fn fuse_flush_on_close_preserves_data() {
 
 #[test]
 fn fuse_fsync_after_multiple_writes() {
+    let _ = tracing_subscriber::fmt::try_init();
     with_rw_mount(|mnt| {
         let path = mnt.join("multi_write_sync.txt");
         let mut file = fs::OpenOptions::new()
