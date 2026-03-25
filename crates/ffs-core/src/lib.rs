@@ -831,18 +831,27 @@ impl BlockDevice for TransactionBlockAdapter<'_, '_> {
         // First check staged writes in the transaction.
         let tx = self.tx.lock();
         if let Some(staged) = tx.staged_write(block) {
-            tracing::error!("TransactionBlockAdapter::read_block FOUND block {} in tx", block.0);
+            tracing::error!(
+                "TransactionBlockAdapter::read_block FOUND block {} in tx",
+                block.0
+            );
             return Ok(BlockBuf::new(staged.to_vec()));
         }
         drop(tx);
 
-        tracing::error!("TransactionBlockAdapter::read_block falling back to base for block {}", block.0);
+        tracing::error!(
+            "TransactionBlockAdapter::read_block falling back to base for block {}",
+            block.0
+        );
         // Fall back to base device.
         self.base.read_block(cx, block)
     }
 
     fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
-        tracing::error!("TransactionBlockAdapter::write_block STAGING block {} to tx", block.0);
+        tracing::error!(
+            "TransactionBlockAdapter::write_block STAGING block {} to tx",
+            block.0
+        );
         let mut tx = self.tx.lock();
         tx.stage_write(block, data.to_vec());
         drop(tx);
@@ -5208,18 +5217,9 @@ impl OpenFs {
             }
         }
 
-        // 3. Fallback to direct device read (unversioned).
-        let bs = u64::from(self.block_size());
-        let offset = block
-            .0
-            .checked_mul(bs)
-            .ok_or_else(|| FfsError::Corruption {
-                block: block.0,
-                detail: "block offset overflow".into(),
-            })?;
-        let mut buf = vec![0_u8; self.block_size() as usize];
-        self.dev.read_exact_at(cx, ByteOffset(offset), &mut buf)?;
-        Ok(buf)
+        // 3. Fall back to the device's default adapter (which uses the current snapshot).
+        let dev = self.block_device_adapter();
+        Ok(dev.read_block(cx, block)?.as_slice().to_vec())
     }
 
     /// Resolve a logical file block to a physical block number via the inode's
@@ -6456,7 +6456,8 @@ impl OpenFs {
                 // Store in i_block[12].
                 let new_ptr = u32::try_from(new_block.0).map_err(|_| {
                     FfsError::InvalidGeometry(format!(
-                        "e2compr: indirect block {} exceeds 32-bit pointer range", new_block.0
+                        "e2compr: indirect block {} exceeds 32-bit pointer range",
+                        new_block.0
                     ))
                 })?;
                 inode.extent_bytes[ind_ptr_off..ind_ptr_off + 4]
@@ -6578,7 +6579,8 @@ impl OpenFs {
         }
         let ptr = u32::try_from(new_block.0).map_err(|_| {
             FfsError::InvalidGeometry(format!(
-                "e2compr: indirect block {} exceeds 32-bit pointer range", new_block.0
+                "e2compr: indirect block {} exceeds 32-bit pointer range",
+                new_block.0
             ))
         })?;
         inode.extent_bytes[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
@@ -6633,7 +6635,8 @@ impl OpenFs {
         }
         let ptr = u32::try_from(new_block.0).map_err(|_| {
             FfsError::InvalidGeometry(format!(
-                "e2compr: indirect block {} exceeds 32-bit pointer range", new_block.0
+                "e2compr: indirect block {} exceeds 32-bit pointer range",
+                new_block.0
             ))
         })?;
         data[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
@@ -6781,12 +6784,18 @@ impl OpenFs {
             4
         };
 
-        let ulen = u32::try_from(non_hole_data.len()).map_err(|_| FfsError::InvalidGeometry(
-            format!("e2compr: uncompressed data {} bytes exceeds u32", non_hole_data.len()),
-        ))?;
-        let clen = u32::try_from(compressed.len()).map_err(|_| FfsError::InvalidGeometry(
-            format!("e2compr: compressed data {} bytes exceeds u32", compressed.len()),
-        ))?;
+        let ulen = u32::try_from(non_hole_data.len()).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "e2compr: uncompressed data {} bytes exceeds u32",
+                non_hole_data.len()
+            ))
+        })?;
+        let clen = u32::try_from(compressed.len()).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "e2compr: compressed data {} bytes exceeds u32",
+                compressed.len()
+            ))
+        })?;
 
         // Build cluster header.
         let header_total = 16 + holemap_nbytes as usize;
@@ -7479,7 +7488,8 @@ impl OpenFs {
         // Add directory entry to parent.
         self.ext4_add_dir_entry(
             cx,
-            &mut alloc,            parent,
+            &mut alloc,
+            parent,
             &parent_inode,
             name,
             ino,
@@ -7635,7 +7645,8 @@ impl OpenFs {
         // This will also update parent timestamps and size if needed.
         self.ext4_add_dir_entry(
             cx,
-            &mut alloc,            parent,
+            &mut alloc,
+            parent,
             &parent_inode,
             name,
             ino,
@@ -7704,7 +7715,8 @@ impl OpenFs {
                         ffs_inode::write_inode(
                             cx,
                             &block_dev,
-                            &alloc.geo,                            &alloc.groups,
+                            &alloc.geo,
+                            &alloc.groups,
                             parent,
                             &parent_upd,
                             csum_seed,
@@ -7988,7 +8000,8 @@ impl OpenFs {
         let mut alloc = alloc_mutex.lock();
         self.ext4_add_dir_entry(
             cx,
-            &mut alloc,            new_parent,
+            &mut alloc,
+            new_parent,
             &new_parent_inode,
             new_name,
             ino,
@@ -8668,9 +8681,11 @@ impl OpenFs {
         // Process data cluster-by-cluster.
         let mut pos = offset;
         while pos < end {
-            let logical_block = u32::try_from(pos / bs).map_err(|_| FfsError::InvalidGeometry(
-                format!("e2compr: file offset {pos} produces logical block exceeding u32"),
-            ))?;
+            let logical_block = u32::try_from(pos / bs).map_err(|_| {
+                FfsError::InvalidGeometry(format!(
+                    "e2compr: file offset {pos} produces logical block exceeding u32"
+                ))
+            })?;
             let cluster_start = logical_block - (logical_block % cluster_nblocks);
             let cluster_file_offset = u64::from(cluster_start) * bs;
             let cluster_end_offset = cluster_file_offset + cluster_bytes as u64;
@@ -8944,7 +8959,8 @@ impl OpenFs {
         let new_parent_inode_fresh = self.read_inode(cx, new_parent)?;
         self.ext4_add_dir_entry(
             cx,
-            &mut alloc,            new_parent,
+            &mut alloc,
+            new_parent,
             &new_parent_inode_fresh,
             new_name,
             child_ino,
@@ -9041,7 +9057,7 @@ impl OpenFs {
     }
 
     /// Set attributes on an ext4 inode.
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     fn ext4_setattr(
         &self,
         cx: &Cx,
@@ -15344,7 +15360,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                FfsError::Io(_) | FfsError::Corruption { .. } | FfsError::InvalidGeometry(_)
+                FfsError::Io(_)
+                    | FfsError::Corruption { .. }
+                    | FfsError::InvalidGeometry(_)
+                    | FfsError::Format(_)
             ),
             "unexpected error variant: {err:?}"
         );
@@ -15363,7 +15382,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                FfsError::Io(_) | FfsError::Corruption { .. } | FfsError::InvalidGeometry(_)
+                FfsError::Io(_)
+                    | FfsError::Corruption { .. }
+                    | FfsError::InvalidGeometry(_)
+                    | FfsError::Format(_)
             ),
             "unexpected error variant: {err:?}"
         );

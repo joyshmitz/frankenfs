@@ -305,18 +305,24 @@ impl SuccinctBitmap {
         for bi in block_start..block_end {
             let block_bit_start = (bi as u32) * BLOCK_BITS;
             let local_ones = u32::from(self.blocks[bi]);
-            let local_zeros = block_bit_start.saturating_sub(super_bit).saturating_sub(local_ones);
+            let local_zeros = block_bit_start
+                .saturating_sub(super_bit)
+                .saturating_sub(local_ones);
 
             let next_bi = bi + 1;
             let next_zeros = if next_bi < block_end {
                 let next_bit_start = (next_bi as u32) * BLOCK_BITS;
                 let next_local_ones = u32::from(self.blocks[next_bi]);
-                next_bit_start.saturating_sub(super_bit).saturating_sub(next_local_ones)
+                next_bit_start
+                    .saturating_sub(super_bit)
+                    .saturating_sub(next_local_ones)
             } else {
                 let next_super_bit = (((super_idx + 1) as u64) * u64::from(SUPERBLOCK_BITS))
                     .min(u64::from(self.len)) as u32;
                 let total_ones = self.superblocks[super_idx + 1] - self.superblocks[super_idx];
-                next_super_bit.saturating_sub(super_bit).saturating_sub(total_ones)
+                next_super_bit
+                    .saturating_sub(super_bit)
+                    .saturating_sub(total_ones)
             };
 
             if next_zeros > remaining {

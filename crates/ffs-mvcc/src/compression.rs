@@ -303,7 +303,7 @@ mod tests {
         let policy = CompressionPolicy::default();
         assert!(policy.dedup_identical);
         assert_eq!(policy.max_chain_length, Some(64));
-        assert_eq!(policy.algo, CompressionAlgo::None);
+        assert_eq!(policy.algo, CompressionAlgo::Zstd { level: 0 });
     }
 
     #[test]
