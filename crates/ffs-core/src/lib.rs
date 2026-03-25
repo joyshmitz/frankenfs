@@ -6778,8 +6778,12 @@ impl OpenFs {
             4
         };
 
-        let ulen = non_hole_data.len() as u32;
-        let clen = compressed.len() as u32;
+        let ulen = u32::try_from(non_hole_data.len()).map_err(|_| FfsError::InvalidGeometry(
+            format!("e2compr: uncompressed data {} bytes exceeds u32", non_hole_data.len()),
+        ))?;
+        let clen = u32::try_from(compressed.len()).map_err(|_| FfsError::InvalidGeometry(
+            format!("e2compr: compressed data {} bytes exceeds u32", compressed.len()),
+        ))?;
 
         // Build cluster header.
         let header_total = 16 + holemap_nbytes as usize;
@@ -8640,7 +8644,9 @@ impl OpenFs {
         // Process data cluster-by-cluster.
         let mut pos = offset;
         while pos < end {
-            let logical_block = (pos / bs) as u32;
+            let logical_block = u32::try_from(pos / bs).map_err(|_| FfsError::InvalidGeometry(
+                format!("e2compr: file offset {pos} produces logical block exceeding u32"),
+            ))?;
             let cluster_start = logical_block - (logical_block % cluster_nblocks);
             let cluster_file_offset = u64::from(cluster_start) * bs;
             let cluster_end_offset = cluster_file_offset + cluster_bytes as u64;
@@ -8652,12 +8658,13 @@ impl OpenFs {
             let existing_end = inode.size.min(cluster_end_offset);
             if existing_end > cluster_file_offset {
                 let existing_len = (existing_end - cluster_file_offset) as usize;
+                let existing_len_u32 = u32::try_from(existing_len).unwrap_or(u32::MAX);
                 let existing = self.read_ext4_compressed(
                     cx,
                     scope,
                     inode,
                     cluster_file_offset,
-                    existing_len as u32,
+                    existing_len_u32,
                 )?;
                 let copy_len = existing.len().min(cluster_bytes);
                 cluster_data[..copy_len].copy_from_slice(&existing[..copy_len]);
