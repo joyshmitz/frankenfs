@@ -6451,7 +6451,11 @@ impl OpenFs {
                     block_dev.write_block(cx, new_block, &zeros)?;
                 }
                 // Store in i_block[12].
-                let new_ptr = new_block.0 as u32;
+                let new_ptr = u32::try_from(new_block.0).map_err(|_| {
+                    FfsError::InvalidGeometry(format!(
+                        "e2compr: indirect block {} exceeds 32-bit pointer range", new_block.0
+                    ))
+                })?;
                 inode.extent_bytes[ind_ptr_off..ind_ptr_off + 4]
                     .copy_from_slice(&new_ptr.to_le_bytes());
                 new_block
@@ -6570,7 +6574,11 @@ impl OpenFs {
         } else {
             block_dev.write_block(cx, new_block, &zeros)?;
         }
-        let ptr = new_block.0 as u32;
+        let ptr = u32::try_from(new_block.0).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "e2compr: indirect block {} exceeds 32-bit pointer range", new_block.0
+            ))
+        })?;
         inode.extent_bytes[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
         Ok(new_block)
     }
@@ -6622,7 +6630,11 @@ impl OpenFs {
             let z = vec![0_u8; bs as usize];
             block_dev.write_block(cx, new_block, &z)?;
         }
-        let ptr = new_block.0 as u32;
+        let ptr = u32::try_from(new_block.0).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "e2compr: indirect block {} exceeds 32-bit pointer range", new_block.0
+            ))
+        })?;
         data[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
         if let Some(tx) = &mut scope.tx {
             tx.stage_write(parent_block, data);
@@ -6850,15 +6862,13 @@ impl OpenFs {
                 block_dev.write_block(cx, phys_block, block_data)?;
             }
 
-            #[expect(clippy::cast_possible_truncation)]
-            self.write_block_ptr(
-                cx,
-                scope,
-                inode,
-                alloc,
-                cluster_start + i,
-                phys_block.0 as u32,
-            )?;
+            let phys_u32 = u32::try_from(phys_block.0).map_err(|_| {
+                FfsError::InvalidGeometry(format!(
+                    "e2compr: allocated block {} exceeds 32-bit indirect pointer range",
+                    phys_block.0
+                ))
+            })?;
+            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_u32)?;
         }
 
         // Set remaining block pointers in the cluster to 0 (holes).
@@ -6867,14 +6877,13 @@ impl OpenFs {
         }
 
         // Set sentinel on the last block pointer.
-        #[expect(clippy::cast_possible_truncation)]
         self.write_block_ptr(
             cx,
             scope,
             inode,
             alloc,
             cluster_start + cluster_nblocks - 1,
-            ffs_types::EXT2_COMPRESSED_BLKADDR as u32,
+            0xFFFF_FFFF, // EXT2_COMPRESSED_BLKADDR sentinel (u32)
         )?;
 
         let blocks_needed_u64 = u64::from(blocks_needed);
@@ -6950,15 +6959,13 @@ impl OpenFs {
                 block_dev.write_block(cx, phys_block, &block_data)?;
             }
 
-            #[expect(clippy::cast_possible_truncation)]
-            self.write_block_ptr(
-                cx,
-                scope,
-                inode,
-                alloc,
-                cluster_start + i,
-                phys_block.0 as u32,
-            )?;
+            let phys_u32 = u32::try_from(phys_block.0).map_err(|_| {
+                FfsError::InvalidGeometry(format!(
+                    "e2compr: allocated block {} exceeds 32-bit indirect pointer range",
+                    phys_block.0
+                ))
+            })?;
+            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_u32)?;
             blocks_written += 1;
         }
 
@@ -7807,7 +7814,7 @@ impl OpenFs {
         expect_dir: bool,
     ) -> ffs_error::Result<()> {
         let alloc_mutex = self.require_alloc_state()?;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
@@ -8627,7 +8634,7 @@ impl OpenFs {
         // Extract compression method from i_flags bits 26-30.
         let method_idx = ((inode.flags >> 26) & 0x1F) as u8;
 
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let end = offset + data.len() as u64;
         let mut bytes_written = 0_u32;
         let mut pending_frees = Vec::new();
@@ -8774,7 +8781,7 @@ impl OpenFs {
         }
 
         let alloc_mutex = self.require_alloc_state()?;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
@@ -9015,7 +9022,7 @@ impl OpenFs {
         attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
         let alloc_mutex = self.require_alloc_state()?;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
