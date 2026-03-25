@@ -3374,10 +3374,12 @@ impl OpenFs {
         }
 
         let persist_ctx = PersistCtx {
-            gdt_block: BlockNumber(if block_size == 1024 { 2 } else { 1 }),
+            gdt_block: BlockNumber(u64::from(sb.first_data_block) + 1),
             desc_size: geom.group_desc_size,
             has_metadata_csum: geom.has_metadata_csum,
             csum_seed: geom.csum_seed,
+            blocks_per_group: sb.blocks_per_group,
+            inodes_per_group: sb.inodes_per_group,
         };
 
         info!(
@@ -4929,7 +4931,7 @@ impl OpenFs {
             ffs_ondisk::ext4::verify_block_bitmap_checksum(
                 &bitmap,
                 sb.csum_seed(),
-                group.0,
+                sb.blocks_per_group,
                 &gd,
                 sb.group_desc_size(),
             )
@@ -4959,7 +4961,7 @@ impl OpenFs {
             ffs_ondisk::ext4::verify_inode_bitmap_checksum(
                 &bitmap,
                 sb.csum_seed(),
-                group.0,
+                sb.inodes_per_group,
                 &gd,
                 sb.group_desc_size(),
             )

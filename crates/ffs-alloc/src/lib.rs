@@ -426,6 +426,10 @@ pub struct PersistCtx {
     pub has_metadata_csum: bool,
     /// CRC32C seed for metadata_csum (from superblock).
     pub csum_seed: u32,
+    /// Blocks (clusters) per group — needed for bitmap checksum length.
+    pub blocks_per_group: u32,
+    /// Inodes per group — needed for inode bitmap checksum length.
+    pub inodes_per_group: u32,
 }
 
 fn is_power_of(mut value: u32, factor: u32) -> bool {
@@ -598,14 +602,14 @@ fn persist_group_desc(
         ffs_ondisk::ext4::stamp_block_bitmap_checksum(
             block_bitmap.as_slice(),
             pctx.csum_seed,
-            group.0,
+            pctx.blocks_per_group,
             &mut updated,
             pctx.desc_size,
         );
         ffs_ondisk::ext4::stamp_inode_bitmap_checksum(
             inode_bitmap.as_slice(),
             pctx.csum_seed,
-            group.0,
+            pctx.inodes_per_group,
             &mut updated,
             pctx.desc_size,
         );
@@ -1890,6 +1894,8 @@ mod tests {
             desc_size: 32,
             has_metadata_csum: false,
             csum_seed: 0,
+            blocks_per_group: 32768,
+            inodes_per_group: 2048,
         }
     }
 
@@ -2702,6 +2708,8 @@ mod tests {
             desc_size: 32,
             has_metadata_csum: false,
             csum_seed: 0,
+            blocks_per_group: 32768,
+            inodes_per_group: 2048,
         };
         let cloned = pctx.clone();
         assert_eq!(cloned.gdt_block, pctx.gdt_block);

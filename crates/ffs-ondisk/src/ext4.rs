@@ -1252,20 +1252,31 @@ impl Ext4GroupDesc {
     }
 }
 
-fn ext4_bitmap_checksum(raw_bitmap: &[u8], csum_seed: u32, group_number: u32) -> u32 {
-    let mut csum = ext4_chksum(csum_seed, &group_number.to_le_bytes());
-    csum = ext4_chksum(csum, raw_bitmap);
-    csum
+/// Compute the CRC32C checksum for a block or inode bitmap.
+///
+/// The kernel's `ext4_block_bitmap_csum_set` / `ext4_inode_bitmap_csum_set`
+/// does `crc32c(s_csum_seed, bitmap_data, len)` where `len` is:
+/// - For block bitmaps: `EXT4_CLUSTERS_PER_GROUP(sb) / 8`
+/// - For inode bitmaps: `EXT4_INODES_PER_GROUP(sb) / 8`
+///
+/// No group number is mixed in (unlike group descriptor checksums).
+/// The caller must pass the correct `checksum_len` — typically
+/// `blocks_per_group / 8` for block bitmaps or `inodes_per_group / 8`
+/// for inode bitmaps.
+fn ext4_bitmap_checksum(raw_bitmap: &[u8], csum_seed: u32, checksum_len: usize) -> u32 {
+    let len = checksum_len.min(raw_bitmap.len());
+    ext4_chksum(csum_seed, &raw_bitmap[..len])
 }
 
 #[must_use]
 pub fn block_bitmap_checksum_value(
     raw_bitmap: &[u8],
     csum_seed: u32,
-    group_number: u32,
+    clusters_per_group: u32,
     desc_size: u16,
 ) -> u32 {
-    let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, group_number);
+    let checksum_len = (clusters_per_group / 8) as usize;
+    let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, checksum_len);
     if desc_size >= 64 { csum } else { csum & 0xFFFF }
 }
 
@@ -1273,21 +1284,22 @@ pub fn block_bitmap_checksum_value(
 pub fn inode_bitmap_checksum_value(
     raw_bitmap: &[u8],
     csum_seed: u32,
-    group_number: u32,
+    inodes_per_group: u32,
     desc_size: u16,
 ) -> u32 {
-    let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, group_number);
+    let checksum_len = (inodes_per_group / 8) as usize;
+    let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, checksum_len);
     if desc_size >= 64 { csum } else { csum & 0xFFFF }
 }
 
 pub fn verify_block_bitmap_checksum(
     raw_bitmap: &[u8],
     csum_seed: u32,
-    group_number: u32,
+    clusters_per_group: u32,
     gd: &Ext4GroupDesc,
     desc_size: u16,
 ) -> Result<(), ParseError> {
-    let expected = block_bitmap_checksum_value(raw_bitmap, csum_seed, group_number, desc_size);
+    let expected = block_bitmap_checksum_value(raw_bitmap, csum_seed, clusters_per_group, desc_size);
     if expected != gd.block_bitmap_csum {
         return Err(ParseError::InvalidField {
             field: "bg_block_bitmap_csum",
@@ -1300,11 +1312,11 @@ pub fn verify_block_bitmap_checksum(
 pub fn verify_inode_bitmap_checksum(
     raw_bitmap: &[u8],
     csum_seed: u32,
-    group_number: u32,
+    inodes_per_group: u32,
     gd: &Ext4GroupDesc,
     desc_size: u16,
 ) -> Result<(), ParseError> {
-    let expected = inode_bitmap_checksum_value(raw_bitmap, csum_seed, group_number, desc_size);
+    let expected = inode_bitmap_checksum_value(raw_bitmap, csum_seed, inodes_per_group, desc_size);
     if expected != gd.inode_bitmap_csum {
         return Err(ParseError::InvalidField {
             field: "bg_inode_bitmap_csum",
@@ -1317,23 +1329,23 @@ pub fn verify_inode_bitmap_checksum(
 pub fn stamp_block_bitmap_checksum(
     raw_bitmap: &[u8],
     csum_seed: u32,
-    group_number: u32,
+    clusters_per_group: u32,
     gd: &mut Ext4GroupDesc,
     desc_size: u16,
 ) {
     gd.block_bitmap_csum =
-        block_bitmap_checksum_value(raw_bitmap, csum_seed, group_number, desc_size);
+        block_bitmap_checksum_value(raw_bitmap, csum_seed, clusters_per_group, desc_size);
 }
 
 pub fn stamp_inode_bitmap_checksum(
     raw_bitmap: &[u8],
     csum_seed: u32,
-    group_number: u32,
+    inodes_per_group: u32,
     gd: &mut Ext4GroupDesc,
     desc_size: u16,
 ) {
     gd.inode_bitmap_csum =
-        inode_bitmap_checksum_value(raw_bitmap, csum_seed, group_number, desc_size);
+        inode_bitmap_checksum_value(raw_bitmap, csum_seed, inodes_per_group, desc_size);
 }
 
 impl Ext4GroupDesc {
@@ -4919,7 +4931,8 @@ mod tests {
     fn bitmap_checksum_helpers_roundtrip() {
         let raw_bitmap = vec![0xA5_u8; 4096];
         let csum_seed = 0x1234_5678;
-        let group = 7_u32;
+        let blocks_per_group = 32768_u32; // 32768/8 = 4096 bytes = full bitmap
+        let inodes_per_group = 2048_u32;  // 2048/8 = 256 bytes
         let mut gd32 = Ext4GroupDesc {
             block_bitmap: 0,
             inode_bitmap: 0,
@@ -4933,18 +4946,18 @@ mod tests {
             block_bitmap_csum: 0,
             inode_bitmap_csum: 0,
         };
-        stamp_block_bitmap_checksum(&raw_bitmap, csum_seed, group, &mut gd32, 32);
-        stamp_inode_bitmap_checksum(&raw_bitmap, csum_seed, group, &mut gd32, 32);
-        assert!(verify_block_bitmap_checksum(&raw_bitmap, csum_seed, group, &gd32, 32).is_ok());
-        assert!(verify_inode_bitmap_checksum(&raw_bitmap, csum_seed, group, &gd32, 32).is_ok());
+        stamp_block_bitmap_checksum(&raw_bitmap, csum_seed, blocks_per_group, &mut gd32, 32);
+        stamp_inode_bitmap_checksum(&raw_bitmap, csum_seed, inodes_per_group, &mut gd32, 32);
+        assert!(verify_block_bitmap_checksum(&raw_bitmap, csum_seed, blocks_per_group, &gd32, 32).is_ok());
+        assert!(verify_inode_bitmap_checksum(&raw_bitmap, csum_seed, inodes_per_group, &gd32, 32).is_ok());
         assert_eq!(gd32.block_bitmap_csum >> 16, 0);
         assert_eq!(gd32.inode_bitmap_csum >> 16, 0);
 
         let mut gd64 = gd32.clone();
-        stamp_block_bitmap_checksum(&raw_bitmap, csum_seed, group, &mut gd64, 64);
-        stamp_inode_bitmap_checksum(&raw_bitmap, csum_seed, group, &mut gd64, 64);
-        assert!(verify_block_bitmap_checksum(&raw_bitmap, csum_seed, group, &gd64, 64).is_ok());
-        assert!(verify_inode_bitmap_checksum(&raw_bitmap, csum_seed, group, &gd64, 64).is_ok());
+        stamp_block_bitmap_checksum(&raw_bitmap, csum_seed, blocks_per_group, &mut gd64, 64);
+        stamp_inode_bitmap_checksum(&raw_bitmap, csum_seed, inodes_per_group, &mut gd64, 64);
+        assert!(verify_block_bitmap_checksum(&raw_bitmap, csum_seed, blocks_per_group, &gd64, 64).is_ok());
+        assert!(verify_inode_bitmap_checksum(&raw_bitmap, csum_seed, inodes_per_group, &gd64, 64).is_ok());
         assert_ne!(gd64.block_bitmap_csum, gd32.block_bitmap_csum);
         assert_ne!(gd64.inode_bitmap_csum, gd32.inode_bitmap_csum);
     }

@@ -104,6 +104,8 @@ fn make_persist_ctx() -> PersistCtx {
         desc_size: 32,
         has_metadata_csum: false,
         csum_seed: 0,
+        blocks_per_group: 32768,
+        inodes_per_group: 2048,
     }
 }
 
