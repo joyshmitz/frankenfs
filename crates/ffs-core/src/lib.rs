@@ -6387,7 +6387,7 @@ impl OpenFs {
     /// Handles direct blocks (0..11) inline, and single-indirect blocks
     /// (12..12+ptrs_per_block) via read-modify-write of the indirect block.
     /// Allocates the indirect block on first use.
-    #[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn write_block_ptr(
         &self,
         cx: &Cx,
@@ -6534,7 +6534,6 @@ impl OpenFs {
 
     /// Ensure i_block[idx] points to an allocated indirect block.
     /// If zero, allocates a new zero-filled block and stores the pointer.
-    #[expect(clippy::cast_possible_truncation)]
     fn ensure_indirect_block(
         &self,
         cx: &Cx,
@@ -6585,7 +6584,6 @@ impl OpenFs {
 
     /// Ensure a pointer at `index` within an indirect block is allocated.
     /// If zero, allocates a new zero-filled block and stores the pointer.
-    #[expect(clippy::cast_possible_truncation)]
     fn ensure_pointer_in_block(
         &self,
         cx: &Cx,
@@ -6724,7 +6722,7 @@ impl OpenFs {
         data: &[u8],
     ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
-        let mut block_dev = self.block_device_adapter();
+        let block_dev = self.block_device_adapter();
         let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
         let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
@@ -6916,7 +6914,7 @@ impl OpenFs {
         data: &[u8],
     ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
-        let mut block_dev = self.block_device_adapter();
+        let block_dev = self.block_device_adapter();
         let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
         let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
@@ -8634,7 +8632,7 @@ impl OpenFs {
         // Extract compression method from i_flags bits 26-30.
         let method_idx = ((inode.flags >> 26) & 0x1F) as u8;
 
-        let mut block_dev = self.block_device_adapter();
+        let block_dev = self.block_device_adapter();
         let end = offset + data.len() as u64;
         let mut bytes_written = 0_u32;
         let mut pending_frees = Vec::new();
@@ -9022,7 +9020,7 @@ impl OpenFs {
         attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
         let alloc_mutex = self.require_alloc_state()?;
-        let mut block_dev = self.block_device_adapter();
+        let block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
