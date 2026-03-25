@@ -801,6 +801,9 @@ pub fn block_to_group(
     blocks_per_group: u32,
     first_data_block: u32,
 ) -> GroupNumber {
+    if blocks_per_group == 0 {
+        return GroupNumber(0);
+    }
     let adjusted = block.0.saturating_sub(u64::from(first_data_block));
     GroupNumber((adjusted / u64::from(blocks_per_group)) as u32)
 }
@@ -823,6 +826,9 @@ pub fn group_first_block(
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // ext4 group count is u32
 pub fn inode_to_group(ino: InodeNumber, inodes_per_group: u32) -> GroupNumber {
+    if inodes_per_group == 0 {
+        return GroupNumber(0);
+    }
     GroupNumber(((ino.0.saturating_sub(1)) / u64::from(inodes_per_group)) as u32)
 }
 

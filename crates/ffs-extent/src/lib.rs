@@ -64,8 +64,11 @@ pub fn map_logical_to_physical(
 
     while pos < end {
         cx_checkpoint(cx)?;
-        let logical_block =
-            u32::try_from(pos).expect("logical position stays within u32 inode block range");
+        let logical_block = u32::try_from(pos).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "map_logical_to_physical: logical position {pos} exceeds u32 block range"
+            ))
+        })?;
         let result = ffs_btree::search(cx, dev, root_bytes, logical_block)?;
         match result {
             SearchResult::Found {
@@ -83,8 +86,11 @@ pub fn map_logical_to_physical(
                         ),
                     });
                 }
-                let mapping_count =
-                    u32::try_from(to_map).expect("extent mapping chunk length fits in u32");
+                let mapping_count = u32::try_from(to_map).map_err(|_| {
+                    FfsError::InvalidGeometry(format!(
+                        "map_logical_to_physical: extent chunk length {to_map} exceeds u32"
+                    ))
+                })?;
                 mappings.push(ExtentMapping {
                     logical_start: logical_block,
                     physical_start: extent.physical_start + u64::from(offset_in_extent),
@@ -103,10 +109,16 @@ pub fn map_logical_to_physical(
                         ),
                     });
                 }
-                let hole_start = u32::try_from(pos)
-                    .expect("logical position stays within u32 inode block range");
-                let hole_count =
-                    u32::try_from(to_map).expect("hole mapping chunk length fits in u32");
+                let hole_start = u32::try_from(pos).map_err(|_| {
+                    FfsError::InvalidGeometry(format!(
+                        "map_logical_to_physical: hole position {pos} exceeds u32 block range"
+                    ))
+                })?;
+                let hole_count = u32::try_from(to_map).map_err(|_| {
+                    FfsError::InvalidGeometry(format!(
+                        "map_logical_to_physical: hole chunk length {to_map} exceeds u32"
+                    ))
+                })?;
                 mappings.push(ExtentMapping {
                     logical_start: hole_start,
                     physical_start: 0,

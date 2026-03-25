@@ -4320,7 +4320,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
         let block_size = u64::from(self.block_size());
         let bs_usize = block_size as usize;
-        let mut block_dev = self.block_device_adapter();
+        let block_dev = self.block_device_adapter();
 
         let mut data_remaining = data;
         while !data_remaining.is_empty() {
@@ -6712,7 +6712,7 @@ impl OpenFs {
         data: &[u8],
     ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
         let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
@@ -6907,7 +6907,7 @@ impl OpenFs {
         data: &[u8],
     ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
         let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
@@ -7903,6 +7903,10 @@ impl OpenFs {
             }
         }
 
+        // Re-acquire the block device adapter so the parent inode update sees any inode-table
+        // mutation committed while updating or deleting the child inode.
+        block_dev = self.block_device_adapter();
+
         // Update parent timestamps.
         let mut parent_upd = self.read_inode(cx, parent)?;
         if expect_dir {
@@ -7941,7 +7945,7 @@ impl OpenFs {
         const EMLINK_ERRNO: i32 = 31;
 
         let alloc_mutex = self.require_alloc_state()?;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
@@ -8850,6 +8854,7 @@ impl OpenFs {
                         cx, &block_dev, geo, groups, new_parent, &new_par, csum_seed,
                     )?;
                 }
+                block_dev = self.block_device_adapter();
             } else {
                 ex_upd.links_count = ex_upd.links_count.saturating_sub(1);
             }
@@ -8883,6 +8888,7 @@ impl OpenFs {
                     )?;
                 }
             }
+            block_dev = self.block_device_adapter();
         }
 
         // Remove old entry from source parent.
@@ -8913,6 +8919,10 @@ impl OpenFs {
             tstamp_secs,
             tstamp_nanos,
         )?;
+
+        // Re-acquire the block device adapter so subsequent inode writes see the metadata updates
+        // committed while moving the directory entry.
+        block_dev = self.block_device_adapter();
 
         // If renaming a directory across parents, update .. and link counts.
         if child_inode.is_dir() && parent != new_parent {
@@ -8952,6 +8962,7 @@ impl OpenFs {
                 &old_parent,
                 csum_seed,
             )?;
+            block_dev = self.block_device_adapter();
 
             let mut new_par = self.read_inode(cx, new_parent)?;
             new_par.links_count = new_par.links_count.saturating_add(1);
@@ -8965,6 +8976,7 @@ impl OpenFs {
                 &new_par,
                 csum_seed,
             )?;
+            block_dev = self.block_device_adapter();
         }
 
         // Touch ctime on the moved inode.
