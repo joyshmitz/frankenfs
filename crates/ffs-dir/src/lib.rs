@@ -282,12 +282,14 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
                 let merged_u16 = u16::try_from(merged)
                     .map_err(|_| FfsError::Format("merged rec_len exceeds u16".to_owned()))?;
                 write_u16_le(block, prev_off + 4, merged_u16)?;
+                println!("remove_entry: coalescing {} at {} with prev at {}", String::from_utf8_lossy(name), off, prev_off);
             }
 
             write_u32_le(block, off, 0)?;
             // Clear metadata for cleanliness.
             block[off + 6] = 0;
             block[off + 7] = 0;
+            println!("remove_entry: SUCCESS removed {} at {}", String::from_utf8_lossy(name), off);
             return Ok(true);
         }
 

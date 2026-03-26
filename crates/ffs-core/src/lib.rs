@@ -5503,6 +5503,7 @@ impl OpenFs {
     ) -> Result<Vec<Ext4DirEntry>, FfsError> {
         let bs = u64::from(self.block_size());
         let num_blocks = dir_logical_block_count(inode.size, bs)?;
+        tracing::error!("read_dir_with_scope: inode.size={}, num_blocks={}", inode.size, num_blocks);
 
         let mut all_entries = Vec::new();
 
@@ -7686,140 +7687,155 @@ impl OpenFs {
         tstamp_secs: u64,
         tstamp_nanos: u32,
     ) -> ffs_error::Result<()> {
-        let mut block_dev = self.block_device_adapter();
+        let block_dev = self.block_device_adapter();
+        let mut store_guard = self.mvcc_store.write();
+        let mut txn = store_guard.begin();
+        drop(store_guard);
+        
+        let result = (|| -> ffs_error::Result<()> {
+            let tx_dev = TransactionBlockAdapter {
+                base: &block_dev,
+                tx: Mutex::new(&mut txn),
+            };
+            let dev = &tx_dev;
 
-        // Collect existing directory extents.
-        let extents = self.collect_extents(cx, parent_inode)?;
+            // Collect existing directory extents.
+            let extents = self.collect_extents(cx, parent_inode)?;
 
-        // Try adding to each existing block.
-        let child_ino_u32 = u32::try_from(child_ino.0)
-            .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
-        let reserved_tail = self.ext4_dir_reserved_tail();
-        for ext in &extents {
-            if ext.is_unwritten() {
-                continue;
-            }
-            for block in Self::extent_phys_blocks(ext) {
-                let mut data = self.read_block_vec(cx, block)?;
-                match ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail) {
-                    Ok(_) => {
-                        block_dev.write_block(cx, block, &data)?;
+            // Try adding to each existing block.
+            let child_ino_u32 = u32::try_from(child_ino.0)
+                .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+            let reserved_tail = self.ext4_dir_reserved_tail();
+            for ext in &extents {
+                if ext.is_unwritten() {
+                    continue;
+                }
+                for block in Self::extent_phys_blocks(ext) {
+                    let mut data = self.read_block_vec(cx, block)?;
+                    match ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail) {
+                        Ok(_) => {
+                            dev.write_block(cx, block, &data)?;
 
-                        // Update parent metadata (timestamps and link count if it's a new directory).
-                        let mut parent_upd = parent_inode.clone();
-                        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
-                        if file_type == Ext4FileType::Dir {
-                            parent_upd.links_count = parent_upd.links_count.saturating_add(1);
+                            // Update parent metadata (timestamps and link count if it's a new directory).
+                            let mut parent_upd = parent_inode.clone();
+                            ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+                            if file_type == Ext4FileType::Dir {
+                                parent_upd.links_count = parent_upd.links_count.saturating_add(1);
+                            }
+
+                            ffs_inode::write_inode(
+                                cx,
+                                dev,
+                                &alloc.geo,
+                                &alloc.groups,
+                                parent,
+                                &parent_upd,
+                                csum_seed,
+                            )?;
+                            return Ok(());
                         }
-
-                        ffs_inode::write_inode(
-                            cx,
-                            &block_dev,
-                            &alloc.geo,
-                            &alloc.groups,
-                            parent,
-                            &parent_upd,
-                            csum_seed,
-                        )?;
-                        return Ok(());
+                        Err(FfsError::NoSpace) => {}
+                        Err(e) => return Err(e),
                     }
-                    Err(FfsError::NoSpace) => {}
-                    Err(e) => return Err(e),
                 }
             }
+
+            // All blocks full — allocate a new directory block.
+            let hint = AllocHint {
+                goal_group: None,
+                goal_block: extents.last().map(Self::extent_end_hint),
+            };
+            let new_alloc = ffs_alloc::alloc_blocks_persist(
+                cx,
+                dev,
+                &alloc.geo,
+                &mut alloc.groups,
+                1,
+                &hint,
+                &alloc.persist_ctx,
+            )?;
+
+            let block_size = usize::try_from(alloc.geo.block_size)
+                .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+            let mut new_block = vec![0u8; block_size];
+            // Write a single empty dir entry spanning the whole block (minus tail), then add our entry.
+            // Initialize with a single unused entry spanning the usable area.
+            {
+                // rec_len covers the usable area
+                let rec_len =
+                    u16::try_from(block_size.saturating_sub(reserved_tail)).map_err(|_| {
+                        FfsError::Format("directory block size exceeds 16-bit rec_len field".into())
+                    })?;
+                new_block[4..6].copy_from_slice(&rec_len.to_le_bytes());
+                // inode=0, name_len=0, file_type=0 ⇒ unused entry
+            }
+            ffs_dir::add_entry(
+                &mut new_block,
+                child_ino_u32,
+                name,
+                file_type,
+                reserved_tail,
+            )?;
+            dev.write_block(cx, new_alloc.start, &new_block)?;
+
+            // Insert extent for the new directory block and update parent metadata.
+            let mut parent_upd = parent_inode.clone();
+            let logical_end = extents
+                .iter()
+                .map(|e| e.logical_block + u32::from(e.actual_len()))
+                .max()
+                .unwrap_or(0);
+            let extent = Ext4Extent {
+                logical_block: logical_end,
+                raw_len: 1,
+                physical_start: new_alloc.start.0,
+            };
+            let mut root_bytes = Self::extent_root(&parent_upd);
+            let tree_hint = AllocHint {
+                goal_group: None,
+                goal_block: Some(new_alloc.start),
+            };
+            let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                cx,
+                dev,
+                geo: &alloc.geo,
+                groups: &mut alloc.groups,
+                hint: tree_hint,
+                pctx: &alloc.persist_ctx,
+            };
+            ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
+            Self::set_extent_root(&mut parent_upd, &root_bytes);
+            self.extent_cache.invalidate_range(extent_root_namespace(&parent_upd), logical_end, u64::from(u32::MAX - logical_end));
+            parent_upd.size += u64::from(alloc.geo.block_size);
+            if parent_upd.is_huge_file() {
+                parent_upd.blocks += 1;
+            } else {
+                parent_upd.blocks += u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE);
+            }
+            if file_type == Ext4FileType::Dir {
+                parent_upd.links_count = parent_upd.links_count.saturating_add(1);
+            }
+            ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+            ffs_inode::write_inode(
+                cx,
+                dev,
+                &alloc.geo,
+                &alloc.groups,
+                parent,
+                &parent_upd,
+                csum_seed,
+            )?;
+
+            Ok(())
+        })();
+
+        if result.is_ok() {
+            self.mvcc_store
+                .write()
+                .commit(txn)
+                .map_err(|e| FfsError::Format(e.to_string()))?;
         }
-
-        // All blocks full — allocate a new directory block.
-        let hint = AllocHint {
-            goal_group: None,
-            goal_block: extents.last().map(Self::extent_end_hint),
-        };
-        let new_alloc = ffs_alloc::alloc_blocks_persist(
-            cx,
-            &block_dev,
-            &alloc.geo,
-            &mut alloc.groups,
-            1,
-            &hint,
-            &alloc.persist_ctx,
-        )?;
-
-        let block_size = usize::try_from(alloc.geo.block_size)
-            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
-        let mut new_block = vec![0u8; block_size];
-        // Write a single empty dir entry spanning the whole block (minus tail), then add our entry.
-        // Initialize with a single unused entry spanning the usable area.
-        {
-            // rec_len covers the usable area
-            let rec_len =
-                u16::try_from(block_size.saturating_sub(reserved_tail)).map_err(|_| {
-                    FfsError::Format("directory block size exceeds 16-bit rec_len field".into())
-                })?;
-            new_block[4..6].copy_from_slice(&rec_len.to_le_bytes());
-            // inode=0, name_len=0, file_type=0 ⇒ unused entry
-        }
-        ffs_dir::add_entry(
-            &mut new_block,
-            child_ino_u32,
-            name,
-            file_type,
-            reserved_tail,
-        )?;
-        block_dev.write_block(cx, new_alloc.start, &new_block)?;
-
-        // Re-acquire block_dev to ensure subsequent index block allocations
-        // read the updated block bitmap.
-        block_dev = self.block_device_adapter();
-
-        // Insert extent for the new directory block and update parent metadata.
-        let mut parent_upd = parent_inode.clone();
-        let logical_end = extents
-            .iter()
-            .map(|e| e.logical_block + u32::from(e.actual_len()))
-            .max()
-            .unwrap_or(0);
-        let extent = Ext4Extent {
-            logical_block: logical_end,
-            raw_len: 1,
-            physical_start: new_alloc.start.0,
-        };
-        let mut root_bytes = Self::extent_root(&parent_upd);
-        let tree_hint = AllocHint {
-            goal_group: None,
-            goal_block: Some(new_alloc.start),
-        };
-        let mut tree_alloc = ffs_extent::GroupBlockAllocator {
-            cx,
-            dev: &block_dev,
-            geo: &alloc.geo,
-            groups: &mut alloc.groups,
-            hint: tree_hint,
-            pctx: &alloc.persist_ctx,
-        };
-        ffs_btree::insert(cx, &block_dev, &mut root_bytes, extent, &mut tree_alloc)?;
-        Self::set_extent_root(&mut parent_upd, &root_bytes);
-
-        parent_upd.size += u64::from(alloc.geo.block_size);
-        if parent_upd.is_huge_file() {
-            parent_upd.blocks += 1;
-        } else {
-            parent_upd.blocks += u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE);
-        }
-        if file_type == Ext4FileType::Dir {
-            parent_upd.links_count = parent_upd.links_count.saturating_add(1);
-        }
-        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
-        ffs_inode::write_inode(
-            cx,
-            &block_dev,
-            &alloc.geo,
-            &alloc.groups,
-            parent,
-            &parent_upd,
-            csum_seed,
-        )?;
-
-        Ok(())
+        result
     }
 
     /// Remove a directory entry (unlink a file or rmdir).
@@ -7831,9 +7847,17 @@ impl OpenFs {
         name: &[u8],
         expect_dir: bool,
     ) -> ffs_error::Result<()> {
-        let alloc_mutex = self.require_alloc_state()?;
-        let mut block_dev = self.block_device_adapter();
-        let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
+        let block_dev = self.block_device_adapter();
+        let mut store_guard = self.mvcc_store.write();
+        let mut txn = store_guard.begin();
+        drop(store_guard);
+        let result = (|| -> ffs_error::Result<()> {
+            let tx_dev = TransactionBlockAdapter {
+                base: &block_dev,
+                tx: Mutex::new(&mut txn),
+            };
+            let alloc_mutex = self.require_alloc_state()?;
+            let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
             .ext4_superblock()
@@ -7912,7 +7936,7 @@ impl OpenFs {
             if child_upd.links_count == 0 {
                 ffs_inode::delete_inode(
                     cx,
-                    &block_dev,
+                    &tx_dev,
                     geo,
                     groups,
                     child_ino,
@@ -7923,14 +7947,10 @@ impl OpenFs {
                 )?;
             } else {
                 ffs_inode::write_inode(
-                    cx, &block_dev, geo, groups, child_ino, &child_upd, csum_seed,
+                    cx, &tx_dev, geo, groups, child_ino, &child_upd, csum_seed,
                 )?;
             }
         }
-
-        // Re-acquire the block device adapter so the parent inode update sees any inode-table
-        // mutation committed while updating or deleting the child inode.
-        block_dev = self.block_device_adapter();
 
         // Update parent timestamps.
         let mut parent_upd = self.read_inode(cx, parent)?;
@@ -7940,7 +7960,7 @@ impl OpenFs {
         ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
         {
             let Ext4AllocState { geo, groups, .. } = &mut *alloc;
-            ffs_inode::write_inode(cx, &block_dev, geo, groups, parent, &parent_upd, csum_seed)?;
+            ffs_inode::write_inode(cx, &tx_dev, geo, groups, parent, &parent_upd, csum_seed)?;
         }
 
         trace!(
@@ -7954,6 +7974,15 @@ impl OpenFs {
         );
 
         Ok(())
+        })();
+
+        if result.is_ok() {
+            self.mvcc_store
+                .write()
+                .commit(txn)
+                .map_err(|e| FfsError::Format(e.to_string()))?;
+        }
+        result
     }
 
     /// Create a hard link in `new_parent/new_name` to existing inode `ino`.

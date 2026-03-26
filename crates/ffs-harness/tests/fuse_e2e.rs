@@ -1051,7 +1051,6 @@ fn statfs_snapshot(path: &Path) -> StatFsSnapshot {
 
 #[test]
 fn fuse_write_large_file() {
-    let _ = tracing_subscriber::fmt::try_init();
     with_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
         // Write 64 KiB of patterned data (crosses multiple blocks).
@@ -1453,7 +1452,6 @@ fn fuse_flush_on_close_preserves_data() {
 
 #[test]
 fn fuse_fsync_after_multiple_writes() {
-    let _ = tracing_subscriber::fmt::try_init();
     with_rw_mount(|mnt| {
         let path = mnt.join("multi_write_sync.txt");
         let mut file = fs::OpenOptions::new()
