@@ -10599,6 +10599,7 @@ impl OpenFs {
         let mut alloc = alloc_mutex.lock();
 
         let child = self.btrfs_lookup_dir_entry(&alloc, parent_oid, name)?;
+        let child_is_dir = child.file_type == BTRFS_FT_DIR;
 
         // Remove old entry and its INODE_REF.
         self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
@@ -10607,9 +10608,19 @@ impl OpenFs {
         // If target exists, remove it first and handle nlink cleanup.
         if let Ok(target) = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
             let target_oid = target.child_objectid;
+            let target_is_dir = target.file_type == BTRFS_FT_DIR;
+            if child_is_dir && !target_is_dir {
+                return Err(FfsError::NotDirectory);
+            }
+            if !child_is_dir && target_is_dir {
+                return Err(FfsError::IsDirectory);
+            }
+            if target_is_dir && !self.btrfs_dir_is_empty(&alloc, target_oid)? {
+                return Err(FfsError::NotEmpty);
+            }
             self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name)?;
             self.btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid);
-            if target.file_type == BTRFS_FT_DIR {
+            if target_is_dir {
                 self.btrfs_adjust_nlink(&mut alloc, target_oid, -2)?;
                 self.btrfs_adjust_nlink(&mut alloc, new_parent_oid, -1)?;
             } else {
@@ -10639,7 +10650,7 @@ impl OpenFs {
         )?;
 
         // If moving a directory across parents, adjust nlink for ".." backref.
-        if child.file_type == BTRFS_FT_DIR && new_parent_oid != parent_oid {
+        if child_is_dir && new_parent_oid != parent_oid {
             self.btrfs_adjust_nlink(&mut alloc, parent_oid, -1)?;
             self.btrfs_adjust_nlink(&mut alloc, new_parent_oid, 1)?;
         }
@@ -14704,8 +14715,8 @@ mod tests {
     fn e2compr_cluster_header_roundtrip() {
         // Build a fake compressed cluster with proper header and verify
         // decompress_e2compr_cluster-style parsing can read it back.
-        use flate2::write::ZlibEncoder;
         use flate2::Compression;
+        use flate2::write::ZlibEncoder;
         use std::io::Write;
 
         let block_size = 4096_usize;
@@ -14718,7 +14729,7 @@ mod tests {
         source.extend_from_slice(&vec![0xEF_u8; block_size]); // block 3: data
 
         // Build holemap: block 1 is a hole.
-        let holemap_bits: u32 = 0b0010; // bit 1 = hole
+        let holemap_bits: u8 = 0b0010; // bit 1 = hole
         let holemap_nbytes = 1_u8;
 
         // Non-hole data: blocks 0, 2, 3 (3 * 4096 = 12288 bytes).
@@ -14732,13 +14743,13 @@ mod tests {
         encoder.write_all(&non_hole).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        let ulen = non_hole.len() as u32;
-        let clen = compressed.len() as u32;
+        let ulen = u32::try_from(non_hole.len()).unwrap();
+        let clen = u32::try_from(compressed.len()).unwrap();
         let header_total = 16 + holemap_nbytes as usize;
 
         // Build raw cluster data.
         let total = header_total + compressed.len();
-        let padded_len = ((total + block_size - 1) / block_size) * block_size;
+        let padded_len = total.div_ceil(block_size) * block_size;
         let mut raw = vec![0_u8; padded_len];
         // Magic
         raw[0..2].copy_from_slice(&ffs_types::EXT2_COMPRESS_MAGIC.to_le_bytes());
@@ -14751,7 +14762,7 @@ mod tests {
         // clen
         raw[12..16].copy_from_slice(&clen.to_le_bytes());
         // Holemap
-        raw[16] = holemap_bits as u8;
+        raw[16] = holemap_bits;
         // Compressed data
         raw[header_total..header_total + compressed.len()].copy_from_slice(&compressed);
         // Checksum
@@ -14766,18 +14777,19 @@ mod tests {
         assert_eq!(parsed_method, 20);
         let parsed_holemap_nbytes = raw[3] as usize;
         assert_eq!(parsed_holemap_nbytes, 1);
-        let parsed_ulen =
-            u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]) as usize;
-        let parsed_clen =
-            u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]) as usize;
+        let parsed_ulen = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]) as usize;
+        let parsed_clen = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]) as usize;
         assert_eq!(parsed_ulen, non_hole.len());
         assert_eq!(parsed_clen, compressed.len());
 
         // Decompress
         let data_start = 16 + parsed_holemap_nbytes;
-        let decompressed =
-            OpenFs::e2compr_decompress(parsed_method, &raw[data_start..data_start + parsed_clen], parsed_ulen)
-                .unwrap();
+        let decompressed = OpenFs::e2compr_decompress(
+            parsed_method,
+            &raw[data_start..data_start + parsed_clen],
+            parsed_ulen,
+        )
+        .unwrap();
         assert_eq!(decompressed.len(), parsed_ulen);
         assert_eq!(&decompressed, &non_hole);
 
@@ -14800,9 +14812,21 @@ mod tests {
 
         // Verify the reassembled data matches the original.
         assert_eq!(&output[0..block_size], &source[0..block_size], "block 0");
-        assert_eq!(&output[block_size..2 * block_size], &vec![0_u8; block_size], "block 1 (hole)");
-        assert_eq!(&output[2 * block_size..3 * block_size], &source[2 * block_size..3 * block_size], "block 2");
-        assert_eq!(&output[3 * block_size..4 * block_size], &source[3 * block_size..4 * block_size], "block 3");
+        assert_eq!(
+            &output[block_size..2 * block_size],
+            &vec![0_u8; block_size],
+            "block 1 (hole)"
+        );
+        assert_eq!(
+            &output[2 * block_size..3 * block_size],
+            &source[2 * block_size..3 * block_size],
+            "block 2"
+        );
+        assert_eq!(
+            &output[3 * block_size..4 * block_size],
+            &source[3 * block_size..4 * block_size],
+            "block 3"
+        );
     }
 
     #[test]
@@ -25566,6 +25590,163 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn btrfs_write_rename_file_over_directory_returns_eisdir() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("file-src"),
+            0o644,
+            0,
+            0,
+        )
+        .unwrap();
+        ops.mkdir(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("dir-dst"),
+            0o755,
+            0,
+            0,
+        )
+        .unwrap();
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("file-src"),
+                InodeNumber(1),
+                OsStr::new("dir-dst"),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EISDIR);
+    }
+
+    #[test]
+    fn btrfs_write_rename_directory_over_file_returns_enotdir() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        ops.mkdir(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("dir-src"),
+            0o755,
+            0,
+            0,
+        )
+        .unwrap();
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("file-dst"),
+            0o644,
+            0,
+            0,
+        )
+        .unwrap();
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("dir-src"),
+                InodeNumber(1),
+                OsStr::new("file-dst"),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    #[test]
+    fn btrfs_write_rename_directory_over_nonempty_directory_returns_enotempty() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let src = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("src-dir"),
+                0o755,
+                0,
+                0,
+            )
+            .unwrap();
+        let dst = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("dst-dir"),
+                0o755,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            dst.ino,
+            OsStr::new("child.txt"),
+            0o644,
+            0,
+            0,
+        )
+        .unwrap();
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("src-dir"),
+                InodeNumber(1),
+                OsStr::new("dst-dir"),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOTEMPTY);
+
+        let src_lookup = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("src-dir"),
+            )
+            .unwrap();
+        assert_eq!(src_lookup.ino, src.ino);
+        let dst_lookup = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("dst-dir"),
+            )
+            .unwrap();
+        assert_eq!(dst_lookup.ino, dst.ino);
+        let child_lookup = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                dst.ino,
+                OsStr::new("child.txt"),
+            )
+            .unwrap();
+        assert_eq!(child_lookup.kind, FileType::RegularFile);
     }
 
     #[test]

@@ -43,6 +43,7 @@ fn create_test_image(dir: &Path) -> std::path::PathBuf {
     create_test_image_with_size(dir, 4 * 1024 * 1024)
 }
 
+#[allow(clippy::too_many_lines)]
 fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::PathBuf {
     let image = dir.join("test.ext4");
 
@@ -188,7 +189,7 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         .args([
             "-w",
             "-R",
-            &format!("set_inode_field testdir/nested.txt uid {}", uid),
+            &format!("set_inode_field testdir/nested.txt uid {uid}"),
             image.to_str().unwrap(),
         ])
         .output()
@@ -198,7 +199,7 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         .args([
             "-w",
             "-R",
-            &format!("set_inode_field testdir/nested.txt gid {}", gid),
+            &format!("set_inode_field testdir/nested.txt gid {gid}"),
             image.to_str().unwrap(),
         ])
         .output()
