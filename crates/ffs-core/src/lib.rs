@@ -14696,6 +14696,47 @@ mod tests {
     }
 
     #[test]
+    fn e2compr_decompress_gzip_garbage_input() {
+        // Garbage data should produce a decompression error, not a panic.
+        let garbage = vec![0xFF_u8; 256];
+        let result = OpenFs::e2compr_decompress(20, &garbage, 4096);
+        assert!(result.is_err(), "garbage gzip input should error");
+    }
+
+    #[test]
+    fn e2compr_decompress_lzo_garbage_input() {
+        let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let result = OpenFs::e2compr_decompress(10, &garbage, 4096);
+        assert!(result.is_err(), "garbage LZO input should error");
+    }
+
+    #[test]
+    fn e2compr_decompress_empty_input() {
+        // Empty compressed data should error gracefully.
+        let result_gzip = OpenFs::e2compr_decompress(20, &[], 0);
+        // Empty gzip is valid (produces empty output)
+        assert!(result_gzip.is_ok());
+        assert!(result_gzip.unwrap().is_empty());
+    }
+
+    #[test]
+    fn e2compr_decompress_ulen_mismatch() {
+        // Compress some data, then request wrong ulen — should still decompress
+        // (ulen is a hint for pre-allocation, not a strict constraint in our impl).
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let data = b"test data for ulen mismatch";
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(data).unwrap();
+        let compressed = enc.finish().unwrap();
+        // Request larger ulen than actual — decompressor returns actual size.
+        let result = OpenFs::e2compr_decompress(20, &compressed, 99999);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), data);
+    }
+
+    #[test]
     fn e2compr_compress_decompress_roundtrip_gzip() {
         let original = b"Hello e2compr! This data should survive compression and decompression roundtrip intact.";
         let compressed = OpenFs::e2compr_compress(20, original).unwrap(); // method 20 = gzip5
@@ -26121,6 +26162,80 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), file.ino)
             .unwrap();
         assert_eq!(file_after.nlink, 1);
+    }
+
+    #[test]
+    fn btrfs_write_rename_over_same_inode_hardlink_is_noop() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let file = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("original.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            file.ino,
+            0,
+            b"same inode rename",
+        )
+        .unwrap();
+        ops.link(
+            &cx,
+            &mut RequestScope::empty(),
+            file.ino,
+            InodeNumber(1),
+            OsStr::new("alias.txt"),
+        )
+        .unwrap();
+
+        ops.rename(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("original.txt"),
+            InodeNumber(1),
+            OsStr::new("alias.txt"),
+        )
+        .unwrap();
+
+        let alias = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("alias.txt"),
+            )
+            .unwrap();
+        assert_eq!(alias.ino, file.ino);
+
+        let original_err = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("original.txt"),
+            )
+            .unwrap_err();
+        assert_eq!(original_err.to_errno(), libc::ENOENT);
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), file.ino)
+            .unwrap();
+        assert_eq!(after.nlink, 1);
+
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), file.ino, 0, 4096)
+            .unwrap();
+        assert_eq!(data, b"same inode rename");
     }
 
     #[test]
