@@ -10601,11 +10601,6 @@ impl OpenFs {
         let child = self.btrfs_lookup_dir_entry(&alloc, parent_oid, name)?;
         let child_is_dir = child.file_type == BTRFS_FT_DIR;
 
-        // Remove old entry and its INODE_REF.
-        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
-        self.btrfs_remove_inode_ref(&mut alloc, child.child_objectid, parent_oid);
-
-        // If target exists, remove it first and handle nlink cleanup.
         if let Ok(target) = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
             let target_oid = target.child_objectid;
             let target_is_dir = target.file_type == BTRFS_FT_DIR;
@@ -10618,6 +10613,16 @@ impl OpenFs {
             if target_is_dir && !self.btrfs_dir_is_empty(&alloc, target_oid)? {
                 return Err(FfsError::NotEmpty);
             }
+        }
+
+        // Remove old entry and its INODE_REF.
+        self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
+        self.btrfs_remove_inode_ref(&mut alloc, child.child_objectid, parent_oid);
+
+        // If target exists, remove it first and handle nlink cleanup.
+        if let Ok(target) = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
+            let target_oid = target.child_objectid;
+            let target_is_dir = target.file_type == BTRFS_FT_DIR;
             self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name)?;
             self.btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid);
             if target_is_dir {
@@ -27231,10 +27236,54 @@ mod tests {
                     d.unrecoverable_risk_bound
                 );
             }
+
+            // ── e2compr roundtrip property ─────────────────────────
+
+            /// e2compr compress→decompress is identity for arbitrary data.
+            #[test]
+            fn e2compr_roundtrip_identity(
+                data in proptest::collection::vec(any::<u8>(), 1..4096),
+                method_idx in prop_oneof![Just(20_u8), Just(10_u8)],
+            ) {
+                let compressed = OpenFs::e2compr_compress(method_idx, &data)
+                    .expect("compression should succeed");
+                let decompressed = OpenFs::e2compr_decompress(method_idx, &compressed, data.len())
+                    .expect("decompression should succeed");
+                prop_assert_eq!(&decompressed, &data, "roundtrip mismatch");
+            }
+
+            /// adler32_seeded is deterministic.
+            #[test]
+            fn adler32_deterministic(
+                seed in any::<u32>(),
+                data in proptest::collection::vec(any::<u8>(), 0..1024),
+            ) {
+                let a = adler32_seeded(seed, &data);
+                let b = adler32_seeded(seed, &data);
+                prop_assert_eq!(a, b, "adler32 must be deterministic");
+            }
+
+            /// bump_inode_version increments by exactly 1 (wrapping).
+            #[test]
+            fn inode_version_monotonic(initial_lo in any::<u32>(), initial_hi in any::<u32>()) {
+                let mut inode = ffs_ondisk::Ext4Inode {
+                    mode: 0o100_644, uid: 0, gid: 0, size: 0, links_count: 1,
+                    blocks: 0, flags: 0, version: initial_lo, generation: 0, file_acl: 0,
+                    atime: 0, ctime: 0, mtime: 0, dtime: 0,
+                    atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
+                    crtime: 0, crtime_extra: 0,
+                    extra_isize: 32, checksum: 0, version_hi: initial_hi, projid: 0,
+                    extent_bytes: vec![0; 60], xattr_ibody: Vec::new(),
+                };
+                let before = u64::from(inode.version) | (u64::from(inode.version_hi) << 32);
+                ffs_inode::bump_inode_version(&mut inode);
+                let after = u64::from(inode.version) | (u64::from(inode.version_hi) << 32);
+                prop_assert_eq!(after, before.wrapping_add(1));
+            }
         }
     }
 
-    // ── Mount-mode boundary enforcement tests ───────────────────────────
+    // ── Mount-mode boundary enforcement tests ──────────────────────────
 
     #[test]
     fn mount_mode_default_is_compat() {
