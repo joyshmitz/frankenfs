@@ -4020,6 +4020,18 @@ impl OpenFs {
         }
     }
 
+    fn btrfs_file_type_code_from_mode(mode: u32) -> u8 {
+        match Self::btrfs_mode_to_file_type(mode) {
+            FileType::Directory => BTRFS_FT_DIR,
+            FileType::Symlink => BTRFS_FT_SYMLINK,
+            FileType::BlockDevice => BTRFS_FT_BLKDEV,
+            FileType::CharDevice => BTRFS_FT_CHRDEV,
+            FileType::Fifo => BTRFS_FT_FIFO,
+            FileType::Socket => BTRFS_FT_SOCK,
+            FileType::RegularFile => BTRFS_FT_REG_FILE,
+        }
+    }
+
     fn btrfs_inode_attr_from_item(
         &self,
         ino: InodeNumber,
@@ -5503,7 +5515,11 @@ impl OpenFs {
     ) -> Result<Vec<Ext4DirEntry>, FfsError> {
         let bs = u64::from(self.block_size());
         let num_blocks = dir_logical_block_count(inode.size, bs)?;
-        tracing::error!("read_dir_with_scope: inode.size={}, num_blocks={}", inode.size, num_blocks);
+        tracing::error!(
+            "read_dir_with_scope: inode.size={}, num_blocks={}",
+            inode.size,
+            num_blocks
+        );
 
         let mut all_entries = Vec::new();
 
@@ -7480,12 +7496,6 @@ impl OpenFs {
             persist_ctx,
         )?;
 
-        // Re-acquire the block device adapter so that subsequent reads (e.g. for the parent inode
-        // in ext4_add_dir_entry) will see the newly committed snapshot from create_inode.
-        // Otherwise, if the parent inode and new inode share the same inode table block,
-        // writing the parent inode would read the old block and overwrite the new inode.
-        let block_dev = self.block_device_adapter();
-
         // Add directory entry to parent.
         self.ext4_add_dir_entry(
             cx,
@@ -7527,7 +7537,7 @@ impl OpenFs {
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
         let alloc_mutex = self.require_alloc_state()?;
-        let mut block_dev = self.block_device_adapter();
+        let block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
@@ -7575,7 +7585,7 @@ impl OpenFs {
 
         // Re-acquire the block device adapter so subsequent metadata reads and writes observe
         // the newly committed inode-table state from create_inode().
-        block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
 
         // Allocate a data block for the directory and initialize with . and ..
         let hint = AllocHint {
@@ -7691,7 +7701,7 @@ impl OpenFs {
         let mut store_guard = self.mvcc_store.write();
         let mut txn = store_guard.begin();
         drop(store_guard);
-        
+
         let result = (|| -> ffs_error::Result<()> {
             let tx_dev = TransactionBlockAdapter {
                 base: &block_dev,
@@ -7712,13 +7722,23 @@ impl OpenFs {
                 }
                 for block in Self::extent_phys_blocks(ext) {
                     let mut data = self.read_block_vec(cx, block)?;
-                    match ffs_dir::add_entry(&mut data, child_ino_u32, name, file_type, reserved_tail) {
+                    match ffs_dir::add_entry(
+                        &mut data,
+                        child_ino_u32,
+                        name,
+                        file_type,
+                        reserved_tail,
+                    ) {
                         Ok(_) => {
                             dev.write_block(cx, block, &data)?;
 
                             // Update parent metadata (timestamps and link count if it's a new directory).
                             let mut parent_upd = parent_inode.clone();
-                            ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+                            ffs_inode::touch_mtime_ctime(
+                                &mut parent_upd,
+                                tstamp_secs,
+                                tstamp_nanos,
+                            );
                             if file_type == Ext4FileType::Dir {
                                 parent_upd.links_count = parent_upd.links_count.saturating_add(1);
                             }
@@ -7805,7 +7825,11 @@ impl OpenFs {
             };
             ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
             Self::set_extent_root(&mut parent_upd, &root_bytes);
-            self.extent_cache.invalidate_range(extent_root_namespace(&parent_upd), logical_end, u64::from(u32::MAX - logical_end));
+            self.extent_cache.invalidate_range(
+                extent_root_namespace(&parent_upd),
+                logical_end,
+                u64::from(u32::MAX - logical_end),
+            );
             parent_upd.size += u64::from(alloc.geo.block_size);
             if parent_upd.is_huge_file() {
                 parent_upd.blocks += 1;
@@ -7859,121 +7883,121 @@ impl OpenFs {
             let alloc_mutex = self.require_alloc_state()?;
             let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
-        let sb = self
-            .ext4_superblock()
-            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
-        let csum_seed = sb.csum_seed();
+            let sb = self
+                .ext4_superblock()
+                .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+            let csum_seed = sb.csum_seed();
 
-        let parent_inode = self.read_inode(cx, parent)?;
-        if !parent_inode.is_dir() {
-            return Err(FfsError::NotDirectory);
-        }
-
-        // Look up the child to get its inode number.
-        let entry = self
-            .lookup_name(cx, &parent_inode, name)?
-            .ok_or_else(|| FfsError::NotFound(String::from_utf8_lossy(name).into_owned()))?;
-        let child_ino = InodeNumber(u64::from(entry.inode));
-        let child_inode = self.read_inode(cx, child_ino)?;
-
-        if expect_dir {
-            if !child_inode.is_dir() {
+            let parent_inode = self.read_inode(cx, parent)?;
+            if !parent_inode.is_dir() {
                 return Err(FfsError::NotDirectory);
             }
-            // Check directory is empty (only . and ..).
-            let entries = self.read_dir(cx, &child_inode)?;
-            let real_entries = entries
-                .iter()
-                .filter(|e| e.name != b"." && e.name != b"..")
-                .count();
-            if real_entries > 0 {
-                return Err(FfsError::NotEmpty);
-            }
-        } else if child_inode.is_dir() {
-            return Err(FfsError::IsDirectory);
-        }
 
-        let mut alloc = alloc_mutex.lock();
+            // Look up the child to get its inode number.
+            let entry = self
+                .lookup_name(cx, &parent_inode, name)?
+                .ok_or_else(|| FfsError::NotFound(String::from_utf8_lossy(name).into_owned()))?;
+            let child_ino = InodeNumber(u64::from(entry.inode));
+            let child_inode = self.read_inode(cx, child_ino)?;
 
-        // Remove directory entry from parent blocks.
-        let extents = self.collect_extents(cx, &parent_inode)?;
-        let mut removed = false;
-        let reserved_tail = self.ext4_dir_reserved_tail();
-        'outer: for ext in &extents {
-            if removed {
-                break;
+            if expect_dir {
+                if !child_inode.is_dir() {
+                    return Err(FfsError::NotDirectory);
+                }
+                // Check directory is empty (only . and ..).
+                let entries = self.read_dir(cx, &child_inode)?;
+                let real_entries = entries
+                    .iter()
+                    .filter(|e| e.name != b"." && e.name != b"..")
+                    .count();
+                if real_entries > 0 {
+                    return Err(FfsError::NotEmpty);
+                }
+            } else if child_inode.is_dir() {
+                return Err(FfsError::IsDirectory);
             }
-            for block in Self::extent_phys_blocks(ext) {
-                let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
-                    block_dev.write_block(cx, block, &data)?;
-                    removed = true;
-                    break 'outer;
+
+            let mut alloc = alloc_mutex.lock();
+
+            // Remove directory entry from parent blocks.
+            let extents = self.collect_extents(cx, &parent_inode)?;
+            let mut removed = false;
+            let reserved_tail = self.ext4_dir_reserved_tail();
+            'outer: for ext in &extents {
+                if removed {
+                    break;
+                }
+                for block in Self::extent_phys_blocks(ext) {
+                    let mut data = self.read_block_vec(cx, block)?;
+                    if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
+                        block_dev.write_block(cx, block, &data)?;
+                        removed = true;
+                        break 'outer;
+                    }
                 }
             }
-        }
-        if !removed {
-            return Err(FfsError::NotFound(
-                String::from_utf8_lossy(name).into_owned(),
-            ));
-        }
+            if !removed {
+                return Err(FfsError::NotFound(
+                    String::from_utf8_lossy(name).into_owned(),
+                ));
+            }
 
-        // Decrement child link count.
-        let mut child_upd = child_inode;
-        if expect_dir {
-            child_upd.links_count = 0; // Removing a directory drops both the parent link and the `.` link
-        } else {
-            child_upd.links_count = child_upd.links_count.saturating_sub(1);
-        }
-        ffs_inode::touch_ctime(&mut child_upd, tstamp_secs, tstamp_nanos);
+            // Decrement child link count.
+            let mut child_upd = child_inode;
+            if expect_dir {
+                child_upd.links_count = 0; // Removing a directory drops both the parent link and the `.` link
+            } else {
+                child_upd.links_count = child_upd.links_count.saturating_sub(1);
+            }
+            ffs_inode::touch_ctime(&mut child_upd, tstamp_secs, tstamp_nanos);
 
-        {
-            let Ext4AllocState {
-                geo,
-                groups,
-                persist_ctx,
-            } = &mut *alloc;
-            if child_upd.links_count == 0 {
-                ffs_inode::delete_inode(
-                    cx,
-                    &tx_dev,
+            {
+                let Ext4AllocState {
                     geo,
                     groups,
-                    child_ino,
-                    &mut child_upd,
-                    csum_seed,
-                    tstamp_secs,
                     persist_ctx,
-                )?;
-            } else {
-                ffs_inode::write_inode(
-                    cx, &tx_dev, geo, groups, child_ino, &child_upd, csum_seed,
-                )?;
+                } = &mut *alloc;
+                if child_upd.links_count == 0 {
+                    ffs_inode::delete_inode(
+                        cx,
+                        &tx_dev,
+                        geo,
+                        groups,
+                        child_ino,
+                        &mut child_upd,
+                        csum_seed,
+                        tstamp_secs,
+                        persist_ctx,
+                    )?;
+                } else {
+                    ffs_inode::write_inode(
+                        cx, &tx_dev, geo, groups, child_ino, &child_upd, csum_seed,
+                    )?;
+                }
             }
-        }
 
-        // Update parent timestamps.
-        let mut parent_upd = self.read_inode(cx, parent)?;
-        if expect_dir {
-            parent_upd.links_count = parent_upd.links_count.saturating_sub(1);
-        }
-        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
-        {
-            let Ext4AllocState { geo, groups, .. } = &mut *alloc;
-            ffs_inode::write_inode(cx, &tx_dev, geo, groups, parent, &parent_upd, csum_seed)?;
-        }
+            // Update parent timestamps.
+            let mut parent_upd = self.read_inode(cx, parent)?;
+            if expect_dir {
+                parent_upd.links_count = parent_upd.links_count.saturating_sub(1);
+            }
+            ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+            {
+                let Ext4AllocState { geo, groups, .. } = &mut *alloc;
+                ffs_inode::write_inode(cx, &tx_dev, geo, groups, parent, &parent_upd, csum_seed)?;
+            }
 
-        trace!(
-            target: "ffs::write",
-            op = if expect_dir { "rmdir" } else { "unlink" },
-            parent = parent.0,
-            child = child_ino.0,
-            name = %String::from_utf8_lossy(name),
-            links_remaining = child_upd.links_count,
-            "entry removed"
-        );
+            trace!(
+                target: "ffs::write",
+                op = if expect_dir { "rmdir" } else { "unlink" },
+                parent = parent.0,
+                child = child_ino.0,
+                name = %String::from_utf8_lossy(name),
+                links_remaining = child_upd.links_count,
+                "entry removed"
+            );
 
-        Ok(())
+            Ok(())
         })();
 
         if result.is_ok() {
@@ -7999,7 +8023,6 @@ impl OpenFs {
         const EMLINK_ERRNO: i32 = 31;
 
         let alloc_mutex = self.require_alloc_state()?;
-        let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
         let sb = self
@@ -8042,7 +8065,7 @@ impl OpenFs {
 
         // Re-acquire the block device adapter so that updating the source inode's link count sees
         // the parent inode-table block as modified by ext4_add_dir_entry().
-        block_dev = self.block_device_adapter();
+        let block_dev = self.block_device_adapter();
 
         src_upd.links_count = src_upd.links_count.saturating_add(1);
         ffs_inode::touch_ctime(&mut src_upd, tstamp_secs, tstamp_nanos);
@@ -10650,7 +10673,7 @@ impl OpenFs {
         let ft = if Self::btrfs_mode_to_file_type(inode.mode) == FileType::Directory {
             return Err(FfsError::IsDirectory); // Can't hard-link directories
         } else {
-            BTRFS_FT_REG_FILE
+            Self::btrfs_file_type_code_from_mode(inode.mode)
         };
 
         let dir_item = BtrfsDirItem {
@@ -12572,35 +12595,31 @@ impl FsOps for OpenFs {
     }
 
     fn begin_request_scope(&self, _cx: &Cx, op: RequestOp) -> ffs_error::Result<RequestScope> {
-        let is_write = op.is_write();
-        let mut tx = None;
-        let mut snapshot = None;
-
-        if is_write {
+        let (snapshot, tx) = if op.is_write() {
             // Write operations must use a transaction for isolation and atomicity.
             let mut store = self.mvcc_store.write();
             let txn = store.begin();
             drop(store);
-            snapshot = Some(txn.snapshot);
-            tx = Some(txn);
+            let snapshot = txn.snapshot;
             trace!(
                 target: "ffs::mvcc",
                 op = ?op,
-                txn_id = tx.as_ref().unwrap().id().0,
+                txn_id = txn.id().0,
                 "mvcc_request_scope_begin_write"
             );
+            (Some(snapshot), Some(txn))
         } else {
             // Read operations use a lightweight snapshot.
-            let snap = self.current_snapshot();
-            self.mvcc_store.write().register_snapshot(snap);
-            snapshot = Some(snap);
+            let snapshot = self.current_snapshot();
+            self.mvcc_store.write().register_snapshot(snapshot);
             trace!(
                 target: "ffs::mvcc",
                 op = ?op,
-                snapshot_high = snap.high.0,
+                snapshot_high = snapshot.high.0,
                 "mvcc_request_scope_begin_read"
             );
-        }
+            (Some(snapshot), None)
+        };
 
         Ok(RequestScope { snapshot, tx })
     }
@@ -14679,6 +14698,111 @@ mod tests {
         let compressed = OpenFs::e2compr_compress(10, original).unwrap(); // method 10 = lzo1x_1
         let decompressed = OpenFs::e2compr_decompress(10, &compressed, original.len()).unwrap();
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn e2compr_cluster_header_roundtrip() {
+        // Build a fake compressed cluster with proper header and verify
+        // decompress_e2compr_cluster-style parsing can read it back.
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let block_size = 4096_usize;
+        let cluster_nblocks = 4_u32;
+
+        // Source data: 4 blocks, second block is a hole (all zeros).
+        let mut source = vec![0xAB_u8; block_size]; // block 0: data
+        source.extend_from_slice(&vec![0_u8; block_size]); // block 1: hole
+        source.extend_from_slice(&vec![0xCD_u8; block_size]); // block 2: data
+        source.extend_from_slice(&vec![0xEF_u8; block_size]); // block 3: data
+
+        // Build holemap: block 1 is a hole.
+        let holemap_bits: u32 = 0b0010; // bit 1 = hole
+        let holemap_nbytes = 1_u8;
+
+        // Non-hole data: blocks 0, 2, 3 (3 * 4096 = 12288 bytes).
+        let mut non_hole = Vec::with_capacity(3 * block_size);
+        non_hole.extend_from_slice(&source[0..block_size]); // block 0
+        non_hole.extend_from_slice(&source[2 * block_size..3 * block_size]); // block 2
+        non_hole.extend_from_slice(&source[3 * block_size..4 * block_size]); // block 3
+
+        // Compress with gzip (method 20 = gzip5).
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(5));
+        encoder.write_all(&non_hole).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let ulen = non_hole.len() as u32;
+        let clen = compressed.len() as u32;
+        let header_total = 16 + holemap_nbytes as usize;
+
+        // Build raw cluster data.
+        let total = header_total + compressed.len();
+        let padded_len = ((total + block_size - 1) / block_size) * block_size;
+        let mut raw = vec![0_u8; padded_len];
+        // Magic
+        raw[0..2].copy_from_slice(&ffs_types::EXT2_COMPRESS_MAGIC.to_le_bytes());
+        // Method
+        raw[2] = 20; // gzip5
+        // Holemap nbytes
+        raw[3] = holemap_nbytes;
+        // ulen
+        raw[8..12].copy_from_slice(&ulen.to_le_bytes());
+        // clen
+        raw[12..16].copy_from_slice(&clen.to_le_bytes());
+        // Holemap
+        raw[16] = holemap_bits as u8;
+        // Compressed data
+        raw[header_total..header_total + compressed.len()].copy_from_slice(&compressed);
+        // Checksum
+        let seed = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        let checksum = adler32_seeded(seed, &raw[8..header_total + compressed.len()]);
+        raw[4..8].copy_from_slice(&checksum.to_le_bytes());
+
+        // Now parse it back using the same logic as decompress_e2compr_cluster.
+        let magic = u16::from_le_bytes([raw[0], raw[1]]);
+        assert_eq!(magic, ffs_types::EXT2_COMPRESS_MAGIC);
+        let parsed_method = raw[2];
+        assert_eq!(parsed_method, 20);
+        let parsed_holemap_nbytes = raw[3] as usize;
+        assert_eq!(parsed_holemap_nbytes, 1);
+        let parsed_ulen =
+            u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]) as usize;
+        let parsed_clen =
+            u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]) as usize;
+        assert_eq!(parsed_ulen, non_hole.len());
+        assert_eq!(parsed_clen, compressed.len());
+
+        // Decompress
+        let data_start = 16 + parsed_holemap_nbytes;
+        let decompressed =
+            OpenFs::e2compr_decompress(parsed_method, &raw[data_start..data_start + parsed_clen], parsed_ulen)
+                .unwrap();
+        assert_eq!(decompressed.len(), parsed_ulen);
+        assert_eq!(&decompressed, &non_hole);
+
+        // Verify holemap unpacking: reassemble full cluster
+        let holemap = &raw[16..16 + parsed_holemap_nbytes];
+        let mut output = vec![0_u8; cluster_nblocks as usize * block_size];
+        let mut src_off = 0;
+        for block_idx in 0..cluster_nblocks as usize {
+            let is_hole = if block_idx < parsed_holemap_nbytes * 8 {
+                (holemap[block_idx / 8] >> (block_idx % 8)) & 1 == 1
+            } else {
+                false
+            };
+            if !is_hole && src_off + block_size <= decompressed.len() {
+                output[block_idx * block_size..(block_idx + 1) * block_size]
+                    .copy_from_slice(&decompressed[src_off..src_off + block_size]);
+                src_off += block_size;
+            }
+        }
+
+        // Verify the reassembled data matches the original.
+        assert_eq!(&output[0..block_size], &source[0..block_size], "block 0");
+        assert_eq!(&output[block_size..2 * block_size], &vec![0_u8; block_size], "block 1 (hole)");
+        assert_eq!(&output[2 * block_size..3 * block_size], &source[2 * block_size..3 * block_size], "block 2");
+        assert_eq!(&output[3 * block_size..4 * block_size], &source[3 * block_size..4 * block_size], "block 3");
     }
 
     #[test]
@@ -25311,6 +25435,47 @@ mod tests {
             ops.getattr(&cx, &mut RequestScope::empty(), attr.ino)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn btrfs_write_hard_link_preserves_symlink_type() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let sym_attr = ops
+            .symlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("original-link"),
+                Path::new("/tmp/target"),
+                0,
+                0,
+            )
+            .expect("create symlink");
+        assert_eq!(sym_attr.kind, FileType::Symlink);
+
+        let linked = ops
+            .link(
+                &cx,
+                &mut RequestScope::empty(),
+                sym_attr.ino,
+                InodeNumber(1),
+                OsStr::new("linked-symlink"),
+            )
+            .expect("hard-link symlink");
+        assert_eq!(linked.kind, FileType::Symlink);
+
+        let looked_up = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("linked-symlink"),
+            )
+            .expect("lookup linked symlink");
+        assert_eq!(looked_up.kind, FileType::Symlink);
+        assert_eq!(looked_up.ino, sym_attr.ino);
     }
 
     #[test]

@@ -3978,4 +3978,184 @@ mod tests {
             "zeroed xattr block should be freed"
         );
     }
+
+    // ── bump_inode_version tests ─────────────────────────────────────
+
+    #[test]
+    fn bump_inode_version_increments_from_zero() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            version: 0,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            version_hi: 0,
+            projid: 0,
+            extent_bytes: vec![0; 60],
+            xattr_ibody: Vec::new(),
+        };
+        assert_eq!(inode.version, 0);
+        assert_eq!(inode.version_hi, 0);
+        bump_inode_version(&mut inode);
+        assert_eq!(inode.version, 1);
+        assert_eq!(inode.version_hi, 0);
+    }
+
+    #[test]
+    fn bump_inode_version_wraps_at_u32_max() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            version: u32::MAX,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            version_hi: 0,
+            projid: 0,
+            extent_bytes: vec![0; 60],
+            xattr_ibody: Vec::new(),
+        };
+        bump_inode_version(&mut inode);
+        // u32::MAX + 1 = 0x1_0000_0000 → version=0, version_hi=1
+        assert_eq!(inode.version, 0);
+        assert_eq!(inode.version_hi, 1);
+    }
+
+    #[test]
+    fn bump_inode_version_wraps_at_u64_max() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            version: u32::MAX,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            version_hi: u32::MAX,
+            projid: 0,
+            extent_bytes: vec![0; 60],
+            xattr_ibody: Vec::new(),
+        };
+        bump_inode_version(&mut inode);
+        // u64::MAX + 1 wraps to 0
+        assert_eq!(inode.version, 0);
+        assert_eq!(inode.version_hi, 0);
+    }
+
+    #[test]
+    fn touch_mtime_ctime_bumps_version() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            version: 42,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            version_hi: 0,
+            projid: 0,
+            extent_bytes: vec![0; 60],
+            xattr_ibody: Vec::new(),
+        };
+        touch_mtime_ctime(&mut inode, 1000, 0);
+        assert_eq!(
+            inode.version, 43,
+            "version should be bumped by touch_mtime_ctime"
+        );
+    }
+
+    #[test]
+    fn touch_ctime_bumps_version() {
+        let mut inode = Ext4Inode {
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            links_count: 1,
+            blocks: 0,
+            flags: 0,
+            version: 99,
+            generation: 0,
+            file_acl: 0,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            atime_extra: 0,
+            ctime_extra: 0,
+            mtime_extra: 0,
+            crtime: 0,
+            crtime_extra: 0,
+            extra_isize: 32,
+            checksum: 0,
+            version_hi: 0,
+            projid: 0,
+            extent_bytes: vec![0; 60],
+            xattr_ibody: Vec::new(),
+        };
+        touch_ctime(&mut inode, 2000, 0);
+        assert_eq!(
+            inode.version, 100,
+            "version should be bumped by touch_ctime"
+        );
+    }
 }

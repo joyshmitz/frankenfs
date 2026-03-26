@@ -4686,4 +4686,69 @@ mod tests {
             }
         }
     }
+
+    // ── external_journal_segment tests ───────────────────────────────
+
+    #[test]
+    fn external_journal_segment_basic() {
+        let sb = Jbd2Superblock {
+            block_size: 4096,
+            max_len: 1024,
+            first_log_block: 1,
+            start_sequence: 0,
+            start_block: 0,
+            num_fc_blocks: 0,
+            feature_compat: 0,
+            feature_incompat: 0,
+            feature_ro_compat: 0,
+            uuid: [0; 16],
+        };
+        let seg = sb.external_journal_segment();
+        assert_eq!(seg.start.0, 1, "should start at first_log_block");
+        assert_eq!(seg.blocks, 1023, "usable = max_len - first_log_block");
+    }
+
+    #[test]
+    fn external_journal_segment_zero_first_log_block() {
+        let sb = Jbd2Superblock {
+            block_size: 4096,
+            max_len: 512,
+            first_log_block: 0,
+            start_sequence: 0,
+            start_block: 0,
+            num_fc_blocks: 0,
+            feature_compat: 0,
+            feature_incompat: 0,
+            feature_ro_compat: 0,
+            uuid: [0; 16],
+        };
+        let seg = sb.external_journal_segment();
+        assert_eq!(seg.start.0, 1, "should default to 1 when first_log_block=0");
+        assert_eq!(seg.blocks, 511);
+    }
+
+    #[test]
+    fn external_journal_segment_resolve() {
+        let sb = Jbd2Superblock {
+            block_size: 4096,
+            max_len: 100,
+            first_log_block: 2,
+            start_sequence: 0,
+            start_block: 0,
+            num_fc_blocks: 0,
+            feature_compat: 0,
+            feature_incompat: 0,
+            feature_ro_compat: 0,
+            uuid: [0; 16],
+        };
+        let seg = sb.external_journal_segment();
+        assert_eq!(seg.start.0, 2);
+        assert_eq!(seg.blocks, 98);
+        // Resolve index 0 → block 2
+        assert_eq!(seg.resolve(0), Some(ffs_types::BlockNumber(2)));
+        // Resolve last valid index
+        assert_eq!(seg.resolve(97), Some(ffs_types::BlockNumber(99)));
+        // Out of range
+        assert_eq!(seg.resolve(98), None);
+    }
 }
