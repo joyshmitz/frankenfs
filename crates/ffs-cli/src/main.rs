@@ -5193,7 +5193,6 @@ mod tests {
 
     fn parse_first_json_line(buffer: &SharedLogBuffer) -> Value {
         let logs = buffer.as_string();
-        println!("RAW LOGS:\n{}", logs);
         let line = logs
             .lines()
             .find(|line| !line.trim().is_empty())

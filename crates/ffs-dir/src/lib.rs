@@ -288,8 +288,6 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
             // Clear metadata for cleanliness.
             block[off + 6] = 0;
             block[off + 7] = 0;
-                off
-            );
             return Ok(true);
         }
 
