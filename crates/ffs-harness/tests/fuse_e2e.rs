@@ -1337,8 +1337,7 @@ fn fuse_create_and_remove_across_dir_block_boundary() {
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
             let path = dir.join(&name);
-            fs::remove_file(&path)
-                .unwrap_or_else(|e| panic!("remove file_{i:04}.txt: {e}"));
+            fs::remove_file(&path).unwrap_or_else(|e| panic!("remove file_{i:04}.txt: {e}"));
         }
 
         fs::remove_dir(&dir).expect("remove boundary_dir");

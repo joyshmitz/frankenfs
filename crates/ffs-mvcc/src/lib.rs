@@ -2561,18 +2561,11 @@ impl MvccStore {
     /// unmount).
     ///
     /// Returns the number of blocks flushed.
-    pub fn flush_to_device<D: BlockDevice>(
-        &self,
-        cx: &Cx,
-        device: &D,
-    ) -> FfsResult<usize> {
+    pub fn flush_to_device<D: BlockDevice>(&self, cx: &Cx, device: &D) -> FfsResult<usize> {
         let snapshot = self.current_snapshot();
         let mut flushed = 0usize;
         for (block, versions) in &self.versions {
-            if let Some(idx) = versions
-                .iter()
-                .rposition(|v| v.commit_seq <= snapshot.high)
-            {
+            if let Some(idx) = versions.iter().rposition(|v| v.commit_seq <= snapshot.high) {
                 if let Some(data) = compression::resolve_data_with(versions, idx, |v| &v.data) {
                     device.write_block(cx, *block, &data)?;
                     flushed += 1;

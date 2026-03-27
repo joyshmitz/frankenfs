@@ -7979,8 +7979,7 @@ impl OpenFs {
                 let tail_off = block_size - reserved_tail;
                 // inode=0 (already zero)
                 // rec_len=12
-                new_block[tail_off + 4..tail_off + 6]
-                    .copy_from_slice(&12_u16.to_le_bytes());
+                new_block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
                 // name_len=0 (already zero)
                 // file_type = 0xDE (EXT4_FT_DIR_CSUM)
                 new_block[tail_off + 7] = 0xDE;
@@ -21787,6 +21786,72 @@ mod tests {
     }
 
     #[test]
+    fn write_compressed_indirect_truncate_to_zero_frees_blocks() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("e2compr_indirect_truncate_zero.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+
+        let block_size = u64::from(fs.ext4_superblock().expect("ext4 superblock").block_size);
+        let indirect_cluster_offset = 12 * block_size;
+        let baseline = fs.free_space_summary(&cx).expect("baseline free space");
+        let payload = vec![b'I'; 4096];
+        fs.write(&cx, attr.ino, indirect_cluster_offset, &payload)
+            .expect("indirect compressed write before truncate");
+
+        let after_write = fs.free_space_summary(&cx).expect("free space after write");
+        assert!(
+            after_write.free_blocks_total < baseline.free_blocks_total,
+            "indirect compressed write should consume blocks before truncate"
+        );
+
+        let trunc = SetAttrRequest {
+            size: Some(0),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, attr.ino, &trunc)
+            .expect("truncate indirect compressed inode to zero");
+
+        let after_truncate = fs
+            .free_space_summary(&cx)
+            .expect("free space after truncate");
+        let inode_after = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode after truncate");
+        let readback = fs
+            .read(&cx, attr.ino, indirect_cluster_offset, 64)
+            .expect("read after truncate");
+
+        assert_eq!(
+            after_truncate.free_blocks_total, baseline.free_blocks_total,
+            "truncate should free indirect compressed data and metadata blocks"
+        );
+        assert_eq!(
+            after_truncate.gd_free_blocks_total, baseline.gd_free_blocks_total,
+            "group descriptor free block count should return to baseline after indirect truncate"
+        );
+        assert_eq!(inode_after.size, 0, "truncate should reset file size");
+        assert_eq!(inode_after.blocks, 0, "truncate should clear i_blocks");
+        assert!(
+            readback.is_empty(),
+            "truncate should remove indirect compressed file contents"
+        );
+    }
+
+    #[test]
     fn write_multiple_files_readdir_shows_all() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -31551,8 +31616,14 @@ mod tests {
 
         // Verify readdir returns all entries.
         let entries = fs.readdir(&cx, dir_attr.ino, 0).expect("readdir");
-        let real = entries.iter().filter(|e| e.name != b"." && e.name != b"..").count();
-        assert_eq!(real, count as usize, "readdir should see all {count} files, saw {real}");
+        let real = entries
+            .iter()
+            .filter(|e| e.name != b"." && e.name != b"..")
+            .count();
+        assert_eq!(
+            real, count as usize,
+            "readdir should see all {count} files, saw {real}"
+        );
 
         for i in 0..count {
             let name = format!("file_{i:04}.txt");

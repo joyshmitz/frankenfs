@@ -1197,6 +1197,7 @@ fn parse_fc_operation(tag: FcTag, payload: &[u8]) -> Option<FcOperation> {
         }),
         FcTag::Creat | FcTag::Link => (payload.len() >= 8).then(|| {
             // ext4_fc_dentry_info: parent_ino(4) + ino(4) + dname[](rest)
+            // Name length is derived from the tag payload length: tag_len - 8.
             let parent_ino = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let ino = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
             let name = payload[8..].to_vec();
