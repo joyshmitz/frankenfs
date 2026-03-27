@@ -327,8 +327,8 @@ pub fn init_dir_block(
         b"..",
     )?;
 
-    if reserved_tail == 12 {
-        let off = block.len() - 12;
+    if reserved_tail >= 12 {
+        let off = block.len() - reserved_tail;
         // struct ext4_dir_entry_tail: { 0(4), rec_len=12(2), 0(1), 0xDE(1), checksum(4) }
         write_u32_le(block, off, 0)?;
         write_u16_le(block, off + 4, 12)?;
