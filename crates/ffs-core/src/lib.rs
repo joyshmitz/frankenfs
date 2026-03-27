@@ -834,27 +834,15 @@ impl BlockDevice for TransactionBlockAdapter<'_, '_> {
         // First check staged writes in the transaction.
         let tx = self.tx.lock();
         if let Some(staged) = tx.staged_write(block) {
-            tracing::error!(
-                "TransactionBlockAdapter::read_block FOUND block {} in tx",
-                block.0
-            );
             return Ok(BlockBuf::new(staged.to_vec()));
         }
         drop(tx);
 
-        tracing::error!(
-            "TransactionBlockAdapter::read_block falling back to base for block {}",
-            block.0
-        );
         // Fall back to base device.
         self.base.read_block(cx, block)
     }
 
     fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<(), FfsError> {
-        tracing::error!(
-            "TransactionBlockAdapter::write_block STAGING block {} to tx",
-            block.0
-        );
         let mut tx = self.tx.lock();
         tx.stage_write(block, data.to_vec());
         drop(tx);
@@ -21714,7 +21702,7 @@ mod tests {
     }
 
     #[test]
-    fn create_many_files_then_lookup_all() {
+    fn create_many_files_then_lookup_and_unlink_all() {
         let Some(fs) = open_writable_ext4() else {
             return;
         };
@@ -21726,14 +21714,21 @@ mod tests {
             .mkdir(&cx, root, OsStr::new("bulk_dir"), 0o755, 0, 0)
             .expect("mkdir bulk_dir");
 
-        let count = 250;
+        // Create 1000 files (mirrors the FUSE E2E test that fails at file 169).
+        let count = 1_000u32;
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
             fs.create(&cx, dir_attr.ino, OsStr::new(&name), 0o644, 0, 0)
                 .unwrap_or_else(|e| panic!("create {name}: {e}"));
+            // Write a small payload.
+            let attr = fs
+                .lookup(&cx, dir_attr.ino, OsStr::new(&name))
+                .unwrap_or_else(|e| panic!("lookup after create {name}: {e}"));
+            fs.write(&cx, attr.ino, 0, format!("payload {i}\n").as_bytes())
+                .unwrap_or_else(|e| panic!("write {name}: {e}"));
         }
 
-        // Verify all files can be looked up.
+        // Verify all files can be looked up and then unlinked.
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
             let result = fs.lookup(&cx, dir_attr.ino, OsStr::new(&name));
@@ -21742,6 +21737,8 @@ mod tests {
                 "lookup file_{i:04}.txt failed: {:?}",
                 result.err()
             );
+            fs.unlink(&cx, dir_attr.ino, OsStr::new(&name))
+                .unwrap_or_else(|e| panic!("unlink {name}: {e}"));
         }
     }
 
