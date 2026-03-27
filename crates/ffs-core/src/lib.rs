@@ -28144,7 +28144,7 @@ mod tests {
                     Ok(BtrfsExtentData::Regular { .. })
                 )
             })
-            .map(|(key, _)| key.clone())
+            .map(|(key, _)| *key)
             .expect("regular extent key");
         alloc
             .fs_tree

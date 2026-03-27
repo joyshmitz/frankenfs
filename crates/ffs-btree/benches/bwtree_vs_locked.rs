@@ -253,7 +253,7 @@ fn run_bwtree_workload(
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            let mut rng = (tid as u64 + 1) * 6_364_136_223_846_793_005;
+            let mut rng = (tid as u64 + 1).wrapping_mul(6_364_136_223_846_793_005);
             for _ in 0..OPS_PER_THREAD {
                 let op = xorshift64(&mut rng) % total;
                 let key = xorshift64(&mut rng) % (PREPOPULATE * 2);
@@ -293,7 +293,7 @@ fn run_locked_workload(
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            let mut rng = (tid as u64 + 1) * 6_364_136_223_846_793_005;
+            let mut rng = (tid as u64 + 1).wrapping_mul(6_364_136_223_846_793_005);
             for _ in 0..OPS_PER_THREAD {
                 let op = xorshift64(&mut rng) % total;
                 let key = xorshift64(&mut rng) % (PREPOPULATE * 2);
