@@ -7894,26 +7894,10 @@ impl OpenFs {
             }
 
             // Look up the child to get its inode number.
-            let entry = match self.lookup_name(cx, &parent_inode, name)? {
-                Some(e) => e,
-                None => {
-                    eprintln!(
-                        "DEBUG: lookup_name failed for {:?} in parent {}",
-                        String::from_utf8_lossy(name),
-                        parent.0
-                    );
-                    let extents = self.collect_extents(cx, &parent_inode)?;
-                    eprintln!("DEBUG: Parent extents: {:?}", extents);
-                    for ext in extents {
-                        for block in Self::extent_phys_blocks(&ext) {
-                            let data = self.read_block_vec(cx, block)?;
-                            eprintln!("DEBUG: block {} contents length: {}", block.0, data.len());
-                        }
-                    }
-                    return Err(FfsError::NotFound(
-                        String::from_utf8_lossy(name).into_owned(),
-                    ));
-                }
+            let Some(entry) = self.lookup_name(cx, &parent_inode, name)? else {
+                return Err(FfsError::NotFound(
+                    String::from_utf8_lossy(name).into_owned(),
+                ));
             };
             let child_ino = InodeNumber(u64::from(entry.inode));
             let child_inode = self.read_inode(cx, child_ino)?;
@@ -10822,7 +10806,7 @@ impl OpenFs {
     /// Set attributes on a btrfs inode.
     fn btrfs_setattr(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         ino: InodeNumber,
         attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
@@ -10844,61 +10828,20 @@ impl OpenFs {
         if let Some(size) = attrs.size {
             let old_size = inode.size;
             inode.size = size;
-            inode.nbytes = size;
 
-            // If truncating to a smaller size, remove EXTENT_DATA items
-            // whose start offset is at or beyond the new size.
+            // If truncating to a smaller size, trim or remove every extent that overlaps the new
+            // EOF so stale tail bytes cannot reappear if the file is extended later.
             if size < old_size {
-                let ext_start = BtrfsKey {
-                    objectid: canonical,
-                    item_type: BTRFS_ITEM_EXTENT_DATA,
-                    offset: 0,
-                };
-                let ext_end = BtrfsKey {
-                    objectid: canonical,
-                    item_type: BTRFS_ITEM_EXTENT_DATA,
-                    offset: u64::MAX,
-                };
-                if let Ok(extents) = alloc.fs_tree.range(&ext_start, &ext_end) {
-                    for (k, edata) in extents {
-                        if k.offset >= size {
-                            if let Ok(BtrfsExtentData::Regular {
-                                disk_bytenr,
-                                disk_num_bytes,
-                                ..
-                            }) = parse_extent_data(&edata)
-                            {
-                                if disk_bytenr > 0 {
-                                    if let Err(e) = alloc.extent_alloc.free_extent(
-                                        disk_bytenr,
-                                        disk_num_bytes,
-                                        false,
-                                    ) {
-                                        warn!(
-                                            "truncate: failed to free extent at {disk_bytenr}: {e:?}"
-                                        );
-                                    }
-                                }
-                            }
-                            if let Err(e) = alloc.fs_tree.delete(&k) {
-                                warn!("truncate: failed to delete extent key {k:?}: {e:?}");
-                            }
-                        }
-                    }
-                }
-
-                // If truncating to 0, also remove any inline extent at offset 0.
-                if size == 0 {
-                    let inline_key = BtrfsKey {
-                        objectid: canonical,
-                        item_type: BTRFS_ITEM_EXTENT_DATA,
-                        offset: 0,
-                    };
-                    if let Err(e) = alloc.fs_tree.delete(&inline_key) {
-                        warn!("truncate: failed to delete inline extent: {e:?}");
-                    }
-                }
+                self.btrfs_remove_overlapping_extent_data(
+                    cx,
+                    &mut alloc,
+                    canonical,
+                    size,
+                    u64::MAX,
+                )?;
             }
+
+            inode.nbytes = Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?;
         }
         if let Some(atime) = attrs.atime {
             let dur = atime.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
@@ -26051,6 +25994,63 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
             .unwrap();
         assert_eq!(data, b"helloX");
+    }
+
+    #[test]
+    fn btrfs_write_truncate_then_sparse_extend_zero_fills_gap() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("truncate_sparse_extend.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            b"hello world!",
+        )
+        .unwrap();
+
+        ops.setattr(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            &SetAttrRequest {
+                size: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Extend the file with a sparse write beyond the new EOF. Bytes in the gap must read as
+        // zeros, not stale data from the pre-truncate tail.
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 10, b"Z")
+            .unwrap();
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .unwrap();
+        assert_eq!(after.size, 11);
+
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
+            .unwrap();
+        assert_eq!(data[..5], *b"hello");
+        assert!(
+            data[5..10].iter().all(|&b| b == 0),
+            "gap leaked stale bytes: {data:?}"
+        );
+        assert_eq!(data[10], b'Z');
     }
 
     #[test]
