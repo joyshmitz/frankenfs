@@ -82,6 +82,7 @@ fn adler32_seeded(seed: u32, data: &[u8]) -> u32 {
 #[derive(Debug)]
 struct Ext4CompressedClusterWrite {
     old_blocks: Vec<BlockNumber>,
+    new_blocks: Vec<BlockNumber>,
 }
 
 /// Detected filesystem type with the parsed superblock embedded.
@@ -6447,10 +6448,11 @@ impl OpenFs {
         alloc: &mut Ext4AllocState,
         logical_block: u32,
         phys: u32,
-    ) -> Result<(), FfsError> {
+    ) -> Result<Vec<BlockNumber>, FfsError> {
         let lb = logical_block as usize;
         if lb < 12 {
-            return Self::set_indirect_block_ptr(inode, logical_block, phys);
+            Self::set_indirect_block_ptr(inode, logical_block, phys)?;
+            return Ok(Vec::new());
         }
 
         let bs = self.block_size();
@@ -6473,7 +6475,7 @@ impl OpenFs {
                 0
             };
 
-            let ind_block_num = if current_ind == 0 {
+            let (ind_block_num, new_metadata_block) = if current_ind == 0 {
                 // Allocate a new indirect block.
                 let hint = AllocHint {
                     goal_group: None,
@@ -6510,9 +6512,9 @@ impl OpenFs {
                 })?;
                 inode.extent_bytes[ind_ptr_off..ind_ptr_off + 4]
                     .copy_from_slice(&new_ptr.to_le_bytes());
-                new_block
+                (new_block, Some(new_block))
             } else {
-                BlockNumber(u64::from(current_ind))
+                (BlockNumber(u64::from(current_ind)), None)
             };
 
             // Read-modify-write the indirect block (read through scope to see staged writes).
@@ -6530,7 +6532,7 @@ impl OpenFs {
             } else {
                 block_dev.write_block(cx, ind_block_num, &ind_data)?;
             }
-            return Ok(());
+            return Ok(new_metadata_block.into_iter().collect());
         }
 
         // Double indirect: i_block[13] -> indirect block -> pointer block -> data
@@ -6539,13 +6541,14 @@ impl OpenFs {
             let block_dev = self.block_device_adapter();
 
             // Ensure i_block[13] (double-indirect root) exists.
-            let dind_root = self.ensure_indirect_block(
+            let (dind_root, root_allocated) = self.ensure_indirect_block(
                 cx, scope, inode, alloc, 13, // i_block[13]
             )?;
 
             // Ensure the level-1 indirect block exists.
             let idx1 = lb_dind / ptrs_per_block;
-            let level1 = self.ensure_pointer_in_block(cx, scope, alloc, dind_root, idx1)?;
+            let (level1, level1_allocated) =
+                self.ensure_pointer_in_block(cx, scope, alloc, dind_root, idx1)?;
 
             // Write the final pointer in the level-2 block (read through scope).
             let idx2 = lb_dind % ptrs_per_block;
@@ -6557,7 +6560,10 @@ impl OpenFs {
             } else {
                 block_dev.write_block(cx, level1, &data)?;
             }
-            return Ok(());
+            let mut new_blocks = Vec::new();
+            new_blocks.extend(root_allocated);
+            new_blocks.extend(level1_allocated);
+            return Ok(new_blocks);
         }
 
         // Triple indirect: i_block[14] -> dind -> ind -> data
@@ -6565,11 +6571,14 @@ impl OpenFs {
         {
             let block_dev = self.block_device_adapter();
 
-            let tind_root = self.ensure_indirect_block(cx, scope, inode, alloc, 14)?;
+            let (tind_root, tind_allocated) =
+                self.ensure_indirect_block(cx, scope, inode, alloc, 14)?;
             let idx1 = lb_triple / (ptrs_per_block * ptrs_per_block);
-            let dind_block = self.ensure_pointer_in_block(cx, scope, alloc, tind_root, idx1)?;
+            let (dind_block, dind_allocated) =
+                self.ensure_pointer_in_block(cx, scope, alloc, tind_root, idx1)?;
             let idx2 = (lb_triple / ptrs_per_block) % ptrs_per_block;
-            let ind_block = self.ensure_pointer_in_block(cx, scope, alloc, dind_block, idx2)?;
+            let (ind_block, ind_allocated) =
+                self.ensure_pointer_in_block(cx, scope, alloc, dind_block, idx2)?;
             let idx3 = lb_triple % ptrs_per_block;
 
             let mut data = self.read_block_with_scope(cx, scope, ind_block)?;
@@ -6580,7 +6589,11 @@ impl OpenFs {
             } else {
                 block_dev.write_block(cx, ind_block, &data)?;
             }
-            Ok(())
+            let mut new_blocks = Vec::new();
+            new_blocks.extend(tind_allocated);
+            new_blocks.extend(dind_allocated);
+            new_blocks.extend(ind_allocated);
+            Ok(new_blocks)
         }
     }
 
@@ -6593,7 +6606,7 @@ impl OpenFs {
         inode: &mut Ext4Inode,
         alloc: &mut Ext4AllocState,
         iblock_idx: usize,
-    ) -> Result<BlockNumber, FfsError> {
+    ) -> Result<(BlockNumber, Vec<BlockNumber>), FfsError> {
         let off = iblock_idx * 4;
         let raw = &inode.extent_bytes;
         let current = if off + 4 <= raw.len() {
@@ -6602,7 +6615,7 @@ impl OpenFs {
             0
         };
         if current != 0 {
-            return Ok(BlockNumber(u64::from(current)));
+            return Ok((BlockNumber(u64::from(current)), Vec::new()));
         }
         let block_dev = self.block_device_adapter();
         let bs = self.block_size();
@@ -6632,7 +6645,7 @@ impl OpenFs {
             ))
         })?;
         inode.extent_bytes[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
-        Ok(new_block)
+        Ok((new_block, vec![new_block]))
     }
 
     /// Ensure a pointer at `index` within an indirect block is allocated.
@@ -6644,7 +6657,7 @@ impl OpenFs {
         alloc: &mut Ext4AllocState,
         parent_block: BlockNumber,
         index: usize,
-    ) -> Result<BlockNumber, FfsError> {
+    ) -> Result<(BlockNumber, Vec<BlockNumber>), FfsError> {
         let block_dev = self.block_device_adapter();
         let bs = self.block_size();
         // Read through the active scope so we see any staged writes (e.g., a
@@ -6659,7 +6672,7 @@ impl OpenFs {
         }
         let current = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
         if current != 0 {
-            return Ok(BlockNumber(u64::from(current)));
+            return Ok((BlockNumber(u64::from(current)), Vec::new()));
         }
         let hint = AllocHint {
             goal_group: None,
@@ -6693,7 +6706,7 @@ impl OpenFs {
         } else {
             block_dev.write_block(cx, parent_block, &data)?;
         }
-        Ok(new_block)
+        Ok((new_block, vec![new_block]))
     }
 
     /// Write a u32 block pointer in the inode's direct block table (i_block[0..11]).
@@ -6727,31 +6740,77 @@ impl OpenFs {
     #[allow(clippy::unused_self)]
     fn collect_old_cluster_blocks(
         &self,
+        cx: &Cx,
+        scope: &RequestScope,
         inode: &Ext4Inode,
         cluster_start: u32,
         cluster_nblocks: u32,
-    ) -> Vec<BlockNumber> {
+    ) -> Result<Vec<BlockNumber>, FfsError> {
         const COMPRESSED_BLOCKADDR_U32: u32 = u32::MAX;
-
-        let raw = &inode.extent_bytes;
         let mut old_blocks = Vec::new();
 
         for i in 0..cluster_nblocks {
-            let lb = (cluster_start + i) as usize;
-            if lb >= 12 {
-                break; // Only direct blocks
-            }
-            let off = lb * 4;
-            if off + 4 > raw.len() {
-                break;
-            }
-            let ptr = u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
-            if ptr != 0 && ptr != COMPRESSED_BLOCKADDR_U32 {
-                old_blocks.push(BlockNumber(u64::from(ptr)));
+            let logical_block = cluster_start + i;
+            if let Some(phys) = self.resolve_indirect_block(cx, scope, inode, logical_block)? {
+                let ptr = u32::try_from(phys).map_err(|_| FfsError::Corruption {
+                    block: phys,
+                    detail: format!("e2compr: resolved block pointer {phys} exceeds 32-bit range"),
+                })?;
+                if ptr != COMPRESSED_BLOCKADDR_U32 {
+                    old_blocks.push(BlockNumber(phys));
+                }
             }
         }
 
-        old_blocks
+        Ok(old_blocks)
+    }
+
+    fn ext4_checked_inode_blocks_after_cluster_rewrite(
+        &self,
+        inode: &Ext4Inode,
+        ino: InodeNumber,
+        added_data_blocks: u64,
+        added_metadata_blocks: u64,
+        freed_data_blocks: u64,
+        context: &'static str,
+    ) -> Result<u64, FfsError> {
+        let presented_ino = Self::ext4_presented_inode(ino);
+        let total_added_blocks = added_data_blocks
+            .checked_add(added_metadata_blocks)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "inode {} e2compr {context} metadata accounting overflow",
+                    presented_ino.0
+                ),
+            })?;
+
+        let block_delta = if inode.is_huge_file() {
+            i128::from(total_added_blocks) - i128::from(freed_data_blocks)
+        } else {
+            let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
+            let added_sectors = total_added_blocks
+                .checked_mul(sectors_per_block)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "inode {} e2compr {context} sector delta overflow",
+                        presented_ino.0
+                    ),
+                })?;
+            let freed_sectors = freed_data_blocks
+                .checked_mul(sectors_per_block)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "inode {} e2compr freed cluster sector delta overflow",
+                        presented_ino.0
+                    ),
+                })?;
+            i128::from(added_sectors) - i128::from(freed_sectors)
+        };
+
+        Self::ext4_checked_inode_blocks_delta(inode.blocks, presented_ino, block_delta)
     }
 
     /// Compress data into an e2compr cluster and write it to disk.
@@ -6778,9 +6837,9 @@ impl OpenFs {
     ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
         let block_dev = self.block_device_adapter();
-        let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
-        let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
+        let old_blocks =
+            self.collect_old_cluster_blocks(cx, scope, inode, cluster_start, cluster_nblocks)?;
 
         // Build holemap: scan for blocks that are entirely zero (holes).
         let mut holemap_bits = 0_u32;
@@ -6896,35 +6955,10 @@ impl OpenFs {
         let checksum = adler32_seeded(seed, &cluster_raw[8..header_total + compressed.len()]);
         cluster_raw[4..8].copy_from_slice(&checksum.to_le_bytes());
 
-        let presented_ino = Self::ext4_presented_inode(ino);
         let blocks_needed_u64 = u64::from(blocks_needed);
         let freed_blocks_u64 = u64::try_from(old_blocks.len()).unwrap_or(u64::MAX);
-        let block_delta = if inode.is_huge_file() {
-            i128::from(blocks_needed_u64) - i128::from(freed_blocks_u64)
-        } else {
-            let added_sectors = blocks_needed_u64
-                .checked_mul(sectors_per_block)
-                .ok_or_else(|| FfsError::Corruption {
-                    block: 0,
-                    detail: format!(
-                        "inode {} e2compr compressed cluster sector delta overflow",
-                        presented_ino.0
-                    ),
-                })?;
-            let freed_sectors =
-                freed_blocks_u64
-                    .checked_mul(sectors_per_block)
-                    .ok_or_else(|| FfsError::Corruption {
-                        block: 0,
-                        detail: format!(
-                            "inode {} e2compr freed cluster sector delta overflow",
-                            presented_ino.0
-                        ),
-                    })?;
-            i128::from(added_sectors) - i128::from(freed_sectors)
-        };
-        let blocks_after_write =
-            Self::ext4_checked_inode_blocks_delta(inode.blocks, presented_ino, block_delta)?;
+        let mut metadata_blocks_allocated = 0_u64;
+        let mut new_blocks = Vec::new();
 
         // Allocate physical blocks and write.
         for i in 0..blocks_needed {
@@ -6947,6 +6981,7 @@ impl OpenFs {
                 persist_ctx,
             )?;
             let phys_block = alloc_result.start;
+            new_blocks.push(phys_block);
 
             let start = i as usize * bs_usize;
             let block_data = &cluster_raw[start..start + bs_usize];
@@ -6963,16 +6998,24 @@ impl OpenFs {
                     phys_block.0
                 ))
             })?;
-            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_u32)?;
+            let new_metadata_blocks =
+                self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_u32)?;
+            metadata_blocks_allocated +=
+                u64::try_from(new_metadata_blocks.len()).unwrap_or(u64::MAX);
+            new_blocks.extend(new_metadata_blocks);
         }
 
         // Set remaining block pointers in the cluster to 0 (holes).
         for i in blocks_needed..cluster_nblocks - 1 {
-            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, 0)?;
+            let new_metadata_blocks =
+                self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, 0)?;
+            metadata_blocks_allocated +=
+                u64::try_from(new_metadata_blocks.len()).unwrap_or(u64::MAX);
+            new_blocks.extend(new_metadata_blocks);
         }
 
         // Set sentinel on the last block pointer.
-        self.write_block_ptr(
+        let new_metadata_blocks = self.write_block_ptr(
             cx,
             scope,
             inode,
@@ -6980,10 +7023,24 @@ impl OpenFs {
             cluster_start + cluster_nblocks - 1,
             0xFFFF_FFFF, // EXT2_COMPRESSED_BLKADDR sentinel (u32)
         )?;
+        metadata_blocks_allocated += u64::try_from(new_metadata_blocks.len()).unwrap_or(u64::MAX);
+        new_blocks.extend(new_metadata_blocks);
+
+        let blocks_after_write = self.ext4_checked_inode_blocks_after_cluster_rewrite(
+            inode,
+            ino,
+            blocks_needed_u64,
+            metadata_blocks_allocated,
+            freed_blocks_u64,
+            "compressed cluster",
+        )?;
 
         inode.blocks = blocks_after_write;
 
-        Ok(Ext4CompressedClusterWrite { old_blocks })
+        Ok(Ext4CompressedClusterWrite {
+            old_blocks,
+            new_blocks,
+        })
     }
 
     /// Write an uncompressed cluster (fallback when compression doesn't help).
@@ -7001,48 +7058,26 @@ impl OpenFs {
     ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
         let block_dev = self.block_device_adapter();
-        let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
-        let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
-        let presented_ino = Self::ext4_presented_inode(ino);
+        let old_blocks =
+            self.collect_old_cluster_blocks(cx, scope, inode, cluster_start, cluster_nblocks)?;
         let planned_blocks_written = u32::try_from(data.len().div_ceil(bs_usize))
             .unwrap_or(u32::MAX)
             .min(cluster_nblocks);
         let blocks_written_u64 = u64::from(planned_blocks_written);
         let freed_blocks_u64 = u64::try_from(old_blocks.len()).unwrap_or(u64::MAX);
-        let block_delta = if inode.is_huge_file() {
-            i128::from(blocks_written_u64) - i128::from(freed_blocks_u64)
-        } else {
-            let added_sectors = blocks_written_u64
-                .checked_mul(sectors_per_block)
-                .ok_or_else(|| FfsError::Corruption {
-                    block: 0,
-                    detail: format!(
-                        "inode {} e2compr uncompressed cluster sector delta overflow",
-                        presented_ino.0
-                    ),
-                })?;
-            let freed_sectors =
-                freed_blocks_u64
-                    .checked_mul(sectors_per_block)
-                    .ok_or_else(|| FfsError::Corruption {
-                        block: 0,
-                        detail: format!(
-                            "inode {} e2compr freed cluster sector delta overflow",
-                            presented_ino.0
-                        ),
-                    })?;
-            i128::from(added_sectors) - i128::from(freed_sectors)
-        };
-        let blocks_after_write =
-            Self::ext4_checked_inode_blocks_delta(inode.blocks, presented_ino, block_delta)?;
-
+        let mut metadata_blocks_allocated = 0_u64;
+        let mut new_blocks = Vec::new();
         let mut blocks_written = 0_u32;
         for i in 0..cluster_nblocks {
             let start = i as usize * bs_usize;
             if start >= data.len() {
                 // Beyond file data — set remaining as holes.
-                self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, 0)?;
+                let new_metadata_blocks =
+                    self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, 0)?;
+                metadata_blocks_allocated +=
+                    u64::try_from(new_metadata_blocks.len()).unwrap_or(u64::MAX);
+                new_blocks.extend(new_metadata_blocks);
                 continue;
             }
             let end = (start + bs_usize).min(data.len());
@@ -7068,6 +7103,7 @@ impl OpenFs {
                 persist_ctx,
             )?;
             let phys_block = alloc_result.start;
+            new_blocks.push(phys_block);
 
             if let Some(tx) = &mut scope.tx {
                 tx.stage_write(phys_block, block_data);
@@ -7081,13 +7117,28 @@ impl OpenFs {
                     phys_block.0
                 ))
             })?;
-            self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_u32)?;
+            let new_metadata_blocks =
+                self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_u32)?;
+            metadata_blocks_allocated +=
+                u64::try_from(new_metadata_blocks.len()).unwrap_or(u64::MAX);
+            new_blocks.extend(new_metadata_blocks);
             blocks_written += 1;
         }
         debug_assert_eq!(blocks_written, planned_blocks_written);
+        let blocks_after_write = self.ext4_checked_inode_blocks_after_cluster_rewrite(
+            inode,
+            ino,
+            blocks_written_u64,
+            metadata_blocks_allocated,
+            freed_blocks_u64,
+            "uncompressed cluster",
+        )?;
         inode.blocks = blocks_after_write;
 
-        Ok(Ext4CompressedClusterWrite { old_blocks })
+        Ok(Ext4CompressedClusterWrite {
+            old_blocks,
+            new_blocks,
+        })
     }
 
     /// Compress data using the e2compr method table.
@@ -9103,121 +9154,164 @@ impl OpenFs {
         let end = offset + data.len() as u64;
         let mut bytes_written = 0_u32;
         let mut pending_frees = Vec::new();
+        let mut pending_new_blocks = Vec::new();
 
-        // Process data cluster-by-cluster.
-        let mut pos = offset;
-        while pos < end {
-            let logical_block = u32::try_from(pos / bs).map_err(|_| {
-                FfsError::InvalidGeometry(format!(
-                    "e2compr: file offset {pos} produces logical block exceeding u32"
-                ))
-            })?;
-            let cluster_start = logical_block - (logical_block % cluster_nblocks);
-            let cluster_file_offset = u64::from(cluster_start) * bs;
-            let cluster_end_offset = cluster_file_offset + cluster_bytes as u64;
+        let write_result = (|| -> Result<u32, FfsError> {
+            // Process data cluster-by-cluster.
+            let mut pos = offset;
+            while pos < end {
+                let logical_block = u32::try_from(pos / bs).map_err(|_| {
+                    FfsError::InvalidGeometry(format!(
+                        "e2compr: file offset {pos} produces logical block exceeding u32"
+                    ))
+                })?;
+                let cluster_start = logical_block - (logical_block % cluster_nblocks);
+                let cluster_file_offset = u64::from(cluster_start) * bs;
+                let cluster_end_offset = cluster_file_offset + cluster_bytes as u64;
 
-            // Gather the full cluster data: existing data + new writes.
-            let mut cluster_data = vec![0_u8; cluster_bytes];
+                // Gather the full cluster data: existing data + new writes.
+                let mut cluster_data = vec![0_u8; cluster_bytes];
 
-            // Read existing data for this cluster (if any).
-            let existing_end = inode.size.min(cluster_end_offset);
-            if existing_end > cluster_file_offset {
-                let existing_len = (existing_end - cluster_file_offset) as usize;
-                let existing_len_u32 = u32::try_from(existing_len).unwrap_or(u32::MAX);
-                let existing = self.read_ext4_compressed(
+                // Read existing data for this cluster (if any).
+                let existing_end = inode.size.min(cluster_end_offset);
+                if existing_end > cluster_file_offset {
+                    let existing_len = (existing_end - cluster_file_offset) as usize;
+                    let existing_len_u32 = u32::try_from(existing_len).unwrap_or(u32::MAX);
+                    let existing = self.read_ext4_compressed(
+                        cx,
+                        scope,
+                        inode,
+                        cluster_file_offset,
+                        existing_len_u32,
+                    )?;
+                    let copy_len = existing.len().min(cluster_bytes);
+                    cluster_data[..copy_len].copy_from_slice(&existing[..copy_len]);
+                }
+
+                // Overlay the new data.
+                let write_start_in_cluster = (pos - cluster_file_offset) as usize;
+                let data_offset = (pos - offset) as usize;
+                let write_end_in_cluster =
+                    ((end - cluster_file_offset) as usize).min(cluster_bytes);
+                let write_len = write_end_in_cluster - write_start_in_cluster;
+                cluster_data[write_start_in_cluster..write_end_in_cluster]
+                    .copy_from_slice(&data[data_offset..data_offset + write_len]);
+
+                // Compress and write the cluster.
+                let mut alloc = alloc_mutex.lock();
+                let cluster_write = self.write_ext4_compressed_cluster(
                     cx,
                     scope,
+                    ino,
                     inode,
-                    cluster_file_offset,
-                    existing_len_u32,
+                    &mut alloc,
+                    cluster_start,
+                    cluster_nblocks,
+                    method_idx,
+                    &cluster_data,
                 )?;
-                let copy_len = existing.len().min(cluster_bytes);
-                cluster_data[..copy_len].copy_from_slice(&existing[..copy_len]);
+                pending_frees.extend(cluster_write.old_blocks);
+                pending_new_blocks.extend(cluster_write.new_blocks);
+                drop(alloc);
+
+                // Ensure COMPRBLK_FL is set.
+                inode.flags |= ffs_types::EXT4_COMPRBLK_FL;
+
+                let written_this_cluster = write_len as u32;
+                bytes_written = bytes_written.saturating_add(written_this_cluster);
+                pos = cluster_end_offset.min(end);
             }
 
-            // Overlay the new data.
-            let write_start_in_cluster = (pos - cluster_file_offset) as usize;
-            let data_offset = (pos - offset) as usize;
-            let write_end_in_cluster = ((end - cluster_file_offset) as usize).min(cluster_bytes);
-            let write_len = write_end_in_cluster - write_start_in_cluster;
-            cluster_data[write_start_in_cluster..write_end_in_cluster]
-                .copy_from_slice(&data[data_offset..data_offset + write_len]);
+            // Update inode size if we extended the file.
+            if end > inode.size {
+                inode.size = end;
+            }
+            ffs_inode::touch_mtime_ctime(inode, tstamp_secs, tstamp_nanos);
 
-            // Compress and write the cluster.
-            let mut alloc = alloc_mutex.lock();
-            let write_result = self.write_ext4_compressed_cluster(
-                cx,
-                scope,
-                ino,
-                inode,
-                &mut alloc,
-                cluster_start,
-                cluster_nblocks,
-                method_idx,
-                &cluster_data,
-            )?;
-            pending_frees.extend(write_result.old_blocks);
-            drop(alloc);
-
-            // Ensure COMPRBLK_FL is set.
-            inode.flags |= ffs_types::EXT4_COMPRBLK_FL;
-
-            let written_this_cluster = write_len as u32;
-            bytes_written = bytes_written.saturating_add(written_this_cluster);
-            pos = cluster_end_offset.min(end);
-        }
-
-        // Update inode size if we extended the file.
-        if end > inode.size {
-            inode.size = end;
-        }
-        ffs_inode::touch_mtime_ctime(inode, tstamp_secs, tstamp_nanos);
-
-        // Write updated inode and free superseded cluster blocks.
-        let mut alloc = alloc_mutex.lock();
-        if let Some(tx) = &mut scope.tx {
-            let tx_dev = TransactionBlockAdapter {
-                base: &block_dev,
-                tx: Mutex::new(tx),
-            };
-            ffs_inode::write_inode(
-                cx,
-                &tx_dev,
-                &alloc.geo,
-                &alloc.groups,
-                ino,
-                inode,
-                csum_seed,
-            )?;
-        } else {
-            ffs_inode::write_inode(
-                cx,
-                &block_dev,
-                &alloc.geo,
-                &alloc.groups,
-                ino,
-                inode,
-                csum_seed,
-            )?;
-        }
-
-        for block in pending_frees {
-            let Ext4AllocState {
-                geo,
-                groups,
-                persist_ctx,
-            } = &mut *alloc;
-            if let Err(error) =
-                ffs_alloc::free_blocks_persist(cx, &block_dev, geo, groups, block, 1, persist_ctx)
+            // Write updated inode and free superseded cluster blocks.
             {
-                warn!(
-                    block = block.0,
-                    error = %error,
-                    "e2compr: failed to release superseded cluster block after inode update"
-                );
+                let mut alloc = alloc_mutex.lock();
+                if let Some(tx) = &mut scope.tx {
+                    let tx_dev = TransactionBlockAdapter {
+                        base: &block_dev,
+                        tx: Mutex::new(tx),
+                    };
+                    ffs_inode::write_inode(
+                        cx,
+                        &tx_dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        ino,
+                        inode,
+                        csum_seed,
+                    )?;
+                } else {
+                    ffs_inode::write_inode(
+                        cx,
+                        &block_dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        ino,
+                        inode,
+                        csum_seed,
+                    )?;
+                }
+
+                for block in std::mem::take(&mut pending_frees) {
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                    } = &mut *alloc;
+                    if let Err(error) = ffs_alloc::free_blocks_persist(
+                        cx,
+                        &block_dev,
+                        geo,
+                        groups,
+                        block,
+                        1,
+                        persist_ctx,
+                    ) {
+                        warn!(
+                            block = block.0,
+                            error = %error,
+                            "e2compr: failed to release superseded cluster block after inode update"
+                        );
+                    }
+                }
+                drop(alloc);
+            }
+            Ok(bytes_written)
+        })();
+
+        if write_result.is_err() && !pending_new_blocks.is_empty() {
+            {
+                let mut alloc = alloc_mutex.lock();
+                for block in pending_new_blocks {
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                    } = &mut *alloc;
+                    if let Err(error) = ffs_alloc::free_blocks_persist(
+                        cx,
+                        &block_dev,
+                        geo,
+                        groups,
+                        block,
+                        1,
+                        persist_ctx,
+                    ) {
+                        warn!(
+                            block = block.0,
+                            error = %error,
+                            "e2compr: failed to release newly allocated block after write rollback"
+                        );
+                    }
+                }
+                drop(alloc);
             }
         }
-        drop(alloc);
 
         trace!(
             target: "ffs::write",
@@ -9229,7 +9323,7 @@ impl OpenFs {
             "e2compr data written"
         );
 
-        Ok(bytes_written)
+        write_result
     }
 
     /// Rename an entry from one directory to another.
@@ -21407,6 +21501,136 @@ mod tests {
         assert!(
             readback.is_empty(),
             "failed compressed write must not publish file data"
+        );
+    }
+
+    #[test]
+    fn write_compressed_indirect_rewrite_reuses_blocks() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("e2compr_indirect_rewrite.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+
+        let block_size = u64::from(fs.ext4_superblock().expect("ext4 superblock").block_size);
+        let sectors_per_block = block_size / u64::from(EXT4_SECTOR_SIZE);
+        let indirect_cluster_offset = 12 * block_size;
+        let baseline = fs.free_space_summary(&cx).expect("baseline free space");
+
+        let first = vec![b'A'; 4096];
+        fs.write(&cx, attr.ino, indirect_cluster_offset, &first)
+            .expect("first indirect compressed write");
+
+        let after_first_summary = fs.free_space_summary(&cx).expect("after first write");
+        let inode_after_first = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after first write");
+        assert!(
+            after_first_summary.free_blocks_total < baseline.free_blocks_total,
+            "indirect compressed write should consume blocks"
+        );
+        let consumed_blocks = baseline.free_blocks_total - after_first_summary.free_blocks_total;
+        assert_eq!(
+            inode_after_first.blocks,
+            consumed_blocks * sectors_per_block,
+            "i_blocks must include indirect metadata blocks as well as cluster payload blocks"
+        );
+
+        let second = vec![b'B'; 4096];
+        fs.write(&cx, attr.ino, indirect_cluster_offset, &second)
+            .expect("second indirect compressed write");
+
+        let after_second_summary = fs.free_space_summary(&cx).expect("after rewrite");
+        let inode_after_second = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after second write");
+        let readback = fs
+            .read(&cx, attr.ino, indirect_cluster_offset, 4096)
+            .expect("readback");
+
+        assert_eq!(
+            after_second_summary.free_blocks_total, after_first_summary.free_blocks_total,
+            "rewriting an indirect compressed cluster should not leak old data blocks"
+        );
+        assert_eq!(
+            after_second_summary.gd_free_blocks_total,
+            after_first_summary.gd_free_blocks_total
+        );
+        assert_eq!(inode_after_second.blocks, inode_after_first.blocks);
+        assert_eq!(&readback[..second.len()], second.as_slice());
+    }
+
+    #[test]
+    fn write_compressed_multicluster_failure_rolls_back_allocations() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("e2compr_multicluster_rollback.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+
+        let block_size = u64::from(fs.ext4_superblock().expect("ext4 superblock").block_size);
+        let sectors_per_block = block_size / u64::from(EXT4_SECTOR_SIZE);
+        let indirect_cluster_offset = 12 * block_size;
+        let free_before = fs.free_space_summary(&cx).expect("free space before write");
+
+        let mut inode = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode before compressed write");
+        inode.blocks = u64::MAX - (2 * sectors_per_block);
+        persist_ext4_test_inode(&fs, &cx, attr.ino, &inode);
+
+        let payload = vec![b'Q'; 8192];
+        let err = fs
+            .write(&cx, attr.ino, indirect_cluster_offset, &payload)
+            .expect_err("second compressed cluster should overflow inode.blocks");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let free_after = fs
+            .free_space_summary(&cx)
+            .expect("free space after failed write");
+        assert_eq!(
+            free_after.free_blocks_total, free_before.free_blocks_total,
+            "failed multicluster compressed write should free newly allocated data and metadata blocks"
+        );
+        assert_eq!(
+            free_after.gd_free_blocks_total, free_before.gd_free_blocks_total,
+            "group descriptor free block count should roll back after failed multicluster compressed write"
+        );
+
+        let inode_after = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode after failed compressed write");
+        assert_eq!(inode_after.size, 0, "failed write must not extend the file");
+        let readback = fs
+            .read(&cx, attr.ino, indirect_cluster_offset, 32)
+            .expect("read after failed write");
+        assert!(
+            readback.is_empty(),
+            "failed write must not publish compressed data"
         );
     }
 

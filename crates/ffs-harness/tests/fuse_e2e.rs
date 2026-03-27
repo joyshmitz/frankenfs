@@ -413,7 +413,7 @@ fn try_mount_ffs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Background
     let cx = Cx::for_testing();
     let opts = OpenOptions {
         skip_validation: false,
-        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
         mvcc_wal_path: Some(image.with_extension("wal")),
         ..OpenOptions::default()
     };
