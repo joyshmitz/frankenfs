@@ -8087,6 +8087,13 @@ impl OpenFs {
             FfsError::Format("directory block size exceeds 16-bit rec_len field".into())
         })?;
         empty_block[4..6].copy_from_slice(&rec_len.to_le_bytes());
+        // Initialise checksum tail so parse_dir_block does not
+        // misinterpret trailing zeros as an oversized entry.
+        if reserved_tail >= 12 {
+            let tail_off = block_size - reserved_tail;
+            empty_block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+            empty_block[tail_off + 7] = 0xDE;
+        }
         match ffs_dir::add_entry(&mut empty_block, 1, name, file_type, reserved_tail) {
             Ok(_) | Err(FfsError::NoSpace) => Ok(()),
             Err(err) => Err(err),
