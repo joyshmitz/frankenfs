@@ -10440,7 +10440,7 @@ impl OpenFs {
         self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
 
         // Add INODE_REF for parent backref.
-        self.btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
+        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
 
         // Update parent inode timestamps.
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
@@ -10514,7 +10514,7 @@ impl OpenFs {
         self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
 
         // Add INODE_REF for parent backref.
-        self.btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
+        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
 
         // Bump parent nlink for the new subdirectory.
         self.btrfs_adjust_nlink(&mut alloc, parent_oid, 1)?;
@@ -10559,7 +10559,7 @@ impl OpenFs {
         self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
 
         // Remove the INODE_REF back-pointer from child → parent.
-        self.btrfs_remove_inode_ref(&mut alloc, child_oid, parent_oid);
+        Self::btrfs_remove_inode_ref(&mut alloc, child_oid, parent_oid, name)?;
 
         // Decrement child nlink.
         if expect_dir {
@@ -10619,14 +10619,14 @@ impl OpenFs {
 
         // Remove old entry and its INODE_REF.
         self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
-        self.btrfs_remove_inode_ref(&mut alloc, child.child_objectid, parent_oid);
+        Self::btrfs_remove_inode_ref(&mut alloc, child.child_objectid, parent_oid, name)?;
 
         // If target exists, remove it first and handle nlink cleanup.
         if let Ok(target) = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
             let target_oid = target.child_objectid;
             let target_is_dir = target.file_type == BTRFS_FT_DIR;
             self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name)?;
-            self.btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid);
+            Self::btrfs_remove_inode_ref(&mut alloc, target_oid, new_parent_oid, new_name)?;
             if target_is_dir {
                 self.btrfs_adjust_nlink(&mut alloc, target_oid, -2)?;
                 self.btrfs_adjust_nlink(&mut alloc, new_parent_oid, -1)?;
@@ -10648,7 +10648,7 @@ impl OpenFs {
             name: new_name.to_vec(),
         };
         self.btrfs_insert_dir_entry(&mut alloc, new_parent_oid, &dir_item)?;
-        self.btrfs_insert_inode_ref(
+        Self::btrfs_insert_inode_ref(
             &mut alloc,
             child.child_objectid,
             new_parent_oid,
@@ -10702,7 +10702,7 @@ impl OpenFs {
             name: new_name.to_vec(),
         };
         self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
-        self.btrfs_insert_inode_ref(&mut alloc, target_oid, parent_oid, new_name, target_oid)?;
+        Self::btrfs_insert_inode_ref(&mut alloc, target_oid, parent_oid, new_name, target_oid)?;
         self.btrfs_adjust_nlink(&mut alloc, target_oid, 1)?;
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
 
@@ -10796,7 +10796,7 @@ impl OpenFs {
             name: name.to_vec(),
         };
         self.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)?;
-        self.btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
+        Self::btrfs_insert_inode_ref(&mut alloc, new_oid, parent_oid, name, new_oid)?;
         self.btrfs_touch_inode_times(&mut alloc, parent_oid, secs, nanos)?;
         drop(alloc);
 
@@ -11724,8 +11724,63 @@ impl OpenFs {
     /// The INODE_REF key is `{objectid: child, item_type: 12, offset: parent}`.
     /// The payload is `index(8) + name_len(2) + name`.
     #[allow(clippy::unused_self)]
+    fn btrfs_parse_inode_ref_payload(payload: &[u8]) -> ffs_error::Result<Vec<(u64, Vec<u8>)>> {
+        let mut refs = Vec::new();
+        let mut cursor = 0_usize;
+        while cursor < payload.len() {
+            if cursor + 10 > payload.len() {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "truncated inode_ref payload".into(),
+                });
+            }
+            let index =
+                u64::from_le_bytes(payload[cursor..cursor + 8].try_into().map_err(|_| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: "invalid inode_ref index".into(),
+                    }
+                })?);
+            let name_len = usize::from(u16::from_le_bytes(
+                payload[cursor + 8..cursor + 10]
+                    .try_into()
+                    .map_err(|_| FfsError::Corruption {
+                        block: 0,
+                        detail: "invalid inode_ref name length".into(),
+                    })?,
+            ));
+            let name_start = cursor + 10;
+            let Some(name_end) = name_start.checked_add(name_len) else {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "inode_ref name length overflow".into(),
+                });
+            };
+            if name_end > payload.len() {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "inode_ref name extends past payload".into(),
+                });
+            }
+            refs.push((index, payload[name_start..name_end].to_vec()));
+            cursor = name_end;
+        }
+        Ok(refs)
+    }
+
+    fn btrfs_serialize_inode_ref_payload(entries: &[(u64, Vec<u8>)]) -> ffs_error::Result<Vec<u8>> {
+        let mut payload = Vec::new();
+        for (index, name) in entries {
+            let name_len = u16::try_from(name.len())
+                .map_err(|_| FfsError::Format("inode ref name too long".into()))?;
+            payload.extend_from_slice(&index.to_le_bytes());
+            payload.extend_from_slice(&name_len.to_le_bytes());
+            payload.extend_from_slice(name);
+        }
+        Ok(payload)
+    }
+
     fn btrfs_insert_inode_ref(
-        &self,
         alloc: &mut BtrfsAllocState,
         child_oid: u64,
         parent_oid: u64,
@@ -11737,12 +11792,33 @@ impl OpenFs {
             item_type: BTRFS_ITEM_INODE_REF,
             offset: parent_oid,
         };
-        let name_len = u16::try_from(name.len())
-            .map_err(|_| FfsError::Format("inode ref name too long".into()))?;
-        let mut payload = Vec::with_capacity(10 + name.len());
-        payload.extend_from_slice(&index.to_le_bytes());
-        payload.extend_from_slice(&name_len.to_le_bytes());
-        payload.extend_from_slice(name);
+        let existing_payload = alloc
+            .fs_tree
+            .range(&ref_key, &ref_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+            .map(|(_, payload)| payload.clone());
+        let entries = existing_payload
+            .as_deref()
+            .map(Self::btrfs_parse_inode_ref_payload)
+            .transpose()?
+            .unwrap_or_default();
+        let mut replaced = false;
+        let mut merged = Vec::with_capacity(entries.len().saturating_add(1));
+        for (existing_index, existing_name) in entries {
+            if existing_name == name {
+                if !replaced {
+                    merged.push((index, name.to_vec()));
+                    replaced = true;
+                }
+            } else {
+                merged.push((existing_index, existing_name));
+            }
+        }
+        if !replaced {
+            merged.push((index, name.to_vec()));
+        }
+        let payload = Self::btrfs_serialize_inode_ref_payload(&merged)?;
 
         alloc
             .fs_tree
@@ -11754,15 +11830,54 @@ impl OpenFs {
 
     /// Remove the INODE_REF item linking `child_oid` back to `parent_oid`.
     #[allow(clippy::unused_self)]
-    fn btrfs_remove_inode_ref(&self, alloc: &mut BtrfsAllocState, child_oid: u64, parent_oid: u64) {
+    fn btrfs_remove_inode_ref(
+        alloc: &mut BtrfsAllocState,
+        child_oid: u64,
+        parent_oid: u64,
+        name: &[u8],
+    ) -> ffs_error::Result<()> {
         let ref_key = BtrfsKey {
             objectid: child_oid,
             item_type: BTRFS_ITEM_INODE_REF,
             offset: parent_oid,
         };
-        if let Err(e) = alloc.fs_tree.delete(&ref_key) {
-            warn!("unlink: failed to delete inode_ref {ref_key:?}: {e:?}");
+        let existing_payload = alloc
+            .fs_tree
+            .range(&ref_key, &ref_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+            .map(|(_, payload)| payload.clone());
+        let Some(existing_payload) = existing_payload else {
+            return Ok(());
+        };
+        let entries = Self::btrfs_parse_inode_ref_payload(&existing_payload)?;
+        let original_len = entries.len();
+        let remaining: Vec<_> = entries
+            .into_iter()
+            .filter(|(_, existing_name)| existing_name.as_slice() != name)
+            .collect();
+        if remaining.len() == original_len {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "inode_ref missing expected name {} for child {child_oid} parent {parent_oid}",
+                    String::from_utf8_lossy(name)
+                ),
+            });
         }
+        if remaining.is_empty() {
+            alloc
+                .fs_tree
+                .delete(&ref_key)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            return Ok(());
+        }
+        let payload = Self::btrfs_serialize_inode_ref_payload(&remaining)?;
+        alloc
+            .fs_tree
+            .update(&ref_key, &payload)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        Ok(())
     }
 
     /// Look up the parent objectid for a btrfs inode via its INODE_REF.
@@ -25641,6 +25756,98 @@ mod tests {
             ops.getattr(&cx, &mut RequestScope::empty(), attr.ino)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn btrfs_write_hard_links_same_parent_preserve_all_inode_refs() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("original.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.link(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            InodeNumber(1),
+            OsStr::new("link_a.txt"),
+        )
+        .unwrap();
+        ops.link(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            InodeNumber(1),
+            OsStr::new("link_b.txt"),
+        )
+        .unwrap();
+
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+        let ref_key = BtrfsKey {
+            objectid: attr.ino.0,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: 256,
+        };
+        let payload = alloc.fs_tree.range(&ref_key, &ref_key).unwrap();
+        let refs = OpenFs::btrfs_parse_inode_ref_payload(&payload.first().unwrap().1).unwrap();
+        drop(alloc);
+
+        let mut names: Vec<_> = refs
+            .iter()
+            .map(|(_, name)| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["link_a.txt", "link_b.txt", "original.txt"]);
+
+        ops.unlink(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("link_a.txt"),
+        )
+        .unwrap();
+
+        let alloc = fs.btrfs_alloc_state.as_ref().unwrap().lock();
+        let payload = alloc.fs_tree.range(&ref_key, &ref_key).unwrap();
+        let refs = OpenFs::btrfs_parse_inode_ref_payload(&payload.first().unwrap().1).unwrap();
+        drop(alloc);
+
+        let mut names: Vec<_> = refs
+            .iter()
+            .map(|(_, name)| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["link_b.txt", "original.txt"]);
+    }
+
+    #[test]
+    fn btrfs_remove_inode_ref_missing_name_reports_corruption() {
+        let (fs, _cx) = open_writable_btrfs();
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        let ref_key = BtrfsKey {
+            objectid: 9001,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: 256,
+        };
+        let payload =
+            OpenFs::btrfs_serialize_inode_ref_payload(&[(42, b"present.txt".to_vec())]).unwrap();
+        alloc.fs_tree.insert(ref_key, &payload).unwrap();
+
+        let err = OpenFs::btrfs_remove_inode_ref(&mut alloc, 9001, 256, b"missing.txt")
+            .expect_err("missing backref name should be treated as corruption");
+        drop(alloc);
+
+        assert!(matches!(err, FfsError::Corruption { .. }));
     }
 
     #[test]

@@ -803,12 +803,18 @@ impl Jbd2Writer {
 
         let mut total = 0_u64;
         if writes > 0 {
+            if tags_per_desc == 0 {
+                return u64::MAX;
+            }
             let desc_blocks = writes.div_ceil(tags_per_desc) as u64;
             total = total
                 .saturating_add(desc_blocks)
                 .saturating_add(writes as u64);
         }
         if revokes > 0 {
+            if entries_per_revoke == 0 {
+                return u64::MAX;
+            }
             total = total.saturating_add(revokes.div_ceil(entries_per_revoke) as u64);
         }
         // Commit block.
@@ -832,6 +838,23 @@ impl Jbd2Writer {
     ) -> Result<(u32, Jbd2WriteStats)> {
         let bs = usize::try_from(dev.block_size())
             .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        if bs < JBD2_HEADER_SIZE {
+            return Err(FfsError::Format(
+                "block size too small for JBD2 headers".to_owned(),
+            ));
+        }
+        let tags_per_desc = max_tags_per_descriptor(bs, self.is_64bit);
+        if !txn.writes.is_empty() && tags_per_desc == 0 {
+            return Err(FfsError::Format(
+                "block size too small for JBD2 descriptor tags".to_owned(),
+            ));
+        }
+        let entries_per_revoke = max_revoke_entries(bs, self.is_64bit);
+        if !txn.revokes.is_empty() && entries_per_revoke == 0 {
+            return Err(FfsError::Format(
+                "block size too small for JBD2 revoke entries".to_owned(),
+            ));
+        }
 
         let needed = Self::blocks_needed(
             dev.block_size(),
@@ -847,7 +870,6 @@ impl Jbd2Writer {
         let seq = txn.sequence;
 
         // --- Phase 1: descriptor + data blocks ---
-        let tags_per_desc = max_tags_per_descriptor(bs, self.is_64bit);
         let tag_size = if self.is_64bit {
             JBD2_TAG_SIZE_64
         } else {
@@ -920,7 +942,6 @@ impl Jbd2Writer {
 
         // --- Phase 2: revoke blocks ---
         if !txn.revokes.is_empty() {
-            let entries_per_revoke = max_revoke_entries(bs, self.is_64bit);
             let entry_size = if self.is_64bit { 8 } else { 4 };
             let mut revoke_idx = 0;
 
@@ -4386,6 +4407,48 @@ mod tests {
         assert_eq!(max_revoke_entries(1024, false), 252);
         // Block size smaller than header: saturating_sub returns 0.
         assert_eq!(max_revoke_entries(8, false), 0);
+    }
+
+    #[test]
+    fn blocks_needed_saturates_on_impossible_descriptor_geometry() {
+        assert_eq!(Jbd2Writer::blocks_needed(8, 1, 0, false), u64::MAX);
+        assert_eq!(Jbd2Writer::blocks_needed(12, 0, 1, false), u64::MAX);
+    }
+
+    #[test]
+    fn commit_transaction_rejects_block_size_too_small_for_descriptor_tags() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(12, 16);
+        let region = JournalRegion {
+            start: BlockNumber(0),
+            blocks: 8,
+        };
+        let mut writer = Jbd2Writer::new(region, 1);
+        let mut txn = writer.begin_transaction();
+        txn.add_write(BlockNumber(99), vec![1; 12]);
+
+        let err = writer
+            .commit_transaction(&cx, &dev, &txn)
+            .expect_err("descriptor tags should not fit in an 8-byte block");
+        assert!(matches!(err, FfsError::Format(message) if message.contains("descriptor tags")));
+    }
+
+    #[test]
+    fn commit_transaction_rejects_block_size_too_small_for_revoke_entries() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(12, 16);
+        let region = JournalRegion {
+            start: BlockNumber(0),
+            blocks: 8,
+        };
+        let mut writer = Jbd2Writer::new(region, 1);
+        let mut txn = writer.begin_transaction();
+        txn.add_revoke(BlockNumber(99));
+
+        let err = writer
+            .commit_transaction(&cx, &dev, &txn)
+            .expect_err("revoke entries should not fit in a 12-byte block");
+        assert!(matches!(err, FfsError::Format(message) if message.contains("revoke entries")));
     }
 
     // ── Property-based tests (proptest) ────────────────────────────────
