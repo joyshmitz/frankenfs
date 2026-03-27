@@ -20786,12 +20786,12 @@ mod tests {
         );
         assert_eq!(
             fs.getxattr(&cx, left, "user.large").expect("left getxattr"),
-            Some(updated.clone())
+            Some(updated)
         );
         assert_eq!(
             fs.getxattr(&cx, right, "user.large")
                 .expect("right getxattr"),
-            Some(original.clone())
+            Some(original)
         );
 
         let old_shared = fs
@@ -20886,7 +20886,7 @@ mod tests {
         assert_eq!(
             fs.getxattr(&cx, right, "user.large")
                 .expect("right getxattr"),
-            Some(original.clone())
+            Some(original)
         );
 
         let old_shared = fs
