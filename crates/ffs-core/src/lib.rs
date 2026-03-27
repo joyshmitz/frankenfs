@@ -24316,11 +24316,16 @@ mod tests {
                         .and_then(Value::as_str)
                         .is_some_and(|value| value.starts_with("btrfs-fallocate-"))
             })
-            .unwrap_or_else(|| {
-                let binding = buffer.inner.lock().unwrap();
-                let raw = String::from_utf8_lossy(&binding);
-                panic!("expected btrfs fallocate success log event: {logs:?}\nRAW BUFFER: {raw}");
-            });
+            .unwrap_or_else(
+                #[allow(clippy::significant_drop_tightening)]
+                || {
+                    let binding = buffer.inner.lock().unwrap();
+                    let raw = String::from_utf8_lossy(&binding);
+                    panic!(
+                        "expected btrfs fallocate success log event: {logs:?}\nRAW BUFFER: {raw}"
+                    );
+                },
+            );
 
         assert_eq!(
             applied.get("scenario_id").and_then(Value::as_str),
