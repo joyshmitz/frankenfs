@@ -651,4 +651,13 @@ pub trait FsOps: Send + Sync {
     fn commit_request_scope(&self, _scope: &mut RequestScope) -> ffs_error::Result<CommitSeq> {
         Ok(CommitSeq(0))
     }
+
+    /// Flush all pending writes to durable storage before unmount.
+    ///
+    /// Called by the FUSE `destroy` callback to ensure in-memory MVCC
+    /// data is materialised to the underlying image.  The default
+    /// implementation is a no-op.
+    fn flush_on_destroy(&self, _cx: &Cx) -> ffs_error::Result<()> {
+        Ok(())
+    }
 }

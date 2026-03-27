@@ -3479,6 +3479,21 @@ impl OpenFs {
         self.ext4_alloc_state.is_some() || self.btrfs_alloc_state.is_some()
     }
 
+    /// Flush all committed MVCC block versions to the underlying image.
+    ///
+    /// This materialises in-memory writes to durable storage.  Call this
+    /// before unmounting to ensure data written through the FUSE interface
+    /// survives across remounts.  Returns the number of blocks flushed.
+    pub fn flush_mvcc_to_device(&self, cx: &Cx) -> ffs_error::Result<usize> {
+        let base_dev = self.direct_block_device_adapter();
+        let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+        if flushed > 0 {
+            self.dev.sync(cx)?;
+            info!(flushed_blocks = flushed, "flush_mvcc_to_device");
+        }
+        Ok(flushed)
+    }
+
     /// Enable write operations by loading allocation state for the detected
     /// filesystem type (ext4 or btrfs).
     ///
@@ -10585,6 +10600,19 @@ impl OpenFs {
             return Err(FfsError::ReadOnly);
         }
 
+        // Flush committed MVCC block versions to the underlying device so
+        // that data written through the MVCC store becomes durable on disk.
+        let base_dev = self.direct_block_device_adapter();
+        let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+        if flushed > 0 {
+            trace!(
+                target: "ffs::ext4::rw",
+                operation_id = %operation_id,
+                flushed_blocks = flushed,
+                "mvcc_flush_before_sync"
+            );
+        }
+
         let duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         match self.dev.sync(cx) {
             Ok(()) => {
@@ -10596,6 +10624,7 @@ impl OpenFs {
                     ino = ino.0,
                     datasync,
                     duration_us,
+                    flushed_blocks = flushed,
                     "ext4_sync_applied"
                 );
                 Ok(())
@@ -10651,6 +10680,18 @@ impl OpenFs {
             return Err(FfsError::ReadOnly);
         }
 
+        // Flush committed MVCC block versions to the underlying device.
+        let base_dev = self.direct_block_device_adapter();
+        let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+        if flushed > 0 {
+            trace!(
+                target: "ffs::btrfs::rw",
+                operation_id = %operation_id,
+                flushed_blocks = flushed,
+                "mvcc_flush_before_sync"
+            );
+        }
+
         match self.dev.sync(cx) {
             Ok(()) => {
                 info!(
@@ -10660,6 +10701,7 @@ impl OpenFs {
                     outcome = "applied",
                     ino = ino.0,
                     datasync,
+                    flushed_blocks = flushed,
                     "btrfs_sync_applied"
                 );
                 Ok(())
@@ -13836,6 +13878,16 @@ impl FsOps for OpenFs {
     /// Returns `FfsError::Conflict` if the transaction cannot be committed.
     fn commit_request_scope(&self, scope: &mut RequestScope) -> ffs_error::Result<CommitSeq> {
         scope.commit_if_write(&self.mvcc_store)
+    }
+
+    fn flush_on_destroy(&self, cx: &Cx) -> ffs_error::Result<()> {
+        if self.is_writable() {
+            let flushed = self.flush_mvcc_to_device(cx)?;
+            if flushed > 0 {
+                info!(flushed_blocks = flushed, "flush_on_destroy");
+            }
+        }
+        Ok(())
     }
 }
 

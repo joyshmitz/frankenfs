@@ -982,7 +982,12 @@ impl Filesystem for FrankenFuse {
         Ok(())
     }
 
-    fn destroy(&mut self) {}
+    fn destroy(&mut self) {
+        let cx = Self::cx_for_request();
+        if let Err(e) = self.inner.ops.flush_on_destroy(&cx) {
+            warn!("flush_on_destroy failed during FUSE destroy: {e}");
+        }
+    }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let cx = Self::cx_for_request();

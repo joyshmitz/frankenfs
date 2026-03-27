@@ -2552,6 +2552,40 @@ impl MvccStore {
         freed
     }
 
+    /// Flush all committed block versions to the underlying device.
+    ///
+    /// For each block that has committed versions in the MVCC store, this
+    /// writes the latest version visible at the current snapshot to the
+    /// base device.  This materialises in-memory MVCC data to persistent
+    /// storage, which is required for write durability (e.g. `fsync`,
+    /// unmount).
+    ///
+    /// Returns the number of blocks flushed.
+    pub fn flush_to_device<D: BlockDevice>(
+        &self,
+        cx: &Cx,
+        device: &D,
+    ) -> FfsResult<usize> {
+        let snapshot = self.current_snapshot();
+        let mut flushed = 0usize;
+        for (block, versions) in &self.versions {
+            if let Some(idx) = versions
+                .iter()
+                .rposition(|v| v.commit_seq <= snapshot.high)
+            {
+                if let Some(data) = compression::resolve_data_with(versions, idx, |v| &v.data) {
+                    device.write_block(cx, *block, &data)?;
+                    flushed += 1;
+                }
+            }
+        }
+        if flushed > 0 {
+            device.sync(cx)?;
+            debug!(flushed_blocks = flushed, "mvcc_flush_to_device");
+        }
+        Ok(flushed)
+    }
+
     pub fn prune_versions_older_than(&mut self, watermark: CommitSeq) {
         let mut retired_versions = Vec::new();
         let active_snapshot_count = self.active_snapshot_count();
