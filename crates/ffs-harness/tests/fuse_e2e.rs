@@ -1308,6 +1308,43 @@ fn fuse_readdir_large_directory() {
     });
 }
 
+/// Regression test: creating files that span multiple directory blocks
+/// then removing them must succeed.  Exercises the transition from
+/// a single-block to a multi-block directory.
+#[test]
+fn fuse_create_and_remove_across_dir_block_boundary() {
+    with_rw_mount_sized(64 * 1024 * 1024, |mnt| {
+        let dir = mnt.join("boundary_dir");
+        fs::create_dir(&dir).expect("mkdir boundary_dir");
+
+        // 200 files crosses the ~170-entry first-block boundary.
+        let count = 200_u32;
+        for i in 0..count {
+            let name = format!("file_{i:04}.txt");
+            let path = dir.join(&name);
+            fs::write(&path, format!("payload {i}\n").as_bytes())
+                .unwrap_or_else(|e| panic!("write {name}: {e}"));
+        }
+
+        // Verify all files are accessible.
+        for i in 0..count {
+            let name = format!("file_{i:04}.txt");
+            let path = dir.join(&name);
+            assert!(path.exists(), "file_{i:04}.txt should exist after creation");
+        }
+
+        // Remove all files.
+        for i in 0..count {
+            let name = format!("file_{i:04}.txt");
+            let path = dir.join(&name);
+            fs::remove_file(&path)
+                .unwrap_or_else(|e| panic!("remove file_{i:04}.txt: {e}"));
+        }
+
+        fs::remove_dir(&dir).expect("remove boundary_dir");
+    });
+}
+
 #[test]
 fn fuse_write_enospc_on_full_filesystem() {
     if !fuse_available() {

@@ -5550,12 +5550,6 @@ impl OpenFs {
     ) -> Result<Vec<Ext4DirEntry>, FfsError> {
         let bs = u64::from(self.block_size());
         let num_blocks = dir_logical_block_count(inode.size, bs)?;
-        tracing::error!(
-            "read_dir_with_scope: inode.size={}, num_blocks={}",
-            inode.size,
-            num_blocks
-        );
-
         let mut all_entries = Vec::new();
 
         for lb in 0..num_blocks {
@@ -7976,6 +7970,20 @@ impl OpenFs {
                     })?;
                 new_block[4..6].copy_from_slice(&rec_len.to_le_bytes());
                 // inode=0, name_len=0, file_type=0 ⇒ unused entry
+            }
+            // Initialize the checksum tail (if present) so that
+            // parse_dir_block does not misinterpret the trailing zeros
+            // as an entry with rec_len = block_size (rec_len_from_disk
+            // treats raw=0 as block_size).
+            if reserved_tail >= 12 {
+                let tail_off = block_size - reserved_tail;
+                // inode=0 (already zero)
+                // rec_len=12
+                new_block[tail_off + 4..tail_off + 6]
+                    .copy_from_slice(&12_u16.to_le_bytes());
+                // name_len=0 (already zero)
+                // file_type = 0xDE (EXT4_FT_DIR_CSUM)
+                new_block[tail_off + 7] = 0xDE;
             }
             ffs_dir::add_entry(
                 &mut new_block,
@@ -19674,6 +19682,48 @@ mod tests {
         Some(fs)
     }
 
+    /// Create a fresh ext4 image via `mkfs.ext4` and open it writable.
+    ///
+    /// Returns `None` if `mkfs.ext4` is not available.
+    fn open_writable_ext4_mkfs(size_mb: u64) -> Option<(OpenFs, tempfile::TempDir)> {
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let image = tmp.path().join("test.ext4");
+        let f = std::fs::File::create(&image).expect("create image");
+        f.set_len(size_mb * 1024 * 1024).expect("set image size");
+        drop(f);
+
+        let out = std::process::Command::new("mkfs.ext4")
+            .args(["-F", "-b", "4096", image.to_str().unwrap()])
+            .output();
+        let out = match out {
+            Ok(o) if o.status.success() => o,
+            _ => return None,
+        };
+        let _ = out; // suppress unused warning
+
+        // Make root writable.
+        let _ = std::process::Command::new("debugfs")
+            .args([
+                "-w",
+                "-R",
+                "set_inode_field / mode 040777",
+                image.to_str().unwrap(),
+            ])
+            .output();
+
+        let cx = Cx::for_testing();
+        let data = std::fs::read(&image).expect("read image");
+        let dev = TestDevice::from_vec(data);
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+            ..OpenOptions::default()
+        };
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
+        fs.enable_writes(&cx).expect("enable writes");
+        assert!(fs.is_writable());
+        Some((fs, tmp))
+    }
+
     fn enable_e2compr_for_inode(
         fs: &OpenFs,
         cx: &Cx,
@@ -21675,6 +21725,68 @@ mod tests {
     }
 
     #[test]
+    fn write_compressed_truncate_to_zero_frees_blocks() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("e2compr_truncate_zero.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+
+        let baseline = fs.free_space_summary(&cx).expect("baseline free space");
+        let payload = vec![b'T'; 4096];
+        fs.write(&cx, attr.ino, 0, &payload)
+            .expect("compressed write before truncate");
+
+        let after_write = fs.free_space_summary(&cx).expect("free space after write");
+        assert!(
+            after_write.free_blocks_total < baseline.free_blocks_total,
+            "compressed write should consume blocks before truncate"
+        );
+
+        let trunc = SetAttrRequest {
+            size: Some(0),
+            ..SetAttrRequest::default()
+        };
+        fs.setattr(&cx, attr.ino, &trunc)
+            .expect("truncate compressed inode to zero");
+
+        let after_truncate = fs
+            .free_space_summary(&cx)
+            .expect("free space after truncate");
+        let inode_after = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode after truncate");
+        let readback = fs.read(&cx, attr.ino, 0, 64).expect("read after truncate");
+
+        assert_eq!(
+            after_truncate.free_blocks_total, baseline.free_blocks_total,
+            "truncate should free all compressed data/metadata blocks"
+        );
+        assert_eq!(
+            after_truncate.gd_free_blocks_total, baseline.gd_free_blocks_total,
+            "group descriptor free block count should return to baseline after truncate"
+        );
+        assert_eq!(inode_after.size, 0, "truncate should reset file size");
+        assert_eq!(inode_after.blocks, 0, "truncate should clear i_blocks");
+        assert!(
+            readback.is_empty(),
+            "truncate should remove compressed file contents"
+        );
+    }
+
+    #[test]
     fn write_multiple_files_readdir_shows_all() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -22794,6 +22906,54 @@ mod tests {
         assert!(
             data[..4096].iter().all(|&b| b == 0xAB),
             "failed punch hole must leave file data intact"
+        );
+    }
+
+    #[test]
+    fn write_fallocate_punch_hole_on_compressed_inode_zeroes_data() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("falloc_compressed_punch.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+
+        let fill = vec![0xCD_u8; 12288];
+        fs.write(&cx, attr.ino, 0, &fill)
+            .expect("seed compressed file");
+
+        fs.fallocate(
+            &cx,
+            attr.ino,
+            4096,
+            4096,
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("punch hole on compressed inode");
+
+        let data = fs.read(&cx, attr.ino, 0, 12288).expect("read after punch");
+        assert!(
+            data[..4096].iter().all(|&b| b == 0xCD),
+            "data before hole should remain intact on compressed inode"
+        );
+        assert!(
+            data[4096..8192].iter().all(|&b| b == 0),
+            "punched range should be zeroed on compressed inode"
+        );
+        assert!(
+            data[8192..12288].iter().all(|&b| b == 0xCD),
+            "data after hole should remain intact on compressed inode"
         );
     }
 
@@ -31355,5 +31515,51 @@ mod tests {
         assert!(store.read_visible(BlockNumber(1), snap).is_none());
         drop(store);
         assert!(!report.outcome.is_clean());
+    }
+
+    /// Regression test: create enough files in a subdirectory to force a
+    /// second directory block allocation, then verify all can be looked up
+    /// and unlinked.  Uses `mkfs.ext4` for a realistic image.
+    ///
+    /// This exercises the checksum-tail initialisation fix for newly
+    /// allocated directory blocks.  Without the fix, `parse_dir_block`
+    /// misinterprets trailing zero bytes as an entry with
+    /// `rec_len = block_size` (because `rec_len_from_disk(0, bs) = bs`),
+    /// causing a "directory entry extends past block boundary" parse error
+    /// that silently hides all entries in the new block.
+    #[test]
+    fn create_many_files_across_dir_block_boundary_mkfs() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let dir_attr = fs
+            .mkdir(&cx, root, OsStr::new("bulk_dir"), 0o755, 0, 0)
+            .expect("mkdir bulk_dir");
+
+        let count = 250_u32;
+        for i in 0..count {
+            let name = format!("file_{i:04}.txt");
+            fs.create(&cx, dir_attr.ino, OsStr::new(&name), 0o644, 0, 0)
+                .unwrap_or_else(|e| panic!("create {name}: {e}"));
+            fs.lookup(&cx, dir_attr.ino, OsStr::new(&name))
+                .unwrap_or_else(|e| panic!("lookup after create {name}: {e}"));
+        }
+
+        // Verify readdir returns all entries.
+        let entries = fs.readdir(&cx, dir_attr.ino, 0).expect("readdir");
+        let real = entries.iter().filter(|e| e.name != b"." && e.name != b"..").count();
+        assert_eq!(real, count as usize, "readdir should see all {count} files, saw {real}");
+
+        for i in 0..count {
+            let name = format!("file_{i:04}.txt");
+            fs.lookup(&cx, dir_attr.ino, OsStr::new(&name))
+                .unwrap_or_else(|e| panic!("lookup {name}: {e}"));
+            fs.unlink(&cx, dir_attr.ino, OsStr::new(&name))
+                .unwrap_or_else(|e| panic!("unlink {name}: {e}"));
+        }
     }
 }
