@@ -21714,6 +21714,38 @@ mod tests {
     }
 
     #[test]
+    fn create_many_files_then_lookup_all() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Create a subdirectory to avoid conflicts with existing root entries.
+        let dir_attr = fs
+            .mkdir(&cx, root, OsStr::new("bulk_dir"), 0o755, 0, 0)
+            .expect("mkdir bulk_dir");
+
+        let count = 250;
+        for i in 0..count {
+            let name = format!("file_{i:04}.txt");
+            fs.create(&cx, dir_attr.ino, OsStr::new(&name), 0o644, 0, 0)
+                .unwrap_or_else(|e| panic!("create {name}: {e}"));
+        }
+
+        // Verify all files can be looked up.
+        for i in 0..count {
+            let name = format!("file_{i:04}.txt");
+            let result = fs.lookup(&cx, dir_attr.ino, OsStr::new(&name));
+            assert!(
+                result.is_ok(),
+                "lookup file_{i:04}.txt failed: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
     fn write_symlink_then_readlink() {
         let Some(fs) = open_writable_ext4() else {
             return;
