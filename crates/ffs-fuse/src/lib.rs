@@ -1674,8 +1674,6 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EINVAL);
             return;
         };
-        eprintln!("FUSE fallocate mode: 0x{:08x}", mode);
-
         let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Fallocate, |cx, scope| {
             self.inner.ops.fallocate(
