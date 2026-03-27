@@ -11250,6 +11250,82 @@ impl OpenFs {
         }
     }
 
+    fn btrfs_serialize_xattr_item(name: &[u8], value: &[u8]) -> ffs_error::Result<Vec<u8>> {
+        let mut payload = Vec::with_capacity(30 + name.len() + value.len());
+        payload.extend_from_slice(&[0u8; 17]);
+        payload.extend_from_slice(&[0u8; 8]);
+        let value_len = u16::try_from(value.len()).map_err(|_| {
+            FfsError::InvalidGeometry("xattr value length exceeds 16-bit field".into())
+        })?;
+        let name_len = u16::try_from(name.len()).map_err(|_| FfsError::NameTooLong)?;
+        payload.extend_from_slice(&value_len.to_le_bytes());
+        payload.extend_from_slice(&name_len.to_le_bytes());
+        payload.push(0);
+        payload.extend_from_slice(name);
+        payload.extend_from_slice(value);
+        Ok(payload)
+    }
+
+    fn btrfs_merge_xattr_item(
+        existing_payload: Option<&[u8]>,
+        name: &str,
+        value: &[u8],
+    ) -> ffs_error::Result<Vec<u8>> {
+        let mut entries = existing_payload
+            .map(|payload| parse_xattr_items(payload).map_err(|e| parse_to_ffs_error(&e)))
+            .transpose()?
+            .unwrap_or_default();
+
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|entry| entry.name == name.as_bytes())
+        {
+            existing.value = value.to_vec();
+        } else {
+            entries.push(ffs_btrfs::BtrfsXattrItem {
+                name: name.as_bytes().to_vec(),
+                value: value.to_vec(),
+            });
+        }
+
+        let mut merged = Vec::new();
+        for entry in &entries {
+            merged.extend_from_slice(&Self::btrfs_serialize_xattr_item(
+                &entry.name,
+                &entry.value,
+            )?);
+        }
+        Ok(merged)
+    }
+
+    fn btrfs_remove_xattr_item(
+        existing_payload: &[u8],
+        name: &str,
+    ) -> ffs_error::Result<Option<Vec<u8>>> {
+        let entries = parse_xattr_items(existing_payload).map_err(|e| parse_to_ffs_error(&e))?;
+        let original_len = entries.len();
+        let remaining: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| entry.name != name.as_bytes())
+            .collect();
+        if remaining.len() == original_len {
+            return Ok(None);
+        }
+
+        if remaining.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let mut payload = Vec::new();
+        for entry in &remaining {
+            payload.extend_from_slice(&Self::btrfs_serialize_xattr_item(
+                &entry.name,
+                &entry.value,
+            )?);
+        }
+        Ok(Some(payload))
+    }
+
     /// Set an extended attribute on a btrfs inode.
     fn btrfs_setxattr(
         &self,
@@ -11279,22 +11355,13 @@ impl OpenFs {
             item_type: BTRFS_ITEM_XATTR_ITEM,
             offset: u64::from(name_hash),
         };
-
-        // Build the xattr item: name + value concatenated, with a header.
-        let mut payload = Vec::with_capacity(30 + name.len() + value.len());
-        // Location key: zeros (xattrs don't have a location)
-        payload.extend_from_slice(&[0u8; 17]);
-        // transid: zeros
-        payload.extend_from_slice(&[0u8; 8]);
-        let value_len = u16::try_from(value.len()).map_err(|_| {
-            FfsError::InvalidGeometry("xattr value length exceeds 16-bit field".into())
-        })?;
-        let name_len = u16::try_from(name.len()).map_err(|_| FfsError::NameTooLong)?;
-        payload.extend_from_slice(&value_len.to_le_bytes());
-        payload.extend_from_slice(&name_len.to_le_bytes());
-        payload.push(0); // type = 0 for xattr
-        payload.extend_from_slice(name.as_bytes());
-        payload.extend_from_slice(value);
+        let existing_payload = alloc
+            .fs_tree
+            .range(&key, &key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+            .map(|(_, payload)| payload.clone());
+        let payload = Self::btrfs_merge_xattr_item(existing_payload.as_deref(), name, value)?;
 
         alloc
             .fs_tree
@@ -11318,12 +11385,34 @@ impl OpenFs {
             item_type: BTRFS_ITEM_XATTR_ITEM,
             offset: u64::from(name_hash),
         };
+        let Some(existing_payload) = alloc
+            .fs_tree
+            .range(&key, &key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+            .map(|(_, payload)| payload.clone())
+        else {
+            drop(alloc);
+            return Ok(false);
+        };
 
-        match alloc.fs_tree.delete(&key) {
-            Ok(_) => Ok(true),
-            Err(BtrfsMutationError::MissingNode(_)) => Ok(false),
-            Err(e) => Err(btrfs_mutation_to_ffs(&e)),
-        }
+        let result = match Self::btrfs_remove_xattr_item(&existing_payload, name)? {
+            None => Ok(false),
+            Some(payload) if payload.is_empty() => match alloc.fs_tree.delete(&key) {
+                Ok(_) => Ok(true),
+                Err(BtrfsMutationError::MissingNode(_)) => Ok(false),
+                Err(e) => Err(btrfs_mutation_to_ffs(&e)),
+            },
+            Some(payload) => {
+                alloc
+                    .fs_tree
+                    .update(&key, &payload)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                Ok(true)
+            }
+        };
+        drop(alloc);
+        result
     }
 
     // ── Btrfs write-path helpers ────────────────────────────────────────
@@ -23665,6 +23754,88 @@ mod tests {
             .expect_err("replace on missing xattr should fail");
         assert_eq!(err.to_errno(), libc::ENOENT);
         assert_eq!(ops.getxattr(&cx, attr.ino, "user.missing").unwrap(), None);
+    }
+
+    #[test]
+    fn btrfs_write_xattr_hash_collision_preserves_neighbors() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let collision_a = "user.qQHUkgl8f";
+        let collision_b = "user.dua3yAXVkTW";
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("xattr_collision.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        ops.setxattr(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            collision_a,
+            b"alpha",
+            XattrSetMode::Set,
+        )
+        .unwrap();
+        ops.setxattr(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            collision_b,
+            b"beta",
+            XattrSetMode::Set,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ops.getxattr(&cx, attr.ino, collision_a).unwrap(),
+            Some(b"alpha".to_vec())
+        );
+        assert_eq!(
+            ops.getxattr(&cx, attr.ino, collision_b).unwrap(),
+            Some(b"beta".to_vec())
+        );
+
+        ops.setxattr(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            collision_a,
+            b"alpha-2",
+            XattrSetMode::Replace,
+        )
+        .unwrap();
+        assert_eq!(
+            ops.getxattr(&cx, attr.ino, collision_a).unwrap(),
+            Some(b"alpha-2".to_vec())
+        );
+        assert_eq!(
+            ops.getxattr(&cx, attr.ino, collision_b).unwrap(),
+            Some(b"beta".to_vec()),
+            "updating one colliding xattr must preserve its neighbor"
+        );
+
+        let removed = ops
+            .removexattr(&cx, &mut RequestScope::empty(), attr.ino, collision_a)
+            .unwrap();
+        assert!(removed);
+        assert_eq!(ops.getxattr(&cx, attr.ino, collision_a).unwrap(), None);
+        assert_eq!(
+            ops.getxattr(&cx, attr.ino, collision_b).unwrap(),
+            Some(b"beta".to_vec()),
+            "removing one colliding xattr must preserve the other"
+        );
+
+        let mut names = ops.listxattr(&cx, attr.ino).unwrap();
+        names.sort();
+        assert_eq!(names, vec![collision_b]);
     }
 
     #[test]
