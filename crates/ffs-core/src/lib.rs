@@ -364,6 +364,8 @@ struct BtrfsAllocState {
     sectorsize: u32,
 }
 
+type BtrfsPurgeAction = (BtrfsKey, Option<(u64, u64)>);
+
 /// Outcome of crash recovery performed at mount time.
 ///
 /// When an ext4 filesystem is mounted and the superblock `state` field
@@ -1986,6 +1988,18 @@ fn classify_merge_pair(left: MergeMutation, right: MergeMutation) -> MergeClassi
         })
 }
 
+enum Ext4XattrPostInodeAction {
+    UpdateRefcount {
+        block_no: BlockNumber,
+        new_refcount: u32,
+    },
+    FreeBlock(BlockNumber),
+    WriteBlock {
+        block_no: BlockNumber,
+        data: Vec<u8>,
+    },
+}
+
 impl OpenFs {
     /// Open a filesystem image at `path` with default options (validation enabled).
     pub fn open(cx: &Cx, path: impl AsRef<Path>) -> Result<Self, FfsError> {
@@ -2576,9 +2590,21 @@ impl OpenFs {
                     let freed_sectors = if inode.is_huge_file() {
                         freed
                     } else {
-                        freed.saturating_mul(u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE))
+                        freed
+                            .checked_mul(u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE))
+                            .ok_or_else(|| FfsError::Corruption {
+                                block: 0,
+                                detail: format!(
+                                    "inode {} orphan recovery freed sectors overflow",
+                                    ino.0
+                                ),
+                            })?
                     };
-                    inode.blocks = inode.blocks.saturating_sub(freed_sectors);
+                    inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        -(i128::from(freed_sectors)),
+                    )?;
                 }
 
                 inode.dtime = 0;
@@ -3558,7 +3584,12 @@ impl OpenFs {
             // Allow replace in case of duplicate keys from multiple walks.
             fs_tree
                 .update(&tree_item.key, &tree_item.data)
-                .or_else(|_| fs_tree.insert(tree_item.key, &tree_item.data))
+                .or_else(|err| match err {
+                    BtrfsMutationError::KeyNotFound => {
+                        fs_tree.insert(tree_item.key, &tree_item.data)
+                    }
+                    other => Err(other),
+                })
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
 
@@ -6737,6 +6768,7 @@ impl OpenFs {
         &self,
         cx: &Cx,
         scope: &mut RequestScope,
+        ino: InodeNumber,
         inode: &mut Ext4Inode,
         alloc: &mut Ext4AllocState,
         cluster_start: u32,
@@ -6780,6 +6812,7 @@ impl OpenFs {
             return self.write_ext4_uncompressed_cluster(
                 cx,
                 scope,
+                ino,
                 inode,
                 alloc,
                 cluster_start,
@@ -6824,6 +6857,7 @@ impl OpenFs {
             return self.write_ext4_uncompressed_cluster(
                 cx,
                 scope,
+                ino,
                 inode,
                 alloc,
                 cluster_start,
@@ -6861,6 +6895,36 @@ impl OpenFs {
         ]);
         let checksum = adler32_seeded(seed, &cluster_raw[8..header_total + compressed.len()]);
         cluster_raw[4..8].copy_from_slice(&checksum.to_le_bytes());
+
+        let presented_ino = Self::ext4_presented_inode(ino);
+        let blocks_needed_u64 = u64::from(blocks_needed);
+        let freed_blocks_u64 = u64::try_from(old_blocks.len()).unwrap_or(u64::MAX);
+        let block_delta = if inode.is_huge_file() {
+            i128::from(blocks_needed_u64) - i128::from(freed_blocks_u64)
+        } else {
+            let added_sectors = blocks_needed_u64
+                .checked_mul(sectors_per_block)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "inode {} e2compr compressed cluster sector delta overflow",
+                        presented_ino.0
+                    ),
+                })?;
+            let freed_sectors =
+                freed_blocks_u64
+                    .checked_mul(sectors_per_block)
+                    .ok_or_else(|| FfsError::Corruption {
+                        block: 0,
+                        detail: format!(
+                            "inode {} e2compr freed cluster sector delta overflow",
+                            presented_ino.0
+                        ),
+                    })?;
+            i128::from(added_sectors) - i128::from(freed_sectors)
+        };
+        let blocks_after_write =
+            Self::ext4_checked_inode_blocks_delta(inode.blocks, presented_ino, block_delta)?;
 
         // Allocate physical blocks and write.
         for i in 0..blocks_needed {
@@ -6917,19 +6981,7 @@ impl OpenFs {
             0xFFFF_FFFF, // EXT2_COMPRESSED_BLKADDR sentinel (u32)
         )?;
 
-        let blocks_needed_u64 = u64::from(blocks_needed);
-        let freed_blocks_u64 = u64::try_from(old_blocks.len()).unwrap_or(u64::MAX);
-        if inode.is_huge_file() {
-            inode.blocks = inode
-                .blocks
-                .saturating_sub(freed_blocks_u64)
-                .saturating_add(blocks_needed_u64);
-        } else {
-            inode.blocks = inode
-                .blocks
-                .saturating_sub(freed_blocks_u64.saturating_mul(sectors_per_block))
-                .saturating_add(blocks_needed_u64.saturating_mul(sectors_per_block));
-        }
+        inode.blocks = blocks_after_write;
 
         Ok(Ext4CompressedClusterWrite { old_blocks })
     }
@@ -6940,6 +6992,7 @@ impl OpenFs {
         &self,
         cx: &Cx,
         scope: &mut RequestScope,
+        ino: InodeNumber,
         inode: &mut Ext4Inode,
         alloc: &mut Ext4AllocState,
         cluster_start: u32,
@@ -6951,6 +7004,38 @@ impl OpenFs {
         let sectors_per_block = u64::from(self.block_size() / EXT4_SECTOR_SIZE);
 
         let old_blocks = self.collect_old_cluster_blocks(inode, cluster_start, cluster_nblocks);
+        let presented_ino = Self::ext4_presented_inode(ino);
+        let planned_blocks_written = u32::try_from(data.len().div_ceil(bs_usize))
+            .unwrap_or(u32::MAX)
+            .min(cluster_nblocks);
+        let blocks_written_u64 = u64::from(planned_blocks_written);
+        let freed_blocks_u64 = u64::try_from(old_blocks.len()).unwrap_or(u64::MAX);
+        let block_delta = if inode.is_huge_file() {
+            i128::from(blocks_written_u64) - i128::from(freed_blocks_u64)
+        } else {
+            let added_sectors = blocks_written_u64
+                .checked_mul(sectors_per_block)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "inode {} e2compr uncompressed cluster sector delta overflow",
+                        presented_ino.0
+                    ),
+                })?;
+            let freed_sectors =
+                freed_blocks_u64
+                    .checked_mul(sectors_per_block)
+                    .ok_or_else(|| FfsError::Corruption {
+                        block: 0,
+                        detail: format!(
+                            "inode {} e2compr freed cluster sector delta overflow",
+                            presented_ino.0
+                        ),
+                    })?;
+            i128::from(added_sectors) - i128::from(freed_sectors)
+        };
+        let blocks_after_write =
+            Self::ext4_checked_inode_blocks_delta(inode.blocks, presented_ino, block_delta)?;
 
         let mut blocks_written = 0_u32;
         for i in 0..cluster_nblocks {
@@ -6999,20 +7084,8 @@ impl OpenFs {
             self.write_block_ptr(cx, scope, inode, alloc, cluster_start + i, phys_u32)?;
             blocks_written += 1;
         }
-
-        let blocks_written_u64 = u64::from(blocks_written);
-        let freed_blocks_u64 = u64::try_from(old_blocks.len()).unwrap_or(u64::MAX);
-        if inode.is_huge_file() {
-            inode.blocks = inode
-                .blocks
-                .saturating_sub(freed_blocks_u64)
-                .saturating_add(blocks_written_u64);
-        } else {
-            inode.blocks = inode
-                .blocks
-                .saturating_sub(freed_blocks_u64.saturating_mul(sectors_per_block))
-                .saturating_add(blocks_written_u64.saturating_mul(sectors_per_block));
-        }
+        debug_assert_eq!(blocks_written, planned_blocks_written);
+        inode.blocks = blocks_after_write;
 
         Ok(Ext4CompressedClusterWrite { old_blocks })
     }
@@ -7496,8 +7569,10 @@ impl OpenFs {
             persist_ctx,
         )?;
 
+        let attr = inode_to_attr(sb, ino, &new_inode);
+
         // Add directory entry to parent.
-        self.ext4_add_dir_entry(
+        if let Err(err) = self.ext4_add_dir_entry(
             cx,
             &mut alloc,
             parent,
@@ -7508,9 +7583,26 @@ impl OpenFs {
             csum_seed,
             tstamp_secs,
             tstamp_nanos,
-        )?;
-
-        let attr = inode_to_attr(sb, ino, &new_inode);
+        ) {
+            let mut rollback_inode = new_inode;
+            let Ext4AllocState {
+                geo,
+                groups,
+                persist_ctx,
+            } = &mut *alloc;
+            ffs_inode::delete_inode(
+                cx,
+                &block_dev,
+                geo,
+                groups,
+                ino,
+                &mut rollback_inode,
+                csum_seed,
+                tstamp_secs,
+                persist_ctx,
+            )?;
+            return Err(err);
+        }
 
         trace!(
             target: "ffs::write",
@@ -7654,7 +7746,7 @@ impl OpenFs {
 
         // Add directory entry to parent.
         // This will also update parent timestamps and size if needed.
-        self.ext4_add_dir_entry(
+        if let Err(err) = self.ext4_add_dir_entry(
             cx,
             &mut alloc,
             parent,
@@ -7665,7 +7757,25 @@ impl OpenFs {
             csum_seed,
             tstamp_secs,
             tstamp_nanos,
-        )?;
+        ) {
+            let Ext4AllocState {
+                geo,
+                groups,
+                persist_ctx,
+            } = &mut *alloc;
+            ffs_inode::delete_inode(
+                cx,
+                &block_dev,
+                geo,
+                groups,
+                ino,
+                &mut new_inode,
+                csum_seed,
+                tstamp_secs,
+                persist_ctx,
+            )?;
+            return Err(err);
+        }
 
         let attr = inode_to_attr(sb, ino, &new_inode);
 
@@ -7740,7 +7850,11 @@ impl OpenFs {
                                 tstamp_nanos,
                             );
                             if file_type == Ext4FileType::Dir {
-                                parent_upd.links_count = parent_upd.links_count.saturating_add(1);
+                                parent_upd.links_count = Self::ext4_checked_links_count_delta(
+                                    parent_upd.links_count,
+                                    parent,
+                                    1,
+                                )?;
                             }
 
                             ffs_inode::write_inode(
@@ -7761,6 +7875,26 @@ impl OpenFs {
             }
 
             // All blocks full — allocate a new directory block.
+            let parent_new_size = parent_inode
+                .size
+                .checked_add(u64::from(alloc.geo.block_size))
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "inode {} directory size overflow on block expansion",
+                        parent.0
+                    ),
+                })?;
+            let added_sectors = if parent_inode.is_huge_file() {
+                1
+            } else {
+                u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE)
+            };
+            let parent_blocks_after_alloc = Self::ext4_checked_inode_blocks_delta(
+                parent_inode.blocks,
+                parent,
+                i128::from(added_sectors),
+            )?;
             let hint = AllocHint {
                 goal_group: None,
                 goal_block: extents.last().map(Self::extent_end_hint),
@@ -7830,14 +7964,11 @@ impl OpenFs {
                 logical_end,
                 u64::from(u32::MAX - logical_end),
             );
-            parent_upd.size += u64::from(alloc.geo.block_size);
-            if parent_upd.is_huge_file() {
-                parent_upd.blocks += 1;
-            } else {
-                parent_upd.blocks += u64::from(alloc.geo.block_size / EXT4_SECTOR_SIZE);
-            }
+            parent_upd.size = parent_new_size;
+            parent_upd.blocks = parent_blocks_after_alloc;
             if file_type == Ext4FileType::Dir {
-                parent_upd.links_count = parent_upd.links_count.saturating_add(1);
+                parent_upd.links_count =
+                    Self::ext4_checked_links_count_delta(parent_upd.links_count, parent, 1)?;
             }
             ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
             ffs_inode::write_inode(
@@ -7860,6 +7991,103 @@ impl OpenFs {
                 .map_err(|e| FfsError::Format(e.to_string()))?;
         }
         result
+    }
+
+    fn ext4_preflight_dir_entry_insert(
+        &self,
+        cx: &Cx,
+        parent_inode: &Ext4Inode,
+        name: &[u8],
+        file_type: Ext4FileType,
+    ) -> ffs_error::Result<()> {
+        let extents = self.collect_extents(cx, parent_inode)?;
+        let reserved_tail = self.ext4_dir_reserved_tail();
+
+        for ext in &extents {
+            if ext.is_unwritten() {
+                continue;
+            }
+            for block in Self::extent_phys_blocks(ext) {
+                let mut data = self.read_block_vec(cx, block)?;
+                match ffs_dir::add_entry(&mut data, 1, name, file_type, reserved_tail) {
+                    Ok(_) | Err(FfsError::NoSpace) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let block_size = usize::try_from(sb.block_size)
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+        let mut empty_block = vec![0u8; block_size];
+        let rec_len = u16::try_from(block_size.saturating_sub(reserved_tail)).map_err(|_| {
+            FfsError::Format("directory block size exceeds 16-bit rec_len field".into())
+        })?;
+        empty_block[4..6].copy_from_slice(&rec_len.to_le_bytes());
+        match ffs_dir::add_entry(&mut empty_block, 1, name, file_type, reserved_tail) {
+            Ok(_) | Err(FfsError::NoSpace) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn ext4_checked_links_count_delta(
+        current: u16,
+        ino: InodeNumber,
+        delta: i32,
+    ) -> ffs_error::Result<u16> {
+        if delta > 0 {
+            current
+                .checked_add(u16::try_from(delta).map_err(|_| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} link delta does not fit u16", ino.0),
+                })?)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} links_count overflow on delta {delta}", ino.0),
+                })
+        } else {
+            current
+                .checked_sub(u16::try_from(delta.unsigned_abs()).map_err(|_| {
+                    FfsError::Corruption {
+                        block: 0,
+                        detail: format!("inode {} link delta does not fit u16", ino.0),
+                    }
+                })?)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} links_count underflow on delta {delta}", ino.0),
+                })
+        }
+    }
+
+    fn ext4_checked_inode_blocks_delta(
+        current: u64,
+        ino: InodeNumber,
+        delta: i128,
+    ) -> ffs_error::Result<u64> {
+        if delta >= 0 {
+            current
+                .checked_add(u64::try_from(delta).map_err(|_| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} block delta does not fit u64", ino.0),
+                })?)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} blocks overflow on delta {delta}", ino.0),
+                })
+        } else {
+            current
+                .checked_sub(u64::try_from(-delta).map_err(|_| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} block delta does not fit u64", ino.0),
+                })?)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} blocks underflow on delta {delta}", ino.0),
+                })
+        }
     }
 
     /// Remove a directory entry (unlink a file or rmdir).
@@ -7949,7 +8177,8 @@ impl OpenFs {
             if expect_dir {
                 child_upd.links_count = 0; // Removing a directory drops both the parent link and the `.` link
             } else {
-                child_upd.links_count = child_upd.links_count.saturating_sub(1);
+                child_upd.links_count =
+                    Self::ext4_checked_links_count_delta(child_upd.links_count, child_ino, -1)?;
             }
             ffs_inode::touch_ctime(&mut child_upd, tstamp_secs, tstamp_nanos);
 
@@ -7981,7 +8210,8 @@ impl OpenFs {
             // Update parent timestamps.
             let mut parent_upd = self.read_inode(cx, parent)?;
             if expect_dir {
-                parent_upd.links_count = parent_upd.links_count.saturating_sub(1);
+                parent_upd.links_count =
+                    Self::ext4_checked_links_count_delta(parent_upd.links_count, parent, -1)?;
             }
             ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
             {
@@ -8050,26 +8280,11 @@ impl OpenFs {
             return Err(FfsError::Exists);
         }
 
-        let mut src_upd = src_inode;
+        let mut src_upd = src_inode.clone();
         let mut alloc = alloc_mutex.lock();
-        self.ext4_add_dir_entry(
-            cx,
-            &mut alloc,
-            new_parent,
-            &new_parent_inode,
-            new_name,
-            ino,
-            inode_dir_entry_file_type(&src_upd),
-            csum_seed,
-            tstamp_secs,
-            tstamp_nanos,
-        )?;
-
-        // Re-acquire the block device adapter so that updating the source inode's link count sees
-        // the parent inode-table block as modified by ext4_add_dir_entry().
         let block_dev = self.block_device_adapter();
 
-        src_upd.links_count = src_upd.links_count.saturating_add(1);
+        src_upd.links_count = Self::ext4_checked_links_count_delta(src_upd.links_count, ino, 1)?;
         ffs_inode::touch_ctime(&mut src_upd, tstamp_secs, tstamp_nanos);
         ffs_inode::write_inode(
             cx,
@@ -8080,6 +8295,31 @@ impl OpenFs {
             &src_upd,
             csum_seed,
         )?;
+
+        if let Err(err) = self.ext4_add_dir_entry(
+            cx,
+            &mut alloc,
+            new_parent,
+            &new_parent_inode,
+            new_name,
+            ino,
+            inode_dir_entry_file_type(&src_upd),
+            csum_seed,
+            tstamp_secs,
+            tstamp_nanos,
+        ) {
+            let block_dev = self.block_device_adapter();
+            ffs_inode::write_inode(
+                cx,
+                &block_dev,
+                &alloc.geo,
+                &alloc.groups,
+                ino,
+                &src_inode,
+                csum_seed,
+            )?;
+            return Err(err);
+        }
 
         debug!(
             target: "ffs::write",
@@ -8095,7 +8335,7 @@ impl OpenFs {
     }
 
     /// Create a symbolic link inode and directory entry.
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     #[expect(clippy::too_many_arguments)]
     fn ext4_symlink(
         &self,
@@ -8174,9 +8414,69 @@ impl OpenFs {
 
                 let Ext4AllocState { geo, groups, .. } = &mut *alloc;
                 ffs_inode::write_inode(cx, &block_dev, geo, groups, ino, &inode, csum_seed)?;
+
+                if let Err(err) = self.ext4_add_dir_entry(
+                    cx,
+                    &mut alloc,
+                    parent,
+                    &parent_inode,
+                    name,
+                    ino,
+                    Ext4FileType::Symlink,
+                    csum_seed,
+                    tstamp_secs,
+                    tstamp_nanos,
+                ) {
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                    } = &mut *alloc;
+                    ffs_inode::delete_inode(
+                        cx,
+                        &block_dev,
+                        geo,
+                        groups,
+                        ino,
+                        &mut inode,
+                        csum_seed,
+                        tstamp_secs,
+                        persist_ctx,
+                    )?;
+                    return Err(err);
+                }
             }
 
-            self.ext4_add_dir_entry(
+            (ino, inode)
+        };
+
+        if !fast_storage {
+            if let Err(err) = self.ext4_write(cx, scope, ino, 0, target_bytes) {
+                let mut rollback_inode = self.read_inode(cx, ino)?;
+                let mut alloc = alloc_mutex.lock();
+                let block_dev = self.block_device_adapter();
+                let Ext4AllocState {
+                    geo,
+                    groups,
+                    persist_ctx,
+                } = &mut *alloc;
+                ffs_inode::delete_inode(
+                    cx,
+                    &block_dev,
+                    geo,
+                    groups,
+                    ino,
+                    &mut rollback_inode,
+                    csum_seed,
+                    tstamp_secs,
+                    persist_ctx,
+                )?;
+                return Err(err);
+            }
+
+            symlink_inode = self.read_inode(cx, ino)?;
+            let mut alloc = alloc_mutex.lock();
+            if let Err(err) = self.ext4_add_dir_entry(
                 cx,
                 &mut alloc,
                 parent,
@@ -8187,14 +8487,26 @@ impl OpenFs {
                 csum_seed,
                 tstamp_secs,
                 tstamp_nanos,
-            )?;
-
-            (ino, inode)
-        };
-
-        if !fast_storage {
-            let _written = self.ext4_write(cx, scope, ino, 0, target_bytes)?;
-            symlink_inode = self.read_inode(cx, ino)?;
+            ) {
+                let block_dev = self.block_device_adapter();
+                let Ext4AllocState {
+                    geo,
+                    groups,
+                    persist_ctx,
+                } = &mut *alloc;
+                ffs_inode::delete_inode(
+                    cx,
+                    &block_dev,
+                    geo,
+                    groups,
+                    ino,
+                    &mut symlink_inode,
+                    csum_seed,
+                    tstamp_secs,
+                    persist_ctx,
+                )?;
+                return Err(err);
+            }
         }
 
         debug!(
@@ -8281,8 +8593,42 @@ impl OpenFs {
             let logical_count =
                 u32::try_from(length / block_size).map_err(|_| FfsError::NoSpace)?;
             if logical_count > 0 {
+                let mappings = ffs_extent::map_logical_to_physical(
+                    cx,
+                    &block_dev,
+                    &root_bytes,
+                    logical_start,
+                    u64::from(logical_count),
+                )?;
+                let allocated_blocks_to_free = mappings
+                    .iter()
+                    .filter(|mapping| mapping.physical_start != 0)
+                    .map(|mapping| u64::from(mapping.count))
+                    .sum::<u64>();
+                let blocks_after_punch = if inode.is_huge_file() {
+                    Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        -(i128::from(allocated_blocks_to_free)),
+                    )?
+                } else {
+                    let freed_sectors = allocated_blocks_to_free
+                        .checked_mul(sectors_per_block)
+                        .ok_or_else(|| FfsError::Corruption {
+                            block: 0,
+                            detail: format!(
+                                "inode {} freed sectors overflow during punch_hole preflight",
+                                ino.0
+                            ),
+                        })?;
+                    Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        -(i128::from(freed_sectors)),
+                    )?
+                };
                 let extent_ns = extent_root_namespace(&inode);
-                let freed_blocks = {
+                {
                     let Ext4AllocState {
                         geo,
                         groups,
@@ -8304,13 +8650,7 @@ impl OpenFs {
                     logical_start,
                     u64::from(logical_count),
                 );
-                if inode.is_huge_file() {
-                    inode.blocks = inode.blocks.saturating_sub(freed_blocks);
-                } else {
-                    inode.blocks = inode
-                        .blocks
-                        .saturating_sub(freed_blocks.saturating_mul(sectors_per_block));
-                }
+                inode.blocks = blocks_after_punch;
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
         } else if zero_range {
@@ -8363,6 +8703,37 @@ impl OpenFs {
                 logical_start,
                 logical_count,
             )?;
+            let planned_new_blocks = mappings
+                .iter()
+                .filter(|mapping| mapping.physical_start == 0)
+                .map(|mapping| u64::from(mapping.count))
+                .sum::<u64>();
+            let blocks_after_prealloc = if planned_new_blocks > 0 {
+                if inode.is_huge_file() {
+                    Some(Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        i128::from(planned_new_blocks),
+                    )?)
+                } else {
+                    let added_sectors = planned_new_blocks
+                        .checked_mul(sectors_per_block)
+                        .ok_or_else(|| FfsError::Corruption {
+                            block: 0,
+                            detail: format!(
+                                "inode {} added sectors overflow during fallocate preflight",
+                                ino.0
+                            ),
+                        })?;
+                    Some(Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        i128::from(added_sectors),
+                    )?)
+                }
+            } else {
+                None
+            };
             let zero_block = vec![
                 0_u8;
                 usize::try_from(block_size).map_err(|_| {
@@ -8425,13 +8796,8 @@ impl OpenFs {
             }
 
             if newly_allocated_blocks > 0 {
-                if inode.is_huge_file() {
-                    inode.blocks = inode.blocks.saturating_add(newly_allocated_blocks);
-                } else {
-                    inode.blocks = inode
-                        .blocks
-                        .saturating_add(newly_allocated_blocks.saturating_mul(sectors_per_block));
-                }
+                inode.blocks =
+                    blocks_after_prealloc.expect("planned block delta for allocated extents");
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
 
@@ -8558,6 +8924,16 @@ impl OpenFs {
                 Some(b) => b,
                 None => {
                     // Allocate new extent for this block.
+                    let added_sectors = if inode.is_huge_file() {
+                        1
+                    } else {
+                        u64::from(block_size / EXT4_SECTOR_SIZE)
+                    };
+                    let blocks_after_alloc = Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        i128::from(added_sectors),
+                    )?;
                     let hint = AllocHint {
                         goal_group: None,
                         goal_block: extents.last().map(Self::extent_end_hint),
@@ -8610,11 +8986,7 @@ impl OpenFs {
                         1,
                     );
                     Self::set_extent_root(&mut inode, &root_bytes);
-                    if inode.is_huge_file() {
-                        inode.blocks += 1;
-                    } else {
-                        inode.blocks += u64::from(block_size / EXT4_SECTOR_SIZE);
-                    }
+                    inode.blocks = blocks_after_alloc;
                     BlockNumber(mapping.physical_start)
                 }
             };
@@ -8776,6 +9148,7 @@ impl OpenFs {
             let write_result = self.write_ext4_compressed_cluster(
                 cx,
                 scope,
+                ino,
                 inode,
                 &mut alloc,
                 cluster_start,
@@ -8912,6 +9285,38 @@ impl OpenFs {
             return Err(FfsError::NotDirectory);
         }
 
+        self.ext4_preflight_dir_entry_insert(cx, &new_parent_inode, new_name, ft)?;
+
+        let planned_child_dir_update = if child_inode.is_dir() && parent != new_parent {
+            Self::ext4_checked_links_count_delta(parent_inode.links_count, parent, -1)?;
+            let child_extents = self.collect_extents(cx, &child_inode)?;
+            let first_ext = child_extents.first().ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "directory inode missing data block for '..' update".to_owned(),
+            })?;
+            let dot_dot_block = BlockNumber(first_ext.physical_start);
+            let mut data = self.read_block_vec(cx, dot_dot_block)?;
+            let reserved_tail = self.ext4_dir_reserved_tail();
+            if !ffs_dir::remove_entry(&mut data, b"..", reserved_tail)? {
+                return Err(FfsError::Corruption {
+                    block: dot_dot_block.0,
+                    detail: "directory missing '..' entry before cross-parent rename".to_owned(),
+                });
+            }
+            let parent_ino_u32 = u32::try_from(new_parent.0)
+                .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+            ffs_dir::add_entry(
+                &mut data,
+                parent_ino_u32,
+                b"..",
+                Ext4FileType::Dir,
+                reserved_tail,
+            )?;
+            Some((dot_dot_block, data))
+        } else {
+            None
+        };
+
         if let Some(existing) = self.lookup_name(cx, &new_parent_inode, new_name)? {
             let existing_ino = InodeNumber(u64::from(existing.inode));
             let existing_inode = self.read_inode(cx, existing_ino)?;
@@ -8930,6 +9335,12 @@ impl OpenFs {
                 }
             } else if child_inode.is_dir() {
                 return Err(FfsError::NotDirectory);
+            }
+
+            if existing_inode.is_dir() {
+                Self::ext4_checked_links_count_delta(new_parent_inode.links_count, new_parent, -1)?;
+            } else {
+                Self::ext4_checked_links_count_delta(existing_inode.links_count, existing_ino, -1)?;
             }
 
             // Remove the existing target.
@@ -8951,7 +9362,8 @@ impl OpenFs {
 
                 // Decrement the new parent's link count for the ".." backref from the deleted directory.
                 let mut new_par = self.read_inode(cx, new_parent)?;
-                new_par.links_count = new_par.links_count.saturating_sub(1);
+                new_par.links_count =
+                    Self::ext4_checked_links_count_delta(new_par.links_count, new_parent, -1)?;
                 ffs_inode::touch_mtime_ctime(&mut new_par, tstamp_secs, tstamp_nanos);
                 {
                     let Ext4AllocState { geo, groups, .. } = &mut *alloc;
@@ -8961,7 +9373,8 @@ impl OpenFs {
                 }
                 block_dev = self.block_device_adapter();
             } else {
-                ex_upd.links_count = ex_upd.links_count.saturating_sub(1);
+                ex_upd.links_count =
+                    Self::ext4_checked_links_count_delta(ex_upd.links_count, existing_ino, -1)?;
             }
             {
                 let Ext4AllocState {
@@ -9030,32 +9443,14 @@ impl OpenFs {
 
         // If renaming a directory across parents, update .. and link counts.
         if child_inode.is_dir() && parent != new_parent {
-            // Update .. in child directory to point to new_parent.
-            let child_extents = self.collect_extents(cx, &child_inode)?;
-            if let Some(first_ext) = child_extents.first() {
-                let dot_dot_block = BlockNumber(first_ext.physical_start);
-                let mut data = self.read_block_vec(cx, dot_dot_block)?;
-                // Remove old .. and add new one.
-                let reserved_tail = self.ext4_dir_reserved_tail();
-                if let Err(e) = ffs_dir::remove_entry(&mut data, b"..", reserved_tail) {
-                    warn!("rename: failed to remove '..' entry: {e}");
-                }
-                let parent_ino_u32 = u32::try_from(new_parent.0).map_err(|_| {
-                    FfsError::Format("inode number exceeds ext4 32-bit limit".into())
-                })?;
-                ffs_dir::add_entry(
-                    &mut data,
-                    parent_ino_u32,
-                    b"..",
-                    Ext4FileType::Dir,
-                    reserved_tail,
-                )?;
-                block_dev.write_block(cx, dot_dot_block, &data)?;
+            if let Some((dot_dot_block, data)) = planned_child_dir_update.as_ref() {
+                block_dev.write_block(cx, *dot_dot_block, data)?;
             }
 
             // Decrement old parent link count, increment new parent.
             let mut old_parent = self.read_inode(cx, parent)?;
-            old_parent.links_count = old_parent.links_count.saturating_sub(1);
+            old_parent.links_count =
+                Self::ext4_checked_links_count_delta(old_parent.links_count, parent, -1)?;
             ffs_inode::touch_mtime_ctime(&mut old_parent, tstamp_secs, tstamp_nanos);
             ffs_inode::write_inode(
                 cx,
@@ -9064,20 +9459,6 @@ impl OpenFs {
                 &alloc.groups,
                 parent,
                 &old_parent,
-                csum_seed,
-            )?;
-            block_dev = self.block_device_adapter();
-
-            let mut new_par = self.read_inode(cx, new_parent)?;
-            new_par.links_count = new_par.links_count.saturating_add(1);
-            ffs_inode::touch_mtime_ctime(&mut new_par, tstamp_secs, tstamp_nanos);
-            ffs_inode::write_inode(
-                cx,
-                &block_dev,
-                &alloc.geo,
-                &alloc.groups,
-                new_parent,
-                &new_par,
                 csum_seed,
             )?;
             block_dev = self.block_device_adapter();
@@ -9207,13 +9588,24 @@ impl OpenFs {
                         u64::from(u32::MAX) - u64::from(new_logical_end),
                     );
                     Self::set_extent_root(&mut inode, &root_bytes);
-                    if inode.is_huge_file() {
-                        inode.blocks = inode.blocks.saturating_sub(freed);
+                    let freed_sectors = if inode.is_huge_file() {
+                        freed
                     } else {
-                        inode.blocks = inode
-                            .blocks
-                            .saturating_sub(freed * u64::from(block_size / EXT4_SECTOR_SIZE));
-                    }
+                        freed
+                            .checked_mul(u64::from(block_size / EXT4_SECTOR_SIZE))
+                            .ok_or_else(|| FfsError::Corruption {
+                                block: 0,
+                                detail: format!(
+                                    "inode {} setattr truncation freed sectors overflow",
+                                    ino.0
+                                ),
+                            })?
+                    };
+                    inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                        inode.blocks,
+                        ino,
+                        -(i128::from(freed_sectors)),
+                    )?;
                 } else {
                     // Extend: just update size (sparse — blocks allocated on write).
                 }
@@ -9346,31 +9738,59 @@ impl OpenFs {
                     persist_ctx,
                 )?;
                 let block_size = geo.block_size;
-                drop(alloc);
 
                 let block_size_usize = usize::try_from(block_size)
                     .map_err(|_| FfsError::Format("block size does not fit usize".to_owned()))?;
                 external_block = Some(vec![0u8; block_size_usize]);
                 inode.file_acl = block_alloc.start.0;
-                if inode.is_huge_file() {
-                    inode.blocks = inode.blocks.saturating_add(1);
+                let added_sectors = if inode.is_huge_file() {
+                    1
                 } else {
-                    inode.blocks = inode
-                        .blocks
-                        .saturating_add(u64::from(block_size / EXT4_SECTOR_SIZE));
-                }
-
-                ffs_xattr::set_xattr(
+                    u64::from(block_size / EXT4_SECTOR_SIZE)
+                };
+                inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                    inode.blocks,
+                    ino,
+                    i128::from(added_sectors),
+                )?;
+                match ffs_xattr::set_xattr(
                     &mut inode,
                     external_block.as_deref_mut(),
                     name,
                     value,
                     access,
-                )?
+                ) {
+                    Ok(storage) => storage,
+                    Err(err) => {
+                        inode.file_acl = 0;
+                        let removed_sectors = if inode.is_huge_file() {
+                            1
+                        } else {
+                            u64::from(block_size / EXT4_SECTOR_SIZE)
+                        };
+                        inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                            inode.blocks,
+                            ino,
+                            -(i128::from(removed_sectors)),
+                        )?;
+                        ffs_alloc::free_blocks_persist(
+                            cx,
+                            &block_dev,
+                            geo,
+                            groups,
+                            block_alloc.start,
+                            1,
+                            persist_ctx,
+                        )?;
+                        return Err(err);
+                    }
+                }
             }
             Err(e) => return Err(e),
         };
 
+        let mut allocated_external_block = None;
+        let mut post_inode_actions = Vec::new();
         if let Some(mut block) = external_block {
             let mut alloc = alloc_mutex.lock();
             let Ext4AllocState {
@@ -9397,18 +9817,22 @@ impl OpenFs {
                 inode.file_acl = block_alloc.start.0;
                 block[4..8].copy_from_slice(&1_u32.to_le_bytes()); // new block has refcount 1
                 block_dev.write_block(cx, block_alloc.start, &block)?;
-
-                // Decrement old block's refcount.
-                let mut old_block = self.read_block_vec(cx, BlockNumber(old_acl))?;
-                let new_refcount = old_refcount - 1;
-                old_block[4..8].copy_from_slice(&new_refcount.to_le_bytes());
-                block_dev.write_block(cx, BlockNumber(old_acl), &old_block)?;
+                allocated_external_block = Some(block_alloc.start);
+                post_inode_actions.push(Ext4XattrPostInodeAction::UpdateRefcount {
+                    block_no: BlockNumber(old_acl),
+                    new_refcount: old_refcount - 1,
+                });
             } else if old_acl != 0 {
-                // Not shared, modify in place
-                block_dev.write_block(cx, BlockNumber(old_acl), &block)?;
+                // Not shared, defer in-place block mutation until the inode write succeeds.
+                post_inode_actions.push(Ext4XattrPostInodeAction::WriteBlock {
+                    block_no: BlockNumber(old_acl),
+                    data: block,
+                });
             } else {
                 // New block
-                block_dev.write_block(cx, BlockNumber(inode.file_acl), &block)?;
+                let new_block = BlockNumber(inode.file_acl);
+                block_dev.write_block(cx, new_block, &block)?;
+                allocated_external_block = Some(new_block);
             }
             drop(alloc);
         }
@@ -9416,7 +9840,7 @@ impl OpenFs {
         ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
 
         let alloc = alloc_mutex.lock();
-        ffs_inode::write_inode(
+        let inode_write = ffs_inode::write_inode(
             cx,
             &block_dev,
             &alloc.geo,
@@ -9424,7 +9848,31 @@ impl OpenFs {
             ino,
             &inode,
             csum_seed,
-        )?;
+        );
+        drop(alloc);
+
+        if let Err(err) = inode_write {
+            if let Some(new_block) = allocated_external_block {
+                let mut alloc = alloc_mutex.lock();
+                let Ext4AllocState {
+                    geo,
+                    groups,
+                    persist_ctx,
+                } = &mut *alloc;
+                ffs_alloc::free_blocks_persist(
+                    cx,
+                    &block_dev,
+                    geo,
+                    groups,
+                    new_block,
+                    1,
+                    persist_ctx,
+                )?;
+            }
+            return Err(err);
+        }
+
+        self.apply_ext4_xattr_post_inode_actions(cx, &post_inode_actions)?;
 
         trace!(
             target: "ffs::write",
@@ -9439,86 +9887,51 @@ impl OpenFs {
         Ok(())
     }
 
-    /// Reconcile an external xattr block after a remove-xattr mutation.
-    ///
-    /// Handles three cases: block became empty (free or decrement refcount),
-    /// block modified but shared (COW), or block modified and unshared (in-place write).
-    fn reconcile_xattr_block_after_remove(
+    #[allow(clippy::significant_drop_tightening)]
+    fn apply_ext4_xattr_post_inode_actions(
         &self,
         cx: &Cx,
-        inode: &mut Ext4Inode,
-        mut block: Vec<u8>,
-        old_acl_refcount: (u64, u32),
-        ino: InodeNumber,
-        alloc: &mut Ext4AllocState,
+        actions: &[Ext4XattrPostInodeAction],
     ) -> ffs_error::Result<()> {
-        let (old_acl, old_refcount) = old_acl_refcount;
         let block_dev = self.block_device_adapter();
-        let new_acl = inode.file_acl;
-        let Ext4AllocState {
-            geo,
-            groups,
-            persist_ctx,
-        } = alloc;
-
-        if new_acl == 0 {
-            // Block became empty.
-            if old_refcount > 1 {
-                let mut old_block = self.read_block_vec(cx, BlockNumber(old_acl))?;
-                let new_refcount = old_refcount - 1;
-                old_block[4..8].copy_from_slice(&new_refcount.to_le_bytes());
-                block_dev.write_block(cx, BlockNumber(old_acl), &old_block)?;
-            } else {
-                ffs_alloc::free_blocks_persist(
-                    cx,
-                    &block_dev,
-                    geo,
-                    groups,
-                    BlockNumber(old_acl),
-                    1,
-                    persist_ctx,
-                )?;
+        for action in actions {
+            match action {
+                Ext4XattrPostInodeAction::UpdateRefcount {
+                    block_no,
+                    new_refcount,
+                } => {
+                    let mut block = self.read_block_vec(cx, *block_no)?;
+                    block[4..8].copy_from_slice(&new_refcount.to_le_bytes());
+                    block_dev.write_block(cx, *block_no, &block)?;
+                }
+                Ext4XattrPostInodeAction::FreeBlock(block_no) => {
+                    let alloc_mutex = self.require_alloc_state()?;
+                    let mut alloc = alloc_mutex.lock();
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                    } = &mut *alloc;
+                    ffs_alloc::free_blocks_persist(
+                        cx,
+                        &block_dev,
+                        geo,
+                        groups,
+                        *block_no,
+                        1,
+                        persist_ctx,
+                    )?;
+                }
+                Ext4XattrPostInodeAction::WriteBlock { block_no, data } => {
+                    block_dev.write_block(cx, *block_no, data)?;
+                }
             }
-            if inode.is_huge_file() {
-                inode.blocks = inode.blocks.saturating_sub(1);
-            } else {
-                inode.blocks = inode
-                    .blocks
-                    .saturating_sub(u64::from(geo.block_size / EXT4_SECTOR_SIZE));
-            }
-        } else if old_refcount > 1 {
-            // Block modified but shared — COW.
-            let ino_group = ffs_types::inode_to_group(ino, geo.inodes_per_group);
-            let hint = AllocHint {
-                goal_group: Some(ino_group),
-                goal_block: None,
-            };
-            let block_alloc = ffs_alloc::alloc_blocks_persist(
-                cx,
-                &block_dev,
-                geo,
-                groups,
-                1,
-                &hint,
-                persist_ctx,
-            )?;
-            inode.file_acl = block_alloc.start.0;
-            block[4..8].copy_from_slice(&1_u32.to_le_bytes());
-            block_dev.write_block(cx, block_alloc.start, &block)?;
-
-            let mut old_block = self.read_block_vec(cx, BlockNumber(old_acl))?;
-            let new_refcount = old_refcount - 1;
-            old_block[4..8].copy_from_slice(&new_refcount.to_le_bytes());
-            block_dev.write_block(cx, BlockNumber(old_acl), &old_block)?;
-        } else {
-            // Not shared, modify in place.
-            block_dev.write_block(cx, BlockNumber(old_acl), &block)?;
         }
         Ok(())
     }
 
     /// Remove one ext4 xattr.
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     fn ext4_removexattr(&self, cx: &Cx, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
         let alloc_mutex = self.require_alloc_state()?;
         let block_dev = self.block_device_adapter();
@@ -9554,22 +9967,71 @@ impl OpenFs {
             return Ok(false);
         }
 
-        let mut alloc = alloc_mutex.lock();
+        let mut allocated_external_block = None;
+        let mut post_inode_actions = Vec::new();
+        if let Some(mut block) = external_block {
+            let mut alloc = alloc_mutex.lock();
+            let Ext4AllocState {
+                geo,
+                groups,
+                persist_ctx,
+            } = &mut *alloc;
 
-        if let Some(block) = external_block {
-            self.reconcile_xattr_block_after_remove(
-                cx,
-                &mut inode,
-                block,
-                (old_acl, old_refcount),
-                ino,
-                &mut alloc,
-            )?;
+            if inode.file_acl == 0 {
+                if old_refcount > 1 {
+                    post_inode_actions.push(Ext4XattrPostInodeAction::UpdateRefcount {
+                        block_no: BlockNumber(old_acl),
+                        new_refcount: old_refcount - 1,
+                    });
+                } else {
+                    post_inode_actions
+                        .push(Ext4XattrPostInodeAction::FreeBlock(BlockNumber(old_acl)));
+                }
+                let removed_sectors = if inode.is_huge_file() {
+                    1
+                } else {
+                    u64::from(geo.block_size / EXT4_SECTOR_SIZE)
+                };
+                inode.blocks = Self::ext4_checked_inode_blocks_delta(
+                    inode.blocks,
+                    ino,
+                    -(i128::from(removed_sectors)),
+                )?;
+            } else if old_refcount > 1 {
+                let ino_group = ffs_types::inode_to_group(ino, geo.inodes_per_group);
+                let hint = AllocHint {
+                    goal_group: Some(ino_group),
+                    goal_block: None,
+                };
+                let block_alloc = ffs_alloc::alloc_blocks_persist(
+                    cx,
+                    &block_dev,
+                    geo,
+                    groups,
+                    1,
+                    &hint,
+                    persist_ctx,
+                )?;
+                inode.file_acl = block_alloc.start.0;
+                block[4..8].copy_from_slice(&1_u32.to_le_bytes());
+                block_dev.write_block(cx, block_alloc.start, &block)?;
+                allocated_external_block = Some(block_alloc.start);
+                post_inode_actions.push(Ext4XattrPostInodeAction::UpdateRefcount {
+                    block_no: BlockNumber(old_acl),
+                    new_refcount: old_refcount - 1,
+                });
+            } else {
+                post_inode_actions.push(Ext4XattrPostInodeAction::WriteBlock {
+                    block_no: BlockNumber(old_acl),
+                    data: block,
+                });
+            }
         }
 
         ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
 
-        ffs_inode::write_inode(
+        let alloc = alloc_mutex.lock();
+        let inode_write = ffs_inode::write_inode(
             cx,
             &block_dev,
             &alloc.geo,
@@ -9577,7 +10039,31 @@ impl OpenFs {
             ino,
             &inode,
             csum_seed,
-        )?;
+        );
+        drop(alloc);
+
+        if let Err(err) = inode_write {
+            if let Some(new_block) = allocated_external_block {
+                let mut alloc = alloc_mutex.lock();
+                let Ext4AllocState {
+                    geo,
+                    groups,
+                    persist_ctx,
+                } = &mut *alloc;
+                ffs_alloc::free_blocks_persist(
+                    cx,
+                    &block_dev,
+                    geo,
+                    groups,
+                    new_block,
+                    1,
+                    persist_ctx,
+                )?;
+            }
+            return Err(err);
+        }
+
+        self.apply_ext4_xattr_post_inode_actions(cx, &post_inode_actions)?;
 
         trace!(
             target: "ffs::write",
@@ -10279,7 +10765,12 @@ impl OpenFs {
             alloc
                 .fs_tree
                 .update(&extent_key, &extent_bytes)
-                .or_else(|_| alloc.fs_tree.insert(extent_key, &extent_bytes))
+                .or_else(|err| match err {
+                    BtrfsMutationError::KeyNotFound => {
+                        alloc.fs_tree.insert(extent_key, &extent_bytes)
+                    }
+                    other => Err(other),
+                })
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         } else {
             self.btrfs_remove_overlapping_extent_data(cx, &mut alloc, canonical, offset, end)?;
@@ -10387,7 +10878,11 @@ impl OpenFs {
         let parent_oid = self.btrfs_canonical_inode(parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
 
+        Self::validate_single_path_component(name)?;
+
         let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
 
         // Check for duplicate name — POSIX requires EEXIST.
         if self
@@ -10463,7 +10958,12 @@ impl OpenFs {
         let parent_oid = self.btrfs_canonical_inode(parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
 
+        Self::validate_single_path_component(name)?;
+
         let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
+        self.btrfs_validate_nlink_adjustment(&alloc, parent_oid, 1)?;
 
         // Check for duplicate name — POSIX requires EEXIST.
         if self
@@ -10537,6 +11037,7 @@ impl OpenFs {
         let (secs, nanos) = Self::btrfs_now_timestamp();
 
         let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
 
         // Lookup the child entry in the parent directory.
         let child = self.btrfs_lookup_dir_entry(&alloc, parent_oid, name)?;
@@ -10555,6 +11056,19 @@ impl OpenFs {
             return Err(FfsError::NotEmpty);
         }
 
+        Self::btrfs_require_inode_ref_name(&alloc, child_oid, parent_oid, name)?;
+        self.btrfs_validate_nlink_adjustment(&alloc, child_oid, if expect_dir { -2 } else { -1 })?;
+        if expect_dir {
+            self.btrfs_validate_nlink_adjustment(&alloc, parent_oid, -1)?;
+        }
+
+        let child_inode_before = self.btrfs_read_inode_from_tree(&alloc, child_oid)?;
+        let child_will_be_purged = (expect_dir && child_inode_before.nlink <= 2)
+            || (!expect_dir && child_inode_before.nlink <= 1);
+        if child_will_be_purged {
+            Self::btrfs_validate_purgeable_items(&alloc, child_oid)?;
+        }
+
         // Remove DIR_ITEM and DIR_INDEX entries.
         self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
 
@@ -10571,6 +11085,7 @@ impl OpenFs {
         // If nlink reached 0, purge the orphaned inode and all its data.
         let child_inode = self.btrfs_read_inode_from_tree(&alloc, child_oid)?;
         if child_inode.nlink == 0 {
+            debug_assert!(child_will_be_purged);
             self.btrfs_purge_inode(&mut alloc, child_oid)?;
         }
 
@@ -10582,6 +11097,49 @@ impl OpenFs {
         drop(alloc);
 
         Ok(())
+    }
+
+    fn btrfs_preflight_rename_target(
+        &self,
+        alloc: &BtrfsAllocState,
+        new_parent_oid: u64,
+        new_name: &[u8],
+        child_is_dir: bool,
+    ) -> ffs_error::Result<bool> {
+        let Ok(target) = self.btrfs_lookup_dir_entry(alloc, new_parent_oid, new_name) else {
+            return Ok(false);
+        };
+
+        let target_oid = target.child_objectid;
+        let target_is_dir = target.file_type == BTRFS_FT_DIR;
+        if child_is_dir && !target_is_dir {
+            return Err(FfsError::NotDirectory);
+        }
+        if !child_is_dir && target_is_dir {
+            return Err(FfsError::IsDirectory);
+        }
+        if target_is_dir && !self.btrfs_dir_is_empty(alloc, target_oid)? {
+            return Err(FfsError::NotEmpty);
+        }
+        Self::btrfs_require_inode_ref_name(alloc, target_oid, new_parent_oid, new_name)?;
+        self.btrfs_validate_nlink_adjustment(
+            alloc,
+            target_oid,
+            if target_is_dir { -2 } else { -1 },
+        )?;
+        if target_is_dir {
+            self.btrfs_validate_nlink_adjustment(alloc, new_parent_oid, -1)?;
+        }
+
+        let target_inode_before = self.btrfs_read_inode_from_tree(alloc, target_oid)?;
+        if (target_is_dir && target_inode_before.nlink <= 2)
+            || (!target_is_dir && target_inode_before.nlink <= 1)
+        {
+            Self::btrfs_validate_purgeable_items(alloc, target_oid)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Rename a btrfs directory entry.
@@ -10598,24 +11156,29 @@ impl OpenFs {
         let new_parent_oid = self.btrfs_canonical_inode(new_parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
 
+        Self::validate_single_path_component(name)?;
+        Self::validate_single_path_component(new_name)?;
+
         let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        self.btrfs_require_directory_inode(&alloc, new_parent_oid)?;
 
         let child = self.btrfs_lookup_dir_entry(&alloc, parent_oid, name)?;
         let child_is_dir = child.file_type == BTRFS_FT_DIR;
-
-        if let Ok(target) = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
-            let target_oid = target.child_objectid;
-            let target_is_dir = target.file_type == BTRFS_FT_DIR;
-            if child_is_dir && !target_is_dir {
-                return Err(FfsError::NotDirectory);
-            }
-            if !child_is_dir && target_is_dir {
-                return Err(FfsError::IsDirectory);
-            }
-            if target_is_dir && !self.btrfs_dir_is_empty(&alloc, target_oid)? {
-                return Err(FfsError::NotEmpty);
-            }
+        Self::btrfs_require_inode_ref_name(&alloc, child.child_objectid, parent_oid, name)?;
+        Self::btrfs_preflight_dir_entry_insert(
+            &alloc,
+            new_parent_oid,
+            new_name,
+            child.child_objectid,
+        )?;
+        Self::btrfs_preflight_inode_ref_insert(&alloc, child.child_objectid, new_parent_oid)?;
+        if child_is_dir && parent_oid != new_parent_oid {
+            self.btrfs_validate_nlink_adjustment(&alloc, parent_oid, -1)?;
+            self.btrfs_validate_nlink_adjustment(&alloc, new_parent_oid, 1)?;
         }
+        let target_will_be_purged =
+            self.btrfs_preflight_rename_target(&alloc, new_parent_oid, new_name, child_is_dir)?;
 
         // Remove old entry and its INODE_REF.
         self.btrfs_remove_dir_entry(&mut alloc, parent_oid, name)?;
@@ -10635,6 +11198,7 @@ impl OpenFs {
             }
             let target_inode = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
             if target_inode.nlink == 0 {
+                debug_assert!(target_will_be_purged);
                 self.btrfs_purge_inode(&mut alloc, target_oid)?;
             }
         }
@@ -10684,7 +11248,13 @@ impl OpenFs {
         let parent_oid = self.btrfs_canonical_inode(new_parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
 
+        Self::validate_single_path_component(new_name)?;
+
         let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, new_name, target_oid)?;
+        Self::btrfs_preflight_inode_ref_insert(&alloc, target_oid, parent_oid)?;
+        self.btrfs_validate_nlink_adjustment(&alloc, target_oid, 1)?;
 
         if self
             .btrfs_lookup_dir_entry(&alloc, parent_oid, new_name)
@@ -10733,7 +11303,11 @@ impl OpenFs {
         let (secs, nanos) = Self::btrfs_now_timestamp();
         let target_bytes = target.as_os_str().as_encoded_bytes();
 
+        Self::validate_single_path_component(name)?;
+
         let mut alloc = alloc_mutex.lock();
+        self.btrfs_require_directory_inode(&alloc, parent_oid)?;
+        Self::btrfs_preflight_dir_entry_insert(&alloc, parent_oid, name, alloc.next_objectid)?;
 
         // Check for duplicate name — POSIX requires EEXIST.
         if self
@@ -11355,6 +11929,7 @@ impl OpenFs {
         }
 
         let mut alloc = alloc_mutex.lock();
+        let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
 
         let name_hash = ffs_types::crc32c_append(0, name.as_bytes());
         let key = BtrfsKey {
@@ -11373,7 +11948,23 @@ impl OpenFs {
         alloc
             .fs_tree
             .update(&key, &payload)
-            .or_else(|_| alloc.fs_tree.insert(key, &payload))
+            .or_else(|err| match err {
+                BtrfsMutationError::KeyNotFound => alloc.fs_tree.insert(key, &payload),
+                other => Err(other),
+            })
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        let (secs, nanos) = Self::btrfs_now_timestamp();
+        inode.ctime_sec = secs;
+        inode.ctime_nsec = nanos;
+        let inode_key = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        };
+        alloc
+            .fs_tree
+            .update(&inode_key, &inode.to_bytes())
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         drop(alloc);
 
@@ -11386,6 +11977,7 @@ impl OpenFs {
         let canonical = self.btrfs_canonical_inode(ino)?;
 
         let mut alloc = alloc_mutex.lock();
+        let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
         let name_hash = ffs_types::crc32c_append(0, name.as_bytes());
         let key = BtrfsKey {
             objectid: canonical,
@@ -11406,7 +11998,21 @@ impl OpenFs {
         let result = match Self::btrfs_remove_xattr_item(&existing_payload, name)? {
             None => Ok(false),
             Some(payload) if payload.is_empty() => match alloc.fs_tree.delete(&key) {
-                Ok(_) => Ok(true),
+                Ok(_) => {
+                    let (secs, nanos) = Self::btrfs_now_timestamp();
+                    inode.ctime_sec = secs;
+                    inode.ctime_nsec = nanos;
+                    let inode_key = BtrfsKey {
+                        objectid: canonical,
+                        item_type: BTRFS_ITEM_INODE_ITEM,
+                        offset: 0,
+                    };
+                    alloc
+                        .fs_tree
+                        .update(&inode_key, &inode.to_bytes())
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                    Ok(true)
+                }
                 Err(BtrfsMutationError::MissingNode(_)) => Ok(false),
                 Err(e) => Err(btrfs_mutation_to_ffs(&e)),
             },
@@ -11414,6 +12020,18 @@ impl OpenFs {
                 alloc
                     .fs_tree
                     .update(&key, &payload)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                let (secs, nanos) = Self::btrfs_now_timestamp();
+                inode.ctime_sec = secs;
+                inode.ctime_nsec = nanos;
+                let inode_key = BtrfsKey {
+                    objectid: canonical,
+                    item_type: BTRFS_ITEM_INODE_ITEM,
+                    offset: 0,
+                };
+                alloc
+                    .fs_tree
+                    .update(&inode_key, &inode.to_bytes())
                     .map_err(|e| btrfs_mutation_to_ffs(&e))?;
                 Ok(true)
             }
@@ -11470,6 +12088,92 @@ impl OpenFs {
         }
     }
 
+    fn validate_single_path_component(name: &[u8]) -> ffs_error::Result<()> {
+        if name.is_empty() {
+            return Err(FfsError::Format("path component must not be empty".into()));
+        }
+        if name.contains(&b'/') {
+            return Err(FfsError::Format(
+                "path component must not contain '/'".into(),
+            ));
+        }
+        if name.len() > usize::from(u8::MAX) {
+            return Err(FfsError::NameTooLong);
+        }
+        Ok(())
+    }
+
+    fn btrfs_require_directory_inode(
+        &self,
+        alloc: &BtrfsAllocState,
+        objectid: u64,
+    ) -> ffs_error::Result<()> {
+        let inode = self.btrfs_read_inode_from_tree(alloc, objectid)?;
+        if Self::btrfs_mode_to_file_type(inode.mode) != FileType::Directory {
+            return Err(FfsError::NotDirectory);
+        }
+        Ok(())
+    }
+
+    fn btrfs_preflight_dir_entry_insert(
+        alloc: &BtrfsAllocState,
+        parent_oid: u64,
+        name: &[u8],
+        child_oid: u64,
+    ) -> ffs_error::Result<()> {
+        let name_hash = ffs_types::crc32c_append(0, name);
+        let dir_item_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(name_hash),
+        };
+        if let Some((_, payload)) = alloc
+            .fs_tree
+            .range(&dir_item_key, &dir_item_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+        {
+            let _ = parse_dir_items(payload).map_err(|e| parse_to_ffs_error(&e))?;
+        }
+
+        let dir_index_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: child_oid,
+        };
+        if let Some((_, payload)) = alloc
+            .fs_tree
+            .range(&dir_index_key, &dir_index_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+        {
+            let _ = parse_dir_items(payload).map_err(|e| parse_to_ffs_error(&e))?;
+        }
+
+        Ok(())
+    }
+
+    fn btrfs_preflight_inode_ref_insert(
+        alloc: &BtrfsAllocState,
+        child_oid: u64,
+        parent_oid: u64,
+    ) -> ffs_error::Result<()> {
+        let ref_key = BtrfsKey {
+            objectid: child_oid,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: parent_oid,
+        };
+        if let Some((_, payload)) = alloc
+            .fs_tree
+            .range(&ref_key, &ref_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+        {
+            let _ = Self::btrfs_parse_inode_ref_payload(payload)?;
+        }
+        Ok(())
+    }
+
     /// Insert a directory entry (both DIR_ITEM and DIR_INDEX) into the FS tree.
     #[allow(clippy::unused_self)]
     fn btrfs_insert_dir_entry(
@@ -11504,7 +12208,10 @@ impl OpenFs {
         alloc
             .fs_tree
             .update(&dir_item_key, &merged)
-            .or_else(|_| alloc.fs_tree.insert(dir_item_key, &merged))
+            .or_else(|err| match err {
+                BtrfsMutationError::KeyNotFound => alloc.fs_tree.insert(dir_item_key, &merged),
+                other => Err(other),
+            })
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
         // Also insert a DIR_INDEX entry. The offset uses the child objectid,
@@ -11530,7 +12237,12 @@ impl OpenFs {
         alloc
             .fs_tree
             .update(&dir_index_key, &merged_index)
-            .or_else(|_| alloc.fs_tree.insert(dir_index_key, &merged_index))
+            .or_else(|err| match err {
+                BtrfsMutationError::KeyNotFound => {
+                    alloc.fs_tree.insert(dir_index_key, &merged_index)
+                }
+                other => Err(other),
+            })
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
         Ok(())
@@ -11574,17 +12286,26 @@ impl OpenFs {
         parent_oid: u64,
         name: &[u8],
     ) -> ffs_error::Result<()> {
+        Self::btrfs_remove_named_dir_item(alloc, parent_oid, name)?;
+        Self::btrfs_remove_named_dir_index(alloc, parent_oid, name)?;
+        Ok(())
+    }
+
+    fn btrfs_remove_named_dir_item(
+        alloc: &mut BtrfsAllocState,
+        parent_oid: u64,
+        name: &[u8],
+    ) -> ffs_error::Result<()> {
         let name_hash = ffs_types::crc32c_append(0, name);
         let dir_item_key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_ITEM,
             offset: u64::from(name_hash),
         };
-
-        // btrfs stores multiple dir entries with the same CRC32C hash in a
-        // single payload. Remove only the matching entry and fail hard if the
-        // expected name is missing so callers do not silently desynchronize
-        // dir items from inode refs and nlink state.
+        let detail = format!(
+            "dir_item missing expected name {} in parent {parent_oid}",
+            String::from_utf8_lossy(name)
+        );
         let dir_item_payload = alloc
             .fs_tree
             .range(&dir_item_key, &dir_item_key)
@@ -11593,22 +12314,13 @@ impl OpenFs {
             .map(|(_, payload)| payload.clone())
             .ok_or_else(|| FfsError::Corruption {
                 block: 0,
-                detail: format!(
-                    "dir_item missing expected name {} in parent {parent_oid}",
-                    String::from_utf8_lossy(name)
-                ),
+                detail: detail.clone(),
             })?;
         let entries = parse_dir_items(&dir_item_payload).map_err(|e| parse_to_ffs_error(&e))?;
         let original_len = entries.len();
-        let remaining: Vec<_> = entries.iter().filter(|e| e.name != name).collect();
+        let remaining: Vec<_> = entries.iter().filter(|entry| entry.name != name).collect();
         if remaining.len() == original_len {
-            return Err(FfsError::Corruption {
-                block: 0,
-                detail: format!(
-                    "dir_item missing expected name {} in parent {parent_oid}",
-                    String::from_utf8_lossy(name)
-                ),
-            });
+            return Err(FfsError::Corruption { block: 0, detail });
         }
         if remaining.is_empty() {
             alloc
@@ -11625,8 +12337,14 @@ impl OpenFs {
                 .update(&dir_item_key, &payload)
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
+        Ok(())
+    }
 
-        // Also remove the DIR_INDEX. We need to find it by scanning.
+    fn btrfs_remove_named_dir_index(
+        alloc: &mut BtrfsAllocState,
+        parent_oid: u64,
+        name: &[u8],
+    ) -> ffs_error::Result<()> {
         let range_start = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_INDEX,
@@ -11637,6 +12355,10 @@ impl OpenFs {
             item_type: BTRFS_ITEM_DIR_INDEX,
             offset: u64::MAX,
         };
+        let detail = format!(
+            "dir_index missing expected name {} in parent {parent_oid}",
+            String::from_utf8_lossy(name)
+        );
         let indices = alloc
             .fs_tree
             .range(&range_start, &range_end)
@@ -11644,7 +12366,7 @@ impl OpenFs {
         let mut found_dir_index = None;
         for (key, data) in &indices {
             let entries = parse_dir_items(data).map_err(|e| parse_to_ffs_error(&e))?;
-            if entries.iter().any(|e| e.name == name) {
+            if entries.iter().any(|entry| entry.name == name) {
                 found_dir_index = Some((*key, entries));
                 break;
             }
@@ -11652,10 +12374,7 @@ impl OpenFs {
         let (dir_index_key, dir_index_entries) =
             found_dir_index.ok_or_else(|| FfsError::Corruption {
                 block: 0,
-                detail: format!(
-                    "dir_index missing expected name {} in parent {parent_oid}",
-                    String::from_utf8_lossy(name)
-                ),
+                detail: detail.clone(),
             })?;
         let original_index_len = dir_index_entries.len();
         let remaining_index_entries: Vec<_> = dir_index_entries
@@ -11663,13 +12382,7 @@ impl OpenFs {
             .filter(|entry| entry.name != name)
             .collect();
         if remaining_index_entries.len() == original_index_len {
-            return Err(FfsError::Corruption {
-                block: 0,
-                detail: format!(
-                    "dir_index missing expected name {} in parent {parent_oid}",
-                    String::from_utf8_lossy(name)
-                ),
-            });
+            return Err(FfsError::Corruption { block: 0, detail });
         }
         if remaining_index_entries.is_empty() {
             alloc
@@ -11686,7 +12399,6 @@ impl OpenFs {
                 .update(&dir_index_key, &payload)
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
-
         Ok(())
     }
 
@@ -11714,6 +12426,39 @@ impl OpenFs {
         Ok(items.is_empty())
     }
 
+    fn btrfs_checked_nlink_delta(
+        current: u32,
+        objectid: u64,
+        delta: i32,
+    ) -> ffs_error::Result<u32> {
+        if delta > 0 {
+            current
+                .checked_add(delta.unsigned_abs())
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {objectid} nlink overflow on delta {delta}"),
+                })
+        } else {
+            current
+                .checked_sub(delta.unsigned_abs())
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {objectid} nlink underflow on delta {delta}"),
+                })
+        }
+    }
+
+    fn btrfs_validate_nlink_adjustment(
+        &self,
+        alloc: &BtrfsAllocState,
+        objectid: u64,
+        delta: i32,
+    ) -> ffs_error::Result<()> {
+        let inode = self.btrfs_read_inode_from_tree(alloc, objectid)?;
+        let _ = Self::btrfs_checked_nlink_delta(inode.nlink, objectid, delta)?;
+        Ok(())
+    }
+
     /// Adjust the nlink count of a btrfs inode by `delta` (+1 or -1).
     fn btrfs_adjust_nlink(
         &self,
@@ -11722,11 +12467,7 @@ impl OpenFs {
         delta: i32,
     ) -> ffs_error::Result<()> {
         let mut inode = self.btrfs_read_inode_from_tree(alloc, objectid)?;
-        if delta > 0 {
-            inode.nlink = inode.nlink.saturating_add(delta.unsigned_abs());
-        } else {
-            inode.nlink = inode.nlink.saturating_sub(delta.unsigned_abs());
-        }
+        inode.nlink = Self::btrfs_checked_nlink_delta(inode.nlink, objectid, delta)?;
         let key = BtrfsKey {
             objectid,
             item_type: BTRFS_ITEM_INODE_ITEM,
@@ -11739,17 +12480,10 @@ impl OpenFs {
         Ok(())
     }
 
-    /// Remove all tree items for an inode (INODE_ITEM, EXTENT_DATA, XATTR_ITEM).
-    ///
-    /// Called when nlink drops to 0 to free the orphaned inode's metadata.
-    #[allow(clippy::unused_self)]
-    fn btrfs_purge_inode(
-        &self,
-        alloc: &mut BtrfsAllocState,
+    fn btrfs_collect_purge_plan(
+        alloc: &BtrfsAllocState,
         objectid: u64,
-    ) -> ffs_error::Result<()> {
-        // Collect all keys for this objectid, then delete them.
-        // We query a range covering all possible item types (1..255).
+    ) -> ffs_error::Result<Vec<BtrfsPurgeAction>> {
         let start = BtrfsKey {
             objectid,
             item_type: 0,
@@ -11765,30 +12499,64 @@ impl OpenFs {
             .range(&start, &end)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
+        let mut plan = Vec::with_capacity(items.len());
         for (key, data) in items {
-            if key.item_type == BTRFS_ITEM_EXTENT_DATA {
-                if let Ok(BtrfsExtentData::Regular {
-                    disk_bytenr,
-                    disk_num_bytes,
-                    ..
-                }) = parse_extent_data(&data)
-                {
-                    if disk_bytenr > 0 {
-                        if let Err(e) =
-                            alloc
-                                .extent_alloc
-                                .free_extent(disk_bytenr, disk_num_bytes, false)
-                        {
-                            warn!("cleanup: failed to free extent at {disk_bytenr}: {e:?}");
-                        }
-                    }
+            let extent_to_free = if key.item_type == BTRFS_ITEM_EXTENT_DATA {
+                match parse_extent_data(&data).map_err(|e| parse_to_ffs_error(&e))? {
+                    BtrfsExtentData::Regular {
+                        disk_bytenr,
+                        disk_num_bytes,
+                        ..
+                    } if disk_bytenr > 0 => Some((disk_bytenr, disk_num_bytes)),
+                    _ => None,
                 }
+            } else {
+                None
+            };
+            plan.push((key, extent_to_free));
+        }
+
+        Ok(plan)
+    }
+
+    fn btrfs_validate_purgeable_items(
+        alloc: &BtrfsAllocState,
+        objectid: u64,
+    ) -> ffs_error::Result<()> {
+        let _ = Self::btrfs_collect_purge_plan(alloc, objectid)?;
+        Ok(())
+    }
+
+    fn btrfs_execute_purge_plan(
+        alloc: &mut BtrfsAllocState,
+        purge_plan: Vec<BtrfsPurgeAction>,
+    ) -> ffs_error::Result<()> {
+        for (key, extent_to_free) in purge_plan {
+            if let Some((disk_bytenr, disk_num_bytes)) = extent_to_free {
+                alloc
+                    .extent_alloc
+                    .free_extent(disk_bytenr, disk_num_bytes, false)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
             }
-            if let Err(e) = alloc.fs_tree.delete(&key) {
-                warn!("cleanup: failed to delete inode item {key:?}: {e:?}");
-            }
+            alloc
+                .fs_tree
+                .delete(&key)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
         Ok(())
+    }
+
+    /// Remove all tree items for an inode (INODE_ITEM, EXTENT_DATA, XATTR_ITEM).
+    ///
+    /// Called when nlink drops to 0 to free the orphaned inode's metadata.
+    #[allow(clippy::unused_self)]
+    fn btrfs_purge_inode(
+        &self,
+        alloc: &mut BtrfsAllocState,
+        objectid: u64,
+    ) -> ffs_error::Result<()> {
+        let purge_plan = Self::btrfs_collect_purge_plan(alloc, objectid)?;
+        Self::btrfs_execute_purge_plan(alloc, purge_plan)
     }
 
     /// Insert an INODE_REF item linking `child_oid` back to `parent_oid`.
@@ -11895,7 +12663,10 @@ impl OpenFs {
         alloc
             .fs_tree
             .update(&ref_key, &payload)
-            .or_else(|_| alloc.fs_tree.insert(ref_key, &payload))
+            .or_else(|err| match err {
+                BtrfsMutationError::KeyNotFound => alloc.fs_tree.insert(ref_key, &payload),
+                other => Err(other),
+            })
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         Ok(())
     }
@@ -11920,7 +12691,13 @@ impl OpenFs {
             .first()
             .map(|(_, payload)| payload.clone());
         let Some(existing_payload) = existing_payload else {
-            return Ok(());
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "inode_ref missing key for child {child_oid} parent {parent_oid} name {}",
+                    String::from_utf8_lossy(name)
+                ),
+            });
         };
         let entries = Self::btrfs_parse_inode_ref_payload(&existing_payload)?;
         let original_len = entries.len();
@@ -11950,6 +12727,47 @@ impl OpenFs {
             .update(&ref_key, &payload)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         Ok(())
+    }
+
+    fn btrfs_require_inode_ref_name(
+        alloc: &BtrfsAllocState,
+        child_oid: u64,
+        parent_oid: u64,
+        name: &[u8],
+    ) -> ffs_error::Result<()> {
+        let ref_key = BtrfsKey {
+            objectid: child_oid,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: parent_oid,
+        };
+        let existing_payload = alloc
+            .fs_tree
+            .range(&ref_key, &ref_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+            .map(|(_, payload)| payload.clone())
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "inode_ref missing key for child {child_oid} parent {parent_oid} name {}",
+                    String::from_utf8_lossy(name)
+                ),
+            })?;
+        let entries = Self::btrfs_parse_inode_ref_payload(&existing_payload)?;
+        if entries
+            .iter()
+            .any(|(_, existing_name)| existing_name.as_slice() == name)
+        {
+            Ok(())
+        } else {
+            Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "inode_ref missing expected name {} for child {child_oid} parent {parent_oid}",
+                    String::from_utf8_lossy(name)
+                ),
+            })
+        }
     }
 
     /// Look up the parent objectid for a btrfs inode via its INODE_REF.
@@ -13782,6 +14600,7 @@ mod tests {
     };
     use serde_json::Value;
     use std::io::{self, Write};
+    use std::os::unix::ffi::OsStrExt;
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 
@@ -18751,6 +19570,24 @@ mod tests {
         .expect("persist e2compr inode flags");
     }
 
+    fn persist_ext4_test_inode(fs: &OpenFs, cx: &Cx, ino: InodeNumber, inode: &Ext4Inode) {
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let csum_seed = sb.csum_seed();
+        let block_dev = fs.block_device_adapter();
+        let alloc_mutex = fs.require_alloc_state().expect("alloc state");
+        let alloc = alloc_mutex.lock();
+        ffs_inode::write_inode(
+            cx,
+            &block_dev,
+            &alloc.geo,
+            &alloc.groups,
+            ino,
+            inode,
+            csum_seed,
+        )
+        .expect("persist test inode");
+    }
+
     #[test]
     fn write_create_and_read_roundtrip() {
         let Some(fs) = open_writable_ext4() else {
@@ -18782,6 +19619,84 @@ mod tests {
             .lookup(&cx, root, OsStr::new("test_rw.txt"))
             .expect("lookup");
         assert_eq!(looked_up.ino, ino);
+    }
+
+    #[test]
+    fn write_create_invalid_name_rolls_back_inode_allocation() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let free_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count before create");
+
+        let err = fs
+            .create(&cx, root, OsStr::from_bytes(b"bad/name"), 0o644, 1000, 1000)
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let free_after = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count after create");
+        assert_eq!(
+            free_after, free_before,
+            "failed create should not leak inode"
+        );
+    }
+
+    #[test]
+    fn write_data_block_inode_blocks_overflow_reports_corruption() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("blocks_overflow_write.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file")
+            .ino;
+        let free_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before write");
+
+        let mut inode = fs.read_inode(&cx, ino).expect("read inode before write");
+        inode.blocks = u64::MAX;
+        persist_ext4_test_inode(&fs, &cx, ino, &inode);
+
+        let err = fs
+            .write(&cx, ino, 0, b"x")
+            .expect_err("write should fail on inode.blocks overflow");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let free_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after failed write");
+        assert_eq!(
+            free_after, free_before,
+            "failed write should not leak a newly allocated data block"
+        );
+
+        let inode_after = fs
+            .read_inode(&cx, ino)
+            .expect("read inode after failed write");
+        assert_eq!(
+            inode_after.size, 0,
+            "failed write must not extend file size"
+        );
+        let readback = fs.read(&cx, ino, 0, 16).expect("read after failed write");
+        assert!(
+            readback.is_empty(),
+            "failed write must not publish any file data"
+        );
     }
 
     #[test]
@@ -18852,6 +19767,75 @@ mod tests {
             .expect("lookup dir");
         assert_eq!(looked_up.ino, attr.ino);
         assert_eq!(looked_up.kind, FileType::Directory);
+    }
+
+    #[test]
+    fn write_mkdir_invalid_name_rolls_back_inode_allocation() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let free_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count before mkdir");
+
+        let err = fs
+            .mkdir(&cx, root, OsStr::from_bytes(b"bad/dir"), 0o755, 0, 0)
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let free_after = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count after mkdir");
+        assert_eq!(
+            free_after, free_before,
+            "failed mkdir should not leak inode"
+        );
+    }
+
+    #[test]
+    fn write_mkdir_parent_nlink_overflow_reports_corruption() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let free_inodes_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count before mkdir");
+        let free_blocks_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before mkdir");
+
+        let mut root_inode = fs.read_inode(&cx, root).expect("read root inode");
+        root_inode.links_count = u16::MAX;
+        persist_ext4_test_inode(&fs, &cx, root, &root_inode);
+
+        let err = fs
+            .mkdir(&cx, root, OsStr::new("overflow_dir"), 0o755, 0, 0)
+            .expect_err("mkdir should fail on parent nlink overflow");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let lookup_err = fs
+            .lookup(&cx, root, OsStr::new("overflow_dir"))
+            .expect_err("failed mkdir must not publish directory entry");
+        assert_eq!(lookup_err.to_errno(), libc::ENOENT);
+
+        let free_inodes_after = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count after mkdir");
+        let free_blocks_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after mkdir");
+        assert_eq!(
+            free_inodes_after, free_inodes_before,
+            "failed mkdir should not leak inode allocation"
+        );
+        assert_eq!(
+            free_blocks_after, free_blocks_before,
+            "failed mkdir should not leak directory block allocation"
+        );
     }
 
     #[test]
@@ -18965,6 +19949,47 @@ mod tests {
     }
 
     #[test]
+    fn write_rename_directory_over_empty_directory_with_bad_parent_nlink_preserves_both_names() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let src = fs
+            .mkdir(&cx, root, OsStr::new("rename_corrupt_src"), 0o755, 0, 0)
+            .expect("create source dir");
+        let dst = fs
+            .mkdir(&cx, root, OsStr::new("rename_corrupt_dst"), 0o755, 0, 0)
+            .expect("create destination dir");
+
+        let mut root_inode = fs.read_inode(&cx, root).expect("read root inode");
+        root_inode.links_count = 0;
+        persist_ext4_test_inode(&fs, &cx, root, &root_inode);
+
+        let err = fs
+            .rename(
+                &cx,
+                root,
+                OsStr::new("rename_corrupt_src"),
+                root,
+                OsStr::new("rename_corrupt_dst"),
+            )
+            .expect_err("rename should fail on corrupt destination parent nlink");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let src_lookup = fs
+            .lookup(&cx, root, OsStr::new("rename_corrupt_src"))
+            .expect("source name should remain after failed rename");
+        assert_eq!(src_lookup.ino, src.ino);
+
+        let dst_lookup = fs
+            .lookup(&cx, root, OsStr::new("rename_corrupt_dst"))
+            .expect("destination name should remain after failed rename");
+        assert_eq!(dst_lookup.ino, dst.ino);
+    }
+
+    #[test]
     fn write_rename_over_existing_file_replaces_target() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -19010,6 +20035,40 @@ mod tests {
             .read(&cx, renamed.ino, 0, read_len)
             .expect("read renamed file");
         assert_eq!(&readback, src_payload);
+    }
+
+    #[test]
+    fn write_rename_invalid_new_name_preserves_source() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let src = fs
+            .create(&cx, root, OsStr::new("rename_bad_src.txt"), 0o644, 0, 0)
+            .expect("create source");
+
+        let err = fs
+            .rename(
+                &cx,
+                root,
+                OsStr::new("rename_bad_src.txt"),
+                root,
+                OsStr::from_bytes(b"bad/name"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = fs
+            .lookup(&cx, root, OsStr::new("rename_bad_src.txt"))
+            .expect("source should remain after failed rename");
+        assert_eq!(looked_up.ino, src.ino);
+
+        let bad_lookup = fs
+            .lookup(&cx, root, OsStr::from_bytes(b"bad/name"))
+            .unwrap_err();
+        assert_eq!(bad_lookup.to_errno(), libc::ENOENT);
     }
 
     #[test]
@@ -19099,6 +20158,29 @@ mod tests {
     }
 
     #[test]
+    fn write_link_invalid_name_rolls_back_nlink() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let src = fs
+            .create(&cx, root, OsStr::new("link_invalid_src.txt"), 0o644, 0, 0)
+            .expect("create source");
+        let before = fs.getattr(&cx, src.ino).expect("getattr before link");
+        assert_eq!(before.nlink, 1);
+
+        let err = fs
+            .link(&cx, src.ino, root, OsStr::from_bytes(b"bad/link"))
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let after = fs.getattr(&cx, src.ino).expect("getattr after failed link");
+        assert_eq!(after.nlink, 1, "failed link should roll back nlink");
+    }
+
+    #[test]
     fn write_symlink_fast_target_roundtrip() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -19131,6 +20213,38 @@ mod tests {
     }
 
     #[test]
+    fn write_symlink_invalid_name_rolls_back_inode_allocation() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let free_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count before symlink");
+
+        let err = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::from_bytes(b"bad/link"),
+                Path::new("hello.txt"),
+                1000,
+                1000,
+            )
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let free_after = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count after symlink");
+        assert_eq!(
+            free_after, free_before,
+            "failed symlink should not leak inode"
+        );
+    }
+
+    #[test]
     fn write_symlink_slow_target_roundtrip() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -19156,6 +20270,115 @@ mod tests {
 
         let inode = fs.read_inode(&cx, attr.ino).expect("inode");
         assert!(!inode.is_fast_symlink());
+    }
+
+    #[test]
+    fn write_symlink_slow_target_enospc_rolls_back_inode_and_name() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let free_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count before slow symlink failure");
+        let summary = fs.free_space_summary(&cx).expect("free space summary");
+        let block_size = usize::try_from(fs.ext4_superblock().expect("ext4 superblock").block_size)
+            .expect("block size fits usize");
+        let target_len = usize::try_from(summary.free_blocks_total)
+            .expect("free block total fits usize")
+            .saturating_mul(block_size)
+            .saturating_add(1);
+        let huge_target = "x".repeat(target_len);
+
+        let err = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("slow_link_enospc"),
+                Path::new(&huge_target),
+                1000,
+                1000,
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOSPC);
+
+        let lookup_err = fs
+            .lookup(&cx, root, OsStr::new("slow_link_enospc"))
+            .unwrap_err();
+        assert_eq!(lookup_err.to_errno(), libc::ENOENT);
+
+        let free_after = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count after slow symlink failure");
+        assert_eq!(
+            free_after, free_before,
+            "failed slow symlink should not leak inode"
+        );
+    }
+
+    #[test]
+    fn write_symlink_slow_target_corrupt_parent_rolls_back_inode_and_blocks() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let free_inodes_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count before slow symlink corruption");
+        let free_blocks_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before slow symlink corruption");
+        let long_target =
+            "/var/lib/frankenfs/corrupt-parent/slow/symlink/target/path/that/exceeds/fast-storage";
+
+        let root_inode = fs.read_inode(&cx, root).expect("read root inode");
+        let root_extents = fs.collect_extents(&cx, &root_inode).expect("root extents");
+        let first_ext = root_extents.first().expect("root directory extent");
+        let dir_block_no = BlockNumber(first_ext.physical_start);
+        let mut dir_block = fs
+            .read_block_vec(&cx, dir_block_no)
+            .expect("read root directory block");
+        dir_block[4..6].copy_from_slice(&0_u16.to_le_bytes());
+        fs.block_device_adapter()
+            .write_block(&cx, dir_block_no, &dir_block)
+            .expect("persist corrupted root directory block");
+
+        let err = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("slow_link_corrupt_parent"),
+                Path::new(long_target),
+                1000,
+                1000,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { .. } | FfsError::Format(_)),
+            "expected corruption-style failure, got {err:?}"
+        );
+
+        let lookup_err = fs
+            .lookup(&cx, root, OsStr::new("slow_link_corrupt_parent"))
+            .unwrap_err();
+        assert_eq!(lookup_err.to_errno(), libc::ENOENT);
+
+        let free_inodes_after = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count after slow symlink corruption");
+        let free_blocks_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after slow symlink corruption");
+        assert_eq!(
+            free_inodes_after, free_inodes_before,
+            "failed slow symlink should not leak inode allocation"
+        );
+        assert_eq!(
+            free_blocks_after, free_blocks_before,
+            "failed slow symlink should not leak target block allocation"
+        );
     }
 
     #[test]
@@ -19284,6 +20507,163 @@ mod tests {
     }
 
     #[test]
+    fn write_setxattr_oversized_external_retry_rolls_back_block_allocation() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(&cx, root, OsStr::new("xattr_oversized.txt"), 0o644, 0, 0)
+            .expect("create file")
+            .ino;
+        let free_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before oversized xattr");
+        let block_size = usize::try_from(fs.ext4_superblock().expect("ext4 superblock").block_size)
+            .expect("block size fits usize");
+        let oversized_value = vec![b'x'; block_size];
+
+        let err = fs
+            .setxattr(
+                &cx,
+                ino,
+                "user.oversized",
+                &oversized_value,
+                XattrSetMode::Set,
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOSPC);
+
+        let free_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after oversized xattr");
+        assert_eq!(
+            free_after, free_before,
+            "failed xattr external-block retry should not leak a block"
+        );
+
+        let inode = fs
+            .read_inode(&cx, ino)
+            .expect("read inode after failed xattr");
+        assert_eq!(
+            inode.file_acl, 0,
+            "failed xattr should not leave file_acl set"
+        );
+    }
+
+    #[test]
+    fn write_setxattr_external_block_inode_blocks_overflow_reports_corruption() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("xattr_blocks_overflow.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file")
+            .ino;
+        let free_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before xattr");
+
+        let mut inode = fs.read_inode(&cx, ino).expect("read inode before xattr");
+        inode.blocks = u64::MAX;
+        persist_ext4_test_inode(&fs, &cx, ino, &inode);
+
+        let large_value = vec![0xAB_u8; 512];
+        let err = fs
+            .setxattr(&cx, ino, "user.large", &large_value, XattrSetMode::Set)
+            .expect_err("xattr should fail on inode.blocks overflow");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let free_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after xattr");
+        assert_eq!(
+            free_after, free_before,
+            "failed xattr should not leak external block allocation"
+        );
+
+        let inode_after = fs
+            .read_inode(&cx, ino)
+            .expect("read inode after failed xattr");
+        assert_eq!(
+            inode_after.file_acl, 0,
+            "failed xattr should not leave file_acl set"
+        );
+    }
+
+    #[test]
+    fn write_removexattr_external_block_inode_blocks_underflow_reports_corruption() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let ino = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("xattr_blocks_underflow.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file")
+            .ino;
+
+        let large_value = vec![0xEF_u8; 512];
+        fs.setxattr(&cx, ino, "user.large", &large_value, XattrSetMode::Set)
+            .expect("seed external xattr");
+
+        let free_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before removexattr");
+        let mut inode = fs
+            .read_inode(&cx, ino)
+            .expect("read inode before removexattr");
+        assert_ne!(inode.file_acl, 0, "test requires external xattr block");
+        let original_acl = inode.file_acl;
+        inode.blocks = 0;
+        persist_ext4_test_inode(&fs, &cx, ino, &inode);
+
+        let err = fs
+            .removexattr(&cx, ino, "user.large")
+            .expect_err("removexattr should fail on inode.blocks underflow");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let free_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after removexattr");
+        assert_eq!(
+            free_after, free_before,
+            "failed removexattr should not free the external xattr block"
+        );
+
+        let inode_after = fs
+            .read_inode(&cx, ino)
+            .expect("read inode after failed removexattr");
+        assert_eq!(
+            inode_after.file_acl, original_acl,
+            "failed removexattr should leave file_acl unchanged"
+        );
+        assert_eq!(
+            fs.getxattr(&cx, ino, "user.large")
+                .expect("getxattr after failed removexattr"),
+            Some(large_value),
+            "failed removexattr should leave xattr data intact"
+        );
+    }
+
+    #[test]
     fn write_setxattr_respects_create_and_replace_modes() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -19331,6 +20711,192 @@ mod tests {
         // Read it back and verify.
         let readback = fs.getxattr(&cx, attr.ino, "user.large").expect("getxattr");
         assert_eq!(readback.as_deref(), Some(large_value.as_slice()));
+    }
+
+    #[test]
+    fn write_setxattr_shared_external_block_cow_preserves_sibling() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let left = fs
+            .create(&cx, root, OsStr::new("xattr_shared_left.txt"), 0o644, 0, 0)
+            .expect("create left")
+            .ino;
+        let right = fs
+            .create(&cx, root, OsStr::new("xattr_shared_right.txt"), 0o644, 0, 0)
+            .expect("create right")
+            .ino;
+
+        let original = vec![0xAB_u8; 512];
+        fs.setxattr(&cx, left, "user.large", &original, XattrSetMode::Set)
+            .expect("seed external xattr");
+
+        let left_inode = fs.read_inode(&cx, left).expect("read left inode");
+        let mut right_inode = fs.read_inode(&cx, right).expect("read right inode");
+        assert_ne!(
+            left_inode.file_acl, 0,
+            "left inode should use external xattr block"
+        );
+
+        let shared_block = BlockNumber(left_inode.file_acl);
+        let mut shared_data = fs
+            .read_block_vec(&cx, shared_block)
+            .expect("read shared xattr block");
+        shared_data[4..8].copy_from_slice(&2_u32.to_le_bytes());
+        fs.block_device_adapter()
+            .write_block(&cx, shared_block, &shared_data)
+            .expect("mark xattr block shared");
+
+        right_inode.file_acl = left_inode.file_acl;
+        let block_size = fs.ext4_superblock().expect("ext4 superblock").block_size;
+        right_inode.blocks = right_inode
+            .blocks
+            .saturating_add(u64::from(block_size / EXT4_SECTOR_SIZE));
+
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let csum_seed = sb.csum_seed();
+        let block_dev = fs.block_device_adapter();
+        let alloc = fs.require_alloc_state().expect("alloc state").lock();
+        ffs_inode::write_inode(
+            &cx,
+            &block_dev,
+            &alloc.geo,
+            &alloc.groups,
+            right,
+            &right_inode,
+            csum_seed,
+        )
+        .expect("persist right inode sharing xattr block");
+        drop(alloc);
+
+        let updated = vec![0xCD_u8; 512];
+        fs.setxattr(&cx, left, "user.large", &updated, XattrSetMode::Set)
+            .expect("cow update shared xattr");
+
+        let left_after = fs.read_inode(&cx, left).expect("read left after update");
+        let right_after = fs.read_inode(&cx, right).expect("read right after update");
+        assert_ne!(left_after.file_acl, 0);
+        assert_ne!(right_after.file_acl, 0);
+        assert_ne!(
+            left_after.file_acl, right_after.file_acl,
+            "left inode should COW away from shared xattr block"
+        );
+        assert_eq!(
+            fs.getxattr(&cx, left, "user.large").expect("left getxattr"),
+            Some(updated.clone())
+        );
+        assert_eq!(
+            fs.getxattr(&cx, right, "user.large")
+                .expect("right getxattr"),
+            Some(original.clone())
+        );
+
+        let old_shared = fs
+            .read_block_vec(&cx, BlockNumber(right_after.file_acl))
+            .expect("read old shared block");
+        assert_eq!(
+            u32::from_le_bytes([old_shared[4], old_shared[5], old_shared[6], old_shared[7]]),
+            1,
+            "old shared block refcount should be decremented after COW"
+        );
+    }
+
+    #[test]
+    fn write_removexattr_shared_external_block_preserves_sibling() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let left = fs
+            .create(&cx, root, OsStr::new("xattr_remove_left.txt"), 0o644, 0, 0)
+            .expect("create left")
+            .ino;
+        let right = fs
+            .create(&cx, root, OsStr::new("xattr_remove_right.txt"), 0o644, 0, 0)
+            .expect("create right")
+            .ino;
+
+        let original = vec![0x5A_u8; 512];
+        fs.setxattr(&cx, left, "user.large", &original, XattrSetMode::Set)
+            .expect("seed external xattr");
+
+        let left_inode = fs.read_inode(&cx, left).expect("read left inode");
+        let mut right_inode = fs.read_inode(&cx, right).expect("read right inode");
+        assert_ne!(
+            left_inode.file_acl, 0,
+            "left inode should use external xattr block"
+        );
+
+        let shared_block = BlockNumber(left_inode.file_acl);
+        let mut shared_data = fs
+            .read_block_vec(&cx, shared_block)
+            .expect("read shared xattr block");
+        shared_data[4..8].copy_from_slice(&2_u32.to_le_bytes());
+        fs.block_device_adapter()
+            .write_block(&cx, shared_block, &shared_data)
+            .expect("mark xattr block shared");
+
+        right_inode.file_acl = left_inode.file_acl;
+        let block_size = fs.ext4_superblock().expect("ext4 superblock").block_size;
+        right_inode.blocks = right_inode
+            .blocks
+            .saturating_add(u64::from(block_size / EXT4_SECTOR_SIZE));
+
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let csum_seed = sb.csum_seed();
+        let block_dev = fs.block_device_adapter();
+        let alloc = fs.require_alloc_state().expect("alloc state").lock();
+        ffs_inode::write_inode(
+            &cx,
+            &block_dev,
+            &alloc.geo,
+            &alloc.groups,
+            right,
+            &right_inode,
+            csum_seed,
+        )
+        .expect("persist right inode sharing xattr block");
+        drop(alloc);
+
+        assert!(
+            fs.removexattr(&cx, left, "user.large")
+                .expect("remove shared xattr from left"),
+            "left xattr should be removed"
+        );
+
+        let left_after = fs.read_inode(&cx, left).expect("read left after remove");
+        let right_after = fs.read_inode(&cx, right).expect("read right after remove");
+        assert_eq!(
+            left_after.file_acl, 0,
+            "left inode should drop the external xattr block after removal"
+        );
+        assert_eq!(
+            fs.getxattr(&cx, left, "user.large").expect("left getxattr"),
+            None
+        );
+        assert_eq!(
+            right_after.file_acl, shared_block.0,
+            "right inode should keep the original shared block"
+        );
+        assert_eq!(
+            fs.getxattr(&cx, right, "user.large")
+                .expect("right getxattr"),
+            Some(original.clone())
+        );
+
+        let old_shared = fs
+            .read_block_vec(&cx, BlockNumber(right_after.file_acl))
+            .expect("read surviving shared block");
+        assert_eq!(
+            u32::from_le_bytes([old_shared[4], old_shared[5], old_shared[6], old_shared[7]]),
+            1,
+            "shared xattr block refcount should drop to 1 after removal"
+        );
     }
 
     #[test]
@@ -19783,6 +21349,65 @@ mod tests {
         );
         assert_eq!(inode_after_second.blocks, inode_after_first.blocks);
         assert_eq!(&readback[..second.len()], second.as_slice());
+    }
+
+    #[test]
+    fn write_compressed_inode_blocks_overflow_reports_corruption() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("e2compr_blocks_overflow.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+
+        let free_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before compressed write");
+        let mut inode = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode before compressed write");
+        inode.blocks = u64::MAX;
+        persist_ext4_test_inode(&fs, &cx, attr.ino, &inode);
+
+        let payload = vec![b'Z'; 4096];
+        let err = fs
+            .write(&cx, attr.ino, 0, &payload)
+            .expect_err("compressed write should fail on inode.blocks overflow");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let free_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after compressed write failure");
+        assert_eq!(
+            free_after, free_before,
+            "failed compressed write should not leak cluster allocations"
+        );
+
+        let inode_after = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode after compressed write failure");
+        assert_eq!(
+            inode_after.size, 0,
+            "failed compressed write must not extend file"
+        );
+        let readback = fs
+            .read(&cx, attr.ino, 0, 32)
+            .expect("read after failed write");
+        assert!(
+            readback.is_empty(),
+            "failed compressed write must not publish file data"
+        );
     }
 
     #[test]
@@ -20394,6 +22019,32 @@ mod tests {
         assert_eq!(linked.ino, ino);
     }
 
+    #[test]
+    fn write_unlink_zero_links_count_reports_corruption() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("bad_nlink_ext4.txt"), 0o644, 0, 0)
+            .expect("create");
+        let mut inode = fs.read_inode(&cx, attr.ino).expect("read child inode");
+        inode.links_count = 0;
+        persist_ext4_test_inode(&fs, &cx, attr.ino, &inode);
+
+        let err = fs
+            .unlink(&cx, root, OsStr::new("bad_nlink_ext4.txt"))
+            .expect_err("unlink should fail on zero links_count corruption");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let looked_up = fs
+            .lookup(&cx, root, OsStr::new("bad_nlink_ext4.txt"))
+            .expect("failed unlink must leave directory entry intact");
+        assert_eq!(looked_up.ino, attr.ino);
+    }
+
     // ── Write-path edge-case tests (bd-43w8) ─────────────────────────
 
     #[test]
@@ -20496,6 +22147,42 @@ mod tests {
         let data = fs.read(&cx, ino, 0, 4096).expect("read");
         assert_eq!(&data[..3], b"new");
         assert_eq!(fs.getattr(&cx, ino).expect("ga3").size, 3);
+    }
+
+    #[test]
+    fn write_truncate_then_sparse_extend_zero_fills_gap_ext4() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("trunc_sparse_ext4.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        fs.write(&cx, ino, 0, b"hello world!")
+            .expect("initial write");
+        fs.setattr(
+            &cx,
+            ino,
+            &SetAttrRequest {
+                size: Some(5),
+                ..SetAttrRequest::default()
+            },
+        )
+        .expect("truncate to five bytes");
+
+        fs.write(&cx, ino, 10, b"Z").expect("sparse extend write");
+
+        let data = fs.read(&cx, ino, 0, 32).expect("read after sparse extend");
+        assert_eq!(&data[..5], b"hello");
+        assert!(
+            data[5..10].iter().all(|&b| b == 0),
+            "gap after truncate should be zero-filled, got {:?}",
+            &data[..11]
+        );
+        assert_eq!(data[10], b'Z');
     }
 
     #[test]
@@ -20622,6 +22309,75 @@ mod tests {
             .lookup(&cx, dir_b.ino, OsStr::new("child"))
             .expect("lookup in dst");
         assert_eq!(found.ino, child.ino);
+
+        let src_parent_attr = fs.getattr(&cx, dir_a.ino).expect("getattr src_parent");
+        let dst_parent_attr = fs.getattr(&cx, dir_b.ino).expect("getattr dst_parent");
+        assert_eq!(
+            src_parent_attr.nlink, 2,
+            "src parent should lose one child-dir link"
+        );
+        assert_eq!(
+            dst_parent_attr.nlink, 3,
+            "dst parent should gain exactly one child-dir link"
+        );
+    }
+
+    #[test]
+    fn write_rename_directory_across_parents_rejects_missing_dotdot() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let dir_a = fs
+            .mkdir(&cx, root, OsStr::new("corrupt_src_parent"), 0o755, 0, 0)
+            .expect("mkdir src_parent");
+        let dir_b = fs
+            .mkdir(&cx, root, OsStr::new("corrupt_dst_parent"), 0o755, 0, 0)
+            .expect("mkdir dst_parent");
+        let child = fs
+            .mkdir(&cx, dir_a.ino, OsStr::new("corrupt_child"), 0o755, 0, 0)
+            .expect("mkdir child");
+
+        let child_inode = fs.read_inode(&cx, child.ino).expect("read child inode");
+        let child_extents = fs
+            .collect_extents(&cx, &child_inode)
+            .expect("child extents");
+        let first_ext = child_extents.first().expect("directory data extent");
+        let dot_dot_block = BlockNumber(first_ext.physical_start);
+        let mut block = fs
+            .read_block_vec(&cx, dot_dot_block)
+            .expect("read dir block");
+        let reserved_tail = fs.ext4_dir_reserved_tail();
+        assert!(
+            ffs_dir::remove_entry(&mut block, b"..", reserved_tail).expect("remove '..'"),
+            "expected child directory to contain '..'"
+        );
+        fs.block_device_adapter()
+            .write_block(&cx, dot_dot_block, &block)
+            .expect("persist corrupted dir block");
+
+        let err = fs
+            .rename(
+                &cx,
+                dir_a.ino,
+                OsStr::new("corrupt_child"),
+                dir_b.ino,
+                OsStr::new("corrupt_child"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let src_lookup = fs
+            .lookup(&cx, dir_a.ino, OsStr::new("corrupt_child"))
+            .expect("child should remain in source parent");
+        assert_eq!(src_lookup.ino, child.ino);
+
+        let dst_err = fs
+            .lookup(&cx, dir_b.ino, OsStr::new("corrupt_child"))
+            .unwrap_err();
+        assert_eq!(dst_err.to_errno(), libc::ENOENT);
     }
 
     #[test]
@@ -20699,6 +22455,44 @@ mod tests {
     }
 
     #[test]
+    fn write_fallocate_punch_hole_inode_blocks_underflow_reports_corruption() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("falloc_underflow.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &[0xAB; 4096])
+            .expect("write one block");
+
+        let mut inode = fs.read_inode(&cx, attr.ino).expect("read file inode");
+        inode.blocks = 0;
+        persist_ext4_test_inode(&fs, &cx, attr.ino, &inode);
+
+        let err = fs
+            .fallocate(
+                &cx,
+                attr.ino,
+                0,
+                4096,
+                libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+            )
+            .expect_err("punch hole should fail on inode.blocks underflow");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let data = fs
+            .read(&cx, attr.ino, 0, 4096)
+            .expect("read after failed punch hole");
+        assert!(
+            data[..4096].iter().all(|&b| b == 0xAB),
+            "failed punch hole must leave file data intact"
+        );
+    }
+
+    #[test]
     fn write_create_many_files_dir_expansion() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -20724,6 +22518,92 @@ mod tests {
                 "expected {name} in readdir; got: {entry_names:?}"
             );
         }
+    }
+
+    #[test]
+    fn write_dir_expansion_parent_blocks_overflow_reports_corruption() {
+        let Some(probe_fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let probe_dir = probe_fs
+            .mkdir(&cx, root, OsStr::new("expansion_probe"), 0o755, 0, 0)
+            .expect("create probe dir")
+            .ino;
+        let base_size = probe_fs
+            .getattr(&cx, probe_dir)
+            .expect("getattr probe dir")
+            .size;
+
+        let trigger_index = (0..256)
+            .find(|i| {
+                let name = format!("fill_{i:03}_{}", "x".repeat(200));
+                probe_fs
+                    .create(&cx, probe_dir, OsStr::new(&name), 0o644, 0, 0)
+                    .expect("probe create");
+                probe_fs
+                    .getattr(&cx, probe_dir)
+                    .expect("getattr after probe create")
+                    .size
+                    > base_size
+            })
+            .expect("probe should discover a directory-expansion threshold");
+        assert!(
+            trigger_index > 0,
+            "test needs at least one create before expansion triggers"
+        );
+
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("expansion_target"), 0o755, 0, 0)
+            .expect("create target dir")
+            .ino;
+        for i in 0..trigger_index {
+            let name = format!("fill_{i:03}_{}", "x".repeat(200));
+            fs.create(&cx, dir, OsStr::new(&name), 0o644, 0, 0)
+                .expect("prefill target dir");
+        }
+        assert_eq!(
+            fs.getattr(&cx, dir).expect("getattr target dir").size,
+            base_size,
+            "prefill should stop immediately before directory expansion"
+        );
+
+        let free_blocks_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before expansion failure");
+        let free_inodes_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count before expansion failure");
+        let mut dir_inode = fs.read_inode(&cx, dir).expect("read target dir inode");
+        dir_inode.blocks = u64::MAX;
+        persist_ext4_test_inode(&fs, &cx, dir, &dir_inode);
+
+        let failing_name = format!("fill_{trigger_index:03}_{}", "x".repeat(200));
+        let err = fs
+            .create(&cx, dir, OsStr::new(&failing_name), 0o644, 0, 0)
+            .expect_err("create should fail on parent blocks overflow during dir expansion");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let lookup_err = fs
+            .lookup(&cx, dir, OsStr::new(&failing_name))
+            .expect_err("failed create must not publish directory entry");
+        assert_eq!(lookup_err.to_errno(), libc::ENOENT);
+        assert_eq!(
+            fs.count_free_blocks_in_group(&cx, GroupNumber(0))
+                .expect("free block count after expansion failure"),
+            free_blocks_before,
+            "failed directory expansion must not leak a directory block"
+        );
+        assert_eq!(
+            fs.count_free_inodes_in_group(&cx, GroupNumber(0))
+                .expect("free inode count after expansion failure"),
+            free_inodes_before,
+            "failed directory expansion must not leak the child inode"
+        );
     }
 
     #[test]
@@ -20782,6 +22662,49 @@ mod tests {
         let after = fs.getattr(&cx, attr.ino).expect("ga after");
         assert_eq!(before.size, after.size);
         assert_eq!(before.blocks, after.blocks);
+    }
+
+    #[test]
+    fn write_fallocate_prealloc_inode_blocks_overflow_reports_corruption() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("falloc_blocks_overflow.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        let free_blocks_before = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count before fallocate");
+
+        let mut inode = fs.read_inode(&cx, attr.ino).expect("read file inode");
+        inode.blocks = u64::MAX;
+        persist_ext4_test_inode(&fs, &cx, attr.ino, &inode);
+
+        let err = fs
+            .fallocate(&cx, attr.ino, 0, 4096, 0)
+            .expect_err("fallocate should fail on inode.blocks overflow");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let after = fs
+            .getattr(&cx, attr.ino)
+            .expect("getattr after failed fallocate");
+        assert_eq!(after.size, 0, "failed fallocate must not extend file size");
+        let free_blocks_after = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("free block count after fallocate");
+        assert_eq!(
+            free_blocks_after, free_blocks_before,
+            "failed fallocate should not leak block allocation"
+        );
     }
 
     #[test]
@@ -22910,6 +24833,95 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_create_invalid_name_rejected() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let err = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad/name"),
+                0o644,
+                0,
+                0,
+            )
+            .expect_err("create with slash should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let lookup_err = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad/name"),
+            )
+            .expect_err("invalid name must not be created");
+        assert_eq!(lookup_err.to_errno(), libc::ENOENT);
+    }
+
+    #[test]
+    fn btrfs_write_mkdir_invalid_name_rejected() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let err = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad/dir"),
+                0o755,
+                0,
+                0,
+            )
+            .expect_err("mkdir with slash should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let lookup_err = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad/dir"),
+            )
+            .expect_err("invalid dir name must not be created");
+        assert_eq!(lookup_err.to_errno(), libc::ENOENT);
+    }
+
+    #[test]
+    fn btrfs_write_create_non_directory_parent_returns_enotdir() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let file = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("parent-file.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create parent file");
+
+        let err = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                file.ino,
+                OsStr::new("child.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect_err("create under non-directory parent should fail");
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    #[test]
     fn btrfs_write_on_directory_returns_eisdir() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -23355,6 +25367,86 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_rename_invalid_new_name_preserves_source() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rename_src.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source");
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rename_src.txt"),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad/name"),
+            )
+            .expect_err("rename with slash should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rename_src.txt"),
+            )
+            .expect("source should remain after failed rename");
+        assert_eq!(looked_up.ino, attr.ino);
+    }
+
+    #[test]
+    fn btrfs_write_rename_into_non_directory_parent_returns_enotdir() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("rename_src.txt"),
+            0o644,
+            0,
+            0,
+        )
+        .expect("create source");
+        let non_dir = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("not_a_dir.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create non-directory target parent");
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rename_src.txt"),
+                non_dir.ino,
+                OsStr::new("moved.txt"),
+            )
+            .expect_err("rename into non-directory parent should fail");
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    #[test]
     fn btrfs_write_symlink() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -23376,6 +25468,35 @@ mod tests {
             .readlink(&cx, &mut RequestScope::empty(), attr.ino)
             .unwrap();
         assert_eq!(&target, b"/tmp/target");
+    }
+
+    #[test]
+    fn btrfs_write_symlink_invalid_name_rejected() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let err = ops
+            .symlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad/link"),
+                Path::new("/tmp/target"),
+                0,
+                0,
+            )
+            .expect_err("symlink with slash should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let lookup_err = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad/link"),
+            )
+            .expect_err("invalid symlink name must not be created");
+        assert_eq!(lookup_err.to_errno(), libc::ENOENT);
     }
 
     #[test]
@@ -23452,6 +25573,166 @@ mod tests {
             )
             .unwrap();
         assert_eq!(a.ino, b.ino);
+    }
+
+    #[test]
+    fn btrfs_write_link_invalid_name_rolls_back_nlink() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("link_src.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source");
+        assert_eq!(attr.nlink, 1);
+
+        let err = ops
+            .link(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad/link"),
+            )
+            .expect_err("link with slash should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let updated = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after failed link");
+        assert_eq!(updated.nlink, 1, "failed link must not bump nlink");
+    }
+
+    #[test]
+    fn btrfs_write_link_non_directory_parent_returns_enotdir() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let src = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("link-src.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source");
+        let non_dir = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("not_a_dir.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create non-directory parent");
+
+        let err = ops
+            .link(
+                &cx,
+                &mut RequestScope::empty(),
+                src.ino,
+                non_dir.ino,
+                OsStr::new("hardlink.txt"),
+            )
+            .expect_err("link into non-directory parent should fail");
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    #[test]
+    fn btrfs_write_link_rejects_malformed_existing_dir_index_without_partial_mutation() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("original.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.link(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            InodeNumber(1),
+            OsStr::new("link_a.txt"),
+        )
+        .unwrap();
+
+        let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        let dir_index_key = BtrfsKey {
+            objectid: 256,
+            item_type: BTRFS_ITEM_DIR_INDEX,
+            offset: attr.ino.0,
+        };
+        alloc.fs_tree.update(&dir_index_key, &[0xAA, 0xBB]).unwrap();
+        drop(alloc);
+
+        let err = ops
+            .link(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                InodeNumber(1),
+                OsStr::new("link_b.txt"),
+            )
+            .expect_err("malformed existing dir_index should fail closed");
+        assert!(matches!(
+            err,
+            FfsError::Corruption { .. } | FfsError::Format(_)
+        ));
+
+        let attr_after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("source inode should remain readable");
+        assert_eq!(attr_after.nlink, 2, "failed link must not bump nlink");
+
+        let original = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("original.txt"),
+            )
+            .expect("original name should remain");
+        assert_eq!(original.ino, attr.ino);
+
+        let link_a = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("link_a.txt"),
+            )
+            .expect("existing hard link should remain");
+        assert_eq!(link_a.ino, attr.ino);
+
+        let missing = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("link_b.txt"),
+            )
+            .expect_err("new hard link name must not appear after failed link");
+        assert_eq!(missing.to_errno(), libc::ENOENT);
     }
 
     #[test]
@@ -24023,6 +26304,64 @@ mod tests {
         let mut names = ops.listxattr(&cx, attr.ino).unwrap();
         names.sort();
         assert_eq!(names, vec![collision_b]);
+    }
+
+    #[test]
+    fn btrfs_write_xattr_updates_ctime() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("xattr_ctime.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        let before_set = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .unwrap()
+            .ctime;
+        std::thread::sleep(Duration::from_millis(2));
+
+        ops.setxattr(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            "user.key",
+            b"value",
+            XattrSetMode::Set,
+        )
+        .unwrap();
+
+        let after_set = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .unwrap()
+            .ctime;
+        assert!(
+            after_set > before_set,
+            "setxattr should advance ctime: before={before_set:?} after={after_set:?}"
+        );
+
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(
+            ops.removexattr(&cx, &mut RequestScope::empty(), attr.ino, "user.key")
+                .unwrap()
+        );
+
+        let after_remove = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .unwrap()
+            .ctime;
+        assert!(
+            after_remove > after_set,
+            "removexattr should advance ctime: after_set={after_set:?} after_remove={after_remove:?}"
+        );
     }
 
     #[test]
@@ -25765,6 +28104,76 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_unlink_last_reference_rejects_malformed_extent_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("corrupt_doomed.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let payload = vec![0x5A_u8; 8192];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .unwrap();
+
+        let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        let extent_start = BtrfsKey {
+            objectid: attr.ino.0,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let extent_end = BtrfsKey {
+            objectid: attr.ino.0,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        let extents = alloc.fs_tree.range(&extent_start, &extent_end).unwrap();
+        let extent_key = extents
+            .iter()
+            .find(|(_, bytes)| {
+                matches!(
+                    parse_extent_data(bytes),
+                    Ok(BtrfsExtentData::Regular { .. })
+                )
+            })
+            .map(|(key, _)| key.clone())
+            .expect("regular extent key");
+        alloc
+            .fs_tree
+            .update(&extent_key, &[0xAA, 0xBB, 0xCC])
+            .unwrap();
+        drop(alloc);
+
+        let err = ops
+            .unlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("corrupt_doomed.txt"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let lookup = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("corrupt_doomed.txt"),
+            )
+            .expect("unlink should fail closed and preserve directory entry");
+        assert_eq!(lookup.ino, attr.ino);
+    }
+
+    #[test]
     fn btrfs_write_hard_link_unlink_preserves_data() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -25904,6 +28313,242 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["link_b.txt", "original.txt"]);
+    }
+
+    #[test]
+    fn btrfs_write_hard_links_same_parent_readdir_shows_all_names() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("original.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.link(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            InodeNumber(1),
+            OsStr::new("link_a.txt"),
+        )
+        .unwrap();
+        ops.link(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            InodeNumber(1),
+            OsStr::new("link_b.txt"),
+        )
+        .unwrap();
+
+        let entries = ops
+            .readdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0)
+            .unwrap();
+        let mut names: Vec<_> = entries
+            .into_iter()
+            .map(|entry| String::from_utf8_lossy(&entry.name).into_owned())
+            .filter(|name| name != "." && name != "..")
+            .collect();
+        names.sort();
+        assert!(
+            names.contains(&"original.txt".to_string())
+                && names.contains(&"link_a.txt".to_string())
+                && names.contains(&"link_b.txt".to_string()),
+            "expected all hard-link names in readdir, got: {names:?}"
+        );
+
+        ops.unlink(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("link_a.txt"),
+        )
+        .unwrap();
+
+        let entries = ops
+            .readdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0)
+            .unwrap();
+        let mut names: Vec<_> = entries
+            .into_iter()
+            .map(|entry| String::from_utf8_lossy(&entry.name).into_owned())
+            .filter(|name| name != "." && name != "..")
+            .collect();
+        names.sort();
+        assert!(
+            names.contains(&"original.txt".to_string())
+                && names.contains(&"link_b.txt".to_string())
+                && !names.contains(&"link_a.txt".to_string()),
+            "expected surviving hard-link names after unlink, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_unlink_missing_inode_ref_reports_corruption() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("missing_ref.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let ref_key = BtrfsKey {
+                objectid: attr.ino.0,
+                item_type: BTRFS_ITEM_INODE_REF,
+                offset: 256,
+            };
+            alloc
+                .fs_tree
+                .delete(&ref_key)
+                .expect("delete inode_ref key");
+        }
+
+        let err = ops
+            .unlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("missing_ref.txt"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let looked_up = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("missing_ref.txt"),
+            )
+            .expect("failed unlink must leave directory entry intact");
+        assert_eq!(looked_up.ino, attr.ino);
+    }
+
+    #[test]
+    fn btrfs_write_unlink_zero_nlink_reports_corruption() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("bad_nlink.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, attr.ino.0)
+                .expect("read child inode");
+            inode.nlink = 0;
+            let key = BtrfsKey {
+                objectid: attr.ino.0,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .update(&key, &inode.to_bytes())
+                .expect("corrupt inode nlink");
+        }
+
+        let err = ops
+            .unlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("bad_nlink.txt"),
+            )
+            .expect_err("unlink should fail on zero nlink corruption");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let looked_up = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("bad_nlink.txt"),
+            )
+            .expect("failed unlink must leave directory entry intact");
+        assert_eq!(looked_up.ino, attr.ino);
+    }
+
+    #[test]
+    fn btrfs_mkdir_parent_nlink_overflow_preserves_source_state() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let root = InodeNumber(1);
+        let root_oid = fs
+            .btrfs_canonical_inode(root)
+            .expect("canonical root inode");
+
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let mut inode = fs
+                .btrfs_read_inode_from_tree(&alloc, root_oid)
+                .expect("read root inode");
+            inode.nlink = u32::MAX;
+            let key = BtrfsKey {
+                objectid: root_oid,
+                item_type: BTRFS_ITEM_INODE_ITEM,
+                offset: 0,
+            };
+            alloc
+                .fs_tree
+                .update(&key, &inode.to_bytes())
+                .expect("corrupt root nlink");
+        }
+
+        let err = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("overflow-dir"),
+                0o755,
+                0,
+                0,
+            )
+            .expect_err("mkdir should fail before partial mutation");
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        let lookup_err = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                root,
+                OsStr::new("overflow-dir"),
+            )
+            .expect_err("failed mkdir must not publish destination");
+        assert!(
+            matches!(lookup_err, FfsError::NotFound(_)),
+            "overflow-dir should remain absent after failed mkdir, got {lookup_err:?}"
+        );
     }
 
     #[test]
