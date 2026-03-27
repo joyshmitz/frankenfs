@@ -142,7 +142,7 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         .args([
             "-w",
             "-R",
-            &format!("set_inode_field hello.txt uid {}", uid),
+            &format!("set_inode_field hello.txt uid {uid}"),
             image.to_str().unwrap(),
         ])
         .output()
@@ -152,7 +152,7 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         .args([
             "-w",
             "-R",
-            &format!("set_inode_field hello.txt gid {}", gid),
+            &format!("set_inode_field hello.txt gid {gid}"),
             image.to_str().unwrap(),
         ])
         .output()
@@ -414,6 +414,7 @@ fn try_mount_ffs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Background
     let opts = OpenOptions {
         skip_validation: false,
         ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        mvcc_wal_path: Some(image.with_extension("wal")),
         ..OpenOptions::default()
     };
     let mut fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");

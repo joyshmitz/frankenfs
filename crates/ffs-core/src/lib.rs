@@ -7894,9 +7894,27 @@ impl OpenFs {
             }
 
             // Look up the child to get its inode number.
-            let entry = self
-                .lookup_name(cx, &parent_inode, name)?
-                .ok_or_else(|| FfsError::NotFound(String::from_utf8_lossy(name).into_owned()))?;
+            let entry = match self.lookup_name(cx, &parent_inode, name)? {
+                Some(e) => e,
+                None => {
+                    eprintln!(
+                        "DEBUG: lookup_name failed for {:?} in parent {}",
+                        String::from_utf8_lossy(name),
+                        parent.0
+                    );
+                    let extents = self.collect_extents(cx, &parent_inode)?;
+                    eprintln!("DEBUG: Parent extents: {:?}", extents);
+                    for ext in extents {
+                        for block in Self::extent_phys_blocks(&ext) {
+                            let data = self.read_block_vec(cx, block)?;
+                            eprintln!("DEBUG: block {} contents length: {}", block.0, data.len());
+                        }
+                    }
+                    return Err(FfsError::NotFound(
+                        String::from_utf8_lossy(name).into_owned(),
+                    ));
+                }
+            };
             let child_ino = InodeNumber(u64::from(entry.inode));
             let child_inode = self.read_inode(cx, child_ino)?;
 
@@ -7930,7 +7948,7 @@ impl OpenFs {
                 for block in Self::extent_phys_blocks(ext) {
                     let mut data = self.read_block_vec(cx, block)?;
                     if ffs_dir::remove_entry(&mut data, name, reserved_tail)? {
-                        block_dev.write_block(cx, block, &data)?;
+                        tx_dev.write_block(cx, block, &data)?;
                         removed = true;
                         break 'outer;
                     }
@@ -24069,7 +24087,11 @@ mod tests {
                         .and_then(Value::as_str)
                         .is_some_and(|value| value.starts_with("btrfs-fallocate-"))
             })
-            .unwrap_or_else(|| panic!("expected btrfs fallocate success log event: {logs:?}"));
+            .unwrap_or_else(|| {
+                let binding = buffer.inner.lock().unwrap();
+                let raw = String::from_utf8_lossy(&binding);
+                panic!("expected btrfs fallocate success log event: {logs:?}\nRAW BUFFER: {raw}");
+            });
 
         assert_eq!(
             applied.get("scenario_id").and_then(Value::as_str),
@@ -25983,6 +26005,55 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_truncate_partial_then_append_does_not_resurrect_tail() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("truncate_append.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            b"hello world!",
+        )
+        .unwrap();
+
+        ops.setattr(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            &SetAttrRequest {
+                size: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 5, b"X")
+            .unwrap();
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .unwrap();
+        assert_eq!(after.size, 6);
+
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
+            .unwrap();
+        assert_eq!(data, b"helloX");
+    }
+
+    #[test]
     fn btrfs_write_rename_updates_dotdot() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -26284,6 +26355,46 @@ mod tests {
             b"ORIGINAL_DATA",
             "fallocate destroyed existing data"
         );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_overlapping_existing_extent_preserves_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("overlap.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+
+        let mut payload = vec![0u8; 8192];
+        for (idx, byte) in payload.iter_mut().enumerate() {
+            *byte = b'A' + u8::try_from(idx % 26).unwrap();
+        }
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .unwrap();
+
+        // Preallocate the second half of the already-written extent. This must not insert a
+        // competing prealloc extent over live data.
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 4096, 4096, 0)
+            .unwrap();
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .unwrap();
+        assert_eq!(after.size, 8192);
+
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192)
+            .unwrap();
+        assert_eq!(data, payload);
     }
 
     #[test]
