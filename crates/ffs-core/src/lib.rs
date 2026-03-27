@@ -10686,6 +10686,13 @@ impl OpenFs {
 
         let mut alloc = alloc_mutex.lock();
 
+        if self
+            .btrfs_lookup_dir_entry(&alloc, parent_oid, new_name)
+            .is_ok()
+        {
+            return Err(FfsError::Exists);
+        }
+
         // Get the target inode to determine its file type.
         let inode = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
         let ft = if Self::btrfs_mode_to_file_type(inode.mode) == FileType::Directory {
@@ -11500,18 +11507,30 @@ impl OpenFs {
             .or_else(|_| alloc.fs_tree.insert(dir_item_key, &merged))
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
-        // Also insert a DIR_INDEX entry. Use the child objectid as the index
-        // for a simple monotonic ordering. DIR_INDEX keys are unique per child,
-        // so no hash-collision merging is needed here.
+        // Also insert a DIR_INDEX entry. The offset uses the child objectid,
+        // but the payload can still carry multiple names when the same inode
+        // has several hard links in the same parent.
         let dir_index_key = BtrfsKey {
             objectid: parent_oid,
             item_type: BTRFS_ITEM_DIR_INDEX,
             offset: item.child_objectid,
         };
+        let merged_index = alloc
+            .fs_tree
+            .range(&dir_index_key, &dir_index_key)
+            .ok()
+            .and_then(|items| items.first().map(|(_, v)| v.clone()))
+            .map_or_else(
+                || new_bytes.clone(),
+                |mut existing| {
+                    existing.extend_from_slice(&new_bytes);
+                    existing
+                },
+            );
         alloc
             .fs_tree
-            .update(&dir_index_key, &new_bytes)
-            .or_else(|_| alloc.fs_tree.insert(dir_index_key, &new_bytes))
+            .update(&dir_index_key, &merged_index)
+            .or_else(|_| alloc.fs_tree.insert(dir_index_key, &merged_index))
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
 
         Ok(())
@@ -11548,7 +11567,7 @@ impl OpenFs {
     }
 
     /// Remove a directory entry (DIR_ITEM and DIR_INDEX) from the FS tree.
-    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    #[allow(clippy::unused_self)]
     fn btrfs_remove_dir_entry(
         &self,
         alloc: &mut BtrfsAllocState,
@@ -11563,32 +11582,48 @@ impl OpenFs {
         };
 
         // btrfs stores multiple dir entries with the same CRC32C hash in a
-        // single payload. We must parse, remove only the matching entry, and
-        // store the remaining entries back (or delete the key if empty).
-        if let Ok(existing) = alloc.fs_tree.range(&dir_item_key, &dir_item_key) {
-            if let Some((_, edata)) = existing.first() {
-                if let Ok(entries) = parse_dir_items(edata) {
-                    let remaining: Vec<_> = entries.iter().filter(|e| e.name != name).collect();
-                    if remaining.is_empty() {
-                        if let Err(e) = alloc.fs_tree.delete(&dir_item_key) {
-                            warn!("unlink: failed to delete dir_item {dir_item_key:?}: {e:?}");
-                        }
-                    } else {
-                        let mut payload = Vec::new();
-                        for entry in &remaining {
-                            payload.extend_from_slice(&entry.to_bytes());
-                        }
-                        if let Err(e) = alloc.fs_tree.update(&dir_item_key, &payload) {
-                            warn!("unlink: failed to update dir_item {dir_item_key:?}: {e:?}");
-                        }
-                    }
-                } else {
-                    // Can't parse existing entries; delete the whole key.
-                    if let Err(e) = alloc.fs_tree.delete(&dir_item_key) {
-                        warn!("unlink: failed to delete unparseable dir_item: {e:?}");
-                    }
-                }
+        // single payload. Remove only the matching entry and fail hard if the
+        // expected name is missing so callers do not silently desynchronize
+        // dir items from inode refs and nlink state.
+        let dir_item_payload = alloc
+            .fs_tree
+            .range(&dir_item_key, &dir_item_key)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .first()
+            .map(|(_, payload)| payload.clone())
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "dir_item missing expected name {} in parent {parent_oid}",
+                    String::from_utf8_lossy(name)
+                ),
+            })?;
+        let entries = parse_dir_items(&dir_item_payload).map_err(|e| parse_to_ffs_error(&e))?;
+        let original_len = entries.len();
+        let remaining: Vec<_> = entries.iter().filter(|e| e.name != name).collect();
+        if remaining.len() == original_len {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "dir_item missing expected name {} in parent {parent_oid}",
+                    String::from_utf8_lossy(name)
+                ),
+            });
+        }
+        if remaining.is_empty() {
+            alloc
+                .fs_tree
+                .delete(&dir_item_key)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        } else {
+            let mut payload = Vec::new();
+            for entry in &remaining {
+                payload.extend_from_slice(&entry.to_bytes());
             }
+            alloc
+                .fs_tree
+                .update(&dir_item_key, &payload)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
 
         // Also remove the DIR_INDEX. We need to find it by scanning.
@@ -11602,17 +11637,54 @@ impl OpenFs {
             item_type: BTRFS_ITEM_DIR_INDEX,
             offset: u64::MAX,
         };
-        if let Ok(indices) = alloc.fs_tree.range(&range_start, &range_end) {
-            for (key, data) in &indices {
-                if let Ok(entries) = parse_dir_items(data) {
-                    if entries.iter().any(|e| e.name == name) {
-                        if let Err(e) = alloc.fs_tree.delete(key) {
-                            warn!("unlink: failed to delete dir_index {key:?}: {e:?}");
-                        }
-                        break;
-                    }
-                }
+        let indices = alloc
+            .fs_tree
+            .range(&range_start, &range_end)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let mut found_dir_index = None;
+        for (key, data) in &indices {
+            let entries = parse_dir_items(data).map_err(|e| parse_to_ffs_error(&e))?;
+            if entries.iter().any(|e| e.name == name) {
+                found_dir_index = Some((*key, entries));
+                break;
             }
+        }
+        let (dir_index_key, dir_index_entries) =
+            found_dir_index.ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "dir_index missing expected name {} in parent {parent_oid}",
+                    String::from_utf8_lossy(name)
+                ),
+            })?;
+        let original_index_len = dir_index_entries.len();
+        let remaining_index_entries: Vec<_> = dir_index_entries
+            .iter()
+            .filter(|entry| entry.name != name)
+            .collect();
+        if remaining_index_entries.len() == original_index_len {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "dir_index missing expected name {} in parent {parent_oid}",
+                    String::from_utf8_lossy(name)
+                ),
+            });
+        }
+        if remaining_index_entries.is_empty() {
+            alloc
+                .fs_tree
+                .delete(&dir_index_key)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        } else {
+            let mut payload = Vec::new();
+            for entry in &remaining_index_entries {
+                payload.extend_from_slice(&entry.to_bytes());
+            }
+            alloc
+                .fs_tree
+                .update(&dir_index_key, &payload)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         }
 
         Ok(())
@@ -25856,6 +25928,30 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_remove_dir_entry_missing_name_reports_corruption() {
+        let (fs, _cx) = open_writable_btrfs();
+        let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        let parent_oid = 256;
+        let dir_item = BtrfsDirItem {
+            child_objectid: 9001,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: BTRFS_FT_REG_FILE,
+            name: b"present.txt".to_vec(),
+        };
+        fs.btrfs_insert_dir_entry(&mut alloc, parent_oid, &dir_item)
+            .unwrap();
+
+        let err = fs
+            .btrfs_remove_dir_entry(&mut alloc, parent_oid, b"missing.txt")
+            .expect_err("missing dir entry should be treated as corruption");
+        drop(alloc);
+
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
     fn btrfs_write_hard_link_preserves_symlink_type() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -25894,6 +25990,61 @@ mod tests {
             .expect("lookup linked symlink");
         assert_eq!(looked_up.kind, FileType::Symlink);
         assert_eq!(looked_up.ino, sym_attr.ino);
+    }
+
+    #[test]
+    fn btrfs_write_hard_link_existing_name_returns_exists() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let target = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("target.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create target");
+        let occupied = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("occupied.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create occupied");
+
+        let err = ops
+            .link(
+                &cx,
+                &mut RequestScope::empty(),
+                target.ino,
+                InodeNumber(1),
+                OsStr::new("occupied.txt"),
+            )
+            .expect_err("hard link should reject an existing destination name");
+        assert!(matches!(err, FfsError::Exists));
+
+        let target_after = ops
+            .getattr(&cx, &mut RequestScope::empty(), target.ino)
+            .expect("target inode survives");
+        assert_eq!(target_after.nlink, 1);
+
+        let occupied_lookup = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("occupied.txt"),
+            )
+            .expect("occupied entry remains intact");
+        assert_eq!(occupied_lookup.ino, occupied.ino);
     }
 
     #[test]
