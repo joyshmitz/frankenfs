@@ -382,14 +382,18 @@ fn replay_jbd2_inner(
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
                 stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
+                let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit) else {
+                    break;
+                };
                 let tags = parse_descriptor_tags(raw.as_slice(), is_64bit);
+                debug_assert_eq!(tags.len(), tag_count);
                 stats.descriptor_tags = stats
                     .descriptor_tags
                     .saturating_add(u64::try_from(tags.len()).unwrap_or(u64::MAX));
 
                 // Check if all data blocks fit within the journal region.
-                let tag_count = u64::try_from(tags.len()).unwrap_or(u64::MAX);
-                if tag_count >= total_blocks {
+                let tag_count_u64 = u64::try_from(tag_count).unwrap_or(u64::MAX);
+                if tag_count_u64 >= total_blocks {
                     break;
                 }
 
@@ -413,8 +417,8 @@ fn replay_jbd2_inner(
                 let txn = pending.entry(header.sequence).or_default();
                 txn.writes.extend(staged);
 
-                idx = idx.saturating_add(1).saturating_add(tag_count);
-                blocks_scanned = blocks_scanned.saturating_add(tag_count);
+                idx = idx.saturating_add(1).saturating_add(tag_count_u64);
+                blocks_scanned = blocks_scanned.saturating_add(tag_count_u64);
             }
             JBD2_BLOCKTYPE_COMMIT => {
                 stats.commit_blocks = stats.commit_blocks.saturating_add(1);
@@ -731,29 +735,15 @@ impl Jbd2Writer {
                 }
             }
 
-            let Some(header) = Jbd2Header::parse(raw.as_slice()) else {
+            let Some((next_head, next_seq)) =
+                scan_committed_tail_transaction(cx, dev, region, head, is_64bit)?
+            else {
                 break;
             };
-            if header.magic != JBD2_MAGIC {
-                break;
+            if max_seq == start_seq || journal_seq_is_newer_or_equal(next_seq, max_seq) {
+                max_seq = next_seq;
             }
-
-            if max_seq == start_seq || journal_seq_is_newer_or_equal(header.sequence, max_seq) {
-                max_seq = header.sequence.wrapping_add(1);
-            }
-
-            match header.block_type {
-                JBD2_BLOCKTYPE_DESCRIPTOR => {
-                    let tags = parse_descriptor_tags(raw.as_slice(), is_64bit);
-                    // Advance past descriptor + its data blocks.
-                    head = head
-                        .saturating_add(1)
-                        .saturating_add(u64::try_from(tags.len()).unwrap_or(u64::MAX));
-                }
-                _ => {
-                    head = head.saturating_add(1);
-                }
-            }
+            head = next_head;
         }
 
         Ok(Self {
@@ -876,6 +866,7 @@ impl Jbd2Writer {
 
         let mut stats = Jbd2WriteStats::default();
         let seq = txn.sequence;
+        let mut staged_head = self.head;
 
         // --- Phase 1: descriptor + data blocks ---
         let tag_size = if self.is_64bit {
@@ -925,12 +916,12 @@ impl Jbd2Writer {
                 off += tag_size;
             }
 
-            let desc_block = self.alloc_block()?;
+            let desc_block = self.alloc_block(&mut staged_head)?;
             dev.write_block(cx, desc_block, &desc)?;
             stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
 
             for (_, payload) in chunk {
-                let data_block = self.alloc_block()?;
+                let data_block = self.alloc_block(&mut staged_head)?;
                 let mut padded = vec![0_u8; bs];
                 let copy_len = payload.len().min(bs);
                 padded[..copy_len].copy_from_slice(&payload[..copy_len]);
@@ -983,7 +974,7 @@ impl Jbd2Writer {
                     off += entry_size;
                 }
 
-                let rev_block = self.alloc_block()?;
+                let rev_block = self.alloc_block(&mut staged_head)?;
                 dev.write_block(cx, rev_block, &revoke)?;
                 stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
 
@@ -995,9 +986,11 @@ impl Jbd2Writer {
         let mut commit = vec![0_u8; bs];
         encode_jbd2_header(&mut commit, JBD2_BLOCKTYPE_COMMIT, seq);
 
-        let commit_blk = self.alloc_block()?;
+        let commit_blk = self.alloc_block(&mut staged_head)?;
         dev.write_block(cx, commit_blk, &commit)?;
         stats.commit_blocks = stats.commit_blocks.saturating_add(1);
+
+        self.head = staged_head;
 
         tracing::trace!(
             target: "ffs::journal",
@@ -1013,12 +1006,12 @@ impl Jbd2Writer {
     }
 
     /// Allocate the next journal block, advancing head.
-    fn alloc_block(&mut self) -> Result<BlockNumber> {
-        if self.head >= self.region.blocks {
+    fn alloc_block(&self, head: &mut u64) -> Result<BlockNumber> {
+        if *head >= self.region.blocks {
             return Err(FfsError::NoSpace);
         }
-        let block = resolve_region_block(self.region, self.head)?;
-        self.head = self.head.saturating_add(1);
+        let block = resolve_region_block(self.region, *head)?;
+        *head = head.saturating_add(1);
         Ok(block)
     }
 }
@@ -1705,6 +1698,97 @@ fn parse_descriptor_tags(block: &[u8], is_64bit: bool) -> Vec<DescriptorTag> {
     tags
 }
 
+fn strict_descriptor_tag_count(block: &[u8], is_64bit: bool) -> Option<usize> {
+    let tag_size = if is_64bit {
+        JBD2_TAG_SIZE_64
+    } else {
+        JBD2_TAG_SIZE_32
+    };
+
+    let mut offset = JBD2_HEADER_SIZE;
+    let mut count = 0_usize;
+
+    while offset.checked_add(tag_size)? <= block.len() {
+        let flags = read_be_u32(block, offset.checked_add(4)?)?;
+        count = count.checked_add(1)?;
+        if (flags & JBD2_TAG_FLAG_LAST) != 0 {
+            return Some(count);
+        }
+        offset = offset.checked_add(tag_size)?;
+        if (flags & JBD2_TAG_FLAG_SAME_UUID) == 0 {
+            offset = offset.checked_add(16)?;
+        }
+    }
+
+    None
+}
+
+fn scan_committed_tail_transaction(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    region: JournalRegion,
+    start_idx: u64,
+    is_64bit: bool,
+) -> Result<Option<(u64, u32)>> {
+    let mut idx = start_idx;
+    let mut sequence = None;
+    let mut saw_body = false;
+
+    while idx < region.blocks {
+        let block = resolve_region_block(region, idx)?;
+        let raw = dev.read_block(cx, block)?;
+        let Some(header) = Jbd2Header::parse(raw.as_slice()) else {
+            return Ok(None);
+        };
+        if header.magic != JBD2_MAGIC {
+            return Ok(None);
+        }
+
+        let seq = *sequence.get_or_insert(header.sequence);
+        if header.sequence != seq {
+            return Ok(None);
+        }
+
+        match header.block_type {
+            JBD2_BLOCKTYPE_DESCRIPTOR => {
+                saw_body = true;
+                let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit) else {
+                    return Ok(None);
+                };
+                let advance = 1_u64
+                    .checked_add(u64::try_from(tag_count).unwrap_or(u64::MAX))
+                    .ok_or_else(|| {
+                        FfsError::Format(
+                            "descriptor tail advance overflow while opening journal".to_owned(),
+                        )
+                    })?;
+                let next_idx = idx.checked_add(advance).ok_or_else(|| {
+                    FfsError::Format(
+                        "descriptor tail index overflow while opening journal".to_owned(),
+                    )
+                })?;
+                if next_idx > region.blocks {
+                    return Ok(None);
+                }
+                idx = next_idx;
+            }
+            JBD2_BLOCKTYPE_REVOKE => {
+                saw_body = true;
+                idx = idx.saturating_add(1);
+            }
+            JBD2_BLOCKTYPE_COMMIT if saw_body => {
+                let next_head = idx.checked_add(1).ok_or_else(|| {
+                    FfsError::Format("commit tail index overflow while opening journal".to_owned())
+                })?;
+                return Ok(Some((next_head, seq.wrapping_add(1))));
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    Ok(None)
+}
+
 #[must_use]
 fn parse_revoke_entries(block: &[u8], is_64bit: bool) -> Vec<BlockNumber> {
     let mut out = Vec::new();
@@ -1919,6 +2003,7 @@ mod tests {
     use super::*;
     use parking_lot::RwLock;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
     struct MemBlockDevice {
@@ -1989,6 +2074,51 @@ mod tests {
 
         fn sync(&self, _cx: &Cx) -> Result<()> {
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailNthWriteBlockDevice {
+        inner: MemBlockDevice,
+        fail_on_write: usize,
+        writes_seen: AtomicUsize,
+    }
+
+    impl FailNthWriteBlockDevice {
+        fn new(block_size: u32, block_count: u64, fail_on_write: usize) -> Self {
+            Self {
+                inner: MemBlockDevice::new(block_size, block_count),
+                fail_on_write,
+                writes_seen: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl BlockDevice for FailNthWriteBlockDevice {
+        fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<ffs_block::BlockBuf> {
+            self.inner.read_block(cx, block)
+        }
+
+        fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+            let write_idx = self.writes_seen.fetch_add(1, Ordering::Relaxed) + 1;
+            if write_idx == self.fail_on_write {
+                return Err(FfsError::Format(format!(
+                    "injected write failure on attempt {write_idx}"
+                )));
+            }
+            self.inner.write_block(cx, block, data)
+        }
+
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+
+        fn sync(&self, cx: &Cx) -> Result<()> {
+            self.inner.sync(cx)
         }
     }
 
@@ -2485,6 +2615,38 @@ mod tests {
     }
 
     #[test]
+    fn jbd2_writer_open_ignores_incomplete_trailing_transaction() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+
+        {
+            let mut writer = Jbd2Writer::new(region, 1);
+            let mut txn = writer.begin_transaction();
+            txn.add_write(BlockNumber(5), vec![0xAA; 512]);
+            writer.commit_transaction(&cx, &dev, &txn).expect("commit");
+            assert_eq!(writer.head(), 3);
+            assert_eq!(writer.next_seq(), 2);
+        }
+
+        let mut desc = vec![0_u8; 512];
+        encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, 2);
+        let target_u32 = 9_u32;
+        desc[JBD2_HEADER_SIZE..JBD2_HEADER_SIZE + 4].copy_from_slice(&target_u32.to_be_bytes());
+        desc[JBD2_HEADER_SIZE + 4..JBD2_HEADER_SIZE + 8]
+            .copy_from_slice(&JBD2_TAG_FLAG_LAST.to_be_bytes());
+        dev.raw_write(BlockNumber(103), desc);
+        dev.raw_write(BlockNumber(104), vec![0xFF; 512]);
+
+        let reopened = Jbd2Writer::open(&cx, &dev, region, 1).expect("open");
+        assert_eq!(reopened.head(), 3);
+        assert_eq!(reopened.next_seq(), 2);
+    }
+
+    #[test]
     fn jbd2_writer_journal_full_returns_no_space() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 256);
@@ -2579,6 +2741,34 @@ mod tests {
         }
 
         // Re-open and verify head/seq discovery.
+        let reopened = Jbd2Writer::open(&cx, &dev, region, 1).expect("open");
+        assert_eq!(reopened.head(), 3);
+        assert_eq!(reopened.next_seq(), 2);
+    }
+
+    #[test]
+    fn jbd2_writer_open_stops_at_malformed_descriptor_tail() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+
+        {
+            let mut writer = Jbd2Writer::new(region, 1);
+            let mut txn = writer.begin_transaction();
+            txn.add_write(BlockNumber(5), vec![0xAA; 512]);
+            writer.commit_transaction(&cx, &dev, &txn).expect("commit");
+            assert_eq!(writer.head(), 3);
+            assert_eq!(writer.next_seq(), 2);
+        }
+
+        let mut malformed = vec![0_u8; 512];
+        encode_jbd2_header(&mut malformed, JBD2_BLOCKTYPE_DESCRIPTOR, 2);
+        dev.write_block(&cx, BlockNumber(103), &malformed)
+            .expect("write malformed descriptor");
+
         let reopened = Jbd2Writer::open(&cx, &dev, region, 1).expect("open");
         assert_eq!(reopened.head(), 3);
         assert_eq!(reopened.next_seq(), 2);
@@ -4479,6 +4669,31 @@ mod tests {
             matches!(err, FfsError::Format(message) if message.contains("exceeds journal block size"))
         );
         assert_eq!(writer.head(), 0, "failed commit must not advance head");
+    }
+
+    #[test]
+    fn commit_transaction_write_failure_does_not_advance_head() {
+        let cx = test_cx();
+        let dev = FailNthWriteBlockDevice::new(512, 32, 2);
+        let region = JournalRegion {
+            start: BlockNumber(0),
+            blocks: 8,
+        };
+        let mut writer = Jbd2Writer::new(region, 1);
+        let mut txn = writer.begin_transaction();
+        txn.add_write(BlockNumber(7), vec![0xAB; 512]);
+
+        let err = writer
+            .commit_transaction(&cx, &dev, &txn)
+            .expect_err("second write should fail");
+        assert!(
+            matches!(err, FfsError::Format(message) if message.contains("injected write failure"))
+        );
+        assert_eq!(
+            writer.head(),
+            0,
+            "failed commit must not consume journal space"
+        );
     }
 
     // ── Property-based tests (proptest) ────────────────────────────────
