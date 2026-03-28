@@ -381,6 +381,9 @@ fn replay_jbd2_inner(
 
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
+                if committed_sequences.contains(&header.sequence) {
+                    break;
+                }
                 stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
                 let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit) else {
                     break;
@@ -431,6 +434,9 @@ fn replay_jbd2_inner(
                 idx = idx.saturating_add(1);
             }
             JBD2_BLOCKTYPE_REVOKE => {
+                if committed_sequences.contains(&header.sequence) {
+                    break;
+                }
                 stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
                 let Some(revokes) = strict_revoke_entries(raw.as_slice(), is_64bit) else {
                     break;
@@ -443,6 +449,11 @@ fn replay_jbd2_inner(
                 idx = idx.saturating_add(1);
             }
             _ => {
+                if pending.contains_key(&header.sequence)
+                    && !committed_sequences.contains(&header.sequence)
+                {
+                    break;
+                }
                 idx = idx.saturating_add(1);
             }
         }
@@ -3602,6 +3613,69 @@ mod tests {
     }
 
     #[test]
+    fn replay_jbd2_descriptor_after_commit_same_sequence_is_discarded() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 8,
+        };
+
+        dev.raw_write(
+            BlockNumber(10),
+            descriptor_block(512, 7, &[(3, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(11), vec![0xEE; 512]);
+        dev.raw_write(BlockNumber(12), commit_block(512, 7));
+        dev.raw_write(
+            BlockNumber(13),
+            descriptor_block(512, 7, &[(4, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(14), vec![0xAB; 512]);
+
+        let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
+
+        assert_eq!(out.committed_sequences, vec![7]);
+        assert_eq!(out.stats.replayed_blocks, 1);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(3)).unwrap().as_slice(),
+            &[0xEE; 512]
+        );
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(4)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
+    }
+
+    #[test]
+    fn replay_jbd2_revoke_after_commit_same_sequence_is_discarded() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 8,
+        };
+
+        dev.raw_write(
+            BlockNumber(10),
+            descriptor_block(512, 7, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(11), vec![0xCC; 512]);
+        dev.raw_write(BlockNumber(12), commit_block(512, 7));
+        dev.raw_write(BlockNumber(13), revoke_block(512, 7, &[5]));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
+
+        assert_eq!(out.committed_sequences, vec![7]);
+        assert_eq!(out.stats.skipped_revoked_blocks, 0);
+        assert_eq!(out.stats.replayed_blocks, 1);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &[0xCC; 512]
+        );
+    }
+
+    #[test]
     fn adversarial_cross_txn_revoke_supersedes_earlier_write() {
         // Seq 1 writes block 5. Seq 2 revokes block 5.
         // After replay, block 5 should NOT have seq 1's data because
@@ -4056,6 +4130,37 @@ mod tests {
         assert!(out.committed_sequences.is_empty());
         assert_eq!(out.stats.descriptor_blocks, 0);
         assert_eq!(out.stats.commit_blocks, 0);
+    }
+
+    #[test]
+    fn replay_jbd2_unknown_block_inside_transaction_discards_sequence() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 8,
+        };
+
+        dev.raw_write(
+            BlockNumber(10),
+            descriptor_block(512, 1, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(11), vec![0xAA; 512]);
+
+        let mut block = vec![0_u8; 512];
+        block[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+        block[4..8].copy_from_slice(&99u32.to_be_bytes());
+        block[8..12].copy_from_slice(&1u32.to_be_bytes());
+        dev.raw_write(BlockNumber(12), block);
+        dev.raw_write(BlockNumber(13), commit_block(512, 1));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.replayed_blocks, 0);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
     }
 
     #[test]
