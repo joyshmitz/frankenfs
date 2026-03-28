@@ -5597,8 +5597,10 @@ impl OpenFs {
                 let block_data = self.read_block_with_scope(cx, scope, BlockNumber(phys))?;
                 let found = if dir_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0 {
                     lookup_in_dir_block_casefold(&block_data, self.block_size(), name)
+                        .map_err(|e| parse_to_ffs_error(&e))?
                 } else {
                     lookup_in_dir_block(&block_data, self.block_size(), name)
+                        .map_err(|e| parse_to_ffs_error(&e))?
                 };
                 if let Some(entry) = found {
                     return Ok(Some(entry));

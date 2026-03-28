@@ -2712,10 +2712,17 @@ pub fn parse_dir_block(
 /// Look up a single name in a directory data block.
 ///
 /// Returns the matching entry if found.
-#[must_use]
-pub fn lookup_in_dir_block(block: &[u8], block_size: u32, target: &[u8]) -> Option<Ext4DirEntry> {
-    let (entries, _) = parse_dir_block(block, block_size).ok()?;
-    entries.into_iter().find(|e| e.name == target)
+///
+/// Returns `Err` if the block data is corrupt and cannot be parsed.
+/// Returns `Ok(None)` if the block is valid but the target name is
+/// not present.
+pub fn lookup_in_dir_block(
+    block: &[u8],
+    block_size: u32,
+    target: &[u8],
+) -> Result<Option<Ext4DirEntry>, ParseError> {
+    let (entries, _) = parse_dir_block(block, block_size)?;
+    Ok(entries.into_iter().find(|e| e.name == target))
 }
 
 /// Case-insensitive directory entry lookup for casefold directories.
@@ -2723,17 +2730,18 @@ pub fn lookup_in_dir_block(block: &[u8], block_size: u32, target: &[u8]) -> Opti
 /// Compares entry names against `target` using Unicode case-insensitive
 /// matching (lowercase comparison of UTF-8 strings). Falls back to
 /// byte-level comparison for non-UTF-8 filenames.
-#[must_use]
+///
+/// Returns `Err` if the block data is corrupt and cannot be parsed.
 pub fn lookup_in_dir_block_casefold(
     block: &[u8],
     block_size: u32,
     target: &[u8],
-) -> Option<Ext4DirEntry> {
-    let (entries, _) = parse_dir_block(block, block_size).ok()?;
+) -> Result<Option<Ext4DirEntry>, ParseError> {
+    let (entries, _) = parse_dir_block(block, block_size)?;
     let target_lower = casefold_name(target);
-    entries
+    Ok(entries
         .into_iter()
-        .find(|e| casefold_name(&e.name) == target_lower)
+        .find(|e| casefold_name(&e.name) == target_lower))
 }
 
 /// Apply Unicode casefold to a filename for case-insensitive comparison.
@@ -3338,7 +3346,7 @@ impl Ext4ImageReader {
         for lb in 0..num_blocks {
             if let Some(phys) = self.resolve_extent(image, dir_inode, lb)? {
                 let block_data = self.read_block(image, ffs_types::BlockNumber(phys))?;
-                if let Some(entry) = lookup_in_dir_block(block_data, self.sb.block_size, name) {
+                if let Some(entry) = lookup_in_dir_block(block_data, self.sb.block_size, name)? {
                     return Ok(Some(entry));
                 }
             }
@@ -3679,7 +3687,7 @@ impl Ext4ImageReader {
             return Ok(None);
         };
         let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
-        Ok(lookup_in_dir_block(leaf_data, self.sb.block_size, name))
+        lookup_in_dir_block(leaf_data, self.sb.block_size, name)
     }
 
     /// Read a directory block and parse its entries.
@@ -5268,11 +5276,11 @@ mod tests {
         let remaining = u16::try_from(block_size).unwrap() - 24;
         write_dir_entry(&mut block, 24, 42, 1, b"myfile", remaining);
 
-        let found = lookup_in_dir_block(&block, block_size, b"myfile");
+        let found = lookup_in_dir_block(&block, block_size, b"myfile").unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().inode, 42);
 
-        let not_found = lookup_in_dir_block(&block, block_size, b"missing");
+        let not_found = lookup_in_dir_block(&block, block_size, b"missing").unwrap();
         assert!(not_found.is_none());
     }
 
@@ -5287,16 +5295,16 @@ mod tests {
         write_dir_entry(&mut block, 24, 42, 1, b"MyFile.TXT", remaining);
 
         // Case-insensitive: should find "myfile.txt" matching "MyFile.TXT"
-        let found = lookup_in_dir_block_casefold(&block, block_size, b"myfile.txt");
+        let found = lookup_in_dir_block_casefold(&block, block_size, b"myfile.txt").unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().inode, 42);
 
         // Exact case also works
-        let found2 = lookup_in_dir_block_casefold(&block, block_size, b"MyFile.TXT");
+        let found2 = lookup_in_dir_block_casefold(&block, block_size, b"MyFile.TXT").unwrap();
         assert!(found2.is_some());
 
         // Completely different name doesn't match
-        let not_found = lookup_in_dir_block_casefold(&block, block_size, b"other.txt");
+        let not_found = lookup_in_dir_block_casefold(&block, block_size, b"other.txt").unwrap();
         assert!(not_found.is_none());
     }
 
@@ -9481,13 +9489,13 @@ mod tests {
             prop_assert_eq!(&entries[0].name, &name1);
             prop_assert_eq!(entries[1].inode, inode2);
             prop_assert_eq!(&entries[1].name, &name2);
-            let found1 = lookup_in_dir_block(&block, block_size, &name1);
+            let found1 = lookup_in_dir_block(&block, block_size, &name1).unwrap();
             prop_assert!(found1.is_some());
             prop_assert_eq!(found1.unwrap().inode, inode1);
-            let found2 = lookup_in_dir_block(&block, block_size, &name2);
+            let found2 = lookup_in_dir_block(&block, block_size, &name2).unwrap();
             prop_assert!(found2.is_some());
             prop_assert_eq!(found2.unwrap().inode, inode2);
-            prop_assert!(lookup_in_dir_block(&block, block_size, b"ZZZZZZ_NONEXISTENT").is_none());
+            prop_assert!(lookup_in_dir_block(&block, block_size, b"ZZZZZZ_NONEXISTENT").unwrap().is_none());
         }
 
         /// parse_dir_block and iter_dir_block produce the same entries.

@@ -535,7 +535,7 @@ mod tests {
         block[19] = 1; // RegFile
         block[20..25].copy_from_slice(b"hello");
 
-        let found = lookup_in_dir_block(&block, 4096, b"hello");
+        let found = lookup_in_dir_block(&block, 4096, b"hello").unwrap();
         assert!(found.is_some());
         let entry = found.unwrap();
         assert_eq!(entry.inode, 5);
@@ -551,7 +551,7 @@ mod tests {
         block[7] = 2;
         block[8] = b'.';
 
-        assert!(lookup_in_dir_block(&block, 4096, b"nonexistent").is_none());
+        assert!(lookup_in_dir_block(&block, 4096, b"nonexistent").unwrap().is_none());
     }
 
     // ── Ext4GroupDesc tests ─────────────────────────────────────────────

@@ -432,7 +432,9 @@ fn replay_jbd2_inner(
             }
             JBD2_BLOCKTYPE_REVOKE => {
                 stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
-                let revokes = parse_revoke_entries(raw.as_slice(), is_64bit);
+                let Some(revokes) = strict_revoke_entries(raw.as_slice(), is_64bit) else {
+                    break;
+                };
                 stats.revoke_entries = stats
                     .revoke_entries
                     .saturating_add(u64::try_from(revokes.len()).unwrap_or(u64::MAX));
@@ -1820,6 +1822,7 @@ fn strict_revoke_entries(block: &[u8], is_64bit: bool) -> Option<Vec<BlockNumber
     Some(out)
 }
 
+#[cfg(test)]
 #[must_use]
 fn parse_revoke_entries(block: &[u8], is_64bit: bool) -> Vec<BlockNumber> {
     let mut out = Vec::new();
@@ -2671,6 +2674,34 @@ mod tests {
             .copy_from_slice(&JBD2_TAG_FLAG_LAST.to_be_bytes());
         dev.raw_write(BlockNumber(103), desc);
         dev.raw_write(BlockNumber(104), vec![0xFF; 512]);
+
+        let reopened = Jbd2Writer::open(&cx, &dev, region, 1).expect("open");
+        assert_eq!(reopened.head(), 3);
+        assert_eq!(reopened.next_seq(), 2);
+    }
+
+    #[test]
+    fn jbd2_writer_open_stops_at_malformed_revoke_tail() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+
+        {
+            let mut writer = Jbd2Writer::new(region, 1);
+            let mut txn = writer.begin_transaction();
+            txn.add_write(BlockNumber(5), vec![0xAA; 512]);
+            writer.commit_transaction(&cx, &dev, &txn).expect("commit");
+            assert_eq!(writer.head(), 3);
+            assert_eq!(writer.next_seq(), 2);
+        }
+
+        let mut revoke = vec![0_u8; 512];
+        encode_jbd2_header(&mut revoke, JBD2_BLOCKTYPE_REVOKE, 2);
+        revoke[12..16].copy_from_slice(&0xFFFF_FFFF_u32.to_be_bytes());
+        dev.raw_write(BlockNumber(103), revoke);
 
         let reopened = Jbd2Writer::open(&cx, &dev, region, 1).expect("open");
         assert_eq!(reopened.head(), 3);
@@ -3772,7 +3803,8 @@ mod tests {
     #[test]
     fn adversarial_revoke_r_count_exceeds_block_size() {
         // A revoke block where r_count claims more entries than fit in the
-        // block. parse_revoke_entries clamps to block.len().
+        // block. Replay now treats that as malformed and stops before the
+        // trailing commit can publish the transaction.
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 64);
         let region = JournalRegion {
@@ -3801,10 +3833,13 @@ mod tests {
 
         let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
 
-        assert_eq!(out.committed_sequences, vec![1]);
-        // Block 5 should be revoked despite the inflated r_count.
-        assert_eq!(out.stats.skipped_revoked_blocks, 1);
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.skipped_revoked_blocks, 0);
         assert_eq!(out.stats.replayed_blocks, 0);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
     }
 
     #[test]
