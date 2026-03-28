@@ -1091,6 +1091,11 @@ pub fn alloc_blocks_batch_persist(
     }
 
     if results.len() < n as usize {
+        // Rollback any successfully persisted blocks to prevent a persistent block leak.
+        // We do this individually since batch allocations may span multiple groups.
+        for alloc in &results {
+            let _ = free_blocks_persist(cx, dev, geo, groups, alloc.start, alloc.count, pctx);
+        }
         return Err(FfsError::NoSpace);
     }
 

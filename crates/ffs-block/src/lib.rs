@@ -7279,10 +7279,10 @@ mod tests {
 
     #[test]
     fn flush_pin_token_noop_is_noop() {
-        let token = FlushPinToken::noop();
-        assert!(token.is_noop());
-        let real_token = FlushPinToken::new(42_u32);
-        assert!(!real_token.is_noop());
+        let flush_pin = FlushPinToken::noop();
+        assert!(flush_pin.is_noop());
+        let real_flush_pin = FlushPinToken::new(42_u32);
+        assert!(!real_flush_pin.is_noop());
     }
 
     #[test]

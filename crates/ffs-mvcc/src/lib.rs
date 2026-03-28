@@ -159,13 +159,25 @@ fn merge_non_overlapping_ranges(
         return None;
     }
 
-    let mut merged = latest.to_vec();
+    let mut expected_staged = base.to_vec();
     for range in touched_ranges {
         if range.end() > base.len() {
             return None;
         }
+        expected_staged[range.start..range.end()]
+            .copy_from_slice(&staged[range.start..range.end()]);
+    }
+
+    // Strict validation: if the staged block modified ANYTHING outside
+    // the declared touched_ranges, the proof is invalid and we must abort.
+    if expected_staged != staged {
+        return None;
+    }
+
+    let mut merged = latest.to_vec();
+    for range in touched_ranges {
         if latest[range.start..range.end()] != base[range.start..range.end()] {
-            return None;
+            return None; // Latest modified the same range, unresolvable conflict
         }
         merged[range.start..range.end()].copy_from_slice(&staged[range.start..range.end()]);
     }
