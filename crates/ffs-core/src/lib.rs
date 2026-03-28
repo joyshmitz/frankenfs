@@ -14859,9 +14859,10 @@ mod tests {
 
     fn fallocate_log_contract_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .expect("fallocate log-contract lock poisoned")
+        let mutex = LOCK.get_or_init(|| std::sync::Mutex::new(()));
+        // Recover from poison so a panic in one log-contract test does
+        // not cascade-fail all subsequent tests that share the lock.
+        mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
