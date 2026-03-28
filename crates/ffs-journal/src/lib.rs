@@ -855,6 +855,14 @@ impl Jbd2Writer {
                 "block size too small for JBD2 revoke entries".to_owned(),
             ));
         }
+        if let Some((target, payload)) = txn.writes.iter().find(|(_, payload)| payload.len() > bs) {
+            return Err(FfsError::Format(format!(
+                "write payload for block {} exceeds journal block size: {} > {}",
+                target.0,
+                payload.len(),
+                bs
+            )));
+        }
 
         let needed = Self::blocks_needed(
             dev.block_size(),
@@ -4450,6 +4458,27 @@ mod tests {
             .commit_transaction(&cx, &dev, &txn)
             .expect_err("revoke entries should not fit in a 12-byte block");
         assert!(matches!(err, FfsError::Format(message) if message.contains("revoke entries")));
+    }
+
+    #[test]
+    fn commit_transaction_rejects_oversized_payload() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 32);
+        let region = JournalRegion {
+            start: BlockNumber(0),
+            blocks: 8,
+        };
+        let mut writer = Jbd2Writer::new(region, 1);
+        let mut txn = writer.begin_transaction();
+        txn.add_write(BlockNumber(7), vec![0xAB; 513]);
+
+        let err = writer
+            .commit_transaction(&cx, &dev, &txn)
+            .expect_err("oversized payload should be rejected");
+        assert!(
+            matches!(err, FfsError::Format(message) if message.contains("exceeds journal block size"))
+        );
+        assert_eq!(writer.head(), 0, "failed commit must not advance head");
     }
 
     // ── Property-based tests (proptest) ────────────────────────────────
