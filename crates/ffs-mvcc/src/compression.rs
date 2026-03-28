@@ -90,15 +90,34 @@ where
         match get_data(&chain[i]) {
             VersionData::Full(bytes) => return Some(Cow::Borrowed(bytes)),
             VersionData::Zstd(bytes) => {
-                return zstd::decode_all(bytes.as_slice()).ok().map(Cow::Owned);
+                return match zstd::decode_all(bytes.as_slice()) {
+                    Ok(decoded) => Some(Cow::Owned(decoded)),
+                    Err(e) => {
+                        tracing::error!(
+                            index,
+                            compressed_len = bytes.len(),
+                            error = %e,
+                            "mvcc_zstd_decompression_failed"
+                        );
+                        None
+                    }
+                };
             }
             VersionData::Brotli(bytes) => {
                 let mut decoded = Vec::new();
                 let mut decompressor = brotli::Decompressor::new(bytes.as_slice(), 4096);
-                if std::io::Read::read_to_end(&mut decompressor, &mut decoded).is_ok() {
-                    return Some(Cow::Owned(decoded));
-                }
-                return None;
+                return match std::io::Read::read_to_end(&mut decompressor, &mut decoded) {
+                    Ok(_) => Some(Cow::Owned(decoded)),
+                    Err(e) => {
+                        tracing::error!(
+                            index,
+                            compressed_len = bytes.len(),
+                            error = %e,
+                            "mvcc_brotli_decompression_failed"
+                        );
+                        None
+                    }
+                };
             }
             VersionData::Identical => {
                 if i == 0 {

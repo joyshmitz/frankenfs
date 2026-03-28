@@ -1774,6 +1774,9 @@ fn scan_committed_tail_transaction(
             }
             JBD2_BLOCKTYPE_REVOKE => {
                 saw_body = true;
+                if strict_revoke_entries(raw.as_slice(), is_64bit).is_none() {
+                    return Ok(None);
+                }
                 idx = idx.saturating_add(1);
             }
             JBD2_BLOCKTYPE_COMMIT if saw_body => {
@@ -1787,6 +1790,34 @@ fn scan_committed_tail_transaction(
     }
 
     Ok(None)
+}
+
+fn strict_revoke_entries(block: &[u8], is_64bit: bool) -> Option<Vec<BlockNumber>> {
+    let r_count = usize::try_from(read_be_u32(block, 12)?).ok()?;
+    let entry_size = if is_64bit { 8 } else { 4 };
+    if r_count < JBD2_REVOKE_HEADER_SIZE || r_count > block.len() {
+        return None;
+    }
+    if (r_count - JBD2_REVOKE_HEADER_SIZE) % entry_size != 0 {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    let mut offset = JBD2_REVOKE_HEADER_SIZE;
+    while offset.checked_add(entry_size)? <= r_count {
+        if is_64bit {
+            let high = read_be_u32(block, offset)?;
+            let low = read_be_u32(block, offset + 4)?;
+            let full = (u64::from(high) << 32) | u64::from(low);
+            out.push(BlockNumber(full));
+        } else {
+            let raw = read_be_u32(block, offset)?;
+            out.push(BlockNumber(u64::from(raw)));
+        }
+        offset = offset.checked_add(entry_size)?;
+    }
+
+    Some(out)
 }
 
 #[must_use]
@@ -3682,11 +3713,9 @@ mod tests {
 
     #[test]
     fn adversarial_descriptor_with_zero_tags() {
-        // A descriptor block where all tag slots are zero — no LAST flag set,
-        // so the parser fills the entire tags area: (512 - 12) / 8 = 62 tags.
-        // Since those 62 data blocks don't fit in the 4-block region, replay
-        // treats this as a truncated transaction and stops scanning. The commit
-        // block at position 11 is never reached.
+        // A descriptor block where all tag slots are zero — no LAST flag set.
+        // Replay now treats that as malformed and stops scanning before it
+        // stages any writes or reaches the trailing commit block.
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 64);
         let region = JournalRegion {
@@ -3705,11 +3734,39 @@ mod tests {
         dev.raw_write(BlockNumber(11), commit_block(512, 1));
 
         let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
-        // Truncated transaction: commit block never reached.
         assert!(out.committed_sequences.is_empty());
         assert_eq!(out.stats.descriptor_blocks, 1);
-        assert_eq!(out.stats.descriptor_tags, 62);
+        assert_eq!(out.stats.descriptor_tags, 0);
         assert_eq!(out.stats.replayed_blocks, 0);
+    }
+
+    #[test]
+    fn replay_jbd2_malformed_descriptor_with_commit_is_discarded() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 70,
+        };
+
+        let mut desc = vec![0_u8; 512];
+        encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, 1);
+        for i in 0..62 {
+            let off = 12 + i * 8 + 4;
+            desc[off..off + 4].copy_from_slice(&JBD2_TAG_FLAG_SAME_UUID.to_be_bytes());
+        }
+        dev.raw_write(BlockNumber(10), desc);
+        dev.raw_write(BlockNumber(73), commit_block(512, 1));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
+        assert!(out.committed_sequences.is_empty());
+        assert_eq!(out.stats.descriptor_blocks, 1);
+        assert_eq!(out.stats.descriptor_tags, 0);
+        assert_eq!(out.stats.replayed_blocks, 0);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(0)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
     }
 
     #[test]
