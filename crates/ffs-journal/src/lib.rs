@@ -1503,13 +1503,12 @@ impl NativeCowJournal {
         while next_slot < region.blocks {
             let block = resolve_region_block(region, next_slot)?;
             let raw = dev.read_block(cx, block)?;
-            if is_all_zero(raw.as_slice()) {
-                break;
+            match decode_cow_record(raw.as_slice())? {
+                Some(_) => {
+                    next_slot = next_slot.saturating_add(1);
+                }
+                None => break,
             }
-            if !has_cow_magic(raw.as_slice()) {
-                break;
-            }
-            next_slot = next_slot.saturating_add(1);
         }
 
         Ok(Self { region, next_slot })
@@ -1580,7 +1579,12 @@ pub fn recover_native_cow(
     while slot < region.blocks {
         let block = resolve_region_block(region, slot)?;
         let raw = dev.read_block(cx, block)?;
-        let Some(record) = decode_cow_record(raw.as_slice())? else {
+        let decoded = match decode_cow_record(raw.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(FfsError::Format(_)) => break,
+            Err(err) => return Err(err),
+        };
+        let Some(record) = decoded else {
             break;
         };
 
@@ -1906,11 +1910,6 @@ fn read_le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 #[must_use]
 fn is_all_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|b| *b == 0)
-}
-
-#[must_use]
-fn has_cow_magic(bytes: &[u8]) -> bool {
-    read_le_u32(bytes, 0) == Some(COW_MAGIC)
 }
 
 enum CowRecord<'a> {
@@ -2374,6 +2373,98 @@ mod tests {
 
         let second = NativeCowJournal::open(&cx, &dev, region).expect("open second");
         assert_eq!(second.next_slot(), 2);
+    }
+
+    #[test]
+    fn native_cow_open_rejects_malformed_tail_record() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(60),
+            blocks: 16,
+        };
+
+        {
+            let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+            journal
+                .append_write(&cx, &dev, CommitSeq(1), BlockNumber(2), &[0x11; 32])
+                .expect("append write");
+            journal
+                .append_commit(&cx, &dev, CommitSeq(1))
+                .expect("append commit");
+        }
+
+        let mut malformed = vec![0_u8; 512];
+        malformed[0..4].copy_from_slice(&COW_MAGIC.to_le_bytes());
+        malformed[4..6].copy_from_slice(&(999_u16).to_le_bytes());
+        dev.raw_write(BlockNumber(62), malformed);
+
+        let err = NativeCowJournal::open(&cx, &dev, region)
+            .expect_err("malformed tail should be rejected");
+        assert!(
+            matches!(err, FfsError::Format(message) if message.contains("unsupported COW journal version"))
+        );
+    }
+
+    #[test]
+    fn native_cow_failed_commit_append_does_not_advance_tail_or_recover() {
+        let cx = test_cx();
+        let dev = FailNthWriteBlockDevice::new(512, 128, 2);
+        let region = JournalRegion {
+            start: BlockNumber(60),
+            blocks: 16,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(2), &[0x11; 32])
+            .expect("append write");
+        assert_eq!(journal.next_slot(), 1);
+
+        let err = journal
+            .append_commit(&cx, &dev, CommitSeq(1))
+            .expect_err("commit append should fail");
+        assert!(
+            matches!(err, FfsError::Format(message) if message.contains("injected write failure"))
+        );
+        assert_eq!(journal.next_slot(), 1, "failed append must not advance tail");
+
+        let reopened = NativeCowJournal::open(&cx, &dev, region).expect("reopen");
+        assert_eq!(reopened.next_slot(), 1);
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert!(recovered.is_empty(), "failed commit append must not recover");
+    }
+
+    #[test]
+    fn native_cow_recover_stops_cleanly_at_malformed_tail_record() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(60),
+            blocks: 16,
+        };
+
+        {
+            let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+            journal
+                .append_write(&cx, &dev, CommitSeq(1), BlockNumber(2), &[0x11; 32])
+                .expect("append write");
+            journal
+                .append_commit(&cx, &dev, CommitSeq(1))
+                .expect("append commit");
+        }
+
+        let mut malformed = vec![0_u8; 512];
+        malformed[0..4].copy_from_slice(&COW_MAGIC.to_le_bytes());
+        malformed[4..6].copy_from_slice(&(999_u16).to_le_bytes());
+        dev.raw_write(BlockNumber(62), malformed);
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].commit_seq, CommitSeq(1));
+        assert_eq!(recovered[0].writes.len(), 1);
+        assert_eq!(recovered[0].writes[0].block, BlockNumber(2));
     }
 
     #[test]
@@ -4467,7 +4558,9 @@ mod tests {
             .append_write(&cx, &dev, CommitSeq(1), BlockNumber(10), &[0x11; 64])
             .expect("w1");
         journal.append_commit(&cx, &dev, CommitSeq(1)).expect("c1");
-        journal.append_commit(&cx, &dev, CommitSeq(1)).expect("c1-dup");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(1))
+            .expect("c1-dup");
 
         let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
         assert_eq!(recovered.len(), 1);

@@ -551,7 +551,11 @@ mod tests {
         block[7] = 2;
         block[8] = b'.';
 
-        assert!(lookup_in_dir_block(&block, 4096, b"nonexistent").unwrap().is_none());
+        assert!(
+            lookup_in_dir_block(&block, 4096, b"nonexistent")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ── Ext4GroupDesc tests ─────────────────────────────────────────────

@@ -9646,6 +9646,18 @@ impl OpenFs {
 
         // Handle truncation.
         if let Some(new_size) = attrs.size {
+            if inode.is_dir() {
+                return Err(FfsError::IsDirectory);
+            }
+            if inode.is_symlink() {
+                return Err(FfsError::Format("cannot truncate a symlink".into()));
+            }
+            if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
+                return Err(FfsError::UnsupportedFeature(
+                    "truncation of non-extent (indirect block) files is not supported".into(),
+                ));
+            }
+
             if new_size != inode.size {
                 let mut alloc = alloc_mutex.lock();
                 let block_size = alloc.geo.block_size;
@@ -9724,11 +9736,14 @@ impl OpenFs {
                     if new_size > 0 && new_size % u64::from(block_size) != 0 {
                         let partial_logical_block = u32::try_from(new_size / u64::from(block_size))
                             .map_err(|_| {
-                                FfsError::Format("truncation size exceeds ext4 32-bit logical block limit".into())
+                                FfsError::Format(
+                                    "truncation size exceeds ext4 32-bit logical block limit"
+                                        .into(),
+                                )
                             })?;
                         let partial_offset = usize::try_from(new_size % u64::from(block_size))
                             .expect("block size modulo fits in usize");
-                        
+
                         let mappings = ffs_extent::map_logical_to_physical(
                             cx,
                             &block_dev,
@@ -11581,6 +11596,14 @@ impl OpenFs {
             inode.gid = gid;
         }
         if let Some(size) = attrs.size {
+            let file_type = Self::btrfs_mode_to_file_type(inode.mode);
+            if file_type == FileType::Directory {
+                return Err(FfsError::IsDirectory);
+            }
+            if file_type == FileType::Symlink {
+                return Err(FfsError::Format("cannot truncate a symlink".into()));
+            }
+
             let old_size = inode.size;
             inode.size = size;
 
@@ -14896,7 +14919,9 @@ mod tests {
         let mutex = LOCK.get_or_init(|| std::sync::Mutex::new(()));
         // Recover from poison so a panic in one log-contract test does
         // not cascade-fail all subsequent tests that share the lock.
-        mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]

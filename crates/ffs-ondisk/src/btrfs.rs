@@ -983,8 +983,14 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
             item_type: block[base + 8],
             offset: read_le_u64(block, base + 9)?,
         };
-        // btrfs leaf item offsets are absolute within the leaf block.
-        let data_offset = read_le_u32(block, base + 17)?;
+        // btrfs leaf item offsets are relative to the end of the header (BTRFS_HEADER_SIZE).
+        let raw_data_offset = read_le_u32(block, base + 17)?;
+        let data_offset = raw_data_offset.checked_add(BTRFS_HEADER_SIZE as u32).ok_or(
+            ParseError::InvalidField {
+                field: "item_offset",
+                reason: "overflow when adding header size",
+            },
+        )?;
         let data_size = read_le_u32(block, base + 21)?;
 
         let data_end = usize::try_from(data_offset)
@@ -2178,8 +2184,9 @@ mod tests {
             block[0x60..0x64].copy_from_slice(&n_items_u32.to_le_bytes());
             block[0x64] = 0;
 
-            let data_offset = u32::try_from(BTRFS_HEADER_SIZE + n_items * BTRFS_ITEM_SIZE)
+            let data_offset_abs = u32::try_from(BTRFS_HEADER_SIZE + n_items * BTRFS_ITEM_SIZE)
                 .expect("leaf item table endpoint fits in u32");
+            let data_offset_rel = data_offset_abs - (BTRFS_HEADER_SIZE as u32);
 
             for i in 0..n_items {
                 let base = BTRFS_HEADER_SIZE + i * BTRFS_ITEM_SIZE;
@@ -2189,7 +2196,7 @@ mod tests {
                     offset: key_offsets[i],
                 };
                 write_disk_key(&mut block, base, key);
-                block[base + 17..base + 21].copy_from_slice(&data_offset.to_le_bytes());
+                block[base + 17..base + 21].copy_from_slice(&data_offset_rel.to_le_bytes());
                 block[base + 21..base + 25].copy_from_slice(&0_u32.to_le_bytes());
             }
 
@@ -2201,7 +2208,7 @@ mod tests {
                 prop_assert_eq!(items[i].key.objectid, objectids[i]);
                 prop_assert_eq!(items[i].key.item_type, item_types[i]);
                 prop_assert_eq!(items[i].key.offset, key_offsets[i]);
-                prop_assert_eq!(items[i].data_offset, data_offset);
+                prop_assert_eq!(items[i].data_offset, data_offset_abs);
                 prop_assert_eq!(items[i].data_size, 0);
             }
         }

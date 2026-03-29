@@ -567,6 +567,12 @@ fn grow_root_index(
     all_indexes: &[Ext4ExtentIndex],
     alloc: &mut dyn BlockAllocator,
 ) -> Result<()> {
+    if header.depth >= 5 {
+        return Err(FfsError::InvalidGeometry(
+            "extent tree depth exceeds ext4 limit of 5".into(),
+        ));
+    }
+
     let block_size = dev.block_size();
     let mid = all_indexes.len() / 2;
     let left = &all_indexes[..mid];
