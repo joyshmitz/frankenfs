@@ -9719,6 +9719,40 @@ impl OpenFs {
                         ino,
                         -(i128::from(freed_sectors)),
                     )?;
+
+                    // Zero the tail of the partial block to prevent data leakage.
+                    if new_size > 0 && new_size % u64::from(block_size) != 0 {
+                        let partial_logical_block = u32::try_from(new_size / u64::from(block_size))
+                            .map_err(|_| {
+                                FfsError::Format("truncation size exceeds ext4 32-bit logical block limit".into())
+                            })?;
+                        let partial_offset = usize::try_from(new_size % u64::from(block_size))
+                            .expect("block size modulo fits in usize");
+                        
+                        let mappings = ffs_extent::map_logical_to_physical(
+                            cx,
+                            &block_dev,
+                            &root_bytes,
+                            partial_logical_block,
+                            1,
+                        )?;
+                        if let Some(mapping) = mappings.first() {
+                            if mapping.physical_start > 0 && mapping.count > 0 {
+                                let physical_block = BlockNumber(mapping.physical_start);
+                                let mut block_data = self.read_block_vec(cx, physical_block)?;
+                                block_data[partial_offset..].fill(0);
+                                if let Some(tx) = &mut scope.tx {
+                                    let tx_dev = TransactionBlockAdapter {
+                                        base: &block_dev,
+                                        tx: Mutex::new(tx),
+                                    };
+                                    tx_dev.write_block(cx, physical_block, &block_data)?;
+                                } else {
+                                    block_dev.write_block(cx, physical_block, &block_data)?;
+                                }
+                            }
+                        }
+                    }
                 } else {
                     // Extend: just update size (sparse — blocks allocated on write).
                 }
@@ -14862,7 +14896,7 @@ mod tests {
         let mutex = LOCK.get_or_init(|| std::sync::Mutex::new(()));
         // Recover from poison so a panic in one log-contract test does
         // not cascade-fail all subsequent tests that share the lock.
-        mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]
@@ -27231,11 +27265,7 @@ mod tests {
             .with_writer(buffer.clone())
             .finish();
 
-        // Use set_default (not with_default) so ALL threads use this subscriber,
-        // not just the test thread. This prevents flaky failures where background
-        // tasks log to a different subscriber.
-        let default_guard = tracing::subscriber::set_default(subscriber);
-        {
+        tracing::subscriber::with_default(subscriber, || {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
 
@@ -27252,8 +27282,7 @@ mod tests {
                 .expect("create file for fallocate success log test");
             ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0)
                 .expect("fallocate should succeed");
-        }
-        drop(default_guard);
+        });
 
         let logs = parse_json_logs(&buffer);
         let applied = logs

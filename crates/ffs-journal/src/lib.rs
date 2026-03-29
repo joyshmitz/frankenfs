@@ -1573,6 +1573,7 @@ pub fn recover_native_cow(
     }
 
     let mut pending: BTreeMap<u64, Vec<CowWrite>> = BTreeMap::new();
+    let mut committed = BTreeSet::new();
     let mut commit_order = Vec::new();
 
     let mut slot = 0_u64;
@@ -1589,12 +1590,19 @@ pub fn recover_native_cow(
                 block,
                 payload,
             } => {
+                if committed.contains(&commit_seq) {
+                    break;
+                }
                 pending.entry(commit_seq).or_default().push(CowWrite {
                     block,
                     bytes: payload,
                 });
             }
-            DecodedCowRecord::Commit { commit_seq } => commit_order.push(commit_seq),
+            DecodedCowRecord::Commit { commit_seq } => {
+                if committed.insert(commit_seq) {
+                    commit_order.push(commit_seq);
+                }
+            }
         }
 
         slot = slot.saturating_add(1);
@@ -4443,6 +4451,53 @@ mod tests {
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0].commit_seq, CommitSeq(1));
         assert_eq!(recovered[1].commit_seq, CommitSeq(2));
+    }
+
+    #[test]
+    fn native_cow_duplicate_commit_same_sequence_recovered_once() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 32,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(10), &[0x11; 64])
+            .expect("w1");
+        journal.append_commit(&cx, &dev, CommitSeq(1)).expect("c1");
+        journal.append_commit(&cx, &dev, CommitSeq(1)).expect("c1-dup");
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].commit_seq, CommitSeq(1));
+        assert_eq!(recovered[0].writes.len(), 1);
+    }
+
+    #[test]
+    fn native_cow_write_after_commit_same_sequence_is_discarded() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(40),
+            blocks: 32,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(10), &[0x11; 64])
+            .expect("w1");
+        journal.append_commit(&cx, &dev, CommitSeq(1)).expect("c1");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(11), &[0x22; 64])
+            .expect("late write");
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].commit_seq, CommitSeq(1));
+        assert_eq!(recovered[0].writes.len(), 1);
+        assert_eq!(recovered[0].writes[0].block, BlockNumber(10));
     }
 
     #[test]
