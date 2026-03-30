@@ -1633,7 +1633,7 @@ impl Filesystem for FrankenFuse {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        tracing::error!("FUSE write offset {} len {}", offset, data.len());
+        trace!(ino, offset, len = data.len(), "FUSE write");
         match self.dispatch_write(ino, offset, data) {
             Ok(written) => reply.written(written),
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
@@ -1824,7 +1824,7 @@ impl Filesystem for FrankenFuse {
         }
         let cx = Self::cx_for_request();
         match self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
-            self.inner.ops.create(
+            let attr = self.inner.ops.create(
                 cx,
                 scope,
                 InodeNumber(parent),
@@ -1832,7 +1832,9 @@ impl Filesystem for FrankenFuse {
                 mode as u16,
                 req.uid(),
                 req.gid(),
-            )
+            )?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(attr)
         }) {
             Ok(attr) => {
                 reply.created(&ATTR_TTL, &to_file_attr(&attr), attr.generation, 0, 0);

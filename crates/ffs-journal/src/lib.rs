@@ -2544,6 +2544,41 @@ mod tests {
     }
 
     #[test]
+    fn native_cow_committed_write_survives_trailing_uncommitted_overwrite() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(50),
+            blocks: 16,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open journal");
+        // Committed write to block 6.
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(6), &[0xAA; 64])
+            .expect("append committed write");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(1))
+            .expect("commit seq 1");
+        // Uncommitted write to the same block — should be ignored on recovery.
+        journal
+            .append_write(&cx, &dev, CommitSeq(2), BlockNumber(6), &[0xFF; 64])
+            .expect("append uncommitted write");
+        // No commit for seq 2.
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].commit_seq, CommitSeq(1));
+
+        replay_native_cow(&cx, &dev, &recovered).expect("replay");
+
+        let target = dev
+            .read_block(&cx, BlockNumber(6))
+            .expect("read target block");
+        assert_eq!(&target.as_slice()[..64], &[0xAA; 64]);
+    }
+
+    #[test]
     fn native_cow_open_discovers_tail_after_existing_records() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 128);
