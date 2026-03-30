@@ -1557,9 +1557,17 @@ impl Filesystem for FrankenFuse {
         name: &OsStr,
         newparent: u64,
         newname: &OsStr,
-        _flags: u32,
+        flags: u32,
         reply: ReplyEmpty,
     ) {
+        if flags != 0 {
+            // RENAME_NOREPLACE, RENAME_EXCHANGE, etc. are not currently supported.
+            // Silently ignoring them would violate POSIX semantics (e.g., overwriting
+            // a file when NOREPLACE was explicitly requested).
+            reply.error(libc::EINVAL);
+            return;
+        }
+
         match self.dispatch_rename(parent, name, newparent, newname) {
             Ok(()) => reply.ok(),
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),

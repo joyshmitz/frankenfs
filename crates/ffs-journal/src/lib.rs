@@ -244,10 +244,21 @@ struct StagedWrite {
     escaped: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxnBodyEvent {
+    Write(BlockNumber, StagedWrite),
+    Revoke(BlockNumber),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Jbd2TxnBodyItem {
+    Write(BlockNumber, Vec<u8>),
+    Revoke(BlockNumber),
+}
+
 #[derive(Debug, Default)]
 struct PendingTxn {
-    writes: Vec<(BlockNumber, StagedWrite)>,
-    revoked: BTreeSet<BlockNumber>,
+    body_events: Vec<TxnBodyEvent>,
 }
 
 const JOURNAL_SEQ_HALF_RANGE: u32 = 1 << 31;
@@ -418,7 +429,11 @@ fn replay_jbd2_inner(
                 }
 
                 let txn = pending.entry(header.sequence).or_default();
-                txn.writes.extend(staged);
+                txn.body_events.extend(
+                    staged
+                        .into_iter()
+                        .map(|(target, staged)| TxnBodyEvent::Write(target, staged)),
+                );
 
                 idx = idx.saturating_add(1).saturating_add(tag_count_u64);
                 blocks_scanned = blocks_scanned.saturating_add(tag_count_u64);
@@ -445,7 +460,8 @@ fn replay_jbd2_inner(
                     .revoke_entries
                     .saturating_add(u64::try_from(revokes.len()).unwrap_or(u64::MAX));
                 let txn = pending.entry(header.sequence).or_default();
-                txn.revoked.extend(revokes);
+                txn.body_events
+                    .extend(revokes.into_iter().map(TxnBodyEvent::Revoke));
                 idx = idx.saturating_add(1);
             }
             _ => {
@@ -483,45 +499,22 @@ fn replay_jbd2_inner(
         committed_sequences.rotate_left(oldest_idx);
     }
 
-    let mut max_revoke_seq: BTreeMap<BlockNumber, u32> = BTreeMap::new();
-    for &seq in &committed_sequences {
-        if let Some(txn) = pending.get(&seq) {
-            for &revoked_block in &txn.revoked {
-                // In JBD2, a revoke in a newer transaction overrides any
-                // previous version. We track the newest revoke sequence.
-                max_revoke_seq
-                    .entry(revoked_block)
-                    .and_modify(|existing| {
-                        if journal_seq_is_newer(seq, *existing) {
-                            *existing = seq;
-                        }
-                    })
-                    .or_insert(seq);
-            }
-        }
-    }
-
     let mut final_writes: BTreeMap<BlockNumber, StagedWrite> = BTreeMap::new();
 
     for &seq in &committed_sequences {
         if let Some(txn) = pending.get(&seq) {
-            for (target, staged) in &txn.writes {
-                let is_revoked = if let Some(&revoked_seq) = max_revoke_seq.get(target) {
-                    if seq == revoked_seq {
-                        true
-                    } else {
-                        journal_seq_is_newer_or_equal(revoked_seq, seq)
+            for event in &txn.body_events {
+                match event {
+                    TxnBodyEvent::Write(target, staged) => {
+                        final_writes.insert(*target, *staged);
                     }
-                } else {
-                    false
-                };
-
-                if is_revoked {
-                    stats.skipped_revoked_blocks = stats.skipped_revoked_blocks.saturating_add(1);
-                    continue;
+                    TxnBodyEvent::Revoke(target) => {
+                        if final_writes.remove(target).is_some() {
+                            stats.skipped_revoked_blocks =
+                                stats.skipped_revoked_blocks.saturating_add(1);
+                        }
+                    }
                 }
-
-                final_writes.insert(*target, *staged);
             }
         } else {
             stats.orphaned_commit_blocks = stats.orphaned_commit_blocks.saturating_add(1);
@@ -651,8 +644,9 @@ pub struct Jbd2WriteStats {
 #[derive(Debug, Clone)]
 pub struct Jbd2Transaction {
     sequence: u32,
-    writes: Vec<(BlockNumber, Vec<u8>)>,
-    revokes: Vec<BlockNumber>,
+    body_items: Vec<Jbd2TxnBodyItem>,
+    write_count: usize,
+    revoke_count: usize,
 }
 
 impl Jbd2Transaction {
@@ -660,13 +654,15 @@ impl Jbd2Transaction {
     ///
     /// `target` is the home (destination) block number; `payload` is the data.
     pub fn add_write(&mut self, target: BlockNumber, payload: Vec<u8>) {
-        self.writes.push((target, payload));
+        self.body_items.push(Jbd2TxnBodyItem::Write(target, payload));
+        self.write_count = self.write_count.saturating_add(1);
     }
 
     /// Add a revoke entry — `target` will be skipped during replay even if a
     /// prior descriptor references it.
     pub fn add_revoke(&mut self, target: BlockNumber) {
-        self.revokes.push(target);
+        self.body_items.push(Jbd2TxnBodyItem::Revoke(target));
+        self.revoke_count = self.revoke_count.saturating_add(1);
     }
 
     /// The sequence number assigned to this transaction.
@@ -678,13 +674,13 @@ impl Jbd2Transaction {
     /// Number of writes staged so far.
     #[must_use]
     pub fn write_count(&self) -> usize {
-        self.writes.len()
+        self.write_count
     }
 
     /// Number of revoke entries staged so far.
     #[must_use]
     pub fn revoke_count(&self) -> usize {
-        self.revokes.len()
+        self.revoke_count
     }
 }
 
@@ -773,8 +769,9 @@ impl Jbd2Writer {
         self.next_seq = self.next_seq.wrapping_add(1);
         Jbd2Transaction {
             sequence: seq,
-            writes: Vec::new(),
-            revokes: Vec::new(),
+            body_items: Vec::new(),
+            write_count: 0,
+            revoke_count: 0,
         }
     }
 
@@ -847,18 +844,21 @@ impl Jbd2Writer {
             ));
         }
         let tags_per_desc = max_tags_per_descriptor(bs, self.is_64bit);
-        if !txn.writes.is_empty() && tags_per_desc == 0 {
+        if txn.write_count > 0 && tags_per_desc == 0 {
             return Err(FfsError::Format(
                 "block size too small for JBD2 descriptor tags".to_owned(),
             ));
         }
         let entries_per_revoke = max_revoke_entries(bs, self.is_64bit);
-        if !txn.revokes.is_empty() && entries_per_revoke == 0 {
+        if txn.revoke_count > 0 && entries_per_revoke == 0 {
             return Err(FfsError::Format(
                 "block size too small for JBD2 revoke entries".to_owned(),
             ));
         }
-        if let Some((target, payload)) = txn.writes.iter().find(|(_, payload)| payload.len() > bs) {
+        if let Some((target, payload)) = txn.body_items.iter().find_map(|item| match item {
+            Jbd2TxnBodyItem::Write(target, payload) if payload.len() > bs => Some((target, payload)),
+            Jbd2TxnBodyItem::Write(_, _) | Jbd2TxnBodyItem::Revoke(_) => None,
+        }) {
             return Err(FfsError::Format(format!(
                 "write payload for block {} exceeds journal block size: {} > {}",
                 target.0,
@@ -869,8 +869,8 @@ impl Jbd2Writer {
 
         let needed = Self::blocks_needed(
             dev.block_size(),
-            txn.writes.len(),
-            txn.revokes.len(),
+            txn.write_count,
+            txn.revoke_count,
             self.is_64bit,
         );
         if needed > self.free_blocks() {
@@ -887,115 +887,122 @@ impl Jbd2Writer {
         } else {
             JBD2_TAG_SIZE_32
         };
-        let mut write_idx = 0;
-        while write_idx < txn.writes.len() {
-            let chunk_end = (write_idx + tags_per_desc).min(txn.writes.len());
-            let chunk = &txn.writes[write_idx..chunk_end];
-
-            let mut desc = vec![0_u8; bs];
-            encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, seq);
-
-            let mut off = JBD2_HEADER_SIZE;
-            for (i, (target, payload)) in chunk.iter().enumerate() {
-                let is_last_in_desc = i == chunk.len() - 1;
-                let mut flags = if is_last_in_desc {
-                    JBD2_TAG_FLAG_LAST
-                } else {
-                    0
-                };
-
-                // Escaping: if payload starts with JBD2_MAGIC, set flag.
-                let magic_be = JBD2_MAGIC.to_be_bytes();
-                if payload.len() >= 4 && payload[0..4] == magic_be {
-                    flags |= JBD2_TAG_FLAG_ESCAPE;
-                }
-
-                // Always set SAME_UUID since we don't support multi-UUID journals yet.
-                flags |= JBD2_TAG_FLAG_SAME_UUID;
-
-                if self.is_64bit {
-                    let target_low = (target.0 & 0xFFFF_FFFF) as u32;
-                    let target_high = (target.0 >> 32) as u32;
-                    desc[off..off + 4].copy_from_slice(&target_low.to_be_bytes());
-                    desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
-                    desc[off + 8..off + 12].copy_from_slice(&target_high.to_be_bytes());
-                } else {
-                    let target_u32 = u32::try_from(target.0).map_err(|_| {
-                        FfsError::Format(format!("target block {} exceeds u32 range", target.0))
-                    })?;
-                    desc[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
-                    desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
-                }
-                off += tag_size;
-            }
-
-            let desc_block = self.alloc_block(&mut staged_head)?;
-            dev.write_block(cx, desc_block, &desc)?;
-            stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
-
-            for (_, payload) in chunk {
-                let data_block = self.alloc_block(&mut staged_head)?;
-                let mut padded = vec![0_u8; bs];
-                let copy_len = payload.len().min(bs);
-                padded[..copy_len].copy_from_slice(&payload[..copy_len]);
-
-                // Apply escaping: zero out the magic if it was escaped.
-                let magic_be = JBD2_MAGIC.to_be_bytes();
-                if padded.len() >= 4 && padded[0..4] == magic_be {
-                    padded[0..4].copy_from_slice(&[0u8; 4]);
-                }
-
-                dev.write_block(cx, data_block, &padded)?;
-                stats.data_blocks = stats.data_blocks.saturating_add(1);
-            }
-
-            write_idx = chunk_end;
-        }
-
-        // --- Phase 2: revoke blocks ---
-        if !txn.revokes.is_empty() {
-            let entry_size = if self.is_64bit { 8 } else { 4 };
-            let mut revoke_idx = 0;
-
-            while revoke_idx < txn.revokes.len() {
-                let chunk_end = (revoke_idx + entries_per_revoke).min(txn.revokes.len());
-                let chunk = &txn.revokes[revoke_idx..chunk_end];
-
-                let mut revoke = vec![0_u8; bs];
-                encode_jbd2_header(&mut revoke, JBD2_BLOCKTYPE_REVOKE, seq);
-
-                let r_count = u32::try_from(JBD2_REVOKE_HEADER_SIZE + chunk.len() * entry_size)
-                    .map_err(|_| FfsError::Format("revoke r_count overflow".to_owned()))?;
-                revoke[12..16].copy_from_slice(&r_count.to_be_bytes());
-
-                let mut off = JBD2_REVOKE_HEADER_SIZE;
-                for target in chunk {
-                    if self.is_64bit {
-                        let high = (target.0 >> 32) as u32;
-                        let low = (target.0 & 0xFFFF_FFFF) as u32;
-                        revoke[off..off + 4].copy_from_slice(&high.to_be_bytes());
-                        revoke[off + 4..off + 8].copy_from_slice(&low.to_be_bytes());
-                    } else {
-                        let target_u32 = u32::try_from(target.0).map_err(|_| {
-                            FfsError::Format(format!(
-                                "revoke target {} exceeds u32 range",
-                                target.0
-                            ))
-                        })?;
-                        revoke[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
+        let mut item_idx = 0;
+        while item_idx < txn.body_items.len() {
+            match &txn.body_items[item_idx] {
+                Jbd2TxnBodyItem::Write(..) => {
+                    let mut chunk: Vec<(BlockNumber, &[u8])> = Vec::new();
+                    while item_idx < txn.body_items.len() && chunk.len() < tags_per_desc {
+                        match &txn.body_items[item_idx] {
+                            Jbd2TxnBodyItem::Write(target, payload) => {
+                                chunk.push((*target, payload.as_slice()));
+                                item_idx += 1;
+                            }
+                            Jbd2TxnBodyItem::Revoke(_) => break,
+                        }
                     }
-                    off += entry_size;
+
+                    let mut desc = vec![0_u8; bs];
+                    encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, seq);
+
+                    let mut off = JBD2_HEADER_SIZE;
+                    for (i, (target, payload)) in chunk.iter().enumerate() {
+                        let is_last_in_desc = i == chunk.len() - 1;
+                        let mut flags = if is_last_in_desc {
+                            JBD2_TAG_FLAG_LAST
+                        } else {
+                            0
+                        };
+
+                        let magic_be = JBD2_MAGIC.to_be_bytes();
+                        if payload.len() >= 4 && payload[0..4] == magic_be {
+                            flags |= JBD2_TAG_FLAG_ESCAPE;
+                        }
+
+                        flags |= JBD2_TAG_FLAG_SAME_UUID;
+
+                        if self.is_64bit {
+                            let target_low = (target.0 & 0xFFFF_FFFF) as u32;
+                            let target_high = (target.0 >> 32) as u32;
+                            desc[off..off + 4].copy_from_slice(&target_low.to_be_bytes());
+                            desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
+                            desc[off + 8..off + 12].copy_from_slice(&target_high.to_be_bytes());
+                        } else {
+                            let target_u32 = u32::try_from(target.0).map_err(|_| {
+                                FfsError::Format(format!("target block {} exceeds u32 range", target.0))
+                            })?;
+                            desc[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
+                            desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
+                        }
+                        off += tag_size;
+                    }
+
+                    let desc_block = self.alloc_block(&mut staged_head)?;
+                    dev.write_block(cx, desc_block, &desc)?;
+                    stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
+
+                    for (_, payload) in &chunk {
+                        let data_block = self.alloc_block(&mut staged_head)?;
+                        let mut padded = vec![0_u8; bs];
+                        let copy_len = payload.len().min(bs);
+                        padded[..copy_len].copy_from_slice(&payload[..copy_len]);
+
+                        let magic_be = JBD2_MAGIC.to_be_bytes();
+                        if padded.len() >= 4 && padded[0..4] == magic_be {
+                            padded[0..4].copy_from_slice(&[0u8; 4]);
+                        }
+
+                        dev.write_block(cx, data_block, &padded)?;
+                        stats.data_blocks = stats.data_blocks.saturating_add(1);
+                    }
                 }
+                Jbd2TxnBodyItem::Revoke(_) => {
+                    let entry_size = if self.is_64bit { 8 } else { 4 };
+                    let mut chunk = Vec::new();
+                    while item_idx < txn.body_items.len() && chunk.len() < entries_per_revoke {
+                        match &txn.body_items[item_idx] {
+                            Jbd2TxnBodyItem::Revoke(target) => {
+                                chunk.push(*target);
+                                item_idx += 1;
+                            }
+                            Jbd2TxnBodyItem::Write(_, _) => break,
+                        }
+                    }
 
-                let rev_block = self.alloc_block(&mut staged_head)?;
-                dev.write_block(cx, rev_block, &revoke)?;
-                stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
+                    let mut revoke = vec![0_u8; bs];
+                    encode_jbd2_header(&mut revoke, JBD2_BLOCKTYPE_REVOKE, seq);
 
-                revoke_idx = chunk_end;
+                    let r_count = u32::try_from(JBD2_REVOKE_HEADER_SIZE + chunk.len() * entry_size)
+                        .map_err(|_| FfsError::Format("revoke r_count overflow".to_owned()))?;
+                    revoke[12..16].copy_from_slice(&r_count.to_be_bytes());
+
+                    let mut off = JBD2_REVOKE_HEADER_SIZE;
+                    for target in &chunk {
+                        if self.is_64bit {
+                            let high = (target.0 >> 32) as u32;
+                            let low = (target.0 & 0xFFFF_FFFF) as u32;
+                            revoke[off..off + 4].copy_from_slice(&high.to_be_bytes());
+                            revoke[off + 4..off + 8].copy_from_slice(&low.to_be_bytes());
+                        } else {
+                            let target_u32 = u32::try_from(target.0).map_err(|_| {
+                                FfsError::Format(format!(
+                                    "revoke target {} exceeds u32 range",
+                                    target.0
+                                ))
+                            })?;
+                            revoke[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
+                        }
+                        off += entry_size;
+                    }
+
+                    let rev_block = self.alloc_block(&mut staged_head)?;
+                    dev.write_block(cx, rev_block, &revoke)?;
+                    stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
+                }
             }
         }
 
-        // --- Phase 3: commit block ---
+        // --- Final phase: commit block ---
         let mut commit = vec![0_u8; bs];
         encode_jbd2_header(&mut commit, JBD2_BLOCKTYPE_COMMIT, seq);
 
@@ -2952,6 +2959,64 @@ mod tests {
     }
 
     #[test]
+    fn jbd2_writer_revoke_then_later_write_same_target_replays_write() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+
+        let mut writer = Jbd2Writer::new(region, 1);
+        let mut txn = writer.begin_transaction();
+        txn.add_revoke(BlockNumber(7));
+        txn.add_write(BlockNumber(7), vec![0xAC; 512]);
+        let (_, stats) = writer.commit_transaction(&cx, &dev, &txn).expect("commit");
+
+        assert_eq!(stats.revoke_blocks, 1);
+        assert_eq!(stats.descriptor_blocks, 1);
+        assert_eq!(stats.data_blocks, 1);
+
+        let outcome = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert_eq!(outcome.committed_sequences, vec![1]);
+        assert_eq!(outcome.stats.skipped_revoked_blocks, 0);
+        assert_eq!(outcome.stats.replayed_blocks, 1);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(7)).unwrap().as_slice(),
+            &[0xAC; 512]
+        );
+    }
+
+    #[test]
+    fn jbd2_writer_write_then_later_revoke_same_target_skips_write() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+
+        let mut writer = Jbd2Writer::new(region, 1);
+        let mut txn = writer.begin_transaction();
+        txn.add_write(BlockNumber(7), vec![0xBD; 512]);
+        txn.add_revoke(BlockNumber(7));
+        let (_, stats) = writer.commit_transaction(&cx, &dev, &txn).expect("commit");
+
+        assert_eq!(stats.revoke_blocks, 1);
+        assert_eq!(stats.descriptor_blocks, 1);
+        assert_eq!(stats.data_blocks, 1);
+
+        let outcome = replay_jbd2(&cx, &dev, region).expect("replay");
+        assert_eq!(outcome.committed_sequences, vec![1]);
+        assert_eq!(outcome.stats.skipped_revoked_blocks, 1);
+        assert_eq!(outcome.stats.replayed_blocks, 0);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(7)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
+    }
+
+    #[test]
     fn jbd2_writer_incomplete_txn_ignored_on_replay() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 256);
@@ -4072,6 +4137,66 @@ mod tests {
             dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
             &[0xBB; 512],
             "later write should not be affected by earlier revoke"
+        );
+    }
+
+    #[test]
+    fn replay_jbd2_same_sequence_revoke_then_later_write_replays() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 16,
+        };
+
+        // Seq 7: revoke block 5, then later descriptor writes block 5, then commit.
+        dev.raw_write(BlockNumber(10), revoke_block(512, 7, &[5]));
+        dev.raw_write(
+            BlockNumber(11),
+            descriptor_block(512, 7, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(12), vec![0xCC; 512]);
+        dev.raw_write(BlockNumber(13), commit_block(512, 7));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
+
+        assert_eq!(out.committed_sequences, vec![7]);
+        assert_eq!(out.stats.skipped_revoked_blocks, 0);
+        assert_eq!(out.stats.replayed_blocks, 1);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &[0xCC; 512],
+            "later write in the same sequence should override the earlier revoke"
+        );
+    }
+
+    #[test]
+    fn replay_jbd2_same_sequence_write_then_later_revoke_skips_write() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 16,
+        };
+
+        // Seq 7: descriptor writes block 5, then revoke block 5, then commit.
+        dev.raw_write(
+            BlockNumber(10),
+            descriptor_block(512, 7, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(11), vec![0xDD; 512]);
+        dev.raw_write(BlockNumber(12), revoke_block(512, 7, &[5]));
+        dev.raw_write(BlockNumber(13), commit_block(512, 7));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("should succeed");
+
+        assert_eq!(out.committed_sequences, vec![7]);
+        assert_eq!(out.stats.skipped_revoked_blocks, 1);
+        assert_eq!(out.stats.replayed_blocks, 0);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &[0_u8; 512],
+            "later revoke in the same sequence should cancel the earlier write"
         );
     }
 

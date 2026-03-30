@@ -11480,7 +11480,7 @@ impl OpenFs {
         // Get the target inode to determine its file type.
         let inode = self.btrfs_read_inode_from_tree(&alloc, target_oid)?;
         let ft = if Self::btrfs_mode_to_file_type(inode.mode) == FileType::Directory {
-            return Err(FfsError::IsDirectory); // Can't hard-link directories
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(1))); // EPERM
         } else {
             Self::btrfs_file_type_code_from_mode(inode.mode)
         };
@@ -13379,6 +13379,9 @@ impl FsOps for OpenFs {
                 if inode.is_dir() {
                     return Err(FfsError::IsDirectory);
                 }
+                if inode.is_symlink() {
+                    return Err(FfsError::Format("cannot read a symlink".into()));
+                }
 
                 // e2compr compressed inode: if COMPRBLK_FL is set, the file
                 // contains at least one compressed cluster. Route to the
@@ -13403,7 +13406,16 @@ impl FsOps for OpenFs {
                 buf.truncate(n);
                 Ok(buf)
             }
-            FsFlavor::Btrfs(_) => self.btrfs_read_file(cx, ino, offset, size),
+            FsFlavor::Btrfs(_) => {
+                let attr = self.btrfs_read_inode_attr(cx, ino)?;
+                if attr.kind == FileType::Directory {
+                    return Err(FfsError::IsDirectory);
+                }
+                if attr.kind == FileType::Symlink {
+                    return Err(FfsError::Format("cannot read a symlink".into()));
+                }
+                self.btrfs_read_file(cx, ino, offset, size)
+            }
         }
     }
 
@@ -13417,6 +13429,10 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => {
                 let inode =
                     self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                if !inode.is_symlink() {
+                    return Err(FfsError::Format("not a symlink".into()));
+                }
+                
                 if inode.size <= 60 {
                     // Fast symlink: data is stored directly in the inode's block field.
                     #[expect(clippy::cast_possible_truncation)]
@@ -29868,6 +29884,95 @@ mod tests {
             "gap leaked stale bytes: {data:?}"
         );
         assert_eq!(data[10], b'Z');
+    }
+
+    #[test]
+    fn btrfs_write_setattr_extend_zero_fills() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("extend.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, b"ABC")
+            .unwrap();
+
+        // Extend the file via setattr to 16 bytes.
+        let extended = ops
+            .setattr(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                &SetAttrRequest {
+                    size: Some(16),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(extended.size, 16);
+
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
+            .unwrap();
+        assert_eq!(&data[..3], b"ABC");
+        assert!(
+            data[3..16].iter().all(|&b| b == 0),
+            "extended region should be zero-filled, got: {:?}",
+            &data[3..16]
+        );
+    }
+
+    #[test]
+    fn btrfs_write_setattr_same_size_is_noop() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("noop.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            b"hello world!",
+        )
+        .unwrap();
+
+        // Set size to current size (no-op).
+        let same = ops
+            .setattr(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                &SetAttrRequest {
+                    size: Some(12),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(same.size, 12);
+
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
+            .unwrap();
+        assert_eq!(data, b"hello world!");
     }
 
     #[test]
