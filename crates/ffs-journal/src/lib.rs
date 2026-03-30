@@ -1265,6 +1265,7 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
 
         if pos + tag_len > data.len() {
             discard_pending_fc_transaction(&mut result, &mut pending);
+            result.fallback_required = true;
             break; // Truncated tag — stop scanning and force fallback.
         }
 
@@ -1282,6 +1283,11 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
 
         match tag {
             FcTag::Head => {
+                if payload.len() < 16 {
+                    discard_pending_fc_transaction(&mut result, &mut pending);
+                    result.fallback_required = true;
+                    continue;
+                }
                 discard_pending_fc_transaction(&mut result, &mut pending);
                 pending.active = true;
                 result.blocks_scanned += 1;
@@ -1291,10 +1297,13 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
                     result.fallback_required = true;
                     continue;
                 }
-                if payload.len() >= 4 {
-                    result.last_tid =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                if payload.len() < 8 {
+                    discard_pending_fc_transaction(&mut result, &mut pending);
+                    result.fallback_required = true;
+                    continue;
                 }
+                result.last_tid =
+                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 result.transactions_found += 1;
                 result.operations.append(&mut pending.operations);
                 pending.active = false;
@@ -1307,11 +1316,18 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
                 }
                 if let Some(operation) = parse_fc_operation(tag, payload) {
                     pending.operations.push(operation);
+                } else {
+                    discard_pending_fc_transaction(&mut result, &mut pending);
+                    result.fallback_required = true;
                 }
             }
         }
     }
 
+    if pos < data.len() && data[pos..].iter().any(|&byte| byte != 0) {
+        discard_pending_fc_transaction(&mut result, &mut pending);
+        result.fallback_required = true;
+    }
     discard_pending_fc_transaction(&mut result, &mut pending);
     Ok(result)
 }
@@ -1350,7 +1366,10 @@ mod fc_tests {
         payload.extend_from_slice(&10_u32.to_le_bytes()); // len
         payload.extend_from_slice(&5000_u32.to_le_bytes()); // physical_block
         data.extend(build_fc_tag(0x03, &payload)); // ADD_RANGE
-        data.extend(build_fc_tag(0x09, &1_u32.to_le_bytes())); // TAIL
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&1_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
@@ -1405,7 +1424,10 @@ mod fc_tests {
         payload.extend_from_slice(&50_u32.to_le_bytes());
         payload.extend_from_slice(&20_u32.to_le_bytes());
         data.extend(build_fc_tag(0x04, &payload));
-        data.extend(build_fc_tag(0x09, &2_u32.to_le_bytes())); // TAIL
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&2_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
@@ -1425,7 +1447,10 @@ mod fc_tests {
         data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
         data.extend(build_fc_tag(0xFF, &[1, 2, 3])); // unknown tag
         data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
-        data.extend(build_fc_tag(0x09, &3_u32.to_le_bytes())); // TAIL
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
 
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty());
@@ -1445,11 +1470,73 @@ mod fc_tests {
     }
 
     #[test]
+    fn replay_short_head_requires_fallback() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 8])); // HEAD too short
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert!(result.operations.is_empty());
+        assert_eq!(result.transactions_found, 0);
+        assert_eq!(result.incomplete_transactions, 0);
+        assert!(result.fallback_required);
+    }
+
+    #[test]
     fn replay_truncated_tag_stops() {
         let mut data = Vec::new();
         data.extend(build_fc_tag(0x03, &[1, 2, 3])); // ADD_RANGE with payload too short
         let result = replay_fast_commit(&data).unwrap();
         assert!(result.operations.is_empty()); // Payload < 16 bytes, skipped
+        assert!(result.fallback_required);
+    }
+
+    #[test]
+    fn replay_malformed_operation_inside_transaction_requires_fallback() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x07, &[1, 2, 3])); // INODE payload too short
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert!(result.operations.is_empty());
+        assert_eq!(result.transactions_found, 0);
+        assert_eq!(result.incomplete_transactions, 1);
+        assert!(result.fallback_required);
+    }
+
+    #[test]
+    fn replay_short_tail_requires_fallback() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &[1, 2, 3])); // TAIL too short for tid
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert!(result.operations.is_empty());
+        assert_eq!(result.transactions_found, 0);
+        assert_eq!(result.incomplete_transactions, 1);
+        assert!(result.fallback_required);
+    }
+
+    #[test]
+    fn replay_tail_without_crc_requires_fallback() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        data.extend(build_fc_tag(0x09, &3_u32.to_le_bytes())); // TAIL missing crc
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert!(result.operations.is_empty());
+        assert_eq!(result.transactions_found, 0);
+        assert_eq!(result.incomplete_transactions, 1);
         assert!(result.fallback_required);
     }
 
@@ -1467,11 +1554,54 @@ mod fc_tests {
     }
 
     #[test]
+    fn replay_truncated_tag_after_committed_transaction_requires_fallback() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend_from_slice(&0x07_u16.to_le_bytes()); // next tag type
+        data.extend_from_slice(&16_u16.to_le_bytes()); // truncated next tag len
+        data.extend_from_slice(&[1, 2, 3]); // not enough payload bytes
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert_eq!(result.transactions_found, 1);
+        assert_eq!(result.last_tid, 3);
+        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42)]);
+        assert_eq!(result.incomplete_transactions, 0);
+        assert!(result.fallback_required);
+    }
+
+    #[test]
+    fn replay_trailing_nonzero_bytes_require_fallback() {
+        let mut data = Vec::new();
+        data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
+        data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
+        data.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // stray nonzero tail bytes
+
+        let result = replay_fast_commit(&data).unwrap();
+        assert_eq!(result.transactions_found, 1);
+        assert_eq!(result.last_tid, 3);
+        assert_eq!(result.operations, vec![FcOperation::InodeUpdate(42)]);
+        assert_eq!(result.incomplete_transactions, 0);
+        assert!(result.fallback_required);
+    }
+
+    #[test]
     fn replay_zero_padding_after_tail_stops_cleanly() {
         let mut data = Vec::new();
         data.extend(build_fc_tag(0x0A, &[0; 16])); // HEAD
         data.extend(build_fc_tag(0x07, &42_u32.to_le_bytes())); // INODE
-        data.extend(build_fc_tag(0x09, &3_u32.to_le_bytes())); // TAIL
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&3_u32.to_le_bytes()); // tid
+        tail.extend_from_slice(&0_u32.to_le_bytes()); // crc (ignored in replay)
+        data.extend(build_fc_tag(0x09, &tail)); // TAIL
         data.extend_from_slice(&[0_u8; 64]); // zero-filled unused tail space
 
         let result = replay_fast_commit(&data).unwrap();
@@ -1503,11 +1633,12 @@ impl NativeCowJournal {
         while next_slot < region.blocks {
             let block = resolve_region_block(region, next_slot)?;
             let raw = dev.read_block(cx, block)?;
-            match decode_cow_record(raw.as_slice())? {
-                Some(_) => {
+            match decode_cow_record(raw.as_slice()) {
+                Ok(Some(_)) => {
                     next_slot = next_slot.saturating_add(1);
                 }
-                None => break,
+                Ok(None) | Err(FfsError::Format(_)) => break,
+                Err(err) => return Err(err),
             }
         }
 
@@ -2352,6 +2483,67 @@ mod tests {
     }
 
     #[test]
+    fn native_cow_same_target_last_write_wins_within_commit() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(50),
+            blocks: 16,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open journal");
+        journal
+            .append_write(&cx, &dev, CommitSeq(9), BlockNumber(6), &[0xAA; 64])
+            .expect("append first write");
+        journal
+            .append_write(&cx, &dev, CommitSeq(9), BlockNumber(6), &[0xBB; 64])
+            .expect("append second write");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(9))
+            .expect("append commit");
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        replay_native_cow(&cx, &dev, &recovered).expect("replay");
+
+        let target = dev
+            .read_block(&cx, BlockNumber(6))
+            .expect("read target block");
+        assert_eq!(&target.as_slice()[..64], &[0xBB; 64]);
+    }
+
+    #[test]
+    fn native_cow_same_target_later_commit_wins() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 128);
+        let region = JournalRegion {
+            start: BlockNumber(50),
+            blocks: 16,
+        };
+
+        let mut journal = NativeCowJournal::open(&cx, &dev, region).expect("open journal");
+        journal
+            .append_write(&cx, &dev, CommitSeq(1), BlockNumber(6), &[0xAA; 64])
+            .expect("append first write");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(1))
+            .expect("append first commit");
+        journal
+            .append_write(&cx, &dev, CommitSeq(2), BlockNumber(6), &[0xBB; 64])
+            .expect("append second write");
+        journal
+            .append_commit(&cx, &dev, CommitSeq(2))
+            .expect("append second commit");
+
+        let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
+        replay_native_cow(&cx, &dev, &recovered).expect("replay");
+
+        let target = dev
+            .read_block(&cx, BlockNumber(6))
+            .expect("read target block");
+        assert_eq!(&target.as_slice()[..64], &[0xBB; 64]);
+    }
+
+    #[test]
     fn native_cow_open_discovers_tail_after_existing_records() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 128);
@@ -2376,7 +2568,7 @@ mod tests {
     }
 
     #[test]
-    fn native_cow_open_rejects_malformed_tail_record() {
+    fn native_cow_open_stops_cleanly_at_malformed_tail_record() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 128);
         let region = JournalRegion {
@@ -2399,11 +2591,9 @@ mod tests {
         malformed[4..6].copy_from_slice(&(999_u16).to_le_bytes());
         dev.raw_write(BlockNumber(62), malformed);
 
-        let err = NativeCowJournal::open(&cx, &dev, region)
-            .expect_err("malformed tail should be rejected");
-        assert!(
-            matches!(err, FfsError::Format(message) if message.contains("unsupported COW journal version"))
-        );
+        let reopened = NativeCowJournal::open(&cx, &dev, region)
+            .expect("malformed tail should stop discovery cleanly");
+        assert_eq!(reopened.next_slot(), 2);
     }
 
     #[test]

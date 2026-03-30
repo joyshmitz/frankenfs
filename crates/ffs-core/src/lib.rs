@@ -8647,6 +8647,14 @@ impl OpenFs {
         if inode.is_dir() {
             return Err(FfsError::IsDirectory);
         }
+        if inode.is_symlink() {
+            return Err(FfsError::Format("cannot fallocate a symlink".into()));
+        }
+        if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
+            return Err(FfsError::UnsupportedFeature(
+                "fallocate of non-extent (indirect block) files is not supported".into(),
+            ));
+        }
 
         let mut root_bytes = Self::extent_root(&inode);
         let mut alloc = alloc_mutex.lock();
@@ -8936,6 +8944,14 @@ impl OpenFs {
         let mut inode = self.read_inode(cx, ino)?;
         if inode.is_dir() {
             return Err(FfsError::IsDirectory);
+        }
+        if inode.is_symlink() {
+            return Err(FfsError::Format("cannot write to a symlink".into()));
+        }
+        if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
+            return Err(FfsError::UnsupportedFeature(
+                "writing to non-extent (indirect block) files is not supported".into(),
+            ));
         }
 
         // e2compr compressed write: route to cluster-based write path.
@@ -10467,8 +10483,10 @@ impl OpenFs {
             .extent_alloc
             .alloc_data(alloc_size)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        self.dev
-            .write_all_at(cx, ByteOffset(allocation.bytenr), data)?;
+        if let Err(e) = self.dev.write_all_at(cx, ByteOffset(allocation.bytenr), data) {
+            let _ = alloc.extent_alloc.free_extent(allocation.bytenr, alloc_size, false);
+            return Err(e);
+        }
         let extent = BtrfsExtentData::Regular {
             generation: alloc.generation,
             ram_bytes: data_len,
@@ -10484,10 +10502,10 @@ impl OpenFs {
             item_type: BTRFS_ITEM_EXTENT_DATA,
             offset: logical_offset,
         };
-        alloc
-            .fs_tree
-            .insert(extent_key, &extent.to_bytes())
-            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        if let Err(e) = alloc.fs_tree.insert(extent_key, &extent.to_bytes()) {
+            let _ = alloc.extent_alloc.free_extent(allocation.bytenr, alloc_size, false);
+            return Err(btrfs_mutation_to_ffs(&e));
+        }
         Ok(())
     }
 
@@ -10813,8 +10831,12 @@ impl OpenFs {
             .clone();
         let mut inode = parse_inode_item(&inode_data).map_err(|e| parse_to_ffs_error(&e))?;
 
-        if Self::btrfs_mode_to_file_type(inode.mode) == FileType::Directory {
+        let file_type = Self::btrfs_mode_to_file_type(inode.mode);
+        if file_type == FileType::Directory {
             return Err(FfsError::IsDirectory);
+        }
+        if file_type == FileType::Symlink {
+            return Err(FfsError::Format("cannot write to a symlink".into()));
         }
 
         let data_len_u64 = u64::try_from(data.len())
@@ -10975,7 +10997,10 @@ impl OpenFs {
             let disk_bytenr = allocation.bytenr;
 
             // Write data to the allocated logical region.
-            self.btrfs_write_logical(cx, disk_bytenr, data)?;
+            if let Err(e) = self.btrfs_write_logical(cx, disk_bytenr, data) {
+                let _ = alloc.extent_alloc.free_extent(disk_bytenr, alloc_size, false);
+                return Err(e);
+            }
 
             // Insert the EXTENT_DATA item.
             let extent = BtrfsExtentData::Regular {
@@ -10994,10 +11019,10 @@ impl OpenFs {
                 offset,
             };
             let extent_bytes = extent.to_bytes();
-            alloc
-                .fs_tree
-                .insert(extent_key, &extent_bytes)
-                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            if let Err(e) = alloc.fs_tree.insert(extent_key, &extent_bytes) {
+                let _ = alloc.extent_alloc.free_extent(disk_bytenr, alloc_size, false);
+                return Err(btrfs_mutation_to_ffs(&e));
+            }
         }
 
         // Update inode metadata.
@@ -11689,8 +11714,12 @@ impl OpenFs {
         let mut alloc = alloc_mutex.lock();
         let mut inode = self.btrfs_read_inode_from_tree(&alloc, canonical)?;
 
-        if Self::btrfs_mode_to_file_type(inode.mode) == FileType::Directory {
+        let file_type = Self::btrfs_mode_to_file_type(inode.mode);
+        if file_type == FileType::Directory {
             return Err(FfsError::IsDirectory);
+        }
+        if file_type == FileType::Symlink {
+            return Err(FfsError::Format("cannot fallocate a symlink".into()));
         }
 
         if punch_hole || zero_range {
@@ -11835,11 +11864,18 @@ impl OpenFs {
                                     .extent_alloc
                                     .alloc_data(prev_alloc_size)
                                     .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                                self.dev.write_all_at(
+                                if let Err(e) = self.dev.write_all_at(
                                     cx,
                                     ByteOffset(prev_allocation.bytenr),
                                     &prev_data,
-                                )?;
+                                ) {
+                                    let _ = alloc.extent_alloc.free_extent(
+                                        prev_allocation.bytenr,
+                                        prev_alloc_size,
+                                        false,
+                                    );
+                                    return Err(e);
+                                }
                                 let prev_extent = BtrfsExtentData::Regular {
                                     generation: alloc.generation,
                                     ram_bytes: prev_data_len,
@@ -11850,10 +11886,16 @@ impl OpenFs {
                                     extent_offset: 0,
                                     num_bytes: prev_data_len,
                                 };
-                                alloc
-                                    .fs_tree
-                                    .insert(inline_key, &prev_extent.to_bytes())
-                                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                                if let Err(e) =
+                                    alloc.fs_tree.insert(inline_key, &prev_extent.to_bytes())
+                                {
+                                    let _ = alloc.extent_alloc.free_extent(
+                                        prev_allocation.bytenr,
+                                        prev_alloc_size,
+                                        false,
+                                    );
+                                    return Err(btrfs_mutation_to_ffs(&e));
+                                }
                             }
                         }
                     }
@@ -11885,10 +11927,12 @@ impl OpenFs {
                     item_type: BTRFS_ITEM_EXTENT_DATA,
                     offset,
                 };
-                alloc
-                    .fs_tree
-                    .insert(extent_key, &extent.to_bytes())
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                if let Err(e) = alloc.fs_tree.insert(extent_key, &extent.to_bytes()) {
+                    let _ = alloc
+                        .extent_alloc
+                        .free_extent(allocation.bytenr, alloc_size, false);
+                    return Err(btrfs_mutation_to_ffs(&e));
+                }
             }
         }
 
@@ -16702,7 +16746,7 @@ mod tests {
         let mut fc_payload = Vec::new();
         fc_payload.extend(build_fc_tag(0x0A, &[0; 16]));
         fc_payload.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
-        fc_payload.extend(build_fc_tag(0x09, &1_u32.to_le_bytes()));
+        fc_payload.extend(build_fc_tag(0x09, &[1, 0, 0, 0, 0, 0, 0, 0]));
         let fc_block = 24 * 4096;
         image[fc_block..fc_block + fc_payload.len()].copy_from_slice(&fc_payload);
 
