@@ -10,8 +10,8 @@ pub use degradation::{
     DegradationPolicy, DegradationTransition, PressureMonitor,
 };
 pub use vfs::{
-    DirEntry, FileType, FsOps, FsStat, InodeAttr, RequestOp, RequestScope, SetAttrRequest,
-    XattrSetMode,
+    DirEntry, FiemapExtent, FileType, FsOps, FsStat, InodeAttr, RequestOp, RequestScope,
+    SetAttrRequest, XattrSetMode, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN,
 };
 
 use asupersync::{Cx, RaptorQConfig};
@@ -13801,6 +13801,75 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn fiemap(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        start: u64,
+        length: u64,
+    ) -> ffs_error::Result<Vec<FiemapExtent>> {
+        match &self.flavor {
+            FsFlavor::Ext4(ref sb) => {
+                let inode =
+                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                if inode.is_dir() {
+                    return Err(FfsError::IsDirectory);
+                }
+                if inode.is_symlink() {
+                    return Err(FfsError::Format(
+                        "fiemap not supported on symlinks".into(),
+                    ));
+                }
+                // Inline-data and indirect-block inodes don't have extent trees.
+                if inode.flags & ffs_types::EXT4_EXTENTS_FL == 0 {
+                    return Err(FfsError::UnsupportedFeature(
+                        "fiemap requires extent-based inode".to_owned(),
+                    ));
+                }
+
+                let block_size = u64::from(sb.block_size());
+                let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
+
+                let end = start.saturating_add(length);
+                let mut result = Vec::new();
+                for (i, ext) in extents.iter().enumerate() {
+                    let ext_logical_byte = u64::from(ext.logical_block) * block_size;
+                    let ext_len_byte = u64::from(ext.actual_len()) * block_size;
+                    let ext_end = ext_logical_byte + ext_len_byte;
+
+                    // Skip extents entirely before the requested range.
+                    if ext_end <= start {
+                        continue;
+                    }
+                    // Stop once we're past the requested range.
+                    if ext_logical_byte >= end {
+                        break;
+                    }
+
+                    let mut flags = 0_u32;
+                    if ext.is_unwritten() {
+                        flags |= FIEMAP_EXTENT_UNWRITTEN;
+                    }
+                    if i + 1 == extents.len() {
+                        flags |= FIEMAP_EXTENT_LAST;
+                    }
+
+                    result.push(FiemapExtent {
+                        logical: ext_logical_byte,
+                        physical: ext.physical_start * block_size,
+                        length: ext_len_byte,
+                        flags,
+                    });
+                }
+                Ok(result)
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "fiemap is not yet supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
     fn setattr(
         &self,
         cx: &Cx,
@@ -23203,6 +23272,83 @@ mod tests {
     }
 
     #[test]
+    fn write_fallocate_zero_range_zeroes_data() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("zero_range.txt"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        let fill = vec![0x7A_u8; 12288];
+        fs.write(&cx, ino, 0, &fill).expect("fill");
+
+        fs.fallocate(&cx, ino, 4096, 4096, libc::FALLOC_FL_ZERO_RANGE)
+            .expect("zero range");
+
+        assert_eq!(fs.getattr(&cx, ino).expect("ga").size, 12288);
+
+        let data = fs.read(&cx, ino, 0, 12288).expect("read");
+        assert!(
+            data[..4096].iter().all(|&b| b == 0x7A),
+            "data before zero-range should remain intact"
+        );
+        assert!(
+            data[4096..8192].iter().all(|&b| b == 0),
+            "zero-range should zero the selected region"
+        );
+        assert!(
+            data[8192..12288].iter().all(|&b| b == 0x7A),
+            "data after zero-range should remain intact"
+        );
+    }
+
+    #[test]
+    fn write_fallocate_zero_range_keep_size_does_not_extend_file() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("zero_range_keep_size.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        let ino = attr.ino;
+
+        fs.write(&cx, ino, 0, &[0x4D; 4096]).expect("seed");
+
+        fs.fallocate(
+            &cx,
+            ino,
+            0,
+            8192,
+            libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("zero range keep_size");
+
+        let attr = fs.getattr(&cx, ino).expect("ga");
+        assert_eq!(attr.size, 4096, "KEEP_SIZE must preserve file size");
+
+        let data = fs.read(&cx, ino, 0, 4096).expect("read");
+        assert!(
+            data.iter().all(|&b| b == 0),
+            "existing file data should be zeroed even when KEEP_SIZE is set"
+        );
+    }
+
+    #[test]
     fn write_create_many_files_dir_expansion() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -26346,7 +26492,11 @@ mod tests {
                 OsStr::new("dir_hardlink"),
             )
             .unwrap_err();
-        assert_eq!(err.to_errno(), libc::EPERM, "hard-linking a directory must return EPERM");
+        assert_eq!(
+            err.to_errno(),
+            libc::EPERM,
+            "hard-linking a directory must return EPERM"
+        );
     }
 
     #[test]

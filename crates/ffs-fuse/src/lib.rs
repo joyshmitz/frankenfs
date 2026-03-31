@@ -11,15 +11,15 @@ pub mod per_core;
 
 use asupersync::Cx;
 use ffs_core::{
-    BackpressureDecision, BackpressureGate, FileType as FfsFileType, FsOps, InodeAttr, RequestOp,
-    RequestScope, SetAttrRequest, XattrSetMode,
+    BackpressureDecision, BackpressureGate, FiemapExtent, FileType as FfsFileType, FsOps,
+    InodeAttr, RequestOp, RequestScope, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::InodeNumber;
 use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr,
-    Request, TimeOrNow,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyOpen, ReplyStatfs, ReplyWrite,
+    ReplyXattr, Request, TimeOrNow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1713,6 +1713,99 @@ impl Filesystem for FrankenFuse {
                 );
             }
         }
+    }
+
+    fn ioctl(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _flags: u32,
+        cmd: u32,
+        in_data: &[u8],
+        out_size: u32,
+        reply: ReplyIoctl,
+    ) {
+        // FS_IOC_FIEMAP = _IOWR('f', 11, struct fiemap)
+        // The ioctl number is architecture-dependent; on x86_64 it's 0xC020660B.
+        // We also accept the raw command number 11 shifted by 'f' for portability.
+        const FS_IOC_FIEMAP: u32 = 0xC020_660B;
+
+        // FIEMAP header: fm_start(u64) + fm_length(u64) + fm_flags(u32) +
+        //                fm_mapped_extents(u32) + fm_extent_count(u32) = 32 bytes
+        const FIEMAP_HEADER_SIZE: usize = 32;
+        // Each fiemap_extent: fe_logical(u64) + fe_physical(u64) + fe_length(u64) +
+        //                     2*reserved(u64) + fe_flags(u32) + 3*reserved(u32) = 56 bytes
+        const FIEMAP_EXTENT_SIZE: usize = 56;
+
+        let cmd_u64: u64 = cmd.into();
+        if cmd_u64 != u64::from(FS_IOC_FIEMAP) {
+            debug!(ino, cmd, "ioctl: unsupported command");
+            reply.error(libc::ENOTTY);
+            return;
+        }
+
+        // Parse the fiemap header from in_data.
+        if in_data.len() < FIEMAP_HEADER_SIZE {
+            reply.error(libc::EINVAL);
+            return;
+        }
+
+        let fm_start = u64::from_ne_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+        let fm_length = u64::from_ne_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
+        let _fm_flags = u32::from_ne_bytes(in_data[16..20].try_into().unwrap_or([0; 4]));
+        let fm_extent_count = u32::from_ne_bytes(in_data[28..32].try_into().unwrap_or([0; 4]));
+
+        let cx = Self::cx_for_request();
+        let extents = match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
+            self.inner
+                .ops
+                .fiemap(cx, scope, InodeNumber(ino), fm_start, fm_length)
+        }) {
+            Ok(exts) => exts,
+            Err(e) => {
+                let errno = e.to_errno();
+                reply.error(errno);
+                return;
+            }
+        };
+
+        // Limit the number of returned extents to fm_extent_count (or out_size).
+        let max_extents_by_count = fm_extent_count as usize;
+        let max_extents_by_size = if out_size as usize > FIEMAP_HEADER_SIZE {
+            (out_size as usize - FIEMAP_HEADER_SIZE) / FIEMAP_EXTENT_SIZE
+        } else {
+            0
+        };
+        let max_extents = max_extents_by_count.min(max_extents_by_size);
+
+        let returned_extents: Vec<&FiemapExtent> =
+            extents.iter().take(max_extents).collect();
+        let mapped_count = returned_extents.len() as u32;
+
+        // Build the response: fiemap header + fiemap_extent array.
+        let response_size = FIEMAP_HEADER_SIZE + returned_extents.len() * FIEMAP_EXTENT_SIZE;
+        let mut response = vec![0_u8; response_size];
+
+        // Write fiemap header.
+        response[0..8].copy_from_slice(&fm_start.to_ne_bytes());
+        response[8..16].copy_from_slice(&fm_length.to_ne_bytes());
+        // fm_flags: 0
+        response[24..28].copy_from_slice(&mapped_count.to_ne_bytes());
+        response[28..32].copy_from_slice(&fm_extent_count.to_ne_bytes());
+
+        // Write each fiemap_extent.
+        for (i, ext) in returned_extents.iter().enumerate() {
+            let off = FIEMAP_HEADER_SIZE + i * FIEMAP_EXTENT_SIZE;
+            response[off..off + 8].copy_from_slice(&ext.logical.to_ne_bytes());
+            response[off + 8..off + 16].copy_from_slice(&ext.physical.to_ne_bytes());
+            response[off + 16..off + 24].copy_from_slice(&ext.length.to_ne_bytes());
+            // 2 reserved u64 fields (zeros)
+            response[off + 40..off + 44].copy_from_slice(&ext.flags.to_ne_bytes());
+            // 3 reserved u32 fields (zeros)
+        }
+
+        reply.ioctl(0, &response);
     }
 
     fn flush(&mut self, _req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {

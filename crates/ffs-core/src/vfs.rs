@@ -115,6 +115,27 @@ impl DirEntry {
     }
 }
 
+/// A single extent returned by [`FsOps::fiemap`].
+///
+/// Mirrors `struct fiemap_extent` from `<linux/fiemap.h>`. All offsets and
+/// lengths are in **bytes** (not blocks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FiemapExtent {
+    /// Logical offset in the file (bytes).
+    pub logical: u64,
+    /// Physical offset on the device (bytes).
+    pub physical: u64,
+    /// Length in bytes.
+    pub length: u64,
+    /// Flags bitmap (FIEMAP_EXTENT_* constants).
+    pub flags: u32,
+}
+
+/// FIEMAP extent flag: this extent is the last in the file.
+pub const FIEMAP_EXTENT_LAST: u32 = 0x0001;
+/// FIEMAP extent flag: this extent is unwritten / preallocated.
+pub const FIEMAP_EXTENT_UNWRITTEN: u32 = 0x0800;
+
 /// FUSE/VFS operation kind used for MVCC request-scope hooks.
 ///
 /// These operation tags let `FsOps` implementations choose an MVCC policy per
@@ -147,6 +168,7 @@ pub enum RequestOp {
     Setxattr,
     Removexattr,
     Write,
+    Ioctl,
 }
 
 impl RequestOp {
@@ -572,6 +594,24 @@ pub trait FsOps: Send + Sync {
         _mode: i32,
     ) -> ffs_error::Result<()> {
         Err(FfsError::ReadOnly)
+    }
+
+    /// Query extent mappings for a file (FIEMAP semantics).
+    ///
+    /// Returns extent entries covering the byte range `[start, start+length)`.
+    /// If `length` is `u64::MAX`, returns all extents from `start` to EOF.
+    /// Directories and symlinks return `FfsError::InvalidArgument`.
+    fn fiemap(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _start: u64,
+        _length: u64,
+    ) -> ffs_error::Result<Vec<FiemapExtent>> {
+        Err(FfsError::UnsupportedFeature(
+            "fiemap is not supported by this backend".to_owned(),
+        ))
     }
 
     /// Set inode attributes. Returns updated attributes.
