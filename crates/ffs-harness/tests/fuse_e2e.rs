@@ -461,7 +461,7 @@ fn with_rw_mount_sized(image_size_bytes: u64, f: impl FnOnce(&Path)) {
 }
 
 fn query_fiemap(path: &Path, extent_count: u32) -> Value {
-    let script = r#"
+    let script = r"
 import fcntl, json, struct, sys
 
 FS_IOC_FIEMAP = 0xC020660B
@@ -508,7 +508,7 @@ print(json.dumps({
     'requested_extents': requested_extents,
     'extents': extents,
 }))
-    "#;
+    ";
 
     let output = Command::new("python3")
         .args([

@@ -14,13 +14,13 @@ FUSE mount. Established 2026-03-18.
 | generic/068 | skip | wont_fix | FIFREEZE ioctl (kernel-only) |
 | generic/112 | skip | likely_pass | AIO + preallocation (fallocate) |
 | generic/231 | skip | wont_fix | Disk quotas (kernel-only) |
-| ext4/001 | skip | known_fail | FIEMAP verification gap after ZERO_RANGE |
+| ext4/001 | skip | likely_pass | FIEMAP ioctl implemented (bd-pqpu); needs runtime xfstests validation |
 | ext4/003 | skip | known_fail | bigalloc scratch mkfs |
 | ext4/005 | skip | known_fail | chattr -e extent conversion |
 | ext4/013 | skip | wont_fix | debugfs raw inode corruption |
 
 **Passable: 3/11** — generic/001, generic/013, generic/035
-**Likely passable: 1/11** — generic/112 (pending runtime validation)
+**Likely passable: 2/11** — generic/112, ext4/001 (pending runtime validation)
 
 ## Root Cause Analysis
 
@@ -59,16 +59,18 @@ currently expose through the FUSE interface.
 - mremap is not part of the standard FUSE operation set.
 - **Path to fix**: Implement FUSE writeback cache + mmap support in ffs-fuse.
 
-**ext4/001 — ZERO_RANGE path exists, FIEMAP verification still missing**
-- FrankenFS now has a live ext4 `FALLOC_FL_ZERO_RANGE` implementation in
+**ext4/001 — ZERO_RANGE + FIEMAP implemented (bd-pqpu)**
+- FrankenFS has a live ext4 `FALLOC_FL_ZERO_RANGE` implementation in
   `ffs-core::ext4_fallocate`, and regression coverage exercises both data
   zeroing and `KEEP_SIZE` behavior.
-- The remaining xfstests blocker is FIEMAP-based verification of the resulting
-  extent layout. FrankenFS does not currently expose FIEMAP through the FUSE
-  surface, so the test cannot validate the post-zero-range mapping the way the
-  kernel ext4 path does.
-- **Path to fix**: Implement FIEMAP ioctl passthrough (or equivalent extent
-  inspection support consumable by the xfstests flow) in `ffs-fuse`.
+- FIEMAP ioctl passthrough is now implemented in `ffs-fuse` (bd-pqpu,
+  2026-03-31). The `FsOps::fiemap` trait method queries the ext4 extent tree
+  via `collect_extents_with_scope` and returns `FiemapExtent` entries with
+  proper `FIEMAP_EXTENT_LAST` and `FIEMAP_EXTENT_UNWRITTEN` flags. The FUSE
+  `ioctl` handler parses `FS_IOC_FIEMAP` (0xC020660B), marshals the fiemap
+  header and extent array, and replies via `ReplyIoctl`.
+- **Status**: Reclassified from `known_fail` to `likely_pass`. Needs runtime
+  xfstests validation when the build environment is available.
 
 **ext4/003 — bigalloc scratch filesystem**
 - Requires creating a scratch ext4 filesystem with bigalloc feature enabled.
@@ -131,14 +133,14 @@ Completed 2026-03-18. All 8 known failures investigated (100%).
 | generic/068 | wont_fix | No | — | FIFREEZE ioctl is kernel VFS, no FUSE path |
 | generic/112 | likely_pass | N/A | Runtime test | AIO + fallocate both supported; needs xfstests build |
 | generic/231 | wont_fix | No | — | Quota subsystem is kernel-only |
-| ext4/001 | known_fail | Yes (medium) | FIEMAP verification gap | Implement FIEMAP ioctl passthrough / extent inspection path for FUSE validation |
+| ext4/001 | likely_pass | Done (bd-pqpu) | FIEMAP ioctl implemented | Needs runtime xfstests validation |
 | ext4/003 | known_fail | Yes (low) | Test infra | Set up SCRATCH_DEV loop device with bigalloc |
 | ext4/005 | known_fail | Yes (medium) | EXT4_IOC_SETFLAGS | Implement chattr ioctl passthrough in ffs-fuse |
 | ext4/013 | wont_fix | No | — | Requires raw device access (debugfs -w) |
 
 **Actionable items for future work:**
 1. Build xfstests-dev and validate generic/112 (likely_pass)
-2. Implement FIEMAP ioctl passthrough or equivalent extent-inspection support for ext4/001 validation
+2. Validate ext4/001 with FIEMAP ioctl now available (likely_pass, bd-pqpu)
 3. Set up SCRATCH_DEV loop device infrastructure (unblocks ext4/003)
 4. Implement `EXT4_IOC_SETFLAGS` ioctl passthrough (unblocks ext4/005)
 

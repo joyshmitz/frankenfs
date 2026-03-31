@@ -350,6 +350,14 @@ impl Transaction {
         BTreeMap<BlockNumber, Vec<u8>>,
         BTreeMap<BlockNumber, MergeProof>,
     ) {
+        debug_assert!(
+            self.cow_writes.is_empty(),
+            "COW writes silently dropped by into_writes_and_merge_proofs"
+        );
+        debug_assert!(
+            self.cow_orphans.is_empty(),
+            "COW orphans silently dropped by into_writes_and_merge_proofs"
+        );
         (self.writes, self.merge_proofs)
     }
 
@@ -1357,7 +1365,11 @@ impl MvccStore {
         let txn_id = txn.id().0;
         let write_set_size = txn.pending_writes();
         self.runtime_metrics.record_commit_attempt();
-        let (commit_seq, _deferred) = self.apply_fcw_commit(txn);
+        let (commit_seq, deferred) = self.apply_fcw_commit(txn);
+        debug_assert!(
+            deferred.is_empty(),
+            "commit_fcw_prechecked silently drops deferred COW frees"
+        );
         self.emit_transaction_commit(txn_id, commit_seq, write_set_size, started);
         commit_seq
     }
@@ -1397,7 +1409,11 @@ impl MvccStore {
         let write_set_size = txn.pending_writes();
         self.runtime_metrics.record_commit_attempt();
         match self.commit_ssi_internal(txn) {
-            Ok((commit_seq, _)) => {
+            Ok((commit_seq, deferred)) => {
+                debug_assert!(
+                    deferred.is_empty(),
+                    "commit_ssi silently drops deferred COW frees"
+                );
                 self.emit_transaction_commit(txn_id, commit_seq, write_set_size, started);
                 Ok(commit_seq)
             }
