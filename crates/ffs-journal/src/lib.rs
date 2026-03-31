@@ -654,7 +654,8 @@ impl Jbd2Transaction {
     ///
     /// `target` is the home (destination) block number; `payload` is the data.
     pub fn add_write(&mut self, target: BlockNumber, payload: Vec<u8>) {
-        self.body_items.push(Jbd2TxnBodyItem::Write(target, payload));
+        self.body_items
+            .push(Jbd2TxnBodyItem::Write(target, payload));
         self.write_count = self.write_count.saturating_add(1);
     }
 
@@ -856,7 +857,9 @@ impl Jbd2Writer {
             ));
         }
         if let Some((target, payload)) = txn.body_items.iter().find_map(|item| match item {
-            Jbd2TxnBodyItem::Write(target, payload) if payload.len() > bs => Some((target, payload)),
+            Jbd2TxnBodyItem::Write(target, payload) if payload.len() > bs => {
+                Some((target, payload))
+            }
             Jbd2TxnBodyItem::Write(_, _) | Jbd2TxnBodyItem::Revoke(_) => None,
         }) {
             return Err(FfsError::Format(format!(
@@ -929,7 +932,10 @@ impl Jbd2Writer {
                             desc[off + 8..off + 12].copy_from_slice(&target_high.to_be_bytes());
                         } else {
                             let target_u32 = u32::try_from(target.0).map_err(|_| {
-                                FfsError::Format(format!("target block {} exceeds u32 range", target.0))
+                                FfsError::Format(format!(
+                                    "target block {} exceeds u32 range",
+                                    target.0
+                                ))
                             })?;
                             desc[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
                             desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
@@ -2659,13 +2665,20 @@ mod tests {
         assert!(
             matches!(err, FfsError::Format(message) if message.contains("injected write failure"))
         );
-        assert_eq!(journal.next_slot(), 1, "failed append must not advance tail");
+        assert_eq!(
+            journal.next_slot(),
+            1,
+            "failed append must not advance tail"
+        );
 
         let reopened = NativeCowJournal::open(&cx, &dev, region).expect("reopen");
         assert_eq!(reopened.next_slot(), 1);
 
         let recovered = recover_native_cow(&cx, &dev, region).expect("recover");
-        assert!(recovered.is_empty(), "failed commit append must not recover");
+        assert!(
+            recovered.is_empty(),
+            "failed commit append must not recover"
+        );
     }
 
     #[test]

@@ -10483,8 +10483,13 @@ impl OpenFs {
             .extent_alloc
             .alloc_data(alloc_size)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        if let Err(e) = self.dev.write_all_at(cx, ByteOffset(allocation.bytenr), data) {
-            let _ = alloc.extent_alloc.free_extent(allocation.bytenr, alloc_size, false);
+        if let Err(e) = self
+            .dev
+            .write_all_at(cx, ByteOffset(allocation.bytenr), data)
+        {
+            let _ = alloc
+                .extent_alloc
+                .free_extent(allocation.bytenr, alloc_size, false);
             return Err(e);
         }
         let extent = BtrfsExtentData::Regular {
@@ -10503,7 +10508,9 @@ impl OpenFs {
             offset: logical_offset,
         };
         if let Err(e) = alloc.fs_tree.insert(extent_key, &extent.to_bytes()) {
-            let _ = alloc.extent_alloc.free_extent(allocation.bytenr, alloc_size, false);
+            let _ = alloc
+                .extent_alloc
+                .free_extent(allocation.bytenr, alloc_size, false);
             return Err(btrfs_mutation_to_ffs(&e));
         }
         Ok(())
@@ -10998,7 +11005,9 @@ impl OpenFs {
 
             // Write data to the allocated logical region.
             if let Err(e) = self.btrfs_write_logical(cx, disk_bytenr, data) {
-                let _ = alloc.extent_alloc.free_extent(disk_bytenr, alloc_size, false);
+                let _ = alloc
+                    .extent_alloc
+                    .free_extent(disk_bytenr, alloc_size, false);
                 return Err(e);
             }
 
@@ -11020,7 +11029,9 @@ impl OpenFs {
             };
             let extent_bytes = extent.to_bytes();
             if let Err(e) = alloc.fs_tree.insert(extent_key, &extent_bytes) {
-                let _ = alloc.extent_alloc.free_extent(disk_bytenr, alloc_size, false);
+                let _ = alloc
+                    .extent_alloc
+                    .free_extent(disk_bytenr, alloc_size, false);
                 return Err(btrfs_mutation_to_ffs(&e));
             }
         }
@@ -13432,7 +13443,7 @@ impl FsOps for OpenFs {
                 if !inode.is_symlink() {
                     return Err(FfsError::Format("not a symlink".into()));
                 }
-                
+
                 if inode.size <= 60 {
                     // Fast symlink: data is stored directly in the inode's block field.
                     #[expect(clippy::cast_possible_truncation)]
@@ -19934,6 +19945,46 @@ mod tests {
     }
 
     #[test]
+    fn write_cross_block_boundary_preserves_data() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("cross_block.bin"), 0o644, 0, 0)
+            .expect("create");
+        let ino = attr.ino;
+
+        // Write 6KB of distinct data starting at offset 0 to span two 4KB blocks.
+        let mut payload = vec![0u8; 6144];
+        for (idx, byte) in payload.iter_mut().enumerate() {
+            *byte = u8::try_from(idx % 251).unwrap(); // prime modulus for pattern uniqueness
+        }
+        let written = fs.write(&cx, ino, 0, &payload).expect("write 6KB");
+        assert_eq!(written as usize, 6144);
+
+        // Now overwrite 2KB starting at offset 3072 (spanning the 4KB block boundary).
+        let patch = vec![0xFF_u8; 2048];
+        let written2 = fs.write(&cx, ino, 3072, &patch).expect("cross-block write");
+        assert_eq!(written2 as usize, 2048);
+
+        // Read back all 6KB and verify:
+        // - [0..3072] should be original pattern
+        // - [3072..5120] should be 0xFF
+        // - [5120..6144] should be original pattern
+        let readback = fs.read(&cx, ino, 0, 6144).expect("read");
+        assert_eq!(readback.len(), 6144);
+        assert_eq!(&readback[..3072], &payload[..3072], "prefix corrupted");
+        assert!(
+            readback[3072..5120].iter().all(|&b| b == 0xFF),
+            "cross-block patch not applied correctly"
+        );
+        assert_eq!(&readback[5120..], &payload[5120..], "suffix corrupted");
+    }
+
+    #[test]
     fn write_create_invalid_name_rolls_back_inode_allocation() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -26267,6 +26318,35 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .expect("getattr after failed link");
         assert_eq!(updated.nlink, 1, "failed link must not bump nlink");
+    }
+
+    #[test]
+    fn btrfs_write_link_directory_returns_eperm() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let dir = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("subdir"),
+                0o755,
+                0,
+                0,
+            )
+            .unwrap();
+
+        let err = ops
+            .link(
+                &cx,
+                &mut RequestScope::empty(),
+                dir.ino,
+                InodeNumber(1),
+                OsStr::new("dir_hardlink"),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EPERM, "hard-linking a directory must return EPERM");
     }
 
     #[test]
