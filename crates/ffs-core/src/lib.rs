@@ -10,8 +10,8 @@ pub use degradation::{
     DegradationPolicy, DegradationTransition, PressureMonitor,
 };
 pub use vfs::{
-    DirEntry, FiemapExtent, FileType, FsOps, FsStat, InodeAttr, RequestOp, RequestScope,
-    SetAttrRequest, XattrSetMode, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN,
+    DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat,
+    InodeAttr, RequestOp, RequestScope, SetAttrRequest, XattrSetMode,
 };
 
 use asupersync::{Cx, RaptorQConfig};
@@ -13810,16 +13810,14 @@ impl FsOps for OpenFs {
         length: u64,
     ) -> ffs_error::Result<Vec<FiemapExtent>> {
         match &self.flavor {
-            FsFlavor::Ext4(ref sb) => {
+            FsFlavor::Ext4(sb) => {
                 let inode =
                     self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
                 if inode.is_dir() {
                     return Err(FfsError::IsDirectory);
                 }
                 if inode.is_symlink() {
-                    return Err(FfsError::Format(
-                        "fiemap not supported on symlinks".into(),
-                    ));
+                    return Err(FfsError::Format("fiemap not supported on symlinks".into()));
                 }
                 // Inline-data and indirect-block inodes don't have extent trees.
                 if inode.flags & ffs_types::EXT4_EXTENTS_FL == 0 {
@@ -13828,7 +13826,7 @@ impl FsOps for OpenFs {
                     ));
                 }
 
-                let block_size = u64::from(sb.block_size());
+                let block_size = u64::from(sb.block_size);
                 let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
 
                 let end = start.saturating_add(length);
@@ -17295,6 +17293,38 @@ mod tests {
         assert_eq!(extents[0].logical_block, 0);
         assert_eq!(extents[0].physical_start, 15);
         assert_eq!(extents[0].actual_len(), 1);
+    }
+
+    #[test]
+    fn fiemap_returns_extent_for_regular_file() {
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let mut scope = RequestScope::empty();
+        let extents = fs
+            .fiemap(&cx, &mut scope, InodeNumber(11), 0, u64::MAX)
+            .unwrap();
+        assert_eq!(extents.len(), 1);
+        // Block 13 physical, logical block 0, block_size=4096
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].physical, 13 * 4096);
+        assert_eq!(extents[0].length, 4096);
+        // Last extent should have FIEMAP_EXTENT_LAST flag set.
+        assert_ne!(extents[0].flags & FIEMAP_EXTENT_LAST, 0);
+    }
+
+    #[test]
+    fn fiemap_rejects_directory() {
+        let image = build_ext4_image_with_dir();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let mut scope = RequestScope::empty();
+        let result = fs.fiemap(&cx, &mut scope, InodeNumber(2), 0, u64::MAX);
+        assert!(result.is_err());
     }
 
     #[test]

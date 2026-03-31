@@ -15,6 +15,7 @@
 use asupersync::Cx;
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
 use ffs_fuse::{MountOptions, mount_background};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
@@ -455,6 +456,66 @@ fn with_rw_mount_sized(image_size_bytes: u64, f: impl FnOnce(&Path)) {
         return;
     };
     f(&mnt);
+}
+
+fn query_fiemap(path: &Path, extent_count: u32) -> Value {
+    let script = r#"
+import fcntl, json, struct, sys
+
+FS_IOC_FIEMAP = 0xC020660B
+FIEMAP_HEADER_SIZE = 32
+FIEMAP_EXTENT_SIZE = 56
+FIEMAP_EXTENT_LAST = 0x0001
+
+path = sys.argv[1]
+extent_count = int(sys.argv[2])
+buffer = bytearray(FIEMAP_HEADER_SIZE + extent_count * FIEMAP_EXTENT_SIZE)
+struct.pack_into('@Q', buffer, 0, 0)
+struct.pack_into('@Q', buffer, 8, (1 << 64) - 1)
+struct.pack_into('@I', buffer, 24, extent_count)
+
+with open(path, 'rb', buffering=0) as fh:
+    fcntl.ioctl(fh.fileno(), FS_IOC_FIEMAP, buffer, True)
+
+mapped_extents = struct.unpack_from('@I', buffer, 20)[0]
+requested_extents = struct.unpack_from('@I', buffer, 24)[0]
+extents = []
+for index in range(mapped_extents):
+    off = FIEMAP_HEADER_SIZE + index * FIEMAP_EXTENT_SIZE
+    logical = struct.unpack_from('@Q', buffer, off)[0]
+    physical = struct.unpack_from('@Q', buffer, off + 8)[0]
+    length = struct.unpack_from('@Q', buffer, off + 16)[0]
+    flags = struct.unpack_from('@I', buffer, off + 40)[0]
+    extents.append({
+        'logical': logical,
+        'physical': physical,
+        'length': length,
+        'flags': flags,
+        'last': bool(flags & FIEMAP_EXTENT_LAST),
+    })
+
+print(json.dumps({
+    'mapped_extents': mapped_extents,
+    'requested_extents': requested_extents,
+    'extents': extents,
+}))
+    "#;
+
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            script,
+            path.to_str().expect("path utf8"),
+            &extent_count.to_string(),
+        ])
+        .output()
+        .expect("python3 fiemap ioctl");
+    assert!(
+        output.status.success(),
+        "python3 fiemap ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode fiemap JSON")
 }
 
 #[test]
@@ -936,6 +997,60 @@ fn fuse_fallocate_keep_size() {
         // Content should be unchanged.
         let content = fs::read_to_string(&path).expect("read after keep-size");
         assert_eq!(content, "short");
+    });
+}
+
+#[test]
+fn fuse_ioctl_fiemap_reports_valid_extents() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("fiemap.bin");
+        let data = vec![0x5A_u8; 12 * 1024];
+        fs::write(&path, &data).expect("write fiemap test file");
+
+        let meta = fs::metadata(&path).expect("stat fiemap file");
+        let report = query_fiemap(&path, 16);
+        let extents = report["extents"].as_array().expect("fiemap extents array");
+
+        assert!(
+            report["mapped_extents"].as_u64().unwrap_or(0) >= 1,
+            "expected at least one mapped extent: {report}"
+        );
+        assert_eq!(
+            report["requested_extents"].as_u64().unwrap_or(0),
+            16,
+            "kernel should preserve requested extent count in response header"
+        );
+
+        let mut covered = 0_u64;
+        let mut expected_logical = 0_u64;
+        let mut saw_last = false;
+        for extent in extents {
+            let logical = extent["logical"].as_u64().expect("logical");
+            let physical = extent["physical"].as_u64().expect("physical");
+            let length = extent["length"].as_u64().expect("length");
+            let last = extent["last"].as_bool().expect("last flag");
+
+            assert_eq!(
+                logical, expected_logical,
+                "expected extents to begin at logical offset 0 and remain contiguous: {report}"
+            );
+            assert!(physical > 0, "physical offset should be non-zero: {report}");
+            assert!(length > 0, "extent length should be non-zero: {report}");
+
+            covered = covered.saturating_add(length);
+            expected_logical = expected_logical.saturating_add(length);
+            saw_last |= last;
+        }
+
+        assert!(
+            covered >= meta.len(),
+            "fiemap extents should cover file length (covered={covered}, len={}): {report}",
+            meta.len()
+        );
+        assert!(
+            saw_last,
+            "expected FIEMAP_EXTENT_LAST in returned extents: {report}"
+        );
     });
 }
 

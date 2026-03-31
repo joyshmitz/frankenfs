@@ -46,6 +46,15 @@ const MAX_ACCESS_PREDICTOR_ENTRIES: usize = 4096;
 const BACKPRESSURE_THROTTLE_DELAY: Duration = Duration::from_millis(5);
 const XATTR_FLAG_CREATE: i32 = 0x1;
 const XATTR_FLAG_REPLACE: i32 = 0x2;
+const FS_IOC_FIEMAP: u32 = 0xC020_660B;
+const FIEMAP_HEADER_SIZE: usize = 32;
+const FIEMAP_EXTENT_SIZE: usize = 56;
+const FIEMAP_START_OFFSET: usize = 0;
+const FIEMAP_LENGTH_OFFSET: usize = 8;
+#[cfg(test)]
+const FIEMAP_FLAGS_OFFSET: usize = 16;
+const FIEMAP_MAPPED_EXTENTS_OFFSET: usize = 20;
+const FIEMAP_EXTENT_COUNT_OFFSET: usize = 24;
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
@@ -765,6 +774,79 @@ impl FrankenFuse {
             bytes.push(0);
         }
         bytes
+    }
+
+    fn parse_fiemap_request(in_data: &[u8]) -> Result<(u64, u64, u32), c_int> {
+        if in_data.len() < FIEMAP_HEADER_SIZE {
+            return Err(libc::EINVAL);
+        }
+
+        let fm_start = u64::from_ne_bytes(
+            in_data[FIEMAP_START_OFFSET..FIEMAP_START_OFFSET + 8]
+                .try_into()
+                .map_err(|_| libc::EINVAL)?,
+        );
+        let fm_length = u64::from_ne_bytes(
+            in_data[FIEMAP_LENGTH_OFFSET..FIEMAP_LENGTH_OFFSET + 8]
+                .try_into()
+                .map_err(|_| libc::EINVAL)?,
+        );
+        let fm_extent_count = u32::from_ne_bytes(
+            in_data[FIEMAP_EXTENT_COUNT_OFFSET..FIEMAP_EXTENT_COUNT_OFFSET + 4]
+                .try_into()
+                .map_err(|_| libc::EINVAL)?,
+        );
+
+        Ok((fm_start, fm_length, fm_extent_count))
+    }
+
+    fn clamp_fiemap_extent_count(requested: u32, out_size: u32) -> usize {
+        let max_extents_by_count = usize::try_from(requested).unwrap_or(usize::MAX);
+        let max_extents_by_size = if usize::try_from(out_size).unwrap_or(0) > FIEMAP_HEADER_SIZE {
+            (usize::try_from(out_size).unwrap_or(0) - FIEMAP_HEADER_SIZE) / FIEMAP_EXTENT_SIZE
+        } else {
+            0
+        };
+        max_extents_by_count.min(max_extents_by_size)
+    }
+
+    fn encode_fiemap_response(
+        fm_start: u64,
+        fm_length: u64,
+        requested_extent_count: u32,
+        extents: &[FiemapExtent],
+        out_size: u32,
+    ) -> Vec<u8> {
+        let returned_extents = extents
+            .iter()
+            .take(Self::clamp_fiemap_extent_count(
+                requested_extent_count,
+                out_size,
+            ))
+            .collect::<Vec<_>>();
+        let mapped_count = u32::try_from(returned_extents.len()).unwrap_or(u32::MAX);
+
+        let response_size = FIEMAP_HEADER_SIZE + returned_extents.len() * FIEMAP_EXTENT_SIZE;
+        let mut response = vec![0_u8; response_size];
+
+        response[FIEMAP_START_OFFSET..FIEMAP_START_OFFSET + 8]
+            .copy_from_slice(&fm_start.to_ne_bytes());
+        response[FIEMAP_LENGTH_OFFSET..FIEMAP_LENGTH_OFFSET + 8]
+            .copy_from_slice(&fm_length.to_ne_bytes());
+        response[FIEMAP_MAPPED_EXTENTS_OFFSET..FIEMAP_MAPPED_EXTENTS_OFFSET + 4]
+            .copy_from_slice(&mapped_count.to_ne_bytes());
+        response[FIEMAP_EXTENT_COUNT_OFFSET..FIEMAP_EXTENT_COUNT_OFFSET + 4]
+            .copy_from_slice(&requested_extent_count.to_ne_bytes());
+
+        for (i, ext) in returned_extents.iter().enumerate() {
+            let off = FIEMAP_HEADER_SIZE + i * FIEMAP_EXTENT_SIZE;
+            response[off..off + 8].copy_from_slice(&ext.logical.to_ne_bytes());
+            response[off + 8..off + 16].copy_from_slice(&ext.physical.to_ne_bytes());
+            response[off + 16..off + 24].copy_from_slice(&ext.length.to_ne_bytes());
+            response[off + 40..off + 44].copy_from_slice(&ext.flags.to_ne_bytes());
+        }
+
+        response
     }
 
     fn with_request_scope<T, F>(&self, cx: &Cx, op: RequestOp, f: F) -> ffs_error::Result<T>
@@ -1726,35 +1808,24 @@ impl Filesystem for FrankenFuse {
         out_size: u32,
         reply: ReplyIoctl,
     ) {
-        // FS_IOC_FIEMAP = _IOWR('f', 11, struct fiemap)
-        // The ioctl number is architecture-dependent; on x86_64 it's 0xC020660B.
-        // We also accept the raw command number 11 shifted by 'f' for portability.
-        const FS_IOC_FIEMAP: u32 = 0xC020_660B;
-
-        // FIEMAP header: fm_start(u64) + fm_length(u64) + fm_flags(u32) +
-        //                fm_mapped_extents(u32) + fm_extent_count(u32) = 32 bytes
-        const FIEMAP_HEADER_SIZE: usize = 32;
-        // Each fiemap_extent: fe_logical(u64) + fe_physical(u64) + fe_length(u64) +
-        //                     2*reserved(u64) + fe_flags(u32) + 3*reserved(u32) = 56 bytes
-        const FIEMAP_EXTENT_SIZE: usize = 56;
-
-        let cmd_u64: u64 = cmd.into();
-        if cmd_u64 != u64::from(FS_IOC_FIEMAP) {
+        if cmd != FS_IOC_FIEMAP {
             debug!(ino, cmd, "ioctl: unsupported command");
             reply.error(libc::ENOTTY);
             return;
         }
 
-        // Parse the fiemap header from in_data.
-        if in_data.len() < FIEMAP_HEADER_SIZE {
+        let (fm_start, fm_length, fm_extent_count) = match Self::parse_fiemap_request(in_data) {
+            Ok(request) => request,
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            }
+        };
+
+        if out_size < u32::try_from(FIEMAP_HEADER_SIZE).unwrap_or(u32::MAX) {
             reply.error(libc::EINVAL);
             return;
         }
-
-        let fm_start = u64::from_ne_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
-        let fm_length = u64::from_ne_bytes(in_data[8..16].try_into().unwrap_or([0; 8]));
-        let _fm_flags = u32::from_ne_bytes(in_data[16..20].try_into().unwrap_or([0; 4]));
-        let fm_extent_count = u32::from_ne_bytes(in_data[28..32].try_into().unwrap_or([0; 4]));
 
         let cx = Self::cx_for_request();
         let extents = match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
@@ -1770,41 +1841,8 @@ impl Filesystem for FrankenFuse {
             }
         };
 
-        // Limit the number of returned extents to fm_extent_count (or out_size).
-        let max_extents_by_count = fm_extent_count as usize;
-        let max_extents_by_size = if out_size as usize > FIEMAP_HEADER_SIZE {
-            (out_size as usize - FIEMAP_HEADER_SIZE) / FIEMAP_EXTENT_SIZE
-        } else {
-            0
-        };
-        let max_extents = max_extents_by_count.min(max_extents_by_size);
-
-        let returned_extents: Vec<&FiemapExtent> =
-            extents.iter().take(max_extents).collect();
-        let mapped_count = returned_extents.len() as u32;
-
-        // Build the response: fiemap header + fiemap_extent array.
-        let response_size = FIEMAP_HEADER_SIZE + returned_extents.len() * FIEMAP_EXTENT_SIZE;
-        let mut response = vec![0_u8; response_size];
-
-        // Write fiemap header.
-        response[0..8].copy_from_slice(&fm_start.to_ne_bytes());
-        response[8..16].copy_from_slice(&fm_length.to_ne_bytes());
-        // fm_flags: 0
-        response[24..28].copy_from_slice(&mapped_count.to_ne_bytes());
-        response[28..32].copy_from_slice(&fm_extent_count.to_ne_bytes());
-
-        // Write each fiemap_extent.
-        for (i, ext) in returned_extents.iter().enumerate() {
-            let off = FIEMAP_HEADER_SIZE + i * FIEMAP_EXTENT_SIZE;
-            response[off..off + 8].copy_from_slice(&ext.logical.to_ne_bytes());
-            response[off + 8..off + 16].copy_from_slice(&ext.physical.to_ne_bytes());
-            response[off + 16..off + 24].copy_from_slice(&ext.length.to_ne_bytes());
-            // 2 reserved u64 fields (zeros)
-            response[off + 40..off + 44].copy_from_slice(&ext.flags.to_ne_bytes());
-            // 3 reserved u32 fields (zeros)
-        }
-
+        let response =
+            Self::encode_fiemap_response(fm_start, fm_length, fm_extent_count, &extents, out_size);
         reply.ioctl(0, &response);
     }
 
@@ -2233,7 +2271,9 @@ pub fn mount_managed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ffs_core::{DirEntry as FfsDirEntry, RequestScope};
+    use ffs_core::{
+        DirEntry as FfsDirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, RequestScope,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Instant, SystemTime};
@@ -2563,6 +2603,107 @@ mod tests {
         assert_eq!(
             FrankenFuse::parse_setxattr_mode(XATTR_FLAG_CREATE, 1).unwrap_err(),
             libc::EINVAL
+        );
+    }
+
+    #[test]
+    fn parse_fiemap_request_reads_linux_header_layout() {
+        let mut request = vec![0_u8; FIEMAP_HEADER_SIZE];
+        let start = 4096_u64;
+        let length = 16384_u64;
+        let mapped_extents = 7_u32;
+        let extent_count = 3_u32;
+
+        request[FIEMAP_START_OFFSET..FIEMAP_START_OFFSET + 8].copy_from_slice(&start.to_ne_bytes());
+        request[FIEMAP_LENGTH_OFFSET..FIEMAP_LENGTH_OFFSET + 8]
+            .copy_from_slice(&length.to_ne_bytes());
+        request[FIEMAP_FLAGS_OFFSET..FIEMAP_FLAGS_OFFSET + 4].copy_from_slice(&0_u32.to_ne_bytes());
+        request[FIEMAP_MAPPED_EXTENTS_OFFSET..FIEMAP_MAPPED_EXTENTS_OFFSET + 4]
+            .copy_from_slice(&mapped_extents.to_ne_bytes());
+        request[FIEMAP_EXTENT_COUNT_OFFSET..FIEMAP_EXTENT_COUNT_OFFSET + 4]
+            .copy_from_slice(&extent_count.to_ne_bytes());
+
+        let parsed = FrankenFuse::parse_fiemap_request(&request).expect("parse fiemap request");
+        assert_eq!(parsed, (start, length, extent_count));
+    }
+
+    #[test]
+    fn encode_fiemap_response_writes_linux_header_offsets() {
+        let extents = vec![
+            FiemapExtent {
+                logical: 0,
+                physical: 8192,
+                length: 4096,
+                flags: 0,
+            },
+            FiemapExtent {
+                logical: 4096,
+                physical: 12288,
+                length: 4096,
+                flags: FIEMAP_EXTENT_LAST | FIEMAP_EXTENT_UNWRITTEN,
+            },
+        ];
+
+        let response = FrankenFuse::encode_fiemap_response(0, u64::MAX, 8, &extents, 4096);
+        assert_eq!(
+            u32::from_ne_bytes(
+                response[FIEMAP_MAPPED_EXTENTS_OFFSET..FIEMAP_MAPPED_EXTENTS_OFFSET + 4]
+                    .try_into()
+                    .expect("mapped count bytes")
+            ),
+            2
+        );
+        assert_eq!(
+            u32::from_ne_bytes(
+                response[FIEMAP_EXTENT_COUNT_OFFSET..FIEMAP_EXTENT_COUNT_OFFSET + 4]
+                    .try_into()
+                    .expect("extent count bytes")
+            ),
+            8
+        );
+        let second_extent_offset = FIEMAP_HEADER_SIZE + FIEMAP_EXTENT_SIZE;
+        assert_eq!(
+            u32::from_ne_bytes(
+                response[second_extent_offset + 40..second_extent_offset + 44]
+                    .try_into()
+                    .expect("extent flags")
+            ),
+            FIEMAP_EXTENT_LAST | FIEMAP_EXTENT_UNWRITTEN
+        );
+    }
+
+    #[test]
+    fn encode_fiemap_response_limits_extents_to_output_buffer_capacity() {
+        let extents = vec![
+            FiemapExtent {
+                logical: 0,
+                physical: 4096,
+                length: 4096,
+                flags: 0,
+            },
+            FiemapExtent {
+                logical: 4096,
+                physical: 8192,
+                length: 4096,
+                flags: 0,
+            },
+        ];
+
+        let response = FrankenFuse::encode_fiemap_response(
+            0,
+            8192,
+            2,
+            &extents,
+            u32::try_from(FIEMAP_HEADER_SIZE + FIEMAP_EXTENT_SIZE).expect("out_size"),
+        );
+        assert_eq!(response.len(), FIEMAP_HEADER_SIZE + FIEMAP_EXTENT_SIZE);
+        assert_eq!(
+            u32::from_ne_bytes(
+                response[FIEMAP_MAPPED_EXTENTS_OFFSET..FIEMAP_MAPPED_EXTENTS_OFFSET + 4]
+                    .try_into()
+                    .expect("mapped count bytes")
+            ),
+            1
         );
     }
 
