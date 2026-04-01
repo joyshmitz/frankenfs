@@ -49,6 +49,10 @@ const XATTR_FLAG_REPLACE: i32 = 0x2;
 const FS_IOC_FIEMAP: u32 = 0xC020_660B;
 const FIEMAP_HEADER_SIZE: usize = 32;
 const FIEMAP_EXTENT_SIZE: usize = 56;
+/// `EXT4_IOC_GETFLAGS` = `_IOR('f', 1, long)` on x86_64.
+const EXT4_IOC_GETFLAGS: u32 = 0x8008_6601;
+/// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
+const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 const FIEMAP_START_OFFSET: usize = 0;
 const FIEMAP_LENGTH_OFFSET: usize = 8;
 #[cfg(test)]
@@ -849,6 +853,76 @@ impl FrankenFuse {
         response
     }
 
+    fn dispatch_ioctl(&self, ino: u64, cmd: u32, in_data: &[u8], out_size: u32) -> IoctlResult {
+        match cmd {
+            FS_IOC_FIEMAP => {
+                let (fm_start, fm_length, fm_extent_count) =
+                    match Self::parse_fiemap_request(in_data) {
+                        Ok(request) => request,
+                        Err(errno) => return IoctlResult::Error(errno),
+                    };
+
+                if out_size < u32::try_from(FIEMAP_HEADER_SIZE).unwrap_or(u32::MAX) {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+
+                let cx = Self::cx_for_request();
+                let extents = match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
+                    self.inner
+                        .ops
+                        .fiemap(cx, scope, InodeNumber(ino), fm_start, fm_length)
+                }) {
+                    Ok(exts) => exts,
+                    Err(error) => return IoctlResult::Error(error.to_errno()),
+                };
+
+                IoctlResult::Data(Self::encode_fiemap_response(
+                    fm_start,
+                    fm_length,
+                    fm_extent_count,
+                    &extents,
+                    out_size,
+                ))
+            }
+            EXT4_IOC_GETFLAGS => {
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
+                    self.inner.ops.get_inode_flags(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok(flags) => {
+                        let flags_long = i64::from(flags);
+                        IoctlResult::Data(flags_long.to_ne_bytes().to_vec())
+                    }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_SETFLAGS => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if in_data.len() < 8 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let flags_long = i64::from_ne_bytes(in_data[0..8].try_into().unwrap_or([0; 8]));
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let flags = flags_long as u32;
+
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
+                    self.inner
+                        .ops
+                        .set_inode_flags(cx, scope, InodeNumber(ino), flags)?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(())
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            _ => IoctlResult::Error(libc::ENOTTY),
+        }
+    }
+
     fn with_request_scope<T, F>(&self, cx: &Cx, op: RequestOp, f: F) -> ffs_error::Result<T>
     where
         F: FnOnce(&Cx, &mut RequestScope) -> ffs_error::Result<T>,
@@ -1057,6 +1131,12 @@ impl FrankenFuse {
             Ok(served)
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IoctlResult {
+    Data(Vec<u8>),
+    Error(c_int),
 }
 
 impl Filesystem for FrankenFuse {
@@ -1808,42 +1888,15 @@ impl Filesystem for FrankenFuse {
         out_size: u32,
         reply: ReplyIoctl,
     ) {
-        if cmd != FS_IOC_FIEMAP {
-            debug!(ino, cmd, "ioctl: unsupported command");
-            reply.error(libc::ENOTTY);
-            return;
-        }
-
-        let (fm_start, fm_length, fm_extent_count) = match Self::parse_fiemap_request(in_data) {
-            Ok(request) => request,
-            Err(errno) => {
+        match self.dispatch_ioctl(ino, cmd, in_data, out_size) {
+            IoctlResult::Data(data) => reply.ioctl(0, &data),
+            IoctlResult::Error(errno) => {
+                if errno == libc::ENOTTY {
+                    debug!(ino, cmd, "ioctl: unsupported command");
+                }
                 reply.error(errno);
-                return;
             }
-        };
-
-        if out_size < u32::try_from(FIEMAP_HEADER_SIZE).unwrap_or(u32::MAX) {
-            reply.error(libc::EINVAL);
-            return;
         }
-
-        let cx = Self::cx_for_request();
-        let extents = match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
-            self.inner
-                .ops
-                .fiemap(cx, scope, InodeNumber(ino), fm_start, fm_length)
-        }) {
-            Ok(exts) => exts,
-            Err(e) => {
-                let errno = e.to_errno();
-                reply.error(errno);
-                return;
-            }
-        };
-
-        let response =
-            Self::encode_fiemap_response(fm_start, fm_length, fm_extent_count, &extents, out_size);
-        reply.ioctl(0, &response);
     }
 
     fn flush(&mut self, _req: &Request<'_>, ino: u64, fh: u64, lock_owner: u64, reply: ReplyEmpty) {
@@ -2274,6 +2327,7 @@ mod tests {
     use ffs_core::{
         DirEntry as FfsDirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, RequestScope,
     };
+    use ffs_types::CommitSeq;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Instant, SystemTime};
@@ -2704,6 +2758,163 @@ mod tests {
                     .expect("mapped count bytes")
             ),
             1
+        );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum IoctlCall {
+        GetFlags(InodeNumber),
+        SetFlags(InodeNumber, u32),
+        Commit,
+    }
+
+    struct IoctlRecordingFs {
+        flags: u32,
+        calls: Arc<Mutex<Vec<IoctlCall>>>,
+    }
+
+    impl IoctlRecordingFs {
+        fn new(flags: u32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            Self { flags, calls }
+        }
+    }
+
+    impl FsOps for IoctlRecordingFs {
+        fn getattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<InodeAttr> {
+            Err(FfsError::NotFound("stub".into()))
+        }
+
+        fn lookup(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _parent: InodeNumber,
+            _name: &OsStr,
+        ) -> ffs_error::Result<InodeAttr> {
+            Err(FfsError::NotFound("stub".into()))
+        }
+
+        fn readdir(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+            _offset: u64,
+        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
+            Ok(vec![])
+        }
+
+        fn read(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+            _offset: u64,
+            _size: u32,
+        ) -> ffs_error::Result<Vec<u8>> {
+            Ok(vec![])
+        }
+
+        fn readlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<Vec<u8>> {
+            Ok(vec![])
+        }
+
+        fn get_inode_flags(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<u32> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetFlags(ino));
+            Ok(self.flags)
+        }
+
+        fn set_inode_flags(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            flags: u32,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::SetFlags(ino, flags));
+            Ok(())
+        }
+
+        fn commit_request_scope(&self, _scope: &mut RequestScope) -> ffs_error::Result<CommitSeq> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::Commit);
+            Ok(CommitSeq(1))
+        }
+    }
+
+    #[test]
+    fn dispatch_ioctl_getflags_encodes_long_response() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0x1234_5678,
+            Arc::clone(&calls),
+        )));
+
+        let response = fuse.dispatch_ioctl(11, EXT4_IOC_GETFLAGS, &[], 0);
+        let IoctlResult::Data(bytes) = response else {
+            panic!("expected ioctl data response");
+        };
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(
+            i64::from_ne_bytes(bytes.try_into().expect("8-byte ioctl payload")),
+            i64::from(0x1234_5678_u32)
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[IoctlCall::GetFlags(InodeNumber(11))]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_setflags_rejects_read_only_mount() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = fuse.dispatch_ioctl(7, EXT4_IOC_SETFLAGS, &1_i64.to_ne_bytes(), 0);
+        assert_eq!(response, IoctlResult::Error(libc::EROFS));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_setflags_routes_to_fsops_and_commits() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &options,
+        );
+
+        let response = fuse.dispatch_ioctl(9, EXT4_IOC_SETFLAGS, &0x42_i64.to_ne_bytes(), 0);
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[IoctlCall::SetFlags(InodeNumber(9), 0x42), IoctlCall::Commit,]
         );
     }
 

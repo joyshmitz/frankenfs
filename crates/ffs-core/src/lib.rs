@@ -4836,16 +4836,28 @@ impl OpenFs {
                                 detail: "compressed extent disk_num_bytes exceeds addressable size"
                                     .into(),
                             })?;
+                        if compressed_len > 128 * 1024 * 1024 {
+                            return Err(FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "compressed extent disk_num_bytes exceeds 128MB limit"
+                                    .into(),
+                            });
+                        }
                         let mut compressed = vec![0_u8; compressed_len];
                         self.btrfs_read_logical_into(cx, *disk_bytenr, &mut compressed)?;
-                        let decompressed = Self::btrfs_decompress(
-                            &compressed,
-                            *compression,
+                        let ram_bytes_usize =
                             usize::try_from(*ram_bytes).map_err(|_| FfsError::Corruption {
                                 block: *disk_bytenr,
                                 detail: "compressed extent ram_bytes overflow".into(),
-                            })?,
-                        )?;
+                            })?;
+                        if ram_bytes_usize > 128 * 1024 * 1024 {
+                            return Err(FfsError::Corruption {
+                                block: *disk_bytenr,
+                                detail: "compressed extent ram_bytes exceeds 128MB limit".into(),
+                            });
+                        }
+                        let decompressed =
+                            Self::btrfs_decompress(&compressed, *compression, ram_bytes_usize)?;
                         let src_start =
                             usize::try_from(*extent_offset + extent_delta).map_err(|_| {
                                 FfsError::Corruption {
@@ -10261,6 +10273,24 @@ impl OpenFs {
         (dur.as_secs(), dur.subsec_nanos())
     }
 
+    /// Mask of ext4 inode flags that are user-settable via `EXT4_IOC_SETFLAGS`.
+    /// System/internal flags (EXTENTS, HUGE_FILE, EA_INODE, INLINE_DATA, etc.)
+    /// cannot be changed via ioctl.
+    const EXT4_USER_SETTABLE_FLAGS: u32 = ffs_types::EXT4_SECRM_FL
+        | ffs_types::EXT4_UNRM_FL
+        | ffs_types::EXT4_COMPR_FL
+        | ffs_types::EXT4_SYNC_FL
+        | ffs_types::EXT4_IMMUTABLE_FL
+        | ffs_types::EXT4_APPEND_FL
+        | ffs_types::EXT4_NODUMP_FL
+        | ffs_types::EXT4_NOATIME_FL
+        | ffs_types::EXT4_NOCOMPR_FL
+        | ffs_types::EXT4_JOURNAL_DATA_FL
+        | ffs_types::EXT4_NOTAIL_FL
+        | ffs_types::EXT4_DIRSYNC_FL
+        | ffs_types::EXT4_TOPDIR_FL
+        | ffs_types::EXT4_PROJINHERIT_FL;
+
     const EXT4_RW_SCENARIO_FLUSH: &str = "ext4_rw_flush";
     const EXT4_RW_SCENARIO_FSYNC: &str = "ext4_rw_fsync";
     const EXT4_RW_SCENARIO_FSYNCDIR: &str = "ext4_rw_fsyncdir";
@@ -10425,15 +10455,23 @@ impl OpenFs {
                     let compressed_len = usize::try_from(*disk_num_bytes).map_err(|_| {
                         FfsError::InvalidGeometry("compressed extent length overflow".into())
                     })?;
+                    if compressed_len > 128 * 1024 * 1024 {
+                        return Err(FfsError::InvalidGeometry(
+                            "compressed extent disk_num_bytes exceeds 128MB limit".into(),
+                        ));
+                    }
                     let mut compressed = vec![0_u8; compressed_len];
                     self.btrfs_read_logical_into(cx, *disk_bytenr, &mut compressed)?;
-                    let decompressed = Self::btrfs_decompress(
-                        &compressed,
-                        *compression,
-                        usize::try_from(*ram_bytes).map_err(|_| {
-                            FfsError::InvalidGeometry("compressed extent ram_bytes overflow".into())
-                        })?,
-                    )?;
+                    let ram_bytes_usize = usize::try_from(*ram_bytes).map_err(|_| {
+                        FfsError::InvalidGeometry("compressed extent ram_bytes overflow".into())
+                    })?;
+                    if ram_bytes_usize > 128 * 1024 * 1024 {
+                        return Err(FfsError::InvalidGeometry(
+                            "compressed extent ram_bytes exceeds 128MB limit".into(),
+                        ));
+                    }
+                    let decompressed =
+                        Self::btrfs_decompress(&compressed, *compression, ram_bytes_usize)?;
                     let src_start = usize::try_from(*extent_offset).map_err(|_| {
                         FfsError::InvalidGeometry("compressed extent source offset overflow".into())
                     })?;
@@ -13451,8 +13489,8 @@ impl FsOps for OpenFs {
                     Ok(inode.extent_bytes[..len].to_vec())
                 } else {
                     // Slow symlink: data is stored in separate blocks.
-                    #[expect(clippy::cast_possible_truncation)]
-                    let mut buf = vec![0_u8; inode.size as usize];
+                    let capped = inode.size.min(LINUX_PATH_MAX);
+                    let mut buf = vec![0_u8; capped as usize];
                     let n = self.read_file_data(cx, scope, &inode, 0, &mut buf)?;
                     buf.truncate(n);
                     Ok(buf)
@@ -13864,6 +13902,82 @@ impl FsOps for OpenFs {
             }
             FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
                 "fiemap is not yet supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
+    fn get_inode_flags(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let inode =
+                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                Ok(inode.flags)
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "get_inode_flags is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
+    fn set_inode_flags(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        flags: u32,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let canonical = Self::ext4_canonical_inode(ino);
+                let alloc_mutex = self.require_alloc_state()?;
+                let block_dev = self.block_device_adapter();
+                let sb = self
+                    .ext4_superblock()
+                    .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+                let csum_seed = sb.csum_seed();
+
+                let mut inode = self.read_inode_with_scope(cx, scope, canonical)?;
+
+                let new_flags = (inode.flags & !Self::EXT4_USER_SETTABLE_FLAGS)
+                    | (flags & Self::EXT4_USER_SETTABLE_FLAGS);
+                inode.flags = new_flags;
+
+                if let Some(tx) = &mut scope.tx {
+                    let tx_dev = TransactionBlockAdapter {
+                        base: &block_dev,
+                        tx: Mutex::new(tx),
+                    };
+                    let alloc = alloc_mutex.lock();
+                    ffs_inode::write_inode(
+                        cx,
+                        &tx_dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        canonical,
+                        &inode,
+                        csum_seed,
+                    )?;
+                } else {
+                    let alloc = alloc_mutex.lock();
+                    ffs_inode::write_inode(
+                        cx,
+                        &block_dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        canonical,
+                        &inode,
+                        csum_seed,
+                    )?;
+                }
+                Ok(())
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "set_inode_flags is not supported for btrfs".to_owned(),
             )),
         }
     }
@@ -17325,6 +17439,102 @@ mod tests {
         let mut scope = RequestScope::empty();
         let result = fs.fiemap(&cx, &mut scope, InodeNumber(2), 0, u64::MAX);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_inode_flags_returns_ext4_flags() {
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let mut scope = RequestScope::empty();
+        // Inode 11 is a regular file with extents — should have EXT4_EXTENTS_FL.
+        let flags = fs
+            .get_inode_flags(&cx, &mut scope, InodeNumber(11))
+            .unwrap();
+        assert_ne!(flags & ffs_types::EXT4_EXTENTS_FL, 0);
+    }
+
+    #[test]
+    fn set_inode_flags_persists_user_settable_bits_on_ext4() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(&cx, InodeNumber(2), OsStr::new("flags.txt"), 0o644, 0, 0)
+            .expect("create flags.txt");
+
+        let mut read_scope = RequestScope::empty();
+        let original = fs
+            .get_inode_flags(&cx, &mut read_scope, created.ino)
+            .expect("read original flags");
+
+        let requested = original | ffs_types::EXT4_SYNC_FL | ffs_types::EXT4_NOATIME_FL;
+        let mut write_scope = RequestScope::empty();
+        fs.set_inode_flags(&cx, &mut write_scope, created.ino, requested)
+            .expect("set inode flags");
+
+        let mut verify_scope = RequestScope::empty();
+        let updated = fs
+            .get_inode_flags(&cx, &mut verify_scope, created.ino)
+            .expect("read updated flags");
+
+        assert_ne!(updated & ffs_types::EXT4_SYNC_FL, 0);
+        assert_ne!(updated & ffs_types::EXT4_NOATIME_FL, 0);
+        assert_eq!(
+            updated & !OpenFs::EXT4_USER_SETTABLE_FLAGS,
+            original & !OpenFs::EXT4_USER_SETTABLE_FLAGS,
+            "non-user-settable bits must be preserved",
+        );
+    }
+
+    #[test]
+    fn set_inode_flags_ignores_non_user_settable_bits_on_ext4() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("masked-flags.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create masked-flags.txt");
+
+        let mut read_scope = RequestScope::empty();
+        let original = fs
+            .get_inode_flags(&cx, &mut read_scope, created.ino)
+            .expect("read original flags");
+
+        let requested =
+            ffs_types::EXT4_SYNC_FL | ffs_types::EXT4_INLINE_DATA_FL | ffs_types::EXT4_EA_INODE_FL;
+        let mut write_scope = RequestScope::empty();
+        fs.set_inode_flags(&cx, &mut write_scope, created.ino, requested)
+            .expect("set inode flags with masked bits");
+
+        let mut verify_scope = RequestScope::empty();
+        let updated = fs
+            .get_inode_flags(&cx, &mut verify_scope, created.ino)
+            .expect("read updated flags");
+
+        assert_ne!(updated & ffs_types::EXT4_SYNC_FL, 0);
+        assert_eq!(updated & ffs_types::EXT4_INLINE_DATA_FL, 0);
+        assert_eq!(updated & ffs_types::EXT4_EA_INODE_FL, 0);
+        assert_eq!(
+            updated & !OpenFs::EXT4_USER_SETTABLE_FLAGS,
+            original & !OpenFs::EXT4_USER_SETTABLE_FLAGS,
+            "forbidden bits must not perturb preserved internal flags",
+        );
     }
 
     #[test]

@@ -14,13 +14,13 @@ FUSE mount. Established 2026-03-18.
 | generic/068 | skip | wont_fix | FIFREEZE ioctl (kernel-only) |
 | generic/112 | skip | likely_pass | AIO + preallocation (fallocate) |
 | generic/231 | skip | wont_fix | Disk quotas (kernel-only) |
-| ext4/001 | skip | likely_pass | FIEMAP ioctl implemented (bd-pqpu); needs runtime xfstests validation |
+| ext4/001 | skip | known_fail | FIEMAP transport boundary: current FUSE stack returns `EOPNOTSUPP` before userspace handler |
 | ext4/003 | skip | known_fail | bigalloc scratch mkfs |
 | ext4/005 | skip | known_fail | chattr -e extent conversion |
 | ext4/013 | skip | wont_fix | debugfs raw inode corruption |
 
 **Passable: 3/11** — generic/001, generic/013, generic/035
-**Likely passable: 2/11** — generic/112, ext4/001 (pending runtime validation)
+**Likely passable: 1/11** — generic/112 (pending runtime validation)
 
 ## Root Cause Analysis
 
@@ -59,7 +59,7 @@ currently expose through the FUSE interface.
 - mremap is not part of the standard FUSE operation set.
 - **Path to fix**: Implement FUSE writeback cache + mmap support in ffs-fuse.
 
-**ext4/001 — ZERO_RANGE + FIEMAP implemented (bd-pqpu)**
+**ext4/001 — ZERO_RANGE implemented, FIEMAP transport still blocked**
 - FrankenFS has a live ext4 `FALLOC_FL_ZERO_RANGE` implementation in
   `ffs-core::ext4_fallocate`, and regression coverage exercises both data
   zeroing and `KEEP_SIZE` behavior.
@@ -69,8 +69,13 @@ currently expose through the FUSE interface.
   proper `FIEMAP_EXTENT_LAST` and `FIEMAP_EXTENT_UNWRITTEN` flags. The FUSE
   `ioctl` handler parses `FS_IOC_FIEMAP` (0xC020660B), marshals the fiemap
   header and extent array, and replies via `ReplyIoctl`.
-- **Status**: Reclassified from `known_fail` to `likely_pass`. Needs runtime
-  xfstests validation when the build environment is available.
+- Harness-style runtime validation still observes `EOPNOTSUPP` on the mounted
+  path before FrankenFS's userspace `ioctl` handler is reached. An
+  env-gated trace in `ffs-fuse` did not fire during the failing FIEMAP probe,
+  so the current boundary is in the FUSE transport stack rather than the
+  FrankenFS FIEMAP marshaling logic.
+- **Status**: Remains `known_fail` for xfstests/runtime validation until the
+  underlying FUSE transport path can deliver `FS_IOC_FIEMAP` to userspace.
 
 **ext4/003 — bigalloc scratch filesystem**
 - Requires creating a scratch ext4 filesystem with bigalloc feature enabled.
@@ -80,7 +85,12 @@ currently expose through the FUSE interface.
 **ext4/005 — chattr extent conversion**
 - Uses `chattr -e` to convert inodes from extent to non-extent format.
 - This is an ext4-internal operation that modifies inode flags directly.
-- **Path to fix**: Implement EXT4_IOC_SETFLAGS ioctl passthrough in ffs-fuse.
+- `EXT4_IOC_GETFLAGS` and `EXT4_IOC_SETFLAGS` ioctl passthrough is now
+  implemented in `ffs-fuse` (bd-o30c, 2026-03-31). User-settable flags are
+  masked; system flags (EXTENTS, HUGE_FILE, etc.) are protected.
+- **Remaining blocker**: Same FUSE transport limitation as ext4/001 — the
+  kernel FUSE layer may not deliver these ioctls to userspace without
+  `FUSE_IOCTL_UNRESTRICTED` support. Needs runtime validation.
 
 ### Category 3: Likely Passable (Pending Runtime Validation)
 
@@ -133,16 +143,16 @@ Completed 2026-03-18. All 8 known failures investigated (100%).
 | generic/068 | wont_fix | No | — | FIFREEZE ioctl is kernel VFS, no FUSE path |
 | generic/112 | likely_pass | N/A | Runtime test | AIO + fallocate both supported; needs xfstests build |
 | generic/231 | wont_fix | No | — | Quota subsystem is kernel-only |
-| ext4/001 | likely_pass | Done (bd-pqpu) | FIEMAP ioctl implemented | Needs runtime xfstests validation |
+| ext4/001 | known_fail | Partial | FUSE FIEMAP transport investigation | FIEMAP marshaling is implemented, but runtime validation still hits `EOPNOTSUPP` before userspace handler |
 | ext4/003 | known_fail | Yes (low) | Test infra | Set up SCRATCH_DEV loop device with bigalloc |
-| ext4/005 | known_fail | Yes (medium) | EXT4_IOC_SETFLAGS | Implement chattr ioctl passthrough in ffs-fuse |
+| ext4/005 | known_fail | Yes (medium) | FUSE ioctl transport validation | Userspace passthrough exists; remaining work is proving the kernel/FUSE path reaches it |
 | ext4/013 | wont_fix | No | — | Requires raw device access (debugfs -w) |
 
 **Actionable items for future work:**
 1. Build xfstests-dev and validate generic/112 (likely_pass)
-2. Validate ext4/001 with FIEMAP ioctl now available (likely_pass, bd-pqpu)
+2. Revisit ext4/001 only after identifying a FUSE transport path that delivers `FS_IOC_FIEMAP` to userspace
 3. Set up SCRATCH_DEV loop device infrastructure (unblocks ext4/003)
-4. Implement `EXT4_IOC_SETFLAGS` ioctl passthrough (unblocks ext4/005)
+4. Validate whether the FUSE transport can deliver `EXT4_IOC_SETFLAGS` to userspace (ext4/005)
 
 ### Next Steps
 

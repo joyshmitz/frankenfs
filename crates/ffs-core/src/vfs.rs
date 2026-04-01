@@ -614,6 +614,34 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get filesystem-specific inode flags (ext4 `EXT4_IOC_GETFLAGS`).
+    ///
+    /// Returns the raw `i_flags` field for the given inode.
+    fn get_inode_flags(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        Err(FfsError::UnsupportedFeature(
+            "get_inode_flags is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
+    ///
+    /// Updates the raw `i_flags` field. The implementation should validate
+    /// which flags are user-settable and reject immutable/system-only flags.
+    fn set_inode_flags(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _flags: u32,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::ReadOnly)
+    }
+
     /// Set inode attributes. Returns updated attributes.
     fn setattr(
         &self,

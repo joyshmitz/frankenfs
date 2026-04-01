@@ -129,6 +129,7 @@ mod tests {
         assert!(!RequestOp::Read.is_write());
         assert!(!RequestOp::Readdir.is_write());
         assert!(!RequestOp::Readlink.is_write());
+        assert!(!RequestOp::Ioctl.is_write());
 
         // Write operations
         assert!(RequestOp::Create.is_write());

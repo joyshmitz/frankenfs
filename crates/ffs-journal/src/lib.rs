@@ -359,6 +359,8 @@ fn replay_jbd2_inner(
         }
     }
 
+    let wrap_idx = |raw: u64| -> u64 { raw % total_blocks };
+
     let mut blocks_scanned = 0_u64;
     while blocks_scanned < total_blocks {
         let current_idx = idx % total_blocks;
@@ -418,7 +420,8 @@ fn replay_jbd2_inner(
                             FfsError::Format("descriptor tag index does not fit in u64".to_owned())
                         })?
                         .saturating_add(1);
-                    let data_idx = (idx.saturating_add(offset_from_descriptor)) % total_blocks;
+                    let raw_data_idx = idx.saturating_add(offset_from_descriptor);
+                    let data_idx = wrap_idx(raw_data_idx);
                     staged.push((
                         tag.target,
                         StagedWrite {
