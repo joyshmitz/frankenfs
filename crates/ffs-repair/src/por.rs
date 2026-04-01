@@ -215,18 +215,28 @@ impl ChallengeSet {
         // For simplicity with deterministic output, we generate indices and
         // deduplicate. This is fine since challenge_count << total_blocks.
         let mut selected = Vec::with_capacity(count as usize);
-        let mut visited = std::collections::HashSet::with_capacity(count as usize);
 
-        let mut buf = [0_u8; 4];
-        while selected.len() < count as usize {
-            reader.fill(&mut buf);
-            let raw = u32::from_le_bytes(buf);
-            let idx = raw % total_blocks;
-            if visited.insert(idx) {
+        if count == total_blocks {
+            // Optimization: if challenging all blocks, just sequence them.
+            for i in 0..total_blocks {
                 selected.push(Challenge {
-                    index: u64::from(idx),
-                    table_offset: idx,
+                    index: u64::from(i),
+                    table_offset: i,
                 });
+            }
+        } else {
+            let mut visited = std::collections::HashSet::with_capacity(count as usize);
+            let mut buf = [0_u8; 4];
+            while selected.len() < count as usize {
+                reader.fill(&mut buf);
+                let raw = u32::from_le_bytes(buf);
+                let idx = raw % total_blocks;
+                if visited.insert(idx) {
+                    selected.push(Challenge {
+                        index: u64::from(idx),
+                        table_offset: idx,
+                    });
+                }
             }
         }
 
