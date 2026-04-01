@@ -13270,19 +13270,20 @@ impl OpenFs {
         self.with_latest_scope(|scope| <Self as FsOps>::readdir(self, cx, scope, ino, offset))
     }
 
-    /// Return raw DIR_ITEM payloads for a btrfs directory inode.
+    /// Return raw directory-entry payloads for a btrfs directory inode.
     ///
-    /// Each entry is `(key_offset, raw_bytes)` where `key_offset` is the
-    /// btrfs key offset (name hash) and `raw_bytes` are the on-disk item
-    /// payload bytes. Returns an error for ext4 images.
-    pub fn walk_btrfs_dir_items(
+    /// Each entry is `(item_type, key_offset, raw_bytes)` where `item_type`
+    /// is either `DIR_ITEM` or `DIR_INDEX`, `key_offset` is the btrfs key
+    /// offset, and `raw_bytes` are the on-disk item payload bytes. Returns an
+    /// error for ext4 images.
+    pub fn walk_btrfs_dir_entry_items(
         &self,
         cx: &Cx,
         inode: u64,
-    ) -> ffs_error::Result<Vec<(u64, Vec<u8>)>> {
+    ) -> ffs_error::Result<Vec<(u8, u64, Vec<u8>)>> {
         if !matches!(&self.flavor, FsFlavor::Btrfs(_)) {
             return Err(FfsError::Format(
-                "walk_btrfs_dir_items is only available for btrfs images".into(),
+                "walk_btrfs_dir_entry_items is only available for btrfs images".into(),
             ));
         }
         let canonical = self.btrfs_canonical_inode(InodeNumber(inode))?;
@@ -13290,9 +13291,11 @@ impl OpenFs {
         Ok(items
             .iter()
             .filter(|item| {
-                item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_DIR_ITEM
+                item.key.objectid == canonical
+                    && (item.key.item_type == BTRFS_ITEM_DIR_ITEM
+                        || item.key.item_type == BTRFS_ITEM_DIR_INDEX)
             })
-            .map(|item| (item.key.offset, item.data.clone()))
+            .map(|item| (item.key.item_type, item.key.offset, item.data.clone()))
             .collect())
     }
 
@@ -19603,6 +19606,26 @@ mod tests {
         assert_eq!(entries[1].kind, FileType::Directory);
         assert_eq!(entries[2].name, b"hello.txt");
         assert_eq!(entries[2].kind, FileType::RegularFile);
+    }
+
+    #[test]
+    fn walk_btrfs_dir_entry_items_includes_dir_index_items() {
+        let entries: Vec<(&[u8], u64, u8, u32)> =
+            vec![(b"hello.txt", 257, ffs_btrfs::BTRFS_FT_REG_FILE, 0o100_644)];
+        let image = build_btrfs_readdir_image(&entries);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let items = fs
+            .walk_btrfs_dir_entry_items(&cx, 1)
+            .expect("read btrfs directory entry items");
+        assert!(!items.is_empty());
+        assert!(
+            items
+                .iter()
+                .any(|(item_type, _, _)| *item_type == BTRFS_ITEM_DIR_INDEX)
+        );
     }
 
     #[test]

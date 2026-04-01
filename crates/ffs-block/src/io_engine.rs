@@ -162,27 +162,31 @@ impl IoEngine for PreadPwriteEngine {
         let results: Vec<IoCompletion> = ops
             .into_iter()
             .map(|op| match op {
-                IoOp::Read { offset, mut buf } => match self.file.read_exact_at(&mut buf, offset) {
-                    Ok(()) => {
-                        let n = buf.len() as u64;
-                        let mut s = self.stats.lock();
-                        s.reads += 1;
-                        s.bytes_read += n;
-                        drop(s);
-                        IoCompletion::Read(buf)
+                IoOp::Read { offset, mut buf } => {
+                    self.stats.lock().reads += 1;
+                    match self.file.read_exact_at(&mut buf, offset) {
+                        Ok(()) => {
+                            let n = buf.len() as u64;
+                            let mut s = self.stats.lock();
+                            s.bytes_read += n;
+                            drop(s);
+                            IoCompletion::Read(buf)
+                        }
+                        Err(e) => IoCompletion::Error(FfsError::Io(e)),
                     }
-                    Err(e) => IoCompletion::Error(FfsError::Io(e)),
-                },
-                IoOp::Write { offset, data } => match self.file.write_all_at(&data, offset) {
-                    Ok(()) => {
-                        let mut s = self.stats.lock();
-                        s.writes += 1;
-                        s.bytes_written += data.len() as u64;
-                        drop(s);
-                        IoCompletion::Write
+                }
+                IoOp::Write { offset, data } => {
+                    self.stats.lock().writes += 1;
+                    match self.file.write_all_at(&data, offset) {
+                        Ok(()) => {
+                            let mut s = self.stats.lock();
+                            s.bytes_written += data.len() as u64;
+                            drop(s);
+                            IoCompletion::Write
+                        }
+                        Err(e) => IoCompletion::Error(FfsError::Io(e)),
                     }
-                    Err(e) => IoCompletion::Error(FfsError::Io(e)),
-                },
+                }
                 IoOp::Sync => {
                     self.stats.lock().syncs += 1;
                     match self.file.sync_all() {
@@ -244,6 +248,7 @@ impl IoEngine for MemIoEngine {
             .into_iter()
             .map(|op| match op {
                 IoOp::Read { offset, mut buf } => {
+                    self.stats.lock().reads += 1;
                     let start = offset as usize;
                     let end = start + buf.len();
                     if end > data.len() {
@@ -255,12 +260,12 @@ impl IoEngine for MemIoEngine {
                     buf.copy_from_slice(&data[start..end]);
                     let n = buf.len() as u64;
                     let mut s = self.stats.lock();
-                    s.reads += 1;
                     s.bytes_read += n;
                     drop(s);
                     IoCompletion::Read(buf)
                 }
                 IoOp::Write { offset, data: wd } => {
+                    self.stats.lock().writes += 1;
                     let start = offset as usize;
                     let end = start + wd.len();
                     if end > data.len() {
@@ -271,7 +276,6 @@ impl IoEngine for MemIoEngine {
                     }
                     data[start..end].copy_from_slice(&wd);
                     let mut s = self.stats.lock();
-                    s.writes += 1;
                     s.bytes_written += wd.len() as u64;
                     IoCompletion::Write
                 }
@@ -345,9 +349,9 @@ mod tests {
             offset: 0,
             buf: vec![0_u8; 4096],
         }]);
-        match &completions[0] {
-            IoCompletion::Read(buf) => assert_eq!(buf, &data),
-            other => panic!("expected Read, got {other:?}"),
+        assert!(matches!(completions[0], IoCompletion::Read(_)));
+        if let IoCompletion::Read(buf) = &completions[0] {
+            assert_eq!(buf, &data);
         }
     }
 
@@ -389,6 +393,10 @@ mod tests {
         }]);
 
         assert!(matches!(completions[0], IoCompletion::Error(_)));
+        let stats = engine.stats();
+        assert_eq!(stats.batches, 1);
+        assert_eq!(stats.reads, 1);
+        assert_eq!(stats.bytes_read, 0);
     }
 
     #[test]
@@ -465,15 +473,34 @@ mod tests {
             offset: 0,
             buf: vec![0_u8; 512],
         }]);
-        match &completions[0] {
-            IoCompletion::Read(buf) => assert_eq!(buf, &data),
-            other => panic!("expected Read, got {other:?}"),
+        assert!(matches!(completions[0], IoCompletion::Read(_)));
+        if let IoCompletion::Read(buf) = &completions[0] {
+            assert_eq!(buf, &data);
         }
 
         // Check stats.
         let stats = engine.stats();
         assert_eq!(stats.reads, 1);
         assert_eq!(stats.writes, 1);
+    }
+
+    #[test]
+    fn pread_pwrite_engine_failed_read_counts_submission_but_not_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.img");
+        std::fs::write(&path, vec![0_u8; 16]).unwrap();
+
+        let engine = PreadPwriteEngine::open(&path).unwrap();
+        let completions = engine.submit_batch(vec![IoOp::Read {
+            offset: 8,
+            buf: vec![0_u8; 32],
+        }]);
+
+        assert!(matches!(completions[0], IoCompletion::Error(_)));
+        let stats = engine.stats();
+        assert_eq!(stats.batches, 1);
+        assert_eq!(stats.reads, 1);
+        assert_eq!(stats.bytes_read, 0);
     }
 
     #[test]
@@ -622,7 +649,7 @@ mod tests {
 
             let stats = engine.stats();
             prop_assert_eq!(stats.batches, 1);
-            prop_assert_eq!(stats.reads, 0);
+            prop_assert_eq!(stats.reads, 1);
             prop_assert_eq!(stats.bytes_read, 0);
         }
 
@@ -647,7 +674,7 @@ mod tests {
 
             let stats = engine.stats();
             prop_assert_eq!(stats.batches, 1);
-            prop_assert_eq!(stats.writes, 0);
+            prop_assert_eq!(stats.writes, 1);
             prop_assert_eq!(stats.bytes_written, 0);
         }
     }

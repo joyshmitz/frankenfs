@@ -961,6 +961,8 @@ struct DumpDxEntryOutput {
 struct DumpHexBlockOutput {
     logical_block: u32,
     physical_block: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_kind: Option<String>,
     hex: String,
 }
 
@@ -3060,8 +3062,14 @@ fn dump_dir_cmd(inode: u64, path: &PathBuf, json: bool, hex: bool) -> Result<()>
             println!("raw_hex_blocks: {}", raw_hex_blocks.len());
             for block in raw_hex_blocks {
                 println!(
-                    "  logical_block={} physical_block={}",
-                    block.logical_block, block.physical_block
+                    "  logical_block={} physical_block={}{}",
+                    block.logical_block,
+                    block.physical_block,
+                    block
+                        .item_kind
+                        .as_ref()
+                        .map(|kind| format!(" item_kind={kind}"))
+                        .unwrap_or_default()
                 );
                 println!("{}", block.hex);
             }
@@ -3182,22 +3190,30 @@ fn build_btrfs_dump_dir_output(path: &PathBuf, inode: u64, hex: bool) -> Result<
     ];
     let raw_hex_blocks = if hex {
         let items = open_fs
-            .walk_btrfs_dir_items(&cx, inode)
+            .walk_btrfs_dir_entry_items(&cx, inode)
             .context("failed to read btrfs directory items")?;
         let blocks: Vec<DumpHexBlockOutput> = items
             .iter()
             .enumerate()
-            .map(|(idx, (key_offset, raw))| {
+            .map(|(idx, (item_type, key_offset, raw))| {
                 #[allow(clippy::cast_possible_truncation)]
                 DumpHexBlockOutput {
                     logical_block: idx as u32,
                     physical_block: *key_offset,
+                    item_kind: Some(
+                        match *item_type {
+                            ffs_btrfs::BTRFS_ITEM_DIR_ITEM => "dir_item",
+                            ffs_btrfs::BTRFS_ITEM_DIR_INDEX => "dir_index",
+                            _ => "unknown",
+                        }
+                        .to_owned(),
+                    ),
                     hex: bytes_to_hex_dump(raw),
                 }
             })
             .collect();
         limitations.push(
-            "btrfs hex dump shows raw DIR_ITEM payloads from B-tree leaves; \
+            "btrfs hex dump shows raw DIR_ITEM/DIR_INDEX payloads from B-tree leaves; \
              logical_block is the item index, physical_block is the key offset"
                 .to_owned(),
         );
@@ -3442,6 +3458,7 @@ fn read_ext4_directory_hex_blocks(
             blocks.push(DumpHexBlockOutput {
                 logical_block,
                 physical_block,
+                item_kind: None,
                 hex: bytes_to_hex_dump(block),
             });
         }
@@ -5442,6 +5459,158 @@ mod tests {
         let inode_data_start =
             fs_leaf_offset + usize::try_from(inode_data_offset).expect("inode offset fits");
         image[inode_data_start..inode_data_start + inode_bytes.len()].copy_from_slice(&inode_bytes);
+
+        image
+    }
+
+    fn encode_btrfs_dir_index_entry(name: &[u8], child_objectid: u64, file_type: u8) -> Vec<u8> {
+        let mut entry = vec![0_u8; 30 + name.len()];
+        entry[0..8].copy_from_slice(&child_objectid.to_le_bytes());
+        entry[8] = BTRFS_ITEM_INODE_ITEM;
+        entry[9..17].copy_from_slice(&0_u64.to_le_bytes());
+        entry[17..25].copy_from_slice(&1_u64.to_le_bytes());
+        entry[25..27].copy_from_slice(&0_u16.to_le_bytes());
+        let name_len = u16::try_from(name.len()).expect("test name length should fit in u16");
+        entry[27..29].copy_from_slice(&name_len.to_le_bytes());
+        entry[29] = file_type;
+        entry[30..30 + name.len()].copy_from_slice(name);
+        entry
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn build_test_btrfs_image_with_dir_index_entry() -> Vec<u8> {
+        let image_size: usize = 512 * 1024;
+        let mut image = vec![0_u8; image_size];
+        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
+        let root_tree_logical = 0x4_000_u64;
+        let fs_tree_logical = 0x8_000_u64;
+        let root_dir_objectid = 256_u64;
+        let child_objectid = 257_u64;
+
+        let mut sb = build_test_btrfs_superblock_with_single_chunk(
+            primary_offset as u64,
+            11,
+            0,
+            image_size as u64,
+            0,
+            2,
+        );
+        sb[0x50..0x58].copy_from_slice(&root_tree_logical.to_le_bytes());
+        sb[0x80..0x88].copy_from_slice(&root_dir_objectid.to_le_bytes());
+        sb[0x88..0x90].copy_from_slice(&1_u64.to_le_bytes());
+        sb[0xC6] = 0;
+        let checksum = crc32c::crc32c(&sb[0x20..super::BTRFS_SUPER_INFO_SIZE]);
+        sb[0..4].copy_from_slice(&checksum.to_le_bytes());
+        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
+
+        let root_leaf_offset = usize::try_from(root_tree_logical).expect("root tree offset fits");
+        write_btrfs_leaf_header(&mut image, root_leaf_offset, root_tree_logical, 1, 1);
+        let root_item_offset = 3000_u32;
+        let root_item_size = 239_u32;
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf_offset,
+            0,
+            BTRFS_FS_TREE_OBJECTID,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            root_item_offset,
+            root_item_size,
+        );
+        let mut root_item =
+            vec![0_u8; usize::try_from(root_item_size).expect("root item size fits")];
+        root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
+        let root_item_last = root_item.len() - 1;
+        root_item[root_item_last] = 0;
+        let root_data_start =
+            root_leaf_offset + usize::try_from(root_item_offset).expect("root item offset fits");
+        image[root_data_start..root_data_start + root_item.len()].copy_from_slice(&root_item);
+
+        let fs_leaf_offset = usize::try_from(fs_tree_logical).expect("fs tree offset fits");
+        write_btrfs_leaf_header(
+            &mut image,
+            fs_leaf_offset,
+            fs_tree_logical,
+            BTRFS_FS_TREE_OBJECTID,
+            3,
+        );
+
+        let root_inode = BtrfsInodeItem {
+            generation: 1,
+            size: 4096,
+            nbytes: 4096,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            mode: 0o040_755,
+            rdev: 0,
+            atime_sec: 10,
+            atime_nsec: 0,
+            ctime_sec: 10,
+            ctime_nsec: 0,
+            mtime_sec: 10,
+            mtime_nsec: 0,
+            otime_sec: 10,
+            otime_nsec: 0,
+        };
+        let child_inode = BtrfsInodeItem {
+            mode: 0o100_644,
+            nlink: 1,
+            size: 0,
+            nbytes: 0,
+            ..root_inode
+        };
+
+        let root_inode_bytes = root_inode.to_bytes();
+        let dir_index_bytes = encode_btrfs_dir_index_entry(
+            b"hello.txt",
+            child_objectid,
+            ffs_btrfs::BTRFS_FT_REG_FILE,
+        );
+        let child_inode_bytes = child_inode.to_bytes();
+
+        let mut data_cursor = 16 * 1024;
+        data_cursor -= root_inode_bytes.len();
+        write_btrfs_leaf_item(
+            &mut image,
+            fs_leaf_offset,
+            0,
+            root_dir_objectid,
+            BTRFS_ITEM_INODE_ITEM,
+            0,
+            u32::try_from(data_cursor).expect("root inode offset fits"),
+            u32::try_from(root_inode_bytes.len()).expect("root inode size fits"),
+        );
+        image[fs_leaf_offset + data_cursor..fs_leaf_offset + data_cursor + root_inode_bytes.len()]
+            .copy_from_slice(&root_inode_bytes);
+
+        data_cursor -= dir_index_bytes.len();
+        write_btrfs_leaf_item(
+            &mut image,
+            fs_leaf_offset,
+            1,
+            root_dir_objectid,
+            ffs_btrfs::BTRFS_ITEM_DIR_INDEX,
+            2,
+            u32::try_from(data_cursor).expect("dir index offset fits"),
+            u32::try_from(dir_index_bytes.len()).expect("dir index size fits"),
+        );
+        image[fs_leaf_offset + data_cursor..fs_leaf_offset + data_cursor + dir_index_bytes.len()]
+            .copy_from_slice(&dir_index_bytes);
+
+        data_cursor -= child_inode_bytes.len();
+        write_btrfs_leaf_item(
+            &mut image,
+            fs_leaf_offset,
+            2,
+            child_objectid,
+            BTRFS_ITEM_INODE_ITEM,
+            0,
+            u32::try_from(data_cursor).expect("child inode offset fits"),
+            u32::try_from(child_inode_bytes.len()).expect("child inode size fits"),
+        );
+        image[fs_leaf_offset + data_cursor..fs_leaf_offset + data_cursor + child_inode_bytes.len()]
+            .copy_from_slice(&child_inode_bytes);
 
         image
     }
@@ -7544,14 +7713,46 @@ mod tests {
             assert_eq!(output.filesystem, "btrfs");
             assert_eq!(output.inode, 1);
             assert!(output.htree.is_none());
-            // With hex=true, btrfs now returns raw DIR_ITEM payloads.
+            // The root-only fixture has no on-disk directory-entry items.
             assert!(output.raw_hex_blocks.is_some());
+            assert!(
+                output
+                    .raw_hex_blocks
+                    .as_ref()
+                    .is_some_and(std::vec::Vec::is_empty)
+            );
             assert!(output.entries.iter().all(|entry| entry.rec_len == 0));
             assert!(output.entries.iter().any(|entry| entry.name == "."));
             assert!(output.entries.iter().any(|entry| entry.name == ".."));
             assert!(output.limitations.iter().any(|limitation| {
-                limitation.contains("btrfs hex dump shows raw DIR_ITEM payloads")
+                limitation.contains("btrfs hex dump shows raw DIR_ITEM/DIR_INDEX payloads")
             }));
+        });
+    }
+
+    #[test]
+    fn build_dump_dir_output_btrfs_hex_returns_dir_index_payloads() {
+        let image = build_test_btrfs_image_with_dir_index_entry();
+        with_temp_image_path(&image, |path| {
+            let output = super::build_dump_dir_output(&path, 1, true)
+                .expect("build dump dir output for btrfs directory image");
+
+            let raw_hex_blocks = output
+                .raw_hex_blocks
+                .as_ref()
+                .expect("btrfs hex dump should include raw blocks");
+            assert!(!raw_hex_blocks.is_empty());
+            assert!(
+                raw_hex_blocks
+                    .iter()
+                    .any(|block| block.item_kind.as_deref() == Some("dir_index"))
+            );
+            assert!(
+                raw_hex_blocks
+                    .iter()
+                    .all(|block| !block.hex.trim().is_empty())
+            );
+            assert!(output.entries.iter().any(|entry| entry.name == "hello.txt"));
         });
     }
 
