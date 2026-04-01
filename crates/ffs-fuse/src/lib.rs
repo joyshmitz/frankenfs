@@ -431,6 +431,19 @@ impl AccessPredictor {
             drop(guard);
         }
     }
+
+    fn invalidate_inode(&self, ino: InodeNumber) {
+        let mut guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("AccessPredictor state lock poisoned in invalidate, recovering");
+                poisoned.into_inner()
+            }
+        };
+        if let Some(entry) = guard.history.remove(&ino.0) {
+            guard.lru.remove(&entry.last_touch);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1150,6 +1163,12 @@ impl Filesystem for FrankenFuse {
         if let Err(e) = self.inner.ops.flush_on_destroy(&cx) {
             warn!("flush_on_destroy failed during FUSE destroy: {e}");
         }
+    }
+
+    fn forget(&mut self, _req: &Request<'_>, ino: u64, _nlookup: u64) {
+        let inode = InodeNumber(ino);
+        self.inner.readahead.invalidate_inode(inode);
+        self.inner.access_predictor.invalidate_inode(inode);
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {

@@ -3180,10 +3180,31 @@ fn build_btrfs_dump_dir_output(path: &PathBuf, inode: u64, hex: bool) -> Result<
             .to_owned(),
         "htree metadata is ext4-specific and not available for btrfs directories".to_owned(),
     ];
-    if hex {
-        limitations
-            .push("raw hex directory block dump is not yet implemented for btrfs".to_owned());
-    }
+    let raw_hex_blocks = if hex {
+        let items = open_fs
+            .walk_btrfs_dir_items(&cx, inode)
+            .context("failed to read btrfs directory items")?;
+        let blocks: Vec<DumpHexBlockOutput> = items
+            .iter()
+            .enumerate()
+            .map(|(idx, (key_offset, raw))| {
+                #[allow(clippy::cast_possible_truncation)]
+                DumpHexBlockOutput {
+                    logical_block: idx as u32,
+                    physical_block: *key_offset,
+                    hex: bytes_to_hex_dump(raw),
+                }
+            })
+            .collect();
+        limitations.push(
+            "btrfs hex dump shows raw DIR_ITEM payloads from B-tree leaves; \
+             logical_block is the item index, physical_block is the key offset"
+                .to_owned(),
+        );
+        Some(blocks)
+    } else {
+        None
+    };
     Ok(DumpDirOutput {
         filesystem: "btrfs".to_owned(),
         inode,
@@ -3199,7 +3220,7 @@ fn build_btrfs_dump_dir_output(path: &PathBuf, inode: u64, hex: bool) -> Result<
             })
             .collect(),
         htree: None,
-        raw_hex_blocks: None,
+        raw_hex_blocks,
         limitations,
     })
 }
@@ -7523,12 +7544,13 @@ mod tests {
             assert_eq!(output.filesystem, "btrfs");
             assert_eq!(output.inode, 1);
             assert!(output.htree.is_none());
-            assert!(output.raw_hex_blocks.is_none());
+            // With hex=true, btrfs now returns raw DIR_ITEM payloads.
+            assert!(output.raw_hex_blocks.is_some());
             assert!(output.entries.iter().all(|entry| entry.rec_len == 0));
             assert!(output.entries.iter().any(|entry| entry.name == "."));
             assert!(output.entries.iter().any(|entry| entry.name == ".."));
             assert!(output.limitations.iter().any(|limitation| {
-                limitation.contains("raw hex directory block dump is not yet implemented for btrfs")
+                limitation.contains("btrfs hex dump shows raw DIR_ITEM payloads")
             }));
         });
     }

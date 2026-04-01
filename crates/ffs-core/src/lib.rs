@@ -8344,6 +8344,9 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
+        let mut alloc = alloc_mutex.lock();
+        let block_dev = self.block_device_adapter();
+
         let src_inode = self.read_inode(cx, ino)?;
         if src_inode.is_dir() {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(EPERM_ERRNO)));
@@ -8363,8 +8366,6 @@ impl OpenFs {
         }
 
         let mut src_upd = src_inode.clone();
-        let mut alloc = alloc_mutex.lock();
-        let block_dev = self.block_device_adapter();
 
         src_upd.links_count = Self::ext4_checked_links_count_delta(src_upd.links_count, ino, 1)?;
         ffs_inode::touch_ctime(&mut src_upd, tstamp_secs, tstamp_nanos);
@@ -8440,16 +8441,17 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let parent_inode = self.read_inode(cx, parent)?;
-        if !parent_inode.is_dir() {
-            return Err(FfsError::NotDirectory);
-        }
-        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
-            return Err(FfsError::Exists);
-        }
-
-        let (ino, mut symlink_inode) = {
+        let (ino, mut symlink_inode, parent_inode) = {
             let mut alloc = alloc_mutex.lock();
+
+            let parent_inode = self.read_inode(cx, parent)?;
+            if !parent_inode.is_dir() {
+                return Err(FfsError::NotDirectory);
+            }
+            if self.lookup_name(cx, &parent_inode, name)?.is_some() {
+                return Err(FfsError::Exists);
+            }
+
             let parent_group = GroupNumber(
                 u32::try_from(parent.0.saturating_sub(1) / u64::from(alloc.geo.inodes_per_group))
                     .map_err(|_| FfsError::Format("parent inode group index exceeds u32".into()))?,
@@ -8529,7 +8531,7 @@ impl OpenFs {
                 }
             }
 
-            (ino, inode)
+            (ino, inode, parent_inode)
         };
 
         if !fast_storage {
@@ -9406,6 +9408,8 @@ impl OpenFs {
             return Err(FfsError::NotDirectory);
         }
 
+        let mut alloc = alloc_mutex.lock();
+
         // Look up the source entry.
         let entry = self
             .lookup_name(cx, &parent_inode, name)?
@@ -9413,8 +9417,6 @@ impl OpenFs {
         let child_ino = InodeNumber(u64::from(entry.inode));
         let child_inode = self.read_inode(cx, child_ino)?;
         let ft = inode_dir_entry_file_type(&child_inode);
-
-        let mut alloc = alloc_mutex.lock();
 
         // Check if target already exists — if so, remove it first.
         let new_parent_inode = if new_parent == parent {
@@ -13268,6 +13270,32 @@ impl OpenFs {
         self.with_latest_scope(|scope| <Self as FsOps>::readdir(self, cx, scope, ino, offset))
     }
 
+    /// Return raw DIR_ITEM payloads for a btrfs directory inode.
+    ///
+    /// Each entry is `(key_offset, raw_bytes)` where `key_offset` is the
+    /// btrfs key offset (name hash) and `raw_bytes` are the on-disk item
+    /// payload bytes. Returns an error for ext4 images.
+    pub fn walk_btrfs_dir_items(
+        &self,
+        cx: &Cx,
+        inode: u64,
+    ) -> ffs_error::Result<Vec<(u64, Vec<u8>)>> {
+        if !matches!(&self.flavor, FsFlavor::Btrfs(_)) {
+            return Err(FfsError::Format(
+                "walk_btrfs_dir_items is only available for btrfs images".into(),
+            ));
+        }
+        let canonical = self.btrfs_canonical_inode(InodeNumber(inode))?;
+        let items = self.walk_btrfs_fs_tree(cx)?;
+        Ok(items
+            .iter()
+            .filter(|item| {
+                item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_DIR_ITEM
+            })
+            .map(|item| (item.key.offset, item.data.clone()))
+            .collect())
+    }
+
     pub fn read(
         &self,
         cx: &Cx,
@@ -13328,7 +13356,7 @@ impl OpenFs {
     fn ext4_fiemap(
         &self,
         cx: &Cx,
-        scope: &mut RequestScope,
+        scope: &RequestScope,
         ino: InodeNumber,
         start: u64,
         length: u64,
