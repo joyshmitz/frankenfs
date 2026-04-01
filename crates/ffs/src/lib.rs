@@ -130,6 +130,7 @@ mod tests {
         assert!(!RequestOp::Readdir.is_write());
         assert!(!RequestOp::Readlink.is_write());
         assert!(!RequestOp::IoctlRead.is_write());
+        assert!(!RequestOp::IoctlRead.is_metadata_write());
 
         // Write operations
         assert!(RequestOp::Create.is_write());
@@ -145,6 +146,11 @@ mod tests {
         assert!(RequestOp::Removexattr.is_write());
         assert!(RequestOp::Write.is_write());
         assert!(RequestOp::IoctlWrite.is_write());
+        assert!(RequestOp::IoctlWrite.is_metadata_write());
+
+        // Non-metadata data writes remain distinct from metadata-only writes.
+        assert!(!RequestOp::Write.is_metadata_write());
+        assert!(!RequestOp::Fallocate.is_metadata_write());
     }
 
     #[test]
@@ -422,5 +428,20 @@ mod tests {
             transition.is_none() || transition.is_some(),
             "sample returned valid option"
         );
+    }
+
+    #[test]
+    fn fiemap_extent_type_is_accessible_through_facade() {
+        let extent = FiemapExtent {
+            logical: 0,
+            physical: 4096,
+            length: 8192,
+            flags: FIEMAP_EXTENT_LAST | FIEMAP_EXTENT_UNWRITTEN,
+        };
+        assert_eq!(extent.logical, 0);
+        assert_eq!(extent.physical, 4096);
+        assert_eq!(extent.length, 8192);
+        assert_ne!(extent.flags & FIEMAP_EXTENT_LAST, 0);
+        assert_ne!(extent.flags & FIEMAP_EXTENT_UNWRITTEN, 0);
     }
 }
