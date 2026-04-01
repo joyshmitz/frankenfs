@@ -168,7 +168,8 @@ pub enum RequestOp {
     Setxattr,
     Removexattr,
     Write,
-    Ioctl,
+    IoctlRead,
+    IoctlWrite,
 }
 
 impl RequestOp {
@@ -189,6 +190,7 @@ impl RequestOp {
                 | Self::Setxattr
                 | Self::Removexattr
                 | Self::Write
+                | Self::IoctlWrite
                 | Self::Fsync
                 | Self::Fsyncdir
         )
@@ -209,6 +211,7 @@ impl RequestOp {
                 | Self::Setattr
                 | Self::Setxattr
                 | Self::Removexattr
+                | Self::IoctlWrite
         )
     }
 }

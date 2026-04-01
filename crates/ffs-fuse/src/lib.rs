@@ -867,14 +867,15 @@ impl FrankenFuse {
                 }
 
                 let cx = Self::cx_for_request();
-                let extents = match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
-                    self.inner
-                        .ops
-                        .fiemap(cx, scope, InodeNumber(ino), fm_start, fm_length)
-                }) {
-                    Ok(exts) => exts,
-                    Err(error) => return IoctlResult::Error(error.to_errno()),
-                };
+                let extents =
+                    match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                        self.inner
+                            .ops
+                            .fiemap(cx, scope, InodeNumber(ino), fm_start, fm_length)
+                    }) {
+                        Ok(exts) => exts,
+                        Err(error) => return IoctlResult::Error(error.to_errno()),
+                    };
 
                 IoctlResult::Data(Self::encode_fiemap_response(
                     fm_start,
@@ -886,7 +887,7 @@ impl FrankenFuse {
             }
             EXT4_IOC_GETFLAGS => {
                 let cx = Self::cx_for_request();
-                match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
                     self.inner.ops.get_inode_flags(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(flags) => {
@@ -908,7 +909,7 @@ impl FrankenFuse {
                 let flags = flags_long as u32;
 
                 let cx = Self::cx_for_request();
-                match self.with_request_scope(&cx, RequestOp::Ioctl, |cx, scope| {
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
                     self.inner
                         .ops
                         .set_inode_flags(cx, scope, InodeNumber(ino), flags)?;
@@ -2763,9 +2764,11 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum IoctlCall {
+        Begin(RequestOp),
         GetFlags(InodeNumber),
         SetFlags(InodeNumber, u32),
         Commit,
+        End(RequestOp),
     }
 
     struct IoctlRecordingFs {
@@ -2856,6 +2859,27 @@ mod tests {
             Ok(())
         }
 
+        fn begin_request_scope(&self, _cx: &Cx, op: RequestOp) -> ffs_error::Result<RequestScope> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::Begin(op));
+            Ok(RequestScope::empty())
+        }
+
+        fn end_request_scope(
+            &self,
+            _cx: &Cx,
+            op: RequestOp,
+            _scope: RequestScope,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::End(op));
+            Ok(())
+        }
+
         fn commit_request_scope(&self, _scope: &mut RequestScope) -> ffs_error::Result<CommitSeq> {
             self.calls
                 .lock()
@@ -2884,7 +2908,11 @@ mod tests {
         );
         assert_eq!(
             calls.lock().expect("lock ioctl calls").as_slice(),
-            &[IoctlCall::GetFlags(InodeNumber(11))]
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetFlags(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
         );
     }
 
@@ -2914,7 +2942,12 @@ mod tests {
         assert_eq!(response, IoctlResult::Data(Vec::new()));
         assert_eq!(
             calls.lock().expect("lock ioctl calls").as_slice(),
-            &[IoctlCall::SetFlags(InodeNumber(9), 0x42), IoctlCall::Commit,]
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::SetFlags(InodeNumber(9), 0x42),
+                IoctlCall::Commit,
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
         );
     }
 

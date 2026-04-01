@@ -13324,6 +13324,172 @@ impl OpenFs {
 
 // ── FsOps for OpenFs (device-based ext4 adapter) ──────────────────────────
 
+impl OpenFs {
+    fn ext4_fiemap(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        start: u64,
+        length: u64,
+    ) -> ffs_error::Result<Vec<FiemapExtent>> {
+        let FsFlavor::Ext4(sb) = &self.flavor else {
+            return Err(FfsError::Format("not an ext4 filesystem".into()));
+        };
+
+        let inode = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+        if inode.is_dir() {
+            return Err(FfsError::IsDirectory);
+        }
+        if inode.is_symlink() {
+            return Err(FfsError::Format("fiemap not supported on symlinks".into()));
+        }
+        if inode.flags & ffs_types::EXT4_EXTENTS_FL == 0 {
+            return Err(FfsError::UnsupportedFeature(
+                "fiemap requires extent-based inode".to_owned(),
+            ));
+        }
+
+        let block_size = u64::from(sb.block_size);
+        let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
+        let end = start.saturating_add(length);
+        let mut result = Vec::new();
+        for (i, ext) in extents.iter().enumerate() {
+            let ext_logical_byte = u64::from(ext.logical_block) * block_size;
+            let ext_len_byte = u64::from(ext.actual_len()) * block_size;
+            let ext_end = ext_logical_byte + ext_len_byte;
+
+            if ext_end <= start {
+                continue;
+            }
+            if ext_logical_byte >= end {
+                break;
+            }
+
+            let mut flags = 0_u32;
+            if ext.is_unwritten() {
+                flags |= FIEMAP_EXTENT_UNWRITTEN;
+            }
+            if i + 1 == extents.len() {
+                flags |= FIEMAP_EXTENT_LAST;
+            }
+
+            result.push(FiemapExtent {
+                logical: ext_logical_byte,
+                physical: ext.physical_start * block_size,
+                length: ext_len_byte,
+                flags,
+            });
+        }
+        Ok(result)
+    }
+
+    fn btrfs_fiemap_extent_items(
+        &self,
+        cx: &Cx,
+        canonical: u64,
+    ) -> ffs_error::Result<Vec<(u64, BtrfsExtentData)>> {
+        if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+            let ext_start = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            let ext_end = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: u64::MAX,
+            };
+            let alloc = alloc_mutex.lock();
+            let ext_items = alloc
+                .fs_tree
+                .range(&ext_start, &ext_end)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            let parsed = ext_items
+                .iter()
+                .map(|(k, v)| {
+                    parse_extent_data(v)
+                        .map(|extent| (k.offset, extent))
+                        .map_err(|e| parse_to_ffs_error(&e))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(alloc);
+            Ok(parsed)
+        } else {
+            self.walk_btrfs_fs_tree(cx)?
+                .iter()
+                .filter(|item| {
+                    item.key.objectid == canonical && item.key.item_type == BTRFS_ITEM_EXTENT_DATA
+                })
+                .map(|item| {
+                    parse_extent_data(&item.data)
+                        .map(|extent| (item.key.offset, extent))
+                        .map_err(|e| parse_to_ffs_error(&e))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        }
+    }
+
+    fn btrfs_fiemap(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        start: u64,
+        length: u64,
+    ) -> ffs_error::Result<Vec<FiemapExtent>> {
+        let canonical = self.btrfs_canonical_inode(ino)?;
+        let attr = self.btrfs_read_inode_attr(cx, ino)?;
+        if attr.kind == FileType::Directory {
+            return Err(FfsError::IsDirectory);
+        }
+        if attr.kind == FileType::Symlink {
+            return Err(FfsError::Format("fiemap not supported on symlinks".into()));
+        }
+
+        let extents = self.btrfs_fiemap_extent_items(cx, canonical)?;
+        let end = start.saturating_add(length);
+        let mut result = Vec::new();
+        for (i, (file_offset, extent)) in extents.iter().enumerate() {
+            let ext_len = Self::btrfs_extent_logical_len(extent)?;
+            let ext_end = file_offset.saturating_add(ext_len);
+
+            if ext_end <= start {
+                continue;
+            }
+            if *file_offset >= end {
+                break;
+            }
+
+            let (physical, mut flags) = match extent {
+                BtrfsExtentData::Inline { .. } => (0_u64, FIEMAP_EXTENT_LAST),
+                BtrfsExtentData::Regular {
+                    disk_bytenr,
+                    extent_type,
+                    ..
+                } => {
+                    let mut flags = 0_u32;
+                    if *extent_type == BTRFS_FILE_EXTENT_PREALLOC {
+                        flags |= FIEMAP_EXTENT_UNWRITTEN;
+                    }
+                    (*disk_bytenr, flags)
+                }
+            };
+
+            if i + 1 == extents.len() {
+                flags |= FIEMAP_EXTENT_LAST;
+            }
+
+            result.push(FiemapExtent {
+                logical: *file_offset,
+                physical,
+                length: ext_len,
+                flags,
+            });
+        }
+        Ok(result)
+    }
+}
+
 impl FsOps for OpenFs {
     fn getattr(
         &self,
@@ -13848,61 +14014,8 @@ impl FsOps for OpenFs {
         length: u64,
     ) -> ffs_error::Result<Vec<FiemapExtent>> {
         match &self.flavor {
-            FsFlavor::Ext4(sb) => {
-                let inode =
-                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
-                if inode.is_dir() {
-                    return Err(FfsError::IsDirectory);
-                }
-                if inode.is_symlink() {
-                    return Err(FfsError::Format("fiemap not supported on symlinks".into()));
-                }
-                // Inline-data and indirect-block inodes don't have extent trees.
-                if inode.flags & ffs_types::EXT4_EXTENTS_FL == 0 {
-                    return Err(FfsError::UnsupportedFeature(
-                        "fiemap requires extent-based inode".to_owned(),
-                    ));
-                }
-
-                let block_size = u64::from(sb.block_size);
-                let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
-
-                let end = start.saturating_add(length);
-                let mut result = Vec::new();
-                for (i, ext) in extents.iter().enumerate() {
-                    let ext_logical_byte = u64::from(ext.logical_block) * block_size;
-                    let ext_len_byte = u64::from(ext.actual_len()) * block_size;
-                    let ext_end = ext_logical_byte + ext_len_byte;
-
-                    // Skip extents entirely before the requested range.
-                    if ext_end <= start {
-                        continue;
-                    }
-                    // Stop once we're past the requested range.
-                    if ext_logical_byte >= end {
-                        break;
-                    }
-
-                    let mut flags = 0_u32;
-                    if ext.is_unwritten() {
-                        flags |= FIEMAP_EXTENT_UNWRITTEN;
-                    }
-                    if i + 1 == extents.len() {
-                        flags |= FIEMAP_EXTENT_LAST;
-                    }
-
-                    result.push(FiemapExtent {
-                        logical: ext_logical_byte,
-                        physical: ext.physical_start * block_size,
-                        length: ext_len_byte,
-                        flags,
-                    });
-                }
-                Ok(result)
-            }
-            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
-                "fiemap is not yet supported for btrfs".to_owned(),
-            )),
+            FsFlavor::Ext4(_) => self.ext4_fiemap(cx, scope, ino, start, length),
+            FsFlavor::Btrfs(_) => self.btrfs_fiemap(cx, ino, start, length),
         }
     }
 
@@ -24368,6 +24481,43 @@ mod tests {
     }
 
     #[test]
+    fn ioctl_write_request_scope_allocates_transaction() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin request scope");
+        assert!(
+            scope.snapshot.is_some(),
+            "write ioctl should pin a snapshot"
+        );
+        assert!(
+            scope.tx.is_some(),
+            "write ioctl should allocate a transaction"
+        );
+    }
+
+    #[test]
+    fn ioctl_read_request_scope_uses_snapshot_only() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlRead)
+            .expect("begin request scope");
+        assert!(scope.snapshot.is_some(), "read ioctl should pin a snapshot");
+        assert!(
+            scope.tx.is_none(),
+            "read ioctl should not allocate a transaction"
+        );
+    }
+
+    #[test]
     fn end_request_scope_accepts_empty_scope() {
         let image = build_ext4_image_with_state(EXT4_VALID_FS);
         let dev = TestDevice::from_vec(image);
@@ -25364,6 +25514,7 @@ mod tests {
             RequestOp::Read,
             RequestOp::Readdir,
             RequestOp::Readlink,
+            RequestOp::IoctlRead,
         ];
         for op in read_ops {
             assert_eq!(
@@ -25489,6 +25640,7 @@ mod tests {
         assert!(!RequestOp::Opendir.is_write());
         assert!(!RequestOp::Getxattr.is_write());
         assert!(!RequestOp::Listxattr.is_write());
+        assert!(!RequestOp::IoctlRead.is_write());
 
         assert!(RequestOp::Create.is_write());
         assert!(RequestOp::Mkdir.is_write());
@@ -25502,6 +25654,7 @@ mod tests {
         assert!(RequestOp::Setxattr.is_write());
         assert!(RequestOp::Removexattr.is_write());
         assert!(RequestOp::Write.is_write());
+        assert!(RequestOp::IoctlWrite.is_write());
         assert!(RequestOp::Fsync.is_write());
         assert!(RequestOp::Fsyncdir.is_write());
     }
@@ -31398,6 +31551,7 @@ mod tests {
             RequestOp::Setxattr,
             RequestOp::Removexattr,
             RequestOp::Write,
+            RequestOp::IoctlWrite,
             RequestOp::Fsync,
             RequestOp::Fsyncdir,
         ];
@@ -31543,6 +31697,7 @@ mod tests {
                     Just(RequestOp::Setxattr),
                     Just(RequestOp::Removexattr),
                     Just(RequestOp::Write),
+                    Just(RequestOp::IoctlWrite),
                     Just(RequestOp::Fsync),
                     Just(RequestOp::Fsyncdir),
                 ],
@@ -31565,6 +31720,7 @@ mod tests {
                     Just(RequestOp::Read),
                     Just(RequestOp::Readdir),
                     Just(RequestOp::Readlink),
+                    Just(RequestOp::IoctlRead),
                 ],
             ) {
                 prop_assert!(!op.is_write(), "{op:?} should be a read op");
