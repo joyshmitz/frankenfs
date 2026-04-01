@@ -109,11 +109,17 @@ fn encode_entries_region(region_capacity: usize, entries: &[Ext4Xattr]) -> Resul
                 .map_err(|_| FfsError::Format("xattr value offset exceeds u16".to_owned()))?
                 .to_le_bytes(),
         );
-        data[next_entry + 4..next_entry + 8].copy_from_slice(
+        // e_value_block / e_value_inum is 0
+        data[next_entry + 4..next_entry + 8].copy_from_slice(&0_u32.to_le_bytes());
+        // e_value_size is at offset 8
+        data[next_entry + 8..next_entry + 12].copy_from_slice(
             &u32::try_from(entry.value.len())
                 .map_err(|_| FfsError::Format("xattr value size exceeds u32".to_owned()))?
                 .to_le_bytes(),
         );
+        // e_hash is at offset 12 (0 for now)
+        data[next_entry + 12..next_entry + 16].copy_from_slice(&0_u32.to_le_bytes());
+
         data[next_entry + XATTR_ENTRY_HEADER_LEN
             ..next_entry + XATTR_ENTRY_HEADER_LEN + entry.name.len()]
             .copy_from_slice(&entry.name);

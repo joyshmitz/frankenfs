@@ -6671,9 +6671,9 @@ mod tests {
         data[0] = 4; // name_len=4
         data[1] = 1; // name_index=1 (user)
         data[2..4].copy_from_slice(&128_u16.to_le_bytes()); // value_offs=128
-        data[4..8].copy_from_slice(&3_u32.to_le_bytes()); // value_size=3
-        data[8..12].copy_from_slice(&0_u32.to_le_bytes()); // hash (unused)
-        // 12..16 reserved
+        data[4..8].copy_from_slice(&0_u32.to_le_bytes()); // value_block (unused)
+        data[8..12].copy_from_slice(&3_u32.to_le_bytes()); // value_size=3
+        data[12..16].copy_from_slice(&0_u32.to_le_bytes()); // hash (unused)
         // Name: "test" at byte 16
         data[16..20].copy_from_slice(b"test");
 
