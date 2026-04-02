@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use ffs_block::CacheRuntimeMetricsSnapshot;
 use ffs_fuse::MetricsSnapshot;
 use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
@@ -1355,5 +1355,57 @@ fn print_contention_sample_payload(record: &EvidenceRecord) {
             p.total_commits,
             p.effective_policy
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_evidence_args, PresetMode, PRESET_METRICS, PRESET_REPAIR_FAILURES};
+
+    #[test]
+    fn validate_evidence_args_rejects_unknown_preset() {
+        let err = validate_evidence_args(Some("unknown-preset"), None, None, false)
+            .expect_err("unknown preset should fail");
+        let message = err.to_string();
+        assert!(message.contains("unknown preset 'unknown-preset'"));
+        assert!(message.contains(PRESET_METRICS));
+        assert!(message.contains(PRESET_REPAIR_FAILURES));
+    }
+
+    #[test]
+    fn validate_evidence_args_rejects_preset_and_event_type_together() {
+        let err = validate_evidence_args(
+            Some(PRESET_REPAIR_FAILURES),
+            Some("repair_failed"),
+            None,
+            false,
+        )
+        .expect_err("preset and event type should be mutually exclusive");
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn validate_evidence_args_rejects_tail_for_metrics_presets() {
+        let err = validate_evidence_args(Some(PRESET_METRICS), None, Some(5), false)
+            .expect_err("metrics presets should reject tail");
+        assert!(err
+            .to_string()
+            .contains("--tail is only supported for ledger-backed evidence presets"));
+    }
+
+    #[test]
+    fn validate_evidence_args_rejects_summary_for_metrics_presets() {
+        let err = validate_evidence_args(Some(PRESET_METRICS), None, None, true)
+            .expect_err("metrics presets should reject summary");
+        assert!(err
+            .to_string()
+            .contains("--summary is only supported for ledger-backed evidence presets"));
+    }
+
+    #[test]
+    fn validate_evidence_args_accepts_ledger_preset_with_tail_and_summary() {
+        let preset_kind = validate_evidence_args(Some(PRESET_REPAIR_FAILURES), None, Some(3), true)
+            .expect("ledger presets should allow tail and summary");
+        assert_eq!(preset_kind, Some(PresetMode::Ledger));
     }
 }

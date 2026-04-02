@@ -8183,6 +8183,7 @@ impl OpenFs {
     fn ext4_unlink_impl(
         &self,
         cx: &Cx,
+        _scope: &mut RequestScope,
         parent: InodeNumber,
         name: &[u8],
         expect_dir: bool,
@@ -9869,6 +9870,7 @@ impl OpenFs {
     fn ext4_setxattr(
         &self,
         cx: &Cx,
+        _scope: &mut RequestScope,
         ino: InodeNumber,
         name: &str,
         value: &[u8],
@@ -10138,7 +10140,7 @@ impl OpenFs {
 
     /// Remove one ext4 xattr.
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
-    fn ext4_removexattr(&self, cx: &Cx, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
+    fn ext4_removexattr(&self, cx: &Cx, _scope: &mut RequestScope, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
         let alloc_mutex = self.require_alloc_state()?;
         let block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
@@ -11307,6 +11309,7 @@ impl OpenFs {
     fn btrfs_unlink_impl(
         &self,
         _cx: &Cx,
+        _scope: &mut RequestScope,
         parent: InodeNumber,
         name: &[u8],
         expect_dir: bool,
@@ -12218,6 +12221,7 @@ impl OpenFs {
     fn btrfs_setxattr(
         &self,
         cx: &Cx,
+        _scope: &mut RequestScope,
         ino: InodeNumber,
         name: &str,
         value: &[u8],
@@ -12279,7 +12283,7 @@ impl OpenFs {
     }
 
     /// Remove an extended attribute from a btrfs inode.
-    fn btrfs_removexattr(&self, _cx: &Cx, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
+    fn btrfs_removexattr(&self, _cx: &Cx, _scope: &mut RequestScope, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
 
@@ -13821,7 +13825,7 @@ impl FsOps for OpenFs {
     fn setxattr(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         name: &str,
         value: &[u8],
@@ -13829,22 +13833,22 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                self.ext4_setxattr(cx, Self::ext4_canonical_inode(ino), name, value, mode)
+                self.ext4_setxattr(cx, scope, Self::ext4_canonical_inode(ino), name, value, mode)
             }
-            FsFlavor::Btrfs(_) => self.btrfs_setxattr(cx, ino, name, value, mode),
+            FsFlavor::Btrfs(_) => self.btrfs_setxattr(cx, scope, ino, name, value, mode),
         }
     }
 
     fn removexattr(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         name: &str,
     ) -> ffs_error::Result<bool> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => self.ext4_removexattr(cx, Self::ext4_canonical_inode(ino), name),
-            FsFlavor::Btrfs(_) => self.btrfs_removexattr(cx, ino, name),
+            FsFlavor::Ext4(_) => self.ext4_removexattr(cx, scope, Self::ext4_canonical_inode(ino), name),
+            FsFlavor::Btrfs(_) => self.btrfs_removexattr(cx, scope, ino, name),
         }
     }
 
@@ -13909,19 +13913,20 @@ impl FsOps for OpenFs {
     fn unlink(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         parent: InodeNumber,
         name: &OsStr,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => self.ext4_unlink_impl(
                 cx,
+                scope,
                 Self::ext4_canonical_inode(parent),
                 name.as_encoded_bytes(),
                 false,
             ),
             FsFlavor::Btrfs(_) => {
-                self.btrfs_unlink_impl(cx, parent, name.as_encoded_bytes(), false)
+                self.btrfs_unlink_impl(cx, scope, parent, name.as_encoded_bytes(), false)
             }
         }
     }
@@ -13929,18 +13934,19 @@ impl FsOps for OpenFs {
     fn rmdir(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         parent: InodeNumber,
         name: &OsStr,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => self.ext4_unlink_impl(
                 cx,
+                scope,
                 Self::ext4_canonical_inode(parent),
                 name.as_encoded_bytes(),
                 true,
             ),
-            FsFlavor::Btrfs(_) => self.btrfs_unlink_impl(cx, parent, name.as_encoded_bytes(), true),
+            FsFlavor::Btrfs(_) => self.btrfs_unlink_impl(cx, scope, parent, name.as_encoded_bytes(), true),
         }
     }
 
@@ -20805,6 +20811,44 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    #[test]
+    fn write_rename_directory_over_nonempty_directory_returns_enotempty() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.mkdir(&cx, root, OsStr::new("rename_ne_src"), 0o755, 0, 0)
+            .expect("create source dir");
+        let dst = fs
+            .mkdir(&cx, root, OsStr::new("rename_ne_dst"), 0o755, 0, 0)
+            .expect("create destination dir");
+        // Put a file inside destination so it's non-empty.
+        fs.create(&cx, dst.ino, OsStr::new("child.txt"), 0o644, 0, 0)
+            .expect("create child in destination");
+
+        let err = fs
+            .rename(
+                &cx,
+                root,
+                OsStr::new("rename_ne_src"),
+                root,
+                OsStr::new("rename_ne_dst"),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOTEMPTY);
+
+        // Both directories should still exist.
+        fs.lookup(&cx, root, OsStr::new("rename_ne_src"))
+            .expect("source must survive failed rename");
+        fs.lookup(&cx, root, OsStr::new("rename_ne_dst"))
+            .expect("destination must survive failed rename");
+        // Child in destination must be intact.
+        fs.lookup(&cx, dst.ino, OsStr::new("child.txt"))
+            .expect("child must survive failed rename");
     }
 
     #[test]

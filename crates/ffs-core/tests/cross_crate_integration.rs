@@ -8,7 +8,7 @@
 
 use asupersync::Cx;
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice};
-use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
+use ffs_core::{Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, XattrSetMode};
 use ffs_error::{FfsError, Result as FfsResult};
 use ffs_types::{BlockNumber, ByteOffset, InodeNumber, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET};
 use parking_lot::Mutex;
@@ -572,6 +572,54 @@ mod block_alloc {
 mod openfs_write_paths {
     use super::*;
 
+    fn assert_xattr_round_trip(fs: &OpenFs, cx: &Cx, parent: InodeNumber, file_name: &OsStr) {
+        let created = fs
+            .create(cx, parent, file_name, 0o644, 1000, 1000)
+            .expect("create");
+
+        let names = fs.listxattr(cx, created.ino).expect("initial listxattr");
+        assert!(names.is_empty(), "new file should start without xattrs");
+        assert_eq!(
+            fs.getxattr(cx, created.ino, "user.color")
+                .expect("initial getxattr"),
+            None
+        );
+
+        fs.setxattr(
+            cx,
+            created.ino,
+            "user.color",
+            b"blue-green",
+            XattrSetMode::Set,
+        )
+        .expect("setxattr");
+
+        let names = fs.listxattr(cx, created.ino).expect("listxattr after set");
+        assert_eq!(names, vec!["user.color"]);
+        assert_eq!(
+            fs.getxattr(cx, created.ino, "user.color")
+                .expect("getxattr after set"),
+            Some(b"blue-green".to_vec())
+        );
+
+        let removed = fs
+            .removexattr(cx, created.ino, "user.color")
+            .expect("removexattr");
+        assert!(removed, "existing xattr should be removed");
+        assert_eq!(
+            fs.getxattr(cx, created.ino, "user.color")
+                .expect("getxattr after remove"),
+            None
+        );
+        let names = fs
+            .listxattr(cx, created.ino)
+            .expect("listxattr after remove");
+        assert!(
+            names.is_empty(),
+            "removed xattr should disappear from listxattr"
+        );
+    }
+
     #[test]
     fn utf8_filename_round_trips_through_create_write_lookup_and_read() {
         let Some(fs) = open_writable_ext4_fixture() else {
@@ -644,6 +692,22 @@ mod openfs_write_paths {
                 .any(|entry| entry.name_str() == "resume_文件_é.txt"),
             "utf-8 filename should appear in btrfs readdir output"
         );
+    }
+
+    #[test]
+    fn xattr_round_trip_through_public_openfs_api_on_ext4() {
+        let Some(fs) = open_writable_ext4_fixture() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        assert_xattr_round_trip(&fs, &cx, InodeNumber(2), OsStr::new("xattr-ext4.txt"));
+    }
+
+    #[test]
+    fn xattr_round_trip_through_public_openfs_api_on_btrfs() {
+        let fs = open_writable_btrfs_fixture();
+        let cx = Cx::for_testing();
+        assert_xattr_round_trip(&fs, &cx, InodeNumber(1), OsStr::new("xattr-btrfs.txt"));
     }
 }
 
