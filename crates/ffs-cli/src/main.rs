@@ -5229,6 +5229,14 @@ mod tests {
         }
     }
 
+    fn log_contract_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let mutex = LOCK.get_or_init(|| std::sync::Mutex::new(()));
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn parse_first_json_line(buffer: &SharedLogBuffer) -> Value {
         let logs = buffer.as_string();
         let line = logs
@@ -6231,6 +6239,7 @@ mod tests {
 
     #[test]
     fn json_log_serializes_domain_fields() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -6263,6 +6272,7 @@ mod tests {
 
     #[test]
     fn json_log_preserves_span_context() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -6353,6 +6363,7 @@ mod tests {
 
     #[test]
     fn mount_runtime_selection_log_contains_required_fields() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -6390,6 +6401,7 @@ mod tests {
 
     #[test]
     fn mount_runtime_rejection_log_contains_error_class_fields() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -6429,6 +6441,7 @@ mod tests {
     #[test]
     fn repair_coordination_claim_log_contains_required_fields() {
         const EXT4_VALID_FS: u16 = 0x0001;
+        let _guard = log_contract_guard();
         let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
@@ -6476,6 +6489,7 @@ mod tests {
     #[test]
     fn repair_coordination_rejection_log_contains_error_class_fields() {
         const EXT4_VALID_FS: u16 = 0x0001;
+        let _guard = log_contract_guard();
         let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()

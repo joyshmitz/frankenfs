@@ -81,10 +81,6 @@ fn mem_block_device(block_size: u32, block_count: usize) -> ByteBlockDevice<MemB
     ByteBlockDevice::new(mem, block_size).expect("valid device")
 }
 
-fn mem_block_device_from_bytes(bytes: Vec<u8>, block_size: u32) -> ByteBlockDevice<MemByteDevice> {
-    ByteBlockDevice::new(MemByteDevice::from_bytes(bytes), block_size).expect("valid device")
-}
-
 fn open_writable_ext4_fixture() -> Option<OpenFs> {
     let img_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../ffs-harness/tests/fixtures/images/ext4_small.img");
@@ -323,7 +319,7 @@ fn build_btrfs_fsops_image() -> Vec<u8> {
 
 fn open_writable_btrfs_fixture() -> OpenFs {
     let cx = Cx::for_testing();
-    let dev = mem_block_device_from_bytes(build_btrfs_fsops_image(), 4096);
+    let dev = MemByteDevice::from_bytes(build_btrfs_fsops_image());
     let mut fs =
         OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).expect("open btrfs");
     fs.enable_writes(&cx).expect("enable btrfs writes");
