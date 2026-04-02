@@ -9,9 +9,9 @@
 | ext4 metadata parsing | 27 | 27 | 100.0% |
 | btrfs metadata parsing | 27 | 27 | 100.0% |
 | MVCC/COW core | 14 | 14 | 100.0% |
-| FUSE surface | 12 | 12 | 100.0% |
+| FUSE surface | 15 | 15 | 100.0% |
 | self-healing durability policy | 10 | 10 | 100.0% |
-| **Overall** | **90** | **90** | **100.0%** |
+| **Overall** | **93** | **93** | **100.0%** |
 
 > **Canonical source:** This Coverage Summary table in `FEATURE_PARITY.md` is the
 > single source of truth for implemented/total counts. `ParityReport::current()`
@@ -116,6 +116,9 @@ Each row maps directly to deterministic unit/E2E coverage by stable test/scenari
 | FUSE read | FrankenFS spec §9 | ✅ | `FsOps::read` via `OpenFs` |
 | FUSE readlink | FrankenFS spec §9 | ✅ | `FsOps::readlink` via `OpenFs` |
 | FUSE mount runtime | FrankenFS spec §9 | ✅ | Production runtime lifecycle, signal handling, dispatch coverage, and CI-safe skip behavior are implemented; OQ4 (`bd-h6nz.6.4`) is resolved for V1.x with explicit `flush` (non-durable) vs `fsync`/`fsyncdir` (durability boundary) contract and writeback-cache-disabled policy. |
+| FUSE ioctl FIEMAP | `include/linux/fiemap.h` | ✅ | `FsOps::fiemap` queries ext4 extent tree via `collect_extents_with_scope` and btrfs extent data items via `btrfs_fiemap_extent_items`. FUSE `ioctl` handler parses `FS_IOC_FIEMAP` (0xC020660B) and marshals fiemap header + extent array. Note: FUSE transport may not deliver this ioctl to userspace on all kernel versions. |
+| FUSE ioctl EXT4_IOC_GETFLAGS | `fs/ext4/ioctl.c` | ✅ | `FsOps::get_inode_flags` returns raw ext4 `i_flags` field. FUSE `ioctl` handler dispatches `EXT4_IOC_GETFLAGS` (0x80086601). |
+| FUSE ioctl EXT4_IOC_SETFLAGS | `fs/ext4/ioctl.c` | ✅ | `FsOps::set_inode_flags` with user-settable flag masking (`EXT4_USER_SETTABLE_FLAGS`). System flags (EXTENTS, HUGE_FILE, etc.) protected. FUSE `ioctl` handler dispatches `EXT4_IOC_SETFLAGS` (0x40086602), requires write mode. |
 | CLI inspect command | FrankenFS spec §6 | ✅ | Implemented in `ffs-cli` |
 | CLI info command | FrankenFS spec §14.2 | ✅ | `ffs info` implemented in `ffs-cli` with optional `--groups`, `--mvcc`, `--repair`, and `--journal` sections plus `--json` output |
 | CLI dump command | FrankenFS spec §14.4 | ✅ | `ffs dump` implemented in `ffs-cli` with subcommands `superblock`, `group`, `inode`, `extents`, and `dir`, each supporting `--json` and `--hex` |

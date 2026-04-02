@@ -3767,8 +3767,9 @@ fn parse_xattr_entries(data: &[u8], value_base: &[u8]) -> Result<Vec<Ext4Xattr>,
         }
 
         let value_offs = read_le_u16(data, offset + 2)?;
-        let value_size = read_le_u32(data, offset + 4)?;
-        // skip hash at offset + 8..12
+        // e_value_block is at offset + 4
+        let value_size = read_le_u32(data, offset + 8)?;
+        // skip hash at offset + 12..16
 
         let name_start = offset + 16;
         let name_end = name_start + usize::from(name_len);
@@ -6699,16 +6700,20 @@ mod tests {
         // Entry 1: security.selinux = "context"
         data[0] = 7; // name_len
         data[1] = ffs_types::EXT4_XATTR_INDEX_SECURITY;
-        data[2..4].copy_from_slice(&200_u16.to_le_bytes());
-        data[4..8].copy_from_slice(&7_u32.to_le_bytes());
+        data[2..4].copy_from_slice(&200_u16.to_le_bytes()); // value_offs
+        data[4..8].copy_from_slice(&0_u32.to_le_bytes()); // value_block (unused)
+        data[8..12].copy_from_slice(&7_u32.to_le_bytes()); // value_size
+        data[12..16].copy_from_slice(&0_u32.to_le_bytes()); // hash (unused)
         data[16..23].copy_from_slice(b"selinux");
         data[200..207].copy_from_slice(b"context");
 
         // Entry 2 at byte 24 (16 + 7 rounded up to 24): user.mime = "text"
         data[24] = 4;
         data[25] = ffs_types::EXT4_XATTR_INDEX_USER;
-        data[26..28].copy_from_slice(&250_u16.to_le_bytes());
-        data[28..32].copy_from_slice(&4_u32.to_le_bytes());
+        data[26..28].copy_from_slice(&250_u16.to_le_bytes()); // value_offs
+        data[28..32].copy_from_slice(&0_u32.to_le_bytes()); // value_block (unused)
+        data[32..36].copy_from_slice(&4_u32.to_le_bytes()); // value_size
+        data[36..40].copy_from_slice(&0_u32.to_le_bytes()); // hash (unused)
         data[40..44].copy_from_slice(b"mime");
         data[250..254].copy_from_slice(b"text");
 
@@ -6766,7 +6771,9 @@ mod tests {
         buf[entry_start] = 4; // name_len=4
         buf[entry_start + 1] = ffs_types::EXT4_XATTR_INDEX_USER;
         buf[entry_start + 2..entry_start + 4].copy_from_slice(&80_u16.to_le_bytes()); // value_offs=80 (relative to ibody+4)
-        buf[entry_start + 4..entry_start + 8].copy_from_slice(&5_u32.to_le_bytes()); // value_size=5
+        // entry_start + 4..8 = e_value_block (unused, stays zero)
+        buf[entry_start + 8..entry_start + 12].copy_from_slice(&5_u32.to_le_bytes()); // value_size=5
+        // entry_start + 12..16 = e_hash (unused, stays zero)
         buf[entry_start + 16..entry_start + 20].copy_from_slice(b"mime");
 
         // Value at ibody+4+80 = entry data area offset 80
@@ -6802,8 +6809,10 @@ mod tests {
         // Entry at offset 32 (after header)
         block[32] = 3; // name_len=3
         block[33] = ffs_types::EXT4_XATTR_INDEX_SECURITY;
-        block[34..36].copy_from_slice(&200_u16.to_le_bytes());
-        block[36..40].copy_from_slice(&4_u32.to_le_bytes());
+        block[34..36].copy_from_slice(&200_u16.to_le_bytes()); // value_offs
+        // block[36..40] = e_value_block (unused, stays zero)
+        block[40..44].copy_from_slice(&4_u32.to_le_bytes()); // value_size
+        // block[44..48] = e_hash (unused, stays zero)
         block[48..51].copy_from_slice(b"cap");
         block[32 + 200..32 + 204].copy_from_slice(b"data");
 
@@ -8937,11 +8946,13 @@ mod tests {
                     .expect("value offset bounded by strategy")
                     .to_le_bytes(),
             );
-            data[4..8].copy_from_slice(
+            // data[4..8] = e_value_block (unused, stays zero)
+            data[8..12].copy_from_slice(
                 &u32::try_from(value.len())
                     .expect("value length bounded by strategy")
                     .to_le_bytes(),
             );
+            // data[12..16] = e_hash (unused, stays zero)
             data[16..16 + name.len()].copy_from_slice(&name);
             // Write terminator BEFORE value so there is no overlap
             data[entry_len] = 0;
@@ -8999,11 +9010,13 @@ mod tests {
                     .expect("value offset bounded by strategy")
                     .to_le_bytes(),
             );
-            data[4..8].copy_from_slice(
+            // data[4..8] = e_value_block (unused, stays zero)
+            data[8..12].copy_from_slice(
                 &u32::try_from(value_size)
                     .expect("value size bounded by strategy")
                     .to_le_bytes(),
             );
+            // data[12..16] = e_hash (unused, stays zero)
             data[16..16 + name_len].fill(b'x');
             data[entry_len] = 0;
             data[entry_len + 1] = 0;

@@ -224,8 +224,8 @@ mod tests {
         let ap = DurabilityAutopilot::new();
         let candidates: Vec<f64> = (1..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect();
         let decision = ap.choose_overhead(&candidates);
-        // With uninformative prior, should choose some valid overhead in [1.01, 1.10]
-        assert!(decision.repair_overhead >= 1.01);
+        // With uninformative prior, should choose some valid overhead in [1.03, 1.10]
+        assert!(decision.repair_overhead >= 1.03);
         assert!(decision.repair_overhead <= 1.10);
     }
 
@@ -241,7 +241,7 @@ mod tests {
 
         assert!(policy.autopilot_decision().is_some());
         let overhead = policy.effective_overhead();
-        assert!(overhead >= 1.01);
+        assert!(overhead >= 1.03);
         assert!(overhead <= 1.10);
     }
 

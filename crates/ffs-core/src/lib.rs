@@ -7584,6 +7584,7 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        Self::validate_single_path_component(name)?;
         let alloc_mutex = self.require_alloc_state()?;
         let block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
@@ -7690,6 +7691,7 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        Self::validate_single_path_component(name)?;
         let alloc_mutex = self.require_alloc_state()?;
         let block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
@@ -8181,6 +8183,7 @@ impl OpenFs {
         name: &[u8],
         expect_dir: bool,
     ) -> ffs_error::Result<()> {
+        Self::validate_single_path_component(name)?;
         let block_dev = self.block_device_adapter();
         let mut store_guard = self.mvcc_store.write();
         let mut txn = store_guard.begin();
@@ -8336,6 +8339,7 @@ impl OpenFs {
         const EPERM_ERRNO: i32 = 1;
         const EMLINK_ERRNO: i32 = 31;
 
+        Self::validate_single_path_component(new_name)?;
         let alloc_mutex = self.require_alloc_state()?;
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
 
@@ -8430,6 +8434,7 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        Self::validate_single_path_component(name)?;
         let alloc_mutex = self.require_alloc_state()?;
         let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
@@ -9394,6 +9399,8 @@ impl OpenFs {
             return Ok(());
         }
 
+        Self::validate_single_path_component(name)?;
+        Self::validate_single_path_component(new_name)?;
         let alloc_mutex = self.require_alloc_state()?;
         let mut block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
@@ -11297,6 +11304,7 @@ impl OpenFs {
         name: &[u8],
         expect_dir: bool,
     ) -> ffs_error::Result<()> {
+        Self::validate_single_path_component(name)?;
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let parent_oid = self.btrfs_canonical_inode(parent)?;
         let (secs, nanos) = Self::btrfs_now_timestamp();
@@ -14001,6 +14009,10 @@ impl FsOps for OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
+        let target_len = target.as_os_str().as_encoded_bytes().len();
+        if target_len == 0 || u64::try_from(target_len).unwrap_or(u64::MAX) > LINUX_PATH_MAX {
+            return Err(FfsError::NameTooLong);
+        }
         match &self.flavor {
             FsFlavor::Ext4(_) => self
                 .ext4_symlink(
@@ -14921,7 +14933,7 @@ impl Default for DurabilityLossModel {
 /// justified the decision.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RedundancyDecision {
-    /// Chosen RaptorQ repair overhead (e.g. 1.05 = 5% overhead).
+    /// Chosen RaptorQ repair overhead multiplier (e.g. 1.05 = 5% overhead).
     pub repair_overhead: f64,
     /// Expected total loss (redundancy cost + corruption risk cost).
     pub expected_loss: f64,
@@ -14991,7 +15003,7 @@ impl DurabilityAutopilot {
         candidates: &[f64],
         source_block_count: u32,
     ) -> RedundancyDecision {
-        const MIN_OVERHEAD: f64 = 1.01;
+        const MIN_OVERHEAD: f64 = 1.03;
         const MAX_OVERHEAD: f64 = 1.10;
         const DEFAULT_OVERHEAD: f64 = 1.05;
 
@@ -15071,7 +15083,7 @@ impl DurabilityAutopilot {
 /// Mount-configurable repair policy governing overhead ratio and autopilot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairPolicy {
-    /// Static overhead ratio, range `[1.01, 1.10]`, default `1.05`.
+    /// Static overhead ratio, range `[1.03, 1.10]`, default `1.05`.
     pub overhead_ratio: f64,
     /// Refresh repair symbols eagerly on every write?
     pub eager_refresh: bool,
@@ -15103,7 +15115,7 @@ impl RepairPolicy {
     #[must_use]
     pub fn effective_overhead_for_group(&self, source_block_count: u32) -> f64 {
         self.autopilot.as_ref().map_or(self.overhead_ratio, |ap| {
-            let candidates: Vec<f64> = (1..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect();
+            let candidates: Vec<f64> = (3..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect();
             ap.choose_overhead_for_group(&candidates, source_block_count)
                 .repair_overhead
         })
@@ -15123,7 +15135,7 @@ impl RepairPolicy {
         source_block_count: u32,
     ) -> Option<RedundancyDecision> {
         let ap = self.autopilot.as_ref()?;
-        let candidates: Vec<f64> = (1..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect();
+        let candidates: Vec<f64> = (3..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect();
         Some(ap.choose_overhead_for_group(&candidates, source_block_count))
     }
 }
@@ -18327,12 +18339,12 @@ mod tests {
 
     #[test]
     fn durability_autopilot_prefers_more_redundancy_when_failures_observed() {
-        let candidates = [1.02, 1.05, 1.10];
+        let candidates = [1.03, 1.05, 1.10];
 
         let mut clean = DurabilityAutopilot::new();
         clean.observe_scrub(10_000, 0);
         let clean_decision = clean.choose_overhead(&candidates);
-        assert!((clean_decision.repair_overhead - 1.02).abs() < 1e-12);
+        assert!((clean_decision.repair_overhead - 1.03).abs() < 1e-12);
 
         let mut dirty = DurabilityAutopilot::new();
         dirty.observe_scrub(10_000, 300);
@@ -19869,9 +19881,9 @@ mod tests {
 
     // ── DurabilityAutopilot tests ────────────────────────────────────────
 
-    /// Standard candidate set: 1% to 10% overhead.
+    /// Standard candidate set: 3% to 10% overhead.
     fn standard_candidates() -> Vec<f64> {
-        (1..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect()
+        (3..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect()
     }
 
     #[test]
@@ -19926,7 +19938,7 @@ mod tests {
         let ap = DurabilityAutopilot::new();
         let d = ap.choose_overhead(&standard_candidates());
         assert!(
-            (d.repair_overhead - 1.01).abs() < f64::EPSILON,
+            (d.repair_overhead - 1.03).abs() < f64::EPSILON,
             "fresh autopilot should pick lowest overhead (risk equal), got {}",
             d.repair_overhead
         );
@@ -20024,7 +20036,7 @@ mod tests {
         assert!(d.posterior_hi_corruption_rate >= d.posterior_mean_corruption_rate);
 
         // Overhead is in valid range.
-        assert!(d.repair_overhead >= 1.01);
+        assert!(d.repair_overhead >= 1.03);
         assert!(d.repair_overhead <= 1.10);
     }
 
@@ -20094,8 +20106,8 @@ mod tests {
         ap.observe_scrub(100_000, 10);
         let d = ap.choose_overhead(&standard_candidates());
         assert!(
-            (d.repair_overhead - 1.01).abs() < f64::EPSILON,
-            "high redundancy cost should pick 1.01, got {}",
+            (d.repair_overhead - 1.03).abs() < f64::EPSILON,
+            "high redundancy cost should pick 1.03, got {}",
             d.repair_overhead,
         );
     }
@@ -20136,7 +20148,7 @@ mod tests {
         };
         let overhead = policy.effective_overhead();
         // Should come from autopilot, not static ratio.
-        assert!((1.01..=1.10).contains(&overhead));
+        assert!((1.03..=1.10).contains(&overhead));
 
         let decision = policy.autopilot_decision().expect("should have decision");
         assert!((decision.repair_overhead - overhead).abs() < f64::EPSILON);
@@ -21106,6 +21118,56 @@ mod tests {
 
         let inode = fs.read_inode(&cx, attr.ino).expect("inode");
         assert!(!inode.is_fast_symlink());
+    }
+
+    #[test]
+    fn write_symlink_rejects_target_exceeding_path_max() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Target of exactly 4097 bytes exceeds LINUX_PATH_MAX (4096).
+        let too_long = "x".repeat(4097);
+        let err = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("too_long_link"),
+                Path::new(&too_long),
+                1000,
+                1000,
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENAMETOOLONG);
+
+        // Empty target is also rejected.
+        let err = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("empty_link"),
+                Path::new(""),
+                1000,
+                1000,
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENAMETOOLONG);
+
+        // Target of exactly 4096 bytes is accepted (at PATH_MAX boundary).
+        let at_limit = "y".repeat(4096);
+        let attr = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("max_link"),
+                Path::new(&at_limit),
+                1000,
+                1000,
+            )
+            .expect("symlink at PATH_MAX should succeed");
+        assert_eq!(attr.kind, FileType::Symlink);
     }
 
     #[test]
@@ -23056,6 +23118,38 @@ mod tests {
             "expected name-too-long error for 256-char name, got errno {}",
             err.to_errno()
         );
+    }
+
+    #[test]
+    fn write_ext4_rejects_empty_and_slash_names_early() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Empty name must be rejected.
+        let err = fs
+            .create(&cx, root, OsStr::new(""), 0o644, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        // Name containing '/' must be rejected.
+        let err = fs
+            .create(&cx, root, OsStr::new("bad/name"), 0o644, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        // Same for mkdir.
+        let err = fs
+            .mkdir(&cx, root, OsStr::new(""), 0o755, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let err = fs
+            .mkdir(&cx, root, OsStr::new("a/b"), 0o755, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
     }
 
     #[test]
@@ -31968,7 +32062,7 @@ mod tests {
 
             // ── DurabilityAutopilot properties ───────────────────────
 
-            /// choose_overhead always returns a valid overhead in [1.01, 1.10] for valid candidates.
+            /// choose_overhead always returns a valid overhead in [1.03, 1.10] for valid candidates.
             #[test]
             fn autopilot_overhead_in_range(
                 n_events in 0_u32..=20,
@@ -31978,11 +32072,11 @@ mod tests {
                 for i in 0..n_events {
                     ap.observe_event(i < corruption_count);
                 }
-                let candidates = vec![1.01, 1.02, 1.03, 1.05, 1.07, 1.10];
+                let candidates = vec![1.03, 1.05, 1.07, 1.10];
                 let decision = ap.choose_overhead(&candidates);
                 prop_assert!(
-                    decision.repair_overhead >= 1.01 && decision.repair_overhead <= 1.10,
-                    "overhead should be in [1.01, 1.10], got {}",
+                    decision.repair_overhead >= 1.03 && decision.repair_overhead <= 1.10,
+                    "overhead should be in [1.03, 1.10], got {}",
                     decision.repair_overhead
                 );
             }
@@ -31996,7 +32090,7 @@ mod tests {
                 let mut ap = DurabilityAutopilot::new();
                 let corrupted = u64::from(corrupted_frac) * scanned / 100;
                 ap.observe_scrub(scanned, corrupted);
-                let candidates = vec![1.01, 1.03, 1.05, 1.07, 1.10];
+                let candidates = vec![1.03, 1.05, 1.07, 1.10];
                 let d = ap.choose_overhead(&candidates);
                 let sum = d.redundancy_loss + d.corruption_loss;
                 prop_assert!(
@@ -32027,7 +32121,7 @@ mod tests {
                 let mut ap = DurabilityAutopilot::new();
                 let corrupted = u64::from(corrupted_frac) * scanned / 100;
                 ap.observe_scrub(scanned, corrupted);
-                let candidates = vec![1.01, 1.05, 1.10];
+                let candidates = vec![1.03, 1.05, 1.10];
                 let d = ap.choose_overhead(&candidates);
                 prop_assert!(
                     d.posterior_mean_corruption_rate >= 0.0
@@ -32053,7 +32147,7 @@ mod tests {
                 let mut ap = DurabilityAutopilot::new();
                 let corrupted = u64::from(corrupted_frac) * scanned / 100;
                 ap.observe_scrub(scanned, corrupted);
-                let candidates = vec![1.01, 1.03, 1.05, 1.07, 1.10];
+                let candidates = vec![1.03, 1.05, 1.07, 1.10];
                 let d = ap.choose_overhead_for_group(&candidates, source_blocks);
                 prop_assert!(
                     d.unrecoverable_risk_bound >= 0.0 && d.unrecoverable_risk_bound <= 1.0,

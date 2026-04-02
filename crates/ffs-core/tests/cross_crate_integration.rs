@@ -8,9 +8,12 @@
 
 use asupersync::Cx;
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice};
+use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
 use ffs_error::{FfsError, Result as FfsResult};
-use ffs_types::{BlockNumber, ByteOffset};
+use ffs_types::{BlockNumber, ByteOffset, InodeNumber};
 use parking_lot::Mutex;
+use std::ffi::OsStr;
+use std::path::PathBuf;
 
 // ── Shared in-memory device for integration tests ──────────────────────
 
@@ -70,6 +73,23 @@ impl ByteDevice for MemByteDevice {
 fn mem_block_device(block_size: u32, block_count: usize) -> ByteBlockDevice<MemByteDevice> {
     let mem = MemByteDevice::new(block_size as usize * block_count);
     ByteBlockDevice::new(mem, block_size).expect("valid device")
+}
+
+fn open_writable_ext4_fixture() -> Option<OpenFs> {
+    let img_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../ffs-harness/tests/fixtures/images/ext4_small.img");
+    if !img_path.exists() {
+        return None;
+    }
+
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    let mut fs = OpenFs::open_with_options(&cx, &img_path, &opts).ok()?;
+    fs.enable_writes(&cx).ok()?;
+    Some(fs)
 }
 
 // ── Suite 1: MVCC ↔ Journal (WAL-backed MVCC with replay) ─────────────
@@ -312,6 +332,48 @@ mod block_alloc {
         // Should be findable again starting from 5
         let found = bitmap_find_free(&bitmap, total, 5).expect("find freed");
         assert_eq!(found, 5);
+    }
+}
+
+mod openfs_write_paths {
+    use super::*;
+
+    #[test]
+    fn utf8_filename_round_trips_through_create_write_lookup_and_read() {
+        let Some(fs) = open_writable_ext4_fixture() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let name = OsStr::new("resume_文件_é.txt");
+        let payload = b"payload for utf8 filename";
+
+        let created = fs
+            .create(&cx, root, name, 0o644, 1000, 1000)
+            .expect("create");
+        let written = fs.write(&cx, created.ino, 0, payload).expect("write");
+        assert_eq!(written as usize, payload.len());
+
+        let looked_up = fs.lookup(&cx, root, name).expect("lookup");
+        assert_eq!(looked_up.ino, created.ino);
+
+        let readback = fs
+            .read(
+                &cx,
+                created.ino,
+                0,
+                u32::try_from(payload.len()).expect("len fits u32"),
+            )
+            .expect("read");
+        assert_eq!(readback, payload);
+
+        let entries = fs.readdir(&cx, root, 0).expect("readdir");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name_str() == "resume_文件_é.txt"),
+            "utf-8 filename should appear in readdir output"
+        );
     }
 }
 
