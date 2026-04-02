@@ -15333,7 +15333,7 @@ mod tests {
             .collect()
     }
 
-    fn fallocate_log_contract_guard() -> std::sync::MutexGuard<'static, ()> {
+    fn log_contract_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         let mutex = LOCK.get_or_init(|| std::sync::Mutex::new(()));
         // Recover from poison so a panic in one log-contract test does
@@ -28133,7 +28133,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_success_log_contract() {
-        let _guard = fallocate_log_contract_guard();
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -28237,7 +28237,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_rejection_log_contract() {
-        let _guard = fallocate_log_contract_guard();
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -28290,7 +28290,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_unsupported_mode_bits_log_contract() {
-        let _guard = fallocate_log_contract_guard();
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -28356,6 +28356,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fsync_log_contract_success() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -28411,6 +28412,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fsync_rejection_log_contract_read_only() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -28458,6 +28460,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fsyncdir_log_contract_success() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -29313,6 +29316,7 @@ mod tests {
 
     #[test]
     fn ext4_write_fsync_log_contract_success() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -29364,6 +29368,7 @@ mod tests {
 
     #[test]
     fn ext4_write_fsync_rejection_log_contract_read_only() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -29411,6 +29416,7 @@ mod tests {
 
     #[test]
     fn ext4_write_flush_log_contract_records_non_durable_boundary() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -29460,6 +29466,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_flush_log_contract_records_non_durable_boundary() {
+        let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
