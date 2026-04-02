@@ -7575,9 +7575,11 @@ impl OpenFs {
 
     /// Create a regular file in an ext4 directory.
     #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::too_many_arguments)]
     fn ext4_create(
         &self,
         cx: &Cx,
+        _scope: &mut RequestScope,
         parent: InodeNumber,
         name: &[u8],
         mode: u16,
@@ -7682,9 +7684,11 @@ impl OpenFs {
 
     /// Create a directory inside an ext4 parent directory.
     #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    #[allow(clippy::too_many_arguments)]
     fn ext4_mkdir(
         &self,
         cx: &Cx,
+        _scope: &mut RequestScope,
         parent: InodeNumber,
         name: &[u8],
         mode: u16,
@@ -8331,6 +8335,7 @@ impl OpenFs {
     fn ext4_link(
         &self,
         cx: &Cx,
+        _scope: &mut RequestScope,
         ino: InodeNumber,
         new_parent: InodeNumber,
         new_name: &[u8],
@@ -8617,6 +8622,7 @@ impl OpenFs {
     fn ext4_fallocate(
         &self,
         cx: &Cx,
+        _scope: &mut RequestScope,
         ino: InodeNumber,
         offset: u64,
         length: u64,
@@ -9389,6 +9395,7 @@ impl OpenFs {
     fn ext4_rename(
         &self,
         cx: &Cx,
+        _scope: &mut RequestScope,
         parent: InodeNumber,
         name: &[u8],
         new_parent: InodeNumber,
@@ -13846,7 +13853,7 @@ impl FsOps for OpenFs {
     fn create(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         parent: InodeNumber,
         name: &OsStr,
         mode: u16,
@@ -13857,6 +13864,7 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => self
                 .ext4_create(
                     cx,
+                    scope,
                     Self::ext4_canonical_inode(parent),
                     name.as_encoded_bytes(),
                     mode,
@@ -13873,7 +13881,7 @@ impl FsOps for OpenFs {
     fn mkdir(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         parent: InodeNumber,
         name: &OsStr,
         mode: u16,
@@ -13884,6 +13892,7 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => self
                 .ext4_mkdir(
                     cx,
+                    scope,
                     Self::ext4_canonical_inode(parent),
                     name.as_encoded_bytes(),
                     mode,
@@ -13938,7 +13947,7 @@ impl FsOps for OpenFs {
     fn rename(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         parent: InodeNumber,
         name: &OsStr,
         new_parent: InodeNumber,
@@ -13947,6 +13956,7 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => self.ext4_rename(
                 cx,
+                scope,
                 Self::ext4_canonical_inode(parent),
                 name.as_encoded_bytes(),
                 Self::ext4_canonical_inode(new_parent),
@@ -13981,7 +13991,7 @@ impl FsOps for OpenFs {
     fn link(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         new_parent: InodeNumber,
         new_name: &OsStr,
@@ -13990,6 +14000,7 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => self
                 .ext4_link(
                     cx,
+                    scope,
                     Self::ext4_canonical_inode(ino),
                     Self::ext4_canonical_inode(new_parent),
                     new_name.as_encoded_bytes(),
@@ -14034,7 +14045,7 @@ impl FsOps for OpenFs {
     fn fallocate(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         offset: u64,
         length: u64,
@@ -14042,7 +14053,7 @@ impl FsOps for OpenFs {
     ) -> ffs_error::Result<()> {
         match &self.flavor {
             FsFlavor::Ext4(_) => {
-                self.ext4_fallocate(cx, Self::ext4_canonical_inode(ino), offset, length, mode)
+                self.ext4_fallocate(cx, scope, Self::ext4_canonical_inode(ino), offset, length, mode)
             }
             FsFlavor::Btrfs(_) => self.btrfs_fallocate(cx, ino, offset, length, mode),
         }
@@ -26894,13 +26905,15 @@ mod tests {
     }
 
     #[test]
-    fn btrfs_readlink_caps_target_at_path_max() {
+    fn btrfs_symlink_rejects_target_exceeding_path_max() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
         let path_max = usize::try_from(LINUX_PATH_MAX).expect("LINUX_PATH_MAX fits usize");
+
+        // Target exceeding PATH_MAX must be rejected at creation time.
         let long_target = format!("/{}", "x".repeat(path_max + 256));
-        let attr = ops
+        let err = ops
             .symlink(
                 &cx,
                 &mut RequestScope::empty(),
@@ -26910,13 +26923,26 @@ mod tests {
                 0,
                 0,
             )
-            .expect("create long symlink");
+            .expect_err("symlink exceeding PATH_MAX should fail");
+        assert_eq!(err.to_errno(), libc::ENAMETOOLONG);
 
+        // Target at exactly PATH_MAX boundary is accepted.
+        let max_target = "y".repeat(path_max);
+        let attr = ops
+            .symlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("max-link"),
+                Path::new(&max_target),
+                0,
+                0,
+            )
+            .expect("symlink at PATH_MAX should succeed");
         let target = ops
             .readlink(&cx, &mut RequestScope::empty(), attr.ino)
-            .expect("readlink long symlink");
+            .expect("readlink max symlink");
         assert_eq!(target.len(), path_max);
-        assert_eq!(target, long_target.as_bytes()[..path_max]);
     }
 
     #[test]

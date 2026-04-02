@@ -377,9 +377,9 @@ mod tests {
 
         assert!(matches!(completions[0], IoCompletion::Write));
         assert!(matches!(completions[1], IoCompletion::Write));
-        match &completions[2] {
-            IoCompletion::Read(buf) => assert_eq!(buf[0], 1),
-            other => panic!("expected Read, got {other:?}"),
+        assert!(matches!(completions[2], IoCompletion::Read(_)), "expected Read, got {:?}", completions[2]);
+        if let IoCompletion::Read(buf) = &completions[2] {
+            assert_eq!(buf[0], 1);
         }
     }
 
