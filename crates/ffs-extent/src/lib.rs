@@ -4583,4 +4583,35 @@ mod tests {
         assert!(cache.lookup(1, 0).is_none());
         assert!(cache.lookup(2, 0).is_none());
     }
+
+    #[test]
+    fn punch_hole_full_root_overflow() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        // Fill the root node (max entries = 4)
+        for i in 0..4 {
+            allocate_extent(
+                &cx,
+                &dev,
+                &mut root,
+                &geo,
+                &mut groups,
+                i * 10,
+                5,
+                &AllocHint::default(),
+                &pctx,
+            )
+            .unwrap();
+        }
+        
+        // Punching a hole in the middle of the first extent [0..5]
+        // This splits it into two, making 5 total entries in the tree.
+        // It must handle root split properly.
+        punch_hole(&cx, &dev, &mut root, &geo, &mut groups, 2, 1, &pctx).unwrap();
+    }
 }
