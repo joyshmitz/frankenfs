@@ -5796,6 +5796,19 @@ mod tests {
     }
 
     #[test]
+    fn load_evidence_records_tail_zero_returns_empty() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":1,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":2,\"event_type\":\"repair_failed\",\"block_group\":2}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records = load_evidence_records(&path, Some("repair_failed"), Some(0), None)
+                .expect("tail=0 evidence read should succeed");
+            assert!(records.is_empty(), "tail=0 should suppress all returned records");
+        });
+    }
+
+    #[test]
     fn load_evidence_records_skips_non_utf8_lines() {
         let mut ledger = Vec::new();
         ledger.extend_from_slice(

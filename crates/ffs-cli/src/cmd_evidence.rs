@@ -1360,7 +1360,11 @@ fn print_contention_sample_payload(record: &EvidenceRecord) {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_evidence_args, PresetMode, PRESET_METRICS, PRESET_REPAIR_FAILURES};
+    use super::{
+        validate_evidence_args, PresetMode, PRESET_CACHE, PRESET_CONTENTION, PRESET_METRICS,
+        PRESET_MVCC, PRESET_PRESSURE_TRANSITIONS, PRESET_REPAIR_FAILURES, PRESET_REPAIR_LIVE,
+        PRESET_REPLAY_ANOMALIES,
+    };
 
     #[test]
     fn validate_evidence_args_rejects_unknown_preset() {
@@ -1407,5 +1411,77 @@ mod tests {
         let preset_kind = validate_evidence_args(Some(PRESET_REPAIR_FAILURES), None, Some(3), true)
             .expect("ledger presets should allow tail and summary");
         assert_eq!(preset_kind, Some(PresetMode::Ledger));
+    }
+
+    #[test]
+    fn validate_evidence_args_rejects_tail_and_summary_for_all_metrics_presets() {
+        for preset in [
+            PRESET_METRICS,
+            PRESET_CACHE,
+            PRESET_MVCC,
+            PRESET_REPAIR_LIVE,
+        ] {
+            let tail_err = validate_evidence_args(Some(preset), None, Some(5), false).unwrap_err();
+            assert!(
+                tail_err
+                    .to_string()
+                    .contains("--tail is only supported for ledger-backed evidence presets"),
+                "preset {preset} should reject --tail with the ledger-only message"
+            );
+
+            let summary_err = validate_evidence_args(Some(preset), None, None, true).unwrap_err();
+            assert!(
+                summary_err
+                    .to_string()
+                    .contains("--summary is only supported for ledger-backed evidence presets"),
+                "preset {preset} should reject --summary with the ledger-only message"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_evidence_args_accepts_tail_and_summary_for_all_ledger_presets() {
+        for preset in [
+            PRESET_REPLAY_ANOMALIES,
+            PRESET_REPAIR_FAILURES,
+            PRESET_PRESSURE_TRANSITIONS,
+            PRESET_CONTENTION,
+        ] {
+            let preset_kind = validate_evidence_args(Some(preset), None, Some(3), true)
+                .unwrap_or_else(|_| panic!("ledger preset {preset} should allow tail+summary"));
+            assert_eq!(
+                preset_kind,
+                Some(PresetMode::Ledger),
+                "ledger preset {preset} should classify as ledger-backed"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_evidence_args_classifies_all_metrics_presets_as_metrics_mode() {
+        for preset in [
+            PRESET_METRICS,
+            PRESET_CACHE,
+            PRESET_MVCC,
+            PRESET_REPAIR_LIVE,
+        ] {
+            let preset_kind = validate_evidence_args(Some(preset), None, None, false)
+                .unwrap_or_else(|_| panic!("metrics preset {preset} should classify cleanly"));
+            assert_eq!(
+                preset_kind,
+                Some(PresetMode::Metrics),
+                "metrics preset {preset} should classify as metrics-backed"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_evidence_args_accepts_raw_event_type_filter_without_preset() {
+        let preset_kind = validate_evidence_args(None, Some("repair_failed"), Some(4), true)
+            .expect("raw event-type filtering without preset should be accepted");
+        assert_eq!(
+            preset_kind, None,
+            "no-preset validation path should not classify as a preset mode"
+        );
     }
 }

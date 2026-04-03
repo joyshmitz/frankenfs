@@ -34,7 +34,7 @@
 //! and OS scheduler hints. True pinning requires a future `pin` feature.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 // ── Per-core metrics ───────────────────────────────────────────────────────
 
@@ -43,6 +43,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct CoreMetrics {
     /// Requests processed by this core.
     pub requests: AtomicU64,
+    /// Currently active/pending requests in this core's queue.
+    pub pending_requests: AtomicI64,
     /// Cache hits on this core's local partition.
     pub cache_hits: AtomicU64,
     /// Cache misses requiring cross-core or backing store access.
@@ -59,6 +61,7 @@ impl CoreMetrics {
     pub fn new() -> Self {
         Self {
             requests: AtomicU64::new(0),
+            pending_requests: std::sync::atomic::AtomicI64::new(0),
             cache_hits: AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
             stolen_from: AtomicU64::new(0),
@@ -66,9 +69,15 @@ impl CoreMetrics {
         }
     }
 
+    /// Record a request beginning processing.
+    pub fn begin_request(&self) {
+        self.pending_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Record a request processed.
     pub fn record_request(&self) {
         self.requests.fetch_add(1, Ordering::Relaxed);
+        self.pending_requests.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Record a cache hit.
@@ -86,6 +95,7 @@ impl CoreMetrics {
     pub fn snapshot(&self) -> CoreMetricsSnapshot {
         CoreMetricsSnapshot {
             requests: self.requests.load(Ordering::Relaxed),
+            pending_requests: self.pending_requests.load(Ordering::Relaxed),
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
             stolen_from: self.stolen_from.load(Ordering::Relaxed),
@@ -104,6 +114,7 @@ impl Default for CoreMetrics {
 #[derive(Debug, Clone, Copy)]
 pub struct CoreMetricsSnapshot {
     pub requests: u64,
+    pub pending_requests: i64,
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub stolen_from: u64,
@@ -260,17 +271,22 @@ impl PerCoreDispatcher {
             return false;
         }
 
-        let total: u64 = self
+        let total: i64 = self
             .core_metrics
             .iter()
-            .map(|m| m.requests.load(Ordering::Relaxed))
+            .map(|m| m.pending_requests.load(Ordering::Relaxed))
             .sum();
+        
+        if total <= 0 {
+            return false;
+        }
+
         let avg = total as f64 / n as f64;
         let mine = self.core_metrics[core as usize]
-            .requests
+            .pending_requests
             .load(Ordering::Relaxed) as f64;
 
-        // This core is idle relative to average — try to steal work.
+        // This core is idle relative to average queue depth — try to steal work.
         mine < avg / self.config.steal_threshold
     }
 
@@ -278,6 +294,7 @@ impl PerCoreDispatcher {
     #[must_use]
     pub fn aggregate_metrics(&self) -> AggregateMetrics {
         let mut total_requests = 0_u64;
+        let mut total_pending_requests = 0_i64;
         let mut total_hits = 0_u64;
         let mut total_misses = 0_u64;
         let mut per_core = Vec::with_capacity(self.core_metrics.len());
@@ -285,6 +302,7 @@ impl PerCoreDispatcher {
         for metrics in &self.core_metrics {
             let snap = metrics.snapshot();
             total_requests += snap.requests;
+            total_pending_requests += snap.pending_requests;
             total_hits += snap.cache_hits;
             total_misses += snap.cache_misses;
             per_core.push(snap);
@@ -299,6 +317,7 @@ impl PerCoreDispatcher {
 
         AggregateMetrics {
             total_requests,
+            total_pending_requests,
             total_cache_hits: total_hits,
             total_cache_misses: total_misses,
             aggregate_hit_rate: hit_rate,
@@ -320,6 +339,7 @@ impl std::fmt::Debug for PerCoreDispatcher {
 #[derive(Debug, Clone)]
 pub struct AggregateMetrics {
     pub total_requests: u64,
+    pub total_pending_requests: i64,
     pub total_cache_hits: u64,
     pub total_cache_misses: u64,
     pub aggregate_hit_rate: f64,
@@ -455,7 +475,7 @@ mod tests {
         for ino in 0..100_u64 {
             let core = disp.route_inode(ino);
             let metrics = disp.core_metrics(core).unwrap();
-            metrics.record_request();
+            metrics.begin_request();
             if ino % 3 == 0 {
                 metrics.record_hit();
             } else {
@@ -480,10 +500,10 @@ mod tests {
         // Give all requests to core 0.
         let m0 = disp.core_metrics(0).unwrap();
         for _ in 0..100 {
-            m0.record_request();
+            m0.begin_request();
         }
         let m1 = disp.core_metrics(1).unwrap();
-        m1.record_request(); // 1 request to core 1
+        m1.begin_request(); // 1 request to core 1
 
         let agg = disp.aggregate_metrics();
         assert_eq!(agg.total_requests, 101);
@@ -502,7 +522,7 @@ mod tests {
         // Give 100 requests to core 0, 0 to core 1.
         let m0 = disp.core_metrics(0).unwrap();
         for _ in 0..100 {
-            m0.record_request();
+            m0.begin_request();
         }
 
         // Core 1 is idle → should steal.
@@ -522,7 +542,7 @@ mod tests {
         for (core, count) in [(0, 10), (1, 50), (2, 30)] {
             let m = disp.core_metrics(core).unwrap();
             for _ in 0..count {
-                m.record_request();
+                m.begin_request();
             }
         }
 

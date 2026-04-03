@@ -11791,6 +11791,13 @@ impl OpenFs {
             return Err(FfsError::Format("cannot fallocate a symlink".into()));
         }
 
+        let sectorsize = u64::from(alloc.sectorsize);
+        if (offset % sectorsize) != 0 || (length % sectorsize) != 0 {
+            return Err(FfsError::UnsupportedFeature(
+                "btrfs fallocate currently requires sector-aligned offset/length".to_owned(),
+            ));
+        }
+
         if punch_hole || zero_range {
             let ext_start = BtrfsKey {
                 objectid: canonical,
