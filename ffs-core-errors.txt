@@ -1,0 +1,4328 @@
+    Checking ffs-core v0.1.0 (/data/projects/frankenfs/crates/ffs-core)
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> crates/ffs-core/src/lib.rs:5567:32
+     |
+5567 |             let entries = self.read_dir(cx, &RequestScope::empty(), &child_inode)?;
+     |                                ^^^^^^^^     ---------------------- unexpected argument #2 of type `&RequestScope`
+     |
+note: method defined here
+    --> crates/ffs-core/src/lib.rs:4489:12
+     |
+4489 |     pub fn read_dir(
+     |            ^^^^^^^^
+help: remove the extra argument
+     |
+5567 -             let entries = self.read_dir(cx, &RequestScope::empty(), &child_inode)?;
+5567 +             let entries = self.read_dir(cx, &child_inode)?;
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> crates/ffs-core/src/lib.rs:6297:36
+     |
+6297 |                 let entries = self.read_dir(cx, &RequestScope::empty(), &existing_inode)?;
+     |                                    ^^^^^^^^     ---------------------- unexpected argument #2 of type `&RequestScope`
+     |
+note: method defined here
+    --> crates/ffs-core/src/lib.rs:4489:12
+     |
+4489 |     pub fn read_dir(
+     |            ^^^^^^^^
+help: remove the extra argument
+     |
+6297 -                 let entries = self.read_dir(cx, &RequestScope::empty(), &existing_inode)?;
+6297 +                 let entries = self.read_dir(cx, &existing_inode)?;
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> crates/ffs-core/src/lib.rs:8911:18
+     |
+8911 |                 .read_inode_attr(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))
+     |                  ^^^^^^^^^^^^^^^     ---------------------- unexpected argument #2 of type `&RequestScope`
+     |
+note: method defined here
+    --> crates/ffs-core/src/lib.rs:3984:12
+     |
+3984 |     pub fn read_inode_attr(
+     |            ^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+8911 -                 .read_inode_attr(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))
+8911 +                 .read_inode_attr(cx, Self::ext4_canonical_inode(ino))
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> crates/ffs-core/src/lib.rs:8938:22
+     |
+8938 |                 self.read_inode_attr(cx, &RequestScope::empty(), child_ino)
+     |                      ^^^^^^^^^^^^^^^     ---------------------- unexpected argument #2 of type `&RequestScope`
+     |
+note: method defined here
+    --> crates/ffs-core/src/lib.rs:3984:12
+     |
+3984 |     pub fn read_inode_attr(
+     |            ^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+8938 -                 self.read_inode_attr(cx, &RequestScope::empty(), child_ino)
+8938 +                 self.read_inode_attr(cx, child_ino)
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> crates/ffs-core/src/lib.rs:5567:32
+     |
+5567 |             let entries = self.read_dir(cx, &RequestScope::empty(), &child_inode)?;
+     |                                ^^^^^^^^     ---------------------- unexpected argument #2 of type `&vfs::RequestScope`
+     |
+note: method defined here
+    --> crates/ffs-core/src/lib.rs:4489:12
+     |
+4489 |     pub fn read_dir(
+     |            ^^^^^^^^
+help: remove the extra argument
+     |
+5567 -             let entries = self.read_dir(cx, &RequestScope::empty(), &child_inode)?;
+5567 +             let entries = self.read_dir(cx, &child_inode)?;
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> crates/ffs-core/src/lib.rs:6297:36
+     |
+6297 |                 let entries = self.read_dir(cx, &RequestScope::empty(), &existing_inode)?;
+     |                                    ^^^^^^^^     ---------------------- unexpected argument #2 of type `&vfs::RequestScope`
+     |
+note: method defined here
+    --> crates/ffs-core/src/lib.rs:4489:12
+     |
+4489 |     pub fn read_dir(
+     |            ^^^^^^^^
+help: remove the extra argument
+     |
+6297 -                 let entries = self.read_dir(cx, &RequestScope::empty(), &existing_inode)?;
+6297 +                 let entries = self.read_dir(cx, &existing_inode)?;
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> crates/ffs-core/src/lib.rs:8911:18
+     |
+8911 |                 .read_inode_attr(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))
+     |                  ^^^^^^^^^^^^^^^     ---------------------- unexpected argument #2 of type `&vfs::RequestScope`
+     |
+note: method defined here
+    --> crates/ffs-core/src/lib.rs:3984:12
+     |
+3984 |     pub fn read_inode_attr(
+     |            ^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+8911 -                 .read_inode_attr(cx, &RequestScope::empty(), Self::ext4_canonical_inode(ino))
+8911 +                 .read_inode_attr(cx, Self::ext4_canonical_inode(ino))
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> crates/ffs-core/src/lib.rs:8938:22
+     |
+8938 |                 self.read_inode_attr(cx, &RequestScope::empty(), child_ino)
+     |                      ^^^^^^^^^^^^^^^     ---------------------- unexpected argument #2 of type `&vfs::RequestScope`
+     |
+note: method defined here
+    --> crates/ffs-core/src/lib.rs:3984:12
+     |
+3984 |     pub fn read_inode_attr(
+     |            ^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+8938 -                 self.read_inode_attr(cx, &RequestScope::empty(), child_ino)
+8938 +                 self.read_inode_attr(cx, child_ino)
+     |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12080:23
+      |
+12080 |         let phys = fs.resolve_extent(&cx, &inode, 0).unwrap();
+      |                       ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4235:12
+      |
+ 4235 |     pub fn resolve_extent(
+      |            ^^^^^^^^^^^^^^
+...
+ 4238 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12080 |         let phys = fs.resolve_extent(&cx, /* &vfs::RequestScope */, &inode, 0).unwrap();
+      |                                           +++++++++++++++++++++++++
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12093:23
+      |
+12093 |         let phys = fs.resolve_extent(&cx, &inode, 1).unwrap();
+      |                       ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4235:12
+      |
+ 4235 |     pub fn resolve_extent(
+      |            ^^^^^^^^^^^^^^
+...
+ 4238 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12093 |         let phys = fs.resolve_extent(&cx, /* &vfs::RequestScope */, &inode, 1).unwrap();
+      |                                           +++++++++++++++++++++++++
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12105:23
+      |
+12105 |         let phys = fs.resolve_extent(&cx, &inode, 0).unwrap();
+      |                       ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4235:12
+      |
+ 4235 |     pub fn resolve_extent(
+      |            ^^^^^^^^^^^^^^
+...
+ 4238 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12105 |         let phys = fs.resolve_extent(&cx, /* &vfs::RequestScope */, &inode, 0).unwrap();
+      |                                           +++++++++++++++++++++++++
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12120:22
+      |
+12120 |         let err = fs.resolve_extent(&cx, &inode, 0).unwrap_err();
+      |                      ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4235:12
+      |
+ 4235 |     pub fn resolve_extent(
+      |            ^^^^^^^^^^^^^^
+...
+ 4238 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12120 |         let err = fs.resolve_extent(&cx, /* &vfs::RequestScope */, &inode, 0).unwrap_err();
+      |                                          +++++++++++++++++++++++++
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12139:22
+      |
+12139 |         let err = fs.resolve_extent(&cx, &inode, 0).unwrap_err();
+      |                      ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4235:12
+      |
+ 4235 |     pub fn resolve_extent(
+      |            ^^^^^^^^^^^^^^
+...
+ 4238 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12139 |         let err = fs.resolve_extent(&cx, /* &vfs::RequestScope */, &inode, 0).unwrap_err();
+      |                                          +++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12186:20
+      |
+12186 |         let n = fs.read_file_data(&cx, &inode, 0, &mut buf).unwrap();
+      |                    ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4429:12
+      |
+ 4429 |     pub fn read_file_data(
+      |            ^^^^^^^^^^^^^^
+...
+ 4432 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12186 |         let n = fs.read_file_data(&cx, /* &vfs::RequestScope */, &inode, 0, &mut buf).unwrap();
+      |                                        +++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12200:20
+      |
+12200 |         let n = fs.read_file_data(&cx, &inode, 0, &mut buf).unwrap();
+      |                    ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4429:12
+      |
+ 4429 |     pub fn read_file_data(
+      |            ^^^^^^^^^^^^^^
+...
+ 4432 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12200 |         let n = fs.read_file_data(&cx, /* &vfs::RequestScope */, &inode, 0, &mut buf).unwrap();
+      |                                        +++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12214:20
+      |
+12214 |         let n = fs.read_file_data(&cx, &inode, 7, &mut buf).unwrap();
+      |                    ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4429:12
+      |
+ 4429 |     pub fn read_file_data(
+      |            ^^^^^^^^^^^^^^
+...
+ 4432 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12214 |         let n = fs.read_file_data(&cx, /* &vfs::RequestScope */, &inode, 7, &mut buf).unwrap();
+      |                                        +++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12228:20
+      |
+12228 |         let n = fs.read_file_data(&cx, &inode, 100, &mut buf).unwrap();
+      |                    ^^^^^^^^^^^^^^      ------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4429:12
+      |
+ 4429 |     pub fn read_file_data(
+      |            ^^^^^^^^^^^^^^
+...
+ 4432 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12228 |         let n = fs.read_file_data(&cx, /* &vfs::RequestScope */, &inode, 100, &mut buf).unwrap();
+      |                                        +++++++++++++++++++++++++
+
+For more information about this error, try `rustc --explain E0061`.
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12382:23
+      |
+12382 |         let data = fs.read_file(&cx, InodeNumber(11), 0, 100).unwrap();
+      |                       ^^^^^^^^^      --------------- argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4567:12
+      |
+ 4567 |     pub fn read_file(
+      |            ^^^^^^^^^
+...
+ 4570 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12382 -         let data = fs.read_file(&cx, InodeNumber(11), 0, 100).unwrap();
+12382 +         let data = fs.read_file(&cx, /* &vfs::RequestScope */, InodeNumber(11), 100, 0).unwrap();
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12393:23
+      |
+12393 |         let data = fs.read_file(&cx, InodeNumber(11), 7, 100).unwrap();
+      |                       ^^^^^^^^^      --------------- argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4567:12
+      |
+ 4567 |     pub fn read_file(
+      |            ^^^^^^^^^
+...
+ 4570 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12393 -         let data = fs.read_file(&cx, InodeNumber(11), 7, 100).unwrap();
+12393 +         let data = fs.read_file(&cx, /* &vfs::RequestScope */, InodeNumber(11), 100, 7).unwrap();
+      |
+
+error: could not compile `ffs-core` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12404:22
+      |
+12404 |         let err = fs.read_file(&cx, InodeNumber(2), 0, 4096).unwrap_err();
+      |                      ^^^^^^^^^      -------------- argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4567:12
+      |
+ 4567 |     pub fn read_file(
+      |            ^^^^^^^^^
+...
+ 4570 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12404 -         let err = fs.read_file(&cx, InodeNumber(2), 0, 4096).unwrap_err();
+12404 +         let err = fs.read_file(&cx, /* &vfs::RequestScope */, InodeNumber(2), 4096, 0).unwrap_err();
+      |
+
+error[E0061]: this method takes 3 arguments but 2 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12417:31
+      |
+12417 |         let (ino, inode) = fs.resolve_path(&cx, "/").unwrap();
+      |                               ^^^^^^^^^^^^      --- argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4596:12
+      |
+ 4596 |     pub fn resolve_path(
+      |            ^^^^^^^^^^^^
+...
+ 4599 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12417 |         let (ino, inode) = fs.resolve_path(&cx, /* &vfs::RequestScope */, "/").unwrap();
+      |                                                 +++++++++++++++++++++++++
+
+error[E0061]: this method takes 3 arguments but 2 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12429:31
+      |
+12429 |         let (ino, inode) = fs.resolve_path(&cx, "/hello.txt").unwrap();
+      |                               ^^^^^^^^^^^^      ------------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4596:12
+      |
+ 4596 |     pub fn resolve_path(
+      |            ^^^^^^^^^^^^
+...
+ 4599 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12429 |         let (ino, inode) = fs.resolve_path(&cx, /* &vfs::RequestScope */, "/hello.txt").unwrap();
+      |                                                 +++++++++++++++++++++++++
+
+error[E0061]: this method takes 3 arguments but 2 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12441:22
+      |
+12441 |         let err = fs.resolve_path(&cx, "/missing").unwrap_err();
+      |                      ^^^^^^^^^^^^      ---------- argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4596:12
+      |
+ 4596 |     pub fn resolve_path(
+      |            ^^^^^^^^^^^^
+...
+ 4599 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12441 |         let err = fs.resolve_path(&cx, /* &vfs::RequestScope */, "/missing").unwrap_err();
+      |                                        +++++++++++++++++++++++++
+
+error[E0061]: this method takes 3 arguments but 2 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12453:22
+      |
+12453 |         let err = fs.resolve_path(&cx, "/hello.txt/child").unwrap_err();
+      |                      ^^^^^^^^^^^^      ------------------ argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4596:12
+      |
+ 4596 |     pub fn resolve_path(
+      |            ^^^^^^^^^^^^
+...
+ 4599 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12453 |         let err = fs.resolve_path(&cx, /* &vfs::RequestScope */, "/hello.txt/child").unwrap_err();
+      |                                        +++++++++++++++++++++++++
+
+error[E0061]: this method takes 3 arguments but 2 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:12464:22
+      |
+12464 |         let err = fs.resolve_path(&cx, "hello.txt").unwrap_err();
+      |                      ^^^^^^^^^^^^      ----------- argument #2 of type `&vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:4596:12
+      |
+ 4596 |     pub fn resolve_path(
+      |            ^^^^^^^^^^^^
+...
+ 4599 |         scope: &RequestScope,
+      |         --------------------
+help: provide the argument
+      |
+12464 |         let err = fs.resolve_path(&cx, /* &vfs::RequestScope */, "hello.txt").unwrap_err();
+      |                                        +++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14500:22
+      |
+14500 |         let err = fs.fsync(&cx, root, 0, false).unwrap_err();
+      |                      ^^^^^      ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:566:8
+      |
+  566 |     fn fsync(
+      |        ^^^^^
+...
+  569 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14500 |         let err = fs.fsync(&cx, /* &mut vfs::RequestScope */, root, 0, false).unwrap_err();
+      |                                 +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14503:22
+      |
+14503 |         let err = fs.fsyncdir(&cx, root, 0, false).unwrap_err();
+      |                      ^^^^^^^^      ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:578:8
+      |
+  578 |     fn fsyncdir(
+      |        ^^^^^^^^
+...
+  581 |         scope: &mut RequestScope,
+      |         ------------------------
+help: provide the argument
+      |
+14503 |         let err = fs.fsyncdir(&cx, /* &mut vfs::RequestScope */, root, 0, false).unwrap_err();
+      |                                    +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14506:12
+      |
+14506 |         fs.flush(&cx, root, 0, 0).expect("flush default no-op");
+      |            ^^^^^      ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:552:8
+      |
+  552 |     fn flush(
+      |        ^^^^^
+...
+  555 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14506 |         fs.flush(&cx, /* &mut vfs::RequestScope */, root, 0, 0).expect("flush default no-op");
+      |                       +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14522:14
+      |
+14522 |             .setxattr(&cx, root, "user.test", b"value", XattrSetMode::Set)
+      |              ^^^^^^^^      ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14522 |             .setxattr(&cx, /* &mut vfs::RequestScope */, root, "user.test", b"value", XattrSetMode::Set)
+      |                            +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14526:22
+      |
+14526 |         let err = fs.removexattr(&cx, root, "user.test").unwrap_err();
+      |                      ^^^^^^^^^^^      ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:411:8
+      |
+  411 |     fn removexattr(
+      |        ^^^^^^^^^^^
+...
+  414 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14526 |         let err = fs.removexattr(&cx, /* &mut vfs::RequestScope */, root, "user.test").unwrap_err();
+      |                                       +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14597:27
+      |
+14597 |         let readback = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+      |                           ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+14597 -         let readback = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+14597 +         let readback = fs.read(&cx, ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14602:14
+      |
+14602 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_rw.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14602 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_rw.txt"))
+14602 +             .lookup(&cx, root, OsStr::new("test_rw.txt"))
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14615:28
+      |
+14615 |         let root_attr = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("getattr root");
+      |                            ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+14615 -         let root_attr = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("getattr root");
+14615 +         let root_attr = fs.getattr(&cx, root).expect("getattr root");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14619:31
+      |
+14619 |         let root_entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir root");
+      |                               ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+14619 -         let root_entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir root");
+14619 +         let root_entries = fs.readdir(&cx, root, 0).expect("readdir root");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14644:26
+      |
+14644 |         let written = fs.write(&cx, &mut RequestScope::empty(), attr.ino, 0, payload).expect("write");
+      |                          ^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8789:12
+      |
+ 8789 |     pub fn write(
+      |            ^^^^^
+help: remove the extra argument
+      |
+14644 -         let written = fs.write(&cx, &mut RequestScope::empty(), attr.ino, 0, payload).expect("write");
+14644 +         let written = fs.write(&cx, attr.ino, 0, payload).expect("write");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14647:27
+      |
+14647 |         let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read");
+      |                           ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+14647 -         let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read");
+14647 +         let readback = fs.read(&cx, attr.ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14651:14
+      |
+14651 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_rw_alias.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14651 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_rw_alias.txt"))
+14651 +             .lookup(&cx, root, OsStr::new("test_rw_alias.txt"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14671:14
+      |
+14671 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_dir"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14671 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("test_dir"))
+14671 +             .lookup(&cx, root, OsStr::new("test_dir"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14696:14
+      |
+14696 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("to_delete.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14696 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("to_delete.txt"))
+14696 +             .lookup(&cx, root, OsStr::new("to_delete.txt"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14726:14
+      |
+14726 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("old_name.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14726 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("old_name.txt"))
+14726 +             .lookup(&cx, root, OsStr::new("old_name.txt"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14732:14
+      |
+14732 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("new_name.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14732 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("new_name.txt"))
+14732 +             .lookup(&cx, root, OsStr::new("new_name.txt"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14818:14
+      |
+14818 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("rename_src.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14818 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("rename_src.txt"))
+14818 +             .lookup(&cx, root, OsStr::new("rename_src.txt"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14823:14
+      |
+14823 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("rename_dst.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14823 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("rename_dst.txt"))
+14823 +             .lookup(&cx, root, OsStr::new("rename_dst.txt"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14830:14
+      |
+14830 |             .read(&cx, &mut RequestScope::empty(), renamed.ino, 0, read_len)
+      |              ^^^^      --------------------------                  -------- expected `u64`, found `u32`
+      |                        |
+      |                        unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+...
+ 8890 |         offset: u64,
+      |         -----------
+help: you can convert a `u32` to a `u64`
+      |
+14830 |             .read(&cx, &mut RequestScope::empty(), renamed.ino, 0, read_len.into())
+      |                                                                            +++++++
+help: remove the extra argument
+      |
+14830 -             .read(&cx, &mut RequestScope::empty(), renamed.ino, 0, read_len)
+14830 +             .read(&cx, renamed.ino, /* u64 */, read_len)
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14850:14
+      |
+14850 |             .link(&cx, src.ino, root, OsStr::new("link_dst.txt"))
+      |              ^^^^      ------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14850 -             .link(&cx, src.ino, root, OsStr::new("link_dst.txt"))
+14850 +             .link(&cx, /* &mut vfs::RequestScope */, root, src.ino, OsStr::new("link_dst.txt"))
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14854:27
+      |
+14854 |         let src_attr = fs.getattr(&cx, &mut RequestScope::empty(), src.ino).expect("getattr source");
+      |                           ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+14854 -         let src_attr = fs.getattr(&cx, &mut RequestScope::empty(), src.ino).expect("getattr source");
+14854 +         let src_attr = fs.getattr(&cx, src.ino).expect("getattr source");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14858:14
+      |
+14858 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("link_dst.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14858 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("link_dst.txt"))
+14858 +             .lookup(&cx, root, OsStr::new("link_dst.txt"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14862:27
+      |
+14862 |         let readback = fs.read(&cx, &mut RequestScope::empty(), dst_attr.ino, 0, 64).expect("read via link");
+      |                           ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+14862 -         let readback = fs.read(&cx, &mut RequestScope::empty(), dst_attr.ino, 0, 64).expect("read via link");
+14862 +         let readback = fs.read(&cx, dst_attr.ino, 0, 64).expect("read via link");
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14878:14
+      |
+14878 |             .link(&cx, dir_attr.ino, root, OsStr::new("dir_hardlink"))
+      |              ^^^^      ------------ argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14878 -             .link(&cx, dir_attr.ino, root, OsStr::new("dir_hardlink"))
+14878 +             .link(&cx, /* &mut vfs::RequestScope */, root, dir_attr.ino, OsStr::new("dir_hardlink"))
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14916:14
+      |
+14916 |             .link(&cx, src.ino, root, OsStr::new("emlink_dst.txt"))
+      |              ^^^^      ------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14916 -             .link(&cx, src.ino, root, OsStr::new("emlink_dst.txt"))
+14916 +             .link(&cx, /* &mut vfs::RequestScope */, root, src.ino, OsStr::new("emlink_dst.txt"))
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14930:14
+      |
+14930 |             .symlink(
+      |              ^^^^^^^
+14931 |                 &cx,
+14932 |                 root,
+      |                 ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:511:8
+      |
+  511 |     fn symlink(
+      |        ^^^^^^^
+...
+  514 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14930 |             .symlink(
+14931 |                 &cx,
+14932 ~                 /* &mut vfs::RequestScope */,
+14933 ~                 root,
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14942:14
+      |
+14942 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("fast_link"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+14942 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("fast_link"))
+14942 +             .lookup(&cx, root, OsStr::new("fast_link"))
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14946:25
+      |
+14946 |         let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink");
+      |                         ^^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8896:12
+      |
+ 8896 |     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+      |            ^^^^^^^^
+help: remove the extra argument
+      |
+14946 -         let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink");
+14946 +         let target = fs.readlink(&cx, attr.ino).expect("readlink");
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14963:14
+      |
+14963 |             .symlink(
+      |              ^^^^^^^
+14964 |                 &cx,
+14965 |                 root,
+      |                 ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:511:8
+      |
+  511 |     fn symlink(
+      |        ^^^^^^^
+...
+  514 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+14963 |             .symlink(
+14964 |                 &cx,
+14965 ~                 /* &mut vfs::RequestScope */,
+14966 ~                 root,
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14974:25
+      |
+14974 |         let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink");
+      |                         ^^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8896:12
+      |
+ 8896 |     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+      |            ^^^^^^^^
+help: remove the extra argument
+      |
+14974 -         let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink");
+14974 +         let target = fs.readlink(&cx, attr.ino).expect("readlink");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14994:30
+      |
+14994 |         let after_alloc = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr");
+      |                              ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+14994 -         let after_alloc = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr");
+14994 +         let after_alloc = fs.getattr(&cx, attr.ino).expect("getattr");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:14998:28
+      |
+14998 |         let zero_data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192).expect("read prealloc");
+      |                            ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+14998 -         let zero_data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192).expect("read prealloc");
+14998 +         let zero_data = fs.read(&cx, attr.ino, 0, 8192).expect("read prealloc");
+      |
+
+error[E0308]: mismatched types
+     --> crates/ffs-core/src/lib.rs:15002:50
+      |
+15002 |         fs.fallocate(&cx, attr.ino, 12288, 4096, libc::FALLOC_FL_KEEP_SIZE)
+      |            ---------                             ^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `i32`
+      |            |
+      |            arguments to this method are incorrect
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8821:12
+      |
+ 8821 |     pub fn fallocate(
+      |            ^^^^^^^^^
+...
+ 8827 |         mode: u32,
+      |         ---------
+help: you can convert an `i32` to a `u32` and panic if the converted value doesn't fit
+      |
+15002 |         fs.fallocate(&cx, attr.ino, 12288, 4096, libc::FALLOC_FL_KEEP_SIZE.try_into().unwrap())
+      |                                                                           ++++++++++++++++++++
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15004:29
+      |
+15004 |         let after_keep = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr keep_size");
+      |                             ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15004 -         let after_keep = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr keep_size");
+15004 +         let after_keep = fs.getattr(&cx, attr.ino).expect("getattr keep_size");
+      |
+
+error[E0308]: mismatched types
+     --> crates/ffs-core/src/lib.rs:15015:13
+      |
+15010 |         fs.fallocate(
+      |            --------- arguments to this method are incorrect
+...
+15015 |             libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `i32`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8821:12
+      |
+ 8821 |     pub fn fallocate(
+      |            ^^^^^^^^^
+...
+ 8827 |         mode: u32,
+      |         ---------
+help: you can convert an `i32` to a `u32` and panic if the converted value doesn't fit
+      |
+15015 |             (libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE).try_into().unwrap(),
+      |             +                                                      +++++++++++++++++++++
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15019:30
+      |
+15019 |         let after_punch = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after punch");
+      |                              ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15019 -         let after_punch = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after punch");
+15019 +         let after_punch = fs.getattr(&cx, attr.ino).expect("getattr after punch");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15021:27
+      |
+15021 |         let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192).expect("read after punch");
+      |                           ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+15021 -         let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192).expect("read after punch");
+15021 +         let readback = fs.read(&cx, attr.ino, 0, 8192).expect("read after punch");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15041:12
+      |
+15041 |         fs.write(&cx, &mut RequestScope::empty(), ino, 0, &data).expect("write");
+      |            ^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8789:12
+      |
+ 8789 |     pub fn write(
+      |            ^^^^^
+help: remove the extra argument
+      |
+15041 -         fs.write(&cx, &mut RequestScope::empty(), ino, 0, &data).expect("write");
+15041 +         fs.write(&cx, ino, 0, &data).expect("write");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15044:23
+      |
+15044 |         let attr = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15044 -         let attr = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+15044 +         let attr = fs.getattr(&cx, ino).expect("getattr");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15056:27
+      |
+15056 |         let readback = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read after truncate");
+      |                           ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+15056 -         let readback = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read after truncate");
+15056 +         let readback = fs.read(&cx, ino, 0, 4096).expect("read after truncate");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15282:26
+      |
+15282 |         let entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir");
+      |                          ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15282 -         let entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir");
+15282 +         let entries = fs.readdir(&cx, dir_attr.ino, 0).expect("readdir");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15432:14
+      |
+15432 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("recycled.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+15432 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("recycled.txt"))
+15432 +             .lookup(&cx, root, OsStr::new("recycled.txt"))
+      |
+
+error[E0061]: this method takes 6 arguments but 7 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15473:14
+      |
+15473 |             .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("cant_hardlink"), 0o755, 0, 0)
+      |              ^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8756:12
+      |
+ 8756 |     pub fn mkdir(
+      |            ^^^^^
+help: remove the extra argument
+      |
+15473 -             .mkdir(&cx, &mut RequestScope::empty(), root, OsStr::new("cant_hardlink"), 0o755, 0, 0)
+15473 +             .mkdir(&cx, root, OsStr::new("cant_hardlink"), 0o755, 0, 0)
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15476:14
+      |
+15476 |             .link(&cx, dir_attr.ino, root, OsStr::new("hardlink_to_dir"))
+      |              ^^^^      ------------ argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+15476 -             .link(&cx, dir_attr.ino, root, OsStr::new("hardlink_to_dir"))
+15476 +             .link(&cx, /* &mut vfs::RequestScope */, root, dir_attr.ino, OsStr::new("hardlink_to_dir"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15501:23
+      |
+15501 |         let hole = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read hole");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+15501 -         let hole = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read hole");
+15501 +         let hole = fs.read(&cx, attr.ino, 0, 4096).expect("read hole");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15534:12
+      |
+15534 |         fs.write(&cx, &mut RequestScope::empty(), attr.ino, 10, &patch).expect("patch write");
+      |            ^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8789:12
+      |
+ 8789 |     pub fn write(
+      |            ^^^^^
+help: remove the extra argument
+      |
+15534 -         fs.write(&cx, &mut RequestScope::empty(), attr.ino, 10, &patch).expect("patch write");
+15534 +         fs.write(&cx, attr.ino, 10, &patch).expect("patch write");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15537:27
+      |
+15537 |         let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 200).expect("read");
+      |                           ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+15537 -         let readback = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 200).expect("read");
+15537 +         let readback = fs.read(&cx, attr.ino, 0, 200).expect("read");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15567:26
+      |
+15567 |         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+      |                          ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15567 -         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+15567 +         let entries = fs.readdir(&cx, root, 0).expect("readdir");
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15591:14
+      |
+15591 |             .symlink(
+      |              ^^^^^^^
+15592 |                 &cx,
+15593 |                 root,
+      |                 ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:511:8
+      |
+  511 |     fn symlink(
+      |        ^^^^^^^
+...
+  514 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+15591 |             .symlink(
+15592 |                 &cx,
+15593 ~                 /* &mut vfs::RequestScope */,
+15594 ~                 root,
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15603:25
+      |
+15603 |         let target = fs.readlink(&cx, &mut RequestScope::empty(), sym_attr.ino).expect("readlink");
+      |                         ^^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8896:12
+      |
+ 8896 |     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+      |            ^^^^^^^^
+help: remove the extra argument
+      |
+15603 -         let target = fs.readlink(&cx, &mut RequestScope::empty(), sym_attr.ino).expect("readlink");
+15603 +         let target = fs.readlink(&cx, sym_attr.ino).expect("readlink");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15642:22
+      |
+15642 |         let err = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("temp_dir")).unwrap_err();
+      |                      ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+15642 -         let err = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("temp_dir")).unwrap_err();
+15642 +         let err = fs.lookup(&cx, root, OsStr::new("temp_dir")).unwrap_err();
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15662:14
+      |
+15662 |             .setattr(
+      |              ^^^^^^^
+15663 |                 &cx,
+15664 |                 attr.ino,
+      |                 -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+15662 |             .setattr(
+15663 |                 &cx,
+15664 ~                 /* &mut vfs::RequestScope */,
+15665 ~                 attr.ino,
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15674:27
+      |
+15674 |         let verified = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after chmod");
+      |                           ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15674 -         let verified = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after chmod");
+15674 +         let verified = fs.getattr(&cx, attr.ino).expect("getattr after chmod");
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15693:14
+      |
+15693 |             .setattr(
+      |              ^^^^^^^
+15694 |                 &cx,
+15695 |                 attr.ino,
+      |                 -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+15693 |             .setattr(
+15694 |                 &cx,
+15695 ~                 /* &mut vfs::RequestScope */,
+15696 ~                 attr.ino,
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15706:27
+      |
+15706 |         let verified = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after chown");
+      |                           ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15706 -         let verified = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr after chown");
+15706 +         let verified = fs.getattr(&cx, attr.ino).expect("getattr after chown");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15725:23
+      |
+15725 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 5);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15725 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 5);
+15725 +         assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 5);
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15729:14
+      |
+15729 |             .setattr(
+      |              ^^^^^^^
+15730 |                 &cx,
+15731 |                 ino,
+      |                 --- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+15729 |             .setattr(
+15730 |                 &cx,
+15731 ~                 /* &mut vfs::RequestScope */,
+15732 ~                 ino,
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15741:23
+      |
+15741 |         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+15741 -         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+15741 +         let data = fs.read(&cx, ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15759:12
+      |
+15759 |         fs.write(&cx, &mut RequestScope::empty(), ino, 0, &[0xAA; 200]).expect("write");
+      |            ^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8789:12
+      |
+ 8789 |     pub fn write(
+      |            ^^^^^
+help: remove the extra argument
+      |
+15759 -         fs.write(&cx, &mut RequestScope::empty(), ino, 0, &[0xAA; 200]).expect("write");
+15759 +         fs.write(&cx, ino, 0, &[0xAA; 200]).expect("write");
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15762:14
+      |
+15762 |             .setattr(
+      |              ^^^^^^^
+15763 |                 &cx,
+15764 |                 ino,
+      |                 --- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+15762 |             .setattr(
+15763 |                 &cx,
+15764 ~                 /* &mut vfs::RequestScope */,
+15765 ~                 ino,
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15773:23
+      |
+15773 |         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+15773 -         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+15773 +         let data = fs.read(&cx, ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15827:23
+      |
+15827 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr").size, 0);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15827 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("getattr").size, 0);
+15827 +         assert_eq!(fs.getattr(&cx, attr.ino).expect("getattr").size, 0);
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15858:23
+      |
+15858 |         let size = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size;
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+15858 -         let size = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size;
+15858 +         let size = fs.getattr(&cx, ino).expect("getattr").size;
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15863:14
+      |
+15863 |             .read(&cx, &mut RequestScope::empty(), ino, 0, u32::try_from(block_size + 10).unwrap())
+      |              ^^^^      --------------------------          --------------------------------------- expected `u64`, found `u32`
+      |                        |
+      |                        unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+...
+ 8890 |         offset: u64,
+      |         -----------
+help: you can convert a `u32` to a `u64`
+      |
+15863 |             .read(&cx, &mut RequestScope::empty(), ino, 0, u32::try_from(block_size + 10).unwrap().into())
+      |                                                                                                   +++++++
+help: remove the extra argument
+      |
+15863 -             .read(&cx, &mut RequestScope::empty(), ino, 0, u32::try_from(block_size + 10).unwrap())
+15863 +             .read(&cx, ino, /* u64 */, u32::try_from(block_size + 10).unwrap())
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15892:14
+      |
+15892 |             .read(&cx, &mut RequestScope::empty(), ino, 0, u32::try_from(data_size).unwrap())
+      |              ^^^^      --------------------------          --------------------------------- expected `u64`, found `u32`
+      |                        |
+      |                        unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+...
+ 8890 |         offset: u64,
+      |         -----------
+help: you can convert a `u32` to a `u64`
+      |
+15892 |             .read(&cx, &mut RequestScope::empty(), ino, 0, u32::try_from(data_size).unwrap().into())
+      |                                                                                             +++++++
+help: remove the extra argument
+      |
+15892 -             .read(&cx, &mut RequestScope::empty(), ino, 0, u32::try_from(data_size).unwrap())
+15892 +             .read(&cx, ino, /* u64 */, u32::try_from(data_size).unwrap())
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15957:14
+      |
+15957 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("same_name.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+15957 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("same_name.txt"))
+15957 +             .lookup(&cx, root, OsStr::new("same_name.txt"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15960:23
+      |
+15960 |         let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+15960 -         let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096).expect("read");
+15960 +         let data = fs.read(&cx, attr.ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:15996:14
+      |
+15996 |             .lookup(&cx, &mut RequestScope::empty(), dir_a.ino, OsStr::new("moved.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+15996 -             .lookup(&cx, &mut RequestScope::empty(), dir_a.ino, OsStr::new("moved.txt"))
+15996 +             .lookup(&cx, dir_a.ino, OsStr::new("moved.txt"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16002:14
+      |
+16002 |             .lookup(&cx, &mut RequestScope::empty(), dir_b.ino, OsStr::new("arrived.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16002 -             .lookup(&cx, &mut RequestScope::empty(), dir_b.ino, OsStr::new("arrived.txt"))
+16002 +             .lookup(&cx, dir_b.ino, OsStr::new("arrived.txt"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16005:23
+      |
+16005 |         let data = fs.read(&cx, &mut RequestScope::empty(), file.ino, 0, 4096).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16005 -         let data = fs.read(&cx, &mut RequestScope::empty(), file.ino, 0, 4096).expect("read");
+16005 +         let data = fs.read(&cx, file.ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16020:14
+      |
+16020 |             .link(&cx, bogus_ino, root, OsStr::new("bogus_link"))
+      |              ^^^^      --------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+16020 -             .link(&cx, bogus_ino, root, OsStr::new("bogus_link"))
+16020 +             .link(&cx, /* &mut vfs::RequestScope */, root, bogus_ino, OsStr::new("bogus_link"))
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16079:14
+      |
+16079 |             .setattr(
+      |              ^^^^^^^
+16080 |                 &cx,
+16081 |                 ino,
+      |                 --- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+16079 |             .setattr(
+16080 |                 &cx,
+16081 ~                 /* &mut vfs::RequestScope */,
+16082 ~                 ino,
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16103:14
+      |
+16103 |             .symlink(
+      |              ^^^^^^^
+16104 |                 &cx,
+16105 |                 root,
+      |                 ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:511:8
+      |
+  511 |     fn symlink(
+      |        ^^^^^^^
+...
+  514 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+16103 |             .symlink(
+16104 |                 &cx,
+16105 ~                 /* &mut vfs::RequestScope */,
+16106 ~                 root,
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16113:25
+      |
+16113 |         let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink fast");
+      |                         ^^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8896:12
+      |
+ 8896 |     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+      |            ^^^^^^^^
+help: remove the extra argument
+      |
+16113 -         let target = fs.readlink(&cx, &mut RequestScope::empty(), attr.ino).expect("readlink fast");
+16113 +         let target = fs.readlink(&cx, attr.ino).expect("readlink fast");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16117:26
+      |
+16117 |         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+      |                          ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16117 -         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+16117 +         let entries = fs.readdir(&cx, root, 0).expect("readdir");
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16142:14
+      |
+16142 |             .link(&cx, ino, root, OsStr::new("nlink_link"))
+      |              ^^^^      --- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+16142 -             .link(&cx, ino, root, OsStr::new("nlink_link"))
+16142 +             .link(&cx, /* &mut vfs::RequestScope */, root, ino, OsStr::new("nlink_link"))
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16149:24
+      |
+16149 |         let after = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr after unlink");
+      |                        ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16149 -         let after = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr after unlink");
+16149 +         let after = fs.getattr(&cx, ino).expect("getattr after unlink");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16154:14
+      |
+16154 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("nlink_link"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16154 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("nlink_link"))
+16154 +             .lookup(&cx, root, OsStr::new("nlink_link"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16175:12
+      |
+16175 |         fs.write(&cx, &mut RequestScope::empty(), ino, 3, b"bbb").expect("write2");
+      |            ^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8789:12
+      |
+ 8789 |     pub fn write(
+      |            ^^^^^
+help: remove the extra argument
+      |
+16175 -         fs.write(&cx, &mut RequestScope::empty(), ino, 3, b"bbb").expect("write2");
+16175 +         fs.write(&cx, ino, 3, b"bbb").expect("write2");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16178:23
+      |
+16178 |         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16178 -         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+16178 +         let data = fs.read(&cx, ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16180:23
+      |
+16180 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 9);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16180 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 9);
+16180 +         assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 9);
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16200:23
+      |
+16200 |         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16200 -         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+16200 +         let data = fs.read(&cx, ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16202:23
+      |
+16202 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 15);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16202 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr").size, 15);
+16202 +         assert_eq!(fs.getattr(&cx, ino).expect("getattr").size, 15);
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16220:21
+      |
+16220 |         let ga = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+      |                     ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16220 -         let ga = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+16220 +         let ga = fs.getattr(&cx, ino).expect("getattr");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16224:23
+      |
+16224 |         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 8192).expect("read hole");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16224 -         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 8192).expect("read hole");
+16224 +         let data = fs.read(&cx, ino, 0, 8192).expect("read hole");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16228:23
+      |
+16228 |         let tail = fs.read(&cx, &mut RequestScope::empty(), ino, 8192, 10).expect("read past hole");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16228 -         let tail = fs.read(&cx, &mut RequestScope::empty(), ino, 8192, 10).expect("read past hole");
+16228 +         let tail = fs.read(&cx, ino, 8192, 10).expect("read past hole");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16246:23
+      |
+16246 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga1").size, 18);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16246 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga1").size, 18);
+16246 +         assert_eq!(fs.getattr(&cx, ino).expect("ga1").size, 18);
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16254:23
+      |
+16254 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga2").size, 0);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16254 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga2").size, 0);
+16254 +         assert_eq!(fs.getattr(&cx, ino).expect("ga2").size, 0);
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16257:12
+      |
+16257 |         fs.write(&cx, &mut RequestScope::empty(), ino, 0, b"new").expect("rewrite");
+      |            ^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8789:12
+      |
+ 8789 |     pub fn write(
+      |            ^^^^^
+help: remove the extra argument
+      |
+16257 -         fs.write(&cx, &mut RequestScope::empty(), ino, 0, b"new").expect("rewrite");
+16257 +         fs.write(&cx, ino, 0, b"new").expect("rewrite");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16258:23
+      |
+16258 |         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16258 -         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 4096).expect("read");
+16258 +         let data = fs.read(&cx, ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16260:23
+      |
+16260 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga3").size, 3);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16260 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga3").size, 3);
+16260 +         assert_eq!(fs.getattr(&cx, ino).expect("ga3").size, 3);
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16292:23
+      |
+16292 |         let gone = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("winner.txt"));
+      |                       ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16292 -         let gone = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("winner.txt"));
+16292 +         let gone = fs.lookup(&cx, root, OsStr::new("winner.txt"));
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16297:14
+      |
+16297 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("loser.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16297 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("loser.txt"))
+16297 +             .lookup(&cx, root, OsStr::new("loser.txt"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16300:23
+      |
+16300 |         let data = fs.read(&cx, &mut RequestScope::empty(), found.ino, 0, 4096).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16300 -         let data = fs.read(&cx, &mut RequestScope::empty(), found.ino, 0, 4096).expect("read");
+16300 +         let data = fs.read(&cx, found.ino, 0, 4096).expect("read");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16315:12
+      |
+16315 |         fs.rmdir(&cx, &mut RequestScope::empty(), root, OsStr::new("empty_rm"))
+      |            ^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8772:12
+      |
+ 8772 |     pub fn rmdir(&self, cx: &Cx, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<()> {
+      |            ^^^^^
+help: remove the extra argument
+      |
+16315 -         fs.rmdir(&cx, &mut RequestScope::empty(), root, OsStr::new("empty_rm"))
+16315 +         fs.rmdir(&cx, root, OsStr::new("empty_rm"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16318:23
+      |
+16318 |         let gone = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("empty_rm"));
+      |                       ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16318 -         let gone = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("empty_rm"));
+16318 +         let gone = fs.lookup(&cx, root, OsStr::new("empty_rm"));
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16335:12
+      |
+16335 |         fs.link(&cx, attr.ino, root, OsStr::new("link_dst.txt"))
+      |            ^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+16335 -         fs.link(&cx, attr.ino, root, OsStr::new("link_dst.txt"))
+16335 +         fs.link(&cx, /* &mut vfs::RequestScope */, root, attr.ino, OsStr::new("link_dst.txt"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16344:14
+      |
+16344 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("link_dst.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16344 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("link_dst.txt"))
+16344 +             .lookup(&cx, root, OsStr::new("link_dst.txt"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16346:23
+      |
+16346 |         let data = fs.read(&cx, &mut RequestScope::empty(), linked.ino, 0, 4096).expect("read via link");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16346 -         let data = fs.read(&cx, &mut RequestScope::empty(), linked.ino, 0, 4096).expect("read via link");
+16346 +         let data = fs.read(&cx, linked.ino, 0, 4096).expect("read via link");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16379:23
+      |
+16379 |         let gone = fs.lookup(&cx, &mut RequestScope::empty(), dir_a.ino, OsStr::new("child"));
+      |                       ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16379 -         let gone = fs.lookup(&cx, &mut RequestScope::empty(), dir_a.ino, OsStr::new("child"));
+16379 +         let gone = fs.lookup(&cx, dir_a.ino, OsStr::new("child"));
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16384:14
+      |
+16384 |             .lookup(&cx, &mut RequestScope::empty(), dir_b.ino, OsStr::new("child"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16384 -             .lookup(&cx, &mut RequestScope::empty(), dir_b.ino, OsStr::new("child"))
+16384 +             .lookup(&cx, dir_b.ino, OsStr::new("child"))
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16411:21
+      |
+16411 |         let ga = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+      |                     ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16411 -         let ga = fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("getattr");
+16411 +         let ga = fs.getattr(&cx, ino).expect("getattr");
+      |
+
+error[E0061]: this method takes 6 arguments but 7 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16425:14
+      |
+16425 |             .create(&cx, &mut RequestScope::empty(), root, OsStr::new("punch.txt"), 0o644, 0, 0)
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8744:12
+      |
+ 8744 |     pub fn create(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16425 -             .create(&cx, &mut RequestScope::empty(), root, OsStr::new("punch.txt"), 0o644, 0, 0)
+16425 +             .create(&cx, root, OsStr::new("punch.txt"), 0o644, 0, 0)
+      |
+
+error[E0308]: mismatched types
+     --> crates/ffs-core/src/lib.rs:16439:13
+      |
+16434 |         fs.fallocate(
+      |            --------- arguments to this method are incorrect
+...
+16439 |             libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `i32`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8821:12
+      |
+ 8821 |     pub fn fallocate(
+      |            ^^^^^^^^^
+...
+ 8827 |         mode: u32,
+      |         ---------
+help: you can convert an `i32` to a `u32` and panic if the converted value doesn't fit
+      |
+16439 |             (libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE).try_into().unwrap(),
+      |             +                                                      +++++++++++++++++++++
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16444:23
+      |
+16444 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga").size, 12288);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16444 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), ino).expect("ga").size, 12288);
+16444 +         assert_eq!(fs.getattr(&cx, ino).expect("ga").size, 12288);
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16447:23
+      |
+16447 |         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 12288).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16447 -         let data = fs.read(&cx, &mut RequestScope::empty(), ino, 0, 12288).expect("read");
+16447 +         let data = fs.read(&cx, ino, 0, 12288).expect("read");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16481:26
+      |
+16481 |         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+      |                          ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16481 -         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+16481 +         let entries = fs.readdir(&cx, root, 0).expect("readdir");
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16506:14
+      |
+16506 |             .symlink(
+      |              ^^^^^^^
+16507 |                 &cx,
+16508 |                 root,
+      |                 ---- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:511:8
+      |
+  511 |     fn symlink(
+      |        ^^^^^^^
+...
+  514 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+16506 |             .symlink(
+16507 |                 &cx,
+16508 ~                 /* &mut vfs::RequestScope */,
+16509 ~                 root,
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16517:27
+      |
+16517 |         let readlink = fs.readlink(&cx, &mut RequestScope::empty(), link.ino).expect("readlink");
+      |                           ^^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8896:12
+      |
+ 8896 |     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+      |            ^^^^^^^^
+help: remove the extra argument
+      |
+16517 -         let readlink = fs.readlink(&cx, &mut RequestScope::empty(), link.ino).expect("readlink");
+16517 +         let readlink = fs.readlink(&cx, link.ino).expect("readlink");
+      |
+
+error[E0061]: this method takes 6 arguments but 7 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16535:14
+      |
+16535 |             .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_zero.bin"), 0o644, 0, 0)
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8744:12
+      |
+ 8744 |     pub fn create(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16535 -             .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_zero.bin"), 0o644, 0, 0)
+16535 +             .create(&cx, root, OsStr::new("falloc_zero.bin"), 0o644, 0, 0)
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16538:25
+      |
+16538 |         let before = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga before");
+      |                         ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16538 -         let before = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga before");
+16538 +         let before = fs.getattr(&cx, attr.ino).expect("ga before");
+      |
+
+error[E0061]: this method takes 5 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16541:12
+      |
+16541 |         fs.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 0, 0)
+      |            ^^^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8821:12
+      |
+ 8821 |     pub fn fallocate(
+      |            ^^^^^^^^^
+help: remove the extra argument
+      |
+16541 -         fs.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 0, 0)
+16541 +         fs.fallocate(&cx, attr.ino, 0, 0, 0)
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16544:24
+      |
+16544 |         let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga after");
+      |                        ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16544 -         let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga after");
+16544 +         let after = fs.getattr(&cx, attr.ino).expect("ga after");
+      |
+
+error[E0308]: mismatched types
+     --> crates/ffs-core/src/lib.rs:16601:48
+      |
+16601 |             .fallocate(&cx, attr.ino, 0, 4096, libc::FALLOC_FL_PUNCH_HOLE)
+      |              ---------                         ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `i32`
+      |              |
+      |              arguments to this method are incorrect
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8821:12
+      |
+ 8821 |     pub fn fallocate(
+      |            ^^^^^^^^^
+...
+ 8827 |         mode: u32,
+      |         ---------
+help: you can convert an `i32` to a `u32` and panic if the converted value doesn't fit
+      |
+16601 |             .fallocate(&cx, attr.ino, 0, 4096, libc::FALLOC_FL_PUNCH_HOLE.try_into().unwrap())
+      |                                                                          ++++++++++++++++++++
+
+error[E0308]: mismatched types
+     --> crates/ffs-core/src/lib.rs:16627:17
+      |
+16622 |             .fallocate(
+      |              --------- arguments to this method are incorrect
+...
+16627 |                 libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+      |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `i32`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8821:12
+      |
+ 8821 |     pub fn fallocate(
+      |            ^^^^^^^^^
+...
+ 8827 |         mode: u32,
+      |         ---------
+help: you can convert an `i32` to a `u32` and panic if the converted value doesn't fit
+      |
+16627 |                 (libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE).try_into().unwrap(),
+      |                 +                                                      +++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 7 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16644:14
+      |
+16644 |             .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_extend.bin"), 0o644, 0, 0)
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8744:12
+      |
+ 8744 |     pub fn create(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16644 -             .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_extend.bin"), 0o644, 0, 0)
+16644 +             .create(&cx, root, OsStr::new("falloc_extend.bin"), 0o644, 0, 0)
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16647:23
+      |
+16647 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga0").size, 0);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16647 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga0").size, 0);
+16647 +         assert_eq!(fs.getattr(&cx, attr.ino).expect("ga0").size, 0);
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16652:24
+      |
+16652 |         let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga1");
+      |                        ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16652 -         let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga1");
+16652 +         let after = fs.getattr(&cx, attr.ino).expect("ga1");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16657:23
+      |
+16657 |         let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16384).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16657 -         let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16384).expect("read");
+16657 +         let data = fs.read(&cx, attr.ino, 0, 16384).expect("read");
+      |
+
+error[E0061]: this method takes 6 arguments but 7 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16669:14
+      |
+16669 |             .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_ks.bin"), 0o644, 0, 0)
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8744:12
+      |
+ 8744 |     pub fn create(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16669 -             .create(&cx, &mut RequestScope::empty(), root, OsStr::new("falloc_ks.bin"), 0o644, 0, 0)
+16669 +             .create(&cx, root, OsStr::new("falloc_ks.bin"), 0o644, 0, 0)
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16672:25
+      |
+16672 |         let before = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga before");
+      |                         ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16672 -         let before = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga before");
+16672 +         let before = fs.getattr(&cx, attr.ino).expect("ga before");
+      |
+
+error[E0308]: mismatched types
+     --> crates/ffs-core/src/lib.rs:16675:47
+      |
+16675 |         fs.fallocate(&cx, attr.ino, 0, 16384, libc::FALLOC_FL_KEEP_SIZE)
+      |            ---------                          ^^^^^^^^^^^^^^^^^^^^^^^^^ expected `u32`, found `i32`
+      |            |
+      |            arguments to this method are incorrect
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8821:12
+      |
+ 8821 |     pub fn fallocate(
+      |            ^^^^^^^^^
+...
+ 8827 |         mode: u32,
+      |         ---------
+help: you can convert an `i32` to a `u32` and panic if the converted value doesn't fit
+      |
+16675 |         fs.fallocate(&cx, attr.ino, 0, 16384, libc::FALLOC_FL_KEEP_SIZE.try_into().unwrap())
+      |                                                                        ++++++++++++++++++++
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16677:24
+      |
+16677 |         let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga after");
+      |                        ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16677 -         let after = fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga after");
+16677 +         let after = fs.getattr(&cx, attr.ino).expect("ga after");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16709:23
+      |
+16709 |         let stat = fs.statfs(&cx, &mut RequestScope::empty(), root).expect("statfs");
+      |                       ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8900:12
+      |
+ 8900 |     pub fn statfs(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<FsStat> {
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16709 -         let stat = fs.statfs(&cx, &mut RequestScope::empty(), root).expect("statfs");
+16709 +         let stat = fs.statfs(&cx, root).expect("statfs");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16735:23
+      |
+16735 |         let stat = fs.statfs(&cx, &mut RequestScope::empty(), root).expect("statfs after");
+      |                       ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8900:12
+      |
+ 8900 |     pub fn statfs(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<FsStat> {
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16735 -         let stat = fs.statfs(&cx, &mut RequestScope::empty(), root).expect("statfs after");
+16735 +         let stat = fs.statfs(&cx, root).expect("statfs after");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16804:23
+      |
+16804 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga").size, 0);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16804 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga").size, 0);
+16804 +         assert_eq!(fs.getattr(&cx, attr.ino).expect("ga").size, 0);
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16822:14
+      |
+16822 |             .link(&cx, b.ino, root, OsStr::new("link_dup_a.txt"))
+      |              ^^^^      ----- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+16822 -             .link(&cx, b.ino, root, OsStr::new("link_dup_a.txt"))
+16822 +             .link(&cx, /* &mut vfs::RequestScope */, root, b.ino, OsStr::new("link_dup_a.txt"))
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16829:20
+      |
+16829 |         let _ = fs.getattr(&cx, &mut RequestScope::empty(), a.ino).expect("a still ok");
+      |                    ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16829 -         let _ = fs.getattr(&cx, &mut RequestScope::empty(), a.ino).expect("a still ok");
+16829 +         let _ = fs.getattr(&cx, a.ino).expect("a still ok");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16892:14
+      |
+16892 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("will_die.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+16892 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("will_die.txt"))
+16892 +             .lookup(&cx, root, OsStr::new("will_die.txt"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16916:26
+      |
+16916 |         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+      |                          ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16916 -         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+16916 +         let entries = fs.readdir(&cx, root, 0).expect("readdir");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16928:26
+      |
+16928 |         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir after");
+      |                          ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16928 -         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir after");
+16928 +         let entries = fs.readdir(&cx, root, 0).expect("readdir after");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16948:23
+      |
+16948 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga1").nlink, 1);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16948 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga1").nlink, 1);
+16948 +         assert_eq!(fs.getattr(&cx, attr.ino).expect("ga1").nlink, 1);
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16951:12
+      |
+16951 |         fs.link(&cx, attr.ino, root, OsStr::new("nlink_lnk.txt"))
+      |            ^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+16951 -         fs.link(&cx, attr.ino, root, OsStr::new("nlink_lnk.txt"))
+16951 +         fs.link(&cx, /* &mut vfs::RequestScope */, root, attr.ino, OsStr::new("nlink_lnk.txt"))
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16953:23
+      |
+16953 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga2").nlink, 2);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16953 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga2").nlink, 2);
+16953 +         assert_eq!(fs.getattr(&cx, attr.ino).expect("ga2").nlink, 2);
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16958:23
+      |
+16958 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga3").nlink, 1);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16958 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga3").nlink, 1);
+16958 +         assert_eq!(fs.getattr(&cx, attr.ino).expect("ga3").nlink, 1);
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16962:23
+      |
+16962 |         let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 5).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16962 -         let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 5).expect("read");
+16962 +         let data = fs.read(&cx, attr.ino, 0, 5).expect("read");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16984:23
+      |
+16984 |         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga").size, 8192);
+      |                       ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+16984 -         assert_eq!(fs.getattr(&cx, &mut RequestScope::empty(), attr.ino).expect("ga").size, 8192);
+16984 +         assert_eq!(fs.getattr(&cx, attr.ino).expect("ga").size, 8192);
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16987:23
+      |
+16987 |         let head = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4).expect("read head");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16987 -         let head = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4).expect("read head");
+16987 +         let head = fs.read(&cx, attr.ino, 0, 4).expect("read head");
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:16991:23
+      |
+16991 |         let tail = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 4, 100).expect("read tail");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+16991 -         let tail = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 4, 100).expect("read tail");
+16991 +         let tail = fs.read(&cx, attr.ino, 4, 100).expect("read tail");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17020:22
+      |
+17020 |         let err = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("ren_src.txt"));
+      |                      ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17020 -         let err = fs.lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("ren_src.txt"));
+17020 +         let err = fs.lookup(&cx, root, OsStr::new("ren_src.txt"));
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17025:14
+      |
+17025 |             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("ren_dst.txt"))
+      |              ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17025 -             .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("ren_dst.txt"))
+17025 +             .lookup(&cx, root, OsStr::new("ren_dst.txt"))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17030:23
+      |
+17030 |         let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 7).expect("read");
+      |                       ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+17030 -         let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 7).expect("read");
+17030 +         let data = fs.read(&cx, attr.ino, 0, 7).expect("read");
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17041:31
+      |
+17041 |         let nlink_before = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga before").nlink;
+      |                               ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+17041 -         let nlink_before = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga before").nlink;
+17041 +         let nlink_before = fs.getattr(&cx, root).expect("ga before").nlink;
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17047:36
+      |
+17047 |         let nlink_after_mkdir = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga mid").nlink;
+      |                                    ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+17047 -         let nlink_after_mkdir = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga mid").nlink;
+17047 +         let nlink_after_mkdir = fs.getattr(&cx, root).expect("ga mid").nlink;
+      |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17056:36
+      |
+17056 |         let nlink_after_rmdir = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga after").nlink;
+      |                                    ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8864:12
+      |
+ 8864 |     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+17056 -         let nlink_after_rmdir = fs.getattr(&cx, &mut RequestScope::empty(), root).expect("ga after").nlink;
+17056 +         let nlink_after_rmdir = fs.getattr(&cx, root).expect("ga after").nlink;
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17063:26
+      |
+17063 |         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+      |                          ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+17063 -         let entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir");
+17063 +         let entries = fs.readdir(&cx, root, 0).expect("readdir");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17330:35
+      |
+17330 |             let root_entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir root");
+      |                                   ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+17330 -             let root_entries = fs.readdir(&cx, &mut RequestScope::empty(), root, 0).expect("readdir root");
+17330 +             let root_entries = fs.readdir(&cx, root, 0).expect("readdir root");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17342:22
+      |
+17342 |                     .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new(&dir_name))
+      |                      ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17342 -                     .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new(&dir_name))
+17342 +                     .lookup(&cx, root, OsStr::new(&dir_name))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17346:38
+      |
+17346 |                 let dir_entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir dir");
+      |                                      ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+17346 -                 let dir_entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir dir");
+17346 +                 let dir_entries = fs.readdir(&cx, dir_attr.ino, 0).expect("readdir dir");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17356:26
+      |
+17356 |                         .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&file_name))
+      |                          ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17356 -                         .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&file_name))
+17356 +                         .lookup(&cx, dir_attr.ino, OsStr::new(&file_name))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17362:26
+      |
+17362 |                         .read(&cx, &mut RequestScope::empty(), file_attr.ino, 0, file_size)
+      |                          ^^^^      --------------------------                    --------- expected `u64`, found `u32`
+      |                                    |
+      |                                    unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+...
+ 8890 |         offset: u64,
+      |         -----------
+help: you can convert a `u32` to a `u64`
+      |
+17362 |                         .read(&cx, &mut RequestScope::empty(), file_attr.ino, 0, file_size.into())
+      |                                                                                           +++++++
+help: remove the extra argument
+      |
+17362 -                         .read(&cx, &mut RequestScope::empty(), file_attr.ino, 0, file_size)
+17362 +                         .read(&cx, file_attr.ino, /* u64 */, file_size)
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17417:18
+      |
+17417 |                 .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("modify_test"))
+      |                  ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17417 -                 .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("modify_test"))
+17417 +                 .lookup(&cx, root, OsStr::new("modify_test"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17431:22
+      |
+17431 |                     .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+      |                      ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17431 -                     .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+17431 +                     .lookup(&cx, dir_attr.ino, OsStr::new(&name))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17459:18
+      |
+17459 |                 .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("modify_test"))
+      |                  ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17459 -                 .lookup(&cx, &mut RequestScope::empty(), root, OsStr::new("modify_test"))
+17459 +                 .lookup(&cx, root, OsStr::new("modify_test"))
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17462:30
+      |
+17462 |             let entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir");
+      |                              ^^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8877:12
+      |
+ 8877 |     pub fn readdir(
+      |            ^^^^^^^
+help: remove the extra argument
+      |
+17462 -             let entries = fs.readdir(&cx, &mut RequestScope::empty(), dir_attr.ino, 0).expect("readdir");
+17462 +             let entries = fs.readdir(&cx, dir_attr.ino, 0).expect("readdir");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17476:22
+      |
+17476 |                     .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+      |                      ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17476 -                     .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+17476 +                     .lookup(&cx, dir_attr.ino, OsStr::new(&name))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17478:31
+      |
+17478 |                 let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+      |                               ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+17478 -                 let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+17478 +                 let data = fs.read(&cx, attr.ino, 0, 256).expect("read");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17492:22
+      |
+17492 |                     .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+      |                      ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17492 -                     .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+17492 +                     .lookup(&cx, dir_attr.ino, OsStr::new(&name))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17494:31
+      |
+17494 |                 let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+      |                               ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+17494 -                 let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+17494 +                 let data = fs.read(&cx, attr.ino, 0, 256).expect("read");
+      |
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17514:22
+      |
+17514 |                     .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+      |                      ^^^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8868:12
+      |
+ 8868 |     pub fn lookup(
+      |            ^^^^^^
+help: remove the extra argument
+      |
+17514 -                     .lookup(&cx, &mut RequestScope::empty(), dir_attr.ino, OsStr::new(&name))
+17514 +                     .lookup(&cx, dir_attr.ino, OsStr::new(&name))
+      |
+
+error[E0061]: this method takes 4 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:17516:31
+      |
+17516 |                 let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+      |                               ^^^^      -------------------------- unexpected argument #2 of type `&mut vfs::RequestScope`
+      |
+note: method defined here
+     --> crates/ffs-core/src/lib.rs:8886:12
+      |
+ 8886 |     pub fn read(
+      |            ^^^^
+help: remove the extra argument
+      |
+17516 -                 let data = fs.read(&cx, &mut RequestScope::empty(), attr.ino, 0, 256).expect("read");
+17516 +                 let data = fs.read(&cx, attr.ino, 0, 256).expect("read");
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:18572:14
+      |
+18572 |             .create(
+      |              ^^^^^^
+18573 |                 &cx,
+18574 |                 InodeNumber(1),
+      |                 -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:424:8
+      |
+  424 |     fn create(
+      |        ^^^^^^
+...
+  427 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+18572 ~             .create(
+18573 +                 &cx,
+18574 +                 /* &mut vfs::RequestScope */,
+18575 +                 InodeNumber(1),
+18576 +                 OsStr::new("newfile.txt"),
+18577 +                 1000,
+18578 +                 1000,
+18579 +                 0o644,
+18580 +             )
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:18816:13
+      |
+18816 |         ops.rename(
+      |             ^^^^^^
+18817 |             &cx,
+18818 |             InodeNumber(1),
+      |             -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:474:8
+      |
+  474 |     fn rename(
+      |        ^^^^^^
+...
+  477 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+18816 |         ops.rename(
+18817 |             &cx,
+18818 ~             /* &mut vfs::RequestScope */,
+18819 ~             InodeNumber(1),
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:18843:14
+      |
+18843 |             .symlink(
+      |              ^^^^^^^
+18844 |                 &cx,
+18845 |                 InodeNumber(1),
+      |                 -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:511:8
+      |
+  511 |     fn symlink(
+      |        ^^^^^^^
+...
+  514 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+18843 |             .symlink(
+18844 |                 &cx,
+18845 ~                 /* &mut vfs::RequestScope */,
+18846 ~                 InodeNumber(1),
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:18866:14
+      |
+18866 |             .symlink(
+      |              ^^^^^^^
+18867 |                 &cx,
+18868 |                 InodeNumber(1),
+      |                 -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:511:8
+      |
+  511 |     fn symlink(
+      |        ^^^^^^^
+...
+  514 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+18866 |             .symlink(
+18867 |                 &cx,
+18868 ~                 /* &mut vfs::RequestScope */,
+18869 ~                 InodeNumber(1),
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:18892:14
+      |
+18892 |             .link(&cx, attr.ino, InodeNumber(1), OsStr::new("hardlink.txt"))
+      |              ^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+18892 -             .link(&cx, attr.ino, InodeNumber(1), OsStr::new("hardlink.txt"))
+18892 +             .link(&cx, /* &mut vfs::RequestScope */, InodeNumber(1), attr.ino, OsStr::new("hardlink.txt"))
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:18918:14
+      |
+18918 |             .setattr(
+      |              ^^^^^^^
+18919 |                 &cx,
+18920 |                 attr.ino,
+      |                 -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+18918 |             .setattr(
+18919 |                 &cx,
+18920 ~                 /* &mut vfs::RequestScope */,
+18921 ~                 attr.ino,
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:18941:14
+      |
+18941 |             .setattr(
+      |              ^^^^^^^
+18942 |                 &cx,
+18943 |                 attr.ino,
+      |                 -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+18941 |             .setattr(
+18942 |                 &cx,
+18943 ~                 /* &mut vfs::RequestScope */,
+18944 ~                 attr.ino,
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19056:13
+      |
+19056 |         ops.rename(
+      |             ^^^^^^
+19057 |             &cx,
+19058 |             InodeNumber(1),
+      |             -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:474:8
+      |
+  474 |     fn rename(
+      |        ^^^^^^
+...
+  477 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19056 |         ops.rename(
+19057 |             &cx,
+19058 ~             /* &mut vfs::RequestScope */,
+19059 ~             InodeNumber(1),
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19093:13
+      |
+19093 |         ops.setxattr(&cx, attr.ino, "user.foo", b"bar", XattrSetMode::Set)
+      |             ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19093 |         ops.setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.foo", b"bar", XattrSetMode::Set)
+      |                           +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19118:13
+      |
+19118 |         ops.setxattr(&cx, attr.ino, "user.alpha", b"aaa", XattrSetMode::Set)
+      |             ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19118 |         ops.setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.alpha", b"aaa", XattrSetMode::Set)
+      |                           +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19120:13
+      |
+19120 |         ops.setxattr(&cx, attr.ino, "user.beta", b"bbb", XattrSetMode::Set)
+      |             ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19120 |         ops.setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.beta", b"bbb", XattrSetMode::Set)
+      |                           +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19128:27
+      |
+19128 |         let removed = ops.removexattr(&cx, attr.ino, "user.alpha").unwrap();
+      |                           ^^^^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:411:8
+      |
+  411 |     fn removexattr(
+      |        ^^^^^^^^^^^
+...
+  414 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19128 |         let removed = ops.removexattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.alpha").unwrap();
+      |                                            +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19151:13
+      |
+19151 |         ops.setxattr(&cx, attr.ino, "user.key", b"old", XattrSetMode::Set)
+      |             ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19151 |         ops.setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.key", b"old", XattrSetMode::Set)
+      |                           +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19159:13
+      |
+19159 |         ops.setxattr(&cx, attr.ino, "user.key", b"new-value", XattrSetMode::Set)
+      |             ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19159 |         ops.setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.key", b"new-value", XattrSetMode::Set)
+      |                           +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19177:14
+      |
+19177 |             .create(
+      |              ^^^^^^
+19178 |                 &cx,
+19179 |                 InodeNumber(1),
+      |                 -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:424:8
+      |
+  424 |     fn create(
+      |        ^^^^^^
+...
+  427 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19177 ~             .create(
+19178 +                 &cx,
+19179 +                 /* &mut vfs::RequestScope */,
+19180 +                 InodeNumber(1),
+19181 +                 OsStr::new("xattr_modes.txt"),
+19182 +                 0,
+19183 +                 0,
+19184 +                 0o644,
+19185 +             )
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19187:13
+      |
+19187 |         ops.setxattr(&cx, attr.ino, "user.color", b"blue", XattrSetMode::Create)
+      |             ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19187 |         ops.setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.color", b"blue", XattrSetMode::Create)
+      |                           +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19191:14
+      |
+19191 |             .setxattr(&cx, attr.ino, "user.color", b"green", XattrSetMode::Create)
+      |              ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19191 |             .setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.color", b"green", XattrSetMode::Create)
+      |                            +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19201:14
+      |
+19201 |             .setxattr(&cx, attr.ino, "user.missing", b"x", XattrSetMode::Replace)
+      |              ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19201 |             .setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.missing", b"x", XattrSetMode::Replace)
+      |                            +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19295:14
+      |
+19295 |             .fallocate(
+      |              ^^^^^^^^^
+19296 |                 &cx,
+19297 |                 attr.ino,
+      |                 -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:525:8
+      |
+  525 |     fn fallocate(
+      |        ^^^^^^^^^
+...
+  528 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19295 ~             .fallocate(
+19296 +                 &cx,
+19297 +                 /* &mut vfs::RequestScope */,
+19298 +                 attr.ino,
+19299 +                 4096,
+19300 +                 0,
+19301 +                 libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+19302 +             )
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19333:14
+      |
+19333 |             .create(
+      |              ^^^^^^
+19334 |                 &cx,
+19335 |                 InodeNumber(1),
+      |                 -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:424:8
+      |
+  424 |     fn create(
+      |        ^^^^^^
+...
+  427 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19333 ~             .create(
+19334 +                 &cx,
+19335 +                 /* &mut vfs::RequestScope */,
+19336 +                 InodeNumber(1),
+19337 +                 OsStr::new("mode_bits.bin"),
+19338 +                 0,
+19339 +                 0,
+19340 +                 0o644,
+19341 +             )
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19395:18
+      |
+19395 |                 .create(
+      |                  ^^^^^^
+19396 |                     &cx,
+19397 |                     InodeNumber(1),
+      |                     -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:424:8
+      |
+  424 |     fn create(
+      |        ^^^^^^
+...
+  427 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19395 ~                 .create(
+19396 +                     &cx,
+19397 +                     /* &mut vfs::RequestScope */,
+19398 +                     InodeNumber(1),
+19399 +                     OsStr::new("log_success.bin"),
+19400 +                     0,
+19401 +                     0,
+19402 +                     0o644,
+19403 +                 )
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19450:18
+      |
+19450 |                 .create(
+      |                  ^^^^^^
+19451 |                     &cx,
+19452 |                     InodeNumber(1),
+      |                     -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:424:8
+      |
+  424 |     fn create(
+      |        ^^^^^^
+...
+  427 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19450 ~                 .create(
+19451 +                     &cx,
+19452 +                     /* &mut vfs::RequestScope */,
+19453 +                     InodeNumber(1),
+19454 +                     OsStr::new("log_reject.bin"),
+19455 +                     0,
+19456 +                     0,
+19457 +                     0o644,
+19458 +                 )
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19459:17
+      |
+19459 |             ops.fallocate(
+      |                 ^^^^^^^^^
+19460 |                 &cx,
+19461 |                 attr.ino,
+      |                 -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:525:8
+      |
+  525 |     fn fallocate(
+      |        ^^^^^^^^^
+...
+  528 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19459 ~             ops.fallocate(
+19460 +                 &cx,
+19461 +                 /* &mut vfs::RequestScope */,
+19462 +                 attr.ino,
+19463 +                 4096,
+19464 +                 0,
+19465 +                 libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
+19466 +             )
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19521:18
+      |
+19521 |                 .create(
+      |                  ^^^^^^
+19522 |                     &cx,
+19523 |                     InodeNumber(1),
+      |                     -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:424:8
+      |
+  424 |     fn create(
+      |        ^^^^^^
+...
+  427 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19521 ~                 .create(
+19522 +                     &cx,
+19523 +                     /* &mut vfs::RequestScope */,
+19524 +                     InodeNumber(1),
+19525 +                     OsStr::new("log_reject_mode_bits.bin"),
+19526 +                     0,
+19527 +                     0,
+19528 +                     0o644,
+19529 +                 )
+      |
+
+error[E0061]: this method takes 7 arguments but 6 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19583:18
+      |
+19583 |                 .create(
+      |                  ^^^^^^
+19584 |                     &cx,
+19585 |                     InodeNumber(1),
+      |                     -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:424:8
+      |
+  424 |     fn create(
+      |        ^^^^^^
+...
+  427 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19583 ~                 .create(
+19584 +                     &cx,
+19585 +                     /* &mut vfs::RequestScope */,
+19586 +                     InodeNumber(1),
+19587 +                     OsStr::new("fsync_log_success.bin"),
+19588 +                     0,
+19589 +                     0,
+19590 +                     0o644,
+19591 +                 )
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19594:17
+      |
+19594 |             ops.fsync(&cx, attr.ino, 0, false)
+      |                 ^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:566:8
+      |
+  566 |     fn fsync(
+      |        ^^^^^
+...
+  569 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19594 |             ops.fsync(&cx, /* &mut vfs::RequestScope */, attr.ino, 0, false)
+      |                            +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19639:17
+      |
+19639 |             ops.fsync(&cx, InodeNumber(1), 0, false)
+      |                 ^^^^^      -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:566:8
+      |
+  566 |     fn fsync(
+      |        ^^^^^
+...
+  569 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+19639 |             ops.fsync(&cx, /* &mut vfs::RequestScope */, InodeNumber(1), 0, false)
+      |                            +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:19682:17
+      |
+19682 |             ops.fsyncdir(&cx, InodeNumber(1), 0, false)
+      |                 ^^^^^^^^      -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:578:8
+      |
+  578 |     fn fsyncdir(
+      |        ^^^^^^^^
+...
+  581 |         scope: &mut RequestScope,
+      |         ------------------------
+help: provide the argument
+      |
+19682 |             ops.fsyncdir(&cx, /* &mut vfs::RequestScope */, InodeNumber(1), 0, false)
+      |                               +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20547:18
+      |
+20547 |                 .fsync(&cx, InodeNumber(2), 0, false)
+      |                  ^^^^^      -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:566:8
+      |
+  566 |     fn fsync(
+      |        ^^^^^
+...
+  569 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20547 |                 .fsync(&cx, /* &mut vfs::RequestScope */, InodeNumber(2), 0, false)
+      |                             +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20592:17
+      |
+20592 |             ops.fsync(&cx, InodeNumber(2), 0, false)
+      |                 ^^^^^      -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:566:8
+      |
+  566 |     fn fsync(
+      |        ^^^^^
+...
+  569 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20592 |             ops.fsync(&cx, /* &mut vfs::RequestScope */, InodeNumber(2), 0, false)
+      |                            +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20639:17
+      |
+20639 |             ops.flush(&cx, InodeNumber(2), 7, 13)
+      |                 ^^^^^      -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:552:8
+      |
+  552 |     fn flush(
+      |        ^^^^^
+...
+  555 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20639 -             ops.flush(&cx, InodeNumber(2), 7, 13)
+20639 +             ops.flush(&cx, /* &mut vfs::RequestScope */, InodeNumber(2), 13, 7)
+      |
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20684:17
+      |
+20684 |             ops.flush(&cx, InodeNumber(1), 5, 11)
+      |                 ^^^^^      -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:552:8
+      |
+  552 |     fn flush(
+      |        ^^^^^
+...
+  555 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20684 -             ops.flush(&cx, InodeNumber(1), 5, 11)
+20684 +             ops.flush(&cx, /* &mut vfs::RequestScope */, InodeNumber(1), 11, 5)
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20723:13
+      |
+20723 |         ops.setxattr(&cx, attr.ino, "user.tag", b"val", XattrSetMode::Set)
+      |             ^^^^^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:396:8
+      |
+  396 |     fn setxattr(
+      |        ^^^^^^^^
+...
+  399 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20723 |         ops.setxattr(&cx, /* &mut vfs::RequestScope */, attr.ino, "user.tag", b"val", XattrSetMode::Set)
+      |                           +++++++++++++++++++++++++++++
+
+error[E0061]: this method takes 5 arguments but 4 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20746:13
+      |
+20746 |         ops.link(&cx, attr.ino, InodeNumber(1), OsStr::new("link.txt"))
+      |             ^^^^      -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:499:8
+      |
+  499 |     fn link(
+      |        ^^^^
+...
+  502 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20746 -         ops.link(&cx, attr.ino, InodeNumber(1), OsStr::new("link.txt"))
+20746 +         ops.link(&cx, /* &mut vfs::RequestScope */, InodeNumber(1), attr.ino, OsStr::new("link.txt"))
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20786:13
+      |
+20786 |         ops.rename(
+      |             ^^^^^^
+20787 |             &cx,
+20788 |             InodeNumber(1),
+      |             -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:474:8
+      |
+  474 |     fn rename(
+      |        ^^^^^^
+...
+  477 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20786 |         ops.rename(
+20787 |             &cx,
+20788 ~             /* &mut vfs::RequestScope */,
+20789 ~             InodeNumber(1),
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20884:13
+      |
+20884 |         ops.setattr(
+      |             ^^^^^^^
+20885 |             &cx,
+20886 |             attr.ino,
+      |             -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20884 |         ops.setattr(
+20885 |             &cx,
+20886 ~             /* &mut vfs::RequestScope */,
+20887 ~             attr.ino,
+      |
+
+error[E0061]: this method takes 4 arguments but 3 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20916:13
+      |
+20916 |         ops.setattr(
+      |             ^^^^^^^
+20917 |             &cx,
+20918 |             attr.ino,
+      |             -------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:538:8
+      |
+  538 |     fn setattr(
+      |        ^^^^^^^
+...
+  541 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20916 |         ops.setattr(
+20917 |             &cx,
+20918 ~             /* &mut vfs::RequestScope */,
+20919 ~             attr.ino,
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20955:13
+      |
+20955 |         ops.rename(
+      |             ^^^^^^
+20956 |             &cx,
+20957 |             dir_a.ino,
+      |             --------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:474:8
+      |
+  474 |     fn rename(
+      |        ^^^^^^
+...
+  477 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20955 |         ops.rename(
+20956 |             &cx,
+20957 ~             /* &mut vfs::RequestScope */,
+20958 ~             dir_a.ino,
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:20993:13
+      |
+20993 |         ops.rename(
+      |             ^^^^^^
+20994 |             &cx,
+20995 |             dir_a.ino,
+      |             --------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:474:8
+      |
+  474 |     fn rename(
+      |        ^^^^^^
+...
+  477 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+20993 |         ops.rename(
+20994 |             &cx,
+20995 ~             /* &mut vfs::RequestScope */,
+20996 ~             dir_a.ino,
+      |
+
+error[E0061]: this method takes 6 arguments but 5 arguments were supplied
+     --> crates/ffs-core/src/lib.rs:21021:13
+      |
+21021 |         ops.rename(
+      |             ^^^^^^
+21022 |             &cx,
+21023 |             InodeNumber(1),
+      |             -------------- argument #2 of type `&mut vfs::RequestScope` is missing
+      |
+note: method defined here
+     --> crates/ffs-core/src/vfs.rs:474:8
+      |
+  474 |     fn rename(
+      |        ^^^^^^
+...
+  477 |         _scope: &mut RequestScope,
+      |         -------------------------
+help: provide the argument
+      |
+21021 |         ops.rename(
+21022 |             &cx,
+21023 ~             /* &mut vfs::RequestScope */,
+21024 ~             InodeNumber(1),
+      |
+
+warning: unused variable: `ino`
+     --> crates/ffs-core/src/lib.rs:10672:66
+      |
+10672 |         fn readlink(&self, _cx: &Cx, __scope: &mut RequestScope, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
+      |                                                                  ^^^ help: if this is intentional, prefix it with an underscore: `_ino`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0061, E0308.
+For more information about an error, try `rustc --explain E0061`.
+warning: `ffs-core` (lib test) generated 1 warning
+error: could not compile `ffs-core` (lib test) due to 222 previous errors; 1 warning emitted

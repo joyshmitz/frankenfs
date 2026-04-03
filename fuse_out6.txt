@@ -1,0 +1,145 @@
+   Compiling ffs-core v0.1.0 (/data/projects/frankenfs/crates/ffs-core)
+   Compiling ffs-harness v0.1.0 (/data/projects/frankenfs/crates/ffs-harness)
+   Compiling ffs-fuse v0.1.0 (/data/projects/frankenfs/crates/ffs-fuse)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.94s
+     Running tests/fuse_e2e.rs (target/debug/deps/fuse_e2e-2d69b0459d12be89)
+
+running 1 test
+[2m2026-03-25T21:26:49.765061Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 2
+[2m2026-03-25T21:26:49.765116Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765129Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 1
+[2m2026-03-25T21:26:49.765150Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765166Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765190Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765229Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765242Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765251Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.765261Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765273Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765295Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765321Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765332Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765341Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.765350Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765359Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765380Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765403Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765415Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765423Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.765433Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765441Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765462Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765486Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765498Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765519Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.765529Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765547Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765574Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765591Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765605Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765613Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.765622Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765631Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765651Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765664Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 16 to tx
+[2m2026-03-25T21:26:49.765678Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765688Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765696Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.765706Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765717Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765739Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765750Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.765781Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765794Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765802Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.765812Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765820Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765841Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765854Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.765865Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.765890Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765901Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.765910Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.765919Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.765928Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.765949Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.765965Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.765976Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766002Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766013Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766021Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766031Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766039Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766068Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.766079Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.766091Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766122Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766134Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766143Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766152Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766161Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766187Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.766198Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.766210Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766237Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766248Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766256Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766266Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766274Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766299Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.766310Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.766322Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766348Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766359Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766367Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766377Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766390Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766416Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.766427Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.766439Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766465Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766477Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766486Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766495Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766518Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766546Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.766558Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.766570Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766598Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766610Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766618Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766628Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766636Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766654Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.766664Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.766675Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766700Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766711Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766719Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766729Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766737Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766762Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.766774Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.766786Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766813Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766824Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766837Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766847Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766856Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766881Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.766892Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.766905Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.766935Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766947Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 2 to tx
+[2m2026-03-25T21:26:49.766955Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 1 in tx
+[2m2026-03-25T21:26:49.766965Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 2 in tx
+[2m2026-03-25T21:26:49.766973Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 18
+[2m2026-03-25T21:26:49.766999Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 1 to tx
+[2m2026-03-25T21:26:49.767010Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block FOUND block 17 in tx
+[2m2026-03-25T21:26:49.767022Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 17 to tx
+[2m2026-03-25T21:26:49.767042Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::read_block falling back to base for block 34
+[2m2026-03-25T21:26:49.767053Z[0m [31mERROR[0m [2mffs_core[0m[2m:[0m TransactionBlockAdapter::write_block STAGING block 34 to tx
+test fuse_write_large_file ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.33s
+

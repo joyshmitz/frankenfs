@@ -8623,7 +8623,7 @@ impl OpenFs {
     fn ext4_fallocate(
         &self,
         cx: &Cx,
-        _scope: &mut RequestScope,
+        scope: &mut RequestScope,
         ino: InodeNumber,
         offset: u64,
         length: u64,
@@ -8869,26 +8869,45 @@ impl OpenFs {
                             groups,
                             persist_ctx,
                         } = &mut *alloc;
-                        ffs_extent::allocate_extent(
-                            cx,
-                            &block_dev,
-                            &mut root_bytes,
-                            geo,
-                            groups,
-                            logical,
-                            chunk,
-                            &hint,
-                            persist_ctx,
-                        )?
+                        if let Some(tx) = &mut scope.tx {
+                            let tx_dev = TransactionBlockAdapter {
+                                base: &block_dev,
+                                tx: Mutex::new(tx),
+                            };
+                            ffs_extent::allocate_extent(
+                                cx,
+                                &tx_dev,
+                                &mut root_bytes,
+                                geo,
+                                groups,
+                                logical,
+                                chunk,
+                                &hint,
+                                persist_ctx,
+                            )?
+                        } else {
+                            ffs_extent::allocate_extent(
+                                cx,
+                                &block_dev,
+                                &mut root_bytes,
+                                geo,
+                                groups,
+                                logical,
+                                chunk,
+                                &hint,
+                                persist_ctx,
+                            )?
+                        }
                     };
                     self.extent_cache.invalidate_all();
 
                     for rel in 0..alloc_mapping.count {
-                        block_dev.write_block(
-                            cx,
-                            BlockNumber(alloc_mapping.physical_start + u64::from(rel)),
-                            &zero_block,
-                        )?;
+                        let phys_block = BlockNumber(alloc_mapping.physical_start + u64::from(rel));
+                        if let Some(tx) = &mut scope.tx {
+                            tx.stage_write(phys_block, zero_block.clone());
+                        } else {
+                            block_dev.write_block(cx, phys_block, &zero_block)?;
+                        }
                     }
                     newly_allocated_blocks += u64::from(alloc_mapping.count);
                     goal_block = Some(BlockNumber(

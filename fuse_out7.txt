@@ -1,0 +1,25 @@
+   Compiling ffs-mvcc v0.1.0 (/data/projects/frankenfs/crates/ffs-mvcc)
+   Compiling ffs-btrfs v0.1.0 (/data/projects/frankenfs/crates/ffs-btrfs)
+   Compiling ffs-core v0.1.0 (/data/projects/frankenfs/crates/ffs-core)
+   Compiling ffs-harness v0.1.0 (/data/projects/frankenfs/crates/ffs-harness)
+   Compiling ffs-fuse v0.1.0 (/data/projects/frankenfs/crates/ffs-fuse)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.15s
+     Running tests/fuse_e2e.rs (target/debug/deps/fuse_e2e-2d69b0459d12be89)
+
+running 1 test
+
+thread 'fuse_fsync_after_multiple_writes' (2147564) panicked at crates/ffs-harness/tests/fuse_e2e.rs:1409:9:
+assertion `left == right` failed
+  left: "\0\0\0\0\0\0\0\0\0\0\0\0\0\0chunk3"
+ right: "chunk1 chunk2 chunk3"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test fuse_fsync_after_multiple_writes ... FAILED
+
+failures:
+
+failures:
+    fuse_fsync_after_multiple_writes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.33s
+
+error: test failed, to rerun pass `-p ffs-harness --test fuse_e2e`

@@ -1,0 +1,15 @@
+   Compiling ffs-dir v0.1.0 (/data/projects/frankenfs/crates/ffs-dir)
+error[E0433]: cannot find module or crate `tracing` in this scope
+   --> crates/ffs-dir/src/lib.rs:285:17
+    |
+285 |                 tracing::error!("remove_entry: coalescing {} at {} with prev at {}", String::from_utf8_lossy(name), off, prev_off);
+    |                 ^^^^^^^ use of unresolved module or unlinked crate `tracing`
+
+error[E0433]: cannot find module or crate `tracing` in this scope
+   --> crates/ffs-dir/src/lib.rs:292:13
+    |
+292 |             tracing::error!("remove_entry: SUCCESS removed {} at {}", String::from_utf8_lossy(name), off);
+    |             ^^^^^^^ use of unresolved module or unlinked crate `tracing`
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `ffs-dir` (lib) due to 2 previous errors

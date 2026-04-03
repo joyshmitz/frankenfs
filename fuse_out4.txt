@@ -1,0 +1,29 @@
+   Compiling ffs-core v0.1.0 (/data/projects/frankenfs/crates/ffs-core)
+   Compiling ffs-harness v0.1.0 (/data/projects/frankenfs/crates/ffs-harness)
+   Compiling ffs-fuse v0.1.0 (/data/projects/frankenfs/crates/ffs-fuse)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.71s
+     Running tests/fuse_e2e.rs (target/debug/deps/fuse_e2e-2d69b0459d12be89)
+
+running 1 test
+[2m2026-03-25T21:19:01.786603Z[0m [31mERROR[0m [2mffs_mvcc[0m[2m:[0m MvccBlockDevice::read_block falling back to base for block 18, snapshot Snapshot { high: CommitSeq(0) }
+[2m2026-03-25T21:19:01.786700Z[0m [31mERROR[0m [2mffs_mvcc[0m[2m:[0m MvccBlockDevice::read_block falling back to base for block 1, snapshot Snapshot { high: CommitSeq(0) }
+[2m2026-03-25T21:19:01.786719Z[0m [31mERROR[0m [2mffs_mvcc[0m[2m:[0m MvccBlockDevice::read_block falling back to base for block 2, snapshot Snapshot { high: CommitSeq(0) }
+[2m2026-03-25T21:19:01.786739Z[0m [31mERROR[0m [2mffs_mvcc[0m[2m:[0m MvccBlockDevice::read_block falling back to base for block 18, snapshot Snapshot { high: CommitSeq(0) }
+[2m2026-03-25T21:19:01.786779Z[0m [31mERROR[0m [2mffs_mvcc[0m[2m:[0m MvccBlockDevice::read_block falling back to base for block 34, snapshot Snapshot { high: CommitSeq(0) }
+[2m2026-03-25T21:19:01.786802Z[0m [31mERROR[0m [2mffs_mvcc[0m[2m:[0m MvccBlockDevice::read_block falling back to base for block 34, snapshot Snapshot { high: CommitSeq(0) }
+[2m2026-03-25T21:19:01.787138Z[0m [31mERROR[0m [2mffs_mvcc[0m[2m:[0m MvccBlockDevice::read_block falling back to base for block 2, snapshot Snapshot { high: CommitSeq(5) }
+[2m2026-03-25T21:19:01.787187Z[0m [31mERROR[0m [2mffs_mvcc[0m[2m:[0m MvccBlockDevice::read_block falling back to base for block 2, snapshot Snapshot { high: CommitSeq(5) }
+
+thread 'fuse_write_large_file' (2108223) panicked at crates/ffs-harness/tests/fuse_e2e.rs:993:33:
+write large file via FUSE: Os { code: 22, kind: InvalidInput, message: "Invalid argument" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test fuse_write_large_file ... FAILED
+
+failures:
+
+failures:
+    fuse_write_large_file
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.33s
+
+error: test failed, to rerun pass `-p ffs-harness --test fuse_e2e`

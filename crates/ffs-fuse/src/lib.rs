@@ -5781,6 +5781,7 @@ mod tests {
                 for (i, &count) in per_core_counts.iter().enumerate() {
                     let m = disp.core_metrics(i as u32).unwrap();
                     for _ in 0..count {
+                        m.begin_request();
                         m.record_request();
                     }
                     expected_total += count;
@@ -5817,6 +5818,7 @@ mod tests {
                 for (i, &count) in per_core_counts.iter().enumerate() {
                     let m = disp.core_metrics(i as u32).unwrap();
                     for _ in 0..count {
+                        m.begin_request();
                         m.record_request();
                     }
                 }

@@ -7437,6 +7437,87 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_evidence_preset_cache() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--preset",
+            "cache",
+            "--json",
+            "/tmp/cache-metrics.json",
+        ])
+        .expect("evidence cache command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                ledger,
+                preset,
+                json,
+                ..
+            } => {
+                assert_eq!(ledger, PathBuf::from("/tmp/cache-metrics.json"));
+                assert_eq!(preset.as_deref(), Some("cache"));
+                assert!(json);
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_preset_mvcc() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--preset",
+            "mvcc",
+            "--json",
+            "/tmp/mvcc-metrics.json",
+        ])
+        .expect("evidence mvcc command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                ledger,
+                preset,
+                json,
+                ..
+            } => {
+                assert_eq!(ledger, PathBuf::from("/tmp/mvcc-metrics.json"));
+                assert_eq!(preset.as_deref(), Some("mvcc"));
+                assert!(json);
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_preset_repair_live() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--preset",
+            "repair-live",
+            "--json",
+            "/tmp/repair-live-metrics.json",
+        ])
+        .expect("evidence repair-live command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                ledger,
+                preset,
+                json,
+                ..
+            } => {
+                assert_eq!(ledger, PathBuf::from("/tmp/repair-live-metrics.json"));
+                assert_eq!(preset.as_deref(), Some("repair-live"));
+                assert!(json);
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
     fn cli_parses_mkfs_with_all_flags() {
         let cli = Cli::try_parse_from([
             "ffs",

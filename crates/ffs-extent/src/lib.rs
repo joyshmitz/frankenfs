@@ -4608,7 +4608,7 @@ mod tests {
             )
             .unwrap();
         }
-        
+
         // Punching a hole in the middle of the first extent [0..5]
         // This splits it into two, making 5 total entries in the tree.
         // It must handle root split properly.

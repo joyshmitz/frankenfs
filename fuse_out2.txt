@@ -1,0 +1,20 @@
+   Compiling ffs-harness v0.1.0 (/data/projects/frankenfs/crates/ffs-harness)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.06s
+     Running tests/fuse_e2e.rs (target/debug/deps/fuse_e2e-2d69b0459d12be89)
+
+running 1 test
+[2m2026-03-25T21:04:01.916171Z[0m [33m WARN[0m [2mffs_fuse[0m[2m:[0m FUSE op failed [3mop[0m[2m=[0m"write" [3mino[0m[2m=[0m15 [3moffset[0m[2m=[0m0 [3merrno[0m[2m=[0m22 [3merror[0m[2m=[0minvalid on-disk format: invalid magic: expected 0xf30a, got 0x0
+
+thread 'fuse_write_large_file' (2021633) panicked at crates/ffs-harness/tests/fuse_e2e.rs:993:33:
+write large file via FUSE: Os { code: 22, kind: InvalidInput, message: "Invalid argument" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test fuse_write_large_file ... FAILED
+
+failures:
+
+failures:
+    fuse_write_large_file
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.33s
+
+error: test failed, to rerun pass `-p ffs-harness --test fuse_e2e`

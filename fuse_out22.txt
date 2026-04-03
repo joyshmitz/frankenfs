@@ -1,0 +1,386 @@
+   Compiling ffs-dir v0.1.0 (/data/projects/frankenfs/crates/ffs-dir)
+   Compiling ffs-core v0.1.0 (/data/projects/frankenfs/crates/ffs-core)
+warning: unused variable: `block_dev`
+    --> crates/ffs-core/src/lib.rs:7486:13
+     |
+7486 |         let block_dev = self.block_device_adapter();
+     |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_block_dev`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `block_dev` is never read
+    --> crates/ffs-core/src/lib.rs:7988:29
+     |
+7988 |         let mut block_dev = self.block_device_adapter();
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `snapshot` is never read
+     --> crates/ffs-core/src/lib.rs:12563:28
+      |
+12563 |         let mut snapshot = None;
+      |                            ^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+   Compiling ffs-harness v0.1.0 (/data/projects/frankenfs/crates/ffs-harness)
+   Compiling ffs-fuse v0.1.0 (/data/projects/frankenfs/crates/ffs-fuse)
+warning: `ffs-core` (lib) generated 3 warnings (run `cargo fix --lib -p ffs-core` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.06s
+     Running tests/fuse_e2e.rs (target/debug/deps/fuse_e2e-2d69b0459d12be89)
+
+running 1 test
+remove_entry: coalescing file_0000.txt at 24 with prev at 12
+remove_entry: SUCCESS removed file_0000.txt at 24
+remove_entry: coalescing file_0001.txt at 48 with prev at 12
+remove_entry: SUCCESS removed file_0001.txt at 48
+remove_entry: coalescing file_0002.txt at 72 with prev at 12
+remove_entry: SUCCESS removed file_0002.txt at 72
+remove_entry: coalescing file_0003.txt at 96 with prev at 12
+remove_entry: SUCCESS removed file_0003.txt at 96
+remove_entry: coalescing file_0004.txt at 120 with prev at 12
+remove_entry: SUCCESS removed file_0004.txt at 120
+remove_entry: coalescing file_0005.txt at 144 with prev at 12
+remove_entry: SUCCESS removed file_0005.txt at 144
+remove_entry: coalescing file_0006.txt at 168 with prev at 12
+remove_entry: SUCCESS removed file_0006.txt at 168
+remove_entry: coalescing file_0007.txt at 192 with prev at 12
+remove_entry: SUCCESS removed file_0007.txt at 192
+remove_entry: coalescing file_0008.txt at 216 with prev at 12
+remove_entry: SUCCESS removed file_0008.txt at 216
+remove_entry: coalescing file_0009.txt at 240 with prev at 12
+remove_entry: SUCCESS removed file_0009.txt at 240
+remove_entry: coalescing file_0010.txt at 264 with prev at 12
+remove_entry: SUCCESS removed file_0010.txt at 264
+remove_entry: coalescing file_0011.txt at 288 with prev at 12
+remove_entry: SUCCESS removed file_0011.txt at 288
+remove_entry: coalescing file_0012.txt at 312 with prev at 12
+remove_entry: SUCCESS removed file_0012.txt at 312
+remove_entry: coalescing file_0013.txt at 336 with prev at 12
+remove_entry: SUCCESS removed file_0013.txt at 336
+remove_entry: coalescing file_0014.txt at 360 with prev at 12
+remove_entry: SUCCESS removed file_0014.txt at 360
+remove_entry: coalescing file_0015.txt at 384 with prev at 12
+remove_entry: SUCCESS removed file_0015.txt at 384
+remove_entry: coalescing file_0016.txt at 408 with prev at 12
+remove_entry: SUCCESS removed file_0016.txt at 408
+remove_entry: coalescing file_0017.txt at 432 with prev at 12
+remove_entry: SUCCESS removed file_0017.txt at 432
+remove_entry: coalescing file_0018.txt at 456 with prev at 12
+remove_entry: SUCCESS removed file_0018.txt at 456
+remove_entry: coalescing file_0019.txt at 480 with prev at 12
+remove_entry: SUCCESS removed file_0019.txt at 480
+remove_entry: coalescing file_0020.txt at 504 with prev at 12
+remove_entry: SUCCESS removed file_0020.txt at 504
+remove_entry: coalescing file_0021.txt at 528 with prev at 12
+remove_entry: SUCCESS removed file_0021.txt at 528
+remove_entry: coalescing file_0022.txt at 552 with prev at 12
+remove_entry: SUCCESS removed file_0022.txt at 552
+remove_entry: coalescing file_0023.txt at 576 with prev at 12
+remove_entry: SUCCESS removed file_0023.txt at 576
+remove_entry: coalescing file_0024.txt at 600 with prev at 12
+remove_entry: SUCCESS removed file_0024.txt at 600
+remove_entry: coalescing file_0025.txt at 624 with prev at 12
+remove_entry: SUCCESS removed file_0025.txt at 624
+remove_entry: coalescing file_0026.txt at 648 with prev at 12
+remove_entry: SUCCESS removed file_0026.txt at 648
+remove_entry: coalescing file_0027.txt at 672 with prev at 12
+remove_entry: SUCCESS removed file_0027.txt at 672
+remove_entry: coalescing file_0028.txt at 696 with prev at 12
+remove_entry: SUCCESS removed file_0028.txt at 696
+remove_entry: coalescing file_0029.txt at 720 with prev at 12
+remove_entry: SUCCESS removed file_0029.txt at 720
+remove_entry: coalescing file_0030.txt at 744 with prev at 12
+remove_entry: SUCCESS removed file_0030.txt at 744
+remove_entry: coalescing file_0031.txt at 768 with prev at 12
+remove_entry: SUCCESS removed file_0031.txt at 768
+remove_entry: coalescing file_0032.txt at 792 with prev at 12
+remove_entry: SUCCESS removed file_0032.txt at 792
+remove_entry: coalescing file_0033.txt at 816 with prev at 12
+remove_entry: SUCCESS removed file_0033.txt at 816
+remove_entry: coalescing file_0034.txt at 840 with prev at 12
+remove_entry: SUCCESS removed file_0034.txt at 840
+remove_entry: coalescing file_0035.txt at 864 with prev at 12
+remove_entry: SUCCESS removed file_0035.txt at 864
+remove_entry: coalescing file_0036.txt at 888 with prev at 12
+remove_entry: SUCCESS removed file_0036.txt at 888
+remove_entry: coalescing file_0037.txt at 912 with prev at 12
+remove_entry: SUCCESS removed file_0037.txt at 912
+remove_entry: coalescing file_0038.txt at 936 with prev at 12
+remove_entry: SUCCESS removed file_0038.txt at 936
+remove_entry: coalescing file_0039.txt at 960 with prev at 12
+remove_entry: SUCCESS removed file_0039.txt at 960
+remove_entry: coalescing file_0040.txt at 984 with prev at 12
+remove_entry: SUCCESS removed file_0040.txt at 984
+remove_entry: coalescing file_0041.txt at 1008 with prev at 12
+remove_entry: SUCCESS removed file_0041.txt at 1008
+remove_entry: coalescing file_0042.txt at 1032 with prev at 12
+remove_entry: SUCCESS removed file_0042.txt at 1032
+remove_entry: coalescing file_0043.txt at 1056 with prev at 12
+remove_entry: SUCCESS removed file_0043.txt at 1056
+remove_entry: coalescing file_0044.txt at 1080 with prev at 12
+remove_entry: SUCCESS removed file_0044.txt at 1080
+remove_entry: coalescing file_0045.txt at 1104 with prev at 12
+remove_entry: SUCCESS removed file_0045.txt at 1104
+remove_entry: coalescing file_0046.txt at 1128 with prev at 12
+remove_entry: SUCCESS removed file_0046.txt at 1128
+remove_entry: coalescing file_0047.txt at 1152 with prev at 12
+remove_entry: SUCCESS removed file_0047.txt at 1152
+remove_entry: coalescing file_0048.txt at 1176 with prev at 12
+remove_entry: SUCCESS removed file_0048.txt at 1176
+remove_entry: coalescing file_0049.txt at 1200 with prev at 12
+remove_entry: SUCCESS removed file_0049.txt at 1200
+remove_entry: coalescing file_0050.txt at 1224 with prev at 12
+remove_entry: SUCCESS removed file_0050.txt at 1224
+remove_entry: coalescing file_0051.txt at 1248 with prev at 12
+remove_entry: SUCCESS removed file_0051.txt at 1248
+remove_entry: coalescing file_0052.txt at 1272 with prev at 12
+remove_entry: SUCCESS removed file_0052.txt at 1272
+remove_entry: coalescing file_0053.txt at 1296 with prev at 12
+remove_entry: SUCCESS removed file_0053.txt at 1296
+remove_entry: coalescing file_0054.txt at 1320 with prev at 12
+remove_entry: SUCCESS removed file_0054.txt at 1320
+remove_entry: coalescing file_0055.txt at 1344 with prev at 12
+remove_entry: SUCCESS removed file_0055.txt at 1344
+remove_entry: coalescing file_0056.txt at 1368 with prev at 12
+remove_entry: SUCCESS removed file_0056.txt at 1368
+remove_entry: coalescing file_0057.txt at 1392 with prev at 12
+remove_entry: SUCCESS removed file_0057.txt at 1392
+remove_entry: coalescing file_0058.txt at 1416 with prev at 12
+remove_entry: SUCCESS removed file_0058.txt at 1416
+remove_entry: coalescing file_0059.txt at 1440 with prev at 12
+remove_entry: SUCCESS removed file_0059.txt at 1440
+remove_entry: coalescing file_0060.txt at 1464 with prev at 12
+remove_entry: SUCCESS removed file_0060.txt at 1464
+remove_entry: coalescing file_0061.txt at 1488 with prev at 12
+remove_entry: SUCCESS removed file_0061.txt at 1488
+remove_entry: coalescing file_0062.txt at 1512 with prev at 12
+remove_entry: SUCCESS removed file_0062.txt at 1512
+remove_entry: coalescing file_0063.txt at 1536 with prev at 12
+remove_entry: SUCCESS removed file_0063.txt at 1536
+remove_entry: coalescing file_0064.txt at 1560 with prev at 12
+remove_entry: SUCCESS removed file_0064.txt at 1560
+remove_entry: coalescing file_0065.txt at 1584 with prev at 12
+remove_entry: SUCCESS removed file_0065.txt at 1584
+remove_entry: coalescing file_0066.txt at 1608 with prev at 12
+remove_entry: SUCCESS removed file_0066.txt at 1608
+remove_entry: coalescing file_0067.txt at 1632 with prev at 12
+remove_entry: SUCCESS removed file_0067.txt at 1632
+remove_entry: coalescing file_0068.txt at 1656 with prev at 12
+remove_entry: SUCCESS removed file_0068.txt at 1656
+remove_entry: coalescing file_0069.txt at 1680 with prev at 12
+remove_entry: SUCCESS removed file_0069.txt at 1680
+remove_entry: coalescing file_0070.txt at 1704 with prev at 12
+remove_entry: SUCCESS removed file_0070.txt at 1704
+remove_entry: coalescing file_0071.txt at 1728 with prev at 12
+remove_entry: SUCCESS removed file_0071.txt at 1728
+remove_entry: coalescing file_0072.txt at 1752 with prev at 12
+remove_entry: SUCCESS removed file_0072.txt at 1752
+remove_entry: coalescing file_0073.txt at 1776 with prev at 12
+remove_entry: SUCCESS removed file_0073.txt at 1776
+remove_entry: coalescing file_0074.txt at 1800 with prev at 12
+remove_entry: SUCCESS removed file_0074.txt at 1800
+remove_entry: coalescing file_0075.txt at 1824 with prev at 12
+remove_entry: SUCCESS removed file_0075.txt at 1824
+remove_entry: coalescing file_0076.txt at 1848 with prev at 12
+remove_entry: SUCCESS removed file_0076.txt at 1848
+remove_entry: coalescing file_0077.txt at 1872 with prev at 12
+remove_entry: SUCCESS removed file_0077.txt at 1872
+remove_entry: coalescing file_0078.txt at 1896 with prev at 12
+remove_entry: SUCCESS removed file_0078.txt at 1896
+remove_entry: coalescing file_0079.txt at 1920 with prev at 12
+remove_entry: SUCCESS removed file_0079.txt at 1920
+remove_entry: coalescing file_0080.txt at 1944 with prev at 12
+remove_entry: SUCCESS removed file_0080.txt at 1944
+remove_entry: coalescing file_0081.txt at 1968 with prev at 12
+remove_entry: SUCCESS removed file_0081.txt at 1968
+remove_entry: coalescing file_0082.txt at 1992 with prev at 12
+remove_entry: SUCCESS removed file_0082.txt at 1992
+remove_entry: coalescing file_0083.txt at 2016 with prev at 12
+remove_entry: SUCCESS removed file_0083.txt at 2016
+remove_entry: coalescing file_0084.txt at 2040 with prev at 12
+remove_entry: SUCCESS removed file_0084.txt at 2040
+remove_entry: coalescing file_0085.txt at 2064 with prev at 12
+remove_entry: SUCCESS removed file_0085.txt at 2064
+remove_entry: coalescing file_0086.txt at 2088 with prev at 12
+remove_entry: SUCCESS removed file_0086.txt at 2088
+remove_entry: coalescing file_0087.txt at 2112 with prev at 12
+remove_entry: SUCCESS removed file_0087.txt at 2112
+remove_entry: coalescing file_0088.txt at 2136 with prev at 12
+remove_entry: SUCCESS removed file_0088.txt at 2136
+remove_entry: coalescing file_0089.txt at 2160 with prev at 12
+remove_entry: SUCCESS removed file_0089.txt at 2160
+remove_entry: coalescing file_0090.txt at 2184 with prev at 12
+remove_entry: SUCCESS removed file_0090.txt at 2184
+remove_entry: coalescing file_0091.txt at 2208 with prev at 12
+remove_entry: SUCCESS removed file_0091.txt at 2208
+remove_entry: coalescing file_0092.txt at 2232 with prev at 12
+remove_entry: SUCCESS removed file_0092.txt at 2232
+remove_entry: coalescing file_0093.txt at 2256 with prev at 12
+remove_entry: SUCCESS removed file_0093.txt at 2256
+remove_entry: coalescing file_0094.txt at 2280 with prev at 12
+remove_entry: SUCCESS removed file_0094.txt at 2280
+remove_entry: coalescing file_0095.txt at 2304 with prev at 12
+remove_entry: SUCCESS removed file_0095.txt at 2304
+remove_entry: coalescing file_0096.txt at 2328 with prev at 12
+remove_entry: SUCCESS removed file_0096.txt at 2328
+remove_entry: coalescing file_0097.txt at 2352 with prev at 12
+remove_entry: SUCCESS removed file_0097.txt at 2352
+remove_entry: coalescing file_0098.txt at 2376 with prev at 12
+remove_entry: SUCCESS removed file_0098.txt at 2376
+remove_entry: coalescing file_0099.txt at 2400 with prev at 12
+remove_entry: SUCCESS removed file_0099.txt at 2400
+remove_entry: coalescing file_0100.txt at 2424 with prev at 12
+remove_entry: SUCCESS removed file_0100.txt at 2424
+remove_entry: coalescing file_0101.txt at 2448 with prev at 12
+remove_entry: SUCCESS removed file_0101.txt at 2448
+remove_entry: coalescing file_0102.txt at 2472 with prev at 12
+remove_entry: SUCCESS removed file_0102.txt at 2472
+remove_entry: coalescing file_0103.txt at 2496 with prev at 12
+remove_entry: SUCCESS removed file_0103.txt at 2496
+remove_entry: coalescing file_0104.txt at 2520 with prev at 12
+remove_entry: SUCCESS removed file_0104.txt at 2520
+remove_entry: coalescing file_0105.txt at 2544 with prev at 12
+remove_entry: SUCCESS removed file_0105.txt at 2544
+remove_entry: coalescing file_0106.txt at 2568 with prev at 12
+remove_entry: SUCCESS removed file_0106.txt at 2568
+remove_entry: coalescing file_0107.txt at 2592 with prev at 12
+remove_entry: SUCCESS removed file_0107.txt at 2592
+remove_entry: coalescing file_0108.txt at 2616 with prev at 12
+remove_entry: SUCCESS removed file_0108.txt at 2616
+remove_entry: coalescing file_0109.txt at 2640 with prev at 12
+remove_entry: SUCCESS removed file_0109.txt at 2640
+remove_entry: coalescing file_0110.txt at 2664 with prev at 12
+remove_entry: SUCCESS removed file_0110.txt at 2664
+remove_entry: coalescing file_0111.txt at 2688 with prev at 12
+remove_entry: SUCCESS removed file_0111.txt at 2688
+remove_entry: coalescing file_0112.txt at 2712 with prev at 12
+remove_entry: SUCCESS removed file_0112.txt at 2712
+remove_entry: coalescing file_0113.txt at 2736 with prev at 12
+remove_entry: SUCCESS removed file_0113.txt at 2736
+remove_entry: coalescing file_0114.txt at 2760 with prev at 12
+remove_entry: SUCCESS removed file_0114.txt at 2760
+remove_entry: coalescing file_0115.txt at 2784 with prev at 12
+remove_entry: SUCCESS removed file_0115.txt at 2784
+remove_entry: coalescing file_0116.txt at 2808 with prev at 12
+remove_entry: SUCCESS removed file_0116.txt at 2808
+remove_entry: coalescing file_0117.txt at 2832 with prev at 12
+remove_entry: SUCCESS removed file_0117.txt at 2832
+remove_entry: coalescing file_0118.txt at 2856 with prev at 12
+remove_entry: SUCCESS removed file_0118.txt at 2856
+remove_entry: coalescing file_0119.txt at 2880 with prev at 12
+remove_entry: SUCCESS removed file_0119.txt at 2880
+remove_entry: coalescing file_0120.txt at 2904 with prev at 12
+remove_entry: SUCCESS removed file_0120.txt at 2904
+remove_entry: coalescing file_0121.txt at 2928 with prev at 12
+remove_entry: SUCCESS removed file_0121.txt at 2928
+remove_entry: coalescing file_0122.txt at 2952 with prev at 12
+remove_entry: SUCCESS removed file_0122.txt at 2952
+remove_entry: coalescing file_0123.txt at 2976 with prev at 12
+remove_entry: SUCCESS removed file_0123.txt at 2976
+remove_entry: coalescing file_0124.txt at 3000 with prev at 12
+remove_entry: SUCCESS removed file_0124.txt at 3000
+remove_entry: coalescing file_0125.txt at 3024 with prev at 12
+remove_entry: SUCCESS removed file_0125.txt at 3024
+remove_entry: coalescing file_0126.txt at 3048 with prev at 12
+remove_entry: SUCCESS removed file_0126.txt at 3048
+remove_entry: coalescing file_0127.txt at 3072 with prev at 12
+remove_entry: SUCCESS removed file_0127.txt at 3072
+remove_entry: coalescing file_0128.txt at 3096 with prev at 12
+remove_entry: SUCCESS removed file_0128.txt at 3096
+remove_entry: coalescing file_0129.txt at 3120 with prev at 12
+remove_entry: SUCCESS removed file_0129.txt at 3120
+remove_entry: coalescing file_0130.txt at 3144 with prev at 12
+remove_entry: SUCCESS removed file_0130.txt at 3144
+remove_entry: coalescing file_0131.txt at 3168 with prev at 12
+remove_entry: SUCCESS removed file_0131.txt at 3168
+remove_entry: coalescing file_0132.txt at 3192 with prev at 12
+remove_entry: SUCCESS removed file_0132.txt at 3192
+remove_entry: coalescing file_0133.txt at 3216 with prev at 12
+remove_entry: SUCCESS removed file_0133.txt at 3216
+remove_entry: coalescing file_0134.txt at 3240 with prev at 12
+remove_entry: SUCCESS removed file_0134.txt at 3240
+remove_entry: coalescing file_0135.txt at 3264 with prev at 12
+remove_entry: SUCCESS removed file_0135.txt at 3264
+remove_entry: coalescing file_0136.txt at 3288 with prev at 12
+remove_entry: SUCCESS removed file_0136.txt at 3288
+remove_entry: coalescing file_0137.txt at 3312 with prev at 12
+remove_entry: SUCCESS removed file_0137.txt at 3312
+remove_entry: coalescing file_0138.txt at 3336 with prev at 12
+remove_entry: SUCCESS removed file_0138.txt at 3336
+remove_entry: coalescing file_0139.txt at 3360 with prev at 12
+remove_entry: SUCCESS removed file_0139.txt at 3360
+remove_entry: coalescing file_0140.txt at 3384 with prev at 12
+remove_entry: SUCCESS removed file_0140.txt at 3384
+remove_entry: coalescing file_0141.txt at 3408 with prev at 12
+remove_entry: SUCCESS removed file_0141.txt at 3408
+remove_entry: coalescing file_0142.txt at 3432 with prev at 12
+remove_entry: SUCCESS removed file_0142.txt at 3432
+remove_entry: coalescing file_0143.txt at 3456 with prev at 12
+remove_entry: SUCCESS removed file_0143.txt at 3456
+remove_entry: coalescing file_0144.txt at 3480 with prev at 12
+remove_entry: SUCCESS removed file_0144.txt at 3480
+remove_entry: coalescing file_0145.txt at 3504 with prev at 12
+remove_entry: SUCCESS removed file_0145.txt at 3504
+remove_entry: coalescing file_0146.txt at 3528 with prev at 12
+remove_entry: SUCCESS removed file_0146.txt at 3528
+remove_entry: coalescing file_0147.txt at 3552 with prev at 12
+remove_entry: SUCCESS removed file_0147.txt at 3552
+remove_entry: coalescing file_0148.txt at 3576 with prev at 12
+remove_entry: SUCCESS removed file_0148.txt at 3576
+remove_entry: coalescing file_0149.txt at 3600 with prev at 12
+remove_entry: SUCCESS removed file_0149.txt at 3600
+remove_entry: coalescing file_0150.txt at 3624 with prev at 12
+remove_entry: SUCCESS removed file_0150.txt at 3624
+remove_entry: coalescing file_0151.txt at 3648 with prev at 12
+remove_entry: SUCCESS removed file_0151.txt at 3648
+remove_entry: coalescing file_0152.txt at 3672 with prev at 12
+remove_entry: SUCCESS removed file_0152.txt at 3672
+remove_entry: coalescing file_0153.txt at 3696 with prev at 12
+remove_entry: SUCCESS removed file_0153.txt at 3696
+remove_entry: coalescing file_0154.txt at 3720 with prev at 12
+remove_entry: SUCCESS removed file_0154.txt at 3720
+remove_entry: coalescing file_0155.txt at 3744 with prev at 12
+remove_entry: SUCCESS removed file_0155.txt at 3744
+remove_entry: coalescing file_0156.txt at 3768 with prev at 12
+remove_entry: SUCCESS removed file_0156.txt at 3768
+remove_entry: coalescing file_0157.txt at 3792 with prev at 12
+remove_entry: SUCCESS removed file_0157.txt at 3792
+remove_entry: coalescing file_0158.txt at 3816 with prev at 12
+remove_entry: SUCCESS removed file_0158.txt at 3816
+remove_entry: coalescing file_0159.txt at 3840 with prev at 12
+remove_entry: SUCCESS removed file_0159.txt at 3840
+remove_entry: coalescing file_0160.txt at 3864 with prev at 12
+remove_entry: SUCCESS removed file_0160.txt at 3864
+remove_entry: coalescing file_0161.txt at 3888 with prev at 12
+remove_entry: SUCCESS removed file_0161.txt at 3888
+remove_entry: coalescing file_0162.txt at 3912 with prev at 12
+remove_entry: SUCCESS removed file_0162.txt at 3912
+remove_entry: coalescing file_0163.txt at 3936 with prev at 12
+remove_entry: SUCCESS removed file_0163.txt at 3936
+remove_entry: coalescing file_0164.txt at 3960 with prev at 12
+remove_entry: SUCCESS removed file_0164.txt at 3960
+remove_entry: coalescing file_0165.txt at 3984 with prev at 12
+remove_entry: SUCCESS removed file_0165.txt at 3984
+remove_entry: coalescing file_0166.txt at 4008 with prev at 12
+remove_entry: SUCCESS removed file_0166.txt at 4008
+remove_entry: coalescing file_0167.txt at 4032 with prev at 12
+remove_entry: SUCCESS removed file_0167.txt at 4032
+remove_entry: coalescing file_0168.txt at 4056 with prev at 12
+remove_entry: SUCCESS removed file_0168.txt at 4056
+
+thread 'fuse_spec_i5_delete_reclaims_free_counts' (2559674) panicked at crates/ffs-harness/tests/fuse_e2e.rs:1142:54:
+remove reclaim file 169: No such file or directory (os error 2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test fuse_spec_i5_delete_reclaims_free_counts ... FAILED
+
+failures:
+
+failures:
+    fuse_spec_i5_delete_reclaims_free_counts
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 67 filtered out; finished in 2.06s
+
+error: test failed, to rerun pass `-p ffs-harness --test fuse_e2e`
