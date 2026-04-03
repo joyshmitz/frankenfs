@@ -8919,8 +8919,10 @@ impl OpenFs {
             }
 
             if newly_allocated_blocks > 0 {
-                inode.blocks =
-                    blocks_after_prealloc.expect("planned block delta for allocated extents");
+                inode.blocks = blocks_after_prealloc.ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: "planned block delta missing but blocks allocated".into(),
+                })?;
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
 
@@ -15384,7 +15386,7 @@ mod tests {
     }
 
     fn parse_json_logs(buffer: &SharedLogBuffer) -> Vec<Value> {
-        let bytes = buffer.inner.lock().expect("log buffer lock poisoned");
+        let bytes = buffer.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         String::from_utf8_lossy(&bytes)
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())

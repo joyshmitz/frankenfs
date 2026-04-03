@@ -5899,6 +5899,33 @@ mod tests {
     }
 
     #[test]
+    fn load_evidence_records_preset_contention_selects_correctly() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":1,\"event_type\":\"merge_proof_checked\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":2,\"event_type\":\"merge_applied\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":3,\"event_type\":\"policy_switched\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":4,\"event_type\":\"repair_failed\",\"block_group\":2}\n",
+            "{\"timestamp_ns\":5,\"event_type\":\"contention_sample\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":6,\"event_type\":\"merge_rejected\",\"block_group\":1}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records = load_evidence_records(&path, None, None, Some("contention"))
+                .expect("contention preset should work");
+            assert_eq!(records.len(), 5);
+            assert!(
+                records
+                    .iter()
+                    .all(|r| r.event_type != EvidenceEventType::RepairFailed)
+            );
+            assert_eq!(records[0].event_type, EvidenceEventType::MergeProofChecked);
+            assert_eq!(records[1].event_type, EvidenceEventType::MergeApplied);
+            assert_eq!(records[2].event_type, EvidenceEventType::PolicySwitched);
+            assert_eq!(records[3].event_type, EvidenceEventType::ContentionSample);
+            assert_eq!(records[4].event_type, EvidenceEventType::MergeRejected);
+        });
+    }
+
+    #[test]
     fn load_evidence_records_preset_tail_keeps_last_matching_records() {
         let ledger = concat!(
             "{\"timestamp_ns\":1,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
@@ -6105,6 +6132,19 @@ mod tests {
     }
 
     #[test]
+    fn load_metrics_report_rejects_unsupported_preset() {
+        with_temp_image_path(b"{}", |path| {
+            let err = load_metrics_report_for_test(&path, "not-a-real-preset")
+                .expect_err("unsupported metrics preset should fail");
+            assert!(
+                err.to_string().contains(
+                    "metrics report requested for unsupported preset 'not-a-real-preset'"
+                )
+            );
+        });
+    }
+
+    #[test]
     fn evidence_metrics_preset_rejects_summary_flag() {
         let bundle = serde_json::json!({
             "metrics": {
@@ -6135,6 +6175,40 @@ mod tests {
                     err.to_string()
                         .contains("--summary is only supported for ledger-backed evidence presets")
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn evidence_metrics_preset_rejects_tail_flag() {
+        let bundle = serde_json::json!({
+            "metrics": {
+                "requests_total": 1,
+                "requests_ok": 1,
+                "requests_err": 0,
+                "bytes_read": 64,
+                "requests_throttled": 0,
+                "requests_shed": 0
+            }
+        });
+
+        with_temp_image_path(
+            serde_json::to_string_pretty(&bundle)
+                .expect("serialize bundle")
+                .as_bytes(),
+            |path| {
+                let err = crate::cmd_evidence::evidence_cmd(
+                    &path,
+                    false,
+                    None,
+                    Some(5),
+                    Some("metrics"),
+                    false,
+                )
+                .expect_err("metrics preset should reject --tail");
+                assert!(err
+                    .to_string()
+                    .contains("--tail is only supported for ledger-backed evidence presets"));
             },
         );
     }
@@ -7404,6 +7478,33 @@ mod tests {
             Command::Evidence { preset, tail, .. } => {
                 assert_eq!(preset.as_deref(), Some("pressure-transitions"));
                 assert_eq!(tail, Some(10));
+            }
+            _ => panic!("expected evidence command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_evidence_preset_contention() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "evidence",
+            "--preset",
+            "contention",
+            "--summary",
+            "/tmp/evidence.jsonl",
+        ])
+        .expect("evidence command should parse");
+
+        match cli.command {
+            Command::Evidence {
+                ledger,
+                preset,
+                summary,
+                ..
+            } => {
+                assert_eq!(ledger, PathBuf::from("/tmp/evidence.jsonl"));
+                assert_eq!(preset.as_deref(), Some("contention"));
+                assert!(summary);
             }
             _ => panic!("expected evidence command"),
         }

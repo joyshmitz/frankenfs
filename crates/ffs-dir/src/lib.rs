@@ -661,4 +661,377 @@ mod tests {
         assert_eq!(entries[0].name, b"a".to_vec());
         assert_eq!(entries[1].name, b"c".to_vec());
     }
+
+    // ── reserved_tail tests ─────────────────────────────────────────────
+
+    #[test]
+    fn add_entry_with_reserved_tail_12() {
+        let mut block = vec![0u8; 1024];
+        init_dir_block(&mut block, 2, 2, 12).unwrap();
+        add_entry(&mut block, 100, b"file.txt", Ext4FileType::RegFile, 12).unwrap();
+        let (entries, tail) = parse_dir_block(&block, 1024).unwrap();
+        assert!(tail.is_some());
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.name == b"file.txt" && e.inode == 100)
+        );
+    }
+
+    #[test]
+    fn remove_entry_with_reserved_tail() {
+        let mut block = vec![0u8; 1024];
+        init_dir_block(&mut block, 2, 2, 12).unwrap();
+        add_entry(&mut block, 100, b"temp", Ext4FileType::RegFile, 12).unwrap();
+        let removed = remove_entry(&mut block, b"temp", 12).unwrap();
+        assert!(removed);
+        let (entries, _) = parse_dir_block(&block, 1024).unwrap();
+        assert!(!entries.iter().any(|e| e.name == b"temp"));
+    }
+
+    #[test]
+    fn add_entry_respects_reserved_tail_capacity() {
+        // 1024-byte block, init with reserved_tail=12, then try to add when
+        // reserved_tail leaves no room beyond existing entries
+        let mut block = vec![0u8; 36];
+        init_dir_block(&mut block, 2, 2, 12).unwrap();
+        // Usable area is 36 - 12 = 24 bytes, entirely consumed by . and ..
+        let err = add_entry(&mut block, 10, b"x", Ext4FileType::RegFile, 12).unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOSPC);
+    }
+
+    // ── name length edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn add_entry_max_name_length_255() {
+        let mut block = vec![0u8; 4096];
+        write_entry(&mut block, 0, 1, 4096, Ext4FileType::Dir, b".").unwrap();
+        let long_name = vec![b'a'; 255];
+        let off = add_entry(&mut block, 99, &long_name, Ext4FileType::RegFile, 0).unwrap();
+        assert!(off > 0);
+        let (entries, _) = parse_dir_block(&block, 4096).unwrap();
+        assert!(entries.iter().any(|e| e.name.len() == 255 && e.inode == 99));
+    }
+
+    #[test]
+    fn add_entry_rejects_name_over_255() {
+        let mut block = vec![0u8; 4096];
+        write_entry(&mut block, 0, 1, 4096, Ext4FileType::Dir, b".").unwrap();
+        let too_long = vec![b'a'; 256];
+        let err = add_entry(&mut block, 10, &too_long, Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn add_entry_single_byte_name() {
+        let mut block = vec![0u8; 1024];
+        write_entry(&mut block, 0, 1, 1024, Ext4FileType::Dir, b".").unwrap();
+        let off = add_entry(&mut block, 50, b"x", Ext4FileType::RegFile, 0).unwrap();
+        assert!(off > 0);
+        let (entries, _) = parse_dir_block(&block, 1024).unwrap();
+        assert_eq!(entries[1].name, b"x".to_vec());
+    }
+
+    // ── htree edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn htree_insert_duplicate_hashes() {
+        let mut entries = Vec::new();
+        htree_insert(&mut entries, 0x5000, 1);
+        htree_insert(&mut entries, 0x5000, 2);
+        htree_insert(&mut entries, 0x5000, 3);
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|e| e.hash == 0x5000));
+    }
+
+    #[test]
+    fn htree_find_leaf_single_entry() {
+        let entries = vec![HtreeEntry {
+            hash: 0x1000,
+            block: 5,
+        }];
+        // With a single entry, partition_point fallback returns index 0 for any target
+        assert_eq!(htree_find_leaf(&entries, 0x0), Some(5));
+        assert_eq!(htree_find_leaf(&entries, 0x1000), Some(5));
+        assert_eq!(htree_find_leaf(&entries, 0xFFFF_FFFF), Some(5));
+    }
+
+    #[test]
+    fn htree_find_leaf_zero_hash() {
+        let entries = vec![
+            HtreeEntry { hash: 0, block: 1 },
+            HtreeEntry {
+                hash: 0x8000,
+                block: 2,
+            },
+        ];
+        assert_eq!(htree_find_leaf(&entries, 0), Some(1));
+        assert_eq!(htree_find_leaf(&entries, 0x7FFF), Some(1));
+        assert_eq!(htree_find_leaf(&entries, 0x8000), Some(2));
+    }
+
+    #[test]
+    fn htree_find_leaf_u32_max_hash() {
+        let entries = vec![
+            HtreeEntry { hash: 0, block: 1 },
+            HtreeEntry {
+                hash: u32::MAX,
+                block: 2,
+            },
+        ];
+        assert_eq!(htree_find_leaf(&entries, u32::MAX), Some(2));
+        assert_eq!(htree_find_leaf(&entries, u32::MAX - 1), Some(1));
+    }
+
+    #[test]
+    fn htree_remove_from_empty() {
+        let mut entries = Vec::new();
+        assert!(!htree_remove(&mut entries, 0x1000, 1));
+    }
+
+    #[test]
+    fn htree_remove_wrong_block_same_hash() {
+        let mut entries = vec![HtreeEntry {
+            hash: 0x1000,
+            block: 5,
+        }];
+        assert!(!htree_remove(&mut entries, 0x1000, 99));
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn htree_insert_into_empty() {
+        let mut entries = Vec::new();
+        let idx = htree_insert(&mut entries, 42, 7);
+        assert_eq!(idx, 0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], HtreeEntry { hash: 42, block: 7 });
+    }
+
+    // ── compute_dx_hash edge cases ──────────────────────────────────────
+
+    #[test]
+    fn compute_dx_hash_different_seeds_differ() {
+        let h1 = compute_dx_hash(1, b"test", &[0, 0, 0, 0]);
+        let h2 = compute_dx_hash(1, b"test", &[1, 2, 3, 4]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn compute_dx_hash_long_name() {
+        let seed = [1, 2, 3, 4];
+        let long_name = vec![b'z'; 255];
+        let h = compute_dx_hash(1, &long_name, &seed);
+        // Just verify it doesn't panic and returns a value
+        let _ = h; // always true, but verifies no panic
+    }
+
+    #[test]
+    fn compute_dx_hash_single_byte_name() {
+        let seed = [1, 2, 3, 4];
+        let h = compute_dx_hash(1, b"a", &seed);
+        let h2 = compute_dx_hash(1, b"b", &seed);
+        assert_ne!(h, h2);
+    }
+
+    // ── block size variations ───────────────────────────────────────────
+
+    #[test]
+    fn init_dir_block_4096() {
+        let mut block = vec![0u8; 4096];
+        init_dir_block(&mut block, 2, 2, 0).unwrap();
+        let (entries, _) = parse_dir_block(&block, 4096).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, b".".to_vec());
+        assert_eq!(entries[1].name, b"..".to_vec());
+    }
+
+    #[test]
+    fn init_dir_block_minimum_viable_size() {
+        // Minimum: . needs 12 bytes, .. needs 12 bytes = 24 total
+        let mut block = vec![0u8; 24];
+        init_dir_block(&mut block, 5, 3, 0).unwrap();
+        let (entries, _) = parse_dir_block(&block, 24).unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    // ── multiple operations ─────────────────────────────────────────────
+
+    #[test]
+    fn fill_block_then_enospc() {
+        let mut block = vec![0u8; 128];
+        init_dir_block(&mut block, 2, 2, 0).unwrap();
+        // Fill up with entries
+        let mut count = 0;
+        for i in 3..100_u32 {
+            let name = format!("f{i}");
+            match add_entry(&mut block, i, name.as_bytes(), Ext4FileType::RegFile, 0) {
+                Ok(_) => count += 1,
+                Err(_) => break,
+            }
+        }
+        assert!(count > 0, "should fit at least one entry");
+        // Next add should fail
+        let err = add_entry(&mut block, 999, b"overflow", Ext4FileType::RegFile, 0);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn add_remove_add_cycle_multiple() {
+        let mut block = vec![0u8; 1024];
+        init_dir_block(&mut block, 2, 2, 0).unwrap();
+
+        for i in 0..5_u32 {
+            let name = format!("cycle{i}");
+            add_entry(
+                &mut block,
+                100 + i,
+                name.as_bytes(),
+                Ext4FileType::RegFile,
+                0,
+            )
+            .unwrap();
+            remove_entry(&mut block, name.as_bytes(), 0).unwrap();
+        }
+
+        // After all cycles, only . and .. should remain (as live entries)
+        let (entries, _) = parse_dir_block(&block, 1024).unwrap();
+        assert_eq!(entries.iter().filter(|e| e.inode != 0).count(), 2);
+    }
+
+    #[test]
+    fn remove_every_other_then_add() {
+        let mut block = vec![0u8; 4096];
+        init_dir_block(&mut block, 2, 2, 0).unwrap();
+
+        // Add 10 entries
+        for i in 0..10_u32 {
+            let name = format!("entry{i:02}");
+            add_entry(
+                &mut block,
+                100 + i,
+                name.as_bytes(),
+                Ext4FileType::RegFile,
+                0,
+            )
+            .unwrap();
+        }
+
+        // Remove odd-indexed entries
+        for i in (1..10_u32).step_by(2) {
+            let name = format!("entry{i:02}");
+            remove_entry(&mut block, name.as_bytes(), 0).unwrap();
+        }
+
+        // Re-add to reclaimed slots
+        for i in 0..5_u32 {
+            let name = format!("new{i:02}");
+            add_entry(
+                &mut block,
+                200 + i,
+                name.as_bytes(),
+                Ext4FileType::RegFile,
+                0,
+            )
+            .unwrap();
+        }
+
+        let (entries, _) = parse_dir_block(&block, 4096).unwrap();
+        // . + .. + 5 even originals + 5 new = 12
+        assert_eq!(entries.iter().filter(|e| e.inode != 0).count(), 12);
+    }
+
+    // ── corruption detection ────────────────────────────────────────────
+
+    #[test]
+    fn add_entry_detects_misaligned_rec_len() {
+        let mut block = vec![0u8; 128];
+        write_u32_le(&mut block, 0, 10).unwrap(); // inode
+        write_u16_le(&mut block, 4, 13).unwrap(); // rec_len = 13 (not 4-aligned)
+        block[6] = 1;
+        block[7] = 1;
+        block[8] = b'a';
+
+        let err = add_entry(&mut block, 20, b"new", Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn add_entry_detects_rec_len_exceeds_block() {
+        let mut block = vec![0u8; 32];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 64).unwrap(); // rec_len > block size
+        block[6] = 1;
+        block[7] = 1;
+        block[8] = b'a';
+
+        let err = add_entry(&mut block, 20, b"x", Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    // ── init_dir_block edge cases ───────────────────────────────────────
+
+    #[test]
+    fn init_dir_block_reserved_tail_zero() {
+        let mut block = vec![0u8; 1024];
+        init_dir_block(&mut block, 5, 3, 0).unwrap();
+        let (_, tail) = parse_dir_block(&block, 1024).unwrap();
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn init_dir_block_large_reserved_tail() {
+        let mut block = vec![0u8; 1024];
+        init_dir_block(&mut block, 5, 3, 24).unwrap();
+        let (entries, tail) = parse_dir_block(&block, 1024).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(tail.is_some());
+    }
+
+    #[test]
+    fn init_dir_block_preserves_inode_numbers() {
+        let mut block = vec![0u8; 1024];
+        init_dir_block(&mut block, 0xFFFF_FFFE, 0xFFFF_FFFF, 0).unwrap();
+        let (entries, _) = parse_dir_block(&block, 1024).unwrap();
+        assert_eq!(entries[0].inode, 0xFFFF_FFFE);
+        assert_eq!(entries[1].inode, 0xFFFF_FFFF);
+    }
+
+    // ── file type preservation ──────────────────────────────────────────
+
+    #[test]
+    fn add_entry_preserves_file_types() {
+        let types = [
+            (Ext4FileType::RegFile, b"file" as &[u8]),
+            (Ext4FileType::Dir, b"dir"),
+            (Ext4FileType::Symlink, b"link"),
+            (Ext4FileType::Chrdev, b"cdev"),
+            (Ext4FileType::Blkdev, b"bdev"),
+            (Ext4FileType::Fifo, b"fifo"),
+            (Ext4FileType::Sock, b"sock"),
+        ];
+        let mut block = vec![0u8; 4096];
+        write_entry(&mut block, 0, 1, 4096, Ext4FileType::Dir, b".").unwrap();
+
+        for (i, (ft, name)) in types.iter().enumerate() {
+            add_entry(&mut block, u32::try_from(i + 10).unwrap(), name, *ft, 0).unwrap();
+        }
+
+        let (entries, _) = parse_dir_block(&block, 4096).unwrap();
+        assert!(entries.len() >= 8);
+        for (ft, name) in &types {
+            let entry = entries.iter().find(|e| e.name == *name).unwrap();
+            assert_eq!(entry.file_type, *ft);
+        }
+    }
+
+    // ── HtreeEntry derive trait coverage ────────────────────────────────
+
+    #[test]
+    fn htree_entry_debug_clone_eq() {
+        let e = HtreeEntry { hash: 42, block: 7 };
+        let e2 = e;
+        assert_eq!(e, e2);
+        assert_eq!(format!("{e:?}"), format!("{e2:?}"));
+    }
 }

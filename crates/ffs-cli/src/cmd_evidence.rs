@@ -956,7 +956,8 @@ pub fn evidence_cmd(
 
     let preset_kind = validate_evidence_args(preset, event_type_filter, tail, summary)?;
     if matches!(preset_kind, Some(PresetMode::Metrics)) {
-        let preset_name = preset.expect("metrics preset kind requires preset name");
+        let preset_name =
+            preset.ok_or_else(|| anyhow::anyhow!("metrics preset kind requires preset name"))?;
         run_metrics_evidence(path, json, preset_name)?;
         log_metrics_completion(started, preset_name, summary);
         return Ok(());

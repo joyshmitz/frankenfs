@@ -1805,4 +1805,214 @@ mod tests {
         let val = get_xattr(&inode, None, "user.key").unwrap();
         assert_eq!(val, Some(Vec::new()));
     }
+
+    // ── Boundary value tests ────────────────────────────────────────────
+
+    #[test]
+    fn set_xattr_max_suffix_length_255() {
+        let mut inode = make_inode(512);
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+        // suffix is 255 - len("user.") = 250 chars; but xattr suffix limit is u8::MAX
+        let suffix = "a".repeat(250);
+        let name = format!("user.{suffix}");
+        set_xattr(&mut inode, None, &name, b"val", access).unwrap();
+        let val = get_xattr(&inode, None, &name).unwrap();
+        assert_eq!(val, Some(b"val".to_vec()));
+    }
+
+    #[test]
+    fn set_xattr_large_value_near_limit() {
+        let mut inode = make_inode(128);
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+        let mut ext_block = vec![0u8; 4096];
+        // Value just under typical block capacity
+        let value = vec![0xAB_u8; 3000];
+        set_xattr(&mut inode, Some(&mut ext_block), "user.big", &value, access).unwrap();
+        let got = get_xattr(&inode, Some(&ext_block), "user.big").unwrap();
+        assert_eq!(got.as_deref(), Some(value.as_slice()));
+    }
+
+    // ── Multiple overwrite cycles ───────────────────────────────────────
+
+    #[test]
+    fn set_xattr_overwrite_five_times() {
+        let mut inode = make_inode(128);
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+        for i in 0..5_u8 {
+            let val = vec![i; (i as usize + 1) * 10];
+            set_xattr(&mut inode, None, "user.cycle", &val, access).unwrap();
+            let got = get_xattr(&inode, None, "user.cycle").unwrap();
+            assert_eq!(got, Some(val));
+        }
+    }
+
+    // ── External block edge cases ───────────────────────────────────────
+
+    #[test]
+    fn external_block_exactly_header_size() {
+        let mut inode = make_inode(0);
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+        // 32 bytes = header only, no room for entries
+        let mut ext_block = vec![0u8; 32];
+        let err = set_xattr(&mut inode, Some(&mut ext_block), "user.x", b"v", access).unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace));
+    }
+
+    #[test]
+    fn get_xattr_missing_returns_none_with_external() {
+        let inode = make_inode(128);
+        let ext_block = vec![0u8; 4096];
+        let val = get_xattr(&inode, Some(&ext_block), "user.nope").unwrap();
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn list_xattrs_empty_with_external_block() {
+        let inode = make_inode(128);
+        let ext_block = vec![0u8; 4096];
+        let names = list_xattrs(&inode, Some(&ext_block)).unwrap();
+        assert!(names.is_empty());
+    }
+
+    // ── All namespace types simultaneously ──────────────────────────────
+
+    #[test]
+    fn all_namespace_types_coexist() {
+        let mut inode = make_inode(256);
+        let admin = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: true,
+            has_cap_sys_admin: true,
+        };
+        let mut ext_block = vec![0u8; 4096];
+
+        set_xattr(&mut inode, Some(&mut ext_block), "user.u", b"1", admin).unwrap();
+        set_xattr(&mut inode, Some(&mut ext_block), "trusted.t", b"2", admin).unwrap();
+        set_xattr(&mut inode, Some(&mut ext_block), "security.s", b"3", admin).unwrap();
+        set_xattr(
+            &mut inode,
+            Some(&mut ext_block),
+            "system.posix_acl_access",
+            b"4",
+            admin,
+        )
+        .unwrap();
+
+        let names = list_xattrs(&inode, Some(&ext_block)).unwrap();
+        assert!(names.contains(&"user.u".to_owned()));
+        assert!(names.contains(&"trusted.t".to_owned()));
+        assert!(names.contains(&"security.s".to_owned()));
+        assert!(names.contains(&"system.posix_acl_access".to_owned()));
+        assert_eq!(names.len(), 4);
+    }
+
+    // ── Remove all then verify clean state ──────────────────────────────
+
+    #[test]
+    fn remove_all_xattrs_leaves_empty_list() {
+        let mut inode = make_inode(128);
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+
+        for i in 0..5 {
+            let name = format!("user.k{i}");
+            set_xattr(&mut inode, None, &name, b"v", access).unwrap();
+        }
+        for i in 0..5 {
+            let name = format!("user.k{i}");
+            remove_xattr(&mut inode, None, &name, access).unwrap();
+        }
+        let names = list_xattrs(&inode, None).unwrap();
+        assert!(names.is_empty());
+    }
+
+    // ── Permission denial edge cases ────────────────────────────────────
+
+    #[test]
+    fn get_xattr_does_not_require_write_access() {
+        let mut inode = make_inode(128);
+        let writer = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+        set_xattr(&mut inode, None, "user.readable", b"hello", writer).unwrap();
+        // get_xattr has no access parameter — always readable
+        let val = get_xattr(&inode, None, "user.readable").unwrap();
+        assert_eq!(val, Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn list_xattrs_does_not_require_write_access() {
+        let mut inode = make_inode(128);
+        let writer = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+        set_xattr(&mut inode, None, "user.listed", b"v", writer).unwrap();
+        let names = list_xattrs(&inode, None).unwrap();
+        assert!(names.contains(&"user.listed".to_owned()));
+    }
+
+    // ── XattrStorage enum coverage ──────────────────────────────────────
+
+    #[test]
+    fn set_xattr_returns_inline_storage() {
+        let mut inode = make_inode(128);
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+        let storage = set_xattr(&mut inode, None, "user.small", b"v", access).unwrap();
+        assert_eq!(storage, XattrStorage::Inline);
+    }
+
+    #[test]
+    fn set_xattr_returns_external_storage_on_spillover() {
+        let mut inode = make_inode(16); // very small inline area
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+        let mut ext_block = vec![0u8; 4096];
+        let value = vec![0xCC; 100];
+        let storage =
+            set_xattr(&mut inode, Some(&mut ext_block), "user.big", &value, access).unwrap();
+        assert_eq!(storage, XattrStorage::External);
+    }
+
+    // ── parse_xattr_name edge cases ─────────────────────────────────────
+
+    #[test]
+    fn parse_xattr_name_rejects_no_dot() {
+        let err = parse_xattr_name("userfoo").unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn parse_xattr_name_rejects_bare_dot() {
+        let err = parse_xattr_name("user.").unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn parse_xattr_name_binary_suffix() {
+        // Non-ASCII suffix bytes are valid (ext4 doesn't require UTF-8)
+        let (idx, name) = parse_xattr_name("user.abc").unwrap();
+        assert_eq!(idx, 1); // EXT4_XATTR_INDEX_USER
+        assert_eq!(name, b"abc");
+    }
 }

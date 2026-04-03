@@ -1807,4 +1807,201 @@ mod tests {
         assert_eq!(format!("{}", MountMode::Compat), "compat");
         assert_eq!(format!("{}", MountMode::Native), "native");
     }
+
+    // ── TxnId and CommitSeq coverage ────────────────────────────────────
+
+    #[test]
+    fn txn_id_ordering() {
+        assert!(TxnId(1) < TxnId(2));
+        assert_eq!(TxnId(42), TxnId(42));
+        assert_ne!(TxnId(1), TxnId(2));
+    }
+
+    #[test]
+    fn txn_id_zero_and_max() {
+        let zero = TxnId(0);
+        let max = TxnId(u64::MAX);
+        assert!(zero < max);
+        assert_eq!(zero.0, 0);
+        assert_eq!(max.0, u64::MAX);
+    }
+
+    #[test]
+    fn txn_id_hash_and_debug() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(TxnId(1));
+        set.insert(TxnId(2));
+        set.insert(TxnId(1));
+        assert_eq!(set.len(), 2);
+        assert!(format!("{:?}", TxnId(42)).contains("42"));
+    }
+
+    #[test]
+    fn commit_seq_ordering() {
+        assert!(CommitSeq(0) < CommitSeq(1));
+        assert_eq!(CommitSeq(100), CommitSeq(100));
+    }
+
+    #[test]
+    fn commit_seq_zero_and_max() {
+        let zero = CommitSeq(0);
+        let max = CommitSeq(u64::MAX);
+        assert!(zero < max);
+        assert_eq!(max.0, u64::MAX);
+    }
+
+    #[test]
+    fn commit_seq_hash_and_debug() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(CommitSeq(10));
+        set.insert(CommitSeq(20));
+        assert_eq!(set.len(), 2);
+        assert!(format!("{:?}", CommitSeq(99)).contains("99"));
+    }
+
+    #[test]
+    fn snapshot_with_commit_seq() {
+        let snap = Snapshot {
+            high: CommitSeq(42),
+        };
+        assert_eq!(snap.high, CommitSeq(42));
+        let snap2 = snap;
+        assert_eq!(snap, snap2);
+    }
+
+    // ── Generation newtype ──────────────────────────────────────────────
+
+    #[test]
+    fn generation_ordering_and_display() {
+        assert!(Generation(1) < Generation(2));
+        assert_eq!(format!("{}", Generation(42)), "42");
+    }
+
+    // ── GroupNumber coverage ────────────────────────────────────────────
+
+    #[test]
+    fn group_number_ordering_and_display() {
+        assert!(GroupNumber(0) < GroupNumber(1));
+        assert_eq!(format!("{}", GroupNumber(7)), "7");
+    }
+
+    #[test]
+    fn group_number_max_value() {
+        let g = GroupNumber(u32::MAX);
+        assert_eq!(g.0, u32::MAX);
+    }
+
+    // ── BlockNumber additional coverage ─────────────────────────────────
+
+    #[test]
+    fn block_number_to_u32_max() {
+        let bn = BlockNumber(u64::from(u32::MAX));
+        assert_eq!(bn.to_u32().unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn block_number_to_u32_overflow() {
+        let bn = BlockNumber(u64::from(u32::MAX) + 1);
+        assert!(bn.to_u32().is_err());
+    }
+
+    #[test]
+    fn block_number_display() {
+        assert_eq!(format!("{}", BlockNumber(123)), "123");
+    }
+
+    // ── ByteOffset additional coverage ──────────────────────────────────
+
+    #[test]
+    fn byte_offset_checked_mul_overflow() {
+        let big = ByteOffset(u64::MAX);
+        assert_eq!(big.checked_mul(2), None);
+    }
+
+    #[test]
+    fn byte_offset_align_down_zero_alignment() {
+        let off = ByteOffset(100);
+        assert_eq!(off.align_down(0), None);
+    }
+
+    #[test]
+    fn byte_offset_align_up_zero_alignment() {
+        let off = ByteOffset(100);
+        assert_eq!(off.align_up(0), None);
+    }
+
+    #[test]
+    fn byte_offset_align_already_aligned() {
+        let off = ByteOffset(4096);
+        assert_eq!(off.align_down(4096), Some(ByteOffset(4096)));
+        assert_eq!(off.align_up(4096), Some(ByteOffset(4096)));
+    }
+
+    // ── Ext4InodeNumber / BtrfsObjectId ─────────────────────────────────
+
+    #[test]
+    fn ext4_inode_number_display() {
+        assert_eq!(format!("{}", Ext4InodeNumber(2)), "2");
+    }
+
+    #[test]
+    fn btrfs_object_id_display() {
+        assert_eq!(format!("{}", BtrfsObjectId(256)), "256");
+    }
+
+    #[test]
+    fn btrfs_object_id_to_canonical_preserves_value() {
+        let oid = BtrfsObjectId(999);
+        let canonical = oid.to_canonical();
+        assert_eq!(canonical, InodeNumber(999));
+    }
+
+    // ── DeviceId additional coverage ────────────────────────────────────
+
+    #[test]
+    fn device_id_max_value() {
+        let d = DeviceId(u128::MAX);
+        let bytes = d.to_uuid_bytes_be();
+        let roundtrip = DeviceId::from_uuid_bytes_be(bytes);
+        assert_eq!(d, roundtrip);
+    }
+
+    // ── ChecksumAlgo coverage ───────────────────────────────────────────
+
+    #[test]
+    fn checksum_algo_crc32c_seed_varies() {
+        let a1 = ChecksumAlgo::Crc32c { seed: 0 };
+        let a2 = ChecksumAlgo::Crc32c { seed: 42 };
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn checksum_algo_blake3_eq() {
+        let b1 = ChecksumAlgo::Blake3Truncated32;
+        let b2 = ChecksumAlgo::Blake3Truncated32;
+        assert_eq!(b1, b2);
+    }
+
+    // ── inode_index_in_group edge case ──────────────────────────────────
+
+    #[test]
+    fn inode_index_in_group_first_inode() {
+        // Inode 1 in group with 128 inodes_per_group
+        let idx = inode_index_in_group(InodeNumber(1), 128);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn inode_index_in_group_last_in_group() {
+        let idx = inode_index_in_group(InodeNumber(128), 128);
+        assert_eq!(idx, 127);
+    }
+
+    #[test]
+    fn inode_index_in_group_first_of_next_group() {
+        let idx = inode_index_in_group(InodeNumber(129), 128);
+        assert_eq!(idx, 0);
+    }
 }

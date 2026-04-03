@@ -812,4 +812,108 @@ mod tests {
         let failing: Result<u64> = Err(FfsError::NoSpace);
         assert!(failing.is_err());
     }
+
+    // ── Untested ErrorKind → EIO fallthrough variants ───────────────────
+
+    #[test]
+    fn io_error_connection_aborted_maps_to_eio() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "aborted");
+        let err = FfsError::Io(io_err);
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_not_connected_maps_to_eio() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotConnected, "not connected");
+        let err = FfsError::Io(io_err);
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_addr_in_use_maps_to_eio() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "in use");
+        let err = FfsError::Io(io_err);
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_addr_not_available_maps_to_eio() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "unavailable");
+        let err = FfsError::Io(io_err);
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_connection_refused_maps_to_eio() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let err = FfsError::Io(io_err);
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_unsupported_maps_to_eio() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported");
+        let err = FfsError::Io(io_err);
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn io_error_other_maps_to_eio() {
+        let io_err = std::io::Error::other("other");
+        let err = FfsError::Io(io_err);
+        assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    // ── Additional edge case coverage ───────────────────────────────────
+
+    #[test]
+    fn display_mode_violation_includes_detail() {
+        let err = FfsError::ModeViolation("native-only op in compat mode".to_owned());
+        let msg = format!("{err}");
+        assert!(msg.contains("native-only op in compat mode"));
+    }
+
+    #[test]
+    fn display_repair_failed_includes_detail() {
+        let err = FfsError::RepairFailed("codec exhausted".to_owned());
+        let msg = format!("{err}");
+        assert!(msg.contains("codec exhausted"));
+    }
+
+    #[test]
+    fn from_io_error_via_question_mark() {
+        fn fallible() -> Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"))?;
+            Ok(())
+        }
+        let err = fallible().unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    #[test]
+    fn error_source_chain_for_io() {
+        let io_err = std::io::Error::other("inner cause");
+        let err = FfsError::Io(io_err);
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some());
+        assert!(format!("{}", source.unwrap()).contains("inner cause"));
+    }
+
+    #[test]
+    fn all_unit_variants_have_stable_errno() {
+        let cases: Vec<(FfsError, libc::c_int)> = vec![
+            (FfsError::Cancelled, libc::EINTR),
+            (FfsError::NoSpace, libc::ENOSPC),
+            (FfsError::PermissionDenied, libc::EACCES),
+            (FfsError::ReadOnly, libc::EROFS),
+            (FfsError::NotDirectory, libc::ENOTDIR),
+            (FfsError::IsDirectory, libc::EISDIR),
+            (FfsError::NotEmpty, libc::ENOTEMPTY),
+            (FfsError::NameTooLong, libc::ENAMETOOLONG),
+            (FfsError::Exists, libc::EEXIST),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_errno(), expected, "wrong errno for {err:?}");
+        }
+    }
 }

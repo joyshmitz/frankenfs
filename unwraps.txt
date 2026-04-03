@@ -57,6 +57,7 @@ crates/ffs-block/tests/cache_workload_comparison.rs:623: .expect("seed file payl
 crates/ffs-block/tests/cache_workload_comparison.rs:633: .expect("warm hot");
 crates/ffs-block/tests/cache_workload_comparison.rs:643: .expect("scan cold");
 crates/ffs-block/tests/cache_workload_comparison.rs:653: .expect("probe hot");
+crates/ffs-block/src/io_engine.rs:242: #[expect(clippy::cast_possible_truncation)] // 64-bit offsets in memory engine
 crates/ffs-block/benches/arc_cache.rs:70: let dev = ByteBlockDevice::new(mem, block_size).expect("device");
 crates/ffs-block/benches/arc_cache.rs:71: ArcCache::new(dev, capacity).expect("cache")
 crates/ffs-block/benches/arc_cache.rs:81: let dev = ByteBlockDevice::new(mem, block_size).expect("device");
@@ -566,6 +567,11 @@ crates/ffs-harness/benches/metadata_parse.rs:28: .expect("btrfs parse in bench")
 crates/ffs-cli/src/cmd_evidence.rs:959: let preset_name = preset.expect("metrics preset kind requires preset name");
 crates/ffs-cli/src/main.rs:3335: write!(&mut out, "{offset:08x}:").expect("write to String cannot fail");
 crates/ffs-cli/src/main.rs:3337: write!(&mut out, " {byte:02x}").expect("write to String cannot fail");
+crates/ffs-extent/src/lib.rs:179: #[expect(clippy::too_many_arguments)]
+crates/ffs-extent/src/lib.rs:207: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-extent/src/lib.rs:241: #[expect(clippy::too_many_arguments)]
+crates/ffs-extent/src/lib.rs:265: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-extent/src/lib.rs:516: #[expect(clippy::cast_possible_truncation)]
 crates/ffs-extent/src/lib.rs:810: .expect("range end is explicitly clamped to u32::MAX");
 crates/ffs-extent/benches/extent_resolve.rs:208: .expect("resolve");
 crates/ffs-extent/benches/extent_resolve.rs:230: .expect("resolve");
@@ -575,6 +581,9 @@ crates/ffs-extent/benches/extent_resolve.rs:287: ffs_extent::cached_map_logical_
 crates/ffs-extent/benches/extent_resolve.rs:301: .expect("resolve");
 crates/ffs-extent/benches/extent_resolve.rs:323: .expect("resolve");
 crates/ffs-extent/benches/extent_resolve.rs:347: .expect("resolve");
+crates/ffs-fuse/src/per_core.rs:151: #[expect(clippy::cast_possible_truncation)] // intentional 64→32 fold
+crates/ffs-fuse/src/per_core.rs:184: #[expect(clippy::cast_possible_truncation)] // .min(16) always fits u32
+crates/ffs-fuse/src/per_core.rs:199: #[expect(clippy::cast_possible_truncation)] // .min(16) always fits u32
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:9: .expect("clock")
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:17: std::fs::remove_file(&ledger_path).expect("remove stale ledger file");
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:22: .expect("enable evidence ledger");
@@ -593,6 +602,7 @@ crates/ffs-mvcc/tests/evidence_ledger_integration.rs:124: let abort_detail = abo
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:135: store.commit(committed).expect("commit succeeds");
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:145: store.commit(winner).expect("winner commits");
 crates/ffs-mvcc/tests/mvcc_demo_integration.rs:6: let result = run_snapshot_isolation_demo().expect("demo should succeed");
+crates/ffs-mvcc/tests/mvcc_stress_suite.rs:79: #[expect(
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:99: store.commit(seed_txn).expect("seed commit should succeed");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:119: writer_patterns[usize::try_from(writer_id).expect("writer id fits in usize")];
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:131: let byte = u8::try_from((writer_id + op) % 251).expect("value fits in u8");
@@ -629,6 +639,7 @@ crates/ffs-mvcc/tests/mvcc_stress_suite.rs:517: guard.1.expect("txn_two complete
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:525: let guard = store.lock().expect("store lock");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:527: let a = guard.read_visible(block_a, snap).expect("A visible")[0];
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:528: let b = guard.read_visible(block_b, snap).expect("B visible")[0];
+crates/ffs-mvcc/tests/mvcc_stress_suite.rs:539: #[expect(
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:568: let mut guard = store.lock().expect("store lock");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:573: guard.commit(seed_txn).expect("seed commit");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:590: let mut guard = store.lock().expect("store lock");
@@ -651,6 +662,7 @@ crates/ffs-mvcc/tests/mvcc_stress_suite.rs:820: .expect("append block must be re
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:857: .expect("keys block must be readable");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:891: .expect("disjoint block must be readable");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:910: store.commit(conflict_a).expect("first write succeeds");
+crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:141: #[expect(
 crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:155: seed_store.commit(txn).expect("seed commit");
 crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:162: .expect("version 2 visible")
 crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:181: .expect("cache"),
@@ -661,6 +673,8 @@ crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:230: .expect("latest vers
 crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:240: .expect("flush thread join")
 crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:241: .expect("flush completes");
 crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:269: .expect("latest survives")
+crates/ffs-mvcc/src/crash_matrix.rs:178: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-mvcc/src/crash_matrix.rs:184: #[expect(clippy::cast_possible_truncation)]
 crates/ffs-mvcc/src/crash_matrix.rs:209: data.extend_from_slice(&wal::encode_commit(c).expect("encode commit"));
 crates/ffs-mvcc/src/crash_matrix.rs:219: offset += wal::encode_commit(c).expect("encode").len();
 crates/ffs-mvcc/src/crash_matrix.rs:226: wal::encode_commit(&commits[n]).expect("encode").len()
@@ -669,10 +683,13 @@ crates/ffs-mvcc/src/crash_matrix.rs:428: .expect("TruncateToLastGood should not 
 crates/ffs-mvcc/src/crash_matrix.rs:486: .expect("TruncateToLastGood should not return Err");
 crates/ffs-mvcc/src/crash_matrix.rs:534: .expect("replay should not fail for clean data");
 crates/ffs-mvcc/src/crash_matrix.rs:599: let partial = wal::encode_commit(&commits[crash_target]).expect("encode");
+crates/ffs-mvcc/src/crash_matrix.rs:601: #[expect(clippy::cast_possible_truncation)]
 crates/ffs-mvcc/src/crash_matrix.rs:613: .expect("TruncateToLastGood should not return Err");
+crates/ffs-mvcc/src/wal_replay.rs:137: #[expect(clippy::too_many_lines)]
 crates/ffs-mvcc/src/lib.rs:1723: .expect("write_set keys must have staged bytes");
 crates/ffs-mvcc/src/lib.rs:1953: .expect("preflight_fcw must reject unmergeable conflicts")
 crates/ffs-mvcc/src/lib.rs:2033: .expect("preflight_fcw must reject unmergeable conflicts")
+crates/ffs-mvcc/src/wal.rs:249: #[expect(clippy::too_many_lines)]
 crates/ffs-mvcc/src/sharded.rs:149: let shard_count_u64 = u64::try_from(self.shard_count).expect("shard_count must fit in u64");
 crates/ffs-mvcc/src/sharded.rs:151: usize::try_from(rem).expect("remainder must fit in usize")
 crates/ffs-mvcc/src/sharded.rs:208: .expect("write_set keys must have staged bytes");
@@ -728,9 +745,27 @@ crates/ffs-mvcc/benches/wal_throughput.rs:1156: w.append_commit(&commit).unwrap(
 crates/ffs-mvcc/benches/wal_throughput.rs:1166: let tmp = tempfile::NamedTempFile::new().unwrap();
 crates/ffs-mvcc/benches/wal_throughput.rs:1175: let mut w = WalWriter::create(&path, cfg).unwrap();
 crates/ffs-mvcc/benches/wal_throughput.rs:1193: w.append_commits_coalesced(&commits).unwrap();
+crates/ffs-alloc/src/lib.rs:72: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-alloc/src/lib.rs:363: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-alloc/src/lib.rs:377: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-alloc/src/lib.rs:478: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-alloc/src/lib.rs:672: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+crates/ffs-alloc/src/lib.rs:836: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+crates/ffs-alloc/src/lib.rs:863: #[expect(clippy::too_many_arguments)]
+crates/ffs-alloc/src/lib.rs:1061: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 crates/ffs-alloc/src/lib.rs:1088: .expect("batch allocation count is bounded by requested u32 count");
+crates/ffs-alloc/src/lib.rs:1107: #[expect(clippy::too_many_arguments)]
 crates/ffs-alloc/src/lib.rs:1170: u32::try_from(allocated.len()).expect("group allocation count is bounded by u32 request");
+crates/ffs-alloc/src/lib.rs:1212: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+crates/ffs-alloc/src/lib.rs:1354: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+crates/ffs-alloc/src/lib.rs:1422: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-alloc/src/succinct.rs:116: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-alloc/src/succinct.rs:210: #[expect(clippy::cast_possible_truncation)] // indices bounded by self.len (u32)
+crates/ffs-alloc/src/succinct.rs:271: #[expect(clippy::cast_possible_truncation)] // indices bounded by self.len (u32)
 crates/ffs-alloc/src/succinct.rs:455: .expect("8 bytes");
+crates/ffs-alloc/src/succinct.rs:485: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-alloc/src/succinct.rs:506: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-alloc/src/succinct.rs:521: #[expect(clippy::cast_possible_truncation)]
 crates/ffs-alloc/benches/batch_alloc.rs:37: let guard = self.blocks.lock().unwrap();
 crates/ffs-alloc/benches/batch_alloc.rs:45: self.blocks.lock().unwrap().insert(block.0, data.to_vec());
 crates/ffs-alloc/benches/batch_alloc.rs:135: .unwrap();
@@ -748,6 +783,9 @@ crates/ffs-repair/tests/self_healing_demo_e2e.rs:302: u32::try_from(result.corru
 crates/ffs-repair/tests/self_healing_demo_e2e.rs:308: let repair = records[1].repair.as_ref().expect("repair detail");
 crates/ffs-repair/tests/self_healing_demo_e2e.rs:315: let json = record.to_json().expect("serialize record");
 crates/ffs-repair/tests/self_healing_demo_e2e.rs:316: let parsed = EvidenceRecord::from_json(&json).expect("deserialize record");
+crates/ffs-repair/src/lrc.rs:66: #[expect(clippy::cast_possible_truncation)] // val is always < 256 after reduction
+crates/ffs-repair/src/por.rs:349: #[expect(clippy::cast_possible_truncation)] // challenge count bounded by u32 total_blocks
+crates/ffs-repair/src/por.rs:429: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 crates/ffs-repair/benches/scrub_codec.rs:67: ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device")
 crates/ffs-repair/benches/scrub_codec.rs:81: .expect("write");
 crates/ffs-repair/benches/scrub_codec.rs:119: .expect("scrub");
@@ -775,9 +813,19 @@ crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:58: serde_json::from_str(&ra
 crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:63: hex::decode(compact).expect("valid fast-commit hex payload")
 crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:105: let replay = replay_fast_commit(&bytes).expect("replay should succeed");
 crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:134: let replay = replay_fast_commit(&bytes).expect("replay should succeed");
+crates/ffs-journal/src/lib.rs:836: #[expect(clippy::too_many_lines)]
 crates/ffs-journal/src/wal_buffer.rs:345: .expect("WAL buffer not initialized — call init_thread_buffer first");
 crates/ffs-journal/src/wal_buffer.rs:541: .expect("force advance must return epoch")
 crates/ffs-journal/src/wal_buffer.rs:998: let err = last_err.expect("at least one attempt was made");
+crates/ffs-btree/src/lib.rs:634: #[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
+crates/ffs-btree/src/lib.rs:886: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-btree/src/lib.rs:1197: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-btree/src/lib.rs:1238: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-btree/src/lib.rs:1256: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-btree/src/lib.rs:1278: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-btree/src/lib.rs:1299: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-btree/src/lib.rs:1327: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-btree/src/lib.rs:1337: #[expect(clippy::cast_possible_truncation)]
 crates/ffs-btree/benches/bwtree_vs_locked.rs:92: let page = table.allocate_page().expect("alloc");
 crates/ffs-btree/benches/bwtree_vs_locked.rs:94: table.insert(page, BwKey(i), BwValue(i)).expect("insert");
 crates/ffs-btree/benches/bwtree_vs_locked.rs:135: let page = table.allocate_page().expect("alloc");
@@ -877,3 +925,10 @@ crates/ffs-ondisk/tests/adversarial_corpus.rs:626: .expect("workspace root")
 crates/ffs-ondisk/tests/adversarial_corpus.rs:650: .expect("workspace root")
 crates/ffs-ondisk/tests/adversarial_corpus.rs:667: .expect("read nightly script metadata")
 crates/ffs-ondisk/tests/adversarial_corpus.rs:691: .expect("workspace root")
+crates/ffs-ondisk/src/ext4.rs:487: #[expect(clippy::too_many_lines)]
+crates/ffs-ondisk/src/ext4.rs:1372: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-inode/src/lib.rs:39: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-inode/src/lib.rs:115: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-inode/src/lib.rs:135: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-inode/src/lib.rs:271: #[expect(clippy::too_many_arguments)]
+crates/ffs-inode/src/lib.rs:378: #[expect(clippy::too_many_arguments)]
