@@ -373,9 +373,10 @@ impl WalWriter {
             detail: format!("failed to encode commit: {e}"),
         })?;
         let bytes_len = encoded.len();
-        let bytes_written = u64::try_from(bytes_len).map_err(|_| WalWriteError::FormatViolation {
-            detail: "commit length exceeds u64 capacity".into(),
-        })?;
+        let bytes_written =
+            u64::try_from(bytes_len).map_err(|_| WalWriteError::FormatViolation {
+                detail: "commit length exceeds u64 capacity".into(),
+            })?;
         let write_offset = self.write_pos;
 
         // ── Append ───────────────────────────────────────────────────────
@@ -710,15 +711,12 @@ impl WalWriter {
             let _ = self.file.set_len(self.write_pos);
             return Err(e);
         }
-        let len_u64 = match u64::try_from(data.len()) {
-            Ok(len) => len,
-            Err(_) => {
-                let _ = self.file.set_len(self.write_pos);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "data length exceeds u64",
-                ));
-            }
+        let Ok(len_u64) = u64::try_from(data.len()) else {
+            let _ = self.file.set_len(self.write_pos);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "data length exceeds u64",
+            ));
         };
         self.write_pos = self.write_pos.checked_add(len_u64).ok_or_else(|| {
             std::io::Error::new(

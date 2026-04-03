@@ -1421,7 +1421,11 @@ mod fc_tests {
         assert_eq!(result.transactions_found, 1);
         assert_eq!(result.last_tid, 7);
         assert_eq!(result.operations.len(), 1);
-        assert!(matches!(result.operations[0], FcOperation::Create(_)), "expected Create, got {:?}", result.operations[0]);
+        assert!(
+            matches!(result.operations[0], FcOperation::Create(_)),
+            "expected Create, got {:?}",
+            result.operations[0]
+        );
         if let FcOperation::Create(d) = &result.operations[0] {
             assert_eq!(d.parent_ino, 2);
             assert_eq!(d.ino, 11);
@@ -3138,7 +3142,10 @@ mod tests {
 
         let result = writer.commit_transaction(&cx, &dev, &txn);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), FfsError::NoSpace), "expected NoSpace");
+        assert!(
+            matches!(result.unwrap_err(), FfsError::NoSpace),
+            "expected NoSpace"
+        );
     }
 
     #[test]

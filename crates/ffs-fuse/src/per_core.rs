@@ -276,7 +276,7 @@ impl PerCoreDispatcher {
             .iter()
             .map(|m| m.pending_requests.load(Ordering::Relaxed))
             .sum();
-        
+
         if total <= 0 {
             return false;
         }
@@ -476,6 +476,7 @@ mod tests {
             let core = disp.route_inode(ino);
             let metrics = disp.core_metrics(core).unwrap();
             metrics.begin_request();
+            metrics.record_request();
             if ino % 3 == 0 {
                 metrics.record_hit();
             } else {
@@ -501,9 +502,11 @@ mod tests {
         let m0 = disp.core_metrics(0).unwrap();
         for _ in 0..100 {
             m0.begin_request();
+            m0.record_request();
         }
         let m1 = disp.core_metrics(1).unwrap();
         m1.begin_request(); // 1 request to core 1
+        m1.record_request();
 
         let agg = disp.aggregate_metrics();
         assert_eq!(agg.total_requests, 101);
@@ -543,6 +546,7 @@ mod tests {
             let m = disp.core_metrics(core).unwrap();
             for _ in 0..count {
                 m.begin_request();
+                m.record_request();
             }
         }
 

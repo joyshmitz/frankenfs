@@ -10140,7 +10140,13 @@ impl OpenFs {
 
     /// Remove one ext4 xattr.
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
-    fn ext4_removexattr(&self, cx: &Cx, _scope: &mut RequestScope, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
+    fn ext4_removexattr(
+        &self,
+        cx: &Cx,
+        _scope: &mut RequestScope,
+        ino: InodeNumber,
+        name: &str,
+    ) -> ffs_error::Result<bool> {
         let alloc_mutex = self.require_alloc_state()?;
         let block_dev = self.block_device_adapter();
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
@@ -12290,7 +12296,13 @@ impl OpenFs {
     }
 
     /// Remove an extended attribute from a btrfs inode.
-    fn btrfs_removexattr(&self, _cx: &Cx, _scope: &mut RequestScope, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
+    fn btrfs_removexattr(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        ino: InodeNumber,
+        name: &str,
+    ) -> ffs_error::Result<bool> {
         let alloc_mutex = self.require_btrfs_alloc_state()?;
         let canonical = self.btrfs_canonical_inode(ino)?;
 
@@ -13839,9 +13851,14 @@ impl FsOps for OpenFs {
         mode: XattrSetMode,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => {
-                self.ext4_setxattr(cx, scope, Self::ext4_canonical_inode(ino), name, value, mode)
-            }
+            FsFlavor::Ext4(_) => self.ext4_setxattr(
+                cx,
+                scope,
+                Self::ext4_canonical_inode(ino),
+                name,
+                value,
+                mode,
+            ),
             FsFlavor::Btrfs(_) => self.btrfs_setxattr(cx, scope, ino, name, value, mode),
         }
     }
@@ -13854,7 +13871,9 @@ impl FsOps for OpenFs {
         name: &str,
     ) -> ffs_error::Result<bool> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => self.ext4_removexattr(cx, scope, Self::ext4_canonical_inode(ino), name),
+            FsFlavor::Ext4(_) => {
+                self.ext4_removexattr(cx, scope, Self::ext4_canonical_inode(ino), name)
+            }
             FsFlavor::Btrfs(_) => self.btrfs_removexattr(cx, scope, ino, name),
         }
     }
@@ -13953,7 +13972,9 @@ impl FsOps for OpenFs {
                 name.as_encoded_bytes(),
                 true,
             ),
-            FsFlavor::Btrfs(_) => self.btrfs_unlink_impl(cx, scope, parent, name.as_encoded_bytes(), true),
+            FsFlavor::Btrfs(_) => {
+                self.btrfs_unlink_impl(cx, scope, parent, name.as_encoded_bytes(), true)
+            }
         }
     }
 
@@ -14065,9 +14086,14 @@ impl FsOps for OpenFs {
         mode: i32,
     ) -> ffs_error::Result<()> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => {
-                self.ext4_fallocate(cx, scope, Self::ext4_canonical_inode(ino), offset, length, mode)
-            }
+            FsFlavor::Ext4(_) => self.ext4_fallocate(
+                cx,
+                scope,
+                Self::ext4_canonical_inode(ino),
+                offset,
+                length,
+                mode,
+            ),
             FsFlavor::Btrfs(_) => self.btrfs_fallocate(cx, ino, offset, length, mode),
         }
     }
@@ -28009,6 +28035,7 @@ mod tests {
             .unwrap();
         let mut original = vec![b'A'; 4096];
         original.extend(vec![b'B'; 4096]);
+        original.extend(vec![b'C'; 4096]);
         ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &original)
             .expect("seed file before punch hole");
         let before_attr = ops
@@ -28018,7 +28045,7 @@ mod tests {
             &cx,
             &mut RequestScope::empty(),
             attr.ino,
-            2048,
+            4096,
             4096,
             libc::FALLOC_FL_KEEP_SIZE | libc::FALLOC_FL_PUNCH_HOLE,
         )
@@ -28027,17 +28054,17 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .expect("getattr after punch hole");
         let after_data = ops
-            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192)
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 12288)
             .expect("read after punch hole");
         assert_eq!(
             after_attr.size, before_attr.size,
             "punch-hole mode must preserve file size under KEEP_SIZE"
         );
-        assert_eq!(&after_data[..2048], &original[..2048]);
-        assert!(after_data[2048..6144].iter().all(|byte| *byte == 0));
+        assert_eq!(&after_data[..4096], &original[..4096]);
+        assert!(after_data[4096..8192].iter().all(|byte| *byte == 0));
         assert_eq!(
-            &after_data[6144..],
-            &original[6144..],
+            &after_data[8192..],
+            &original[8192..],
             "punch hole must preserve data outside the requested range"
         );
     }
@@ -28060,6 +28087,7 @@ mod tests {
             .unwrap();
         let mut original = vec![b'A'; 4096];
         original.extend(vec![b'B'; 4096]);
+        original.extend(vec![b'C'; 4096]);
         ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &original)
             .expect("seed file before zero range");
 
@@ -28067,7 +28095,7 @@ mod tests {
             &cx,
             &mut RequestScope::empty(),
             attr.ino,
-            2048,
+            4096,
             4096,
             libc::FALLOC_FL_ZERO_RANGE,
         )
@@ -28077,14 +28105,14 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .expect("getattr after zero range");
         let after_data = ops
-            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192)
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 12288)
             .expect("read after zero range");
-        assert_eq!(after_attr.size, 8192);
-        assert_eq!(&after_data[..2048], &original[..2048]);
-        assert!(after_data[2048..6144].iter().all(|byte| *byte == 0));
+        assert_eq!(after_attr.size, 12288);
+        assert_eq!(&after_data[..4096], &original[..4096]);
+        assert!(after_data[4096..8192].iter().all(|byte| *byte == 0));
         assert_eq!(
-            &after_data[6144..],
-            &original[6144..],
+            &after_data[8192..],
+            &original[8192..],
             "zero range must preserve data outside the requested range"
         );
     }

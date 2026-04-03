@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ffs_block::CacheRuntimeMetricsSnapshot;
 use ffs_fuse::MetricsSnapshot;
 use ffs_repair::evidence::{EvidenceEventType, EvidenceRecord};
@@ -1361,9 +1361,9 @@ fn print_contention_sample_payload(record: &EvidenceRecord) {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_evidence_args, PresetMode, PRESET_CACHE, PRESET_CONTENTION, PRESET_METRICS,
-        PRESET_MVCC, PRESET_PRESSURE_TRANSITIONS, PRESET_REPAIR_FAILURES, PRESET_REPAIR_LIVE,
-        PRESET_REPLAY_ANOMALIES,
+        PRESET_CACHE, PRESET_CONTENTION, PRESET_METRICS, PRESET_MVCC, PRESET_PRESSURE_TRANSITIONS,
+        PRESET_REPAIR_FAILURES, PRESET_REPAIR_LIVE, PRESET_REPLAY_ANOMALIES, PresetMode,
+        validate_evidence_args,
     };
 
     #[test]
@@ -1392,18 +1392,20 @@ mod tests {
     fn validate_evidence_args_rejects_tail_for_metrics_presets() {
         let err = validate_evidence_args(Some(PRESET_METRICS), None, Some(5), false)
             .expect_err("metrics presets should reject tail");
-        assert!(err
-            .to_string()
-            .contains("--tail is only supported for ledger-backed evidence presets"));
+        assert!(
+            err.to_string()
+                .contains("--tail is only supported for ledger-backed evidence presets")
+        );
     }
 
     #[test]
     fn validate_evidence_args_rejects_summary_for_metrics_presets() {
         let err = validate_evidence_args(Some(PRESET_METRICS), None, None, true)
             .expect_err("metrics presets should reject summary");
-        assert!(err
-            .to_string()
-            .contains("--summary is only supported for ledger-backed evidence presets"));
+        assert!(
+            err.to_string()
+                .contains("--summary is only supported for ledger-backed evidence presets")
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use asupersync::Cx;
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice};
 use ffs_core::{Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, XattrSetMode};
 use ffs_error::{FfsError, Result as FfsResult};
-use ffs_types::{BlockNumber, ByteOffset, InodeNumber, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET};
+use ffs_types::{BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, BlockNumber, ByteOffset, InodeNumber};
 use parking_lot::Mutex;
 use std::ffi::OsStr;
 use std::path::PathBuf;

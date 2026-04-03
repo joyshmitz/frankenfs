@@ -5186,7 +5186,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tracing::{info, info_span};
-    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt::MakeWriter;
 
     #[derive(Clone, Default)]
@@ -5804,7 +5803,10 @@ mod tests {
         with_temp_image_path(ledger.as_bytes(), |path| {
             let records = load_evidence_records(&path, Some("repair_failed"), Some(0), None)
                 .expect("tail=0 evidence read should succeed");
-            assert!(records.is_empty(), "tail=0 should suppress all returned records");
+            assert!(
+                records.is_empty(),
+                "tail=0 should suppress all returned records"
+            );
         });
     }
 
@@ -5893,6 +5895,27 @@ mod tests {
                     .iter()
                     .all(|r| r.event_type != EvidenceEventType::RepairFailed)
             );
+        });
+    }
+
+    #[test]
+    fn load_evidence_records_preset_tail_keeps_last_matching_records() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":1,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":2,\"event_type\":\"wal_recovery\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":3,\"event_type\":\"repair_succeeded\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":4,\"event_type\":\"flush_batch\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":5,\"event_type\":\"scrub_cycle_complete\",\"block_group\":1}\n",
+            "{\"timestamp_ns\":6,\"event_type\":\"durability_policy_changed\",\"block_group\":0}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records = load_evidence_records(&path, None, Some(2), Some("repair-failures"))
+                .expect("preset+tail evidence read should succeed");
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].timestamp_ns, 3);
+            assert_eq!(records[1].timestamp_ns, 5);
+            assert_eq!(records[0].event_type, EvidenceEventType::RepairSucceeded);
+            assert_eq!(records[1].event_type, EvidenceEventType::ScrubCycleComplete);
         });
     }
 
@@ -6180,6 +6203,24 @@ mod tests {
     }
 
     #[test]
+    fn evidence_summary_normalizes_block_groups() {
+        let ledger = concat!(
+            "{\"timestamp_ns\":100,\"event_type\":\"repair_failed\",\"block_group\":7}\n",
+            "{\"timestamp_ns\":200,\"event_type\":\"repair_succeeded\",\"block_group\":0}\n",
+            "{\"timestamp_ns\":300,\"event_type\":\"repair_attempted\",\"block_group\":3}\n",
+            "{\"timestamp_ns\":400,\"event_type\":\"scrub_cycle_complete\",\"block_group\":7}\n",
+            "{\"timestamp_ns\":500,\"event_type\":\"corruption_detected\",\"block_group\":3}\n",
+        );
+        with_temp_image_path(ledger.as_bytes(), |path| {
+            let records =
+                load_evidence_records(&path, None, None, None).expect("load should succeed");
+            let summary =
+                crate::cmd_evidence::build_summary_for_test(&records, Some("repair-failures"));
+            assert_eq!(summary.block_groups_seen, vec![3, 7]);
+        });
+    }
+
+    #[test]
     fn evidence_record_json_schema_stability() {
         // Verify that EvidenceRecord JSON contains expected top-level keys.
         let json_str = r#"{"timestamp_ns":1,"event_type":"repair_failed","block_group":2}"#;
@@ -6259,20 +6300,22 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
+            .with_max_level(tracing::Level::INFO)
             .with_writer(buffer.clone())
             .finish();
 
-        tracing::subscriber::with_default(subscriber, || {
-            info!(
-                target: "ffs::test",
-                event_name = "transaction_commit",
-                txn_id = 42_u64,
-                write_set_size = 3_u64,
-                duration_us = 900_u64,
-                "transaction_commit"
-            );
-        });
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _default = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+
+        info!(
+            target: "ffs::test",
+            event_name = "transaction_commit",
+            txn_id = 42_u64,
+            write_set_size = 3_u64,
+            duration_us = 900_u64,
+            "transaction_commit"
+        );
 
         let json = parse_first_json_line(&buffer);
         assert_eq!(json["event_name"], "transaction_commit");
@@ -6292,15 +6335,19 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
+            .with_max_level(tracing::Level::INFO)
             .with_writer(buffer.clone())
             .finish();
 
-        tracing::subscriber::with_default(subscriber, || {
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _default = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+
+        {
             let span = info_span!("mount", image = "/tmp/ext4.img", mode = "ro");
             let _guard = span.enter();
             info!(target: "ffs::test", action = "mount_begin", "mount_begin");
-        });
+        }
 
         let json = parse_first_json_line(&buffer);
         assert_eq!(json["action"], "mount_begin");
@@ -6383,26 +6430,28 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
+            .with_max_level(tracing::Level::INFO)
             .with_writer(buffer.clone())
             .finish();
 
-        tracing::subscriber::with_default(subscriber, || {
-            let runtime = MountRuntimeConfig {
-                mode: MountRuntimeMode::Standard,
-                managed_unmount_timeout_secs: None,
-            }
-            .validate()
-            .expect("runtime config should validate");
-            log_mount_runtime_selected(
-                "mount-op-test",
-                runtime.mode.scenario_id(false),
-                runtime,
-                false,
-                true,
-                false,
-            );
-        });
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _default = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+
+        let runtime = MountRuntimeConfig {
+            mode: MountRuntimeMode::Standard,
+            managed_unmount_timeout_secs: None,
+        }
+        .validate()
+        .expect("runtime config should validate");
+        log_mount_runtime_selected(
+            "mount-op-test",
+            runtime.mode.scenario_id(false),
+            runtime,
+            false,
+            true,
+            false,
+        );
 
         let json = parse_first_json_line(&buffer);
         assert_eq!(json["operation_id"], "mount-op-test");
@@ -6421,26 +6470,28 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("error"))
+            .with_max_level(tracing::Level::ERROR)
             .with_writer(buffer.clone())
             .finish();
 
-        tracing::subscriber::with_default(subscriber, || {
-            let runtime = MountRuntimeConfig {
-                mode: MountRuntimeMode::Managed,
-                managed_unmount_timeout_secs: Some(12),
-            }
-            .validate()
-            .expect("managed runtime config should validate");
-            log_mount_runtime_rejected(
-                "mount-op-reject",
-                runtime.mode.scenario_id(true),
-                runtime,
-                true,
-                "runtime_mode_unavailable",
-                "managed mode not yet wired",
-            );
-        });
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _default = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+
+        let runtime = MountRuntimeConfig {
+            mode: MountRuntimeMode::Managed,
+            managed_unmount_timeout_secs: Some(12),
+        }
+        .validate()
+        .expect("managed runtime config should validate");
+        log_mount_runtime_rejected(
+            "mount-op-reject",
+            runtime.mode.scenario_id(true),
+            runtime,
+            true,
+            "runtime_mode_unavailable",
+            "managed mode not yet wired",
+        );
 
         let json = parse_first_json_line(&buffer);
         assert_eq!(json["operation_id"], "mount-op-reject");
@@ -6462,21 +6513,23 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
+            .with_max_level(tracing::Level::INFO)
             .with_writer(buffer.clone())
             .finish();
 
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _default = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+
         with_temp_image_path(&image, |path| {
-            tracing::subscriber::with_default(subscriber, || {
-                let decision = coordinate_repair_write_access(
-                    "ffs::test",
-                    REPAIR_COORDINATION_SCENARIO_REPAIR,
-                    "repair",
-                    &path,
-                    true,
-                );
-                assert!(decision.writes_allowed);
-            });
+            let decision = coordinate_repair_write_access(
+                "ffs::test",
+                REPAIR_COORDINATION_SCENARIO_REPAIR,
+                "repair",
+                &path,
+                true,
+            );
+            assert!(decision.writes_allowed);
         });
 
         let json = parse_first_json_line(&buffer);
@@ -6510,22 +6563,24 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
+            .with_max_level(tracing::Level::INFO)
             .with_writer(buffer.clone())
             .finish();
 
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _default = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+
         with_temp_image_path(&image, |path| {
             write_test_coordination_record(&path, "remote-host");
-            tracing::subscriber::with_default(subscriber, || {
-                let decision = coordinate_repair_write_access(
-                    "ffs::test",
-                    REPAIR_COORDINATION_SCENARIO_REPAIR,
-                    "repair",
-                    &path,
-                    true,
-                );
-                assert!(!decision.writes_allowed);
-            });
+            let decision = coordinate_repair_write_access(
+                "ffs::test",
+                REPAIR_COORDINATION_SCENARIO_REPAIR,
+                "repair",
+                &path,
+                true,
+            );
+            assert!(!decision.writes_allowed);
         });
 
         let json = parse_first_json_line(&buffer);
@@ -6545,6 +6600,7 @@ mod tests {
 
     #[test]
     fn mount_cmd_managed_mode_fails_at_image_open_not_validation() {
+        let _guard = log_contract_guard();
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
             &PathBuf::from("/definitely/missing-mountpoint"),
@@ -6566,6 +6622,7 @@ mod tests {
 
     #[test]
     fn mount_cmd_per_core_mode_fails_at_image_open_not_validation() {
+        let _guard = log_contract_guard();
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
             &PathBuf::from("/definitely/missing-mountpoint"),
@@ -8052,6 +8109,7 @@ mod tests {
     #[test]
     fn repair_coordination_allows_same_host_refresh() {
         const EXT4_VALID_FS: u16 = 0x0001;
+        let _guard = log_contract_guard();
         let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
 
         with_temp_image_path(&image, |path| {
@@ -8099,6 +8157,7 @@ mod tests {
     #[test]
     fn repair_coordination_blocks_foreign_host_owner() {
         const EXT4_VALID_FS: u16 = 0x0001;
+        let _guard = log_contract_guard();
         let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
 
         with_temp_image_path(&image, |path| {
