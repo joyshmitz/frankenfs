@@ -6074,6 +6074,37 @@ mod tests {
     }
 
     #[test]
+    fn load_metrics_report_cache_preset_reads_bundle_member() {
+        let bundle = serde_json::json!({
+            "cache": {
+                "cache_hits": 120,
+                "cache_misses": 30,
+                "cache_evictions": 7,
+                "cache_dirty_count": 16,
+                "writeback_queue_depth": 6,
+                "hit_rate": 0.8
+            }
+        });
+
+        with_temp_image_path(
+            serde_json::to_string_pretty(&bundle)
+                .expect("serialize bundle")
+                .as_bytes(),
+            |path| {
+                let report =
+                    load_metrics_report_for_test(&path, "cache").expect("load cache report");
+                let value = serde_json::to_value(report).expect("serialize report");
+                assert_eq!(value["preset"], "cache");
+                assert_eq!(value["snapshot"]["cache_hits"], 120);
+                assert_eq!(value["snapshot"]["cache_misses"], 30);
+                assert_eq!(value["miss_rate"], 0.2);
+                assert_eq!(value["dirty_pressure"], "elevated");
+                assert_eq!(value["writeback_pressure"], "active");
+            },
+        );
+    }
+
+    #[test]
     fn load_metrics_report_mvcc_preset_reads_direct_snapshot() {
         let snapshot = EvidenceMvccRuntimeMetricsSnapshot {
             active_snapshots: 3,
@@ -6106,6 +6137,52 @@ mod tests {
     }
 
     #[test]
+    fn load_metrics_report_mvcc_preset_reads_bundle_member() {
+        let bundle = serde_json::json!({
+            "mvcc": {
+                "active_snapshots": 4,
+                "commit_rate": 12.0,
+                "conflict_rate": 0.2,
+                "abort_rate": 0.05,
+                "version_chain_max_length": 9,
+                "prune_throughput": 17.0,
+                "commit_attempts_total": 100,
+                "commit_successes_total": 72,
+                "conflicts_total": 18,
+                "aborts_total": 5,
+                "pruned_versions_total": 144,
+                "commit_latency_us": {
+                    "buckets": [{"le": 10, "count": 2}, {"le": 100, "count": 6}],
+                    "inf_count": 0,
+                    "sum": 420,
+                    "count": 8
+                },
+                "conflict_resolution_latency_us": {
+                    "buckets": [{"le": 10, "count": 1}, {"le": 100, "count": 4}],
+                    "inf_count": 0,
+                    "sum": 190,
+                    "count": 5
+                }
+            }
+        });
+
+        with_temp_image_path(
+            serde_json::to_string_pretty(&bundle)
+                .expect("serialize bundle")
+                .as_bytes(),
+            |path| {
+                let report = load_metrics_report_for_test(&path, "mvcc").expect("load mvcc report");
+                let value = serde_json::to_value(report).expect("serialize report");
+                assert_eq!(value["preset"], "mvcc");
+                assert_eq!(value["snapshot"]["active_snapshots"], 4);
+                assert_eq!(value["snapshot"]["commit_attempts_total"], 100);
+                assert_eq!(value["commit_success_rate"], 0.72);
+                assert_eq!(value["contention_level"], "high");
+            },
+        );
+    }
+
+    #[test]
     fn load_metrics_report_repair_live_reads_direct_snapshot() {
         let snapshot = RepairRuntimeMetricsSnapshot {
             groups_scrubbed: 20,
@@ -6127,6 +6204,36 @@ mod tests {
                 assert_eq!(value["snapshot"]["groups_scrubbed"], 20);
                 assert_eq!(value["decode_success_rate"], 0.75);
                 assert_eq!(value["freshness"], "aging");
+            },
+        );
+    }
+
+    #[test]
+    fn load_metrics_report_repair_live_reads_bundle_member() {
+        let bundle = serde_json::json!({
+            "repair_live": {
+                "groups_scrubbed": 15,
+                "corruption_detected": 3,
+                "decode_attempts": 9,
+                "decode_successes": 3,
+                "symbol_refresh_count": 11,
+                "symbol_staleness_max_seconds": 601.0
+            }
+        });
+
+        with_temp_image_path(
+            serde_json::to_string_pretty(&bundle)
+                .expect("serialize bundle")
+                .as_bytes(),
+            |path| {
+                let report = load_metrics_report_for_test(&path, "repair-live")
+                    .expect("load repair-live report");
+                let value = serde_json::to_value(report).expect("serialize report");
+                assert_eq!(value["preset"], "repair-live");
+                assert_eq!(value["snapshot"]["groups_scrubbed"], 15);
+                assert_eq!(value["snapshot"]["decode_successes"], 3);
+                assert_eq!(value["decode_success_rate"], 0.333_333_333_333_333_3);
+                assert_eq!(value["freshness"], "stale");
             },
         );
     }

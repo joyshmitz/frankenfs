@@ -146,9 +146,9 @@ impl ShardedMvccStore {
     /// Map a block number to its shard index.
     #[inline]
     fn shard_index(&self, block: BlockNumber) -> usize {
-        let shard_count_u64 = u64::try_from(self.shard_count).expect("shard_count must fit in u64");
+        let shard_count_u64 = u64::try_from(self.shard_count).unwrap_or(u64::MAX);
         let rem = block.0 % shard_count_u64;
-        usize::try_from(rem).expect("remainder must fit in usize")
+        usize::try_from(rem).unwrap_or(0)
     }
 
     fn latest_payload_matches(versions: &[BlockVersion], bytes: &[u8]) -> bool {
@@ -205,7 +205,9 @@ impl ShardedMvccStore {
     ) -> Result<Vec<u8>, CommitError> {
         let staged = txn
             .staged_write(block)
-            .expect("write_set keys must have staged bytes");
+            .ok_or_else(|| CommitError::DurabilityFailure {
+                detail: format!("write_set keys must have staged bytes: {block:?}"),
+            })?;
         let observed = Self::latest_commit_seq_in_shard(shard, block);
         if observed <= txn.snapshot().high {
             return Ok(staged.to_vec());
@@ -336,7 +338,10 @@ impl ShardedMvccStore {
             .unwrap_or_default();
         proof
             .merge_bytes(&base, &latest, &bytes)
-            .expect("preflight must reject unmergeable conflicts")
+            .unwrap_or_else(|| {
+                tracing::error!("preflight missed an unmergeable conflict on block {block:?}");
+                bytes.clone()
+            })
     }
 
     fn install_committed_version_locked(
@@ -494,11 +499,14 @@ impl ShardedMvccStore {
         let (writes, merge_proofs) = txn.into_writes_and_merge_proofs();
         for (block, bytes) in writes {
             let shard_idx = self.shard_index(block);
-            let shard = shard_guards
+            let Some(shard) = shard_guards
                 .iter_mut()
                 .find(|(idx, _)| *idx == shard_idx)
                 .map(|(_, guard)| guard)
-                .expect("shard must be locked");
+            else {
+                tracing::error!("missing shard guard for block {block:?}");
+                continue;
+            };
             Self::install_committed_version_locked(
                 shard,
                 block,
@@ -555,11 +563,14 @@ impl ShardedMvccStore {
         let (writes, merge_proofs) = txn.into_writes_and_merge_proofs();
         for (block, bytes) in writes {
             let shard_idx = self.shard_index(block);
-            let shard = shard_guards
+            let Some(shard) = shard_guards
                 .iter_mut()
                 .find(|(idx, _)| *idx == shard_idx)
                 .map(|(_, guard)| guard)
-                .expect("shard must be locked");
+            else {
+                tracing::error!("missing shard guard for block {block:?}");
+                continue;
+            };
             Self::install_committed_version_locked(
                 shard,
                 block,

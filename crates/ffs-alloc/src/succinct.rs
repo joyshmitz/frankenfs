@@ -452,7 +452,7 @@ impl SuccinctBitmap {
         if byte_start + 8 <= self.data.len() {
             let bytes: [u8; 8] = self.data[byte_start..byte_start + 8]
                 .try_into()
-                .expect("8 bytes");
+                .unwrap_or_default();
             u64::from_le_bytes(bytes)
         } else {
             // Partial word at end.

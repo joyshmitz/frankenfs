@@ -1166,8 +1166,10 @@ fn try_alloc_batch_in_group(
 
     // Single bitmap write for all allocations in this group.
     dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
-    let count_allocated =
-        u32::try_from(allocated.len()).expect("group allocation count is bounded by u32 request");
+    let count_allocated = u32::try_from(allocated.len()).map_err(|_| FfsError::Corruption {
+        block: 0,
+        detail: "group allocation count is bounded by u32 request".into(),
+    })?;
     groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_sub(count_allocated);
 
     // Single GDT persist for all allocations in this group.

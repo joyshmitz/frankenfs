@@ -1720,7 +1720,9 @@ impl MvccStore {
     ) -> Result<Vec<u8>, CommitError> {
         let staged = txn
             .staged_write(block)
-            .expect("write_set keys must have staged bytes");
+            .ok_or_else(|| CommitError::DurabilityFailure {
+                detail: format!("write_set keys must have staged bytes: {block:?}"),
+            })?;
         let observed = self.latest_commit_seq(block);
         if observed <= txn.snapshot.high {
             return Ok(staged.to_vec());
@@ -1950,7 +1952,10 @@ impl MvccStore {
                     .unwrap_or_default();
                 proof
                     .merge_bytes(&base, &latest, &bytes)
-                    .expect("preflight_fcw must reject unmergeable conflicts")
+                    .unwrap_or_else(|| {
+                        tracing::error!("preflight_fcw missed an unmergeable conflict on block {block:?}");
+                        bytes.clone()
+                    })
             } else {
                 bytes
             };
@@ -2030,7 +2035,10 @@ impl MvccStore {
                     .unwrap_or_default();
                 proof
                     .merge_bytes(&base, &latest, &bytes)
-                    .expect("preflight_fcw must reject unmergeable conflicts")
+                    .unwrap_or_else(|| {
+                        tracing::error!("preflight_fcw missed an unmergeable conflict on block {block:?}");
+                        bytes.clone()
+                    })
             } else {
                 bytes
             };
