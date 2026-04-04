@@ -1085,7 +1085,10 @@ pub fn alloc_blocks_batch_persist(
             try_alloc_batch_in_group(cx, dev, geo, groups, group, remaining, hint, pctx)?;
 
         let allocated_in_group_len = u32::try_from(allocated_in_group.len())
-            .expect("batch allocation count is bounded by requested u32 count");
+            .map_err(|_| FfsError::Corruption {
+                block: 0,
+                detail: "batch allocation count is bounded by requested u32 count".into(),
+            })?;
         remaining -= allocated_in_group_len;
         results.extend(allocated_in_group);
     }

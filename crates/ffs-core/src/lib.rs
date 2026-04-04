@@ -12052,6 +12052,9 @@ impl OpenFs {
             .fs_tree
             .update(&inode_key, &inode.to_bytes())
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        
+        println!(">>> btrfs_fallocate reached end! Canonical: {}, operation_id: {}", canonical, operation_id);
+
         info!(
             target: "ffs::btrfs::rw",
             operation_id = %operation_id,

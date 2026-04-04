@@ -252,11 +252,13 @@ impl ShardedMvccStore {
 
         for &block in txn.write_set().keys() {
             let shard_idx = self.shard_index(block);
-            let shard = shard_guards
+            let Some(shard) = shard_guards
                 .iter()
                 .find(|(idx, _)| *idx == shard_idx)
                 .map(|(_, guard)| guard)
-                .expect("shard must be locked");
+            else {
+                return Err(CommitError::DurabilityFailure { detail: "shard guard missing".into() });
+            };
             let latest = Self::latest_commit_seq_in_shard(shard, block);
             if latest > txn.snapshot().high {
                 had_conflict = true;
@@ -390,11 +392,13 @@ impl ShardedMvccStore {
     ) -> Result<(), CommitError> {
         for (&block, &read_version) in txn.read_set() {
             let shard_idx = self.shard_index(block);
-            let shard = shard_guards
+            let Some(shard) = shard_guards
                 .iter()
                 .find(|(idx, _)| *idx == shard_idx)
                 .map(|(_, guard)| guard)
-                .expect("shard must be locked");
+            else {
+                return Err(CommitError::DurabilityFailure { detail: "shard guard missing".into() });
+            };
             for record in shard.ssi_log.iter().rev() {
                 if record.commit_seq <= txn.snapshot().high {
                     break;
