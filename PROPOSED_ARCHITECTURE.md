@@ -268,7 +268,7 @@ pub trait RepairManager: Send + Sync {
 | `MountOption` | Mount configuration (read-only, allow_other, auto_unmount) |
 | `Session` | FUSE session lifecycle management |
 
-> **Status:** `fuser` is a workspace dependency. `ffs-fuse` implements the `fuser::Filesystem` trait and `ffs mount` currently reaches both ext4 and btrfs paths in experimental mode. Default mount is read-only; `--rw` enables write paths that are still under active hardening.
+> **Status:** `fuser` is a workspace dependency. `ffs-fuse` implements the `fuser::Filesystem` trait and `ffs mount` currently reaches both ext4 and btrfs paths under the fully tracked V1 contract. Default mount is read-only; `--rw` enables write paths whose operator-facing runtime remains experimental while hardening continues.
 
 ---
 

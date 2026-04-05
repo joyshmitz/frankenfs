@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://github.com/Dicklesworthstone/frankenfs/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg" alt="MIT+Rider License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-nightly%202024-orange.svg" alt="Rust Nightly"></a>
-  <img src="https://img.shields.io/badge/parity-100%25-brightgreen" alt="Parity 100%">
+  <img src="https://img.shields.io/badge/tracked%20V1%20parity-100%25-brightgreen" alt="Tracked V1 Parity 100%">
   <img src="https://img.shields.io/badge/tests-3591%20passing-brightgreen" alt="3591 Tests">
   <img src="https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg" alt="Unsafe Forbidden">
   <img src="https://img.shields.io/badge/status-early%20development-yellow.svg" alt="Early Development">
@@ -27,7 +27,7 @@
 
 **The problem:** Linux filesystems are trapped in kernel space. ext4 is 30 years old with a global journal lock (JBD2) that serializes all writes. btrfs has better internals but remains kernel-only, hard to test, and impossible to extend from userspace. Both lack automatic corruption recovery; you run `fsck` after the fact and hope.
 
-**The solution:** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19) and re-implements it idiomatically in Rust as a FUSE filesystem. It reads real ext4/btrfs disk images today and can mount both in experimental mode (default read-only, optional `--rw`), while write-path hardening continues.
+**The solution:** FrankenFS extracts the *behavior* of ext4 and btrfs from ~205K lines of Linux kernel C (v6.19) and re-implements it idiomatically in Rust as a FUSE filesystem. The tracked V1 parity matrix is complete, and the current runtime can read real ext4/btrfs disk images and mount both in experimental mode (default read-only, optional `--rw`) while operational hardening continues.
 
 | What | How | Why it matters |
 |------|-----|----------------|
@@ -1291,7 +1291,7 @@ cargo test --workspace
 
 ## Project Status
 
-FrankenFS is in **early development**. The tracked V1 parity matrix is complete (100%), and ongoing work is focused on hardening three major subsystems that reached verification-gate maturity:
+FrankenFS is in **early development**. The tracked V1 parity matrix is complete (100%), meaning every item in [FEATURE_PARITY.md](FEATURE_PARITY.md)'s current denominator has an implemented and tested contract. Ongoing work is focused on operational hardening of three major subsystems that already reached verification-gate maturity:
 
 | Subsystem | Status | Key metric |
 |-----------|--------|------------|
@@ -1306,9 +1306,11 @@ FrankenFS is in **early development**. The tracked V1 parity matrix is complete 
 | ext4 metadata parsing | 100.0% (27/27) |
 | btrfs metadata parsing | 100.0% (27/27) |
 | MVCC/COW core | 100.0% (14/14) |
-| FUSE surface | 100.0% (12/12) |
+| FUSE surface | 100.0% (15/15) |
 | self-healing durability policy | 100.0% (10/10) |
-| **Overall** | **100.0% (90/90)** |
+| **Overall** | **100.0% (93/93)** |
+
+Rows in the btrfs experimental RW contract can still say `partially supported` or `unsupported` without reducing tracked parity coverage when the expected V1 behavior is a deterministic partial-success or explicit rejection path that is implemented and tested.
 
 ### What Works Today
 
@@ -1337,7 +1339,7 @@ See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [P
 
 **ext4:** Single-device images with block sizes 1K/2K/4K. Requires `FILETYPE` feature flag (`EXTENTS` optional — indirect block addressing is supported). FUSE mount defaults to read-only; `--rw` is available but still experimental. All known incompat feature flags are accepted at mount time. `COMPRESSION` keeps mixed-feature filesystems mountable, but individual compressed inodes still return a clear unsupported-format error at read time. `JOURNAL_DEV` images are detected as standalone journal devices; data filesystems that reference an external journal support paired-open replay via `--external-journal`, with UUID/block-size validation and fail-fast errors when required recovery cannot be performed safely. `ENCRYPT` shows filenames as raw bytes (nokey mode). `CASEFOLD` provides case-insensitive directory lookup. `INLINE_DATA` reads data from inode block area + system.data xattr.
 
-**btrfs:** Single- and multi-device images with RAID0/1/5/6/10/DUP support. Metadata parsing + validation (superblock, leaf items, sys_chunk_array, chunk tree walking). FUSE mount path is available in experimental mode (default read-only, optional `--rw`). Transparent decompression (ZLIB/LZO/ZSTD), subvolume mount, tree-log replay, and send/receive stream parsing are implemented.
+**btrfs:** Single- and multi-device images with RAID0/1/5/6/10/DUP support. Metadata parsing + validation (superblock, leaf items, sys_chunk_array, chunk tree walking). The tracked V1 FUSE mount/runtime contract is fully covered, but the operator-facing mount path remains explicitly experimental (default read-only, optional `--rw`). Transparent decompression (ZLIB/LZO/ZSTD), subvolume mount, tree-log replay, and send/receive stream parsing are implemented.
 
 ### btrfs Experimental RW Contract (Current)
 
@@ -1358,7 +1360,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 
 - **Linux only.** FUSE is the sole mount target. No macOS or Windows support planned.
 - **Nightly Rust required.** Edition 2024 features require the nightly toolchain.
-- **Runtime is still early-stage.** Even with full tracked parity, mount/write paths should still be treated as experimental in operational environments.
+- **Runtime is still early-stage.** Full tracked parity means the current V1 matrix is implemented and tested; it does not mean operational hardening, performance tuning, or future-scope features are finished. Mount/write paths should still be treated as experimental in operational environments.
 - **Kernel FUSE writeback-cache mode is intentionally unsupported in V1.x.** The epoch barrier design is implemented and crash-tested, but `writeback_cache` is not enabled in mount options. `flush` is a non-durability lifecycle hook; `fsync` / `fsyncdir` are the explicit durability boundaries.
 - **Default CLI mount path does not enable optional backpressure/per-core scheduling hooks.** `ffs-cli mount` currently uses the standard `ffs-fuse` mount path without wiring `BackpressureGate` controls.
 - **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.
@@ -1372,7 +1374,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 A: Kernel filesystems can't be extended with MVCC or self-healing from userspace. FrankenFS is a research vehicle for exploring what ext4/btrfs could look like with modern concurrency control and erasure coding, while remaining mount-compatible with existing images.
 
 **Q: Can I mount real ext4/btrfs data with this today?**
-A: `ffs mount` supports both ext4 and btrfs images in experimental mode. Default behavior is read-only; `--rw` enables write paths that are still under active hardening. Do not rely on it for production data.
+A: `ffs mount` supports both ext4 and btrfs images under the fully tracked V1 contract, but the runtime is still experimental operationally. Default behavior is read-only; `--rw` enables write paths that are still under active hardening. Do not rely on it for production data.
 
 **Q: What does "spec-first" mean?**
 A: Instead of translating C to Rust line by line, we first extract the *behavioral contract* of each kernel subsystem into specification documents (~400KB of structured Markdown). Then we implement from the spec in idiomatic Rust. This avoids carrying over C-isms and allows architectural improvements.

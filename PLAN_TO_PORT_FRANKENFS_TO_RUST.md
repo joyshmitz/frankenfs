@@ -114,7 +114,7 @@ novel capabilities shared across both filesystems:
 | Deliverable | Description |
 |---|---|
 | 21-crate Cargo workspace (19 core + 2 legacy/reference wrappers) | Modular, independently testable crates |
-| FUSE filesystem binary | Mounts ext4 and btrfs images in Linux userspace via `fuser` (experimental runtime; default read-only, optional `--rw`) |
+| FUSE filesystem binary | Mounts ext4 and btrfs images in Linux userspace via `fuser` (tracked V1 contract complete; runtime remains experimental operationally, default read-only, optional `--rw`) |
 | CLI (`ffs-cli`) | `mount`, `fsck`, `info`, `dump` commands |
 | TUI (`ffs-tui`) | Live monitoring dashboard (cache, MVCC, repair stats) |
 | Conformance harness | Automated comparison against Linux kernel ext4 driver |

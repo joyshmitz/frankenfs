@@ -17,6 +17,13 @@
 > single source of truth for implemented/total counts. `ParityReport::current()`
 > in `ffs-harness` parses this file, and a CI test
 > (`parity_report_matches_feature_parity_md`) enforces the mapping.
+>
+> **Interpretation rule:** "100% coverage" means every capability row in the
+> tracked V1 denominator has a defined, implemented, and tested contract. That
+> contract may be success, bounded partial behavior, or deterministic
+> rejection. Unsupported operations that are intentionally part of the V1
+> surface therefore remain compatible with 100% tracked parity when their
+> rejection behavior is itself implemented and validated.
 
 ## 2. Tracked Capability Matrix
 
@@ -66,6 +73,8 @@
 
 The table below is the authoritative btrfs experimental RW contract for `bd-h6nz.3.1`.
 Each row maps directly to deterministic unit/E2E coverage by stable test/scenario ID.
+`supported`, `partially supported`, and `unsupported` classify the expected V1
+behavior of that operation, not whether the row is unimplemented.
 
 | Contract ID | Operation / Edge Case | Class | Expected Result |
 |-------------|------------------------|-------|-----------------|
@@ -130,7 +139,7 @@ Each row maps directly to deterministic unit/E2E coverage by stable test/scenari
 
 Legend: `✅` implemented.
 
-## 3. Blocking Gaps to 100%
+## 3. Blocking Gaps in the Tracked V1 Matrix
 
 No blocking gaps in the tracked V1 parity matrix.
 
