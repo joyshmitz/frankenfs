@@ -12053,7 +12053,7 @@ impl OpenFs {
             .update(&inode_key, &inode.to_bytes())
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         
-        println!(">>> btrfs_fallocate reached end! Canonical: {}, operation_id: {}", canonical, operation_id);
+        println!(">>> btrfs_fallocate reached end! Canonical: {canonical}, operation_id: {operation_id}");
 
         info!(
             target: "ffs::btrfs::rw",
@@ -15291,7 +15291,7 @@ mod tests {
     use std::io::{self, Write};
     use std::os::unix::ffi::OsStrExt;
     use std::sync::{Arc, Mutex};
-    use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
+    use tracing_subscriber::fmt::MakeWriter;
 
     /// In-memory ByteDevice for testing (no file I/O).
     #[derive(Debug)]
@@ -15404,6 +15404,26 @@ mod tests {
         mutex
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Install a JSON tracing subscriber that captures to `buffer`, using
+    /// `Dispatch::new` + `set_default` + `rebuild_interest_cache` to avoid
+    /// callsite interest cache poisoning in multi-threaded test runs.
+    fn install_json_subscriber(
+        buffer: &SharedLogBuffer,
+    ) -> tracing::dispatcher::DefaultGuard {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(buffer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+        guard
     }
 
     #[test]
@@ -28238,16 +28258,9 @@ mod tests {
     fn btrfs_write_fallocate_success_log_contract() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
-            .with_writer(buffer.clone())
-            .finish();
+        let _sub = install_json_subscriber(&buffer);
 
-        tracing::subscriber::with_default(subscriber, || {
+        {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
 
@@ -28342,21 +28355,13 @@ mod tests {
     fn btrfs_write_fallocate_rejection_log_contract() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
-            .with_writer(buffer.clone())
-            .finish();
-        let subscriber = Arc::new(subscriber);
+        let _sub = install_json_subscriber(&buffer);
 
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
-        let attr = tracing::subscriber::with_default(Arc::clone(&subscriber), || {
-            ops.create(
+        let attr = ops
+            .create(
                 &cx,
                 &mut RequestScope::empty(),
                 InodeNumber(1),
@@ -28365,14 +28370,12 @@ mod tests {
                 0,
                 0,
             )
-            .expect("create file for rejection log test")
-        });
+            .expect("create file for rejection log test");
 
         // Mode 0x02 is PUNCH_HOLE. Without KEEP_SIZE (0x01), it should be rejected.
-        let err = tracing::subscriber::with_default(Arc::clone(&subscriber), || {
-            ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x02)
-                .expect_err("punch-hole without KEEP_SIZE should be rejected")
-        });
+        let err = ops
+            .fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x02)
+            .expect_err("punch-hole without KEEP_SIZE should be rejected");
         assert_eq!(err.to_errno(), libc::EINVAL);
 
         let logs = parse_json_logs(&buffer);
@@ -28400,7 +28403,7 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
+            .with_max_level(tracing::Level::INFO)
             .with_writer(buffer.clone())
             .finish();
 
@@ -28461,16 +28464,9 @@ mod tests {
     fn btrfs_write_fsync_log_contract_success() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
-            .with_writer(buffer.clone())
-            .finish();
+        let _sub = install_json_subscriber(&buffer);
 
-        tracing::subscriber::with_default(subscriber, || {
+        {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
 
@@ -28522,7 +28518,7 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
+            .with_max_level(tracing::Level::INFO)
             .with_writer(buffer.clone())
             .finish();
 
@@ -28565,16 +28561,9 @@ mod tests {
     fn btrfs_write_fsyncdir_log_contract_success() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
-            .with_writer(buffer.clone())
-            .finish();
+        let _sub = install_json_subscriber(&buffer);
 
-        tracing::subscriber::with_default(subscriber, || {
+        {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
             ops.fsyncdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0, false)
@@ -29421,16 +29410,9 @@ mod tests {
     fn ext4_write_fsync_log_contract_success() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
-            .with_writer(buffer.clone())
-            .finish();
+        let _sub = install_json_subscriber(&buffer);
 
-        tracing::subscriber::with_default(subscriber, || {
+        {
             let image = build_ext4_image(2);
             let dev = TestDevice::from_vec(image);
             let cx = Cx::for_testing();
@@ -29478,7 +29460,7 @@ mod tests {
             .flatten_event(true)
             .with_current_span(true)
             .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
+            .with_max_level(tracing::Level::INFO)
             .with_writer(buffer.clone())
             .finish();
 
@@ -29521,16 +29503,9 @@ mod tests {
     fn ext4_write_flush_log_contract_records_non_durable_boundary() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
-            .with_writer(buffer.clone())
-            .finish();
+        let _sub = install_json_subscriber(&buffer);
 
-        tracing::subscriber::with_default(subscriber, || {
+        {
             let image = build_ext4_image(2);
             let dev = TestDevice::from_vec(image);
             let cx = Cx::for_testing();
@@ -29571,16 +29546,9 @@ mod tests {
     fn btrfs_write_flush_log_contract_records_non_durable_boundary() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_env_filter(EnvFilter::new("info"))
-            .with_writer(buffer.clone())
-            .finish();
+        let _sub = install_json_subscriber(&buffer);
 
-        tracing::subscriber::with_default(subscriber, || {
+        {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
             ops.flush(&cx, &mut RequestScope::empty(), InodeNumber(1), 5, 11)

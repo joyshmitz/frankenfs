@@ -1,16 +1,16 @@
 #![forbid(unsafe_code)]
-//! Error types for FrankenFS.
+//! Error types for `FrankenFS`.
 //!
 //! # Error Taxonomy
 //!
-//! FrankenFS uses a two-layer error model:
+//! `FrankenFS` uses a two-layer error model:
 //!
 //! | Layer | Type | Crate | Purpose |
 //! |-------|------|-------|---------|
 //! | Parsing | `ParseError` | `ffs-types` | On-disk format violations detected during byte parsing |
 //! | Runtime | `FfsError` | `ffs-error` (this crate) | User-facing errors for FUSE, CLI, and API consumers |
 //!
-//! ## Mapping Policy: ParseError → FfsError
+//! ## Mapping Policy: `ParseError` → `FfsError`
 //!
 //! `ffs-error` is intentionally independent of `ffs-types` and `ffs-ondisk` to
 //! avoid cyclic dependencies. The conversion from `ParseError` to `FfsError` is
@@ -18,7 +18,7 @@
 //!
 //! The mapping rules are:
 //!
-//! | ParseError Variant | FfsError Variant | Rationale |
+//! | `ParseError` Variant | `FfsError` Variant | Rationale |
 //! |--------------------|------------------|-----------|
 //! | `InsufficientData` | `Corruption { block, detail }` | Truncated metadata indicates corruption or a truncated image |
 //! | `InvalidMagic` | `Format(detail)` | Wrong magic means wrong filesystem type, not corruption |
@@ -34,14 +34,14 @@
 //! ## Mount-Validation Errors
 //!
 //! Mount-time validation (`validate_v1()` in ffs-ondisk) can fail for five
-//! distinct reasons, each with its own FfsError variant:
+//! distinct reasons, each with its own `FfsError` variant:
 //!
-//! | Failure | FfsError Variant | errno | Example |
+//! | Failure | `FfsError` Variant | errno | Example |
 //! |---------|------------------|-------|---------|
-//! | Feature not supported by this build | `UnsupportedFeature` | `EOPNOTSUPP` | ENCRYPT, INLINE_DATA |
+//! | Feature not supported by this build | `UnsupportedFeature` | `EOPNOTSUPP` | ENCRYPT, `INLINE_DATA` |
 //! | Incompatible feature contract not met | `IncompatibleFeature` | `EOPNOTSUPP` | missing FILETYPE+EXTENTS, unknown incompat bits |
-//! | Block size valid in ext4 but unsupported by FrankenFS v1 | `UnsupportedBlockSize` | `EOPNOTSUPP` | 8K ext4 image |
-//! | Block size or geometry out of range | `InvalidGeometry` | `EINVAL` | 64K blocks, zero blocks_per_group |
+//! | Block size valid in ext4 but unsupported by `FrankenFS` v1 | `UnsupportedBlockSize` | `EOPNOTSUPP` | 8K ext4 image |
+//! | Block size or geometry out of range | `InvalidGeometry` | `EINVAL` | 64K blocks, zero `blocks_per_group` |
 //! | Structurally invalid format | `Format` | `EINVAL` | Bad magic, unknown revision |
 //!
 //! The `ffs-core` mount path converts `ParseError::InvalidField` from
@@ -91,7 +91,7 @@
 
 use thiserror::Error;
 
-/// Unified error type for all FrankenFS operations.
+/// Unified error type for all `FrankenFS` operations.
 ///
 /// This is the canonical error type returned by FUSE handlers, CLI commands,
 /// and public API surfaces. Internal crate-specific errors (e.g., `ParseError`
@@ -129,7 +129,7 @@ pub enum FfsError {
     /// The filesystem image uses a feature that this build does not support.
     ///
     /// Used during mount-time validation when incompatible feature flags are
-    /// set (e.g., ENCRYPT, INLINE_DATA). Maps to `EOPNOTSUPP` to distinguish
+    /// set (e.g., ENCRYPT, `INLINE_DATA`). Maps to `EOPNOTSUPP` to distinguish
     /// "we don't support this yet" from "this image is broken."
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(String),
@@ -143,15 +143,15 @@ pub enum FfsError {
 
     /// The image's block size is valid for the format but unsupported by this build.
     ///
-    /// For v1 ext4 compatibility, FrankenFS currently supports 1K/2K/4K only.
+    /// For v1 ext4 compatibility, `FrankenFS` currently supports 1K/2K/4K only.
     #[error("unsupported block size: {0}")]
     UnsupportedBlockSize(String),
 
     /// On-disk geometry is invalid or out of the supported range.
     ///
-    /// Used during mount-time validation for block sizes, blocks_per_group,
-    /// inodes_per_group, or other structural parameters that are numerically
-    /// invalid or outside what FrankenFS supports.
+    /// Used during mount-time validation for block sizes, `blocks_per_group`,
+    /// `inodes_per_group`, or other structural parameters that are numerically
+    /// invalid or outside what `FrankenFS` supports.
     #[error("invalid geometry: {0}")]
     InvalidGeometry(String),
 
@@ -199,7 +199,7 @@ pub enum FfsError {
     #[error("file exists")]
     Exists,
 
-    /// RaptorQ repair or self-healing workflow could not recover data.
+    /// ``RaptorQ`` repair or self-healing workflow could not recover data.
     #[error("repair failed: {0}")]
     RepairFailed(String),
 
@@ -426,8 +426,8 @@ mod tests {
                 "unsupported block size: 16384",
             ),
             (
-                FfsError::InvalidGeometry("zero inodes_per_group".into()),
-                "invalid geometry: zero inodes_per_group",
+                FfsError::InvalidGeometry("zero `inodes_per_group`".into()),
+                "invalid geometry: zero `inodes_per_group`",
             ),
             (
                 FfsError::NotFound("/lost+found".into()),

@@ -5947,6 +5947,78 @@ mod tests {
     }
 
     #[test]
+    fn load_evidence_records_preset_tail_keeps_last_matching_records_for_remaining_ledger_presets() {
+        let cases = [
+            (
+                "replay-anomalies",
+                concat!(
+                    "{\"timestamp_ns\":1,\"event_type\":\"wal_recovery\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":2,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
+                    "{\"timestamp_ns\":3,\"event_type\":\"txn_aborted\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":4,\"event_type\":\"flush_batch\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":5,\"event_type\":\"serialization_conflict\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":6,\"event_type\":\"repair_succeeded\",\"block_group\":1}\n",
+                ),
+                &[
+                    EvidenceEventType::TxnAborted,
+                    EvidenceEventType::SerializationConflict,
+                ][..],
+                &[3_u64, 5_u64][..],
+            ),
+            (
+                "pressure-transitions",
+                concat!(
+                    "{\"timestamp_ns\":1,\"event_type\":\"backpressure_activated\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":2,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
+                    "{\"timestamp_ns\":3,\"event_type\":\"flush_batch\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":4,\"event_type\":\"refresh_policy_changed\",\"block_group\":1}\n",
+                    "{\"timestamp_ns\":5,\"event_type\":\"repair_succeeded\",\"block_group\":1}\n",
+                    "{\"timestamp_ns\":6,\"event_type\":\"durability_policy_changed\",\"block_group\":0}\n",
+                ),
+                &[
+                    EvidenceEventType::RefreshPolicyChanged,
+                    EvidenceEventType::DurabilityPolicyChanged,
+                ][..],
+                &[4_u64, 6_u64][..],
+            ),
+            (
+                "contention",
+                concat!(
+                    "{\"timestamp_ns\":1,\"event_type\":\"merge_proof_checked\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":2,\"event_type\":\"repair_failed\",\"block_group\":1}\n",
+                    "{\"timestamp_ns\":3,\"event_type\":\"merge_applied\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":4,\"event_type\":\"policy_switched\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":5,\"event_type\":\"flush_batch\",\"block_group\":0}\n",
+                    "{\"timestamp_ns\":6,\"event_type\":\"contention_sample\",\"block_group\":0}\n",
+                ),
+                &[
+                    EvidenceEventType::PolicySwitched,
+                    EvidenceEventType::ContentionSample,
+                ][..],
+                &[4_u64, 6_u64][..],
+            ),
+        ];
+
+        for (preset, ledger, expected_types, expected_timestamps) in cases {
+            with_temp_image_path(ledger.as_bytes(), |path| {
+                let records = load_evidence_records(&path, None, Some(2), Some(preset))
+                    .expect("preset+tail evidence read should succeed");
+                assert_eq!(records.len(), 2, "preset {preset}");
+                assert_eq!(
+                    records.iter().map(|record| record.timestamp_ns).collect::<Vec<_>>(),
+                    expected_timestamps,
+                    "preset {preset}"
+                );
+                assert_eq!(
+                    records.iter().map(|record| record.event_type).collect::<Vec<_>>(),
+                    expected_types,
+                    "preset {preset}"
+                );
+            });
+        }
+    }
+
+    #[test]
     fn preset_event_types_returns_none_for_unknown() {
         use crate::cmd_evidence::{KNOWN_PRESETS, preset_event_types};
         assert!(preset_event_types("nonexistent").is_none());

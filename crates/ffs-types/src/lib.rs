@@ -43,29 +43,29 @@ impl SimdCapabilities {
     const AARCH64_CRC: u8 = 1 << 2;
     const AARCH64_NEON: u8 = 1 << 3;
 
-    fn set(&mut self, flag: u8, enabled: bool) {
+    const fn set(&mut self, flag: u8, enabled: bool) {
         if enabled {
             self.bits |= flag;
         }
     }
 
     #[must_use]
-    pub fn has_x86_sse42(self) -> bool {
+    pub const fn has_x86_sse42(self) -> bool {
         (self.bits & Self::X86_SSE42) != 0
     }
 
     #[must_use]
-    pub fn has_x86_avx2(self) -> bool {
+    pub const fn has_x86_avx2(self) -> bool {
         (self.bits & Self::X86_AVX2) != 0
     }
 
     #[must_use]
-    pub fn has_aarch64_crc(self) -> bool {
+    pub const fn has_aarch64_crc(self) -> bool {
         (self.bits & Self::AARCH64_CRC) != 0
     }
 
     #[must_use]
-    pub fn has_aarch64_neon(self) -> bool {
+    pub const fn has_aarch64_neon(self) -> bool {
         (self.bits & Self::AARCH64_NEON) != 0
     }
 }
@@ -209,13 +209,13 @@ impl BlockSize {
     }
 
     #[must_use]
-    pub fn get(self) -> u32 {
+    pub const fn get(self) -> u32 {
         self.0
     }
 
     /// Number of bits to shift to convert between bytes and blocks.
     #[must_use]
-    pub fn shift(self) -> u32 {
+    pub const fn shift(self) -> u32 {
         self.0.trailing_zeros()
     }
 
@@ -272,26 +272,26 @@ pub struct DeviceId(pub u128);
 
 impl DeviceId {
     #[must_use]
-    pub fn from_uuid_bytes_be(bytes: [u8; 16]) -> Self {
+    pub const fn from_uuid_bytes_be(bytes: [u8; 16]) -> Self {
         Self(u128::from_be_bytes(bytes))
     }
 
     #[must_use]
-    pub fn to_uuid_bytes_be(self) -> [u8; 16] {
+    pub const fn to_uuid_bytes_be(self) -> [u8; 16] {
         self.0.to_be_bytes()
     }
 }
 
 /// Filesystem mount mode controlling which on-disk mutations are permitted.
 ///
-/// FrankenFS operates in one of two modes:
+/// `FrankenFS` operates in one of two modes:
 ///
 /// - **Compat** (default): Only standard ext4/btrfs on-disk structures are read
 ///   and written. The resulting image remains mountable by the Linux kernel
 ///   driver. All checksums use CRC32C. Journal uses JBD2 physical journaling.
 ///
-/// - **Native**: In addition to standard structures, FrankenFS may write
-///   MVCC version chains (to a dedicated version-store inode), RaptorQ repair
+/// - **Native**: In addition to standard structures, `FrankenFS` may write
+///   MVCC version chains (to a dedicated version-store inode), `RaptorQ` repair
 ///   symbols (to reserved tail blocks in each block group), and BLAKE3
 ///   checksums for native metadata. Journal uses COW semantics.
 ///
@@ -310,13 +310,13 @@ pub enum MountMode {
 impl MountMode {
     /// Returns `true` if this is native MVCC mode.
     #[must_use]
-    pub fn is_native(self) -> bool {
+    pub const fn is_native(self) -> bool {
         matches!(self, Self::Native)
     }
 
     /// Returns `true` if this is compatibility mode.
     #[must_use]
-    pub fn is_compat(self) -> bool {
+    pub const fn is_compat(self) -> bool {
         matches!(self, Self::Compat)
     }
 }
@@ -428,7 +428,7 @@ pub fn trim_nul_padded(bytes: &[u8]) -> String {
 }
 
 #[must_use]
-pub fn is_power_of_two_u32(value: u32) -> bool {
+pub const fn is_power_of_two_u32(value: u32) -> bool {
     value.is_power_of_two()
 }
 
@@ -498,7 +498,7 @@ impl InodeNumber {
 
     /// Convert to a btrfs object ID (infallible — same width).
     #[must_use]
-    pub fn to_btrfs(self) -> BtrfsObjectId {
+    pub const fn to_btrfs(self) -> BtrfsObjectId {
         BtrfsObjectId(self.0)
     }
 }
@@ -523,6 +523,7 @@ impl Ext4InodeNumber {
 
     /// Promote to the canonical `InodeNumber(u64)` (infallible, lossless).
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn to_canonical(self) -> InodeNumber {
         InodeNumber(u64::from(self.0))
     }
@@ -550,7 +551,7 @@ pub struct BtrfsObjectId(pub u64);
 impl BtrfsObjectId {
     /// Promote to the canonical `InodeNumber(u64)` (infallible, same width).
     #[must_use]
-    pub fn to_canonical(self) -> InodeNumber {
+    pub const fn to_canonical(self) -> InodeNumber {
         InodeNumber(self.0)
     }
 }
@@ -647,7 +648,7 @@ pub const EXT4_PROJINHERIT_FL: u32 = 0x2000_0000;
 /// Casefolded directory.
 pub const EXT4_CASEFOLD_FL: u32 = 0x4000_0000;
 
-/// Maximum ext4 fast symlink target size (stored in the inode's i_block area).
+/// Maximum ext4 fast symlink target size (stored in the inode's `i_block` area).
 pub const EXT4_FAST_SYMLINK_MAX: usize = 60;
 
 // ── ext4 xattr name indices ─────────────────────────────────────────────────
@@ -758,7 +759,7 @@ pub fn checked_mul_block(block: BlockNumber, block_size: BlockSize) -> Option<By
 ///
 /// `alignment` must be a non-zero power of two; returns `None` otherwise.
 #[must_use]
-pub fn align_down(value: u64, alignment: u64) -> Option<u64> {
+pub const fn align_down(value: u64, alignment: u64) -> Option<u64> {
     if alignment == 0 || !alignment.is_power_of_two() {
         return None;
     }
@@ -1998,10 +1999,9 @@ mod tests {
         let idx = inode_index_in_group(InodeNumber(128), 128);
         assert_eq!(idx, 127);
     }
-
-    #[test]
-    fn inode_index_in_group_first_of_next_group() {
-        let idx = inode_index_in_group(InodeNumber(129), 128);
-        assert_eq!(idx, 0);
-    }
+#[test]
+fn inode_index_in_group_first_of_next_group() {
+    let idx = inode_index_in_group(InodeNumber(129), 128);
+    assert_eq!(idx, 0);
+}
 }
