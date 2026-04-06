@@ -4265,19 +4265,11 @@ fn fsck_cmd(path: &PathBuf, options: FsckCommandOptions) -> Result<()> {
         Ok(output) => output,
         Err(err) => {
             if flags.json() {
-                let mut escaped = String::new();
-                for ch in format!("{err:#}").chars() {
-                    match ch {
-                        '"' => escaped.push_str("\\\""),
-                        '\\' => escaped.push_str("\\\\"),
-                        '\n' => escaped.push_str("\\n"),
-                        '\r' => escaped.push_str("\\r"),
-                        '\t' => escaped.push_str("\\t"),
-                        _ => escaped.push(ch),
-                    }
-                }
+                let error_msg = format!("{err:#}");
+                let escaped = serde_json::to_string(&error_msg)
+                    .unwrap_or_else(|_| "\"unknown_error\"".to_string());
                 println!(
-                    "{{\"status\":\"operational_error\",\"exit_code\":4,\"error\":\"{escaped}\"}}"
+                    "{{\"status\":\"operational_error\",\"exit_code\":4,\"error\":{escaped}}}"
                 );
             } else {
                 eprintln!("fsck operational error: {err:#}");

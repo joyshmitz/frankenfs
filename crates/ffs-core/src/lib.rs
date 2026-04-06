@@ -28385,6 +28385,7 @@ mod tests {
                 .expect_err("punch-hole without KEEP_SIZE should be rejected")
         };
         drop(default_guard);
+        // _sub guard dropped at end of function; buffer is Arc-backed and persists.
         assert_eq!(err.to_errno(), libc::EINVAL);
 
         let logs = parse_json_logs(&buffer);
@@ -28395,7 +28396,7 @@ mod tests {
                     && entry.get("error_class").and_then(Value::as_str)
                         == Some("invalid_punch_hole_mode")
             })
-            .unwrap_or_else(|| panic!("expected btrfs_fallocate_rejected log for invalid punch-hole mode. Logs: {:?}", logs));
+            .unwrap_or_else(|| panic!("expected btrfs_fallocate_rejected log for invalid punch-hole mode. Logs: {logs:?}"));
 
         assert_eq!(
             rejected.get("outcome").and_then(Value::as_str),
@@ -28436,6 +28437,7 @@ mod tests {
                 .expect_err("unsupported mode bits should be rejected")
         };
         drop(default_guard);
+        // _sub guard dropped at end of function; buffer is Arc-backed and persists.
         assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
 
         let logs = parse_json_logs(&buffer);

@@ -981,7 +981,13 @@ impl FrankenFuse {
     where
         F: FnOnce(&Cx, &mut RequestScope) -> ffs_error::Result<T>,
     {
-        let mut scope = self.inner.ops.begin_request_scope(cx, op)?;
+        let mut scope = match self.inner.ops.begin_request_scope(cx, op) {
+            Ok(scope) => scope,
+            Err(e) => {
+                self.inner.metrics.record_err();
+                return Err(e);
+            }
+        };
         let op_result = f(cx, &mut scope);
         let end_result = self.inner.ops.end_request_scope(cx, op, scope);
 
