@@ -12052,8 +12052,6 @@ impl OpenFs {
             .fs_tree
             .update(&inode_key, &inode.to_bytes())
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-        
-        println!(">>> btrfs_fallocate reached end! Canonical: {canonical}, operation_id: {operation_id}");
 
         info!(
             target: "ffs::btrfs::rw",
@@ -15389,7 +15387,10 @@ mod tests {
     }
 
     fn parse_json_logs(buffer: &SharedLogBuffer) -> Vec<Value> {
-        let bytes = buffer.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bytes = buffer
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         String::from_utf8_lossy(&bytes)
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -15409,9 +15410,7 @@ mod tests {
     /// Install a JSON tracing subscriber that captures to `buffer`, using
     /// `Dispatch::new` + `set_default` + `rebuild_interest_cache` to avoid
     /// callsite interest cache poisoning in multi-threaded test runs.
-    fn install_json_subscriber(
-        buffer: &SharedLogBuffer,
-    ) -> tracing::dispatcher::DefaultGuard {
+    fn install_json_subscriber(buffer: &SharedLogBuffer) -> tracing::dispatcher::DefaultGuard {
         let subscriber = tracing_subscriber::fmt()
             .json()
             .flatten_event(true)
@@ -28277,7 +28276,7 @@ mod tests {
                 .expect("create file for fallocate success log test");
             ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0)
                 .expect("fallocate should succeed");
-        });
+        }
 
         let logs = parse_json_logs(&buffer);
         let applied = logs
@@ -28386,7 +28385,7 @@ mod tests {
                     && entry.get("error_class").and_then(Value::as_str)
                         == Some("invalid_punch_hole_mode")
             })
-            .expect("expected btrfs_fallocate_rejected log for invalid punch-hole mode");
+            .unwrap_or_else(|| panic!("expected btrfs_fallocate_rejected log for invalid punch-hole mode. Logs: {:?}", logs));
 
         assert_eq!(
             rejected.get("outcome").and_then(Value::as_str),
@@ -28485,7 +28484,7 @@ mod tests {
                 .expect("seed file before fsync");
             ops.fsync(&cx, &mut RequestScope::empty(), attr.ino, 0, false)
                 .expect("fsync should succeed");
-        });
+        }
 
         let logs = parse_json_logs(&buffer);
         let applied = logs
@@ -28513,16 +28512,9 @@ mod tests {
     fn btrfs_write_fsync_rejection_log_contract_read_only() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(buffer.clone())
-            .finish();
+        let _sub = install_json_subscriber(&buffer);
 
-        let err = tracing::subscriber::with_default(subscriber, || {
+        let err = {
             let image = build_btrfs_fsops_image();
             let dev = TestDevice::from_vec(image);
             let cx = Cx::for_testing();
@@ -28531,7 +28523,7 @@ mod tests {
             let ops: &dyn FsOps = &fs;
             ops.fsync(&cx, &mut RequestScope::empty(), InodeNumber(1), 0, false)
                 .expect_err("fsync should be rejected on read-only mount")
-        });
+        };
         assert_eq!(err.to_errno(), libc::EROFS);
 
         let logs = parse_json_logs(&buffer);
@@ -28568,7 +28560,7 @@ mod tests {
             let ops: &dyn FsOps = &fs;
             ops.fsyncdir(&cx, &mut RequestScope::empty(), InodeNumber(1), 0, false)
                 .expect("fsyncdir should succeed");
-        });
+        }
 
         let logs = parse_json_logs(&buffer);
         let applied = logs
@@ -29427,7 +29419,7 @@ mod tests {
             fs_ops
                 .fsync(&cx, &mut RequestScope::empty(), InodeNumber(2), 0, false)
                 .expect("ext4 fsync should succeed");
-        });
+        }
 
         let logs = parse_json_logs(&buffer);
         let applied = logs
@@ -29455,16 +29447,9 @@ mod tests {
     fn ext4_write_fsync_rejection_log_contract_read_only() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(buffer.clone())
-            .finish();
+        let _sub = install_json_subscriber(&buffer);
 
-        let err = tracing::subscriber::with_default(subscriber, || {
+        let err = {
             let image = build_ext4_image(2);
             let dev = TestDevice::from_vec(image);
             let cx = Cx::for_testing();
@@ -29473,7 +29458,7 @@ mod tests {
             let ops: &dyn FsOps = &fs;
             ops.fsync(&cx, &mut RequestScope::empty(), InodeNumber(2), 0, false)
                 .expect_err("ext4 fsync should be rejected on read-only mount")
-        });
+        };
         assert_eq!(err.to_errno(), libc::EROFS);
 
         let logs = parse_json_logs(&buffer);
@@ -29514,7 +29499,7 @@ mod tests {
             let ops: &dyn FsOps = &fs;
             ops.flush(&cx, &mut RequestScope::empty(), InodeNumber(2), 7, 13)
                 .expect("flush should succeed");
-        });
+        }
 
         let logs = parse_json_logs(&buffer);
         let applied = logs
@@ -29553,7 +29538,7 @@ mod tests {
             let ops: &dyn FsOps = &fs;
             ops.flush(&cx, &mut RequestScope::empty(), InodeNumber(1), 5, 11)
                 .expect("btrfs flush should succeed");
-        });
+        }
 
         let logs = parse_json_logs(&buffer);
         let applied = logs

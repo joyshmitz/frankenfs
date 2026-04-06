@@ -257,7 +257,9 @@ impl ShardedMvccStore {
                 .find(|(idx, _)| *idx == shard_idx)
                 .map(|(_, guard)| guard)
             else {
-                return Err(CommitError::DurabilityFailure { detail: "shard guard missing".into() });
+                return Err(CommitError::DurabilityFailure {
+                    detail: "shard guard missing".into(),
+                });
             };
             let latest = Self::latest_commit_seq_in_shard(shard, block);
             if latest > txn.snapshot().high {
@@ -397,7 +399,9 @@ impl ShardedMvccStore {
                 .find(|(idx, _)| *idx == shard_idx)
                 .map(|(_, guard)| guard)
             else {
-                return Err(CommitError::DurabilityFailure { detail: "shard guard missing".into() });
+                return Err(CommitError::DurabilityFailure {
+                    detail: "shard guard missing".into(),
+                });
             };
             for record in shard.ssi_log.iter().rev() {
                 if record.commit_seq <= txn.snapshot().high {

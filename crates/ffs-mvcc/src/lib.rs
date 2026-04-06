@@ -1953,7 +1953,9 @@ impl MvccStore {
                 proof
                     .merge_bytes(&base, &latest, &bytes)
                     .unwrap_or_else(|| {
-                        tracing::error!("preflight_fcw missed an unmergeable conflict on block {block:?}");
+                        tracing::error!(
+                            "preflight_fcw missed an unmergeable conflict on block {block:?}"
+                        );
                         bytes.clone()
                     })
             } else {
@@ -2036,7 +2038,9 @@ impl MvccStore {
                 proof
                     .merge_bytes(&base, &latest, &bytes)
                     .unwrap_or_else(|| {
-                        tracing::error!("preflight_fcw missed an unmergeable conflict on block {block:?}");
+                        tracing::error!(
+                            "preflight_fcw missed an unmergeable conflict on block {block:?}"
+                        );
                         bytes.clone()
                     })
             } else {

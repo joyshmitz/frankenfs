@@ -1999,9 +1999,9 @@ mod tests {
         let idx = inode_index_in_group(InodeNumber(128), 128);
         assert_eq!(idx, 127);
     }
-#[test]
-fn inode_index_in_group_first_of_next_group() {
-    let idx = inode_index_in_group(InodeNumber(129), 128);
-    assert_eq!(idx, 0);
-}
+    #[test]
+    fn inode_index_in_group_first_of_next_group() {
+        let idx = inode_index_in_group(InodeNumber(129), 128);
+        assert_eq!(idx, 0);
+    }
 }

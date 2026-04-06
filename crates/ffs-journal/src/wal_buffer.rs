@@ -537,7 +537,8 @@ impl EpochManager {
 
     /// Force an epoch advance regardless of triggers.
     pub fn force_advance(&self) -> u64 {
-        self.try_advance(true).unwrap_or_else(|| self.epoch.current())
+        self.try_advance(true)
+            .unwrap_or_else(|| self.epoch.current())
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -994,9 +995,8 @@ impl<W: WalWriter> GroupCommitCoordinator<W> {
         }
 
         // All retries exhausted.
-        let err = last_err.unwrap_or_else(|| {
-            FfsError::Format("fsync loop failed to record an error".into())
-        });
+        let err = last_err
+            .unwrap_or_else(|| FfsError::Format("fsync loop failed to record an error".into()));
         let msg = format!("fsync failed after {fsyncs_issued} attempts: {err}");
         tracing::error!(
             target: "ffs::group_commit",

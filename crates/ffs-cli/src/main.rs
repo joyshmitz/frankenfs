@@ -5947,7 +5947,8 @@ mod tests {
     }
 
     #[test]
-    fn load_evidence_records_preset_tail_keeps_last_matching_records_for_remaining_ledger_presets() {
+    fn load_evidence_records_preset_tail_keeps_last_matching_records_for_remaining_ledger_presets()
+    {
         let cases = [
             (
                 "replay-anomalies",
@@ -6005,12 +6006,18 @@ mod tests {
                     .expect("preset+tail evidence read should succeed");
                 assert_eq!(records.len(), 2, "preset {preset}");
                 assert_eq!(
-                    records.iter().map(|record| record.timestamp_ns).collect::<Vec<_>>(),
+                    records
+                        .iter()
+                        .map(|record| record.timestamp_ns)
+                        .collect::<Vec<_>>(),
                     expected_timestamps,
                     "preset {preset}"
                 );
                 assert_eq!(
-                    records.iter().map(|record| record.event_type).collect::<Vec<_>>(),
+                    records
+                        .iter()
+                        .map(|record| record.event_type)
+                        .collect::<Vec<_>>(),
                     expected_types,
                     "preset {preset}"
                 );
@@ -6385,9 +6392,10 @@ mod tests {
                     false,
                 )
                 .expect_err("metrics preset should reject --tail");
-                assert!(err
-                    .to_string()
-                    .contains("--tail is only supported for ledger-backed evidence presets"));
+                assert!(
+                    err.to_string()
+                        .contains("--tail is only supported for ledger-backed evidence presets")
+                );
             },
         );
     }

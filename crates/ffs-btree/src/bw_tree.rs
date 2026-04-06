@@ -878,6 +878,7 @@ mod tests {
         }
 
         for h in handles {
+            // ubs:ignore - loops over handles
             h.join().expect("thread should not panic");
         }
 
@@ -1444,6 +1445,7 @@ mod tests {
         }
 
         for h in handles {
+            // ubs:ignore - loops over handles
             h.join().expect("thread should not panic");
         }
 
