@@ -1,5 +1,5 @@
-ℹ Scan size after ignores: 1MB (limit 1000MB)
-ℹ Created filtered scan workspace at /tmp/tmp.ZffK46ZNIS/scan
+ℹ Scan size after ignores: 246MB (limit 1000MB)
+ℹ Created filtered scan workspace at /tmp/tmp.I2ngr9deUE/scan
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
@@ -34,8 +34,8 @@
 ║                     “We see bugs before you do.”                             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
-UBS Meta-Runner v5.0.7  2026-04-03 00:33:07
-Project: /data/projects/frankenfs/crates/ffs-cli/src
+UBS Meta-Runner v5.0.7  2026-04-06 01:29:58
+Project: /data/projects/frankenfs
 Format:  text
 Detected: rust
 
@@ -74,9 +74,9 @@ Detected: rust
 ╚═══════════════════════════════════════════════════════════════════╝ 
                                                                       
 
-Project:  /data/projects/frankenfs/crates/ffs-cli/src
-Started:  2026-04-03 00:33:07
-Files:    3 source files (rs)
+Project:  /data/projects/frankenfs
+Started:  2026-04-06 01:29:59
+Files:    124 source files (rs)
 
 ✓ ast-grep available (ast-grep) - full AST analysis enabled
 ✓ cargo detected
@@ -95,42 +95,42 @@ Files:    3 source files (rs)
 Panic-prone and debug macros frequently leak into production and cause crashes
 
 • unwrap()/expect() usage
-  ⚠ Warning (609 found)
+  ⚠ Warning (13048 found)
     Potential panics via unwrap/expect
     Prefer `?` or match to propagate/handle errors
-      /data/projects/frankenfs/crates/ffs-cli/src/cmd_evidence.rs:959 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/cmd_evidence.rs#L959)
-              let preset_name = preset.expect("metrics preset kind requires preset name");
-      /data/projects/frankenfs/crates/ffs-cli/src/cmd_evidence.rs:1412 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/cmd_evidence.rs#L1412)
-                  .expect("ledger presets should allow tail and summary");
-      /data/projects/frankenfs/crates/ffs-cli/src/cmd_evidence.rs:1481 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/cmd_evidence.rs#L1481)
-                  .expect("raw event-type filtering without preset should be accepted");
-      /data/projects/frankenfs/crates/ffs-cli/src/main.rs:3335 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/main.rs#L3335)
-              write!(&mut out, "{offset:08x}:").expect("write to String cannot fail");
-      /data/projects/frankenfs/crates/ffs-cli/src/main.rs:3337 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/main.rs#L3337)
-                  write!(&mut out, " {byte:02x}").expect("write to String cannot fail");
+      /data/projects/frankenfs/test_logs.rs:3 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/test_logs.rs#L3)
+          let code = fs::read_to_string("crates/ffs-cli/src/main.rs").unwrap();
+      /data/projects/frankenfs/test_logs.rs:5 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/test_logs.rs#L5)
+          fs::write("crates/ffs-cli/src/main.rs", new_code).unwrap();
+      /data/projects/frankenfs/test_mut.rs:8 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/test_mut.rs#L8)
+              m.lock().unwrap().mutate();
+      /data/projects/frankenfs/test_mut.rs:10 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/test_mut.rs#L10)
+          println!("{}", tx.unwrap().val);
+      /data/projects/frankenfs/test_overflow.rs:48 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/test_overflow.rs#L48)
+              allocate_extent(&cx, &dev, &mut root_bytes, &geo, &mut groups, i * 10, 5, &AllocHint::default(), &pctx).unwrap();
 
 • panic!/unreachable!/todo!/unimplemented!
-  🔥 CRITICAL (40 found)
+  🔥 CRITICAL (220 found)
     panic! macro(s) present
     Avoid panic! in library code
-      /data/projects/frankenfs/crates/ffs-cli/src/cmd_evidence.rs:1451 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/cmd_evidence.rs#L1451)
-                      .unwrap_or_else(|_| panic!("ledger preset {preset} should allow tail+summary"));
-      /data/projects/frankenfs/crates/ffs-cli/src/cmd_evidence.rs:1469 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/cmd_evidence.rs#L1469)
-                      .unwrap_or_else(|_| panic!("metrics preset {preset} should classify cleanly"));
-      /data/projects/frankenfs/crates/ffs-cli/src/main.rs:6594 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/main.rs#L6594)
-                  _ => panic!("expected mount command"),
-      /data/projects/frankenfs/crates/ffs-cli/src/main.rs:6612 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/main.rs#L6612)
-                  _ => panic!("expected mount command"),
-      /data/projects/frankenfs/crates/ffs-cli/src/main.rs:6624 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/main.rs#L6624)
-                  _ => panic!("expected mount command"),
-  ⚠ Warning (2 found)
+      /data/projects/frankenfs/crates/ffs-block/src/io_engine.rs:549 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-block/src/io_engine.rs#L549)
+                      other => panic!("expected Read, got {other:?}"),
+      /data/projects/frankenfs/crates/ffs-block/tests/perf_regression_e2e.rs:565 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-block/tests/perf_regression_e2e.rs#L565)
+              panic!("Performance regression detected (see report above)");
+      /data/projects/frankenfs/crates/ffs-btree/src/lib.rs:1639 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-btree/src/lib.rs#L1639)
+                      _ => panic!("expected Found for block {}", i * 100),
+      /data/projects/frankenfs/crates/ffs-btree/src/lib.rs:1680 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-btree/src/lib.rs#L1680)
+                      _ => panic!("expected Found for block {}", i * 100),
+      /data/projects/frankenfs/crates/ffs-btree/src/lib.rs:1767 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-btree/src/lib.rs#L1767)
+                  _ => panic!("expected Found"),
+  ⚠ Warning (11 found)
     unreachable! may panic if reached
     Double-check logic
 
 • dbg!/println!/eprintln!
-  ℹ Info (357 found)
+  ℹ Info (526 found)
     println! found - prefer logging
-  ℹ Info (14 found)
+  ℹ Info (127 found)
     eprintln! found - prefer logging
 
 • Guard clauses that still unwrap later
@@ -162,19 +162,31 @@ These patterns may introduce UB, memory leaks, or hard-to-debug crashes
 Concurrency misuse leads to deadlocks, head-of-line blocking, and performance issues
 
 • Arc<Mutex<..>> / Rc<RefCell<..>> / RwLock
-  ℹ Info (2 found)
+  ℹ Info (21 found)
     Arc<Mutex<..>> detected - verify contention
+  ℹ Info (34 found)
+    RwLock in use - verify read/write patterns
 
 • Mutex::lock().unwrap()/expect()
-  ⚠ Warning (5 found)
+  ⚠ Warning (308 found)
     Poisoned lock handling via unwrap/expect
-      /data/projects/frankenfs/crates/ffs-cli/src/main.rs:5199 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/main.rs#L5199)
-                  let bytes = self.bytes.lock().expect("log buffer lock poisoned").clone();
+      /data/projects/frankenfs/repro_jbd2_wrap.rs:29 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/repro_jbd2_wrap.rs#L29)
+              self.blocks.lock().unwrap().insert(block.0, data);
+      /data/projects/frankenfs/repro_jbd2_wrap.rs:35 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/repro_jbd2_wrap.rs#L35)
+              let guard = self.blocks.lock().unwrap();
+      /data/projects/frankenfs/repro_jbd2_wrap.rs:42 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/repro_jbd2_wrap.rs#L42)
+              self.blocks.lock().unwrap().insert(block.0, data.to_vec());
+      /data/projects/frankenfs/test_mut.rs:8 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/test_mut.rs#L8)
+              m.lock().unwrap().mutate();
+      /data/projects/frankenfs/crates/ffs-alloc/benches/batch_alloc.rs:37 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-alloc/benches/batch_alloc.rs#L37)
+              let guard = self.blocks.lock().unwrap();
 
 • await inside loops (sequentialism)
 
 • Blocking ops inside async (thread::sleep, std::fs)
-  ℹ Info (22 found)
+  ⚠ Warning (36 found)
+    thread::sleep in async
+  ℹ Info (184 found)
     Blocking std::fs in async code
 
 • block_on within async context
@@ -194,14 +206,14 @@ Concurrency misuse leads to deadlocks, head-of-line blocking, and performance is
 Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
 
 • Floating-point equality comparisons
-  ℹ Info (3 found)
+  ℹ Info (66 found)
     Float equality/inequality check
     Consider epsilon comparisons
 
 • Division/modulo by variable (verify non-zero)
-  ℹ Info (102 found)
+  ℹ Info (687 found)
     Division by variables - guard zero divisors
-  ℹ Info (39 found)
+  ℹ Info (305 found)
     Modulo by variables - guard zero divisors
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -212,11 +224,11 @@ Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
 Iterator misuse often leads to unnecessary allocations or slow paths
 
 • clone() occurrences & clone() in loops
-  ℹ Info (68 found)
+  ℹ Info (732 found)
     clone() usages - audit for necessity
 
 • collect::<Vec<_>>() then for
-  ℹ Info (2 found)
+  ℹ Info (33 found)
     Collecting to Vec before iterate - consider streaming
 
 • nth(0) → next()
@@ -231,7 +243,7 @@ Unnecessary allocations and conversions reduce performance
 • to_owned().to_string() chain
 
 • format!("literal") with no placeholders
-  ℹ Info (188 found)
+  ℹ Info (776 found)
     format!(literal) allocates - use .to_string()
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -242,14 +254,18 @@ Unnecessary allocations and conversions reduce performance
 I/O misuse or command construction from untrusted input can be risky
 
 • std::fs usage (general inventory)
-  ℹ Info (28 found)
+  ℹ Info (215 found)
     std::fs operations present - consider async equivalents where applicable
 
 • std::process::Command usage
-  ℹ Info (1 found)
+  ℹ Info (3 found)
     Command::new detected - ensure args are sanitized and errors handled
-      /data/projects/frankenfs/crates/ffs-cli/src/main.rs:5085 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/main.rs#L5085)
+      /data/projects/frankenfs/crates/ffs-cli/src/main.rs:5085 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-cli/src/main.rs#L5085)
           let mkfs_output = std::process::Command::new("mkfs.ext4")
+      /data/projects/frankenfs/crates/ffs-core/src/lib.rs:20412 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-core/src/lib.rs#L20412)
+              let out = std::process::Command::new("mkfs.ext4")
+      /data/projects/frankenfs/crates/ffs-core/src/lib.rs:20422 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-core/src/lib.rs#L20422)
+              let _ = std::process::Command::new("debugfs")
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 8. SECURITY FINDINGS
@@ -266,10 +282,14 @@ Security misconfigurations can lead to credential leaks and MITM attacks
 • Plain http:// URLs
 
 • Hardcoded secrets/credentials (heuristic)
-  🔥 CRITICAL (1 found)
+  🔥 CRITICAL (3 found)
     Possible hardcoded secrets
-      /data/projects/frankenfs/crates/ffs-cli/src/cmd_repair.rs:254 (https://github.com/Dicklesworthstone/frankenfs/blob/5672f656980bb75cfaa7d5ccc875eddbc2d5e509/cmd_repair.rs#L254)
+      /data/projects/frankenfs/crates/ffs-block/src/lib.rs:7501 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-block/src/lib.rs#L7501)
+              let token = FlushPinToken::default();
+      /data/projects/frankenfs/crates/ffs-cli/src/cmd_repair.rs:254 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-cli/src/cmd_repair.rs#L254)
           let image_token = image
+      /data/projects/frankenfs/crates/ffs-mvcc/tests/mvcc_stress_suite.rs:376 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-mvcc/tests/mvcc_stress_suite.rs#L376)
+                                  let token = lcg_next(&mut rng_state);
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 9. CODE QUALITY MARKERS
@@ -287,9 +307,18 @@ Technical debt markers indicate incomplete or problematic code
 Overly broad visibility complicates API stability and encapsulation
 
 • Wildcard imports (use crate::* or ::*)
-  ✓ OK No wildcard imports detected
+  ℹ Info (104 found)
+    Wildcard imports found; prefer explicit names
+      /data/projects/frankenfs/crates/ffs-alloc/src/lib.rs:1506 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-alloc/src/lib.rs#L1506)
+          use super::*;
+      /data/projects/frankenfs/crates/ffs-alloc/src/lib.rs:2965 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-alloc/src/lib.rs#L2965)
+          use proptest::prelude::*;
+      /data/projects/frankenfs/crates/ffs-alloc/src/succinct.rs:534 (https://github.com/Dicklesworthstone/frankenfs/blob/ba8c335f27fbbe63b9bee3cb013a4d553614c600/crates/ffs-alloc/src/succinct.rs#L534)
+          use super::*;
 
 • pub use re-exports (inventory)
+  ℹ Info (9 found)
+    pub use re-exports present - verify API surface
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 11. TESTS & BENCHES HYGIENE
@@ -299,6 +328,8 @@ Overly broad visibility complicates API stability and encapsulation
 Ensure tests do not hide failures or produce noisy output
 
 • #[ignore] tests
+  ℹ Info (1 found)
+    #[ignore] tests present - verify intent
 
 • todo!/unimplemented! in tests
 
@@ -347,11 +378,11 @@ Common footguns and readability hazards
     DefaultHasher detected - not for cryptographic or stable hashing
 
 • unwrap_err()/expect_err() usage inventory
-  ℹ Info (14 found)
+  ℹ Info (431 found)
     unwrap_err/expect_err present - ensure test-only or justified
 
 • Option::unwrap_or_default inventory
-  ℹ Info (1 found)
+  ℹ Info (46 found)
     unwrap_or_default present - validate default semantics
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -364,7 +395,7 @@ Domain patterns that often hint at bugs
 • reqwest::ClientBuilder inventory
 
 • serde_json::from_str without error context (heuristic)
-  ℹ Info (1 found)
+  ℹ Info (2 found)
     serde_json::from_str uses - ensure error context and validation
 
 • SQL string concatenation (heuristic)
@@ -384,8 +415,8 @@ Domain patterns that often hint at bugs
 High-level view of the project layout
 
 • Cargo.toml features (heuristic count)
-  ℹ Info (1 found)
-    No Cargo.toml at project root (workspace? set PROJECT_DIR accordingly)
+  ℹ Info (features sections: 0, bins: 0, workspace: 0
+0)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 19. RESOURCE LIFECYCLE CORRELATION
@@ -395,7 +426,9 @@ High-level view of the project layout
 Rust relies on explicit joins/shutdowns even with RAII—leaks create zombie work
 
 • Resource lifecycle correlation
-  ✓ OK All tracked resource acquisitions have matching cleanups
+  🔥 CRITICAL (5 found)
+    std::thread::spawn without join() [37m[[0mcrates/ffs-btree/src/bw_tree.rs[37m][0m
+    Store the JoinHandle and call join() or detach intentionally (acquire=11, release=6)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 20. ASYNC LOCKING ACROSS AWAIT
@@ -419,7 +452,7 @@ Holding locks across await can deadlock, starve tasks, and cause latency spikes;
 Panics in destructors or UB hints can crash/abort in subtle ways; these can slip past linting depending on cfg/features
 
 • assert!/assert_eq!/assert_ne! inventory
-  ⚠ Warning (516 found)
+  ⚠ Warning (11047 found)
     assert! macros present (panic surface)
     If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
 
@@ -435,11 +468,14 @@ Panics in destructors or UB hints can crash/abort in subtle ways; these can slip
 `as` casts can silently truncate or change sign; conversion panics may be missed in uncommon input paths
 
 • `as` cast inventory
-  ℹ Info (46 found)
+  ℹ Info (1034 found)
     `as` casts present (possible truncation/sign bugs)
     Prefer TryFrom/TryInto for correctness or document invariants
 
 • try_into().unwrap()/expect() (panic on conversion failure)
+  ⚠ Warning (26 found)
+    try_into().unwrap()/expect() present
+    Handle conversion errors explicitly; panics can be input-dependent
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 23. PARSING & VALIDATION ROBUSTNESS
@@ -451,7 +487,7 @@ Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect
 • parse::<T>().unwrap()/expect()
 
 • serde_json::from_str(...).unwrap()/expect()
-  ⚠ Warning (14 found)
+  ⚠ Warning (113 found)
     serde_json::from_str(...).unwrap()/expect()
     Add context, validation, and schema checks; avoid panics on malformed JSON
 
@@ -476,10 +512,10 @@ Some perf pitfalls become DoS risks on large inputs or hot paths; these often ev
 ═══════════════════════════════════════════════════════════════════════════
 
 Summary Statistics:
-  Files scanned:    3
-  Critical issues:  41
-  Warning issues:   1146
-  Info items:       895
+  Files scanned:    124
+  Critical issues:  228
+  Warning issues:   24589
+  Info items:       5342
 
 Priority Actions:
   🔥 FIX CRITICAL ISSUES IMMEDIATELY
@@ -489,14 +525,14 @@ Priority Actions:
   ℹ Consider INFO suggestions
   Code quality improvements and best practices
 
-Scan completed at: 2026-04-03 00:33:14
+Scan completed at: 2026-04-06 01:30:21
 
 Tip: Run with -v/--verbose for more code samples per finding.
 Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
 
 
 ──────── Combined Summary ────────
-Files: 3
-Critical: 41
-Warning: 1146
-Info: 895
+Files: 124
+Critical: 228
+Warning: 24589
+Info: 5342
