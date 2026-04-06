@@ -28354,27 +28354,37 @@ mod tests {
     fn btrfs_write_fallocate_rejection_log_contract() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let _sub = install_json_subscriber(&buffer);
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(buffer.clone())
+            .finish();
 
-        let (fs, cx) = open_writable_btrfs();
-        let ops: &dyn FsOps = &fs;
+        let default_guard = tracing::subscriber::set_default(subscriber);
+        let err = {
+            let (fs, cx) = open_writable_btrfs();
+            let ops: &dyn FsOps = &fs;
 
-        let attr = ops
-            .create(
-                &cx,
-                &mut RequestScope::empty(),
-                InodeNumber(1),
-                OsStr::new("reject_log.bin"),
-                0o644,
-                0,
-                0,
-            )
-            .expect("create file for rejection log test");
+            let attr = ops
+                .create(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    InodeNumber(1),
+                    OsStr::new("reject_log.bin"),
+                    0o644,
+                    0,
+                    0,
+                )
+                .expect("create file for rejection log test");
 
-        // Mode 0x02 is PUNCH_HOLE. Without KEEP_SIZE (0x01), it should be rejected.
-        let err = ops
-            .fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x02)
-            .expect_err("punch-hole without KEEP_SIZE should be rejected");
+            // Mode 0x02 is PUNCH_HOLE. Without KEEP_SIZE (0x01), it should be rejected.
+            ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x02)
+                .expect_err("punch-hole without KEEP_SIZE should be rejected")
+        };
+        drop(default_guard);
         assert_eq!(err.to_errno(), libc::EINVAL);
 
         let logs = parse_json_logs(&buffer);
