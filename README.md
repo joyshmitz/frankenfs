@@ -16,7 +16,7 @@
   <a href="https://github.com/Dicklesworthstone/frankenfs/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg" alt="MIT+Rider License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-nightly%202024-orange.svg" alt="Rust Nightly"></a>
   <img src="https://img.shields.io/badge/tracked%20V1%20parity-100%25-brightgreen" alt="Tracked V1 Parity 100%">
-  <img src="https://img.shields.io/badge/tests-3591%20passing-brightgreen" alt="3591 Tests">
+  <img src="https://img.shields.io/badge/tests-workspace%20passing-brightgreen" alt="Workspace Tests Passing">
   <img src="https://img.shields.io/badge/unsafe-forbidden-brightgreen.svg" alt="Unsafe Forbidden">
   <img src="https://img.shields.io/badge/status-early%20development-yellow.svg" alt="Early Development">
 </p>
@@ -1186,7 +1186,7 @@ cd frankenfs
 # 2. Build
 cargo build --workspace
 
-# 3. Run tests (3591+ tests across 21 crates)
+# 3. Run tests across the workspace
 cargo test --workspace
 
 # 4. Inspect a filesystem image
