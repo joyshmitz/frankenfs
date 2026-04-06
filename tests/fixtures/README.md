@@ -1,6 +1,9 @@
 # FrankenFS Test Fixtures
 
-This directory contains filesystem images and golden outputs for conformance testing.
+This directory contains generated filesystem images plus legacy inspect-output
+goldens used by targeted tests and local fixture regeneration workflows. The
+canonical repository-wide golden/conformance gate lives under
+`conformance/{fixtures,golden}` and is run via `./scripts/verify_golden.sh`.
 
 ## Directory Structure
 
@@ -99,7 +102,13 @@ Use `--with-content` (requires sudo) to populate with the same structure as ext4
 
 ## Verification
 
-To verify golden outputs match the images:
+For the canonical repository-wide golden/conformance gate, run:
+
+```bash
+./scripts/verify_golden.sh
+```
+
+To verify only the legacy inspect-output artifacts in `tests/fixtures/golden`:
 
 ```bash
 cd tests/fixtures/golden
@@ -108,7 +117,7 @@ sha256sum -c checksums.txt
 
 ## Updating Goldens
 
-After intentional behavior changes:
+After intentional changes to the legacy `tests/fixtures/golden` inspect outputs:
 
 ```bash
 # Regenerate everything
@@ -122,6 +131,10 @@ git diff tests/fixtures/golden/
 git add tests/fixtures/golden/
 git commit -m "chore: update golden outputs"
 ```
+
+If the change affects the canonical conformance artifacts under
+`conformance/{fixtures,golden}`, re-run `./scripts/verify_golden.sh` and update
+those tracked checksums/artifacts in the same change set.
 
 ## Requirements
 

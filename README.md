@@ -1260,6 +1260,16 @@ cargo run -p ffs-harness -- parity
 cargo bench -p ffs-harness
 ```
 
+Canonical golden/conformance verification gate:
+
+```bash
+./scripts/verify_golden.sh
+```
+
+That script is the checked-in gate used by CI for artifact integrity and
+`ffs-harness` conformance checks. Its cargo-heavy steps are routed through
+`rch`.
+
 ### Development Gates
 
 ```bash
