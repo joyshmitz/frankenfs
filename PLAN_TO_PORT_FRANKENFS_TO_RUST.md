@@ -29,6 +29,7 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` complete.
 - [x] Canonicalize all normative trait definitions (single source for `BlockDevice`, MVCC interfaces, repair interfaces) — `BlockDevice` in ffs-block, `FsOps` in ffs-core, MVCC interfaces in ffs-mvcc, repair interfaces in ffs-repair; each trait canonically defined in its owning crate
 - [x] Reconcile doc claims vs workspace reality (21 workspace crates: 19 core + `ffs-ext4`/`ffs-btrfs` wrappers)
 - [x] Reconcile ext4/btrfs scope statements (both formats are in-scope; btrfs phased)
+- [x] Reconcile explicit exclusion rows with current tracked parity/runtime scope (`fscrypt` nokey acceptance, ext4 inline-data read compatibility, and btrfs multi-device/decompression/send-stream parsing are no longer globally excluded)
 - [x] Fix math/spec errors in Section 18 (probabilistic conflict model) to be dimensionally correct and assumption-explicit
 - [x] Remove/repair any references to non-existent files (`ARCHITECTURE.md` -> `PROPOSED_ARCHITECTURE.md`, `CONVENTIONS.md` merged into `AGENTS.md`)
 - [x] Ensure dependency lists match `Cargo.toml` (zerocopy/bytes references removed; `fuser` reflected as an in-workspace dependency; Appendix C updated to match actual Cargo.toml)
@@ -180,15 +181,15 @@ exclusion is deliberate and documented to prevent scope creep.
 |---|---|
 | **Kernel module** | FrankenFS is userspace-only via FUSE. Kernel module development introduces unsafe code, GPL licensing constraints, and kernel ABI stability concerns that conflict with our memory-safety goals. |
 | **ext2/ext3 legacy format support** | We target ext4 exclusively. ext2/ext3 images can be mounted as ext4 by the kernel; we do not need backward compatibility with older superblock formats. |
-| **fscrypt (encrypted filesystem support)** | Filesystem-level encryption adds significant complexity (key management, per-file policies, filename encryption). This can be layered on in a future phase or handled by dm-crypt at the block layer. |
+| **Full fscrypt key management / decrypted-name semantics** | The tracked V1 contract accepts encrypted ext4 metadata in nokey compatibility mode, but does not implement keyring integration, content decryption, or write-side fscrypt policy enforcement. dm-crypt remains the recommended block-layer answer for real encrypted deployments. |
 | **Online resize (resize2fs equivalent)** | Resizing a mounted filesystem requires careful coordination with active I/O. Offline resize via `ffs-cli fsck --resize` may be added later. |
 | **Quota subsystem** | Disk quotas (usrquota, grpquota, prjquota) are an administrative feature. Excluding them removes ~3K LOC of quota tracking code. |
-| **btrfs advanced features** | Initial btrfs scope is single-device images with experimental mount/runtime support (default read-only, optional `--rw`) and limited feature coverage. Multi-device/RAID profiles, send/receive, and transparent compression are phased later. |
+| **btrfs receive-side application + production-hardened multi-device RW** | The tracked V1 contract now includes multi-device chunk mapping, transparent decompression, subvolume mount, tree-log replay, and send-stream parsing. Applying receive streams and hardening broader multi-device mutation semantics remain later phases. |
 | **NFS export support** | NFS export requires stable file handle generation across remounts. This is a protocol concern orthogonal to filesystem correctness. |
-| **ext4 inline data** | The `EXT4_INLINE_DATA_FL` feature stores small files inside the inode itself. This optimization affects ~2% of files and can be added in a future phase. |
-| **Multi-device support** | FrankenFS operates on a single block device (disk image). RAID, LVM, and multi-device btrfs topologies are excluded. |
+| **ext4 inline-data write-side mutation** | The tracked V1 contract includes inline-data read compatibility. Mutating inline-data files while preserving inline-vs-external storage semantics is still future work until that write contract is specified and tested. |
+| **External volume-manager orchestration** | FrankenFS can interpret btrfs-native multi-device chunk maps, but it does not orchestrate LVM/mdraid/device-mapper topologies or present itself as a general multi-device volume manager. |
 | **DAX / direct access** | Persistent-memory (pmem) direct access mode is excluded. FUSE does not support DAX. |
-| **ext4 encrypted directory indexes** | A sub-feature of fscrypt; excluded along with the parent feature. |
+| **ext4 encrypted directory index decryption semantics** | With nokey support, encrypted directory names remain opaque/raw bytes. Full decrypted directory-index behavior remains outside the current V1 contract. |
 | **Verity (fs-verity)** | Read-only integrity verification via Merkle trees. Overlaps with our RaptorQ integrity story but uses a different mechanism. |
 
 ---
@@ -243,7 +244,8 @@ Source location: `/data/projects/frankenfs/legacy_ext4_and_btrfs_code/linux-fs/f
 The reduction from ~205K C LOC to ~45.5K Rust LOC reflects:
 
 - **Exclusions:** ~30% of legacy code covers excluded features (quota, resize,
-  fscrypt, multi-device, NFS export, inline data).
+  NFS export, verity/DAX, full key-managed fscrypt flows, inline-data writes,
+  and external volume-manager orchestration).
 - **No kernel boilerplate:** Kernel module registration, sysfs, procfs, ioctl
   handlers, memory allocation wrappers, and spinlock ceremony are eliminated.
 - **Rust expressiveness:** Sum types (`enum`), `Result<T, E>`, iterators, trait

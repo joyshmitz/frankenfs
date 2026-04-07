@@ -596,7 +596,7 @@ FrankenFS uses a unified 14-variant error enum (`FfsError`) that maps cleanly to
 | `Corruption` | EIO | Checksum mismatch, invalid metadata at a known block |
 | `Format` | EINVAL | Wrong filesystem type, unsupported format version |
 | `Parse` | EINVAL | On-disk structure doesn't decode |
-| `UnsupportedFeature` | EOPNOTSUPP | Image uses a feature FrankenFS doesn't support (ENCRYPT, etc.) |
+| `UnsupportedFeature` | EOPNOTSUPP | Image requests a feature or mode this build still rejects (unknown incompat bits, unsupported mutation modes, unavailable write-side contracts) |
 | `IncompatibleFeature` | EINVAL | Required compat bits missing or unknown incompat bits set |
 | `UnsupportedBlockSize` | EINVAL | Block size outside 1K/2K/4K range |
 | `InvalidGeometry` | EINVAL | Blocks-per-group, inodes-per-group, or other structural parameter out of range |
@@ -1339,7 +1339,7 @@ Rows in the btrfs experimental RW contract can still say `partially supported` o
 - xfstests conformance baseline and root cause analysis
 - CI-compatible FUSE E2E test runner
 - Fuzz corpus expansion for WAL/MVCC/extent paths
-- btrfs feature expansion (multi-device RO, subvolumes)
+- btrfs operational hardening for multi-device/subvolume paths and broader write-side coverage
 
 See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [PLAN_TO_PORT_FRANKENFS_TO_RUST.md](PLAN_TO_PORT_FRANKENFS_TO_RUST.md) for the 9-phase roadmap.
 

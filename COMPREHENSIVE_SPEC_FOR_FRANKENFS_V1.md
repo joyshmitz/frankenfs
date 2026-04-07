@@ -175,8 +175,8 @@ FrankenFS is a **Rust 2024 workspace** (core 19 crates + optional legacy/referen
 |----------|-----------|
 | Kernel module | Userspace-only via FUSE. Kernel modules require `unsafe`, GPL, kernel ABI stability. |
 | Line-by-line C translation | We extract behavior, then reimplement idiomatically in Rust. No `goto` transliteration. |
-| btrfs complete parity on day 1 | FrankenFS targets ext4 and btrfs images, but btrfs support is phased (metadata parse → read-only mount → write-path). Multi-device/RAID profiles and other advanced features are out of scope initially. |
-| Distributed filesystem | Single block device. No multi-device, RAID, replication. |
+| btrfs complete parity on day 1 | FrankenFS targets ext4 and btrfs images, but btrfs support is phased (metadata parse → read-only mount → write-path → broader operational hardening). The tracked V1 contract includes multi-device chunk mapping and other major read-path features, but receive-side application and broader multi-device RW hardening are still later work. |
+| Distributed filesystem | FrankenFS is not a clustered/distributed filesystem. It does not do replication, lease/consensus coordination, or act as a general-purpose volume manager, even though btrfs-native multi-device chunk mapping is part of the tracked V1 surface. |
 | Compatibility shim pile | No technical debt wrapping. ext4 behavior is re-derived from first principles. |
 
 ### 1.3 Two Core Innovations
@@ -3601,7 +3601,7 @@ Size = `s_inode_size` (128 min, 256 typical). Per block = `block_size / s_inode_
 | `EXT4_EXTENTS_FL` | `0x00080000` | Uses extents (MUST be set) |
 | `EXT4_HUGE_FILE_FL` | `0x00040000` | Blocks in fs-block units |
 | `EXT4_EA_INODE_FL` | `0x00200000` | Large xattr in inode |
-| `EXT4_INLINE_DATA_FL` | `0x10000000` | Inline data (rejected) |
+| `EXT4_INLINE_DATA_FL` | `0x10000000` | Inline data (read-compatible; write-side inline mutation remains future work) |
 
 #### 11.3.4 Inode Checksum (`METADATA_CSUM`)
 
@@ -4510,12 +4510,15 @@ for clarification.
 
 - ext2/ext3 images mountable as ext4 by kernel. Users should use kernel driver
   or `tune2fs` conversion.
-- Avoiding legacy code paths: indirect block addressing, 32-bit block counts,
-  JBD v1 journal format, unjournaled metadata.
+- Avoiding ext2/ext3-specific compatibility work beyond what ext4 images
+  already require: no separate ext2/ext3 mount personalities, ext2/ext3-only
+  feature-policy surface, or unjournaled legacy operation mode.
 
 ### 15.3 fscrypt (Filesystem Encryption)
 
-**Excluded.**
+**Partially in scope.** The tracked V1 contract accepts encrypted ext4 metadata
+in nokey compatibility mode, but excludes full key-managed decryption and
+write-side policy enforcement.
 
 - Key management complexity: kernel keyring, per-file policies, AES-256-XTS/CTS-CBC
   derivation, policy inheritance (~4K kernel LOC).
@@ -4523,7 +4526,9 @@ for clarification.
   the version chain; snapshot reads need historical keys.
 - RaptorQ interaction: repair symbols over ciphertext works but complicates
   the repair/verify pipeline.
-- Alternative: dm-crypt/LUKS at block device layer.
+- Current V1 contract: encrypted filenames are surfaced as raw bytes (nokey
+  mode); full content decryption and policy enforcement remain out of scope.
+- Alternative for real encrypted deployments: dm-crypt/LUKS at block device layer.
 
 ### 15.4 Online Resize
 
@@ -4547,17 +4552,19 @@ on later via well-defined hooks at allocation and ownership-change points.
 **In scope (phased).** FrankenFS targets mount-compatible behavior for both
 ext4 and btrfs images, using shared MVCC + self-healing internals.
 
-Initial btrfs scope (explicit):
+Tracked V1 btrfs scope (explicit):
 
-- single-device images only
 - metadata parsing + validation
-- read-only mount surface parity first, then write-path parity
+- single- and multi-device chunk mapping for supported RAID/DUP read paths
+- transparent decompression (ZLIB/LZO/ZSTD)
+- subvolume mount, tree-log replay, and send-stream parsing
+- read-only mount surface parity plus the current experimental RW contract
 
-Excluded initially (btrfs-specific):
+Still phased later (btrfs-specific):
 
-- multi-device/chunk profiles (RAID*, DUP), device replace, balance
-- send/receive
-- transparent compression / fscrypt
+- receive-side application / full send-stream execution
+- device replace, balance, and broader operational hardening for multi-device RW
+- full key-managed encryption / fscrypt
 
 ### 15.7 NFS Export
 
@@ -4567,17 +4574,20 @@ concern orthogonal to filesystem correctness.
 
 ### 15.8 ext4 Inline Data
 
-**Excluded.** `EXT4_INLINE_DATA_FL` stores small files in inode body (~60 bytes
-in `i_block` + extended attribute area). Benefits ~2% of files. Adds
-complexity to every read/write path (inline vs extent-mapped check, transition
-handling). Future optimization after core stabilization.
+**Read-compatible in V1; write-side inline mutation remains future work.**
+`EXT4_INLINE_DATA_FL` stores small files in inode body (~60 bytes in `i_block`
+and the extended attribute area). The current tracked contract supports reading
+inline data and exposing it through the standard file read path. Preserving
+inline-vs-external storage transitions during write-side mutation remains
+future work.
 
 ### 15.9 Multi-Device
 
-**Excluded.** Single block device only. ext4 is inherently single-device;
-multi-device would break format compatibility. Users can layer md-raid/LVM
-beneath. RaptorQ already provides per-group redundancy; multi-device RAID
-is an orthogonal layer.
+**Partially in scope.** ext4 remains inherently single-device, but the tracked
+V1 btrfs contract includes multi-device chunk mapping and supported RAID/DUP
+read dispatch. What remains excluded is general external volume-manager
+orchestration (mdraid/LVM/device-mapper) and broader production-hardened
+multi-device mutation semantics.
 
 ### 15.10 DAX / Persistent Memory
 
@@ -4594,30 +4604,28 @@ at block layer.
 
 ### 15.12 Encrypted Directory Indexes
 
-**Excluded.** Sub-feature of fscrypt (Section 15.3). Encrypted filenames in
-directory entries + keyed SipHash for htree. No use case without the broader
-fscrypt infrastructure; excluded by implication.
+**Partially in scope via nokey compatibility, but decrypted semantics are
+excluded.** Encrypted filenames in directory entries are surfaced as opaque/raw
+bytes under the current V1 contract. Full keyed directory-index behavior and
+decrypted-name semantics remain excluded with the broader key-managed fscrypt
+surface.
 
 ### 15.13 Direct Block Pointers (Legacy Indirect Addressing)
 
-**Excluded.** Pre-extents block mapping via 12 direct + 1 indirect + 1 double-
-indirect + 1 triple-indirect pointers in `i_block[0..14]`. FrankenFS requires
-`INCOMPAT_EXTENTS` -- all inodes MUST use extent trees. Images without extents
-must be converted (`tune2fs -O extents`) before mounting. Rationale: extent
-trees are strictly superior (contiguous ranges, O(log N) vs O(N) lookup for
-large files, simpler COW semantics). Supporting both code paths would double
-the block-mapping complexity for zero practical benefit (all modern ext4
-images use extents by default since Linux 2.6.28).
+**In scope.** FrankenFS supports the legacy ext4 block-mapping path via
+12 direct + 1 indirect + 1 double-indirect + 1 triple-indirect pointers in
+`i_block[0..14]` for inodes that do not use extents. Extent trees remain the
+preferred/default representation, but the tracked V1 mount contract no longer
+requires `INCOMPAT_EXTENTS`, and compatibility-mode reads must handle both
+layouts correctly.
 
 ### 15.14 Casefold (Case-Insensitive Directories)
 
-**Excluded.** `INCOMPAT_CASEFOLD` (0x20000). Requires per-directory casefold
-flag, Unicode NFD normalization for lookups, modified htree hash computation
-(hash the normalized name, not the stored name), and full Unicode casefolding
-tables (~100 KB). Used primarily for Windows/macOS interoperability (Samba,
-case-insensitive Chromium filesystem). Adds complexity to every directory
-lookup and modifies the htree hash contract. Alternative: application-layer
-case-insensitive lookup via `readdir + casefold compare`.
+**In scope (tracked V1 compatibility contract).** `INCOMPAT_CASEFOLD`
+(0x20000) is accepted and FrankenFS performs case-insensitive directory lookup
+via Unicode lowercase comparison in the current mount/read path. Further
+hardening toward kernel-equivalent normalization/hash behavior remains future
+refinement work, but casefold directories are no longer globally excluded.
 
 ### 15.15 Fast Commit
 
