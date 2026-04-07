@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_write_amplification_16block",
+      "mean": 16.33138968114,
+      "stddev": 0.13883872932946126,
+      "median": 16.401908964140002,
+      "user": 20.237562146666665,
+      "system": 7.1711856933333324,
+      "min": 16.17144457214,
+      "max": 16.420815507140002,
+      "times": [
+        16.17144457214,
+        16.420815507140002,
+        16.401908964140002
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

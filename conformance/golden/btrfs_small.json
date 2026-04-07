@@ -1,7 +1,121 @@
 {
   "filesystem": "btrfs",
+  "version": 1,
+  "source": "mkfs.btrfs -r root",
+  "image_params": {
+    "size_bytes": 134217728,
+    "label": "btrfs_small",
+    "variant": "btrfs_small"
+  },
   "sectorsize": 4096,
   "nodesize": 16384,
-  "generation": 8,
-  "label": "btrfs_small"
+  "generation": 9,
+  "label": "btrfs_small",
+  "total_bytes": 134217728,
+  "bytes_used": 147456,
+  "num_devices": 1,
+  "csum_type": 0,
+  "chunks": [
+    {
+      "logical_start": 13631488,
+      "length": 8388608,
+      "owner": 2,
+      "chunk_type_raw": 1,
+      "sector_size": 4096,
+      "stripe_count": 1,
+      "stripes": [
+        {
+          "devid": 1,
+          "physical_start": 13631488
+        }
+      ]
+    },
+    {
+      "logical_start": 22020096,
+      "length": 8388608,
+      "owner": 2,
+      "chunk_type_raw": 34,
+      "sector_size": 4096,
+      "stripe_count": 2,
+      "stripes": [
+        {
+          "devid": 1,
+          "physical_start": 22020096
+        },
+        {
+          "devid": 1,
+          "physical_start": 30408704
+        }
+      ]
+    },
+    {
+      "logical_start": 30408704,
+      "length": 33554432,
+      "owner": 2,
+      "chunk_type_raw": 36,
+      "sector_size": 4096,
+      "stripe_count": 2,
+      "stripes": [
+        {
+          "devid": 1,
+          "physical_start": 38797312
+        },
+        {
+          "devid": 1,
+          "physical_start": 72351744
+        }
+      ]
+    }
+  ],
+  "root_tree": {
+    "system_root_objectids": [
+      2,
+      4,
+      5,
+      7,
+      9,
+      10
+    ],
+    "user_subvolume_ids": [
+      18446744073709551607
+    ],
+    "root_ref_names": []
+  },
+  "directories": [
+    {
+      "path": "/",
+      "entries": [
+        {
+          "name": "README.txt",
+          "kind": "regular"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "/README.txt",
+      "size": 23,
+      "content_hex": "68656c6c6f2066726f6d20627472667320736d616c6c0a",
+      "content_blake3": "aea2e237f41eda5bd31da1ef27916facd6bc2dbbe8f653cb023d02795b8a4e44",
+      "content_preview_hex": "68656c6c6f2066726f6d20627472667320736d616c6c0a",
+      "extents": [
+        {
+          "logical_offset": 0,
+          "kind": "inline",
+          "compression": 0,
+          "ram_bytes": 23,
+          "logical_bytes": 23
+        }
+      ]
+    }
+  ],
+  "subvolumes": [
+    {
+      "id": 18446744073709551607,
+      "parent_id": 0,
+      "name": "subvol-18446744073709551607",
+      "read_only": false
+    }
+  ]
 }

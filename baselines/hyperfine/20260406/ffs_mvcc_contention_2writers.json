@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- mvcc_contention_2writers",
+      "mean": 16.149058778953332,
+      "stddev": 0.12344174798605675,
+      "median": 16.21233441962,
+      "user": 26.73195402,
+      "system": 9.648979793333332,
+      "min": 16.00680897862,
+      "max": 16.22803293862,
+      "times": [
+        16.00680897862,
+        16.21233441962,
+        16.22803293862
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

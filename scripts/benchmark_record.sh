@@ -13,6 +13,9 @@ REF_IMAGE="conformance/golden/ext4_8mb_reference.ext4"
 P99_WARN_THRESHOLD=10
 P99_FAIL_THRESHOLD=20
 P99_FAIL_THRESHOLD_OVERRIDE=""
+FFS_USE_RCH="${FFS_USE_RCH:-1}"
+FORCE_REMOTE="${FFS_BENCH_FORCE_REMOTE:-0}"
+BENCH_PROFILE="${FFS_BENCH_PROFILE:-release-perf}"
 MOUNT_PROBE_USE_SUDO="${FFS_MOUNT_PROBE_USE_SUDO:-0}"
 PERF_BASELINE_PATH="artifacts/baselines/perf_baseline.json"
 THRESHOLDS_PATH="benchmarks/thresholds.toml"
@@ -22,8 +25,36 @@ declare -A OP_WARN_THRESHOLDS=()
 declare -A OP_FAIL_THRESHOLDS=()
 CACHE_WORKLOAD_METRICS_JSON='[]'
 
+have_rch() {
+    [[ "$FFS_USE_RCH" == "1" ]] && command -v rch >/dev/null 2>&1
+}
+
 cargo_exec() {
-    rch exec -- cargo "$@"
+    if have_rch; then
+        rch exec -- cargo "$@"
+    else
+        cargo "$@"
+    fi
+}
+
+cargo_cmd_prefix() {
+    if have_rch; then
+        printf 'rch exec -- cargo'
+    else
+        printf 'cargo'
+    fi
+}
+
+cargo_run_cmd() {
+    local package="$1"
+    shift
+    printf '%s run -p %s --profile %s --quiet -- %s' \
+        "$(cargo_cmd_prefix)" "$package" "$BENCH_PROFILE" "$*"
+}
+
+cargo_bench_cmd() {
+    printf '%s bench --profile %s %s' \
+        "$(cargo_cmd_prefix)" "$BENCH_PROFILE" "$*"
 }
 
 extract_cache_report_from_log() {
@@ -50,7 +81,7 @@ extract_cache_report_from_log() {
 usage() {
     cat <<'USAGE'
 Usage:
-  scripts/benchmark_record.sh [--date YYYYMMDD] [--warmup N] [--runs N] [--compare] [--skip-verify-golden] [--thresholds PATH] [--p99-fail-threshold N] [--mount-probe-use-sudo] [--out-json PATH]
+  scripts/benchmark_record.sh [--date YYYYMMDD] [--warmup N] [--runs N] [--compare] [--skip-verify-golden] [--thresholds PATH] [--p99-fail-threshold N] [--profile PROFILE] [--force-remote] [--mount-probe-use-sudo] [--out-json PATH]
 
 Options:
   --date YYYYMMDD          Override date-tag for output paths (default: today)
@@ -60,6 +91,8 @@ Options:
   --skip-verify-golden     Skip scripts/verify_golden.sh preflight
   --thresholds PATH        Read warn/fail thresholds from TOML (default: benchmarks/thresholds.toml)
   --p99-fail-threshold N   Fail compare if p99 regression exceeds N percent (default: 20)
+  --profile PROFILE        Cargo profile for build/run/bench commands (default: release-perf)
+  --force-remote           Disable local release-binary execution and use cargo run via the configured cargo executor
   --mount-probe-use-sudo   Run mount probe helper via `sudo -n` (or set FFS_MOUNT_PROBE_USE_SUDO=1)
   --out-json PATH          Structured baseline JSON output path (default: artifacts/baselines/perf_baseline.json)
   -h, --help               Show this help
@@ -96,6 +129,15 @@ while [ $# -gt 0 ]; do
             P99_FAIL_THRESHOLD_OVERRIDE="$2"
             shift 2
             ;;
+        --profile)
+            [ $# -ge 2 ] || { echo "missing value for --profile" >&2; exit 2; }
+            BENCH_PROFILE="$2"
+            shift 2
+            ;;
+        --force-remote)
+            FORCE_REMOTE=1
+            shift
+            ;;
         --mount-probe-use-sudo)
             MOUNT_PROBE_USE_SUDO=1
             shift
@@ -121,6 +163,16 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is required but not installed" >&2
+    exit 2
+fi
+
+if ! command -v hyperfine >/dev/null 2>&1; then
+    echo "hyperfine is required but not installed" >&2
+    exit 2
+fi
 
 load_thresholds() {
     if [ ! -f "$THRESHOLDS_PATH" ]; then
@@ -222,28 +274,30 @@ echo "Output directory: ${OUT_DIR}"
 echo ""
 
 echo "Building release binaries once..."
-cargo_exec build -p ffs-cli --release --quiet
-cargo_exec build -p ffs-harness --release --quiet
+cargo_exec build -p ffs-cli --profile "$BENCH_PROFILE" --quiet
+cargo_exec build -p ffs-harness --profile "$BENCH_PROFILE" --quiet
 echo ""
 
-CLI_BIN="${TARGET_DIR}/release/ffs-cli"
-HARNESS_BIN="${TARGET_DIR}/release/ffs-harness"
+CLI_BIN="${TARGET_DIR}/${BENCH_PROFILE}/ffs-cli"
+HARNESS_BIN="${TARGET_DIR}/${BENCH_PROFILE}/ffs-harness"
 USE_LOCAL_RELEASE_BINS=1
-if [ ! -x "$CLI_BIN" ] || [ ! -x "$HARNESS_BIN" ]; then
+if [ "$FORCE_REMOTE" -eq 1 ]; then
+    USE_LOCAL_RELEASE_BINS=0
+elif [ ! -x "$CLI_BIN" ] || [ ! -x "$HARNESS_BIN" ]; then
     # In environments with a non-default CARGO_TARGET_DIR, rch artifact
     # retrieval often materializes under ./target. Prefer that local path
     # before degrading to remote cargo run per benchmark sample.
     local_target_dir="target"
-    local_cli_fallback="${local_target_dir}/release/ffs-cli"
-    local_harness_fallback="${local_target_dir}/release/ffs-harness"
+    local_cli_fallback="${local_target_dir}/${BENCH_PROFILE}/ffs-cli"
+    local_harness_fallback="${local_target_dir}/${BENCH_PROFILE}/ffs-harness"
     if [ -x "$local_cli_fallback" ] && [ -x "$local_harness_fallback" ]; then
         TARGET_DIR="$local_target_dir"
         CLI_BIN="$local_cli_fallback"
         HARNESS_BIN="$local_harness_fallback"
-        echo "warning: missing local release binaries under original target directory; using ${TARGET_DIR}/release fallback" >&2
+        echo "warning: missing local profile binaries under original target directory; using ${TARGET_DIR}/${BENCH_PROFILE} fallback" >&2
     else
         USE_LOCAL_RELEASE_BINS=0
-        echo "warning: missing local release binaries under ${TARGET_DIR}; falling back to rch cargo run commands" >&2
+        echo "warning: missing local profile binaries under ${TARGET_DIR}; falling back to cargo run commands" >&2
     fi
 fi
 
@@ -341,7 +395,7 @@ configure_mount_benchmarks() {
 
     if [ "$USE_LOCAL_RELEASE_BINS" -ne 1 ] || [ ! -x "$CLI_BIN" ]; then
         set_mount_pending_reasons \
-            "mount benchmarks require a local release ffs-cli binary at ${CLI_BIN} (rch remote binaries cannot mount local FUSE)" \
+            "mount benchmarks require a local ${BENCH_PROFILE} ffs-cli binary at ${CLI_BIN} (remote cargo execution cannot mount local FUSE)" \
             "$recovery_reason"
         return
     fi
@@ -488,19 +542,19 @@ if [ "$USE_LOCAL_RELEASE_BINS" -eq 1 ]; then
         "0"
 else
     add_bench "ffs-cli parity --json" \
-        "rch exec -- cargo run -p ffs-cli --release --quiet -- parity --json" \
+        "$(cargo_run_cmd ffs-cli "parity --json")" \
         "ffs_cli_parity.json" \
         "metadata_parity_cli" \
         "0"
 
     add_bench "ffs-harness parity" \
-        "rch exec -- cargo run -p ffs-harness --release --quiet -- parity" \
+        "$(cargo_run_cmd ffs-harness "parity")" \
         "ffs_harness_parity.json" \
         "metadata_parity_harness" \
         "0"
 
     add_bench "ffs-harness check-fixtures" \
-        "rch exec -- cargo run -p ffs-harness --release --quiet -- check-fixtures" \
+        "$(cargo_run_cmd ffs-harness "check-fixtures")" \
         "ffs_harness_check_fixtures.json" \
         "fixture_validation" \
         "0"
@@ -542,21 +596,21 @@ if [ -f "$REF_IMAGE" ]; then
             SKIPPED_LABELS+=("ffs-cli scrub ext4_8mb_reference.ext4 --json (skipped because inspect probe failed)")
         fi
     else
-        if rch exec -- cargo run -p ffs-cli --release --quiet -- inspect "$REF_IMAGE" --json >/dev/null 2>"$probe_stderr"; then
+        if cargo_exec run -p ffs-cli --profile "$BENCH_PROFILE" --quiet -- inspect "$REF_IMAGE" --json >/dev/null 2>"$probe_stderr"; then
             add_bench "ffs-cli inspect ext4_8mb_reference.ext4 --json" \
-                "rch exec -- cargo run -p ffs-cli --release --quiet -- inspect ${REF_IMAGE} --json" \
+                "$(cargo_run_cmd ffs-cli "inspect ${REF_IMAGE} --json")" \
                 "ffs_cli_inspect_ext4_8mb_reference.json" \
                 "read_metadata_inspect_ext4_reference" \
                 "8"
             scrub_probe_exit=0
-            if rch exec -- cargo run -p ffs-cli --release --quiet -- scrub "$REF_IMAGE" --json >"$scrub_probe_stdout" 2>"$scrub_probe_stderr"; then
+            if cargo_exec run -p ffs-cli --profile "$BENCH_PROFILE" --quiet -- scrub "$REF_IMAGE" --json >"$scrub_probe_stdout" 2>"$scrub_probe_stderr"; then
                 scrub_probe_exit=0
             else
                 scrub_probe_exit=$?
             fi
             if scrub_probe_is_acceptable "$scrub_probe_exit" "$scrub_probe_stdout"; then
                 add_bench "ffs-cli scrub ext4_8mb_reference.ext4 --json" \
-                    "bash -lc 'rch exec -- cargo run -p ffs-cli --release --quiet -- scrub \"${REF_IMAGE}\" --json >/dev/null || [ \$? -eq 2 ]'" \
+                    "bash -lc '$(cargo_run_cmd ffs-cli "scrub ${REF_IMAGE} --json") >/dev/null || [ \$? -eq 2 ]'" \
                     "ffs_cli_scrub_ext4_8mb_reference.json" \
                     "read_metadata_scrub_ext4_reference" \
                     "8"
@@ -579,85 +633,85 @@ else
 fi
 
 add_bench "ffs-block arc sequential scan (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan")" \
     "ffs_block_arc_sequential_scan.json" \
     "block_cache_arc_sequential_scan" \
     "0"
 
 add_bench "ffs-block arc zipf distribution (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- block_cache_arc_zipf_distribution" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_zipf_distribution")" \
     "ffs_block_arc_zipf_distribution.json" \
     "block_cache_arc_zipf_distribution" \
     "0"
 
 add_bench "ffs-block arc mixed seq70 hot30 (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- block_cache_arc_mixed_seq70_hot30" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_mixed_seq70_hot30")" \
     "ffs_block_arc_mixed_seq70_hot30.json" \
     "block_cache_arc_mixed_seq70_hot30" \
     "0"
 
 add_bench "ffs-block arc compile-like (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- block_cache_arc_compile_like" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_compile_like")" \
     "ffs_block_arc_compile_like.json" \
     "block_cache_arc_compile_like" \
     "0"
 
 add_bench "ffs-block arc database-like (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- block_cache_arc_database_like" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_database_like")" \
     "ffs_block_arc_database_like.json" \
     "block_cache_arc_database_like" \
     "0"
 
 add_bench "ffs-block s3fifo sequential scan (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_sequential_scan" \
+    "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_sequential_scan")" \
     "ffs_block_s3fifo_sequential_scan.json" \
     "block_cache_s3fifo_sequential_scan" \
     "0"
 
 add_bench "ffs-block s3fifo zipf distribution (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_zipf_distribution" \
+    "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_zipf_distribution")" \
     "ffs_block_s3fifo_zipf_distribution.json" \
     "block_cache_s3fifo_zipf_distribution" \
     "0"
 
 add_bench "ffs-block s3fifo mixed seq70 hot30 (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_mixed_seq70_hot30" \
+    "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_mixed_seq70_hot30")" \
     "ffs_block_s3fifo_mixed_seq70_hot30.json" \
     "block_cache_s3fifo_mixed_seq70_hot30" \
     "0"
 
 add_bench "ffs-block s3fifo compile-like (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_compile_like" \
+    "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_compile_like")" \
     "ffs_block_s3fifo_compile_like.json" \
     "block_cache_s3fifo_compile_like" \
     "0"
 
 add_bench "ffs-block s3fifo database-like (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_database_like" \
+    "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_database_like")" \
     "ffs_block_s3fifo_database_like.json" \
     "block_cache_s3fifo_database_like" \
     "0"
 
 add_bench "ffs-block writeback write seq 4k (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- writeback_write_seq_4k" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- writeback_write_seq_4k")" \
     "ffs_block_writeback_write_seq_4k.json" \
     "write_seq_4k" \
     "0.00390625"
 
 add_bench "ffs-block writeback write random 4k (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- writeback_write_random_4k" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- writeback_write_random_4k")" \
     "ffs_block_writeback_write_random_4k.json" \
     "write_random_4k" \
     "0.00390625"
 
 add_bench "ffs-block writeback fsync single write (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- writeback_sync_single_4k" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- writeback_sync_single_4k")" \
     "ffs_block_writeback_sync_single_4k.json" \
     "fsync_single_write" \
     "0.00390625"
 
 add_bench "ffs-block writeback fsync batch 100x4k (criterion)" \
-    "rch exec -- cargo bench -p ffs-block --bench arc_cache -- writeback_sync_100x4k" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- writeback_sync_100x4k")" \
     "ffs_block_writeback_sync_100x4k.json" \
     "fsync_batch_100" \
     "0.390625"
@@ -665,31 +719,31 @@ add_bench "ffs-block writeback fsync batch 100x4k (criterion)" \
 # ── WAL / MVCC expanded (criterion, ffs-mvcc) ─────────────────────────
 
 add_bench "ffs-mvcc WAL write amplification 1-block (criterion)" \
-    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- wal_write_amplification_1block" \
+    "$(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- wal_write_amplification_1block")" \
     "ffs_mvcc_wal_write_amplification_1block.json" \
     "wal_write_amplification_1block" \
     "0.00390625"
 
 add_bench "ffs-mvcc WAL write amplification 16-block (criterion)" \
-    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- wal_write_amplification_16block" \
+    "$(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- wal_write_amplification_16block")" \
     "ffs_mvcc_wal_write_amplification_16block.json" \
     "wal_write_amplification_16block" \
     "0.0625"
 
 add_bench "ffs-mvcc contention 2 writers (criterion)" \
-    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- mvcc_contention_2writers" \
+    "$(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- mvcc_contention_2writers")" \
     "ffs_mvcc_contention_2writers.json" \
     "mvcc_contention_2writers" \
     "0"
 
 add_bench "ffs-mvcc contention 4 writers (criterion)" \
-    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- mvcc_contention_4writers" \
+    "$(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- mvcc_contention_4writers")" \
     "ffs_mvcc_contention_4writers.json" \
     "mvcc_contention_4writers" \
     "0"
 
 add_bench "ffs-mvcc contention 8 writers (criterion)" \
-    "rch exec -- cargo bench -p ffs-mvcc --bench wal_throughput -- mvcc_contention_8writers" \
+    "$(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- mvcc_contention_8writers")" \
     "ffs_mvcc_contention_8writers.json" \
     "mvcc_contention_8writers" \
     "0"
@@ -697,25 +751,25 @@ add_bench "ffs-mvcc contention 8 writers (criterion)" \
 # ── Scrub / RaptorQ codec (criterion, ffs-repair) ─────────────────────
 
 add_bench "ffs-repair scrub clean 256 blocks (criterion)" \
-    "rch exec -- cargo bench -p ffs-repair --bench scrub_codec -- scrub_clean_256blocks" \
+    "$(cargo_bench_cmd "-p ffs-repair --bench scrub_codec -- scrub_clean_256blocks")" \
     "ffs_repair_scrub_clean_256blocks.json" \
     "scrub_clean_256blocks" \
     "0"
 
 add_bench "ffs-repair scrub corrupted 256 blocks (criterion)" \
-    "rch exec -- cargo bench -p ffs-repair --bench scrub_codec -- scrub_corrupted_256blocks" \
+    "$(cargo_bench_cmd "-p ffs-repair --bench scrub_codec -- scrub_corrupted_256blocks")" \
     "ffs_repair_scrub_corrupted_256blocks.json" \
     "scrub_corrupted_256blocks" \
     "0"
 
 add_bench "ffs-repair raptorq encode 16-block group (criterion)" \
-    "rch exec -- cargo bench -p ffs-repair --bench scrub_codec -- raptorq_encode_group_16blocks" \
+    "$(cargo_bench_cmd "-p ffs-repair --bench scrub_codec -- raptorq_encode_group_16blocks")" \
     "ffs_repair_raptorq_encode_group_16blocks.json" \
     "raptorq_encode_group_16blocks" \
     "0"
 
 add_bench "ffs-repair raptorq decode 16-block group (criterion)" \
-    "rch exec -- cargo bench -p ffs-repair --bench scrub_codec -- raptorq_decode_group_16blocks" \
+    "$(cargo_bench_cmd "-p ffs-repair --bench scrub_codec -- raptorq_decode_group_16blocks")" \
     "ffs_repair_raptorq_decode_group_16blocks.json" \
     "raptorq_decode_group_16blocks" \
     "0"
@@ -813,13 +867,25 @@ run_cache_workload_report() {
     local -a command
 
     if [ "$policy" = "s3fifo" ]; then
-        command=(
-            rch exec -- env "FFS_BLOCK_CACHE_WORKLOAD_REPORT=-" cargo bench -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_sequential_scan
-        )
+        if have_rch; then
+            command=(
+                rch exec -- env "FFS_BLOCK_CACHE_WORKLOAD_REPORT=-" cargo bench -p ffs-block --features s3fifo --bench arc_cache --profile "$BENCH_PROFILE" -- block_cache_s3fifo_sequential_scan
+            )
+        else
+            command=(
+                env "FFS_BLOCK_CACHE_WORKLOAD_REPORT=-" cargo bench -p ffs-block --features s3fifo --bench arc_cache --profile "$BENCH_PROFILE" -- block_cache_s3fifo_sequential_scan
+            )
+        fi
     else
-        command=(
-            rch exec -- env "FFS_BLOCK_CACHE_WORKLOAD_REPORT=-" cargo bench -p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan
-        )
+        if have_rch; then
+            command=(
+                rch exec -- env "FFS_BLOCK_CACHE_WORKLOAD_REPORT=-" cargo bench -p ffs-block --bench arc_cache --profile "$BENCH_PROFILE" -- block_cache_arc_sequential_scan
+            )
+        else
+            command=(
+                env "FFS_BLOCK_CACHE_WORKLOAD_REPORT=-" cargo bench -p ffs-block --bench arc_cache --profile "$BENCH_PROFILE" -- block_cache_arc_sequential_scan
+            )
+        fi
     fi
 
     echo ""
@@ -1062,6 +1128,8 @@ date_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "- rustc: \`${rustc_ver}\`"
     echo "- cargo: \`${cargo_ver}\`"
     echo "- hyperfine: \`${hyperfine_ver}\`"
+    echo "- Cargo profile: \`${BENCH_PROFILE}\`"
+    echo "- Cargo executor: \`$(cargo_cmd_prefix)\`"
     echo "- Warmup runs: \`${WARMUP}\`"
     echo "- Measured runs: \`${RUNS}\`"
     echo "- Thresholds file: \`${THRESHOLDS_PATH}\`"

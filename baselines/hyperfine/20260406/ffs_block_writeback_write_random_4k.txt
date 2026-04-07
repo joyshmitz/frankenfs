@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-block --bench arc_cache -- writeback_write_random_4k
+  Time (mean ± σ):     10.055 s ±  0.095 s    [User: 18.178 s, System: 0.424 s]
+  Range (min … max):    9.948 s … 10.129 s    3 runs
+ 

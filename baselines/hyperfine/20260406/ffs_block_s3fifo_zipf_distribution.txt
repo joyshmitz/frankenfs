@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_zipf_distribution
+  Time (mean ± σ):     11.213 s ±  0.226 s    [User: 18.450 s, System: 0.390 s]
+  Range (min … max):   11.067 s … 11.473 s    3 runs
+ 

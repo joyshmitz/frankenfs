@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_mixed_seq70_hot30
+  Time (mean ± σ):      9.944 s ±  1.723 s    [User: 17.180 s, System: 0.385 s]
+  Range (min … max):    7.977 s … 11.184 s    3 runs
+ 

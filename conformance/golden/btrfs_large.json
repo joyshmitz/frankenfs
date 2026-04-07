@@ -1,7 +1,174 @@
 {
   "filesystem": "btrfs",
+  "version": 1,
+  "source": "mkfs.btrfs -r root --compress zlib --subvol rw:subvol-rw --subvol ro:subvol-ro",
+  "image_params": {
+    "size_bytes": 201326592,
+    "label": "btrfs_large",
+    "variant": "btrfs_large"
+  },
   "sectorsize": 4096,
   "nodesize": 16384,
-  "generation": 8,
-  "label": "btrfs_large"
+  "generation": 9,
+  "label": "btrfs_large",
+  "total_bytes": 201326592,
+  "bytes_used": 184320,
+  "num_devices": 1,
+  "csum_type": 0,
+  "chunks": [
+    {
+      "logical_start": 13631488,
+      "length": 8388608,
+      "owner": 2,
+      "chunk_type_raw": 1,
+      "sector_size": 4096,
+      "stripe_count": 1,
+      "stripes": [
+        {
+          "devid": 1,
+          "physical_start": 13631488
+        }
+      ]
+    },
+    {
+      "logical_start": 22020096,
+      "length": 8388608,
+      "owner": 2,
+      "chunk_type_raw": 34,
+      "sector_size": 4096,
+      "stripe_count": 2,
+      "stripes": [
+        {
+          "devid": 1,
+          "physical_start": 22020096
+        },
+        {
+          "devid": 1,
+          "physical_start": 30408704
+        }
+      ]
+    },
+    {
+      "logical_start": 30408704,
+      "length": 33554432,
+      "owner": 2,
+      "chunk_type_raw": 36,
+      "sector_size": 4096,
+      "stripe_count": 2,
+      "stripes": [
+        {
+          "devid": 1,
+          "physical_start": 38797312
+        },
+        {
+          "devid": 1,
+          "physical_start": 72351744
+        }
+      ]
+    }
+  ],
+  "root_tree": {
+    "system_root_objectids": [
+      2,
+      4,
+      5,
+      7,
+      9,
+      10
+    ],
+    "user_subvolume_ids": [
+      256,
+      257,
+      18446744073709551607
+    ],
+    "root_ref_names": [
+      "subvol-ro",
+      "subvol-rw"
+    ]
+  },
+  "directories": [
+    {
+      "path": "/",
+      "entries": [
+        {
+          "name": "README.txt",
+          "kind": "regular"
+        },
+        {
+          "name": "data",
+          "kind": "directory"
+        },
+        {
+          "name": "subvol-ro",
+          "kind": "directory"
+        },
+        {
+          "name": "subvol-rw",
+          "kind": "directory"
+        }
+      ]
+    },
+    {
+      "path": "/data",
+      "entries": [
+        {
+          "name": "repeat.bin",
+          "kind": "regular"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "/README.txt",
+      "size": 23,
+      "content_hex": "68656c6c6f2066726f6d206274726673206c617267650a",
+      "content_blake3": "fcc103c592a833daba1aa81d11d2121b349bd3f99f31aff429b279432c5934f1",
+      "content_preview_hex": "68656c6c6f2066726f6d206274726673206c617267650a",
+      "extents": [
+        {
+          "logical_offset": 0,
+          "kind": "inline",
+          "compression": 0,
+          "ram_bytes": 23,
+          "logical_bytes": 23
+        }
+      ]
+    },
+    {
+      "path": "/data/repeat.bin",
+      "size": 131072,
+      "content_blake3": "9e7252ac5a9441ff2f9b4fdea3cc4c01dee84104b0c0946aada5dcb72399ea18",
+      "content_preview_hex": "41414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "extents": [
+        {
+          "logical_offset": 0,
+          "kind": "regular",
+          "compression": 1,
+          "ram_bytes": 131072,
+          "logical_bytes": 131072
+        }
+      ]
+    }
+  ],
+  "subvolumes": [
+    {
+      "id": 256,
+      "parent_id": 5,
+      "name": "subvol-rw",
+      "read_only": false
+    },
+    {
+      "id": 257,
+      "parent_id": 5,
+      "name": "subvol-ro",
+      "read_only": true
+    },
+    {
+      "id": 18446744073709551607,
+      "parent_id": 0,
+      "name": "subvol-18446744073709551607",
+      "read_only": false
+    }
+  ]
 }

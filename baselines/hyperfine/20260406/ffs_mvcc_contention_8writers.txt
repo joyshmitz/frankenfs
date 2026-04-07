@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- mvcc_contention_8writers
+  Time (mean ± σ):     16.004 s ±  0.097 s    [User: 25.723 s, System: 10.434 s]
+  Range (min … max):   15.893 s … 16.074 s    3 runs
+ 

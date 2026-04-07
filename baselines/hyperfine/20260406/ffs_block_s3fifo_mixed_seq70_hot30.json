@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_mixed_seq70_hot30",
+      "mean": 9.9440344171,
+      "stddev": 1.7226829635854055,
+      "median": 10.6711149461,
+      "user": 17.17979398,
+      "system": 0.3847444066666667,
+      "min": 7.9770129331,
+      "max": 11.183975372099999,
+      "times": [
+        7.9770129331,
+        11.183975372099999,
+        10.6711149461
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

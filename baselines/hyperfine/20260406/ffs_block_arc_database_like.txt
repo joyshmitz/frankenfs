@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_database_like
+  Time (mean ± σ):     10.929 s ±  0.288 s    [User: 16.184 s, System: 2.440 s]
+  Range (min … max):   10.597 s … 11.095 s    3 runs
+ 

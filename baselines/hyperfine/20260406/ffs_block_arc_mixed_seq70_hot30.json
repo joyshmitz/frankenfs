@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_mixed_seq70_hot30",
+      "mean": 11.25854218838,
+      "stddev": 0.5840428375443765,
+      "median": 11.08649219938,
+      "user": 18.479584313333334,
+      "system": 0.37640521999999993,
+      "min": 10.779850318380001,
+      "max": 11.909284047380002,
+      "times": [
+        11.08649219938,
+        11.909284047380002,
+        10.779850318380001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

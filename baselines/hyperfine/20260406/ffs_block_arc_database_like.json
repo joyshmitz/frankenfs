@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_database_like",
+      "mean": 10.928980672726667,
+      "stddev": 0.28765487970072373,
+      "median": 11.094934420060001,
+      "user": 16.183913146666665,
+      "system": 2.4395212266666664,
+      "min": 10.59682545906,
+      "max": 11.09518213906,
+      "times": [
+        10.59682545906,
+        11.094934420060001,
+        11.09518213906
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

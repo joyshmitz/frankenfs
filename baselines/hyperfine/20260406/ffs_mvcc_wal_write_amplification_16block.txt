@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_write_amplification_16block
+  Time (mean ± σ):     16.331 s ±  0.139 s    [User: 20.238 s, System: 7.171 s]
+  Range (min … max):   16.171 s … 16.421 s    3 runs
+ 

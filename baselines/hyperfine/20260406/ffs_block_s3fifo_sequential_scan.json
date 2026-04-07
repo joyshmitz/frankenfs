@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_sequential_scan",
+      "mean": 11.215545529546667,
+      "stddev": 0.6835335733222152,
+      "median": 11.38803754188,
+      "user": 18.332576439999997,
+      "system": 0.42819394666666666,
+      "min": 10.46228900988,
+      "max": 11.79631003688,
+      "times": [
+        10.46228900988,
+        11.38803754188,
+        11.79631003688
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_database_like
+  Time (mean ± σ):     11.501 s ±  0.166 s    [User: 15.735 s, System: 3.468 s]
+  Range (min … max):   11.310 s … 11.616 s    3 runs
+ 

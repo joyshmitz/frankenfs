@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- writeback_sync_100x4k",
+      "mean": 11.177134742120002,
+      "stddev": 0.07305845463469651,
+      "median": 11.19710632612,
+      "user": 19.250128,
+      "system": 0.4254426266666666,
+      "min": 11.09616733512,
+      "max": 11.23813056512,
+      "times": [
+        11.23813056512,
+        11.19710632612,
+        11.09616733512
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

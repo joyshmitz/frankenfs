@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "sudo -n scripts/mount_benchmark_probe.sh --bin /tmp/cargo-target/release-perf/ffs-cli --image baselines/hyperfine/20260406/mount_recovery_probe.ext4 --mount-root baselines/hyperfine/20260406/mount_probe_mounts --mode recovery",
+      "mean": 0.036220599606666674,
+      "stddev": 0.0001340407960895961,
+      "median": 0.03614524394,
+      "user": 0.006898853333333333,
+      "system": 0.03280014666666666,
+      "min": 0.03614119594,
+      "max": 0.03637535894,
+      "times": [
+        0.03637535894,
+        0.03614524394,
+        0.03614119594
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

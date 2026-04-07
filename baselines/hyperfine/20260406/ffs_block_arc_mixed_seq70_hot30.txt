@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_mixed_seq70_hot30
+  Time (mean ± σ):     11.259 s ±  0.584 s    [User: 18.480 s, System: 0.376 s]
+  Range (min … max):   10.780 s … 11.909 s    3 runs
+ 

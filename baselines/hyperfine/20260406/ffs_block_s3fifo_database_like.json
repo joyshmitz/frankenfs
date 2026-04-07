@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_database_like",
+      "mean": 11.500895935439999,
+      "stddev": 0.16626525106315776,
+      "median": 11.57589653044,
+      "user": 15.734748326666667,
+      "system": 3.4680909399999997,
+      "min": 11.310342324439999,
+      "max": 11.616448951439999,
+      "times": [
+        11.57589653044,
+        11.310342324439999,
+        11.616448951439999
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

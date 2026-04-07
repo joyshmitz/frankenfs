@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- scrub_corrupted_256blocks",
+      "mean": 9.628877157213333,
+      "stddev": 0.2404108774521889,
+      "median": 9.59006814388,
+      "user": 17.766909346666665,
+      "system": 0.40690613999999997,
+      "min": 9.410231699879999,
+      "max": 9.886331627879999,
+      "times": [
+        9.886331627879999,
+        9.410231699879999,
+        9.59006814388
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

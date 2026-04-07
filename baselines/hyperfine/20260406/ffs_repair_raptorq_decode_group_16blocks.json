@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- raptorq_decode_group_16blocks",
+      "mean": 12.153014605993334,
+      "stddev": 0.036847735504009285,
+      "median": 12.14431832266,
+      "user": 20.270171466666664,
+      "system": 0.4313695533333333,
+      "min": 12.12129286266,
+      "max": 12.19343263266,
+      "times": [
+        12.12129286266,
+        12.14431832266,
+        12.19343263266
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

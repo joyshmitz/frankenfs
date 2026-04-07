@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- scrub_corrupted_256blocks
+  Time (mean ± σ):      9.629 s ±  0.240 s    [User: 17.767 s, System: 0.407 s]
+  Range (min … max):    9.410 s …  9.886 s    3 runs
+ 

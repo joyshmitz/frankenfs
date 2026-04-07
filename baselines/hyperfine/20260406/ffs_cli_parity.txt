@@ -1,0 +1,4 @@
+Benchmark 1: /tmp/cargo-target/release-perf/ffs-cli parity --json
+  Time (mean ± σ):       1.8 ms ±   0.2 ms    [User: 1.0 ms, System: 0.8 ms]
+  Range (min … max):     1.6 ms …   2.0 ms    3 runs
+ 

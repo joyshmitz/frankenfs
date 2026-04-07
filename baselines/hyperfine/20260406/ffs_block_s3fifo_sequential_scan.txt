@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_sequential_scan
+  Time (mean ± σ):     11.216 s ±  0.684 s    [User: 18.333 s, System: 0.428 s]
+  Range (min … max):   10.462 s … 11.796 s    3 runs
+ 

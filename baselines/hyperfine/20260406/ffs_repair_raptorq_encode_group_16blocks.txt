@@ -1,0 +1,4 @@
+Benchmark 1: cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- raptorq_encode_group_16blocks
+  Time (mean ± σ):     10.686 s ±  0.101 s    [User: 18.874 s, System: 0.420 s]
+  Range (min … max):   10.580 s … 10.781 s    3 runs
+ 

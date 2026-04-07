@@ -17,7 +17,10 @@ scripts/benchmark_record.sh --warmup 1 --runs 2 --compare
 What this does:
 
 1. Runs `scripts/verify_golden.sh` as a preflight conformance gate (unless `--skip-verify-golden` is set).
-2. Builds release binaries once (via `rch exec -- cargo ...`).
+2. Builds profile binaries once (default: `release-perf`) via the configured cargo executor.
+   - Default local agent mode: `FFS_USE_RCH=1` uses `rch exec -- cargo ...`
+   - GitHub runner mode: `FFS_USE_RCH=0` uses local `cargo ...`
+   - Optional agent mode: `--force-remote` or `FFS_BENCH_FORCE_REMOTE=1` disables local binary probes and routes non-mount commands through cargo execution
 3. Captures `ffs-block` cache workload metric snapshots (ARC and S3-FIFO feature modes) from `ArcCache::metrics()` into TSV reports:
    - `sequential_scan`
    - `zipf_distribution`
@@ -45,7 +48,7 @@ What this does:
    - `artifacts/baselines/perf_baseline.json`
    - `artifacts/baselines/perf_baseline-YYYYMMDD.json`
 
-`perf_baseline.json` always carries the full target operation matrix; operations not yet automated or unsupported on the current host are emitted with `"status": "pending"` so progress is explicit and machine-auditable. `benchmark_record.sh` now attempts rootless FUSE mount probes (`mount_cold`, `mount_warm`, `mount_recovery`) via `scripts/mount_benchmark_probe.sh` whenever a local `target/release/ffs-cli` binary and `/dev/fuse` are available. `mount_recovery` uses a journal-enabled probe image so journal replay scanning is exercised during mount. If rootless FUSE is blocked but passwordless sudo exists, you can opt in to privileged probes with `FFS_MOUNT_PROBE_USE_SUDO=1` (or `--mount-probe-use-sudo`). If a probe still fails, the script records the concrete failure reason in the relevant pending entry. Cache workload metric rows are also embedded under `cache_workload_metrics`.
+`perf_baseline.json` always carries the full target operation matrix; operations not yet automated or unsupported on the current host are emitted with `"status": "pending"` so progress is explicit and machine-auditable. `benchmark_record.sh` now attempts rootless FUSE mount probes (`mount_cold`, `mount_warm`, `mount_recovery`) via `scripts/mount_benchmark_probe.sh` whenever a local `target/<profile>/ffs-cli` binary and `/dev/fuse` are available. `mount_recovery` uses a journal-enabled probe image so journal replay scanning is exercised during mount. If rootless FUSE is blocked but passwordless sudo exists, you can opt in to privileged probes with `FFS_MOUNT_PROBE_USE_SUDO=1` (or `--mount-probe-use-sudo`). If a probe still fails, the script records the concrete failure reason in the relevant pending entry. Cache workload metric rows are also embedded under `cache_workload_metrics`.
 
 ## Regression Policy (p99)
 

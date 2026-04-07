@@ -5,6 +5,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FFS_USE_RCH: "0"
 
 jobs:
   perf-regression:
@@ -33,6 +34,7 @@ jobs:
             --skip-verify-golden \
             --warmup 1 \
             --runs 5 \
+            --profile release-perf \
             --p99-fail-threshold 20
 
       - name: Upload baseline artifacts
