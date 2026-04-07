@@ -253,9 +253,9 @@ impl ShardedMvccStore {
         for &block in txn.write_set().keys() {
             let shard_idx = self.shard_index(block);
             let Some(shard) = shard_guards
-                .iter()
-                .find(|(idx, _)| *idx == shard_idx)
-                .map(|(_, guard)| guard)
+                .binary_search_by_key(&shard_idx, |(idx, _)| *idx)
+                .ok()
+                .map(|pos| &shard_guards[pos].1)
             else {
                 return Err(CommitError::DurabilityFailure {
                     detail: "shard guard missing".into(),
@@ -377,14 +377,15 @@ impl ShardedMvccStore {
     }
 
     fn ssi_shards_for_txn(&self, txn: &Transaction) -> Vec<usize> {
-        let mut shard_indices = BTreeSet::new();
-        for block in txn.write_set().keys() {
-            shard_indices.insert(self.shard_index(*block));
-        }
-        for block in txn.read_set().keys() {
-            shard_indices.insert(self.shard_index(*block));
-        }
-        shard_indices.into_iter().collect()
+        let mut shard_indices: Vec<usize> = txn
+            .write_set()
+            .keys()
+            .chain(txn.read_set().keys())
+            .map(|block| self.shard_index(*block))
+            .collect();
+        shard_indices.sort_unstable();
+        shard_indices.dedup();
+        shard_indices
     }
 
     fn validate_ssi_read_set_locked(
@@ -395,9 +396,9 @@ impl ShardedMvccStore {
         for (&block, &read_version) in txn.read_set() {
             let shard_idx = self.shard_index(block);
             let Some(shard) = shard_guards
-                .iter()
-                .find(|(idx, _)| *idx == shard_idx)
-                .map(|(_, guard)| guard)
+                .binary_search_by_key(&shard_idx, |(idx, _)| *idx)
+                .ok()
+                .map(|pos| &shard_guards[pos].1)
             else {
                 return Err(CommitError::DurabilityFailure {
                     detail: "shard guard missing".into(),
@@ -734,11 +735,16 @@ impl ShardedMvccStore {
 
     /// Sorted, deduplicated shard indices touched by a transaction's writes.
     fn involved_shards(&self, txn: &Transaction) -> Vec<usize> {
-        let mut indices: BTreeSet<usize> = BTreeSet::new();
-        for block in txn.write_set().keys() {
-            indices.insert(self.shard_index(*block));
-        }
-        indices.into_iter().collect()
+        // Avoid BTreeSet allocation: shard indices are small (typically 1-4),
+        // so Vec + sort + dedup is faster than B-tree node allocation.
+        let mut indices: Vec<usize> = txn
+            .write_set()
+            .keys()
+            .map(|block| self.shard_index(*block))
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        indices
     }
 }
 
