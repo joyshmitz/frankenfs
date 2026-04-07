@@ -1815,8 +1815,9 @@ mod tests {
             is_owner: true,
             ..Default::default()
         };
-        // suffix is 255 - len("user.") = 250 chars; but xattr suffix limit is u8::MAX
-        let suffix = "a".repeat(250);
+        // The ext4 xattr name_len field is u8, so suffix max is 255 bytes.
+        // The "user." prefix is stripped before the suffix length check.
+        let suffix = "a".repeat(255);
         let name = format!("user.{suffix}");
         set_xattr(&mut inode, None, &name, b"val", access).unwrap();
         let val = get_xattr(&inode, None, &name).unwrap();

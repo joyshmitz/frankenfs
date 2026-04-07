@@ -5047,12 +5047,24 @@ struct MkfsOutput {
     inodes_count: u32,
 }
 
-fn mkfs_cmd(
-    output: &PathBuf,
+fn mkfs_cmd(output: &Path, size_mb: u64, block_size: u32, label: &str, json: bool) -> Result<()> {
+    mkfs_cmd_with_program(
+        output,
+        size_mb,
+        block_size,
+        label,
+        json,
+        Path::new("mkfs.ext4"),
+    )
+}
+
+fn mkfs_cmd_with_program(
+    output: &Path,
     size_mb: u64,
     block_size: u32,
     label: &str,
     json: bool,
+    mkfs_program: &Path,
 ) -> Result<()> {
     if ![1024, 2048, 4096].contains(&block_size) {
         bail!("block_size must be 1024, 2048, or 4096 (got {block_size})");
@@ -5074,7 +5086,7 @@ fn mkfs_cmd(
     drop(f);
 
     // Run mkfs.ext4.
-    let mkfs_output = std::process::Command::new("mkfs.ext4")
+    let mkfs_output = std::process::Command::new(mkfs_program)
         .args([
             "-F",
             "-b",
@@ -5084,13 +5096,30 @@ fn mkfs_cmd(
             &output.display().to_string(),
         ])
         .output()
-        .context("failed to run mkfs.ext4 (is it installed?)")?;
+        .with_context(|| {
+            format!(
+                "failed to run {} for {} (output image preserved at {})",
+                mkfs_program.display(),
+                output.display(),
+                output.display()
+            )
+        })?;
 
     if !mkfs_output.status.success() {
         let stderr = String::from_utf8_lossy(&mkfs_output.stderr);
-        // Clean up the partial image on failure.
-        let _ = std::fs::remove_file(output);
-        bail!("mkfs.ext4 failed: {stderr}");
+        let stderr = stderr.trim();
+        let status = mkfs_output.status;
+        let failure_detail = if stderr.is_empty() {
+            format!("exit status {status}")
+        } else {
+            format!("exit status {status}: {stderr}")
+        };
+        bail!(
+            "mkfs.ext4 failed for {}. Preserved partial image at {}. {}",
+            output.display(),
+            output.display(),
+            failure_detail
+        );
     }
 
     // Verify the new image by opening it with FrankenFS.
@@ -5174,6 +5203,7 @@ mod tests {
     use ffs_repair::pipeline::RepairRuntimeMetricsSnapshot;
     use serde_json::Value;
     use std::io::{self, Seek, SeekFrom, Write};
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -7894,6 +7924,66 @@ mod tests {
         let result =
             Cli::try_parse_from(["ffs", "mkfs", "--size-mb", "sixty-four", "/tmp/new.img"]);
         assert!(result.is_err(), "mkfs --size-mb must be numeric");
+    }
+
+    #[test]
+    fn mkfs_cmd_preserves_output_image_when_mkfs_ext4_fails() {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "ffs-cli-mkfs-failure-{}-{ts}-{count}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("create temporary mkfs test directory");
+
+        let mut fake_mkfs = dir.clone();
+        fake_mkfs.push("mkfs.ext4");
+        std::fs::write(
+            &fake_mkfs,
+            "#!/bin/sh\nprintf 'simulated mkfs failure\\n' >&2\nexit 1\n",
+        )
+        .expect("write fake mkfs.ext4");
+        let mut perms = std::fs::metadata(&fake_mkfs)
+            .expect("stat fake mkfs.ext4")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_mkfs, perms).expect("chmod fake mkfs.ext4");
+
+        let mut output = dir.clone();
+        output.push("preserved.img");
+
+        let err = super::mkfs_cmd_with_program(&output, 8, 1024, "failtest", false, &fake_mkfs)
+            .expect_err("fake mkfs.ext4 failure should bubble up");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Preserved partial image"),
+            "expected preserved-image guidance, got: {message}"
+        );
+        assert!(
+            message.contains(&output.display().to_string()),
+            "expected output path in error, got: {message}"
+        );
+        assert!(
+            output.exists(),
+            "mkfs failure must leave the sparse image in place"
+        );
+        assert_eq!(
+            std::fs::metadata(&output)
+                .expect("stat preserved output image")
+                .len(),
+            8 * 1024 * 1024,
+            "preserved image should retain the requested size"
+        );
+
+        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_file(&fake_mkfs);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

@@ -1116,9 +1116,17 @@ mod tests {
     fn compute_dx_hash_long_name() {
         let seed = [1, 2, 3, 4];
         let long_name = vec![b'z'; 255];
-        let h = compute_dx_hash(1, &long_name, &seed);
-        // Just verify it doesn't panic and returns a value
-        let _ = h; // always true, but verifies no panic
+        let h1 = compute_dx_hash(1, &long_name, &seed);
+        // Deterministic: same input produces same output
+        let h2 = compute_dx_hash(1, &long_name, &seed);
+        assert_eq!(h1, h2, "hash of max-length name must be deterministic");
+        // Different from shorter name
+        let short_name = vec![b'z'; 10];
+        let h3 = compute_dx_hash(1, &short_name, &seed);
+        assert_ne!(
+            h1, h3,
+            "hash should differ between 255-byte and 10-byte names"
+        );
     }
 
     #[test]
