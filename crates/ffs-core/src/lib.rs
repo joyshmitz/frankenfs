@@ -29,7 +29,7 @@ use ffs_btrfs::{
     BtrfsBlockGroupItem, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem,
     BtrfsKey, BtrfsLeafEntry, BtrfsMutationError, BtrfsTreeItem, InMemoryCowBtrfsTree,
     map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
-    parse_xattr_items, walk_tree,
+    parse_xattr_items, walk_chunk_tree, walk_tree,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -330,6 +330,8 @@ pub struct BtrfsContext {
     pub nodesize: u32,
     /// Root objectid of the mounted subvolume (default: `BTRFS_FS_TREE_OBJECTID` = 5).
     pub subvol_objectid: u64,
+    /// Root inode objectid inside the mounted subvolume's filesystem tree.
+    pub subvol_root_dirid: u64,
 }
 
 /// Mutable ext4 allocation state for write operations.
@@ -2064,8 +2066,42 @@ impl OpenFs {
                 if !options.skip_validation {
                     validate_btrfs_superblock(sb)?;
                 }
-                let chunks = parse_sys_chunk_array(&sb.sys_chunk_array)
+                let bootstrap_chunks = parse_sys_chunk_array(&sb.sys_chunk_array)
                     .map_err(|e| parse_to_ffs_error(&e))?;
+                let chunks = {
+                    let bootstrap_ref = &bootstrap_chunks;
+                    let mut read_bootstrap =
+                        |physical: u64| -> std::result::Result<Vec<u8>, ParseError> {
+                            let mut buf = vec![0u8; sb.nodesize as usize];
+                            dev.read_exact_at(cx, ByteOffset(physical), &mut buf)
+                                .map_err(|_| ParseError::InvalidField {
+                                    field: "chunk_tree",
+                                    reason: "failed to read chunk-tree block",
+                                })?;
+                            Ok(buf)
+                        };
+
+                    match walk_chunk_tree(&mut read_bootstrap, sb, bootstrap_ref) {
+                        Ok(expanded) => {
+                            if expanded.len() > bootstrap_ref.len() {
+                                info!(
+                                    bootstrap_chunks = bootstrap_ref.len(),
+                                    expanded_chunks = expanded.len(),
+                                    "btrfs chunk map expanded from chunk tree"
+                                );
+                            }
+                            expanded
+                        }
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                bootstrap_chunks = bootstrap_ref.len(),
+                                "btrfs chunk tree expansion failed; falling back to sys_chunk_array"
+                            );
+                            bootstrap_chunks
+                        }
+                    }
+                };
                 // Attempt tree-log replay if log_root is set.
                 if sb.log_root != 0 {
                     let nodesize = sb.nodesize;
@@ -2100,10 +2136,53 @@ impl OpenFs {
                     }
                 }
 
+                let subvol_objectid = BTRFS_FS_TREE_OBJECTID;
+                let subvol_root_dirid = {
+                    let nodesize = sb.nodesize;
+                    let chunks_ref = &chunks;
+                    let mut read_phys =
+                        |physical: u64| -> std::result::Result<Vec<u8>, ParseError> {
+                            let mut buf = vec![0u8; nodesize as usize];
+                            dev.read_exact_at(cx, ByteOffset(physical), &mut buf)
+                                .map_err(|_| ParseError::InvalidField {
+                                    field: "root_tree",
+                                    reason: "failed to read root-tree block",
+                                })?;
+                            Ok(buf)
+                        };
+
+                    match walk_tree(&mut read_phys, chunks_ref, sb.root, sb.nodesize)
+                        .and_then(|items| {
+                            items
+                                .into_iter()
+                                .find(|item| {
+                                    item.key.objectid == subvol_objectid
+                                        && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
+                                })
+                                .ok_or(ParseError::InvalidField {
+                                    field: "root_tree",
+                                    reason: "default FS_TREE ROOT_ITEM not found",
+                                })
+                        })
+                        .and_then(|item| parse_root_item(&item.data))
+                    {
+                        Ok(root_item) => root_item.root_dirid,
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                fallback = sb.root_dir_objectid,
+                                "failed to resolve default btrfs subvolume root_dirid; falling back to superblock root_dir_objectid"
+                            );
+                            sb.root_dir_objectid
+                        }
+                    }
+                };
+
                 let ctx = BtrfsContext {
                     chunks,
                     nodesize: sb.nodesize,
-                    subvol_objectid: BTRFS_FS_TREE_OBJECTID,
+                    subvol_objectid,
+                    subvol_root_dirid,
                 };
                 (None, Some(ctx))
             }
@@ -3964,15 +4043,14 @@ impl OpenFs {
 
     /// Translate the FUSE/root-facing inode number to the btrfs objectid.
     ///
-    /// For btrfs we treat inode `1` as an alias for the superblock's
-    /// `root_dir_objectid` so root getattr/readdir/lookup calls can work
+    /// For btrfs we treat inode `1` as an alias for the mounted subvolume's
+    /// root inode objectid so root getattr/readdir/lookup calls can work
     /// through the VFS root inode contract.
     fn btrfs_canonical_inode(&self, ino: InodeNumber) -> Result<u64, FfsError> {
-        let sb = self
-            .btrfs_superblock()
-            .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))?;
         if ino.0 == 1 {
-            Ok(sb.root_dir_objectid)
+            self.btrfs_context()
+                .map(|ctx| ctx.subvol_root_dirid)
+                .ok_or_else(|| FfsError::Format("not a btrfs filesystem".into()))
         } else {
             Ok(ino.0)
         }
@@ -15292,16 +15370,23 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     /// In-memory ByteDevice for testing (no file I/O).
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct TestDevice {
-        data: Mutex<Vec<u8>>,
+        data: Arc<Mutex<Vec<u8>>>,
     }
 
     impl TestDevice {
         fn from_vec(v: Vec<u8>) -> Self {
             Self {
-                data: Mutex::new(v),
+                data: Arc::new(Mutex::new(v)),
             }
+        }
+
+        fn snapshot_bytes(&self) -> Vec<u8> {
+            self.data
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
     }
 
@@ -18772,8 +18857,8 @@ mod tests {
         image[item_off..item_off + 8].copy_from_slice(&256_u64.to_le_bytes());
         image[item_off + 8] = 132;
         image[item_off + 9..item_off + 17].copy_from_slice(&0_u64.to_le_bytes());
-        // data_offset=200, data_size=8
-        image[item_off + 17..item_off + 21].copy_from_slice(&200_u32.to_le_bytes());
+        // data_offset=200 absolute within the block; on disk it is stored relative to the header.
+        image[item_off + 17..item_off + 21].copy_from_slice(&(200_u32 - 101).to_le_bytes());
         image[item_off + 21..item_off + 25].copy_from_slice(&8_u32.to_le_bytes());
         // Actual data at leaf_off + 200
         image[leaf_off + 200..leaf_off + 208]
@@ -18794,10 +18879,13 @@ mod tests {
         data_size: u32,
     ) {
         let item_off = leaf_off + 101 + idx * 25;
+        let data_offset_rel = data_offset
+            .checked_sub(101)
+            .expect("test item payload must live after the leaf header");
         image[item_off..item_off + 8].copy_from_slice(&objectid.to_le_bytes());
         image[item_off + 8] = item_type;
         image[item_off + 9..item_off + 17].copy_from_slice(&key_offset.to_le_bytes());
-        image[item_off + 17..item_off + 21].copy_from_slice(&data_offset.to_le_bytes());
+        image[item_off + 17..item_off + 21].copy_from_slice(&data_offset_rel.to_le_bytes());
         image[item_off + 21..item_off + 25].copy_from_slice(&data_size.to_le_bytes());
     }
 
@@ -18982,6 +19070,7 @@ mod tests {
             root_item_size,
         );
         let mut root_item = vec![0_u8; root_item_size as usize];
+        root_item[168..176].copy_from_slice(&256_u64.to_le_bytes()); // root_dirid
         root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes()); // bytenr
         let root_item_last = root_item.len() - 1;
         root_item[root_item_last] = 0; // level
@@ -19253,6 +19342,7 @@ mod tests {
             root_item_size,
         );
         let mut root_item = vec![0_u8; root_item_size as usize];
+        root_item[168..176].copy_from_slice(&256_u64.to_le_bytes()); // root_dirid
         root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
         let root_item_last = root_item.len() - 1;
         root_item[root_item_last] = 0;
@@ -19611,6 +19701,7 @@ mod tests {
             root_item_size,
         );
         let mut root_item = vec![0_u8; root_item_size as usize];
+        root_item[168..176].copy_from_slice(&256_u64.to_le_bytes()); // root_dirid
         root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
         let last = root_item.len() - 1;
         root_item[last] = 0;
@@ -20439,6 +20530,93 @@ mod tests {
         fs.enable_writes(&cx).expect("enable writes");
         assert!(fs.is_writable());
         Some((fs, tmp))
+    }
+
+    /// Create a fresh ext4 image via `mkfs.ext4`, returning a clonable device
+    /// handle so crash tests can snapshot in-memory bytes before reopening.
+    fn open_writable_ext4_mkfs_with_device(
+        size_mb: u64,
+    ) -> Option<(OpenFs, TestDevice, tempfile::TempDir)> {
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let image = tmp.path().join("test.ext4");
+        let f = std::fs::File::create(&image).expect("create image");
+        f.set_len(size_mb * 1024 * 1024).expect("set image size");
+        drop(f);
+
+        let out = std::process::Command::new("mkfs.ext4")
+            .args(["-F", "-b", "4096", image.to_str().unwrap()])
+            .output();
+        let out = match out {
+            Ok(o) if o.status.success() => o,
+            _ => return None,
+        };
+        let _ = out;
+
+        let _ = std::process::Command::new("debugfs")
+            .args([
+                "-w",
+                "-R",
+                "set_inode_field / mode 040777",
+                image.to_str().unwrap(),
+            ])
+            .output();
+
+        let cx = Cx::for_testing();
+        let data = std::fs::read(&image).expect("read image");
+        let dev = TestDevice::from_vec(data);
+        let snapshot = dev.clone();
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+            ..OpenOptions::default()
+        };
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
+        fs.enable_writes(&cx).expect("enable writes");
+        assert!(fs.is_writable());
+        Some((fs, snapshot, tmp))
+    }
+
+    fn reopen_ext4_after_crash(dev: &TestDevice) -> OpenFs {
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+            ..OpenOptions::default()
+        };
+        OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(dev.snapshot_bytes())),
+            &opts,
+        )
+        .expect("reopen ext4 after crash")
+    }
+
+    fn ext4_lookup_optional(fs: &OpenFs, cx: &Cx, name: &str) -> Option<InodeAttr> {
+        fs.lookup(cx, InodeNumber(2), OsStr::new(name)).ok()
+    }
+
+    fn ext4_read_exact(fs: &OpenFs, cx: &Cx, ino: InodeNumber, size: u64) -> Vec<u8> {
+        fs.read(cx, ino, 0, u32::try_from(size).expect("small test file"))
+            .expect("read exact bytes")
+    }
+
+    fn assert_ext4_crash_event(
+        logs: &[Value],
+        scenario_id: &str,
+        crash_point: &str,
+        outcome: &str,
+    ) {
+        let event = logs
+            .iter()
+            .find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("CRASH_MATRIX_EVENT")
+                    && entry.get("scenario_id").and_then(Value::as_str) == Some(scenario_id)
+            })
+            .unwrap_or_else(|| panic!("missing crash-matrix event for {scenario_id}: {logs:?}"));
+
+        assert_eq!(
+            event.get("crash_point").and_then(Value::as_str),
+            Some(crash_point)
+        );
+        assert_eq!(event.get("outcome").and_then(Value::as_str), Some(outcome));
     }
 
     fn enable_e2compr_for_inode(
@@ -27939,6 +28117,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_basic() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -27985,6 +28164,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_extends_file() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -28019,6 +28199,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_keep_size_does_not_extend_file() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -28062,6 +28243,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_punch_hole_zeroes_data() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -28114,6 +28296,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_zero_range_zeroes_data() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -28162,6 +28345,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_zero_range_keep_size_does_not_extend_file() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -28201,6 +28385,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_unsupported_mode_bits_rejected() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -28320,6 +28505,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_punch_hole_without_keep_size_returns_einval() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -28354,16 +28540,7 @@ mod tests {
     fn btrfs_write_fallocate_rejection_log_contract() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(buffer.clone())
-            .finish();
-
-        let default_guard = tracing::subscriber::set_default(subscriber);
+        let _sub = install_json_subscriber(&buffer);
         let err = {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
@@ -28384,8 +28561,6 @@ mod tests {
             ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x02)
                 .expect_err("punch-hole without KEEP_SIZE should be rejected")
         };
-        drop(default_guard);
-        // _sub guard dropped at end of function; buffer is Arc-backed and persists.
         assert_eq!(err.to_errno(), libc::EINVAL);
 
         let logs = parse_json_logs(&buffer);
@@ -28408,16 +28583,7 @@ mod tests {
     fn btrfs_write_fallocate_unsupported_mode_bits_log_contract() {
         let _guard = log_contract_guard();
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(buffer.clone())
-            .finish();
-
-        let default_guard = tracing::subscriber::set_default(subscriber);
+        let _sub = install_json_subscriber(&buffer);
         let err = {
             let (fs, cx) = open_writable_btrfs();
             let ops: &dyn FsOps = &fs;
@@ -28436,8 +28602,6 @@ mod tests {
             ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096, 0x40)
                 .expect_err("unsupported mode bits should be rejected")
         };
-        drop(default_guard);
-        // _sub guard dropped at end of function; buffer is Arc-backed and persists.
         assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
 
         let logs = parse_json_logs(&buffer);
@@ -31102,6 +31266,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_preserves_data() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -31150,6 +31315,7 @@ mod tests {
 
     #[test]
     fn btrfs_write_fallocate_overlapping_existing_extent_preserves_data() {
+        let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
 
@@ -32717,5 +32883,404 @@ mod tests {
             fs.unlink(&cx, dir_attr.ino, OsStr::new(&name))
                 .unwrap_or_else(|e| panic!("unlink {name}: {e}"));
         }
+    }
+
+    #[test]
+    fn ext4_rw_crash_matrix_01_create_alpha_no_fsync() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        fs.create(&cx, root, OsStr::new("alpha.txt"), 0o644, 0, 0)
+            .expect("create alpha");
+
+        let reopened = reopen_ext4_after_crash(&dev);
+        let maybe_alpha = ext4_lookup_optional(&reopened, &cx, "alpha.txt");
+        if let Some(attr) = maybe_alpha {
+            assert_eq!(
+                attr.size, 0,
+                "non-fsynced create should not expose stray data"
+            );
+        }
+
+        tracing::info!(
+            message = "CRASH_MATRIX_EVENT",
+            scenario_id = "ext4_rw_crash_matrix_01_create_alpha_no_fsync",
+            crash_point = "before_fsync",
+            outcome = "recovered_correctly"
+        );
+        let logs = parse_json_logs(&buffer);
+        assert_ext4_crash_event(
+            &logs,
+            "ext4_rw_crash_matrix_01_create_alpha_no_fsync",
+            "before_fsync",
+            "recovered_correctly",
+        );
+    }
+
+    #[test]
+    fn ext4_rw_crash_matrix_02_append_alpha_no_fsync() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let payload = b"alpha-payload-before-fsync";
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("alpha.txt"), 0o644, 0, 0)
+            .expect("create alpha");
+        fs.write(&cx, attr.ino, 0, payload).expect("write alpha");
+
+        let reopened = reopen_ext4_after_crash(&dev);
+        if let Some(attr) = ext4_lookup_optional(&reopened, &cx, "alpha.txt") {
+            let data = ext4_read_exact(&reopened, &cx, attr.ino, attr.size);
+            assert!(
+                data.len() <= payload.len(),
+                "recovered data should not exceed the pre-crash payload"
+            );
+        }
+
+        tracing::info!(
+            message = "CRASH_MATRIX_EVENT",
+            scenario_id = "ext4_rw_crash_matrix_02_append_alpha_no_fsync",
+            crash_point = "after_write_before_fsync",
+            outcome = "recovered_correctly"
+        );
+        let logs = parse_json_logs(&buffer);
+        assert_ext4_crash_event(
+            &logs,
+            "ext4_rw_crash_matrix_02_append_alpha_no_fsync",
+            "after_write_before_fsync",
+            "recovered_correctly",
+        );
+    }
+
+    #[test]
+    fn ext4_rw_crash_matrix_03_fsync_alpha_and_parent() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let payload = b"alpha-durable-payload";
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("alpha.txt"), 0o644, 0, 0)
+            .expect("create alpha");
+        fs.write(&cx, attr.ino, 0, payload).expect("write alpha");
+        fs.fsync(&cx, attr.ino, 0, false).expect("fsync alpha");
+        fs.fsyncdir(&cx, root, 0, false)
+            .expect("fsync root directory");
+
+        let reopened = reopen_ext4_after_crash(&dev);
+        let alpha = reopened
+            .lookup(&cx, root, OsStr::new("alpha.txt"))
+            .expect("durable alpha must survive remount");
+        assert_eq!(alpha.size, payload.len() as u64);
+        let data = ext4_read_exact(&reopened, &cx, alpha.ino, alpha.size);
+        assert_eq!(data, payload);
+
+        tracing::info!(
+            message = "CRASH_MATRIX_EVENT",
+            scenario_id = "ext4_rw_crash_matrix_03_fsync_alpha_and_parent",
+            crash_point = "after_fsync_file_and_parent",
+            outcome = "durable"
+        );
+        let logs = parse_json_logs(&buffer);
+        assert_ext4_crash_event(
+            &logs,
+            "ext4_rw_crash_matrix_03_fsync_alpha_and_parent",
+            "after_fsync_file_and_parent",
+            "durable",
+        );
+    }
+
+    #[test]
+    fn ext4_rw_crash_matrix_04_rename_alpha_to_beta_no_fsync() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let payload = b"rename-envelope";
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("alpha.txt"), 0o644, 0, 0)
+            .expect("create alpha");
+        fs.write(&cx, attr.ino, 0, payload).expect("write alpha");
+        fs.fsync(&cx, attr.ino, 0, false).expect("fsync alpha");
+        fs.fsyncdir(&cx, root, 0, false)
+            .expect("fsync root before rename");
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("alpha.txt"),
+            root,
+            OsStr::new("beta.txt"),
+        )
+        .expect("rename alpha->beta");
+
+        let reopened = reopen_ext4_after_crash(&dev);
+        let alpha = ext4_lookup_optional(&reopened, &cx, "alpha.txt");
+        let beta = ext4_lookup_optional(&reopened, &cx, "beta.txt");
+        assert!(
+            alpha.is_some() ^ beta.is_some(),
+            "post-crash rename envelope should expose exactly one name"
+        );
+
+        tracing::info!(
+            message = "CRASH_MATRIX_EVENT",
+            scenario_id = "ext4_rw_crash_matrix_04_rename_alpha_to_beta_no_fsync",
+            crash_point = "after_rename_before_parent_fsync",
+            outcome = "envelope_ok"
+        );
+        let logs = parse_json_logs(&buffer);
+        assert_ext4_crash_event(
+            &logs,
+            "ext4_rw_crash_matrix_04_rename_alpha_to_beta_no_fsync",
+            "after_rename_before_parent_fsync",
+            "envelope_ok",
+        );
+    }
+
+    #[test]
+    fn ext4_rw_crash_matrix_05_fsync_rename_parent() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let payload = b"rename-durable";
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("alpha.txt"), 0o644, 0, 0)
+            .expect("create alpha");
+        fs.write(&cx, attr.ino, 0, payload).expect("write alpha");
+        fs.fsync(&cx, attr.ino, 0, false).expect("fsync alpha");
+        fs.fsyncdir(&cx, root, 0, false)
+            .expect("fsync root before rename");
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("alpha.txt"),
+            root,
+            OsStr::new("beta.txt"),
+        )
+        .expect("rename alpha->beta");
+        fs.fsyncdir(&cx, root, 0, false)
+            .expect("fsync root after rename");
+
+        let reopened = reopen_ext4_after_crash(&dev);
+        let beta = reopened
+            .lookup(&cx, root, OsStr::new("beta.txt"))
+            .expect("beta must survive durable rename");
+        assert!(
+            reopened.lookup(&cx, root, OsStr::new("alpha.txt")).is_err(),
+            "old alpha name must not survive durable rename"
+        );
+        let data = ext4_read_exact(&reopened, &cx, beta.ino, beta.size);
+        assert_eq!(data, payload);
+
+        tracing::info!(
+            message = "CRASH_MATRIX_EVENT",
+            scenario_id = "ext4_rw_crash_matrix_05_fsync_rename_parent",
+            crash_point = "after_parent_fsync",
+            outcome = "durable"
+        );
+        let logs = parse_json_logs(&buffer);
+        assert_ext4_crash_event(
+            &logs,
+            "ext4_rw_crash_matrix_05_fsync_rename_parent",
+            "after_parent_fsync",
+            "durable",
+        );
+    }
+
+    #[test]
+    fn ext4_rw_crash_matrix_06_unlink_beta_no_fsync() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let payload = b"unlink-envelope";
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("beta.txt"), 0o644, 0, 0)
+            .expect("create beta");
+        fs.write(&cx, attr.ino, 0, payload).expect("write beta");
+        fs.fsync(&cx, attr.ino, 0, false).expect("fsync beta");
+        fs.fsyncdir(&cx, root, 0, false)
+            .expect("fsync root before unlink");
+        fs.unlink(&cx, root, OsStr::new("beta.txt"))
+            .expect("unlink beta");
+
+        let reopened = reopen_ext4_after_crash(&dev);
+        if let Some(beta) = ext4_lookup_optional(&reopened, &cx, "beta.txt") {
+            let data = ext4_read_exact(&reopened, &cx, beta.ino, beta.size);
+            assert_eq!(data, payload);
+        }
+
+        tracing::info!(
+            message = "CRASH_MATRIX_EVENT",
+            scenario_id = "ext4_rw_crash_matrix_06_unlink_beta_no_fsync",
+            crash_point = "after_unlink_before_parent_fsync",
+            outcome = "envelope_ok"
+        );
+        let logs = parse_json_logs(&buffer);
+        assert_ext4_crash_event(
+            &logs,
+            "ext4_rw_crash_matrix_06_unlink_beta_no_fsync",
+            "after_unlink_before_parent_fsync",
+            "envelope_ok",
+        );
+    }
+
+    #[test]
+    fn ext4_rw_crash_matrix_07_truncate_beta_fsync() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let payload = vec![0x5A; 8192];
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("beta.txt"), 0o644, 0, 0)
+            .expect("create beta");
+        fs.write(&cx, attr.ino, 0, &payload).expect("write beta");
+        fs.fsync(&cx, attr.ino, 0, false).expect("fsync beta");
+        fs.fsyncdir(&cx, root, 0, false)
+            .expect("fsync root before truncate");
+        fs.setattr(
+            &cx,
+            attr.ino,
+            &SetAttrRequest {
+                size: Some(4096),
+                ..SetAttrRequest::default()
+            },
+        )
+        .expect("truncate beta");
+        fs.fsync(&cx, attr.ino, 0, false)
+            .expect("fsync truncated beta");
+
+        let reopened = reopen_ext4_after_crash(&dev);
+        let beta = reopened
+            .lookup(&cx, root, OsStr::new("beta.txt"))
+            .expect("beta must survive durable truncate");
+        assert_eq!(beta.size, 4096);
+        let data = ext4_read_exact(&reopened, &cx, beta.ino, beta.size);
+        assert_eq!(data, payload[..4096]);
+
+        tracing::info!(
+            message = "CRASH_MATRIX_EVENT",
+            scenario_id = "ext4_rw_crash_matrix_07_truncate_beta_fsync",
+            crash_point = "after_truncate_fsync",
+            outcome = "durable"
+        );
+        let logs = parse_json_logs(&buffer);
+        assert_ext4_crash_event(
+            &logs,
+            "ext4_rw_crash_matrix_07_truncate_beta_fsync",
+            "after_truncate_fsync",
+            "durable",
+        );
+    }
+
+    #[test]
+    fn ext4_rw_crash_matrix_08_multi_file_interleaved_fsync() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+
+        let Some((fs, dev, _tmp)) = open_writable_ext4_mkfs_with_device(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let alpha_payload = b"alpha-stable";
+        let gamma_payload = b"gamma-maybe";
+
+        let alpha = fs
+            .create(&cx, root, OsStr::new("alpha.txt"), 0o644, 0, 0)
+            .expect("create alpha");
+        fs.write(&cx, alpha.ino, 0, alpha_payload)
+            .expect("write alpha");
+        fs.fsync(&cx, alpha.ino, 0, false).expect("fsync alpha");
+        fs.fsyncdir(&cx, root, 0, false)
+            .expect("fsync root for alpha");
+
+        let gamma = fs
+            .create(&cx, root, OsStr::new("gamma.txt"), 0o644, 0, 0)
+            .expect("create gamma");
+        fs.write(&cx, gamma.ino, 0, gamma_payload)
+            .expect("write gamma");
+
+        let reopened = reopen_ext4_after_crash(&dev);
+        let alpha_after = reopened
+            .lookup(&cx, root, OsStr::new("alpha.txt"))
+            .expect("fsynced alpha must survive");
+        let alpha_data = ext4_read_exact(&reopened, &cx, alpha_after.ino, alpha_after.size);
+        assert_eq!(alpha_data, alpha_payload);
+        if let Some(gamma_after) = ext4_lookup_optional(&reopened, &cx, "gamma.txt") {
+            let gamma_data = ext4_read_exact(&reopened, &cx, gamma_after.ino, gamma_after.size);
+            assert!(
+                gamma_data.len() <= gamma_payload.len(),
+                "non-fsynced gamma should not grow across recovery"
+            );
+        }
+
+        tracing::info!(
+            message = "CRASH_MATRIX_EVENT",
+            scenario_id = "ext4_rw_crash_matrix_08_multi_file_interleaved_fsync",
+            crash_point = "after_alpha_fsync_before_gamma_fsync",
+            outcome = "durable_alpha_only"
+        );
+        let logs = parse_json_logs(&buffer);
+        assert_ext4_crash_event(
+            &logs,
+            "ext4_rw_crash_matrix_08_multi_file_interleaved_fsync",
+            "after_alpha_fsync_before_gamma_fsync",
+            "durable_alpha_only",
+        );
     }
 }

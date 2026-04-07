@@ -391,6 +391,200 @@ pub fn htree_find_leaf(entries: &[HtreeEntry], target_hash: u32) -> Option<u32> 
 mod tests {
     use super::*;
     use ffs_ondisk::{Ext4FileType, parse_dir_block};
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
+    fn valid_dir_name_strategy(max_len: usize) -> BoxedStrategy<Vec<u8>> {
+        proptest::collection::vec(b'a'..=b'z', 1..=max_len).boxed()
+    }
+
+    fn dir_block_geometry_strategy() -> BoxedStrategy<(usize, usize)> {
+        (6_usize..=1024)
+            .prop_map(|units| units * 4)
+            .prop_flat_map(|block_len| {
+                let max_tail_units = (block_len - 24) / 4;
+                if max_tail_units >= 3 {
+                    prop_oneof![
+                        Just((block_len, 0_usize)),
+                        (3_usize..=max_tail_units)
+                            .prop_map(move |tail_units| { (block_len, tail_units * 4) }),
+                    ]
+                    .boxed()
+                } else {
+                    Just((block_len, 0_usize)).boxed()
+                }
+            })
+            .boxed()
+    }
+
+    fn live_name_set(block: &[u8]) -> BTreeSet<Vec<u8>> {
+        parse_dir_block(block, u32::try_from(block.len()).unwrap())
+            .unwrap()
+            .0
+            .into_iter()
+            .filter(|entry| entry.inode != 0)
+            .map(|entry| entry.name)
+            .collect()
+    }
+
+    fn assert_add_entry_alignment_boundary(name_len: usize) {
+        let mut block = vec![0u8; 12 + required_rec_len(name_len)];
+        let block_len = block.len();
+        write_entry(&mut block, 0, 1, block_len, Ext4FileType::Dir, b".").unwrap();
+
+        let name = vec![b'x'; name_len];
+        let off = add_entry(&mut block, 99, &name, Ext4FileType::RegFile, 0).unwrap();
+
+        assert_eq!(off, 12);
+        assert_eq!(usize::from(read_u16_le(&block, 4).unwrap()), 12);
+        assert_eq!(
+            usize::from(read_u16_le(&block, off + 4).unwrap()),
+            required_rec_len(name_len)
+        );
+
+        let (entries, _) = parse_dir_block(&block, u32::try_from(block.len()).unwrap()).unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.inode == 99)
+            .expect("new entry must be parseable");
+        assert_eq!(entry.name.len(), name_len);
+    }
+
+    macro_rules! add_entry_alignment_boundary_test {
+        ($name:ident, $len:expr) => {
+            #[test]
+            fn $name() {
+                assert_add_entry_alignment_boundary($len);
+            }
+        };
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn proptest_add_remove_roundtrip_preserves_parseability(
+            ino in 3_u32..=u32::MAX,
+            reserved_tail in prop_oneof![Just(0_usize), Just(12_usize), Just(24_usize)],
+            name in valid_dir_name_strategy(255),
+        ) {
+            let mut block = vec![0u8; 4096];
+            init_dir_block(&mut block, 2, 2, reserved_tail).unwrap();
+
+            let off = add_entry(&mut block, ino, &name, Ext4FileType::RegFile, reserved_tail)
+                .unwrap();
+            prop_assert!(off + required_rec_len(name.len()) <= block.len() - reserved_tail);
+
+            let (entries, tail) = parse_dir_block(&block, 4096).unwrap();
+            prop_assert_eq!(tail.is_some(), reserved_tail >= 12);
+            prop_assert!(entries.iter().any(|entry| entry.inode == ino && entry.name == name));
+
+            let removed = remove_entry(&mut block, &name, reserved_tail).unwrap();
+            prop_assert!(removed);
+
+            let (entries_after, tail_after) = parse_dir_block(&block, 4096).unwrap();
+            prop_assert_eq!(tail_after.is_some(), reserved_tail >= 12);
+            prop_assert_eq!(
+                entries_after.iter().filter(|entry| entry.inode != 0).count(),
+                2
+            );
+            prop_assert!(!entries_after
+                .iter()
+                .any(|entry| entry.inode != 0 && entry.name == name));
+        }
+
+        #[test]
+        fn proptest_add_sequence_remains_parseable_until_enospc(
+            reserved_tail in prop_oneof![Just(0_usize), Just(12_usize), Just(24_usize)],
+            operations in proptest::collection::vec(
+                (3_u32..=u32::MAX, valid_dir_name_strategy(32)),
+                0..40
+            ),
+        ) {
+            let mut block = vec![0u8; 1024];
+            init_dir_block(&mut block, 2, 2, reserved_tail).unwrap();
+
+            let mut successes = 0usize;
+            for (ino, name) in operations {
+                let before = block.clone();
+                match add_entry(&mut block, ino, &name, Ext4FileType::RegFile, reserved_tail) {
+                    Ok(off) => {
+                        successes += 1;
+                        prop_assert!(off < block.len() - reserved_tail);
+                        let (entries, tail) = parse_dir_block(&block, 1024).unwrap();
+                        prop_assert_eq!(tail.is_some(), reserved_tail >= 12);
+                        prop_assert_eq!(
+                            entries.iter().filter(|entry| entry.inode != 0).count(),
+                            2 + successes
+                        );
+                    }
+                    Err(FfsError::NoSpace) => {
+                        prop_assert_eq!(block.as_slice(), before.as_slice());
+                        let (entries, tail) = parse_dir_block(&block, 1024).unwrap();
+                        prop_assert_eq!(tail.is_some(), reserved_tail >= 12);
+                        prop_assert_eq!(
+                            entries.iter().filter(|entry| entry.inode != 0).count(),
+                            2 + successes
+                        );
+                    }
+                    Err(err) => prop_assert!(false, "unexpected add_entry error: {err:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn proptest_init_dir_block_roundtrip_preserves_inode_numbers(
+            geometry in dir_block_geometry_strategy(),
+            self_ino in any::<u32>(),
+            parent_ino in any::<u32>(),
+        ) {
+            let (block_len, reserved_tail) = geometry;
+            let mut block = vec![0u8; block_len];
+
+            init_dir_block(&mut block, self_ino, parent_ino, reserved_tail).unwrap();
+
+            let (entries, tail) =
+                parse_dir_block(&block, u32::try_from(block_len).unwrap()).unwrap();
+            prop_assert_eq!(entries.len(), 2);
+            prop_assert_eq!(&entries[0].name, b".");
+            prop_assert_eq!(entries[0].inode, self_ino);
+            prop_assert_eq!(&entries[1].name, b"..");
+            prop_assert_eq!(entries[1].inode, parent_ino);
+            prop_assert_eq!(
+                usize::try_from(entries[1].rec_len).unwrap(),
+                block_len - required_rec_len(1) - reserved_tail
+            );
+            prop_assert_eq!(tail.is_some(), reserved_tail >= 12);
+        }
+
+        #[test]
+        fn proptest_htree_insert_and_lookup_matches_manual_model(
+            operations in proptest::collection::vec((any::<u32>(), any::<u32>()), 0..128),
+            target_hash in any::<u32>(),
+        ) {
+            let mut entries = Vec::new();
+            for (hash, block) in operations {
+                htree_insert(&mut entries, hash, block);
+                prop_assert!(entries.windows(2).all(|pair| pair[0].hash <= pair[1].hash));
+            }
+
+            let expected = if entries.is_empty() {
+                None
+            } else {
+                let mut chosen = entries[0].block;
+                for entry in &entries {
+                    if entry.hash <= target_hash {
+                        chosen = entry.block;
+                    } else {
+                        break;
+                    }
+                }
+                Some(chosen)
+            };
+
+            prop_assert_eq!(htree_find_leaf(&entries, target_hash), expected);
+        }
+    }
 
     #[test]
     fn init_dir_block_contains_dot_and_dotdot() {
@@ -491,6 +685,16 @@ mod tests {
         let removed = remove_entry(&mut block, b"a", 0).unwrap();
         assert!(removed);
         assert_eq!(read_u32_le(&block, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn remove_entry_last_entry_extends_previous_to_block_end() {
+        let mut block = vec![0u8; 64];
+        write_entry(&mut block, 0, 10, 12, Ext4FileType::RegFile, b"a").unwrap();
+        write_entry(&mut block, 12, 11, 52, Ext4FileType::RegFile, b"b").unwrap();
+
+        assert!(remove_entry(&mut block, b"b", 0).unwrap());
+        assert_eq!(read_u16_le(&block, 4).unwrap(), 64);
     }
 
     #[test]
@@ -644,6 +848,52 @@ mod tests {
     }
 
     #[test]
+    fn add_entry_all_zero_block_is_rejected_as_corruption() {
+        let mut block = vec![0u8; 128];
+        let err = add_entry(&mut block, 10, b"new", Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn remove_entry_detects_zero_rec_len() {
+        let mut block = vec![0u8; 128];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 0).unwrap();
+        block[6] = 1;
+        block[7] = Ext4FileType::RegFile as u8;
+        block[8] = b'a';
+
+        let err = remove_entry(&mut block, b"a", 0).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn remove_entry_detects_misaligned_rec_len() {
+        let mut block = vec![0u8; 128];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 13).unwrap();
+        block[6] = 1;
+        block[7] = Ext4FileType::RegFile as u8;
+        block[8] = b'a';
+
+        let err = remove_entry(&mut block, b"a", 0).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn remove_entry_detects_rec_len_exceeds_block() {
+        let mut block = vec![0u8; 32];
+        write_u32_le(&mut block, 0, 10).unwrap();
+        write_u16_le(&mut block, 4, 64).unwrap();
+        block[6] = 1;
+        block[7] = Ext4FileType::RegFile as u8;
+        block[8] = b'a';
+
+        let err = remove_entry(&mut block, b"a", 0).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
     fn test_remove_entry_overlap_bug() {
         let mut block = vec![0u8; 256];
         write_entry(&mut block, 0, 10, 12, Ext4FileType::RegFile, b"a").unwrap();
@@ -730,6 +980,51 @@ mod tests {
         assert!(off > 0);
         let (entries, _) = parse_dir_block(&block, 1024).unwrap();
         assert_eq!(entries[1].name, b"x".to_vec());
+    }
+
+    add_entry_alignment_boundary_test!(add_entry_alignment_boundary_len_1, 1);
+    add_entry_alignment_boundary_test!(add_entry_alignment_boundary_len_2, 2);
+    add_entry_alignment_boundary_test!(add_entry_alignment_boundary_len_3, 3);
+    add_entry_alignment_boundary_test!(add_entry_alignment_boundary_len_4, 4);
+    add_entry_alignment_boundary_test!(add_entry_alignment_boundary_len_5, 5);
+    add_entry_alignment_boundary_test!(add_entry_alignment_boundary_len_8, 8);
+    add_entry_alignment_boundary_test!(add_entry_alignment_boundary_len_12, 12);
+    add_entry_alignment_boundary_test!(add_entry_alignment_boundary_len_16, 16);
+
+    #[test]
+    fn add_entry_reuses_deleted_slot_exact_fit() {
+        let mut block = vec![0u8; 36];
+        write_entry(&mut block, 0, 1, 12, Ext4FileType::Dir, b".").unwrap();
+        write_entry(&mut block, 12, 0, 12, Ext4FileType::Unknown, b"x").unwrap();
+        write_entry(&mut block, 24, 2, 12, Ext4FileType::Dir, b"..").unwrap();
+
+        let off = add_entry(&mut block, 77, b"z", Ext4FileType::RegFile, 0).unwrap();
+
+        assert_eq!(off, 12);
+        assert_eq!(usize::from(read_u16_le(&block, 16).unwrap()), 12);
+        let (entries, _) = parse_dir_block(&block, 36).unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.inode == 77 && entry.name == b"z")
+        );
+    }
+
+    #[test]
+    fn add_entry_exact_capacity_with_reserved_tail_succeeds() {
+        let mut block = vec![0u8; 48];
+        init_dir_block(&mut block, 2, 2, 12).unwrap();
+
+        let off = add_entry(&mut block, 55, b"x", Ext4FileType::RegFile, 12).unwrap();
+
+        assert_eq!(off, 24);
+        let (entries, tail) = parse_dir_block(&block, 48).unwrap();
+        assert!(tail.is_some());
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.inode == 55 && entry.name == b"x")
+        );
     }
 
     // ── htree edge cases ────────────────────────────────────────────────
@@ -855,6 +1150,17 @@ mod tests {
         assert_eq!(entries.len(), 2);
     }
 
+    #[test]
+    fn init_dir_block_reserved_tail_equal_to_block_minus_minimum_entries() {
+        let mut block = vec![0u8; 64];
+        init_dir_block(&mut block, 7, 9, 40).unwrap();
+
+        let (entries, tail) = parse_dir_block(&block, 64).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].rec_len, 12);
+        assert!(tail.is_some());
+    }
+
     // ── multiple operations ─────────────────────────────────────────────
 
     #[test]
@@ -874,6 +1180,34 @@ mod tests {
         // Next add should fail
         let err = add_entry(&mut block, 999, b"overflow", Ext4FileType::RegFile, 0);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn fill_4096_block_parses_every_inserted_entry() {
+        let mut block = vec![0u8; 4096];
+        let mut inserted = BTreeSet::new();
+        init_dir_block(&mut block, 2, 2, 0).unwrap();
+
+        for ino in 3..512_u32 {
+            let name = format!("bulk{ino:03}");
+            match add_entry(&mut block, ino, name.as_bytes(), Ext4FileType::RegFile, 0) {
+                Ok(_) => {
+                    inserted.insert(name.into_bytes());
+                }
+                Err(FfsError::NoSpace) => break,
+                Err(err) => panic!("unexpected add_entry failure: {err:?}"),
+            }
+        }
+
+        let live_names = live_name_set(&block);
+        assert!(live_names.contains(b".".as_slice()));
+        assert!(live_names.contains(b"..".as_slice()));
+        for name in inserted {
+            assert!(
+                live_names.contains(&name),
+                "missing inserted entry {name:?}"
+            );
+        }
     }
 
     #[test]
@@ -939,6 +1273,55 @@ mod tests {
         let (entries, _) = parse_dir_block(&block, 4096).unwrap();
         // . + .. + 5 even originals + 5 new = 12
         assert_eq!(entries.iter().filter(|e| e.inode != 0).count(), 12);
+    }
+
+    #[test]
+    fn add_100_remove_50_add_50_preserves_expected_live_set() {
+        let mut block = vec![0u8; 8192];
+        init_dir_block(&mut block, 2, 2, 0).unwrap();
+
+        for ino in 0..100_u32 {
+            let name = format!("seed{ino:03}");
+            add_entry(
+                &mut block,
+                1_000 + ino,
+                name.as_bytes(),
+                Ext4FileType::RegFile,
+                0,
+            )
+            .unwrap();
+        }
+
+        for ino in 0..50_u32 {
+            let name = format!("seed{ino:03}");
+            assert!(remove_entry(&mut block, name.as_bytes(), 0).unwrap());
+        }
+
+        for ino in 0..50_u32 {
+            let name = format!("fresh{ino:03}");
+            add_entry(
+                &mut block,
+                2_000 + ino,
+                name.as_bytes(),
+                Ext4FileType::RegFile,
+                0,
+            )
+            .unwrap();
+        }
+
+        let live_names = live_name_set(&block);
+        assert_eq!(live_names.len(), 102);
+        assert!(live_names.contains(b".".as_slice()));
+        assert!(live_names.contains(b"..".as_slice()));
+        for ino in 0..50_u32 {
+            assert!(!live_names.contains(format!("seed{ino:03}").as_bytes()));
+        }
+        for ino in 50..100_u32 {
+            assert!(live_names.contains(format!("seed{ino:03}").as_bytes()));
+        }
+        for ino in 0..50_u32 {
+            assert!(live_names.contains(format!("fresh{ino:03}").as_bytes()));
+        }
     }
 
     // ── corruption detection ────────────────────────────────────────────

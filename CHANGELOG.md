@@ -3,8 +3,8 @@
 All notable changes to FrankenFS are documented in this file, organized by capability area rather than chronological diff order. This project has no formal releases or tags; development has been continuous since inception. Commit links point to the canonical GitHub repository.
 
 > **Repository:** <https://github.com/Dicklesworthstone/frankenfs>
-> **Period covered:** 2026-02-09 through 2026-03-21
-> **Total commits:** 536
+> **Period covered:** 2026-02-09 through 2026-04-06
+> **Total commits:** 670
 
 ---
 
@@ -81,6 +81,18 @@ Pure, I/O-free parsing of ext4 on-disk structures in `ffs-ondisk`. All parsers t
   [`481d08f`](https://github.com/Dicklesworthstone/frankenfs/commit/481d08fc3fa286134cbb7409d4ad4c67191e84b1),
   [`dfb02ac`](https://github.com/Dicklesworthstone/frankenfs/commit/dfb02ac163e6647bffe7aecc0ad589c608b510d5)
 
+- **Ext4 metadata surface expansion** -- superblock metadata, JBD2 superblock, flex BG, and MMP parsing landed alongside indirect-block addressing support for the ext4 read/write path
+  [`c3b1f26`](https://github.com/Dicklesworthstone/frankenfs/commit/c3b1f26d8ca7c7bd1ed0aef78d5563fa6d698b4c),
+  [`ad2280e`](https://github.com/Dicklesworthstone/frankenfs/commit/ad2280e0ad74d8f89cce1c64f9672d31eb9cc4ea),
+  [`a19f7d6`](https://github.com/Dicklesworthstone/frankenfs/commit/a19f7d6f9f17b4838c8274c9973d4f478d2ca211)
+
+- **Feature-compatibility and metadata-layout corrections** -- casefold lookup, relaxed incompat acceptance, external-journal UUID pairing, kernel-compatible bitmap CRC32C handling, and ext4 xattr field layout fixes all tightened ext4 compatibility
+  [`9e8acdd`](https://github.com/Dicklesworthstone/frankenfs/commit/9e8acdd1c84eb29a35b44990ac4d73fd748b52f2),
+  [`23c47de`](https://github.com/Dicklesworthstone/frankenfs/commit/23c47de9e96dcb6e7cce2e7e977bb31969a0c65a),
+  [`20d65f4`](https://github.com/Dicklesworthstone/frankenfs/commit/20d65f477ba6e020d573033951f9db6dcf43dcba),
+  [`7f4d6eb`](https://github.com/Dicklesworthstone/frankenfs/commit/7f4d6eb767b457b9edda06be4fb74c612996c4d6),
+  [`1b08f04`](https://github.com/Dicklesworthstone/frankenfs/commit/1b08f04d9ea9bfd273e640af75385d1111cd9281)
+
 ---
 
 ## On-Disk Parsing (btrfs)
@@ -144,6 +156,12 @@ Pure parsing of btrfs on-disk structures, also in `ffs-ondisk` and the `ffs-btrf
 - **Structured fallocate tracing** and comprehensive test coverage for btrfs
   [`9d3e88b`](https://github.com/Dicklesworthstone/frankenfs/commit/9d3e88b7d116134f2e8a8255cfa2d4475a53cff1),
   [`6fc1e5c`](https://github.com/Dicklesworthstone/frankenfs/commit/6fc1e5cfc78fbbc4cca2ff89eca039c00313f6ae)
+
+- **btrfs metadata coverage expansion** -- subvolume object IDs, chunk/device tree walking, `ram_bytes` on extent items, and multi-device RAID stripe resolution all became first-class in the parser + adapter stack
+  [`ad2280e`](https://github.com/Dicklesworthstone/frankenfs/commit/ad2280e0ad74d8f89cce1c64f9672d31eb9cc4ea),
+  [`083f790`](https://github.com/Dicklesworthstone/frankenfs/commit/083f790ebc1ca50efaa8ea9b4ba09ad915d3a60a),
+  [`3b3b5e8`](https://github.com/Dicklesworthstone/frankenfs/commit/3b3b5e8530b0f131431a958670d59d41cc7a1287),
+  [`af1dfed`](https://github.com/Dicklesworthstone/frankenfs/commit/af1dfede9cf9597b4bb84b751d2f0a0579bec2e6)
 
 ---
 
@@ -216,6 +234,21 @@ The `ffs-fuse` adapter translates kernel FUSE protocol into `FsOps` calls on `ff
 - **Link/symlink/setattr API exposure** and ARC cache dirty tracking fix
   [`a16a009`](https://github.com/Dicklesworthstone/frankenfs/commit/a16a009f6c3ff9852b2b1ce53a4345babc73f0e9)
 
+- **Ioctl and inspection-surface expansion** -- FIEMAP support, `EXT4_IOC_GETFLAGS/SETFLAGS`, btrfs FIEMAP, btrfs `DIR_ITEM` inspection, and stricter ioctl/path validation all landed in the same wave
+  [`0f3bfa5`](https://github.com/Dicklesworthstone/frankenfs/commit/0f3bfa5cb7d410eb2845869c4b83f1e0660a2744),
+  [`fafa0fa`](https://github.com/Dicklesworthstone/frankenfs/commit/fafa0fa4e0fdfbd59396280da84c0e16076fa436),
+  [`d546f57`](https://github.com/Dicklesworthstone/frankenfs/commit/d546f570cbd7c814f8f2ac842db40b9d8f938ff9),
+  [`9bd4eb0`](https://github.com/Dicklesworthstone/frankenfs/commit/9bd4eb0d6f917de24dd3c078fa0d538e57a96fc1),
+  [`4bcc449`](https://github.com/Dicklesworthstone/frankenfs/commit/4bcc44920f514fd0f2f2f6155a2cbf2f32ab8506),
+  [`284797e`](https://github.com/Dicklesworthstone/frankenfs/commit/284797e924c670d523077f6bf81d71540bc0414e)
+
+- **RequestScope and runtime hardening** -- ext4 mutators now run under active request scopes, scope-commit ordering was fixed after create, `fuser` ABI 7-31 was enabled, `forget` landed, and per-core/scope-failure metrics became more trustworthy
+  [`16a309b`](https://github.com/Dicklesworthstone/frankenfs/commit/16a309b8dd42fb01fb20e4e0564fb641e84547f7),
+  [`f729ea8`](https://github.com/Dicklesworthstone/frankenfs/commit/f729ea8567037b1d4ffc90def0d127dc5bca2a03),
+  [`e9e89c0`](https://github.com/Dicklesworthstone/frankenfs/commit/e9e89c052191b93ff8a185d48e7406d6e2db95ad),
+  [`27a3207`](https://github.com/Dicklesworthstone/frankenfs/commit/27a32074076e7193aa9f5fbdbbc65b4b92efc0bc),
+  [`954ee2a`](https://github.com/Dicklesworthstone/frankenfs/commit/954ee2a7a8c74ab99f9ca514ea7867df69d326f0)
+
 ---
 
 ## Block I/O and ARC Cache
@@ -263,6 +296,9 @@ The `ffs-block` crate provides the `BlockDevice` trait, Adaptive Replacement Cac
 
 - **Don't restore dirty state** when repair notification fails after successful flush
   [`2fb7834`](https://github.com/Dicklesworthstone/frankenfs/commit/2fb78340ce693b75b4b54895ace3de9761b6ef33)
+
+- **I/O metric semantics alignment** -- `IoEngine` submission counters now reflect real submission behavior rather than optimistic dispatch intent, improving block-layer observability
+  [`3f67e30`](https://github.com/Dicklesworthstone/frankenfs/commit/3f67e3074127030e7cdef861fbe40165f426e531)
 
 ---
 
@@ -330,6 +366,12 @@ The `ffs-mvcc` crate provides block-level Multi-Version Concurrency Control with
 - **`TxnAbortReason` re-export** as public for downstream crates
   [`8126e90`](https://github.com/Dicklesworthstone/frankenfs/commit/8126e906b76a90d1bd6718d4ba598008de3838d5)
 
+- **MVCC durability tightening** -- sharding continued to expand, committed block versions now flush on `fsync`/destroy, snapshot capture was fixed, and `ext4_fallocate` no longer bypasses MVCC bookkeeping
+  [`81ae68b`](https://github.com/Dicklesworthstone/frankenfs/commit/81ae68b29a6c1f3fdd8921d7d73962c0caef3d68),
+  [`11c75dd`](https://github.com/Dicklesworthstone/frankenfs/commit/11c75ddca479747a95c167de0365a65edecdf1d5),
+  [`ff6edef`](https://github.com/Dicklesworthstone/frankenfs/commit/ff6edef13d4a96380a69691ccbbd7e7707765e57),
+  [`27a3207`](https://github.com/Dicklesworthstone/frankenfs/commit/27a32074076e7193aa9f5fbdbbc65b4b92efc0bc)
+
 ---
 
 ## Safe-Merge Conflict Resolution
@@ -360,6 +402,9 @@ Merge-proof system allowing non-conflicting concurrent writes to the same block,
 - **`InodeMetadataMergeFootprint`** introduction and merge-classifier extraction
   [`1e415a3`](https://github.com/Dicklesworthstone/frankenfs/commit/1e415a360da3f147332db9fb23037301ff4ed186),
   [`e719cc4`](https://github.com/Dicklesworthstone/frankenfs/commit/e719cc47fdacc6660161ce715ebc2ddf8faeae40)
+
+- **Merge preflight hardening** -- staged block-range validation now rejects malformed merge/write-set combinations before they can become visible
+  [`4301dfa`](https://github.com/Dicklesworthstone/frankenfs/commit/4301dfa7c33ca4e682a6c83f81b4738ab8fffc62)
 
 ---
 
@@ -435,6 +480,11 @@ RaptorQ fountain-coded repair with Bayesian overhead optimization, scrub pipelin
 
 - **Evidence preset validation** and repair exchange refinement
   [`5965c04`](https://github.com/Dicklesworthstone/frankenfs/commit/5965c048336c83f7e9286051df3d2e091073a09d)
+
+- **Repair robustness improvements** -- decode paths now fail explicitly instead of silently falling back, exchange completion shuts down TCP streams cleanly, and PoR challenge generation is cheaper for full-block cases
+  [`5306287`](https://github.com/Dicklesworthstone/frankenfs/commit/530628751b38d49eb8b5f2c90412f716ef0d0c75),
+  [`77229d4`](https://github.com/Dicklesworthstone/frankenfs/commit/77229d4129d75c9f4d09b83cf0b58c0c22fd9c4a),
+  [`ffb921b`](https://github.com/Dicklesworthstone/frankenfs/commit/ffb921b12d5fb6cd490ef8bb8a9e55ed1aa63181)
 
 ---
 
@@ -536,6 +586,29 @@ Block/inode allocation (`ffs-alloc`), extent B+tree (`ffs-btree`), extent mappin
 - **ExtentCache namespace isolation tests**
   [`242c873`](https://github.com/Dicklesworthstone/frankenfs/commit/242c87378ea967fc6625877407d57b55584b16a6)
 
+- **ext4 `e2compr` write support** -- the path moved from read-only decompression to bidirectional read/write, including single/double/triple indirect block pointers, cluster accounting, and compressed-indirect truncate coverage
+  [`008da90`](https://github.com/Dicklesworthstone/frankenfs/commit/008da90a6a8becbb6569c4aa50b3c0550aa9c3f8),
+  [`ca8ed79`](https://github.com/Dicklesworthstone/frankenfs/commit/ca8ed791418341953440c19b66ced33360aad8a9),
+  [`18cd3d7`](https://github.com/Dicklesworthstone/frankenfs/commit/18cd3d75734f264b9f85c9599cf74db9628b4993),
+  [`06a4288`](https://github.com/Dicklesworthstone/frankenfs/commit/06a42887617df6103a5fe72ed0bcf4bd0d7e5e02),
+  [`a57561d`](https://github.com/Dicklesworthstone/frankenfs/commit/a57561dbbc3fcfffe695d4781bf8582667c11e39),
+  [`220ea22`](https://github.com/Dicklesworthstone/frankenfs/commit/220ea22fcf5c9d194601b779bc98ce03326ef233)
+
+- **btrfs fallocate and extent mutation expansion** -- punch-hole and zero-range support landed with overlapping-extent removal helpers, compressed-extent guard rails, and additional extent-management logic
+  [`5731ae3`](https://github.com/Dicklesworthstone/frankenfs/commit/5731ae35d725f5ebced7f7966f665ce6a2a35342),
+  [`bcf92b2`](https://github.com/Dicklesworthstone/frankenfs/commit/bcf92b2ccc18c4e24d8707e6e55ec839c9524068),
+  [`ea9f019`](https://github.com/Dicklesworthstone/frankenfs/commit/ea9f01900fb9c7f3fdb74b8cbb93ce98b93ae8d9),
+  [`10a90ff`](https://github.com/Dicklesworthstone/frankenfs/commit/10a90ffbd4c30f19dd938e6b45f28289c3b0f512),
+  [`f674445`](https://github.com/Dicklesworthstone/frankenfs/commit/f67444506d397bef7db9b1620d5b0fb857a1c23a)
+
+- **Namespace and metadata correctness hardening** -- directory block allocation became transactional, POSIX rename semantics were enforced, inode `i_version` now bumps on mutation, xattr collision handling improved, and new/preflight dir blocks now initialize checksum tails correctly
+  [`6b01343`](https://github.com/Dicklesworthstone/frankenfs/commit/6b013433c012652cfe318078c2485e479863c4aa),
+  [`75e1888`](https://github.com/Dicklesworthstone/frankenfs/commit/75e1888b7398df6ab3dc0b0fba15aa4816af9842),
+  [`f3c69f2`](https://github.com/Dicklesworthstone/frankenfs/commit/f3c69f2390d79a7fd30986e9f15194249f64578f),
+  [`24afc31`](https://github.com/Dicklesworthstone/frankenfs/commit/24afc3168f2c255d86f05015ca64e3a52865de4b),
+  [`872ce8d`](https://github.com/Dicklesworthstone/frankenfs/commit/872ce8deac41e9a7f6d47b19fca8fd2cdcd8dfde),
+  [`28ab2b4`](https://github.com/Dicklesworthstone/frankenfs/commit/28ab2b4d2523f8b3b2f0a98b764d56099379a734)
+
 ---
 
 ## Journal and WAL Recovery
@@ -569,6 +642,24 @@ JBD2 replay for ext4 compatibility and native MVCC WAL for crash recovery, in `f
 
 - **Superblock checksum write ordering** fix
   [`8400820`](https://github.com/Dicklesworthstone/frankenfs/commit/8400820e9317ee98b769dcb2bc920d20c31da623)
+
+- **Recovery surface expansion** -- ext4 fast-commit, btrfs tree-log replay, mount-time fast-commit application, 64-bit JBD2 support, and external-journal pairing/replay helpers all landed in this window
+  [`64098b5`](https://github.com/Dicklesworthstone/frankenfs/commit/64098b58af122cbc97c92ebd53191787a742c0b8),
+  [`6a4dd9c`](https://github.com/Dicklesworthstone/frankenfs/commit/6a4dd9c146cce2024d95110dac331d42a579faf8),
+  [`a19f7d6`](https://github.com/Dicklesworthstone/frankenfs/commit/a19f7d6f9f17b4838c8274c9973d4f478d2ca211),
+  [`23c47de`](https://github.com/Dicklesworthstone/frankenfs/commit/23c47de9e96dcb6e7cce2e7e977bb31969a0c65a),
+  [`7a8ede4`](https://github.com/Dicklesworthstone/frankenfs/commit/7a8ede42527c95b3b006e3ef16eabdaf4efdc9c4),
+  [`81ae68b`](https://github.com/Dicklesworthstone/frankenfs/commit/81ae68b29a6c1f3fdd8921d7d73962c0caef3d68)
+
+- **Journal and WAL hardening** -- malformed descriptors/revokes and duplicate sequence reuse are now rejected, duplicate/post-commit COW records are blocked, replay logic moved to event-ordered helpers, and WAL-writer logging/evidence paths were strengthened
+  [`136231d`](https://github.com/Dicklesworthstone/frankenfs/commit/136231d4c96d7c0f7e479a35f1e2f9d521ecfd8f),
+  [`0441102`](https://github.com/Dicklesworthstone/frankenfs/commit/04411027aebef1c2a2729bc8ff08a311f75cf840),
+  [`c2faa7a`](https://github.com/Dicklesworthstone/frankenfs/commit/c2faa7ac8ca34ca2513478d0cf2726ae42a5828d),
+  [`d20a990`](https://github.com/Dicklesworthstone/frankenfs/commit/d20a9908bc2460f0055794c18e4441f18ee8d345),
+  [`b341e26`](https://github.com/Dicklesworthstone/frankenfs/commit/b341e26c06518bece53f7a7a0f10aaef1162a4dc),
+  [`b2aa26f`](https://github.com/Dicklesworthstone/frankenfs/commit/b2aa26f3fdafeb0641a2b71e8580df3f45fb60a8),
+  [`890ac99`](https://github.com/Dicklesworthstone/frankenfs/commit/890ac99bbf3542d0b28b8dbd5f43a72bc4496627),
+  [`cba534c`](https://github.com/Dicklesworthstone/frankenfs/commit/cba534c3a9d8af2bd607f48a2499e17a4a6ffb1e)
 
 ---
 
@@ -622,6 +713,18 @@ The `ffs-cli` crate provides the command-line interface (`inspect`, `info`, `dum
 
 - **Operator runbooks** for replay failure triage, corruption recovery, and backpressure investigation
   [`b9caa45`](https://github.com/Dicklesworthstone/frankenfs/commit/b9caa45cadba75df5af3964be1475ce3777ecc80)
+
+- **CLI inspection depth expansion** -- btrfs ZLIB/ZSTD/LZ4 decoding, DIR_INDEX-aware dumps, and dynamic superblock-derived constants improved the fidelity of `inspect`, `dump`, and `info`
+  [`1b47dde`](https://github.com/Dicklesworthstone/frankenfs/commit/1b47dde441dfdb3cbe49ce268a8e35d2252ff53d),
+  [`a7c0761`](https://github.com/Dicklesworthstone/frankenfs/commit/a7c0761c11495de3f9ef5044bcba59cbc3835c4a),
+  [`3f67e30`](https://github.com/Dicklesworthstone/frankenfs/commit/3f67e3074127030e7cdef861fbe40165f426e531),
+  [`3231f01`](https://github.com/Dicklesworthstone/frankenfs/commit/3231f016a9227ebd6e74d6d4e5c8d7c53c770b30)
+
+- **Evidence and error-reporting hardening** -- evidence collection expanded, JSON escaping moved to `serde_json`, and scope-failure metrics made mount/runtime failures easier to diagnose
+  [`5672f65`](https://github.com/Dicklesworthstone/frankenfs/commit/5672f6504497c24497917019f34a26c2aa970650),
+  [`890ac99`](https://github.com/Dicklesworthstone/frankenfs/commit/890ac99bbf3542d0b28b8dbd5f43a72bc4496627),
+  [`cba534c`](https://github.com/Dicklesworthstone/frankenfs/commit/cba534c3a9d8af2bd607f48a2499e17a4a6ffb1e),
+  [`954ee2a`](https://github.com/Dicklesworthstone/frankenfs/commit/954ee2a7a8c74ab99f9ca514ea7867df69d326f0)
 
 ---
 
@@ -709,6 +812,24 @@ The `ffs-harness` crate provides sparse fixtures, golden-file conformance, parit
 - **Cross-crate integration tests** for ffs-core
   [`a82cefe`](https://github.com/Dicklesworthstone/frankenfs/commit/a82cefe7b0ef4feff163483a6ac78744bc81f2ed)
 
+- **Real-image FUSE regression coverage** -- FIEMAP moved to real ext images, ABI 7-31 was exercised under E2E, and truncate/fallocate/ioctl coverage expanded across ext4 and btrfs
+  [`e9e89c0`](https://github.com/Dicklesworthstone/frankenfs/commit/e9e89c052191b93ff8a185d48e7406d6e2db95ad),
+  [`f273f30`](https://github.com/Dicklesworthstone/frankenfs/commit/f273f30b24ff57f192f190707f33f021933888c4),
+  [`0f3bfa5`](https://github.com/Dicklesworthstone/frankenfs/commit/0f3bfa5cb7d410eb2845869c4b83f1e0660a2744),
+  [`fafa0fa`](https://github.com/Dicklesworthstone/frankenfs/commit/fafa0fa4e0fdfbd59396280da84c0e16076fa436),
+  [`4fdf096`](https://github.com/Dicklesworthstone/frankenfs/commit/4fdf09633d62d0c7f779b38f7587eaf7e5572e83)
+
+- **`e2compr` and namespace hardening tests** -- adversarial decompression, new proptests, bulk create/lookup coverage, external-journal cases, and broader cross-crate integration suites landed with the write-path work
+  [`17ca2ee`](https://github.com/Dicklesworthstone/frankenfs/commit/17ca2ee112f611f1af5b8fb03a955067d2f56235),
+  [`60a85a7`](https://github.com/Dicklesworthstone/frankenfs/commit/60a85a7e0f81b1a40163ca5b87dfd18adf8cdbaf),
+  [`73dd17a`](https://github.com/Dicklesworthstone/frankenfs/commit/73dd17ac99ba09dff0e34c3ef7e7d7366a0d3df4),
+  [`9864864`](https://github.com/Dicklesworthstone/frankenfs/commit/98648647f0ec25944c35db338f6ab8e4d99d96d1),
+  [`5672f65`](https://github.com/Dicklesworthstone/frankenfs/commit/5672f6504497c24497917019f34a26c2aa970650)
+
+- **Canonical golden gate documentation** -- `verify_golden.sh` became the single documented entrypoint for golden/conformance verification, with the older script retained as a shim
+  [`162aa59`](https://github.com/Dicklesworthstone/frankenfs/commit/162aa5942ee48d4769c4c046f885f28561d1c1fe),
+  [`bd91c3d`](https://github.com/Dicklesworthstone/frankenfs/commit/bd91c3d662cfa47387e3b37805d350827e8db719)
+
 ---
 
 ## Fuzz Infrastructure
@@ -758,6 +879,10 @@ Criterion benchmarks, perf regression harness, baseline recording, and profiling
 - **Benchmark baseline refresh** and recording pipeline hardening
   [`4007dfa`](https://github.com/Dicklesworthstone/frankenfs/commit/4007dfa6416dfb649b96c2c1040c88ce36455c82)
 
+- **Benchmark harness sanity fixes** -- benchmark RNG seeding was corrected and EBR benchmark artifacts were refreshed during recovery-path hardening
+  [`096024e`](https://github.com/Dicklesworthstone/frankenfs/commit/096024efc36d9f5e9e8cc16d2b6809f1bc7db5ec),
+  [`90bbc5d`](https://github.com/Dicklesworthstone/frankenfs/commit/90bbc5d87f0b60221531f6172c4ca70aa32f3fef)
+
 ---
 
 ## Foundation Types and Error Handling
@@ -788,6 +913,17 @@ Criterion benchmarks, perf regression harness, baseline recording, and profiling
 
 - **`SymbolEquationArityMismatch`** error handling and dependency graph update
   [`fb714f4`](https://github.com/Dicklesworthstone/frankenfs/commit/fb714f41da075d3dacc46f3595d481f36c1e5f11)
+
+- **Broader checked-conversion and panic-removal sweep** -- more silent truncations, panicking integer casts, and ad hoc literals were replaced with fallible conversions and explicit error paths across `core`, `extent`, `alloc`, `types`, and `cli`
+  [`efbebc3`](https://github.com/Dicklesworthstone/frankenfs/commit/efbebc32f3be1cf34d80ba8ec31a2b73c0f9d95a),
+  [`01c3439`](https://github.com/Dicklesworthstone/frankenfs/commit/01c34398361256a8cebaf07f3a5e850a534749b2),
+  [`797b6de`](https://github.com/Dicklesworthstone/frankenfs/commit/797b6de9274f47f7e27e1b0ff1a11cbf2e3f6c96),
+  [`5408144`](https://github.com/Dicklesworthstone/frankenfs/commit/540814425999d6d89f27fa623efef312d8b801ef),
+  [`54b0857`](https://github.com/Dicklesworthstone/frankenfs/commit/54b0857d803af1f89f36ef3e219f7f1fe0493248)
+
+- **Type and error-surface expansion** -- additional filesystem kinds, directory/error variants, and xattr-adjacent APIs were added while pedantic cleanup reduced diagnostic noise
+  [`edd50bd`](https://github.com/Dicklesworthstone/frankenfs/commit/edd50bd4d20ddf615c5435c0d73d388f55852fe3),
+  [`754907b`](https://github.com/Dicklesworthstone/frankenfs/commit/754907b68b53bc5d59a0289920ec2a2ca2040e52)
 
 ---
 
@@ -823,6 +959,13 @@ README, specification documents, architecture alignment, and design documents.
 - **Comprehensive rustdoc** and property-based tests across core, extent, and MVCC crates
   [`1c6fe66`](https://github.com/Dicklesworthstone/frankenfs/commit/1c6fe66598cb5489c9b97001c63b11497f3ee247)
 
+- **README and parity-document refresh** -- tracked V1 parity semantics, feature scope, test-count claims, and the canonical golden-verification workflow were all updated to match the implementation that landed after 2026-03-21
+  [`3aff3af`](https://github.com/Dicklesworthstone/frankenfs/commit/3aff3af0952d929e68d99ca2fa2d413c66b89af6),
+  [`5537150`](https://github.com/Dicklesworthstone/frankenfs/commit/55371502f8d954999d2b090e587644652bcdf7b2),
+  [`dce710b`](https://github.com/Dicklesworthstone/frankenfs/commit/dce710b252d88c7f5908f8f52a9b25ac9d5d6cb5),
+  [`7587971`](https://github.com/Dicklesworthstone/frankenfs/commit/7587971422135d52948087a9a3247324109052b0),
+  [`bd91c3d`](https://github.com/Dicklesworthstone/frankenfs/commit/bd91c3d662cfa47387e3b37805d350827e8db719)
+
 ---
 
 ## Build, Dependencies, and Licensing
@@ -856,3 +999,6 @@ Workspace configuration, dependency management, CI, and license.
 
 - **WebP illustration** added to README header
   [`a72cf4f`](https://github.com/Dicklesworthstone/frankenfs/commit/a72cf4f759db9773100dab0fd199749e8af7900d)
+
+- **Verification entrypoint normalization** -- the legacy `verify-goldens.sh` path now shims to canonical `verify_golden.sh`, keeping CI and operator workflows on one supported script
+  [`162aa59`](https://github.com/Dicklesworthstone/frankenfs/commit/162aa5942ee48d4769c4c046f885f28561d1c1fe)

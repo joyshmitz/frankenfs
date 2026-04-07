@@ -2964,13 +2964,31 @@ fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry,
     let num_stripes = read_le_u16(data, 44)?;
     let sub_stripes = read_le_u16(data, 46)?;
 
+    if num_stripes == 0 {
+        return Err(ParseError::InvalidField {
+            field: "stripes",
+            reason: "chunk has no stripes",
+        });
+    }
+
     let stripe_count = usize::from(num_stripes);
+    let required = CHUNK_FIXED
+        .checked_add(stripe_count.saturating_mul(STRIPE_SIZE))
+        .ok_or(ParseError::InvalidField {
+            field: "stripes",
+            reason: "chunk stripe payload overflows usize",
+        })?;
+    if data.len() < required {
+        return Err(ParseError::InsufficientData {
+            needed: required,
+            offset: CHUNK_FIXED,
+            actual: data.len(),
+        });
+    }
+
     let mut stripes = Vec::with_capacity(stripe_count);
     let mut off = CHUNK_FIXED;
     for _ in 0..stripe_count {
-        if off + STRIPE_SIZE > data.len() {
-            break;
-        }
         stripes.push(ffs_ondisk::BtrfsStripe {
             devid: read_le_u64(data, off)?,
             offset: read_le_u64(data, off + 8)?,
@@ -3447,10 +3465,14 @@ mod tests {
         data_sz: u32,
     ) {
         let base = HEADER_SIZE + idx * ITEM_SIZE;
+        let header_size = u32::try_from(HEADER_SIZE).expect("header size should fit in u32");
+        let encoded_data_off = data_off
+            .checked_sub(header_size)
+            .expect("test leaf item data offset should be after header");
         block[base..base + 8].copy_from_slice(&objectid.to_le_bytes());
         block[base + 8] = item_type;
         block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
-        block[base + 17..base + 21].copy_from_slice(&data_off.to_le_bytes());
+        block[base + 17..base + 21].copy_from_slice(&encoded_data_off.to_le_bytes());
         block[base + 21..base + 25].copy_from_slice(&data_sz.to_le_bytes());
     }
 

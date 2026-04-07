@@ -928,6 +928,11 @@ impl BtrfsHeader {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtrfsItem {
     pub key: BtrfsKey,
+    /// Absolute byte offset of this item's payload within the block.
+    ///
+    /// On disk, btrfs leaf item offsets are stored relative to the 101-byte
+    /// leaf header. The parser normalizes them to absolute block offsets so
+    /// callers can slice payload bytes directly.
     pub data_offset: u32,
     pub data_size: u32,
 }
@@ -983,8 +988,15 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
             item_type: block[base + 8],
             offset: read_le_u64(block, base + 9)?,
         };
-        // btrfs leaf item offsets are absolute offsets from the start of the block.
-        let data_offset = read_le_u32(block, base + 17)?;
+        // On disk, leaf payload offsets are relative to the leaf header. Normalize
+        // them to absolute block offsets for callers.
+        let raw_data_offset = read_le_u32(block, base + 17)?;
+        let data_offset = raw_data_offset
+            .checked_add(u32::try_from(BTRFS_HEADER_SIZE).expect("header size fits in u32"))
+            .ok_or(ParseError::InvalidField {
+                field: "item_offset",
+                reason: "overflow",
+            })?;
         let data_size = read_le_u32(block, base + 21)?;
 
         let data_end = usize::try_from(data_offset)
@@ -1365,7 +1377,8 @@ mod tests {
         block[base..base + 8].copy_from_slice(&123_u64.to_le_bytes());
         block[base + 8] = 42;
         block[base + 9..base + 17].copy_from_slice(&999_u64.to_le_bytes());
-        block[base + 17..base + 21].copy_from_slice(&400_u32.to_le_bytes());
+        block[base + 17..base + 21]
+            .copy_from_slice(&(400_u32 - u32::try_from(BTRFS_HEADER_SIZE).unwrap()).to_le_bytes());
         block[base + 21..base + 25].copy_from_slice(&8_u32.to_le_bytes());
 
         let (_, items) = parse_leaf_items(&block).expect("leaf parse");
@@ -1373,6 +1386,8 @@ mod tests {
         assert_eq!(items[0].key.objectid, 123);
         assert_eq!(items[0].key.item_type, 42);
         assert_eq!(items[0].key.offset, 999);
+        assert_eq!(items[0].data_offset, 400);
+        assert_eq!(items[0].data_size, 8);
     }
 
     /// Helper: build a minimal valid block with a header (zeros except nritems + level).
@@ -1524,8 +1539,9 @@ mod tests {
         let base = BTRFS_HEADER_SIZE;
         block[base..base + 8].copy_from_slice(&1_u64.to_le_bytes());
         block[base + 8] = 1;
-        // data_offset = 600, data_size = 10 — well beyond the 512-byte block
-        block[base + 17..base + 21].copy_from_slice(&600_u32.to_le_bytes());
+        // data_offset = 600 absolute, data_size = 10 — well beyond the 512-byte block
+        block[base + 17..base + 21]
+            .copy_from_slice(&(600_u32 - u32::try_from(BTRFS_HEADER_SIZE).unwrap()).to_le_bytes());
         block[base + 21..base + 25].copy_from_slice(&10_u32.to_le_bytes());
 
         let err = parse_leaf_items(&block).unwrap_err();
@@ -2180,6 +2196,9 @@ mod tests {
 
             let data_offset_abs = u32::try_from(BTRFS_HEADER_SIZE + n_items * BTRFS_ITEM_SIZE)
                 .expect("leaf item table endpoint fits in u32");
+            let data_offset_rel = data_offset_abs
+                .checked_sub(u32::try_from(BTRFS_HEADER_SIZE).expect("header size fits"))
+                .expect("table endpoint always exceeds header size");
 
             for i in 0..n_items {
                 let base = BTRFS_HEADER_SIZE + i * BTRFS_ITEM_SIZE;
@@ -2189,7 +2208,7 @@ mod tests {
                     offset: key_offsets[i],
                 };
                 write_disk_key(&mut block, base, key);
-                block[base + 17..base + 21].copy_from_slice(&data_offset_abs.to_le_bytes());
+                block[base + 17..base + 21].copy_from_slice(&data_offset_rel.to_le_bytes());
                 block[base + 21..base + 25].copy_from_slice(&0_u32.to_le_bytes());
             }
 
@@ -2553,7 +2572,8 @@ mod tests {
             let base = BTRFS_HEADER_SIZE;
             let key = BtrfsKey { objectid, item_type, offset };
             write_disk_key(&mut block, base, key);
-            block[base + 17..base + 21].copy_from_slice(&200_u32.to_le_bytes());
+            block[base + 17..base + 21]
+                .copy_from_slice(&(200_u32 - u32::try_from(BTRFS_HEADER_SIZE).unwrap()).to_le_bytes());
             block[base + 21..base + 25].copy_from_slice(&8_u32.to_le_bytes());
 
             let (_, items) = parse_leaf_items(&block).expect("parse leaf");

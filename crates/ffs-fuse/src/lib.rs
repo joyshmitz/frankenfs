@@ -3555,6 +3555,10 @@ mod tests {
             events.lock().unwrap().as_slice(),
             &[HookEvent::Begin(RequestOp::Lookup)]
         );
+        let metrics = fuse.metrics().snapshot();
+        assert_eq!(metrics.requests_total, 1);
+        assert_eq!(metrics.requests_ok, 0);
+        assert_eq!(metrics.requests_err, 1);
     }
 
     #[test]

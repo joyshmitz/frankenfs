@@ -118,10 +118,13 @@ fn write_btrfs_leaf_item(
     data_size: u32,
 ) {
     let item_off = leaf_off + 101 + idx * 25;
+    let data_offset_rel = data_offset
+        .checked_sub(101)
+        .expect("test item payload must live after the leaf header");
     image[item_off..item_off + 8].copy_from_slice(&objectid.to_le_bytes());
     image[item_off + 8] = item_type;
     image[item_off + 9..item_off + 17].copy_from_slice(&key_offset.to_le_bytes());
-    image[item_off + 17..item_off + 21].copy_from_slice(&data_offset.to_le_bytes());
+    image[item_off + 17..item_off + 21].copy_from_slice(&data_offset_rel.to_le_bytes());
     image[item_off + 21..item_off + 25].copy_from_slice(&data_size.to_le_bytes());
 }
 
@@ -233,6 +236,7 @@ fn build_btrfs_fsops_image() -> Vec<u8> {
         root_item_size,
     );
     let mut root_item = vec![0_u8; root_item_size as usize];
+    root_item[168..176].copy_from_slice(&256_u64.to_le_bytes());
     root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
     let root_item_last = root_item.len() - 1;
     root_item[root_item_last] = 0;

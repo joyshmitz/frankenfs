@@ -7,7 +7,8 @@
 //!
 //! 1. Parse the capability table from `FEATURE_PARITY.md` section 2.1.
 //! 2. For `unit::*` contract IDs, verify the test function exists in `ffs-core`.
-//! 3. For `e2e::*` contract IDs, verify the scenario ID appears in E2E scripts.
+//! 3. For `e2e::*` contract IDs, verify the capability is backed either by an
+//!    E2E script scenario or by an end-to-end Rust test in `ffs-core`.
 //!
 //! # Contract version
 //!
@@ -110,7 +111,8 @@ pub fn check_unit_contract(ffs_core_source: &str, bare_name: &str) -> bool {
 /// progressively stripped forms:
 ///
 /// 1. Full bare name literal match.
-/// 2. With `btrfs_rw_` prefix stripped (catches `run_case` arguments).
+/// 2. With any `<fs>_rw_` prefix stripped (catches mirrored `run_case`
+///    arguments such as `btrfs_rw_*` and `ext4_rw_*`).
 /// 3. For crash-matrix patterns: the label after `crash_matrix_NN_` (catches
 ///    labels in the `crash_matrix_label_for_point` case table).
 #[must_use]
@@ -120,8 +122,11 @@ pub fn check_e2e_contract(e2e_content: &str, bare_name: &str) -> bool {
         return true;
     }
 
-    // 2. Strip the conventional `btrfs_rw_` prefix.
-    let stripped = bare_name.strip_prefix("btrfs_rw_").unwrap_or(bare_name);
+    // 2. Strip the conventional `<fs>_rw_` prefix used by mirrored smoke
+    // suites so the shared case names still satisfy drift detection.
+    let stripped = bare_name
+        .split_once("_rw_")
+        .map_or(bare_name, |(_, rest)| rest);
     if e2e_content.contains(stripped) {
         return true;
     }
@@ -140,6 +145,16 @@ pub fn check_e2e_contract(e2e_content: &str, bare_name: &str) -> bool {
     false
 }
 
+/// Check an E2E contract row against all known backing sources.
+#[must_use]
+pub fn check_e2e_contract_backing(
+    ffs_core_source: &str,
+    e2e_content: &str,
+    bare_name: &str,
+) -> bool {
+    check_e2e_contract(e2e_content, bare_name) || check_unit_contract(ffs_core_source, bare_name)
+}
+
 /// Run full drift detection and return results.
 #[must_use]
 pub fn check_btrfs_drift(
@@ -152,7 +167,9 @@ pub fn check_btrfs_drift(
         .map(|row| {
             let found = match row.kind {
                 ContractKind::Unit => check_unit_contract(ffs_core_source, &row.bare_name),
-                ContractKind::E2e => check_e2e_contract(e2e_content, &row.bare_name),
+                ContractKind::E2e => {
+                    check_e2e_contract_backing(ffs_core_source, e2e_content, &row.bare_name)
+                }
             };
             DriftCheckResult {
                 contract_id: row.contract_id.clone(),
@@ -196,6 +213,38 @@ mod tests {
     }
 
     #[test]
+    fn check_e2e_contract_accepts_mirrored_ext4_crash_matrix_contract_ids() {
+        let e2e_script = r#"
+crash_matrix_label_for_point() {
+    case "$1" in
+        1) printf 'create_alpha_no_fsync' ;;
+        *) return 1 ;;
+    esac
+}
+"#;
+
+        assert!(check_e2e_contract(
+            e2e_script,
+            "btrfs_rw_crash_matrix_01_create_alpha_no_fsync"
+        ));
+        assert!(check_e2e_contract(
+            e2e_script,
+            "ext4_rw_crash_matrix_01_create_alpha_no_fsync"
+        ));
+    }
+
+    #[test]
+    fn check_e2e_contract_backing_accepts_ext4_end_to_end_rust_tests() {
+        let core_src = "fn ext4_rw_crash_matrix_08_multi_file_interleaved_fsync() {}";
+
+        assert!(check_e2e_contract_backing(
+            core_src,
+            "",
+            "ext4_rw_crash_matrix_08_multi_file_interleaved_fsync"
+        ));
+    }
+
+    #[test]
     fn all_documented_unit_contracts_have_test_functions() {
         let root = repo_root();
         let parity =
@@ -230,6 +279,8 @@ mod tests {
         let root = repo_root();
         let parity =
             std::fs::read_to_string(format!("{root}/FEATURE_PARITY.md")).expect("read parity");
+        let core_src = std::fs::read_to_string(format!("{root}/crates/ffs-core/src/lib.rs"))
+            .expect("read core");
         let e2e_script =
             std::fs::read_to_string(format!("{root}/scripts/e2e/ffs_btrfs_rw_smoke.sh"))
                 .expect("read e2e script");
@@ -247,9 +298,9 @@ mod tests {
 
         for row in &e2e_rows {
             assert!(
-                check_e2e_contract(&e2e_script, &row.bare_name),
-                "DRIFT: e2e contract '{}' documented in FEATURE_PARITY.md but scenario '{}' \
-                 not found in ffs_btrfs_rw_smoke.sh",
+                check_e2e_contract_backing(&core_src, &e2e_script, &row.bare_name),
+                "DRIFT: e2e contract '{}' documented in FEATURE_PARITY.md but backing test \
+                 '{}' not found in ffs-core/src/lib.rs or scripts/e2e/ffs_btrfs_rw_smoke.sh",
                 row.contract_id,
                 row.bare_name
             );

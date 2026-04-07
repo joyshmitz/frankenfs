@@ -20,8 +20,10 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true }
+blake3 = { workspace = true }
 criterion = { workspace = true }
 ffs-block = { workspace = true }
+ffs-btrfs = { workspace = true }
 ffs-error = { workspace = true }
 ffs-fuse = { workspace = true }
 fuser = { workspace = true }

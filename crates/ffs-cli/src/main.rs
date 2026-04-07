@@ -5362,10 +5362,13 @@ mod tests {
         const BTRFS_LEAF_HEADER_SIZE: usize = 101;
         const BTRFS_LEAF_ITEM_SIZE: usize = 25;
         let item_offset = leaf_offset + BTRFS_LEAF_HEADER_SIZE + item_index * BTRFS_LEAF_ITEM_SIZE;
+        let data_offset_rel = data_offset
+            .checked_sub(u32::try_from(BTRFS_LEAF_HEADER_SIZE).expect("header size fits"))
+            .expect("test item payload must live after the leaf header");
         image[item_offset..item_offset + 8].copy_from_slice(&objectid.to_le_bytes());
         image[item_offset + 8] = item_type;
         image[item_offset + 9..item_offset + 17].copy_from_slice(&key_offset.to_le_bytes());
-        image[item_offset + 17..item_offset + 21].copy_from_slice(&data_offset.to_le_bytes());
+        image[item_offset + 17..item_offset + 21].copy_from_slice(&data_offset_rel.to_le_bytes());
         image[item_offset + 21..item_offset + 25].copy_from_slice(&data_size.to_le_bytes());
     }
 
@@ -5410,6 +5413,7 @@ mod tests {
         );
         let mut root_item =
             vec![0_u8; usize::try_from(root_item_size).expect("root item size fits")];
+        root_item[168..176].copy_from_slice(&root_dir_objectid.to_le_bytes());
         root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
         let root_item_last = root_item.len() - 1;
         root_item[root_item_last] = 0;
@@ -5518,6 +5522,7 @@ mod tests {
         );
         let mut root_item =
             vec![0_u8; usize::try_from(root_item_size).expect("root item size fits")];
+        root_item[168..176].copy_from_slice(&root_dir_objectid.to_le_bytes());
         root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
         let root_item_last = root_item.len() - 1;
         root_item[root_item_last] = 0;
