@@ -3,8 +3,8 @@
 All notable changes to FrankenFS are documented in this file, organized by capability area rather than chronological diff order. This project has no formal releases or tags; development has been continuous since inception. Commit links point to the canonical GitHub repository.
 
 > **Repository:** <https://github.com/Dicklesworthstone/frankenfs>
-> **Period covered:** 2026-02-09 through 2026-04-06
-> **Total commits:** 670
+> **Period covered:** 2026-02-09 through 2026-04-07
+> **Total commits:** 673
 
 ---
 
@@ -157,11 +157,12 @@ Pure parsing of btrfs on-disk structures, also in `ffs-ondisk` and the `ffs-btrf
   [`9d3e88b`](https://github.com/Dicklesworthstone/frankenfs/commit/9d3e88b7d116134f2e8a8255cfa2d4475a53cff1),
   [`6fc1e5c`](https://github.com/Dicklesworthstone/frankenfs/commit/6fc1e5cfc78fbbc4cca2ff89eca039c00313f6ae)
 
-- **btrfs metadata coverage expansion** -- subvolume object IDs, chunk/device tree walking, `ram_bytes` on extent items, and multi-device RAID stripe resolution all became first-class in the parser + adapter stack
+- **btrfs metadata coverage expansion** -- subvolume object IDs/root dir IDs, chunk/device tree walking, `ram_bytes` on extent items, and multi-device RAID stripe resolution all became first-class in the parser + adapter stack
   [`ad2280e`](https://github.com/Dicklesworthstone/frankenfs/commit/ad2280e0ad74d8f89cce1c64f9672d31eb9cc4ea),
   [`083f790`](https://github.com/Dicklesworthstone/frankenfs/commit/083f790ebc1ca50efaa8ea9b4ba09ad915d3a60a),
   [`3b3b5e8`](https://github.com/Dicklesworthstone/frankenfs/commit/3b3b5e8530b0f131431a958670d59d41cc7a1287),
-  [`af1dfed`](https://github.com/Dicklesworthstone/frankenfs/commit/af1dfede9cf9597b4bb84b751d2f0a0579bec2e6)
+  [`af1dfed`](https://github.com/Dicklesworthstone/frankenfs/commit/af1dfede9cf9597b4bb84b751d2f0a0579bec2e6),
+  [`207ee11`](https://github.com/Dicklesworthstone/frankenfs/commit/207ee11a1498b974e51cdce480258f907fb2a2f4)
 
 ---
 
@@ -830,6 +831,10 @@ The `ffs-harness` crate provides sparse fixtures, golden-file conformance, parit
   [`162aa59`](https://github.com/Dicklesworthstone/frankenfs/commit/162aa5942ee48d4769c4c046f885f28561d1c1fe),
   [`bd91c3d`](https://github.com/Dicklesworthstone/frankenfs/commit/bd91c3d662cfa47387e3b37805d350827e8db719)
 
+- **btrfs kernel-reference conformance expansion** -- dedicated kernel-reference harness coverage landed alongside refreshed sparse fixtures, goldens, capability-drift inputs, and checksum manifests
+  [`207ee11`](https://github.com/Dicklesworthstone/frankenfs/commit/207ee11a1498b974e51cdce480258f907fb2a2f4),
+  [`8ddd3de`](https://github.com/Dicklesworthstone/frankenfs/commit/8ddd3defd26fa6367d75c07467024d3dd276cf41)
+
 ---
 
 ## Fuzz Infrastructure
@@ -882,6 +887,9 @@ Criterion benchmarks, perf regression harness, baseline recording, and profiling
 - **Benchmark harness sanity fixes** -- benchmark RNG seeding was corrected and EBR benchmark artifacts were refreshed during recovery-path hardening
   [`096024e`](https://github.com/Dicklesworthstone/frankenfs/commit/096024efc36d9f5e9e8cc16d2b6809f1bc7db5ec),
   [`90bbc5d`](https://github.com/Dicklesworthstone/frankenfs/commit/90bbc5d87f0b60221531f6172c4ca70aa32f3fef)
+
+- **20260406 baseline refresh** -- benchmark baselines, perf-regression inputs, benchmark-tooling scripts, and history artifacts were refreshed together in the latest committed benchmark pass
+  [`8ddd3de`](https://github.com/Dicklesworthstone/frankenfs/commit/8ddd3defd26fa6367d75c07467024d3dd276cf41)
 
 ---
 
@@ -1002,3 +1010,6 @@ Workspace configuration, dependency management, CI, and license.
 
 - **Verification entrypoint normalization** -- the legacy `verify-goldens.sh` path now shims to canonical `verify_golden.sh`, keeping CI and operator workflows on one supported script
   [`162aa59`](https://github.com/Dicklesworthstone/frankenfs/commit/162aa5942ee48d4769c4c046f885f28561d1c1fe)
+
+- **Cargo.lock refresh** for newly committed harness/conformance dependency changes
+  [`07bd37a`](https://github.com/Dicklesworthstone/frankenfs/commit/07bd37a9423b7829e0fe42a8e7dbe91fc5664916)
