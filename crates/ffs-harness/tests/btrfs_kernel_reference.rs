@@ -759,9 +759,7 @@ fn btrfs_large_subvolume_catalog_matches_golden() {
 
     assert_eq!(obs_subvols, gold_subvols);
     assert!(
-        obs_subvols
-            .iter()
-            .any(|subvolume| subvolume.read_only),
+        obs_subvols.iter().any(|subvolume| subvolume.read_only),
         "expected at least one read-only subvolume"
     );
 }

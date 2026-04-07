@@ -27,6 +27,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 const EOPNOTSUPP_ERRNO: i64 = 95;
+const BTRFS_TEST_WORKSPACE: &str = "testdir";
 
 /// Check if FUSE E2E prerequisites are met.
 fn fuse_available() -> bool {
@@ -1894,15 +1895,32 @@ fn btrfs_fuse_available() -> bool {
 /// Create a small btrfs image and populate it with test files.
 fn create_btrfs_test_image(dir: &Path) -> std::path::PathBuf {
     let image = dir.join("test.btrfs");
+    let seed_root = dir.join("seed_root");
+    let seed_workspace = seed_root.join(BTRFS_TEST_WORKSPACE);
 
     // Create a 128 MiB sparse image (btrfs minimum is ~109 MiB).
     let f = fs::File::create(&image).expect("create btrfs image");
     f.set_len(128 * 1024 * 1024).expect("set btrfs image size");
     drop(f);
 
+    // Seed a writable workspace so unprivileged `default_permissions` mounts
+    // can exercise the btrfs write path without weakening mount semantics.
+    fs::create_dir_all(&seed_workspace).expect("create btrfs seed workspace");
+    fs::set_permissions(&seed_root, fs::Permissions::from_mode(0o777))
+        .expect("chmod btrfs seed root");
+    fs::set_permissions(&seed_workspace, fs::Permissions::from_mode(0o777))
+        .expect("chmod btrfs seed workspace");
+
     // mkfs.btrfs
     let out = Command::new("mkfs.btrfs")
-        .args(["-f", "-L", "ffs-btrfs-e2e", image.to_str().unwrap()])
+        .args([
+            "-f",
+            "-L",
+            "ffs-btrfs-e2e",
+            "--rootdir",
+            seed_root.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ])
         .output()
         .expect("mkfs.btrfs");
     assert!(
@@ -1944,8 +1962,8 @@ fn try_mount_btrfs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Backgrou
     }
 }
 
-/// Helper: create btrfs image, mount rw, run a closure.
-fn with_btrfs_rw_mount(f: impl FnOnce(&Path)) {
+/// Helper: create btrfs image, mount rw, run a closure against the mount root.
+fn with_btrfs_rw_root_mount(f: impl FnOnce(&Path)) {
     if !btrfs_fuse_available() {
         eprintln!("btrfs FUSE prerequisites not met, skipping");
         return;
@@ -1961,18 +1979,31 @@ fn with_btrfs_rw_mount(f: impl FnOnce(&Path)) {
     f(&mnt);
 }
 
+/// Helper: create btrfs image, mount rw, run a closure in the seeded workspace.
+fn with_btrfs_rw_mount(f: impl FnOnce(&Path)) {
+    with_btrfs_rw_root_mount(|mnt| {
+        let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+        assert!(
+            workspace.is_dir(),
+            "seeded btrfs workspace missing at {}",
+            workspace.display()
+        );
+        f(&workspace);
+    });
+}
+
 #[test]
 fn btrfs_fuse_readdir_root() {
-    with_btrfs_rw_mount(|mnt| {
-        // Empty btrfs should at least have . and ..
+    with_btrfs_rw_root_mount(|mnt| {
         let entries: Vec<String> = fs::read_dir(mnt)
             .expect("readdir btrfs root via FUSE")
             .filter_map(Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        // btrfs root dir exists; entries may be empty (no default subvolume files).
-        // Just verify readdir doesn't error.
-        let _ = entries;
+        assert!(
+            entries.iter().any(|entry| entry == BTRFS_TEST_WORKSPACE),
+            "seeded btrfs workspace should appear at root, got: {entries:?}"
+        );
     });
 }
 
@@ -2180,72 +2211,60 @@ fn btrfs_fuse_setattr_utimes() {
 
 #[test]
 fn btrfs_fuse_statfs() {
-    if !btrfs_fuse_available() {
-        eprintln!("btrfs FUSE prerequisites not met, skipping");
-        return;
-    }
+    with_btrfs_rw_root_mount(|mnt| {
+        // Use `stat -f` to exercise the FUSE statfs handler and parse the output.
+        let out = Command::new("stat")
+            .args(["-f", "-c", "%s %b %f %a %c %d %l", mnt.to_str().unwrap()])
+            .output()
+            .expect("stat -f on btrfs mountpoint");
+        assert!(
+            out.status.success(),
+            "stat -f on btrfs failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
-    let tmp = TempDir::new().expect("tmpdir");
-    let image = create_btrfs_test_image(tmp.path());
-    let mnt = tmp.path().join("mnt");
-    fs::create_dir_all(&mnt).expect("create mountpoint");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let fields: Vec<&str> = stdout.split_whitespace().collect();
+        assert_eq!(
+            fields.len(),
+            7,
+            "expected 7 stat -f fields, got: {stdout:?}"
+        );
 
-    let Some(_session) = try_mount_btrfs_rw(&image, &mnt) else {
-        return;
-    };
+        // Parse statfs fields: block_size blocks blocks_free blocks_avail files files_free namelen
+        let block_size: u64 = fields[0].parse().expect("parse block_size");
+        let blocks: u64 = fields[1].parse().expect("parse blocks");
+        let blocks_free: u64 = fields[2].parse().expect("parse blocks_free");
+        let blocks_avail: u64 = fields[3].parse().expect("parse blocks_avail");
+        let files: u64 = fields[4].parse().expect("parse files");
+        let _files_free: u64 = fields[5].parse().expect("parse files_free");
+        let namelen: u64 = fields[6].parse().expect("parse namelen");
 
-    // Use `stat -f` to exercise the FUSE statfs handler and parse the output.
-    let out = Command::new("stat")
-        .args(["-f", "-c", "%s %b %f %a %c %d %l", mnt.to_str().unwrap()])
-        .output()
-        .expect("stat -f on btrfs mountpoint");
-    assert!(
-        out.status.success(),
-        "stat -f on btrfs failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+        // Validate: block size should be a power of two in [4096, 65536].
+        assert!(
+            block_size.is_power_of_two() && (4096..=65536).contains(&block_size),
+            "btrfs block_size {block_size} should be a power-of-two in [4096, 65536]"
+        );
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let fields: Vec<&str> = stdout.split_whitespace().collect();
-    assert_eq!(
-        fields.len(),
-        7,
-        "expected 7 stat -f fields, got: {stdout:?}"
-    );
+        // Total blocks should be non-zero (we made a 128 MiB image).
+        assert!(blocks > 0, "total blocks should be > 0");
 
-    // Parse statfs fields: block_size blocks blocks_free blocks_avail files files_free namelen
-    let block_size: u64 = fields[0].parse().expect("parse block_size");
-    let blocks: u64 = fields[1].parse().expect("parse blocks");
-    let blocks_free: u64 = fields[2].parse().expect("parse blocks_free");
-    let blocks_avail: u64 = fields[3].parse().expect("parse blocks_avail");
-    let files: u64 = fields[4].parse().expect("parse files");
-    let _files_free: u64 = fields[5].parse().expect("parse files_free");
-    let namelen: u64 = fields[6].parse().expect("parse namelen");
+        // Free blocks should not exceed total blocks.
+        assert!(
+            blocks_free <= blocks,
+            "free blocks ({blocks_free}) should be <= total ({blocks})"
+        );
+        assert!(
+            blocks_avail <= blocks,
+            "available blocks ({blocks_avail}) should be <= total ({blocks})"
+        );
 
-    // Validate: block size should be a power of two in [4096, 65536].
-    assert!(
-        block_size.is_power_of_two() && (4096..=65536).contains(&block_size),
-        "btrfs block_size {block_size} should be a power-of-two in [4096, 65536]"
-    );
+        // Total inodes should be non-zero.
+        assert!(files > 0, "total inodes should be > 0");
 
-    // Total blocks should be non-zero (we made a 128 MiB image).
-    assert!(blocks > 0, "total blocks should be > 0");
-
-    // Free blocks should not exceed total blocks.
-    assert!(
-        blocks_free <= blocks,
-        "free blocks ({blocks_free}) should be <= total ({blocks})"
-    );
-    assert!(
-        blocks_avail <= blocks,
-        "available blocks ({blocks_avail}) should be <= total ({blocks})"
-    );
-
-    // Total inodes should be non-zero.
-    assert!(files > 0, "total inodes should be > 0");
-
-    // Max filename length: btrfs is 255.
-    assert_eq!(namelen, 255, "btrfs max filename length should be 255");
+        // Max filename length: btrfs is 255.
+        assert_eq!(namelen, 255, "btrfs max filename length should be 255");
+    });
 }
 
 #[test]
