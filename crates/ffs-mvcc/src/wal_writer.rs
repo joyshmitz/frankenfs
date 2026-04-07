@@ -336,7 +336,7 @@ impl WalWriter {
         }
 
         // ── D1: enforce strict monotonicity ──────────────────────────────
-        if self.last_commit_seq > 0 && commit_seq <= self.last_commit_seq {
+        if commit_seq <= self.last_commit_seq {
             error!(
                 operation_id = op_id,
                 commit_seq,
@@ -647,7 +647,7 @@ impl WalWriter {
                     detail: "reserved sentinel value (u64::MAX) in coalesced batch".to_owned(),
                 });
             }
-            if prev_seq > 0 && seq <= prev_seq {
+            if seq <= prev_seq {
                 return Err(WalWriteError::FormatViolation {
                     detail: format!(
                         "coalesced commit_seq {seq} not strictly greater than {prev_seq}"

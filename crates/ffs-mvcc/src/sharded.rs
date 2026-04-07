@@ -508,9 +508,9 @@ impl ShardedMvccStore {
         for (block, bytes) in writes {
             let shard_idx = self.shard_index(block);
             let Some(shard) = shard_guards
-                .iter_mut()
-                .find(|(idx, _)| *idx == shard_idx)
-                .map(|(_, guard)| guard)
+                .binary_search_by_key(&shard_idx, |(idx, _)| *idx)
+                .ok()
+                .map(|pos| &mut shard_guards[pos].1)
             else {
                 tracing::error!("missing shard guard for block {block:?}");
                 continue;
@@ -572,9 +572,9 @@ impl ShardedMvccStore {
         for (block, bytes) in writes {
             let shard_idx = self.shard_index(block);
             let Some(shard) = shard_guards
-                .iter_mut()
-                .find(|(idx, _)| *idx == shard_idx)
-                .map(|(_, guard)| guard)
+                .binary_search_by_key(&shard_idx, |(idx, _)| *idx)
+                .ok()
+                .map(|pos| &mut shard_guards[pos].1)
             else {
                 tracing::error!("missing shard guard for block {block:?}");
                 continue;
