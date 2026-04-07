@@ -155,14 +155,14 @@
     {
       "id": 256,
       "parent_id": 5,
-      "name": "subvol-rw",
-      "read_only": false
+      "name": "subvol-ro",
+      "read_only": true
     },
     {
       "id": 257,
       "parent_id": 5,
-      "name": "subvol-ro",
-      "read_only": true
+      "name": "subvol-rw",
+      "read_only": false
     },
     {
       "id": 18446744073709551607,

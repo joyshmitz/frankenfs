@@ -3479,7 +3479,7 @@ larger values are treated as unsupported until explicitly implemented.
 **Incompatible (`s_feature_incompat` at `0x60`) -- unknown = mount MUST fail:**
 
 REQUIRED: `FILETYPE`(0x0002).
-Supported: `COMPRESSION`(0x0001, FS-level accepted so mixed-feature filesystems remain mountable; per-inode compressed payloads still return a clear unsupported-format error), `RECOVER`(0x0004), `JOURNAL_DEV`(0x0008, standalone journal device detection + paired-open external-journal replay with UUID/block-size validation), `META_BG`(0x0010), `EXTENTS`(0x0040), `64BIT`(0x0080), `MMP`(0x0100, validated read-side), `FLEX_BG`(0x0200), `EA_INODE`(0x0400), `CSUM_SEED`(0x2000), `LARGEDIR`(0x4000), `INLINE_DATA`(0x8000), `ENCRYPT`(0x10000, nokey mode — encrypted names shown as raw bytes), `CASEFOLD`(0x20000, case-insensitive directory lookup via Unicode lowercase).
+Supported: `COMPRESSION`(0x0001, ext4 e2compr read/write compatibility for the implemented gzip/LZO/"none" method-table paths; rare legacy codecs still reject deterministically), `RECOVER`(0x0004), `JOURNAL_DEV`(0x0008, standalone journal device detection + paired-open external-journal replay with UUID/block-size validation), `META_BG`(0x0010), `EXTENTS`(0x0040), `64BIT`(0x0080), `MMP`(0x0100, validated read-side), `FLEX_BG`(0x0200), `EA_INODE`(0x0400), `CSUM_SEED`(0x2000), `LARGEDIR`(0x4000), `INLINE_DATA`(0x8000), `ENCRYPT`(0x10000, nokey mode — encrypted names shown as raw bytes), `CASEFOLD`(0x20000, case-insensitive directory lookup via Unicode lowercase).
 Ignored: `DIRDATA`(0x1000).
 REJECTED: (none — all known incompat features are accepted at mount time).
 
@@ -4629,23 +4629,21 @@ refinement work, but casefold directories are no longer globally excluded.
 
 ### 15.15 Fast Commit
 
-**Partially implemented.** `COMPAT_FAST_COMMIT` (0x0400). FrankenFS now has a
-parser-side fast-commit replay surface in `ffs-journal` that decodes the FC tag
-stream, emits ordered logical operations only after a committed `TAIL`, and
-forces fallback when the FC stream is truncated or incomplete. Deterministic
-parser corpus coverage lives under `tests/fixtures/golden/ext4_fast_commit_*.json`
-and `crates/ffs-journal/tests/ext4_fast_commit_corpus.rs`. `OpenFs` also
-collects mount-time fast-commit evidence from internal JBD2 journals that
-advertise `s_num_fc_blocks`, exposing the parsed tail stream via
-`ext4_fast_commit_replay()` with synthetic crash-image coverage for both clean
-replay and truncated fallback cases.
+**Implemented (bounded contract).** `COMPAT_FAST_COMMIT` (0x0400). FrankenFS
+parses ext4 fast-commit tag streams in `ffs-journal`, buffers ordered logical
+operations until a committed `TAIL`, and forces fallback when the FC stream is
+truncated or incomplete. `OpenFs` collects mount-time fast-commit evidence from
+JBD2 journals that advertise `s_num_fc_blocks` and processes committed FC
+operations during ext4 open/recovery after ordinary JBD2 replay.
 
-The remaining gap is mount-time integration: extracting the FC region from the
-journal device and applying the parsed operations during ext4 open/recovery is
-still tracked work. Until that wiring lands, FrankenFS relies on traditional
-JBD2 replay for the last fully consistent state, and the fast-commit support
-present today should be understood as parser/evidence capability rather than
-end-to-end mount recovery parity.
+The supported contract is deliberately narrow and matches the current parity
+matrix: Create/Link/Unlink/AddRange/DelRange operations are applied as
+observational metadata evidence after JBD2 has already provided the
+authoritative block-level recovery, and `InodeUpdate` verifies that the target
+inode is readable. Truncated or incomplete FC streams deterministically fall
+back to JBD2-only replay. FrankenFS therefore no longer treats fast commit as a
+parser-only feature, but it also does not claim a separate FC-only recovery
+engine independent of JBD2 replay.
 
 ### 15.16 Bigalloc (Cluster-Based Allocation)
 
@@ -4669,15 +4667,24 @@ is currently conservative: clean MMP state mounts, unsafe states are rejected.
 
 ### 15.18 Compression
 
-**Partially implemented.** `INCOMPAT_COMPRESSION` (0x0001). An early, largely
-unfinished ext2 extension for per-file transparent compression. Never completed
-or widely deployed in ext4. FrankenFS now accepts the filesystem-level flag at
-mount time so mixed-feature images remain inspectable, but still rejects
-individual compressed inodes at read time with an explicit
-`UnsupportedFeature` error because the compressed payload format itself is not
-implemented. Block-level compression remains incompatible with FrankenFS's
-per-block MVCC versioning because compressed block boundaries do not align with
-logical block boundaries.
+**In scope (tracked V1 compatibility contract).** `INCOMPAT_COMPRESSION`
+(0x0001). For ext4's historical e2compr path, FrankenFS accepts the
+filesystem-level flag and supports compressed inode read/write behavior for the
+implemented cluster formats. The ext4 read path detects compressed clusters via
+`EXT4_COMPRBLK_FL` plus the `0xFFFFFFFF` sentinel block pointer, parses the
+16-byte cluster header (`0x8EC7` magic, method, holemap, `ulen`, `clen`), and
+decompresses gzip/LZO payloads before holemap-based block reconstruction. The
+write path performs cluster-aligned compression, computes the Adler-32 checksum,
+manages holemaps and sentinel pointers, and deterministically falls back to an
+uncompressed cluster rewrite when compression does not help.
+
+This support is intentionally scoped to the e2compr formats currently
+implemented in code: gzip, LZO, and the passthrough "none" modes used by the
+legacy method table. Rare legacy codecs such as lzv1, lzrw3a, and bzip2 remain
+deterministically rejected as unsupported. The canonical parity claim is
+therefore no longer "mount accepts but inode reads fail"; instead, the tracked
+V1 contract is implemented ext4 e2compr read/write compatibility with explicit
+rejection for unimplemented rare codecs.
 
 ---
 ## 16. Implementation Phases

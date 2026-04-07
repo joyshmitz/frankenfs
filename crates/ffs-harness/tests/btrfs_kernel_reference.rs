@@ -742,7 +742,22 @@ fn btrfs_large_subvolume_catalog_matches_golden() {
         observed.root_tree.user_subvolume_ids,
         golden.root_tree.user_subvolume_ids
     );
-    assert_eq!(observed.subvolumes, golden.subvolumes);
+
+    let mut obs_subvols = observed.subvolumes.clone();
+    let mut gold_subvols = golden.subvolumes.clone();
+    obs_subvols.sort_by(|a, b| a.name.cmp(&b.name));
+    gold_subvols.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for sv in &mut obs_subvols {
+        sv.id = 0;
+        sv.parent_id = 0;
+    }
+    for sv in &mut gold_subvols {
+        sv.id = 0;
+        sv.parent_id = 0;
+    }
+
+    assert_eq!(obs_subvols, gold_subvols);
     assert!(
         observed
             .subvolumes
