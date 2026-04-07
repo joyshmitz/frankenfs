@@ -743,8 +743,8 @@ fn btrfs_large_subvolume_catalog_matches_golden() {
         golden.root_tree.user_subvolume_ids
     );
 
-    let mut obs_subvols = observed.subvolumes.clone();
-    let mut gold_subvols = golden.subvolumes.clone();
+    let mut obs_subvols = observed.subvolumes;
+    let mut gold_subvols = golden.subvolumes;
     obs_subvols.sort_by(|a, b| a.name.cmp(&b.name));
     gold_subvols.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -759,8 +759,7 @@ fn btrfs_large_subvolume_catalog_matches_golden() {
 
     assert_eq!(obs_subvols, gold_subvols);
     assert!(
-        observed
-            .subvolumes
+        obs_subvols
             .iter()
             .any(|subvolume| subvolume.read_only),
         "expected at least one read-only subvolume"
