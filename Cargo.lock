@@ -767,8 +767,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "asupersync",
+ "blake3",
  "criterion",
  "ffs-block",
+ "ffs-btrfs",
  "ffs-core",
  "ffs-error",
  "ffs-fuse",
