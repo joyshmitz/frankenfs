@@ -56,3 +56,13 @@ doc = false
 name = "fuzz_extent_tree"
 path = "fuzz_targets/fuzz_extent_tree.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_btrfs_chunk_mapping"
+path = "fuzz_targets/fuzz_btrfs_chunk_mapping.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ext4_checksums"
+path = "fuzz_targets/fuzz_ext4_checksums.rs"
+doc = false
