@@ -267,12 +267,10 @@ impl ShardedMvccStore {
 
                 // Under Strict policy, any conflict is an immediate abort.
                 if effective == ConflictPolicy::Strict {
-                    self.contention_metrics.write().record_commit(
-                        self.adaptive_config.ema_alpha,
-                        true,
-                        false,
-                        true,
-                    );
+                    let mut cm = self.contention_metrics.write();
+                    cm.record_commit(self.adaptive_config.ema_alpha, true, false, true);
+                    cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
+                    drop(cm);
                     return Err(CommitError::Conflict {
                         block,
                         snapshot: txn.snapshot().high,
@@ -292,12 +290,10 @@ impl ShardedMvccStore {
                         "{merge_log_event}"
                     );
                 } else {
-                    self.contention_metrics.write().record_commit(
-                        self.adaptive_config.ema_alpha,
-                        true,
-                        false,
-                        true,
-                    );
+                    let mut cm = self.contention_metrics.write();
+                    cm.record_commit(self.adaptive_config.ema_alpha, true, false, true);
+                    cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
+                    drop(cm);
                     return Err(CommitError::Conflict {
                         block,
                         snapshot: txn.snapshot().high,
@@ -308,12 +304,15 @@ impl ShardedMvccStore {
         }
 
         // Record successful preflight (no abort).
-        self.contention_metrics.write().record_commit(
+        let mut cm = self.contention_metrics.write();
+        cm.record_commit(
             self.adaptive_config.ema_alpha,
             had_conflict,
             merge_succeeded,
             false,
         );
+        cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
+        drop(cm);
         Ok(())
     }
 
@@ -867,6 +866,93 @@ mod tests {
             let seq = store.commit(txn).expect("commit");
             assert_eq!(seq, CommitSeq(i));
         }
+    }
+
+    #[test]
+    fn adaptive_conflict_free_commit_sets_strict_incumbent() {
+        let mut store = make_store(4);
+        store.adaptive_config = AdaptivePolicyConfig {
+            warmup_commits: 0,
+            ..AdaptivePolicyConfig::default()
+        };
+        store.set_conflict_policy(ConflictPolicy::Adaptive);
+
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(1), vec![0xAA; 8]);
+        store.commit(txn).expect("commit");
+
+        let metrics = store.contention_metrics();
+        assert_eq!(metrics.last_selected, Some(ConflictPolicy::Strict));
+        assert_eq!(store.effective_policy(), ConflictPolicy::Strict);
+    }
+
+    #[test]
+    fn adaptive_hysteresis_blocks_non_convincing_flip_in_sharded_store() {
+        let mut store = make_store(4);
+        store.adaptive_config = AdaptivePolicyConfig {
+            warmup_commits: 0,
+            hysteresis_ratio: 1.5,
+            ..AdaptivePolicyConfig::default()
+        };
+        store.set_conflict_policy(ConflictPolicy::Adaptive);
+        *store.contention_metrics.write() = ContentionMetrics {
+            conflict_rate: 0.0012,
+            merge_success_rate: 0.95,
+            abort_rate: 0.001,
+            total_commits: 100,
+            total_conflicts: 1,
+            total_merges: 1,
+            total_aborts: 0,
+            last_selected: Some(ConflictPolicy::Strict),
+        };
+
+        assert_eq!(store.effective_policy(), ConflictPolicy::Strict);
+    }
+
+    #[test]
+    fn adaptive_hysteresis_allows_convincing_flip_in_sharded_store() {
+        let mut store = make_store(4);
+        store.adaptive_config = AdaptivePolicyConfig {
+            warmup_commits: 0,
+            hysteresis_ratio: 1.5,
+            ..AdaptivePolicyConfig::default()
+        };
+        store.set_conflict_policy(ConflictPolicy::Adaptive);
+        *store.contention_metrics.write() = ContentionMetrics {
+            conflict_rate: 0.001,
+            merge_success_rate: 0.0,
+            abort_rate: 0.001,
+            total_commits: 100,
+            total_conflicts: 1,
+            total_merges: 0,
+            total_aborts: 0,
+            last_selected: Some(ConflictPolicy::SafeMerge),
+        };
+
+        assert_eq!(store.effective_policy(), ConflictPolicy::Strict);
+    }
+
+    #[test]
+    fn adaptive_hysteresis_disabled_switches_on_any_improvement_in_sharded_store() {
+        let mut store = make_store(4);
+        store.adaptive_config = AdaptivePolicyConfig {
+            warmup_commits: 0,
+            hysteresis_ratio: 1.0,
+            ..AdaptivePolicyConfig::default()
+        };
+        store.set_conflict_policy(ConflictPolicy::Adaptive);
+        *store.contention_metrics.write() = ContentionMetrics {
+            conflict_rate: 0.0012,
+            merge_success_rate: 0.95,
+            abort_rate: 0.001,
+            total_commits: 100,
+            total_conflicts: 1,
+            total_merges: 1,
+            total_aborts: 0,
+            last_selected: Some(ConflictPolicy::Strict),
+        };
+
+        assert_eq!(store.effective_policy(), ConflictPolicy::SafeMerge);
     }
 
     #[test]

@@ -127,10 +127,25 @@ impl MergeProof {
             Self::Unsafe | Self::DisjointBlocks => None,
             Self::AppendOnly { base_len } => {
                 if *base_len > base.len() || *base_len > latest.len() || *base_len > staged.len() {
+                    warn!(
+                        target: "ffs::mvcc::merge",
+                        proof = "AppendOnly",
+                        base_len = *base_len,
+                        actual_base = base.len(),
+                        actual_latest = latest.len(),
+                        actual_staged = staged.len(),
+                        "merge_proof_rejected: base_len exceeds buffer size"
+                    );
                     return None;
                 }
                 let prefix = &base[..*base_len];
                 if latest[..*base_len] != *prefix || staged[..*base_len] != *prefix {
+                    warn!(
+                        target: "ffs::mvcc::merge",
+                        proof = "AppendOnly",
+                        base_len = *base_len,
+                        "merge_proof_rejected: prefix mismatch (base region was modified)"
+                    );
                     return None;
                 }
                 let mut merged = latest.to_vec();
@@ -140,9 +155,21 @@ impl MergeProof {
             Self::IndependentKeys { touched_ranges }
             | Self::NonOverlappingExtents { touched_ranges }
             | Self::TimestampOnlyInode { touched_ranges } => {
-                merge_non_overlapping_ranges(touched_ranges, base, latest, staged)
+                merge_non_overlapping_ranges(touched_ranges, base, latest, staged, self)
             }
         }
+    }
+}
+
+/// Extract the variant name from a `MergeProof` for diagnostic logging.
+fn merge_proof_variant_name(proof: &MergeProof) -> &'static str {
+    match proof {
+        MergeProof::Unsafe => "Unsafe",
+        MergeProof::DisjointBlocks => "DisjointBlocks",
+        MergeProof::AppendOnly { .. } => "AppendOnly",
+        MergeProof::IndependentKeys { .. } => "IndependentKeys",
+        MergeProof::NonOverlappingExtents { .. } => "NonOverlappingExtents",
+        MergeProof::TimestampOnlyInode { .. } => "TimestampOnlyInode",
     }
 }
 
@@ -151,17 +178,41 @@ fn merge_non_overlapping_ranges(
     base: &[u8],
     latest: &[u8],
     staged: &[u8],
+    proof: &MergeProof,
 ) -> Option<Vec<u8>> {
+    let variant = merge_proof_variant_name(proof);
     if latest.len() != base.len() || staged.len() != base.len() {
+        warn!(
+            target: "ffs::mvcc::merge",
+            proof_variant = %variant,
+            base_len = base.len(),
+            latest_len = latest.len(),
+            staged_len = staged.len(),
+            "merge_proof_rejected: buffer length mismatch"
+        );
         return None;
     }
     if !ranges_are_pairwise_disjoint(touched_ranges) {
+        warn!(
+            target: "ffs::mvcc::merge",
+            proof_variant = %variant,
+            range_count = touched_ranges.len(),
+            "merge_proof_rejected: touched ranges overlap"
+        );
         return None;
     }
 
     let mut expected_staged = base.to_vec();
     for range in touched_ranges {
         if range.end() > base.len() {
+            warn!(
+                target: "ffs::mvcc::merge",
+                proof_variant = %variant,
+                range_start = range.start,
+                range_end = range.end(),
+                base_len = base.len(),
+                "merge_proof_rejected: range exceeds block size"
+            );
             return None;
         }
         expected_staged[range.start..range.end()]
@@ -171,13 +222,26 @@ fn merge_non_overlapping_ranges(
     // Strict validation: if the staged block modified ANYTHING outside
     // the declared touched_ranges, the proof is invalid and we must abort.
     if expected_staged != staged {
+        warn!(
+            target: "ffs::mvcc::merge",
+            proof_variant = %variant,
+            range_count = touched_ranges.len(),
+            "merge_proof_rejected: staged block modified bytes outside declared touched_ranges"
+        );
         return None;
     }
 
     let mut merged = latest.to_vec();
     for range in touched_ranges {
         if latest[range.start..range.end()] != base[range.start..range.end()] {
-            return None; // Latest modified the same range, unresolvable conflict
+            warn!(
+                target: "ffs::mvcc::merge",
+                proof_variant = %variant,
+                range_start = range.start,
+                range_end = range.end(),
+                "merge_proof_rejected: latest version modified the same byte range (true conflict)"
+            );
+            return None;
         }
         merged[range.start..range.end()].copy_from_slice(&staged[range.start..range.end()]);
     }
@@ -493,6 +557,14 @@ pub struct AdaptivePolicyConfig {
     /// Below this, the policy falls back to `SafeMerge`.
     /// Default: 20.
     pub warmup_commits: u64,
+    /// Hysteresis ratio for policy switching.  The adaptive selector will only
+    /// switch away from the *current* policy when the alternative's expected
+    /// loss is better by at least this multiplicative factor.
+    ///
+    /// A value of 1.0 disables hysteresis (switch on any improvement).
+    /// Default: 1.5 — require a 50 % improvement before switching, preventing
+    /// rapid oscillation near the decision boundary.
+    pub hysteresis_ratio: f64,
 }
 
 impl Default for AdaptivePolicyConfig {
@@ -503,6 +575,7 @@ impl Default for AdaptivePolicyConfig {
             base_corruption_probability: 1e-6,
             ema_alpha: 0.1,
             warmup_commits: 20,
+            hysteresis_ratio: 1.5,
         }
     }
 }
@@ -527,6 +600,9 @@ pub struct ContentionMetrics {
     pub total_merges: u64,
     /// Total aborts observed.
     pub total_aborts: u64,
+    /// The last policy selected by the adaptive selector, used for hysteresis.
+    /// `None` until the first adaptive selection after warmup.
+    pub last_selected: Option<ConflictPolicy>,
 }
 
 impl Default for ContentionMetrics {
@@ -539,6 +615,7 @@ impl Default for ContentionMetrics {
             total_conflicts: 0,
             total_merges: 0,
             total_aborts: 0,
+            last_selected: None,
         }
     }
 }
@@ -599,10 +676,15 @@ impl ContentionMetrics {
         corruption_loss + residual_abort_rate * config.abort_cost
     }
 
-    /// Select the conflict resolution strategy with the lowest expected loss.
+    /// Select the conflict resolution strategy with the lowest expected loss,
+    /// applying hysteresis to prevent rapid oscillation near the decision boundary.
     ///
-    /// Returns `Strict` if the expected loss of strict FCW is lower than safe-merge,
-    /// or if we haven't observed enough commits yet (warmup period).
+    /// The selector only switches away from the current policy when the
+    /// alternative's expected loss is better by at least
+    /// [`AdaptivePolicyConfig::hysteresis_ratio`].  This prevents limit-cycle
+    /// oscillation when the two policies have similar expected loss.
+    ///
+    /// Returns `SafeMerge` during the warmup period.
     #[must_use]
     pub fn select_policy(&self, config: &AdaptivePolicyConfig) -> ConflictPolicy {
         if self.total_commits < config.warmup_commits {
@@ -610,6 +692,32 @@ impl ContentionMetrics {
         }
         let loss_strict = self.expected_loss_strict(config);
         let loss_merge = self.expected_loss_safe_merge(config);
+
+        // Apply hysteresis: the *challenger* must beat the *incumbent* by the
+        // hysteresis ratio.  On the very first selection after warmup
+        // (`last_selected` is `None`), no hysteresis is applied.
+        let raw_winner = if loss_strict <= loss_merge {
+            ConflictPolicy::Strict
+        } else {
+            ConflictPolicy::SafeMerge
+        };
+
+        let selected = match self.last_selected {
+            Some(incumbent) if incumbent != raw_winner => {
+                // Challenger must beat incumbent by the hysteresis ratio.
+                let (incumbent_loss, challenger_loss) = if incumbent == ConflictPolicy::Strict {
+                    (loss_strict, loss_merge)
+                } else {
+                    (loss_merge, loss_strict)
+                };
+                if challenger_loss * config.hysteresis_ratio < incumbent_loss {
+                    raw_winner // Challenger wins convincingly
+                } else {
+                    incumbent // Stick with incumbent
+                }
+            }
+            _ => raw_winner, // First selection or same policy: no hysteresis needed
+        };
 
         trace!(
             target: "ffs::mvcc::adaptive",
@@ -619,14 +727,14 @@ impl ContentionMetrics {
             merge_success_rate = self.merge_success_rate,
             abort_rate = self.abort_rate,
             total_commits = self.total_commits,
+            hysteresis_ratio = config.hysteresis_ratio,
+            ?selected,
+            ?raw_winner,
+            incumbent = ?self.last_selected,
             "adaptive_policy_selection"
         );
 
-        if loss_strict <= loss_merge {
-            ConflictPolicy::Strict
-        } else {
-            ConflictPolicy::SafeMerge
-        }
+        selected
     }
 }
 
@@ -1744,11 +1852,7 @@ impl MvccStore {
 
     /// Extract the short variant name from a `MergeProof`'s debug representation.
     fn merge_proof_variant_name(proof: &MergeProof) -> String {
-        let debug = format!("{proof:?}");
-        debug
-            .split_once(' ')
-            .or_else(|| debug.split_once('{'))
-            .map_or_else(|| debug.clone(), |(name, _)| name.to_owned())
+        merge_proof_variant_name(proof).to_owned()
     }
 
     /// Handle a single block-level conflict during FCW preflight.
@@ -1867,6 +1971,8 @@ impl MvccStore {
                             false,
                             true,
                         );
+                        self.contention_metrics.last_selected =
+                            Some(self.contention_metrics.select_policy(&self.adaptive_config));
                         self.maybe_emit_policy_switch(prev_effective);
                         return Err(err);
                     }
@@ -1881,6 +1987,8 @@ impl MvccStore {
                         merge_succeeded,
                         true,
                     );
+                    self.contention_metrics.last_selected =
+                        Some(self.contention_metrics.select_policy(&self.adaptive_config));
                     return Err(err);
                 }
             }
@@ -1893,6 +2001,9 @@ impl MvccStore {
             merge_succeeded,
             false,
         );
+        // Update hysteresis state so the next select_policy call has a stable incumbent.
+        self.contention_metrics.last_selected =
+            Some(self.contention_metrics.select_policy(&self.adaptive_config));
 
         // mvcc_merge_applied — emit after successful merge commit preflight.
         if merged_block_count > 0 {
@@ -8979,6 +9090,7 @@ mod tests {
             total_conflicts: 80,
             total_merges: 76,
             total_aborts: 4,
+            last_selected: None,
         };
 
         // Under high contention with good merge success, SafeMerge should win
@@ -9003,6 +9115,7 @@ mod tests {
             total_conflicts: 10,
             total_merges: 0,
             total_aborts: 10,
+            last_selected: None,
         };
 
         // When corruption risk is high and merges don't help, strict is safer.
@@ -9021,6 +9134,70 @@ mod tests {
             total_commits: 5, // Below warmup threshold.
             ..ContentionMetrics::default()
         };
+        assert_eq!(m.select_policy(&config), ConflictPolicy::SafeMerge);
+    }
+
+    #[test]
+    fn adaptive_hysteresis_prevents_oscillation() {
+        let config = AdaptivePolicyConfig {
+            warmup_commits: 0,
+            hysteresis_ratio: 1.5,
+            ..AdaptivePolicyConfig::default()
+        };
+
+        // Step 1: First selection (no incumbent) — SafeMerge clearly wins.
+        let mut m = ContentionMetrics {
+            conflict_rate: 0.8,
+            merge_success_rate: 0.95,
+            abort_rate: 0.04,
+            total_commits: 100,
+            total_conflicts: 80,
+            total_merges: 76,
+            total_aborts: 4,
+            last_selected: None,
+        };
+        assert_eq!(m.select_policy(&config), ConflictPolicy::SafeMerge);
+        m.last_selected = Some(ConflictPolicy::SafeMerge);
+
+        // Step 2: Strict is convincingly better (2x) — hysteresis allows switch.
+        // Strict loss  = 0.001 * 1.0 = 0.001
+        // SafeMerge loss = 1e-6 * 1000 + 0.001 * 1.0 = 0.002
+        // challenger(Strict=0.001) * 1.5 = 0.0015 < incumbent(SafeMerge=0.002) ✓
+        m.conflict_rate = 0.001;
+        m.merge_success_rate = 0.0;
+        assert_eq!(m.select_policy(&config), ConflictPolicy::Strict);
+        m.last_selected = Some(ConflictPolicy::Strict);
+
+        // Step 3: SafeMerge is raw winner but NOT convincingly better — hysteresis blocks.
+        // Strict loss  = 0.0012
+        // SafeMerge loss = 0.001 + 0.0012 * 0.05 = 0.00106
+        // SafeMerge wins raw (0.00106 < 0.0012).
+        // But: challenger(0.00106) * 1.5 = 0.00159 > incumbent(0.0012) — not convincing.
+        m.conflict_rate = 0.0012;
+        m.merge_success_rate = 0.95;
+        assert_eq!(m.select_policy(&config), ConflictPolicy::Strict);
+    }
+
+    #[test]
+    fn adaptive_hysteresis_disabled_at_ratio_one() {
+        let config = AdaptivePolicyConfig {
+            warmup_commits: 0,
+            hysteresis_ratio: 1.0, // Disabled.
+            ..AdaptivePolicyConfig::default()
+        };
+        let m = ContentionMetrics {
+            conflict_rate: 0.0012,
+            merge_success_rate: 0.95,
+            abort_rate: 0.001,
+            total_commits: 100,
+            total_conflicts: 1,
+            total_merges: 1,
+            total_aborts: 0,
+            // Incumbent is Strict; SafeMerge is raw winner by a tiny margin.
+            last_selected: Some(ConflictPolicy::Strict),
+        };
+        // With ratio=1.0 (no hysteresis), any improvement triggers switch.
+        // Strict loss = 0.0012, SafeMerge loss = 0.001 + tiny = 0.00106
         assert_eq!(m.select_policy(&config), ConflictPolicy::SafeMerge);
     }
 
