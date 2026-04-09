@@ -2584,7 +2584,7 @@ impl BtrfsExtentAllocator {
             BlockGroupState {
                 start,
                 item,
-                alloc_offset: 0,
+                alloc_offset: item.used_bytes,
             },
         );
     }

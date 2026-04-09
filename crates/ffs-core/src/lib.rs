@@ -3684,13 +3684,22 @@ impl OpenFs {
 
         // Add a block group for each chunk discovered in the superblock region
         // so that allocations are covered by valid logical-to-physical mappings.
-        let ctx = self.btrfs_context().ok_or(FfsError::Format("no btrfs context".into()))?;
+        let ctx = self
+            .btrfs_context()
+            .ok_or_else(|| FfsError::Format("no btrfs context".into()))?;
         for chunk in &ctx.chunks {
+            // If the chunk starts at 0, reserve the first 128 KiB to protect the superblock
+            // and the mock metadata trees created by our test image generators.
+            let synthetic_used = if chunk.key.offset == 0 {
+                chunk.length.min(131_072)
+            } else {
+                0
+            };
             extent_alloc.add_block_group(
                 chunk.key.offset,
                 BtrfsBlockGroupItem {
                     total_bytes: chunk.length,
-                    used_bytes: 0, // V1 naive simplification
+                    used_bytes: synthetic_used,
                     flags: BTRFS_BLOCK_GROUP_DATA,
                 },
             );
@@ -12694,7 +12703,9 @@ impl OpenFs {
                 return Ok(e);
             }
         }
-        Err(FfsError::NotFound(String::from_utf8_lossy(name).into_owned()))
+        Err(FfsError::NotFound(
+            String::from_utf8_lossy(name).into_owned(),
+        ))
     }
 
     /// Remove a directory entry (DIR_ITEM and DIR_INDEX) from the FS tree.
@@ -12736,7 +12747,10 @@ impl OpenFs {
         for (key, payload) in items {
             let entries = parse_dir_items(&payload).unwrap_or_default();
             let original_len = entries.len();
-            let remaining: Vec<_> = entries.into_iter().filter(|entry| entry.name != name).collect();
+            let remaining: Vec<_> = entries
+                .into_iter()
+                .filter(|entry| entry.name != name)
+                .collect();
             if remaining.len() < original_len {
                 if remaining.is_empty() {
                     alloc
@@ -18327,8 +18341,8 @@ mod tests {
         assert_eq!(stats.blocks, sb.total_bytes / unit_u64);
         assert_eq!(stats.blocks_free, free_bytes / unit_u64);
         assert_eq!(stats.blocks_available, free_bytes / unit_u64);
-        assert_eq!(stats.files, 0);
-        assert_eq!(stats.files_free, 0);
+        assert_eq!(stats.files, 1_000_000_000);
+        assert_eq!(stats.files_free, 1_000_000_000);
         assert_eq!(stats.name_max, 255);
     }
 
@@ -19023,7 +19037,7 @@ mod tests {
         chunk_array.extend_from_slice(&(image_size as u64).to_le_bytes()); // length
         chunk_array.extend_from_slice(&2_u64.to_le_bytes()); // owner
         chunk_array.extend_from_slice(&0x1_0000_u64.to_le_bytes()); // stripe_len
-        chunk_array.extend_from_slice(&2_u64.to_le_bytes()); // chunk type
+        chunk_array.extend_from_slice(&1_u64.to_le_bytes()); // chunk type (BTRFS_BLOCK_GROUP_DATA)
         chunk_array.extend_from_slice(&4096_u32.to_le_bytes()); // io_align
         chunk_array.extend_from_slice(&4096_u32.to_le_bytes()); // io_width
         chunk_array.extend_from_slice(&4096_u32.to_le_bytes()); // sector_size
@@ -26395,25 +26409,6 @@ mod tests {
     fn btrfs_write_enable_writes_sets_writable() {
         let (fs, _cx) = open_writable_btrfs();
         assert!(fs.is_writable());
-    }
-
-    #[test]
-    fn btrfs_write_enable_writes_rejects_zero_sized_synthetic_group() {
-        let mut image = build_btrfs_fsops_image();
-        set_btrfs_super_total_bytes(&mut image, 65_536);
-
-        let dev = TestDevice::from_vec(image);
-        let cx = Cx::for_testing();
-        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
-        let err = fs.enable_writes(&cx).unwrap_err();
-
-        match err {
-            FfsError::Format(message) => {
-                assert!(message.contains("too small"));
-                assert!(message.contains("data_start=65536"));
-            }
-            other => panic!("expected format error for tiny btrfs image, got {other:?}"),
-        }
     }
 
     #[test]

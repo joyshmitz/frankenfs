@@ -2482,49 +2482,93 @@ pub fn parse_extent_tree(bytes: &[u8]) -> Result<(Ext4ExtentHeader, ExtentTree),
     }
 
     if header.depth == 0 {
-        let mut extents = Vec::with_capacity(entries_len);
-        for idx in 0..entries_len {
-            // entries_len is from u16 so idx*12 fits in usize, but be explicit.
-            let base = 12
-                + idx.checked_mul(12).ok_or(ParseError::InvalidField {
-                    field: "extent_entries",
-                    reason: "entry offset overflow",
-                })?;
-            let logical_block = read_le_u32(bytes, base)?;
-            let raw_len = read_le_u16(bytes, base + 4)?;
-            let start_hi = u64::from(read_le_u16(bytes, base + 6)?);
-            let start_lo = u64::from(read_le_u32(bytes, base + 8)?);
-            let physical_start = start_lo | (start_hi << 32);
-
-            extents.push(Ext4Extent {
-                logical_block,
-                raw_len,
-                physical_start,
-            });
-        }
-
-        Ok((header, ExtentTree::Leaf(extents)))
+        Ok((
+            header,
+            ExtentTree::Leaf(parse_extent_leaf(bytes, entries_len)?),
+        ))
     } else {
-        let mut indexes = Vec::with_capacity(entries_len);
-        for idx in 0..entries_len {
-            let base = 12
-                + idx.checked_mul(12).ok_or(ParseError::InvalidField {
-                    field: "extent_indexes",
-                    reason: "index offset overflow",
-                })?;
-            let logical_block = read_le_u32(bytes, base)?;
-            let leaf_lo = u64::from(read_le_u32(bytes, base + 4)?);
-            let leaf_hi = u64::from(read_le_u16(bytes, base + 8)?);
-            let leaf_block = leaf_lo | (leaf_hi << 32);
+        Ok((
+            header,
+            ExtentTree::Index(parse_extent_index(bytes, entries_len)?),
+        ))
+    }
+}
 
-            indexes.push(Ext4ExtentIndex {
-                logical_block,
-                leaf_block,
-            });
+/// Parse the leaf entries of an extent node.
+///
+/// Validates that extents are sorted by `logical_block` with no overlap.
+/// The on-disk ext4 format requires this invariant; downstream consumers
+/// (e.g. `ffs-btree::partition_point`) silently return wrong results when
+/// it is violated, which would cause silent data misreads from corrupted
+/// or crafted images.
+fn parse_extent_leaf(bytes: &[u8], entries_len: usize) -> Result<Vec<Ext4Extent>, ParseError> {
+    let mut extents: Vec<Ext4Extent> = Vec::with_capacity(entries_len);
+    for idx in 0..entries_len {
+        let base = 12
+            + idx.checked_mul(12).ok_or(ParseError::InvalidField {
+                field: "extent_entries",
+                reason: "entry offset overflow",
+            })?;
+        let logical_block = read_le_u32(bytes, base)?;
+        let raw_len = read_le_u16(bytes, base + 4)?;
+        let start_hi = u64::from(read_le_u16(bytes, base + 6)?);
+        let start_lo = u64::from(read_le_u32(bytes, base + 8)?);
+        let physical_start = start_lo | (start_hi << 32);
+
+        if let Some(prev) = extents.last() {
+            let prev_end = u64::from(prev.logical_block) + u64::from(prev.actual_len());
+            if u64::from(logical_block) < prev_end {
+                return Err(ParseError::InvalidField {
+                    field: "extent_entries",
+                    reason: "extents not sorted by logical_block or overlap",
+                });
+            }
         }
 
-        Ok((header, ExtentTree::Index(indexes)))
+        extents.push(Ext4Extent {
+            logical_block,
+            raw_len,
+            physical_start,
+        });
     }
+    Ok(extents)
+}
+
+/// Parse the index entries of an extent node.
+///
+/// Validates that index entries are strictly sorted by `logical_block`.
+/// See [`parse_extent_leaf`] for the rationale.
+fn parse_extent_index(
+    bytes: &[u8],
+    entries_len: usize,
+) -> Result<Vec<Ext4ExtentIndex>, ParseError> {
+    let mut indexes: Vec<Ext4ExtentIndex> = Vec::with_capacity(entries_len);
+    for idx in 0..entries_len {
+        let base = 12
+            + idx.checked_mul(12).ok_or(ParseError::InvalidField {
+                field: "extent_indexes",
+                reason: "index offset overflow",
+            })?;
+        let logical_block = read_le_u32(bytes, base)?;
+        let leaf_lo = u64::from(read_le_u32(bytes, base + 4)?);
+        let leaf_hi = u64::from(read_le_u16(bytes, base + 8)?);
+        let leaf_block = leaf_lo | (leaf_hi << 32);
+
+        if let Some(prev) = indexes.last() {
+            if logical_block <= prev.logical_block {
+                return Err(ParseError::InvalidField {
+                    field: "extent_indexes",
+                    reason: "index entries not strictly sorted by logical_block",
+                });
+            }
+        }
+
+        indexes.push(Ext4ExtentIndex {
+            logical_block,
+            leaf_block,
+        });
+    }
+    Ok(indexes)
 }
 
 pub fn parse_inode_extent_tree(
@@ -9356,13 +9400,19 @@ mod tests {
 
         /// Building a valid leaf extent tree and parsing it recovers
         /// header fields and all extent entries.
+        ///
+        /// The on-disk format requires extents to be sorted by `logical_block`
+        /// with non-overlapping ranges, so we deterministically build a
+        /// strictly-increasing sequence using the proptest gaps.
         #[test]
         fn ext4_proptest_extent_tree_leaf_roundtrip(
             n_entries in 0_u16..=10,
             max_entries in 10_u16..=20,
             generation in any::<u32>(),
-            logical_blocks in proptest::collection::vec(any::<u32>(), 10),
-            raw_lens in proptest::collection::vec(1_u16..=EXT_INIT_MAX_LEN, 10),
+            // Gaps between consecutive extents — keeps logical_blocks sorted
+            // and ranges non-overlapping by construction.
+            gaps in proptest::collection::vec(0_u32..=1024, 10),
+            raw_lens in proptest::collection::vec(1_u16..=128, 10),
             phys_starts in proptest::collection::vec(any::<u64>(), 10),
         ) {
             let entries = usize::from(n_entries);
@@ -9373,6 +9423,15 @@ mod tests {
             buf[4..6].copy_from_slice(&max_entries.to_le_bytes());
             buf[6..8].copy_from_slice(&0_u16.to_le_bytes());
             buf[8..12].copy_from_slice(&generation.to_le_bytes());
+            // Build sorted, non-overlapping logical_blocks: start at 0, then
+            // for each entry advance by `prev_actual_len + gap`.
+            let mut logical_blocks = Vec::with_capacity(entries);
+            let mut next_logical: u32 = 0;
+            for (raw_len, gap) in raw_lens.iter().zip(gaps.iter()).take(entries) {
+                logical_blocks.push(next_logical);
+                let advance = u32::from(*raw_len).saturating_add(*gap);
+                next_logical = next_logical.saturating_add(advance);
+            }
             for i in 0..entries {
                 let base = 12 + i * 12;
                 let ps = phys_starts[i] & 0x0000_FFFF_FFFF_FFFF;
@@ -9402,13 +9461,17 @@ mod tests {
 
         /// Building a valid index extent tree (depth > 0) and parsing it
         /// recovers the header and index entries.
+        ///
+        /// On-disk index entries must be strictly sorted by `logical_block`,
+        /// so we deterministically build a strictly-increasing sequence.
         #[test]
         fn ext4_proptest_extent_tree_index_roundtrip(
             n_entries in 0_u16..=10,
             max_entries in 10_u16..=20,
             depth in 1_u16..=5,
             generation in any::<u32>(),
-            logical_blocks in proptest::collection::vec(any::<u32>(), 10),
+            // Strictly-positive gaps so successive logical_blocks differ.
+            gaps in proptest::collection::vec(1_u32..=4096, 10),
             leaf_blocks in proptest::collection::vec(any::<u64>(), 10),
         ) {
             let entries = usize::from(n_entries);
@@ -9419,6 +9482,13 @@ mod tests {
             buf[4..6].copy_from_slice(&max_entries.to_le_bytes());
             buf[6..8].copy_from_slice(&depth.to_le_bytes());
             buf[8..12].copy_from_slice(&generation.to_le_bytes());
+            // Build a strictly-increasing logical_block sequence.
+            let mut logical_blocks = Vec::with_capacity(entries);
+            let mut next_logical: u32 = 0;
+            for &gap in gaps.iter().take(entries) {
+                logical_blocks.push(next_logical);
+                next_logical = next_logical.saturating_add(gap);
+            }
             for i in 0..entries {
                 let base = 12 + i * 12;
                 let leaf = leaf_blocks[i] & 0x0000_FFFF_FFFF_FFFF;
@@ -9440,6 +9510,85 @@ mod tests {
             } else {
                 prop_assert!(false, "expected Index extent tree, got Leaf");
             }
+        }
+
+        /// Unsorted leaf extents are always rejected.  This prevents silent
+        /// data misreads from corrupted images, since downstream consumers
+        /// (e.g. ffs-btree::partition_point) assume sorted ordering.
+        #[test]
+        fn ext4_proptest_extent_tree_unsorted_leaf_rejected(
+            first_logical in 100_u32..=10_000,
+            backslide in 1_u32..=99,
+        ) {
+            // Build a leaf with two extents where the second has a smaller
+            // logical_block than the first.
+            let n_entries: u16 = 2;
+            let mut buf = vec![0u8; 12 + 2 * 12];
+            buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+            buf[2..4].copy_from_slice(&n_entries.to_le_bytes());
+            buf[4..6].copy_from_slice(&n_entries.to_le_bytes());
+            buf[6..8].copy_from_slice(&0_u16.to_le_bytes());
+            // First extent at logical_block = first_logical, length 1.
+            buf[12..16].copy_from_slice(&first_logical.to_le_bytes());
+            buf[16..18].copy_from_slice(&1_u16.to_le_bytes());
+            // Second extent at first_logical - backslide (out of order).
+            let second_logical = first_logical - backslide;
+            buf[24..28].copy_from_slice(&second_logical.to_le_bytes());
+            buf[28..30].copy_from_slice(&1_u16.to_le_bytes());
+            prop_assert!(
+                parse_extent_tree(&buf).is_err(),
+                "unsorted leaf extents must be rejected"
+            );
+        }
+
+        /// Overlapping leaf extents are always rejected.  Two extents whose
+        /// logical ranges intersect would corrupt binary search lookups.
+        #[test]
+        fn ext4_proptest_extent_tree_overlapping_leaf_rejected(
+            first_logical in 0_u32..=10_000,
+            first_len in 4_u16..=100,
+            overlap in 1_u32..=3,
+        ) {
+            let n_entries: u16 = 2;
+            let mut buf = vec![0u8; 12 + 2 * 12];
+            buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+            buf[2..4].copy_from_slice(&n_entries.to_le_bytes());
+            buf[4..6].copy_from_slice(&n_entries.to_le_bytes());
+            buf[6..8].copy_from_slice(&0_u16.to_le_bytes());
+            // First extent: [first_logical, first_logical + first_len)
+            buf[12..16].copy_from_slice(&first_logical.to_le_bytes());
+            buf[16..18].copy_from_slice(&first_len.to_le_bytes());
+            // Second extent starts inside the first one.
+            let second_logical = first_logical + u32::from(first_len) - overlap;
+            buf[24..28].copy_from_slice(&second_logical.to_le_bytes());
+            buf[28..30].copy_from_slice(&1_u16.to_le_bytes());
+            prop_assert!(
+                parse_extent_tree(&buf).is_err(),
+                "overlapping leaf extents must be rejected"
+            );
+        }
+
+        /// Unsorted index entries are always rejected.
+        #[test]
+        fn ext4_proptest_extent_tree_unsorted_index_rejected(
+            first_logical in 100_u32..=10_000,
+            backslide in 0_u32..=99,
+        ) {
+            let n_entries: u16 = 2;
+            let depth: u16 = 1;
+            let mut buf = vec![0u8; 12 + 2 * 12];
+            buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+            buf[2..4].copy_from_slice(&n_entries.to_le_bytes());
+            buf[4..6].copy_from_slice(&n_entries.to_le_bytes());
+            buf[6..8].copy_from_slice(&depth.to_le_bytes());
+            buf[12..16].copy_from_slice(&first_logical.to_le_bytes());
+            // Index entries must be *strictly* increasing — equal also rejected.
+            let second_logical = first_logical - backslide;
+            buf[24..28].copy_from_slice(&second_logical.to_le_bytes());
+            prop_assert!(
+                parse_extent_tree(&buf).is_err(),
+                "unsorted or duplicate index entries must be rejected"
+            );
         }
 
         /// Extent entries > max_entries is always rejected.
