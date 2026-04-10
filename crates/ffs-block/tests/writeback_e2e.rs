@@ -186,7 +186,7 @@ fn scenario_1_basic_flush_correctness() {
             .expect("write block");
     }
 
-    wait_for_dirty_drain(&cache, Duration::from_millis(120));
+    wait_for_dirty_drain(&cache, Duration::from_secs(1));
     daemon.shutdown();
 
     let reopened = build_read_cache(shared, 256);

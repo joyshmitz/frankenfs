@@ -1597,7 +1597,9 @@ mod tests {
                 store.commit(txn).expect("commit before checkpoint");
             }
 
-            store.checkpoint(&ckpt_path).expect("checkpoint at commit 5");
+            store
+                .checkpoint(&ckpt_path)
+                .expect("checkpoint at commit 5");
 
             // Two more commits after the checkpoint
             for i in 6_u8..=7 {
@@ -1626,7 +1628,10 @@ mod tests {
                 .expect("reopen with checkpoint");
 
             let stats = store.wal_stats();
-            assert_eq!(stats.replayed_commits, 2, "WAL should replay commits 6 and 7");
+            assert_eq!(
+                stats.replayed_commits, 2,
+                "WAL should replay commits 6 and 7"
+            );
 
             let snap = store.current_snapshot();
             assert_eq!(snap.high, CommitSeq(7));

@@ -6494,10 +6494,11 @@ mod tests {
         let ti = ThrottleInjector::new(dev, config, 6);
         let cx = Cx::for_testing();
 
-        // First read: 5ms latency.
-        let start = Instant::now();
+        // First read: 5ms configured latency.
         let _ = ti.read_block(&cx, BlockNumber(0)).unwrap();
-        let t1 = start.elapsed();
+        let log = ti.throttle_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].delay, Duration::from_millis(5));
 
         // Progressive: increase latency to 15ms.
         ti.update_config(ThrottleConfig {
@@ -6505,14 +6506,10 @@ mod tests {
             ..Default::default()
         });
 
-        let start = Instant::now();
         let _ = ti.read_block(&cx, BlockNumber(0)).unwrap();
-        let t2 = start.elapsed();
-
-        assert!(
-            t2 > t1,
-            "second read should be slower after config update: t1={t1:?}, t2={t2:?}"
-        );
+        let log = ti.throttle_log();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[1].delay, Duration::from_millis(15));
     }
 
     #[test]
@@ -7498,8 +7495,8 @@ mod tests {
 
     #[test]
     fn flush_pin_token_default_is_noop() {
-        let token = FlushPinToken::default();
-        assert!(token.is_noop());
+        let flush_pin = FlushPinToken::default();
+        assert!(flush_pin.is_noop());
     }
 
     #[test]

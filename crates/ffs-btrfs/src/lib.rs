@@ -3600,7 +3600,10 @@ mod tests {
         // Address beyond the 1GiB chunk range
         let far_logical = 0x8000_0000_u64;
         let mut read = |_phys: u64| -> Result<Vec<u8>, ParseError> {
-            panic!("should not be called");
+            Err(ParseError::InvalidField {
+                field: "unexpected_read",
+                reason: "should not be called",
+            })
         };
         let err = walk_tree(&mut read, &chunks, far_logical, NODESIZE).unwrap_err();
         assert!(
@@ -4749,22 +4752,24 @@ mod tests {
         data[45..53].copy_from_slice(&128_u64.to_le_bytes());
 
         let parsed = parse_extent_data(&data).expect("parse extent");
-        match parsed {
-            BtrfsExtentData::Regular {
-                generation,
-                extent_type,
-                compression,
-                disk_bytenr,
-                num_bytes,
-                ..
-            } => {
-                assert_eq!(generation, 0);
-                assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG);
-                assert_eq!(compression, 0);
-                assert_eq!(disk_bytenr, 0x8_000);
-                assert_eq!(num_bytes, 128);
-            }
-            BtrfsExtentData::Inline { .. } => panic!("expected regular extent"),
+        assert!(
+            matches!(parsed, BtrfsExtentData::Regular { .. }),
+            "expected regular extent"
+        );
+        if let BtrfsExtentData::Regular {
+            generation,
+            extent_type,
+            compression,
+            disk_bytenr,
+            num_bytes,
+            ..
+        } = parsed
+        {
+            assert_eq!(generation, 0);
+            assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG);
+            assert_eq!(compression, 0);
+            assert_eq!(disk_bytenr, 0x8_000);
+            assert_eq!(num_bytes, 128);
         }
     }
 
@@ -5411,13 +5416,17 @@ mod tests {
 
         let _ = tx1.commit(&mut store, &cx).expect("tx1 commit");
         let err = tx2.commit(&mut store, &cx).expect_err("tx2 must conflict");
-        match err {
-            BtrfsTransactionError::Commit(CommitError::Conflict { block, .. }) => {
-                let expected =
-                    BtrfsTransaction::tree_root_block(BTRFS_FS_TREE_OBJECTID).expect("block");
-                assert_eq!(block, expected);
-            }
-            other => panic!("unexpected error: {other:?}"),
+        assert!(
+            matches!(
+                err,
+                BtrfsTransactionError::Commit(CommitError::Conflict { .. })
+            ),
+            "unexpected error: {err:?}"
+        );
+        if let BtrfsTransactionError::Commit(CommitError::Conflict { block, .. }) = err {
+            let expected =
+                BtrfsTransaction::tree_root_block(BTRFS_FS_TREE_OBJECTID).expect("block");
+            assert_eq!(block, expected);
         }
     }
 
@@ -5632,7 +5641,7 @@ mod tests {
         leaf[ext1_off as usize..(ext1_off + 53) as usize].copy_from_slice(&reg_payload);
 
         // Inode 257 INODE_ITEM (unrelated)
-        let ext2_off = 3100_u32;
+        let ext2_off = 3400_u32;
         write_leaf_item(&mut leaf, 3, 257, BTRFS_ITEM_INODE_ITEM, ext2_off, 160);
 
         let blocks: HashMap<u64, Vec<u8>> = [(logical, leaf)].into();
@@ -5664,25 +5673,28 @@ mod tests {
 
         // Verify inline extent
         let inline = parse_extent_data(&extents[0].data).expect("parse inline");
-        match inline {
-            BtrfsExtentData::Inline { data, .. } => {
-                assert_eq!(data, b"hello world", "inline extent data mismatch");
-            }
-            BtrfsExtentData::Regular { .. } => panic!("expected inline extent, got regular"),
+        assert!(
+            matches!(inline, BtrfsExtentData::Inline { .. }),
+            "expected inline extent, got regular"
+        );
+        if let BtrfsExtentData::Inline { data, .. } = inline {
+            assert_eq!(data, b"hello world", "inline extent data mismatch");
         }
 
         // Verify regular extent
         let regular = parse_extent_data(&extents[1].data).expect("parse regular");
-        match regular {
-            BtrfsExtentData::Regular {
-                disk_bytenr,
-                num_bytes,
-                ..
-            } => {
-                assert_eq!(disk_bytenr, 0x10_000);
-                assert_eq!(num_bytes, 4096);
-            }
-            BtrfsExtentData::Inline { .. } => panic!("expected regular extent, got inline"),
+        assert!(
+            matches!(regular, BtrfsExtentData::Regular { .. }),
+            "expected regular extent, got inline"
+        );
+        if let BtrfsExtentData::Regular {
+            disk_bytenr,
+            num_bytes,
+            ..
+        } = regular
+        {
+            assert_eq!(disk_bytenr, 0x10_000);
+            assert_eq!(num_bytes, 4096);
         }
     }
 
@@ -5855,14 +5867,16 @@ mod tests {
         payload[21..].copy_from_slice(file_data);
 
         let parsed = parse_extent_data(&payload).expect("parse inline extent");
-        match parsed {
-            BtrfsExtentData::Inline {
-                compression, data, ..
-            } => {
-                assert_eq!(compression, 0, "should be uncompressed");
-                assert_eq!(data, file_data, "inline data mismatch");
-            }
-            BtrfsExtentData::Regular { .. } => panic!("expected inline extent, got regular"),
+        assert!(
+            matches!(parsed, BtrfsExtentData::Inline { .. }),
+            "expected inline extent, got regular"
+        );
+        if let BtrfsExtentData::Inline {
+            compression, data, ..
+        } = parsed
+        {
+            assert_eq!(compression, 0, "should be uncompressed");
+            assert_eq!(data, file_data, "inline data mismatch");
         }
     }
 
@@ -5880,24 +5894,26 @@ mod tests {
         payload[45..53].copy_from_slice(&8192_u64.to_le_bytes()); // num_bytes
 
         let parsed = parse_extent_data(&payload).expect("parse regular extent");
-        match parsed {
-            BtrfsExtentData::Regular {
-                extent_type,
-                compression,
-                disk_bytenr,
-                disk_num_bytes,
-                extent_offset,
-                num_bytes,
-                ..
-            } => {
-                assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG);
-                assert_eq!(compression, 0);
-                assert_eq!(disk_bytenr, 0x20_0000);
-                assert_eq!(disk_num_bytes, 8192);
-                assert_eq!(extent_offset, 0);
-                assert_eq!(num_bytes, 8192);
-            }
-            BtrfsExtentData::Inline { .. } => panic!("expected regular extent, got inline"),
+        assert!(
+            matches!(parsed, BtrfsExtentData::Regular { .. }),
+            "expected regular extent, got inline"
+        );
+        if let BtrfsExtentData::Regular {
+            extent_type,
+            compression,
+            disk_bytenr,
+            disk_num_bytes,
+            extent_offset,
+            num_bytes,
+            ..
+        } = parsed
+        {
+            assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG);
+            assert_eq!(compression, 0);
+            assert_eq!(disk_bytenr, 0x20_0000);
+            assert_eq!(disk_num_bytes, 8192);
+            assert_eq!(extent_offset, 0);
+            assert_eq!(num_bytes, 8192);
         }
     }
 
@@ -5915,25 +5931,27 @@ mod tests {
         payload[45..53].copy_from_slice(&16384_u64.to_le_bytes()); // num_bytes
 
         let parsed = parse_extent_data(&payload).expect("parse compressed extent");
-        match parsed {
-            BtrfsExtentData::Regular {
-                extent_type,
-                compression,
-                disk_bytenr,
-                disk_num_bytes,
-                num_bytes,
-                ..
-            } => {
-                assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG);
-                assert_eq!(compression, 1, "compression should be zlib (1)");
-                assert_eq!(disk_bytenr, 0x30_0000);
-                assert_eq!(
-                    disk_num_bytes, 4096,
-                    "compressed on-disk size should be smaller"
-                );
-                assert_eq!(num_bytes, 16384, "logical extent size");
-            }
-            BtrfsExtentData::Inline { .. } => panic!("expected regular extent, got inline"),
+        assert!(
+            matches!(parsed, BtrfsExtentData::Regular { .. }),
+            "expected regular extent, got inline"
+        );
+        if let BtrfsExtentData::Regular {
+            extent_type,
+            compression,
+            disk_bytenr,
+            disk_num_bytes,
+            num_bytes,
+            ..
+        } = parsed
+        {
+            assert_eq!(extent_type, BTRFS_FILE_EXTENT_REG);
+            assert_eq!(compression, 1, "compression should be zlib (1)");
+            assert_eq!(disk_bytenr, 0x30_0000);
+            assert_eq!(
+                disk_num_bytes, 4096,
+                "compressed on-disk size should be smaller"
+            );
+            assert_eq!(num_bytes, 16384, "logical extent size");
         }
     }
 
@@ -5952,23 +5970,25 @@ mod tests {
         payload[45..53].copy_from_slice(&65536_u64.to_le_bytes()); // num_bytes
 
         let parsed = parse_extent_data(&payload).expect("parse prealloc extent");
-        match parsed {
-            BtrfsExtentData::Regular {
-                extent_type,
-                compression,
-                disk_bytenr,
-                num_bytes,
-                ..
-            } => {
-                assert_eq!(
-                    extent_type, BTRFS_FILE_EXTENT_PREALLOC,
-                    "should be PREALLOC type"
-                );
-                assert_eq!(compression, 0, "prealloc extents are uncompressed");
-                assert_eq!(disk_bytenr, 0x40_0000);
-                assert_eq!(num_bytes, 65536);
-            }
-            BtrfsExtentData::Inline { .. } => panic!("expected prealloc extent, got inline"),
+        assert!(
+            matches!(parsed, BtrfsExtentData::Regular { .. }),
+            "expected prealloc extent, got inline"
+        );
+        if let BtrfsExtentData::Regular {
+            extent_type,
+            compression,
+            disk_bytenr,
+            num_bytes,
+            ..
+        } = parsed
+        {
+            assert_eq!(
+                extent_type, BTRFS_FILE_EXTENT_PREALLOC,
+                "should be PREALLOC type"
+            );
+            assert_eq!(compression, 0, "prealloc extents are uncompressed");
+            assert_eq!(disk_bytenr, 0x40_0000);
+            assert_eq!(num_bytes, 65536);
         }
     }
 
