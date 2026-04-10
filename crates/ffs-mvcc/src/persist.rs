@@ -504,7 +504,8 @@ impl PersistentMvccStore {
     /// using a temp file + rename.
     ///
     /// After checkpointing, you can optionally truncate the WAL to reduce space
-    /// by calling `truncate_wal()`.
+    /// by calling `truncate_wal()`, but only if no newer commits have landed
+    /// since the checkpoint snapshot was taken.
     ///
     /// # Arguments
     ///
@@ -516,7 +517,11 @@ impl PersistentMvccStore {
     pub fn checkpoint(&self, checkpoint_path: impl AsRef<Path>) -> Result<()> {
         let path = checkpoint_path.as_ref();
 
-        // Get a consistent snapshot of the store
+        // Hold the store read lock through snapshot collection AND stats update.
+        // This prevents a concurrent commit() from advancing next_commit between
+        // our snapshot and the stats.checkpoint_commit_seq write, which would let
+        // a subsequent truncate_wal() pass the staleness check against a stale
+        // checkpoint_commit_seq value.
         let store_guard = self.store.read();
         let next_txn = store_guard.next_txn;
         let next_commit = store_guard.next_commit;
@@ -527,9 +532,10 @@ impl PersistentMvccStore {
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
-        drop(store_guard);
 
-        // Write to temp file first
+        // Write to temp file first (still holding store read lock to block
+        // concurrent commits — the file I/O cost is acceptable because
+        // checkpoint() is an infrequent, explicitly requested operation).
         let temp_path = path.with_extension("tmp");
         {
             let file = File::create(&temp_path)?;
@@ -552,12 +558,15 @@ impl PersistentMvccStore {
             }
         }
 
-        // Update stats
+        // Update stats while still holding the store read lock, ensuring
+        // checkpoint_commit_seq is consistent with the actual store state.
         {
             let mut stats = self.stats.write();
             stats.checkpoints_created += 1;
             stats.checkpoint_commit_seq = next_commit.saturating_sub(1);
         }
+
+        drop(store_guard);
 
         Ok(())
     }
@@ -569,8 +578,22 @@ impl PersistentMvccStore {
     ///
     /// # Warning
     ///
-    /// If called without a valid checkpoint, all WAL data will be lost.
+    /// If called without a valid checkpoint, or if newer commits landed after
+    /// the checkpoint snapshot, committed WAL data will be lost.
     pub fn truncate_wal(&self) -> Result<()> {
+        // Hold a shared store lock while checking the checkpoint horizon and
+        // truncating the WAL. This blocks concurrent commits (which require the
+        // store write lock) from sneaking in between the freshness check and the
+        // destructive WAL rewrite.
+        let store_guard = self.store.read();
+        let current_commit_seq = store_guard.next_commit.saturating_sub(1);
+        let checkpoint_commit_seq = self.stats.read().checkpoint_commit_seq;
+        if current_commit_seq > checkpoint_commit_seq {
+            return Err(FfsError::Format(format!(
+                "refusing to truncate WAL: checkpoint is stale (checkpoint_commit_seq={checkpoint_commit_seq}, latest_commit_seq={current_commit_seq})"
+            )));
+        }
+
         let header_size = {
             let mut wal_guard = self.wal.write();
             let file = wal_guard.file_mut();
@@ -580,17 +603,24 @@ impl PersistentMvccStore {
             let header = WalHeader::default();
             let header_bytes = wal::encode_header(&header);
             file.write_all(&header_bytes)?;
-            file.sync_all()?;
 
             // Truncate to header size
             let header_size = u64::try_from(HEADER_SIZE)
                 .map_err(|_| FfsError::Format("header size overflow".to_owned()))?;
             file.set_len(header_size)?;
             wal_guard.write_pos = header_size;
-            wal_guard.set_last_commit_seq(0);
+            wal_guard.set_last_commit_seq(current_commit_seq);
+
+            if wal_guard.pending_sync_count() > 0 {
+                wal_guard.flush().map(|_| ()).map_err(FfsError::from)?;
+            } else {
+                wal_guard.file_mut().sync_all()?;
+            }
 
             header_size
         };
+
+        drop(store_guard);
 
         // Update stats
         {
@@ -1488,6 +1518,126 @@ mod tests {
             for i in 1_u8..=10 {
                 let data = store.read_visible(BlockNumber(u64::from(i)), snap);
                 assert_eq!(data, Some(vec![i; 64]));
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_wal_rejects_stale_checkpoint() {
+        let cx = test_cx();
+        let wal_tmp = NamedTempFile::new().expect("create wal file");
+        let wal_path = wal_tmp.path().to_path_buf();
+        let ckpt_tmp = NamedTempFile::new().expect("create checkpoint file");
+        let ckpt_path = ckpt_tmp.path().to_path_buf();
+
+        {
+            let store = PersistentMvccStore::open(&cx, &wal_path).expect("open");
+
+            for i in 1_u8..=3 {
+                let mut txn = store.begin();
+                txn.stage_write(BlockNumber(u64::from(i)), vec![i; 32]);
+                store.commit(txn).expect("commit before checkpoint");
+            }
+
+            store.checkpoint(&ckpt_path).expect("checkpoint");
+
+            let mut txn = store.begin();
+            txn.stage_write(BlockNumber(4), vec![4; 32]);
+            store.commit(txn).expect("commit after checkpoint");
+
+            let err = store
+                .truncate_wal()
+                .expect_err("stale checkpoint must block truncation");
+            assert!(
+                matches!(&err, FfsError::Format(detail) if detail.contains("checkpoint is stale")),
+                "expected stale-checkpoint format error, got {err:?}"
+            );
+
+            let stats = store.wal_stats();
+            assert!(stats.wal_size_bytes > HEADER_SIZE as u64);
+        }
+
+        {
+            let store = PersistentMvccStore::open_with_checkpoint(&cx, &wal_path, &ckpt_path)
+                .expect("reopen with checkpoint");
+
+            let stats = store.wal_stats();
+            assert_eq!(stats.replayed_commits, 1);
+
+            let snap = store.current_snapshot();
+            assert_eq!(snap.high, CommitSeq(4));
+
+            for i in 1_u8..=4 {
+                let data = store.read_visible(BlockNumber(u64::from(i)), snap);
+                assert_eq!(data, Some(vec![i; 32]));
+            }
+        }
+    }
+
+    /// Regression test for bd-mu0n: truncate_wal must reject truncation when
+    /// the checkpoint is stale relative to the current commit sequence. After
+    /// the fix, checkpoint() holds the store read lock through the stats
+    /// update, preventing a concurrent commit from creating a window where
+    /// checkpoint_commit_seq lags behind the actual store state.
+    #[test]
+    fn truncate_wal_preserves_post_checkpoint_commits() {
+        let cx = test_cx();
+        let wal_tmp = NamedTempFile::new().expect("create wal file");
+        let wal_path = wal_tmp.path().to_path_buf();
+        let ckpt_tmp = NamedTempFile::new().expect("create checkpoint file");
+        let ckpt_path = ckpt_tmp.path().to_path_buf();
+
+        // Session 1: checkpoint at commit 5, then commit 6 and 7
+        {
+            let store = PersistentMvccStore::open(&cx, &wal_path).expect("open");
+
+            for i in 1_u8..=5 {
+                let mut txn = store.begin();
+                txn.stage_write(BlockNumber(u64::from(i)), vec![i; 48]);
+                store.commit(txn).expect("commit before checkpoint");
+            }
+
+            store.checkpoint(&ckpt_path).expect("checkpoint at commit 5");
+
+            // Two more commits after the checkpoint
+            for i in 6_u8..=7 {
+                let mut txn = store.begin();
+                txn.stage_write(BlockNumber(u64::from(i)), vec![i; 48]);
+                store.commit(txn).expect("commit after checkpoint");
+            }
+
+            // truncate_wal MUST refuse — the checkpoint only covers commits 1-5
+            let err = store
+                .truncate_wal()
+                .expect_err("truncation must be rejected when post-checkpoint commits exist");
+            assert!(
+                matches!(&err, FfsError::Format(detail) if detail.contains("checkpoint is stale")),
+                "expected stale-checkpoint error, got {err:?}"
+            );
+
+            // WAL must still contain the post-checkpoint commits
+            let stats = store.wal_stats();
+            assert!(stats.wal_size_bytes > HEADER_SIZE as u64);
+        }
+
+        // Session 2: reopen from checkpoint + WAL — all 7 commits must survive
+        {
+            let store = PersistentMvccStore::open_with_checkpoint(&cx, &wal_path, &ckpt_path)
+                .expect("reopen with checkpoint");
+
+            let stats = store.wal_stats();
+            assert_eq!(stats.replayed_commits, 2, "WAL should replay commits 6 and 7");
+
+            let snap = store.current_snapshot();
+            assert_eq!(snap.high, CommitSeq(7));
+
+            for i in 1_u8..=7 {
+                let data = store.read_visible(BlockNumber(u64::from(i)), snap);
+                assert_eq!(
+                    data,
+                    Some(vec![i; 48]),
+                    "block {i} missing after checkpoint + WAL replay"
+                );
             }
         }
     }

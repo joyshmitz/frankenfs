@@ -18954,6 +18954,10 @@ mod tests {
         BTRFS_TEST_FS_TREE_LOGICAL + BTRFS_TEST_EXTENT_OFF
     }
 
+    #[expect(
+        dead_code,
+        reason = "test helper reserved for future btrfs geometry tests"
+    )]
     fn set_btrfs_super_total_bytes(image: &mut [u8], total_bytes: u64) {
         let sb_off = BTRFS_SUPER_INFO_OFFSET;
         image[sb_off + 0x70..sb_off + 0x78].copy_from_slice(&total_bytes.to_le_bytes());
