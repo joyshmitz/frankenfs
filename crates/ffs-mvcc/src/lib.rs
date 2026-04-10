@@ -555,7 +555,9 @@ pub struct AdaptivePolicyConfig {
     pub ema_alpha: f64,
     /// Minimum number of commits observed before adaptive kicks in.
     /// Below this, the policy falls back to `SafeMerge`.
-    /// Default: 20.
+    /// Default: 50 (increased from 20 to provide more statistically credible
+    /// evidence before policy switching; 20 commits yields <2.3 effective
+    /// Bayesian samples which is insufficient for reliable decision-making).
     pub warmup_commits: u64,
     /// Hysteresis ratio for policy switching.  The adaptive selector will only
     /// switch away from the *current* policy when the alternative's expected
@@ -574,7 +576,7 @@ impl Default for AdaptivePolicyConfig {
             abort_cost: 1.0,
             base_corruption_probability: 1e-6,
             ema_alpha: 0.1,
-            warmup_commits: 20,
+            warmup_commits: 50,
             hysteresis_ratio: 1.5,
         }
     }

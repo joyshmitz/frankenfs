@@ -3,7 +3,7 @@
 ![CI](https://github.com/cberner/fuser/actions/workflows/ci.yml/badge.svg)
 [![Crates.io](https://img.shields.io/crates/v/fuser.svg)](https://crates.io/crates/fuser)
 [![Documentation](https://docs.rs/fuser/badge.svg)](https://docs.rs/fuser)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/cberner/fuser/blob/master/LICENSE.md)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/cberner/fuser/blob/main/LICENSE.md)
 [![dependency status](https://deps.rs/repo/github/cberner/fuser/status.svg)](https://deps.rs/repo/github/cberner/fuser)
 
 ## About
