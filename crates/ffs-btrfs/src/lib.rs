@@ -911,6 +911,19 @@ fn walk_node(
     active_path: &mut HashSet<u64>,
     visited_nodes: &mut HashSet<u64>,
 ) -> Result<(), ParseError> {
+    let nodesize_u64 = u64::from(nodesize);
+    if nodesize_u64 == 0 {
+        return Err(ParseError::InvalidField {
+            field: "nodesize",
+            reason: "zero nodesize",
+        });
+    }
+    if logical % nodesize_u64 != 0 {
+        return Err(ParseError::InvalidField {
+            field: "logical_address",
+            reason: "not aligned to nodesize",
+        });
+    }
     if !active_path.insert(logical) {
         return Err(ParseError::InvalidField {
             field: "logical_address",
@@ -948,6 +961,12 @@ fn walk_node(
     } else {
         let (_, ptrs) = parse_internal_items(&block)?;
         for kp in &ptrs {
+            if kp.blockptr % nodesize_u64 != 0 {
+                return Err(ParseError::InvalidField {
+                    field: "blockptr",
+                    reason: "not aligned to nodesize",
+                });
+            }
             walk_node(
                 read_physical,
                 chunks,
@@ -3616,6 +3635,54 @@ mod tests {
             ),
             "expected unmapped error, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn walk_unaligned_root_fails() {
+        let chunks = identity_chunks();
+        let unaligned = 0x4_001_u64;
+        let mut read = |_phys: u64| -> Result<Vec<u8>, ParseError> {
+            Err(ParseError::InvalidField {
+                field: "unexpected_read",
+                reason: "should not be called",
+            })
+        };
+        let err = walk_tree(&mut read, &chunks, unaligned, NODESIZE).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "logical_address",
+                reason: "not aligned to nodesize",
+            }
+        ));
+    }
+
+    #[test]
+    fn walk_unaligned_child_pointer_fails() {
+        let root_logical = 0x1_0000_u64;
+        let chunks = identity_chunks();
+        let unaligned_child = 0x2_0001_u64;
+
+        let mut root = vec![0_u8; NODESIZE as usize];
+        write_header(&mut root, root_logical, 1, 1, 1, 10);
+        write_key_ptr(&mut root, 0, 256, 1, unaligned_child, 10);
+
+        let blocks: HashMap<u64, Vec<u8>> = [(root_logical, root)].into();
+        let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
+            blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                field: "physical",
+                reason: "block not in test image",
+            })
+        };
+
+        let err = walk_tree(&mut read, &chunks, root_logical, NODESIZE).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "blockptr",
+                reason: "not aligned to nodesize",
+            }
+        ));
     }
 
     #[test]

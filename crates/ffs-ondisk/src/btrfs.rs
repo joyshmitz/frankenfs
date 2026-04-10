@@ -1011,7 +1011,7 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
             })?;
         let data_size_usize = usize::try_from(data_size)
             .map_err(|_| ParseError::IntegerConversion { field: "item_size" })?;
-        if data_size_usize > 0 && data_offset_usize < items_end {
+        if data_offset_usize < items_end {
             return Err(ParseError::InvalidField {
                 field: "item_offset",
                 reason: "item payload overlaps header/item table",
@@ -1600,6 +1600,31 @@ mod tests {
         // raw_data_offset = 0 → absolute offset = header_size (overlaps item table)
         block[base + 17..base + 21].copy_from_slice(&0_u32.to_le_bytes());
         block[base + 21..base + 25].copy_from_slice(&4_u32.to_le_bytes());
+
+        let err = parse_leaf_items(&block).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ParseError::InvalidField {
+                    field: "item_offset",
+                    ..
+                }
+            ),
+            "expected item_offset error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_leaf_items_rejects_zero_length_payload_in_header() {
+        let mut block = make_block(512, 1, 0);
+        let base = BTRFS_HEADER_SIZE;
+        block[base..base + 8].copy_from_slice(&1_u64.to_le_bytes());
+        block[base + 8] = 1;
+        block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
+        // raw_data_offset = 0 → absolute offset = header_size (inside item table)
+        block[base + 17..base + 21].copy_from_slice(&0_u32.to_le_bytes());
+        // data_size = 0 to exercise zero-length validation
+        block[base + 21..base + 25].copy_from_slice(&0_u32.to_le_bytes());
 
         let err = parse_leaf_items(&block).unwrap_err();
         assert!(
