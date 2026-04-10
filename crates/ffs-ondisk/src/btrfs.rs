@@ -991,21 +991,38 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
         // On disk, leaf payload offsets are relative to the leaf header. Normalize
         // them to absolute block offsets for callers.
         let raw_data_offset = read_le_u32(block, base + 17)?;
-        let data_offset = raw_data_offset
-            .checked_add(u32::try_from(BTRFS_HEADER_SIZE).expect("header size fits in u32"))
-            .ok_or(ParseError::InvalidField {
-                field: "item_offset",
-                reason: "overflow",
+        let header_size =
+            u32::try_from(BTRFS_HEADER_SIZE).map_err(|_| ParseError::IntegerConversion {
+                field: "header_size",
             })?;
+        let data_offset =
+            raw_data_offset
+                .checked_add(header_size)
+                .ok_or(ParseError::InvalidField {
+                    field: "item_offset",
+                    reason: "overflow",
+                })?;
         let data_size = read_le_u32(block, base + 21)?;
 
-        let data_end = usize::try_from(data_offset)
-            .ok()
-            .and_then(|off| off.checked_add(usize::try_from(data_size).ok()?))
-            .ok_or(ParseError::InvalidField {
+        let data_offset_usize =
+            usize::try_from(data_offset).map_err(|_| ParseError::IntegerConversion {
                 field: "item_offset",
-                reason: "overflow",
             })?;
+        if data_offset_usize < items_end {
+            return Err(ParseError::InvalidField {
+                field: "item_offset",
+                reason: "item payload overlaps header/item table",
+            });
+        }
+        let data_size_usize = usize::try_from(data_size)
+            .map_err(|_| ParseError::IntegerConversion { field: "item_size" })?;
+        let data_end =
+            data_offset_usize
+                .checked_add(data_size_usize)
+                .ok_or(ParseError::InvalidField {
+                    field: "item_offset",
+                    reason: "overflow",
+                })?;
 
         if data_end > block.len() {
             return Err(ParseError::InvalidField {
@@ -1543,6 +1560,30 @@ mod tests {
         block[base + 17..base + 21]
             .copy_from_slice(&(600_u32 - u32::try_from(BTRFS_HEADER_SIZE).unwrap()).to_le_bytes());
         block[base + 21..base + 25].copy_from_slice(&10_u32.to_le_bytes());
+
+        let err = parse_leaf_items(&block).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ParseError::InvalidField {
+                    field: "item_offset",
+                    ..
+                }
+            ),
+            "expected item_offset error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_leaf_items_rejects_overlapping_payload() {
+        let mut block = make_block(512, 1, 0);
+        let base = BTRFS_HEADER_SIZE;
+        block[base..base + 8].copy_from_slice(&1_u64.to_le_bytes());
+        block[base + 8] = 1;
+        block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
+        // raw_data_offset = 0 → absolute offset = header_size (overlaps item table)
+        block[base + 17..base + 21].copy_from_slice(&0_u32.to_le_bytes());
+        block[base + 21..base + 25].copy_from_slice(&4_u32.to_le_bytes());
 
         let err = parse_leaf_items(&block).unwrap_err();
         assert!(
