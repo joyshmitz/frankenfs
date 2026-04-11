@@ -5137,7 +5137,12 @@ fn mkfs_cmd_with_program(
             groups_count: sb.groups_count(),
             inodes_count: sb.inodes_count,
         },
-        FsFlavor::Btrfs(_) => unreachable!("mkfs.ext4 created a btrfs image"),
+        FsFlavor::Btrfs(_) => {
+            bail!(
+                "mkfs.ext4 verification opened {} as btrfs; refusing to continue",
+                output.display()
+            );
+        }
     };
 
     if json {
@@ -6949,7 +6954,10 @@ mod tests {
                 assert_eq!(runtime_mode, MountRuntimeMode::PerCore);
                 assert_eq!(managed_unmount_timeout_secs, None);
             }
-            _ => panic!("expected mount command"),
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
         }
     }
 
@@ -6967,7 +6975,10 @@ mod tests {
                     "default mount runtime mode must remain standard"
                 );
             }
-            _ => panic!("expected mount command"),
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
         }
     }
 
@@ -6979,7 +6990,10 @@ mod tests {
             Command::Mount { native, .. } => {
                 assert!(!native, "default native flag must be false (compat mode)");
             }
-            _ => panic!("expected mount command"),
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
         }
     }
 
@@ -6991,7 +7005,10 @@ mod tests {
             Command::Mount { native, .. } => {
                 assert!(native, "--native flag should set native to true");
             }
-            _ => panic!("expected mount command"),
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
         }
     }
 
@@ -7099,7 +7116,10 @@ mod tests {
                 assert!(journal);
                 assert!(json);
             }
-            _ => panic!("expected info command"),
+            other => assert!(
+                matches!(other, Command::Info { .. }),
+                "expected info command"
+            ),
         }
     }
 
@@ -7113,7 +7133,10 @@ mod tests {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert!(json);
             }
-            _ => panic!("expected inspect command"),
+            other => assert!(
+                matches!(other, Command::Inspect { .. }),
+                "expected inspect command"
+            ),
         }
     }
 
@@ -7127,7 +7150,10 @@ mod tests {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert!(!json);
             }
-            _ => panic!("expected mvcc-stats command"),
+            other => assert!(
+                matches!(other, Command::MvccStats { .. }),
+                "expected mvcc-stats command"
+            ),
         }
     }
 
@@ -7151,7 +7177,10 @@ mod tests {
                 assert!(!journal);
                 assert!(!json);
             }
-            _ => panic!("expected info command"),
+            other => assert!(
+                matches!(other, Command::Info { .. }),
+                "expected info command"
+            ),
         }
     }
 
@@ -7174,9 +7203,15 @@ mod tests {
                     assert!(json);
                     assert!(hex);
                 }
-                _ => panic!("expected dump superblock command"),
+                other => assert!(
+                    matches!(other, DumpCommand::Superblock { .. }),
+                    "expected dump superblock command"
+                ),
             },
-            _ => panic!("expected dump command"),
+            other => assert!(
+                matches!(other, Command::Dump { .. }),
+                "expected dump command"
+            ),
         }
     }
 
@@ -7198,9 +7233,15 @@ mod tests {
                     assert!(!json);
                     assert!(!hex);
                 }
-                _ => panic!("expected dump group command"),
+                other => assert!(
+                    matches!(other, DumpCommand::Group { .. }),
+                    "expected dump group command"
+                ),
             },
-            _ => panic!("expected dump command"),
+            other => assert!(
+                matches!(other, Command::Dump { .. }),
+                "expected dump command"
+            ),
         }
     }
 
@@ -7230,9 +7271,15 @@ mod tests {
                     assert!(json);
                     assert!(hex);
                 }
-                _ => panic!("expected dump inode command"),
+                other => assert!(
+                    matches!(other, DumpCommand::Inode { .. }),
+                    "expected dump inode command"
+                ),
             },
-            _ => panic!("expected dump command"),
+            other => assert!(
+                matches!(other, Command::Dump { .. }),
+                "expected dump command"
+            ),
         }
     }
 
@@ -7254,9 +7301,15 @@ mod tests {
                     assert!(!json);
                     assert!(!hex);
                 }
-                _ => panic!("expected dump extents command"),
+                other => assert!(
+                    matches!(other, DumpCommand::Extents { .. }),
+                    "expected dump extents command"
+                ),
             },
-            _ => panic!("expected dump command"),
+            other => assert!(
+                matches!(other, Command::Dump { .. }),
+                "expected dump command"
+            ),
         }
     }
 
@@ -7278,9 +7331,15 @@ mod tests {
                     assert!(!json);
                     assert!(hex);
                 }
-                _ => panic!("expected dump dir command"),
+                other => assert!(
+                    matches!(other, DumpCommand::Dir { .. }),
+                    "expected dump dir command"
+                ),
             },
-            _ => panic!("expected dump command"),
+            other => assert!(
+                matches!(other, Command::Dump { .. }),
+                "expected dump command"
+            ),
         }
     }
 
@@ -7315,7 +7374,10 @@ mod tests {
                 assert_eq!(block_group, Some(3));
                 assert!(json);
             }
-            _ => panic!("expected fsck command"),
+            other => assert!(
+                matches!(other, Command::Fsck { .. }),
+                "expected fsck command"
+            ),
         }
     }
 
@@ -7339,7 +7401,10 @@ mod tests {
                 assert_eq!(block_group, None);
                 assert!(!json);
             }
-            _ => panic!("expected fsck command"),
+            other => assert!(
+                matches!(other, Command::Fsck { .. }),
+                "expected fsck command"
+            ),
         }
     }
 
@@ -7378,7 +7443,10 @@ mod tests {
                 assert_eq!(max_threads, Some(4));
                 assert!(json);
             }
-            _ => panic!("expected repair command"),
+            other => assert!(
+                matches!(other, Command::Repair { .. }),
+                "expected repair command"
+            ),
         }
     }
 
@@ -7405,7 +7473,10 @@ mod tests {
                 assert_eq!(max_threads, None);
                 assert!(!json);
             }
-            _ => panic!("expected repair command"),
+            other => assert!(
+                matches!(other, Command::Repair { .. }),
+                "expected repair command"
+            ),
         }
     }
 
@@ -7442,7 +7513,10 @@ mod tests {
                 assert!(rw);
                 assert!(!native);
             }
-            _ => panic!("expected mount command"),
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
         }
     }
 
@@ -7470,7 +7544,10 @@ mod tests {
                 assert!(!rw);
                 assert!(!native);
             }
-            _ => panic!("expected mount command"),
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
         }
     }
 
@@ -7507,7 +7584,10 @@ mod tests {
                 assert!(!rw);
                 assert!(!native);
             }
-            _ => panic!("expected mount command"),
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
         }
     }
 
@@ -7521,7 +7601,10 @@ mod tests {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert!(json);
             }
-            _ => panic!("expected scrub command"),
+            other => assert!(
+                matches!(other, Command::Scrub { .. }),
+                "expected scrub command"
+            ),
         }
     }
 
@@ -7534,7 +7617,10 @@ mod tests {
                 assert_eq!(image, PathBuf::from("/tmp/fs.img"));
                 assert!(!json);
             }
-            _ => panic!("expected scrub command"),
+            other => assert!(
+                matches!(other, Command::Scrub { .. }),
+                "expected scrub command"
+            ),
         }
     }
 
@@ -7547,7 +7633,10 @@ mod tests {
             Command::Parity { json } => {
                 assert!(json);
             }
-            _ => panic!("expected parity command"),
+            other => assert!(
+                matches!(other, Command::Parity { .. }),
+                "expected parity command"
+            ),
         }
     }
 
@@ -7559,7 +7648,10 @@ mod tests {
             Command::Parity { json } => {
                 assert!(!json);
             }
-            _ => panic!("expected parity command"),
+            other => assert!(
+                matches!(other, Command::Parity { .. }),
+                "expected parity command"
+            ),
         }
     }
 
@@ -7593,7 +7685,10 @@ mod tests {
                 assert_eq!(preset, None);
                 assert!(!summary);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7618,7 +7713,10 @@ mod tests {
                 assert_eq!(preset, None);
                 assert!(!summary);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7650,7 +7748,10 @@ mod tests {
                 assert_eq!(preset.as_deref(), Some("replay-anomalies"));
                 assert!(summary);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7671,7 +7772,10 @@ mod tests {
                 assert_eq!(preset.as_deref(), Some("repair-failures"));
                 assert!(json);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7693,7 +7797,10 @@ mod tests {
                 assert_eq!(preset.as_deref(), Some("pressure-transitions"));
                 assert_eq!(tail, Some(10));
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7720,7 +7827,10 @@ mod tests {
                 assert_eq!(preset.as_deref(), Some("contention"));
                 assert!(summary);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7747,7 +7857,10 @@ mod tests {
                 assert_eq!(preset.as_deref(), Some("metrics"));
                 assert!(json);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7774,7 +7887,10 @@ mod tests {
                 assert_eq!(preset.as_deref(), Some("cache"));
                 assert!(json);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7801,7 +7917,10 @@ mod tests {
                 assert_eq!(preset.as_deref(), Some("mvcc"));
                 assert!(json);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7828,7 +7947,10 @@ mod tests {
                 assert_eq!(preset.as_deref(), Some("repair-live"));
                 assert!(json);
             }
-            _ => panic!("expected evidence command"),
+            other => assert!(
+                matches!(other, Command::Evidence { .. }),
+                "expected evidence command"
+            ),
         }
     }
 
@@ -7862,7 +7984,10 @@ mod tests {
                 assert_eq!(label, "testvol");
                 assert!(json);
             }
-            _ => panic!("expected mkfs command"),
+            other => assert!(
+                matches!(other, Command::Mkfs { .. }),
+                "expected mkfs command"
+            ),
         }
     }
 
@@ -7885,7 +8010,10 @@ mod tests {
                 assert_eq!(label, "frankenfs");
                 assert!(!json);
             }
-            _ => panic!("expected mkfs command"),
+            other => assert!(
+                matches!(other, Command::Mkfs { .. }),
+                "expected mkfs command"
+            ),
         }
     }
 
@@ -8163,9 +8291,10 @@ mod tests {
                     assert_eq!(chunk.stripes[0].physical_start, 0x20000);
                     assert_eq!(chunk.stripes[0].physical_end_inclusive, 0x2_FFFF);
                 }
-                super::GroupsInfoOutput::Ext4 { .. } => {
-                    panic!("expected btrfs groups output")
-                }
+                other @ super::GroupsInfoOutput::Ext4 { .. } => assert!(
+                    matches!(other, super::GroupsInfoOutput::Btrfs { .. }),
+                    "expected btrfs groups output"
+                ),
             }
 
             assert!(!output.limitations.iter().any(|limitation| {

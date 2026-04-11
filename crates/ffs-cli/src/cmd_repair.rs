@@ -243,12 +243,12 @@ pub fn repair_coordination_record_path(image: &Path) -> PathBuf {
 }
 
 fn repair_coordination_operation_id(command: &str, image: &Path, host: &str) -> String {
-    let image_token = image
+    let image_slug = image
         .file_name()
         .and_then(|name| name.to_str())
         .map_or_else(|| "image".to_owned(), sanitize_token);
     format!(
-        "{command}-coordination-{}-{image_token}",
+        "{command}-coordination-{}-{image_slug}",
         sanitize_token(host)
     )
 }
@@ -1449,6 +1449,13 @@ pub fn scrub_ext4_groups_for_repair(
         });
     }
 
+    let block_size = match flavor {
+        FsFlavor::Ext4(sb) => sb.block_size,
+        FsFlavor::Btrfs(_) => {
+            bail!("ext4 repair helper called for non-ext4 flavor");
+        }
+    };
+
     let mut reports = Vec::with_capacity(groups.len());
     for group in groups {
         let spec = specs
@@ -1460,10 +1467,7 @@ pub fn scrub_ext4_groups_for_repair(
         let report = scrub_range_for_repair(
             path,
             flavor,
-            match flavor {
-                FsFlavor::Ext4(sb) => sb.block_size,
-                FsFlavor::Btrfs(_) => unreachable!("ext4 helper called for non-ext4 flavor"),
-            },
+            block_size,
             spec.scrub_start_block,
             spec.scrub_block_count,
             max_threads,
