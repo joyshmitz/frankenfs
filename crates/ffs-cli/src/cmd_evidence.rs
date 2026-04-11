@@ -981,6 +981,9 @@ pub fn load_evidence_records(
 
     let file = File::open(path)
         .with_context(|| format!("failed to open evidence ledger: {}", path.display()))?;
+    if matches!(tail, Some(0)) {
+        return Ok(Vec::new());
+    }
     let mut reader = BufReader::new(file);
     let mut records: Vec<EvidenceRecord> = Vec::new();
     let mut tail_records: VecDeque<EvidenceRecord> = VecDeque::new();
@@ -1411,9 +1414,8 @@ mod tests {
 
     #[test]
     fn validate_evidence_args_accepts_ledger_preset_with_tail_and_summary() {
-        let preset_kind = validate_evidence_args(Some(PRESET_REPAIR_FAILURES), None, Some(3), true)
-            .expect("ledger presets should allow tail and summary");
-        assert_eq!(preset_kind, Some(PresetMode::Ledger));
+        let preset_kind = validate_evidence_args(Some(PRESET_REPAIR_FAILURES), None, Some(3), true);
+        assert!(matches!(preset_kind, Ok(Some(PresetMode::Ledger))));
     }
 
     #[test]
@@ -1450,11 +1452,11 @@ mod tests {
             PRESET_PRESSURE_TRANSITIONS,
             PRESET_CONTENTION,
         ] {
-            let preset_kind = validate_evidence_args(Some(preset), None, Some(3), true)
-                .unwrap_or_else(|_| panic!("ledger preset {preset} should allow tail+summary"));
-            assert_eq!(
-                preset_kind,
-                Some(PresetMode::Ledger),
+            assert!(
+                matches!(
+                    validate_evidence_args(Some(preset), None, Some(3), true),
+                    Ok(Some(PresetMode::Ledger))
+                ),
                 "ledger preset {preset} should classify as ledger-backed"
             );
         }
@@ -1468,11 +1470,11 @@ mod tests {
             PRESET_MVCC,
             PRESET_REPAIR_LIVE,
         ] {
-            let preset_kind = validate_evidence_args(Some(preset), None, None, false)
-                .unwrap_or_else(|_| panic!("metrics preset {preset} should classify cleanly"));
-            assert_eq!(
-                preset_kind,
-                Some(PresetMode::Metrics),
+            assert!(
+                matches!(
+                    validate_evidence_args(Some(preset), None, None, false),
+                    Ok(Some(PresetMode::Metrics))
+                ),
                 "metrics preset {preset} should classify as metrics-backed"
             );
         }
@@ -1480,10 +1482,11 @@ mod tests {
 
     #[test]
     fn validate_evidence_args_accepts_raw_event_type_filter_without_preset() {
-        let preset_kind = validate_evidence_args(None, Some("repair_failed"), Some(4), true)
-            .expect("raw event-type filtering without preset should be accepted");
-        assert_eq!(
-            preset_kind, None,
+        assert!(
+            matches!(
+                validate_evidence_args(None, Some("repair_failed"), Some(4), true),
+                Ok(None)
+            ),
             "no-preset validation path should not classify as a preset mode"
         );
     }
