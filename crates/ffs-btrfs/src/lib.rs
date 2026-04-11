@@ -3076,11 +3076,10 @@ pub fn walk_chunk_tree(
     let mut chunks = bootstrap_chunks.to_vec();
     for item in &items {
         if item.key.item_type == BTRFS_ITEM_CHUNK {
-            if let Ok(chunk) = parse_chunk_item(&item.data, item.key.offset) {
-                // Only add if not already in bootstrap set (avoid duplicates).
-                if !chunks.iter().any(|c| c.key.offset == chunk.key.offset) {
-                    chunks.push(chunk);
-                }
+            let chunk = parse_chunk_item(&item.data, item.key.offset)?;
+            // Only add if not already in bootstrap set (avoid duplicates).
+            if !chunks.iter().any(|c| c.key.offset == chunk.key.offset) {
+                chunks.push(chunk);
             }
         }
     }
@@ -3494,7 +3493,7 @@ pub fn replay_tree_log(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ffs_ondisk::BtrfsStripe;
+    use ffs_ondisk::{BtrfsStripe, BtrfsSuperblock};
     use std::collections::{BTreeMap, HashMap};
 
     const NODESIZE: u32 = 4096;
@@ -3591,6 +3590,57 @@ mod tests {
                 dev_uuid: [0; 16],
             }],
         }]
+    }
+
+    #[test]
+    fn walk_chunk_tree_rejects_invalid_chunk_item() {
+        let root_logical = 0x4000_u64;
+        let chunks = identity_chunks();
+
+        let mut leaf = vec![0_u8; NODESIZE as usize];
+        write_header(&mut leaf, root_logical, 1, 0, BTRFS_CHUNK_TREE_OBJECTID, 1);
+        let data_off = NODESIZE.saturating_sub(16);
+        write_leaf_item(&mut leaf, 0, 256, BTRFS_ITEM_CHUNK, data_off, 16);
+
+        let blocks: HashMap<u64, Vec<u8>> = [(root_logical, leaf)].into();
+        let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
+            blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+                field: "physical",
+                reason: "block not in test image",
+            })
+        };
+
+        let sb = BtrfsSuperblock {
+            csum: [0; 32],
+            fsid: [0; 16],
+            bytenr: root_logical,
+            flags: 0,
+            magic: 0,
+            generation: 1,
+            root: 0,
+            chunk_root: root_logical,
+            log_root: 0,
+            total_bytes: 0,
+            bytes_used: 0,
+            root_dir_objectid: 0,
+            num_devices: 1,
+            sectorsize: 4096,
+            nodesize: NODESIZE,
+            stripesize: 0,
+            compat_flags: 0,
+            compat_ro_flags: 0,
+            incompat_flags: 0,
+            csum_type: 0,
+            root_level: 0,
+            chunk_root_level: 0,
+            log_root_level: 0,
+            label: String::new(),
+            sys_chunk_array_size: 0,
+            sys_chunk_array: Vec::new(),
+        };
+
+        let err = walk_chunk_tree(&mut read, &sb, &chunks).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
     }
 
     #[test]
