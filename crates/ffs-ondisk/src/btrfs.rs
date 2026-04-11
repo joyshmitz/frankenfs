@@ -268,6 +268,12 @@ pub fn parse_sys_chunk_array(data: &[u8]) -> Result<Vec<BtrfsChunkEntry>, ParseE
         let sub_stripes = read_le_u16(data, cur + 46)?;
         cur += BTRFS_CHUNK_FIXED_SIZE;
 
+        if length == 0 {
+            return Err(ParseError::InvalidField {
+                field: "chunk_length",
+                reason: "chunk has zero length",
+            });
+        }
         if stripe_len == 0 {
             return Err(ParseError::InvalidField {
                 field: "stripe_len",
@@ -3098,6 +3104,27 @@ mod tests {
             assert!(matches!(
                 result.unwrap_err(),
                 ParseError::InvalidField { field: "num_stripes", .. }
+            ));
+        }
+
+        /// parse_sys_chunk_array rejects zero chunk length.
+        #[test]
+        fn btrfs_proptest_sys_chunk_array_rejects_zero_chunk_length(
+            key_objectid in any::<u64>(),
+            key_offset in any::<u64>(),
+        ) {
+            let mut data = vec![0_u8; BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE];
+            data[0..8].copy_from_slice(&key_objectid.to_le_bytes());
+            data[8] = 228;
+            data[9..17].copy_from_slice(&key_offset.to_le_bytes());
+            let c = BTRFS_DISK_KEY_SIZE;
+            data[c + 16..c + 24].copy_from_slice(&4096_u64.to_le_bytes());
+            data[c + 44..c + 46].copy_from_slice(&1_u16.to_le_bytes());
+            let result = parse_sys_chunk_array(&data);
+            prop_assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                ParseError::InvalidField { field: "chunk_length", .. }
             ));
         }
 

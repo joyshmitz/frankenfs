@@ -2983,6 +2983,12 @@ fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry,
     let num_stripes = read_le_u16(data, 44)?;
     let sub_stripes = read_le_u16(data, 46)?;
 
+    if length == 0 {
+        return Err(ParseError::InvalidField {
+            field: "chunk_length",
+            reason: "chunk has zero length",
+        });
+    }
     if stripe_len == 0 {
         return Err(ParseError::InvalidField {
             field: "stripe_len",
@@ -6290,6 +6296,36 @@ mod tests {
             err,
             ParseError::InvalidField {
                 field: "stripe_len",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_chunk_item_rejects_zero_length() {
+        const CHUNK_FIXED: usize = 48;
+        const STRIPE_SIZE: usize = 32;
+        let mut data = vec![0_u8; CHUNK_FIXED + STRIPE_SIZE];
+
+        data[0..8].copy_from_slice(&0_u64.to_le_bytes()); // length (invalid)
+        data[8..16].copy_from_slice(&2_u64.to_le_bytes()); // owner
+        data[16..24].copy_from_slice(&4096_u64.to_le_bytes()); // stripe_len
+        data[24..32].copy_from_slice(&2_u64.to_le_bytes()); // chunk_type
+        data[32..36].copy_from_slice(&4096_u32.to_le_bytes()); // io_align
+        data[36..40].copy_from_slice(&4096_u32.to_le_bytes()); // io_width
+        data[40..44].copy_from_slice(&4096_u32.to_le_bytes()); // sector_size
+        data[44..46].copy_from_slice(&1_u16.to_le_bytes()); // num_stripes
+        data[46..48].copy_from_slice(&0_u16.to_le_bytes()); // sub_stripes
+
+        let s = CHUNK_FIXED;
+        data[s..s + 8].copy_from_slice(&1_u64.to_le_bytes()); // devid
+        data[s + 8..s + 16].copy_from_slice(&0x80_0000_u64.to_le_bytes()); // offset
+
+        let err = parse_chunk_item(&data, 0x100_0000).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "chunk_length",
                 ..
             }
         ));
