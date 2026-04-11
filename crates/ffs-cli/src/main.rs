@@ -49,7 +49,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tracing::{debug, error, info, info_span};
+use tracing::{debug, error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 
 // ── Production Cx acquisition ───────────────────────────────────────────────
@@ -5082,25 +5082,23 @@ fn emit_mkfs_output(result: &MkfsOutput, size_mb: u64, json: bool) -> Result<()>
     Ok(())
 }
 
-fn mkfs_cmd_with_program(
-    output: &Path,
-    size_mb: u64,
-    block_size: u32,
-    label: &str,
-    json: bool,
-    mkfs_program: &Path,
-) -> Result<()> {
+fn validate_mkfs_params(output: &Path, size_mb: u64, block_size: u32) -> Result<u64> {
     if ![1024, 2048, 4096].contains(&block_size) {
         bail!("block_size must be 1024, 2048, or 4096 (got {block_size})");
     }
     if size_mb == 0 {
         bail!("size_mb must be > 0");
     }
-    let size_bytes = size_mb
+    let output_str = output.as_os_str().to_string_lossy();
+    if output_str.starts_with('-') {
+        bail!("output path must not start with '-' (use ./ or an absolute path): {output_str}");
+    }
+    size_mb
         .checked_mul(1024 * 1024)
-        .ok_or_else(|| anyhow::anyhow!("size_mb too large to represent bytes"))?;
+        .ok_or_else(|| anyhow::anyhow!("size_mb too large to represent bytes"))
+}
 
-    // Create sparse image file.
+fn create_sparse_image(output: &Path, size_bytes: u64) -> Result<()> {
     let f = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -5117,8 +5115,15 @@ fn mkfs_cmd_with_program(
     f.set_len(size_bytes)
         .with_context(|| format!("set image size to {size_bytes}"))?;
     drop(f);
+    Ok(())
+}
 
-    // Run mkfs.ext4.
+fn run_mkfs_program(
+    mkfs_program: &Path,
+    output: &Path,
+    block_size: u32,
+    label: &str,
+) -> Result<()> {
     let mkfs_output = std::process::Command::new(mkfs_program)
         .arg("-F")
         .arg("-b")
@@ -5152,22 +5157,42 @@ fn mkfs_cmd_with_program(
             failure_detail
         );
     }
+    Ok(())
+}
+
+fn mkfs_cmd_with_program(
+    output: &Path,
+    size_mb: u64,
+    block_size: u32,
+    label: &str,
+    json: bool,
+    mkfs_program: &Path,
+) -> Result<()> {
+    let size_bytes = validate_mkfs_params(output, size_mb, block_size)?;
+    create_sparse_image(output, size_bytes)?;
+    run_mkfs_program(mkfs_program, output, block_size, label)?;
 
     // Verify the new image by opening it with FrankenFS.
     let cx = cli_cx();
     let fs = OpenFs::open(&cx, output)
         .with_context(|| format!("verify new image at {}", output.display()))?;
 
-    let result = match &fs.flavor {
-        FsFlavor::Ext4(sb) => MkfsOutput {
-            path: output.display().to_string(),
-            size_bytes,
-            block_size: sb.block_size,
-            label: label.to_owned(),
-            block_count: sb.blocks_count,
-            groups_count: sb.groups_count(),
-            inodes_count: sb.inodes_count,
-        },
+    let (result, actual_label) = match &fs.flavor {
+        FsFlavor::Ext4(sb) => {
+            let actual_label = sb.volume_name.clone();
+            (
+                MkfsOutput {
+                    path: output.display().to_string(),
+                    size_bytes,
+                    block_size: sb.block_size,
+                    label: actual_label.clone(),
+                    block_count: sb.blocks_count,
+                    groups_count: sb.groups_count(),
+                    inodes_count: sb.inodes_count,
+                },
+                actual_label,
+            )
+        }
         FsFlavor::Btrfs(_) => {
             bail!(
                 "mkfs.ext4 verification opened {} as btrfs; refusing to continue",
@@ -5176,6 +5201,15 @@ fn mkfs_cmd_with_program(
         }
     };
 
+    if actual_label != label {
+        warn!(
+            target: "ffs::cli",
+            requested_label = %label,
+            resolved_label = %actual_label,
+            "mkfs label adjusted by mkfs.ext4"
+        );
+    }
+
     emit_mkfs_output(&result, size_mb, json)?;
 
     info!(
@@ -5183,7 +5217,7 @@ fn mkfs_cmd_with_program(
         path = %output.display(),
         size_bytes,
         block_size,
-        label,
+        label = %actual_label,
         "mkfs_complete"
     );
 
@@ -8094,6 +8128,34 @@ mod tests {
         assert!(
             !output.exists(),
             "overflow check should run before creating the image file"
+        );
+    }
+
+    #[test]
+    fn mkfs_cmd_rejects_dash_prefixed_output() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let output = PathBuf::from(format!("-ffs-cli-mkfs-dash-{}-{ts}", std::process::id()));
+
+        let err = super::mkfs_cmd_with_program(
+            &output,
+            8,
+            1024,
+            "dash",
+            false,
+            std::path::Path::new("mkfs.ext4"),
+        )
+        .expect_err("dash-prefixed output should be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("must not start with '-'"),
+            "expected dash-prefixed output guardrail, got: {message}"
+        );
+        assert!(
+            !output.exists(),
+            "dash-prefixed output guardrail should run before creating the image file"
         );
     }
 
