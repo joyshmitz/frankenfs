@@ -139,3 +139,17 @@ third_party/
 
 # One-off migration/fix scripts (agent-generated)
 fix_*.py
+
+# NTM session state
+.ntm/
+
+# Scratch lint/audit reports (agent-generated)
+clippy*.txt
+pedantic_clippy.txt
+fresh-ubs.txt
+*ubs*.txt
+indexing_slicing.txt
+unwraps*.txt
+
+# Root-level scratch source files
+/get_hash.rs
