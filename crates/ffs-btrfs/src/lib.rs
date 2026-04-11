@@ -3354,8 +3354,13 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
         // Skip crc32 at pos+6..pos+10
         pos += 10;
 
+        let cmd_data_start = pos;
         if pos + cmd_len > data.len() {
-            break;
+            return Err(ffs_types::ParseError::InsufficientData {
+                needed: cmd_len,
+                offset: cmd_data_start,
+                actual: data.len().saturating_sub(cmd_data_start),
+            });
         }
 
         let cmd_data = &data[pos..pos + cmd_len];
@@ -3379,7 +3384,11 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
                 u16::from_le_bytes([cmd_data[attr_pos + 2], cmd_data[attr_pos + 3]]) as usize;
             attr_pos += 4;
             if attr_pos + attr_len > cmd_data.len() {
-                break;
+                return Err(ffs_types::ParseError::InsufficientData {
+                    needed: attr_len,
+                    offset: cmd_data_start + attr_pos,
+                    actual: cmd_data.len().saturating_sub(attr_pos),
+                });
             }
             attrs.push((attr_type, cmd_data[attr_pos..attr_pos + attr_len].to_vec()));
             attr_pos += attr_len;
@@ -7354,5 +7363,41 @@ mod tests {
     fn parse_send_stream_rejects_bad_magic() {
         let data = b"not-btrfs-magic\x01\x00\x00\x00";
         assert!(parse_send_stream(data).is_err());
+    }
+
+    #[test]
+    fn parse_send_stream_rejects_truncated_command() {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&1_u32.to_le_bytes());
+        data.extend_from_slice(&4_u32.to_le_bytes()); // cmd_len
+        data.extend_from_slice(&4_u16.to_le_bytes()); // cmd = Mkdir
+        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
+
+        let err = parse_send_stream(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            ffs_types::ParseError::InsufficientData { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_send_stream_rejects_truncated_attribute() {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&1_u32.to_le_bytes());
+
+        // Command with attribute header but missing attribute payload.
+        data.extend_from_slice(&4_u32.to_le_bytes()); // cmd_len (attr header only)
+        data.extend_from_slice(&4_u16.to_le_bytes()); // cmd = Mkdir
+        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
+        data.extend_from_slice(&15_u16.to_le_bytes()); // attr type = Path
+        data.extend_from_slice(&8_u16.to_le_bytes()); // attr len (missing payload)
+
+        let err = parse_send_stream(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            ffs_types::ParseError::InsufficientData { .. }
+        ));
     }
 }
