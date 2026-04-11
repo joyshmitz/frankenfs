@@ -3345,6 +3345,7 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
     let version = u32::from_le_bytes([data[13], data[14], data[15], data[16]]);
     let mut pos = 17;
     let mut commands = Vec::new();
+    let mut saw_end = false;
 
     while pos + 10 <= data.len() {
         // Command header: len(u32), cmd(u16), crc32(u32)
@@ -3355,7 +3356,13 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
         pos += 10;
 
         let cmd_data_start = pos;
-        if pos + cmd_len > data.len() {
+        let Some(cmd_end) = pos.checked_add(cmd_len) else {
+            return Err(ffs_types::ParseError::InvalidField {
+                field: "send_stream_cmd_len",
+                reason: "overflow",
+            });
+        };
+        if cmd_end > data.len() {
             return Err(ffs_types::ParseError::InsufficientData {
                 needed: cmd_len,
                 offset: cmd_data_start,
@@ -3363,8 +3370,8 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
             });
         }
 
-        let cmd_data = &data[pos..pos + cmd_len];
-        pos += cmd_len;
+        let cmd_data = &data[pos..cmd_end];
+        pos = cmd_end;
 
         let cmd = SendCommand::from_u16(cmd_type).unwrap_or(SendCommand::Unspec);
         if cmd == SendCommand::End {
@@ -3372,6 +3379,7 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
                 cmd,
                 attrs: Vec::new(),
             });
+            saw_end = true;
             break;
         }
 
@@ -3383,18 +3391,45 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
             let attr_len =
                 u16::from_le_bytes([cmd_data[attr_pos + 2], cmd_data[attr_pos + 3]]) as usize;
             attr_pos += 4;
-            if attr_pos + attr_len > cmd_data.len() {
+            let Some(attr_end) = attr_pos.checked_add(attr_len) else {
+                return Err(ffs_types::ParseError::InvalidField {
+                    field: "send_stream_attr_len",
+                    reason: "overflow",
+                });
+            };
+            if attr_end > cmd_data.len() {
                 return Err(ffs_types::ParseError::InsufficientData {
                     needed: attr_len,
                     offset: cmd_data_start + attr_pos,
                     actual: cmd_data.len().saturating_sub(attr_pos),
                 });
             }
-            attrs.push((attr_type, cmd_data[attr_pos..attr_pos + attr_len].to_vec()));
-            attr_pos += attr_len;
+            attrs.push((attr_type, cmd_data[attr_pos..attr_end].to_vec()));
+            attr_pos = attr_end;
+        }
+        if attr_pos != cmd_data.len() {
+            return Err(ffs_types::ParseError::InsufficientData {
+                needed: 4,
+                offset: cmd_data_start + attr_pos,
+                actual: cmd_data.len().saturating_sub(attr_pos),
+            });
         }
 
         commands.push(SendStreamCommand { cmd, attrs });
+    }
+
+    if pos < data.len() {
+        if saw_end {
+            return Err(ffs_types::ParseError::InvalidField {
+                field: "send_stream",
+                reason: "trailing bytes after end command",
+            });
+        }
+        return Err(ffs_types::ParseError::InsufficientData {
+            needed: 10,
+            offset: pos,
+            actual: data.len().saturating_sub(pos),
+        });
     }
 
     Ok(SendStreamParseResult { version, commands })
@@ -7382,6 +7417,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_send_stream_rejects_truncated_command_header() {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&1_u32.to_le_bytes());
+        data.extend_from_slice(&[0xAA, 0xBB]); // partial command header
+
+        let err = parse_send_stream(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            ffs_types::ParseError::InsufficientData { .. }
+        ));
+    }
+
+    #[test]
     fn parse_send_stream_rejects_truncated_attribute() {
         let mut data = Vec::new();
         data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
@@ -7399,5 +7448,37 @@ mod tests {
             err,
             ffs_types::ParseError::InsufficientData { .. }
         ));
+    }
+
+    #[test]
+    fn parse_send_stream_rejects_truncated_attribute_header() {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&1_u32.to_le_bytes());
+
+        data.extend_from_slice(&2_u32.to_le_bytes()); // cmd_len (partial attr header)
+        data.extend_from_slice(&4_u16.to_le_bytes()); // cmd = Mkdir
+        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
+        data.extend_from_slice(&[0x11, 0x22]); // partial attribute header
+
+        let err = parse_send_stream(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            ffs_types::ParseError::InsufficientData { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_send_stream_rejects_trailing_bytes_after_end() {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&1_u32.to_le_bytes());
+        data.extend_from_slice(&0_u32.to_le_bytes()); // cmd_len
+        data.extend_from_slice(&21_u16.to_le_bytes()); // cmd = End
+        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
+        data.extend_from_slice(&[0xEE, 0xFF]); // trailing bytes
+
+        let err = parse_send_stream(&data).unwrap_err();
+        assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
     }
 }
