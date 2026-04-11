@@ -716,13 +716,8 @@ fn resolve_raid0_stripe(
     offset_within: u64,
 ) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
     let stripe_len = require_nonzero_stripe_len(chunk, "RAID0")?;
+    validate_stripe_count(chunk)?;
     let num = u64::from(chunk.num_stripes);
-    if num == 0 {
-        return Err(ParseError::InvalidField {
-            field: "num_stripes",
-            reason: "RAID0 has zero stripes",
-        });
-    }
     let stripe_idx = (offset_within / stripe_len) % num;
     let offset_in_stripe = offset_within % stripe_len;
     let stripe_nr = offset_within
@@ -751,6 +746,7 @@ fn resolve_raid10_stripes(
     offset_within: u64,
 ) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
     let stripe_len = require_nonzero_stripe_len(chunk, "RAID10")?;
+    validate_stripe_count(chunk)?;
     if chunk.sub_stripes == 0 {
         return Err(ParseError::InvalidField {
             field: "sub_stripes",
@@ -842,12 +838,20 @@ fn resolve_raid56_stripe(
     profile: BtrfsRaidProfile,
 ) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
     let stripe_len = require_nonzero_stripe_len(chunk, "RAID5/6")?;
+    validate_stripe_count(chunk)?;
     let num = u64::from(chunk.num_stripes);
     let parity_count: u64 = if profile == BtrfsRaidProfile::Raid6 {
         2
     } else {
         1
     };
+    let min_stripes = parity_count + 2;
+    if num < min_stripes {
+        return Err(ParseError::InvalidField {
+            field: "num_stripes",
+            reason: "RAID5/6 requires at least two data stripes plus parity",
+        });
+    }
     let data_stripes = num.saturating_sub(parity_count);
     if data_stripes == 0 {
         return Err(ParseError::InvalidField {
@@ -3742,6 +3746,28 @@ mod tests {
     }
 
     #[test]
+    fn stripe_resolve_raid0_rejects_mismatched_stripe_count() {
+        let mut chunk = make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+            vec![stripe(1, 0x10_0000), stripe(2, 0x20_0000)],
+            0,
+        );
+        chunk.num_stripes = 3;
+
+        let err = map_logical_to_stripes(&[chunk], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "num_stripes",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn stripe_resolve_raid10_rejects_zero_sub_stripes() {
         let chunks = vec![make_chunk(
             0,
@@ -3803,6 +3829,52 @@ mod tests {
             err,
             ParseError::InvalidField {
                 field: "stripe_offset",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stripe_resolve_raid5_rejects_too_few_stripes() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5,
+            vec![stripe(1, 0x10_0000), stripe(2, 0x20_0000)],
+            0,
+        )];
+
+        let err = map_logical_to_stripes(&chunks, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "num_stripes",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stripe_resolve_raid6_rejects_too_few_stripes() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6,
+            vec![
+                stripe(1, 0x10_0000),
+                stripe(2, 0x20_0000),
+                stripe(3, 0x30_0000),
+            ],
+            0,
+        )];
+
+        let err = map_logical_to_stripes(&chunks, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "num_stripes",
                 ..
             }
         ));
