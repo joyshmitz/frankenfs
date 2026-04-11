@@ -472,6 +472,27 @@ impl ReadaheadManager {
         }
     }
 
+    fn remove_fifo_entry(state: &mut ReadaheadState, key: (u64, u64)) {
+        state.fifo.retain(|&existing| existing != key);
+    }
+
+    fn enforce_limit(&self, state: &mut ReadaheadState) {
+        while state.fifo.len() > self.max_pending {
+            if let Some(key) = state.fifo.pop_front() {
+                let _ = state.map.remove(&key);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn insert_locked(&self, state: &mut ReadaheadState, key: (u64, u64), data: Vec<u8>) {
+        let _ = state.map.insert(key, data);
+        Self::remove_fifo_entry(state, key);
+        state.fifo.push_back(key);
+        self.enforce_limit(state);
+    }
+
     fn insert(&self, ino: InodeNumber, offset: u64, data: Vec<u8>) {
         if data.is_empty() {
             return;
@@ -484,20 +505,7 @@ impl ReadaheadManager {
             }
         };
         let key = (ino.0, offset);
-        let replaced = guard.map.insert(key, data).is_some();
-        if replaced {
-            if let Some(pos) = guard.fifo.iter().position(|&k| k == key) {
-                guard.fifo.remove(pos);
-            }
-        }
-        guard.fifo.push_back(key);
-        while guard.fifo.len() > self.max_pending {
-            if let Some(key) = guard.fifo.pop_front() {
-                let _ = guard.map.remove(&key);
-            } else {
-                break;
-            }
-        }
+        self.insert_locked(&mut guard, key, data);
         drop(guard);
     }
 
@@ -511,9 +519,7 @@ impl ReadaheadManager {
         };
         let mut cached = guard.map.remove(&(ino.0, offset))?;
         // Remove from FIFO to avoid zombies.
-        if let Some(pos) = guard.fifo.iter().position(|&k| k == (ino.0, offset)) {
-            guard.fifo.remove(pos);
-        }
+        Self::remove_fifo_entry(&mut guard, (ino.0, offset));
 
         if cached.len() <= requested_len {
             drop(guard);
@@ -523,16 +529,7 @@ impl ReadaheadManager {
         let tail = cached.split_off(requested_len);
         let consumed = u64::try_from(cached.len()).unwrap_or(u64::MAX);
         let next_offset = offset.saturating_add(consumed);
-        if guard.map.insert((ino.0, next_offset), tail).is_none() {
-            guard.fifo.push_back((ino.0, next_offset));
-        }
-        while guard.fifo.len() > self.max_pending {
-            if let Some(key) = guard.fifo.pop_front() {
-                let _ = guard.map.remove(&key);
-            } else {
-                break;
-            }
-        }
+        self.insert_locked(&mut guard, (ino.0, next_offset), tail);
         drop(guard);
         Some(cached)
     }
@@ -3256,6 +3253,24 @@ mod tests {
         manager.insert(ino, 100, vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(manager.take(ino, 100, 4), Some(vec![1, 2, 3, 4]));
         assert_eq!(manager.take(ino, 104, 8), Some(vec![5, 6]));
+    }
+
+    #[test]
+    fn readahead_manager_tail_requeue_refreshes_fifo_order() {
+        let manager = ReadaheadManager::new(3);
+        let ino = InodeNumber(6);
+
+        manager.insert(ino, 0, vec![1, 2, 3, 4, 5, 6]);
+        manager.insert(ino, 4, vec![9, 9]);
+        manager.insert(ino, 8, vec![7, 7]);
+
+        assert_eq!(manager.take(ino, 0, 4), Some(vec![1, 2, 3, 4]));
+
+        manager.insert(ino, 12, vec![8, 8]);
+        manager.insert(ino, 16, vec![9, 9]);
+
+        assert_eq!(manager.take(ino, 8, 2), None);
+        assert_eq!(manager.take(ino, 4, 2), Some(vec![5, 6]));
     }
 
     #[test]
