@@ -483,9 +483,14 @@ impl ReadaheadManager {
                 poisoned.into_inner()
             }
         };
-        if guard.map.insert((ino.0, offset), data).is_none() {
-            guard.fifo.push_back((ino.0, offset));
+        let key = (ino.0, offset);
+        let replaced = guard.map.insert(key, data).is_some();
+        if replaced {
+            if let Some(pos) = guard.fifo.iter().position(|&k| k == key) {
+                guard.fifo.remove(pos);
+            }
         }
+        guard.fifo.push_back(key);
         while guard.fifo.len() > self.max_pending {
             if let Some(key) = guard.fifo.pop_front() {
                 let _ = guard.map.remove(&key);
@@ -3265,6 +3270,22 @@ mod tests {
         assert_eq!(manager.take(ino, 0, 1), None);
         assert_eq!(manager.take(ino, 8, 1), Some(vec![1]));
         assert_eq!(manager.take(ino, 16, 1), Some(vec![2]));
+    }
+
+    #[test]
+    fn readahead_manager_reinsert_refreshes_fifo_order() {
+        let manager = ReadaheadManager::new(2);
+        let ino = InodeNumber(11);
+
+        manager.insert(ino, 0, vec![1]);
+        manager.insert(ino, 8, vec![2]);
+        // Reinsert offset 0 to refresh its FIFO position.
+        manager.insert(ino, 0, vec![3]);
+        manager.insert(ino, 16, vec![4]); // Evicts the oldest remaining entry.
+
+        assert_eq!(manager.take(ino, 8, 1), None);
+        assert_eq!(manager.take(ino, 0, 1), Some(vec![3]));
+        assert_eq!(manager.take(ino, 16, 1), Some(vec![4]));
     }
 
     #[test]
