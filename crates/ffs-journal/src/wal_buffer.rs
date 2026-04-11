@@ -61,7 +61,14 @@ impl EpochCounter {
     /// atomic fetch-add. Under typical workloads epoch advancement is infrequent
     /// (once per group commit), so contention is negligible.
     pub fn advance(&self) -> u64 {
-        self.value.fetch_add(1, Ordering::AcqRel).saturating_add(1)
+        match self
+            .value
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            }) {
+            Ok(prev) => prev + 1,
+            Err(prev) => prev,
+        }
     }
 }
 
@@ -727,7 +734,7 @@ impl DurabilityNotifier {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if let Some((failed_epoch, ref msg)) = state.failed {
-                if epoch <= failed_epoch {
+                if epoch >= failed_epoch {
                     return Some(DurabilityOutcome::Failed(msg.clone()));
                 }
             }
@@ -746,7 +753,7 @@ impl DurabilityNotifier {
             if timeout_result.timed_out() {
                 // One more check before giving up.
                 if let Some((failed_epoch, ref msg)) = state.failed {
-                    if epoch <= failed_epoch {
+                    if epoch >= failed_epoch {
                         return Some(DurabilityOutcome::Failed(msg.clone()));
                     }
                 }
@@ -1194,6 +1201,15 @@ mod tests {
         all_values.sort_unstable();
         all_values.dedup();
         assert_eq!(all_values.len(), 800);
+    }
+
+    #[test]
+    fn epoch_counter_saturates_at_u64_max() {
+        let epoch = EpochCounter::new(u64::MAX - 1);
+        assert_eq!(epoch.advance(), u64::MAX);
+        assert_eq!(epoch.current(), u64::MAX);
+        assert_eq!(epoch.advance(), u64::MAX);
+        assert_eq!(epoch.current(), u64::MAX);
     }
 
     // -- ExplicitWalPool tests --
@@ -1674,6 +1690,22 @@ mod tests {
         assert_eq!(
             outcome,
             DurabilityOutcome::Failed("disk on fire".to_string())
+        );
+    }
+
+    #[test]
+    fn durability_notifier_timeout_returns_failure_for_later_epoch() {
+        let notifier = Arc::new(DurabilityNotifier::new());
+        let n2 = Arc::clone(&notifier);
+        let handle = std::thread::spawn(move || {
+            n2.await_epoch_timeout(5, std::time::Duration::from_secs(1))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        notifier.notify_failed(3, "disk on fire".to_string());
+        let outcome = handle.join().expect("no panic");
+        assert_eq!(
+            outcome,
+            Some(DurabilityOutcome::Failed("disk on fire".to_string()))
         );
     }
 
