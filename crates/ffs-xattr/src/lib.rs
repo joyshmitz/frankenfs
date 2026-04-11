@@ -64,7 +64,11 @@ fn entry_index(entries: &[Ext4Xattr], name_index: u8, name: &[u8]) -> Option<usi
         .position(|e| e.name_index == name_index && e.name == name)
 }
 
-fn encode_entries_region(region_capacity: usize, entries: &[Ext4Xattr]) -> Result<Vec<u8>> {
+fn encode_entries_region(
+    region_capacity: usize,
+    entries: &[Ext4Xattr],
+    value_offset_base: usize,
+) -> Result<Vec<u8>> {
     let mut data = vec![0_u8; region_capacity];
     let mut next_entry = 0_usize;
     let mut value_tail = region_capacity;
@@ -102,10 +106,13 @@ fn encode_entries_region(region_capacity: usize, entries: &[Ext4Xattr]) -> Resul
         data[value_start..value_start + entry.value.len()].copy_from_slice(&entry.value);
         value_tail = value_start;
 
+        let value_offset = value_start
+            .checked_add(value_offset_base)
+            .ok_or_else(|| FfsError::Format("xattr value offset overflow".to_owned()))?;
         data[next_entry] = u8::try_from(entry.name.len()).map_err(|_| FfsError::NameTooLong)?;
         data[next_entry + 1] = entry.name_index;
         data[next_entry + 2..next_entry + 4].copy_from_slice(
-            &u16::try_from(value_start)
+            &u16::try_from(value_offset)
                 .map_err(|_| FfsError::Format("xattr value offset exceeds u16".to_owned()))?
                 .to_le_bytes(),
         );
@@ -149,7 +156,7 @@ fn build_inline_ibody(ibody_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u8>
     }
 
     out[0..4].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
-    let encoded = encode_entries_region(ibody_len - INLINE_HEADER_LEN, entries)?;
+    let encoded = encode_entries_region(ibody_len - INLINE_HEADER_LEN, entries, INLINE_HEADER_LEN)?;
     out[INLINE_HEADER_LEN..].copy_from_slice(&encoded);
     Ok(out)
 }
@@ -170,7 +177,11 @@ fn build_external_block(block_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u
     out[4..8].copy_from_slice(&1_u32.to_le_bytes()); // h_refcount
     out[8..12].copy_from_slice(&1_u32.to_le_bytes()); // h_blocks
 
-    let encoded = encode_entries_region(block_len - EXTERNAL_HEADER_LEN, entries)?;
+    let encoded = encode_entries_region(
+        block_len - EXTERNAL_HEADER_LEN,
+        entries,
+        EXTERNAL_HEADER_LEN,
+    )?;
     out[EXTERNAL_HEADER_LEN..].copy_from_slice(&encoded);
     Ok(out)
 }
@@ -1269,7 +1280,7 @@ mod tests {
             name: vec![b'a'; XATTR_NAME_MAX + 1],
             value: b"v".to_vec(),
         };
-        let err = encode_entries_region(4096, &[entry]).unwrap_err();
+        let err = encode_entries_region(4096, &[entry], 0).unwrap_err();
         assert!(matches!(err, FfsError::NameTooLong));
     }
 
@@ -1280,7 +1291,7 @@ mod tests {
             name: b"k".to_vec(),
             value: vec![0_u8; XATTR_VALUE_MAX + 1],
         };
-        let err = encode_entries_region(XATTR_VALUE_MAX + 100, &[entry]).unwrap_err();
+        let err = encode_entries_region(XATTR_VALUE_MAX + 100, &[entry], 0).unwrap_err();
         assert!(matches!(err, FfsError::Format(_)));
     }
 
@@ -1292,7 +1303,7 @@ mod tests {
             value: b"value".to_vec(),
         };
         // Region too small to hold even one entry + value.
-        let err = encode_entries_region(10, &[entry]).unwrap_err();
+        let err = encode_entries_region(10, &[entry], 0).unwrap_err();
         assert!(matches!(err, FfsError::NoSpace));
     }
 
@@ -1720,7 +1731,7 @@ mod tests {
             name: vec![b'x'; 256], // exceeds u8::MAX
             value: b"v".to_vec(),
         };
-        let err = encode_entries_region(4096, &[entry]).unwrap_err();
+        let err = encode_entries_region(4096, &[entry], 0).unwrap_err();
         assert!(matches!(err, FfsError::NameTooLong));
     }
 
@@ -1731,7 +1742,7 @@ mod tests {
             name: b"k".to_vec(),
             value: vec![0u8; XATTR_VALUE_MAX + 1],
         };
-        let err = encode_entries_region(65600, &[entry]).unwrap_err();
+        let err = encode_entries_region(65600, &[entry], 0).unwrap_err();
         assert!(matches!(err, FfsError::Format(_)));
     }
 
@@ -1743,7 +1754,7 @@ mod tests {
             value: vec![b'v'; 100],
         };
         // Region too small to hold entry header + name + value.
-        let err = encode_entries_region(32, &[entry]).unwrap_err();
+        let err = encode_entries_region(32, &[entry], 0).unwrap_err();
         assert!(matches!(err, FfsError::NoSpace));
     }
 

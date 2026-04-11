@@ -3680,7 +3680,7 @@ impl Ext4ImageReader {
             return Ok(Vec::new());
         }
         let entries = &inode.xattr_ibody[4..];
-        parse_xattr_entries(entries, entries)
+        parse_xattr_entries(entries, &inode.xattr_ibody)
     }
 
     /// Read xattrs from an external xattr block (pointed to by `i_file_acl`).
@@ -3709,11 +3709,10 @@ impl Ext4ImageReader {
                 actual: u64::from(magic),
             });
         }
-        // Entries and values both start at byte 32 of the xattr block.
-        // Our write code (ffs-xattr encode_entries_region) stores value offsets
-        // relative to the entries region, not the full block.
+        // Entries start at byte 32 (after the xattr header). Value offsets are
+        // relative to the start of the block, per ext4 spec.
         let entries_region = &block_data[32..];
-        parse_xattr_entries(entries_region, entries_region)
+        parse_xattr_entries(entries_region, block_data)
     }
 
     /// Read all xattrs for an inode (inline + external block).
@@ -3848,7 +3847,7 @@ impl Ext4Xattr {
 /// Each entry is:
 ///   - u8 name_len
 ///   - u8 name_index
-///   - u16 value_offs (offset from start of the value area, which is the end of the block/ibody)
+///   - u16 value_offs (offset from start of the block/ibody xattr area)
 ///   - u32 value_size
 ///   - u32 hash (we ignore this)
 ///   - [u8; name_len] name
@@ -3941,7 +3940,7 @@ pub fn parse_ibody_xattrs(inode: &Ext4Inode) -> Result<Vec<Ext4Xattr>, ParseErro
         return Ok(Vec::new());
     }
     let entries = &inode.xattr_ibody[4..];
-    parse_xattr_entries(entries, entries)
+    parse_xattr_entries(entries, &inode.xattr_ibody)
 }
 
 /// Parse xattrs from an external xattr block (raw block data).
@@ -3963,7 +3962,7 @@ pub fn parse_xattr_block(block_data: &[u8]) -> Result<Vec<Ext4Xattr>, ParseError
         });
     }
     let entries_region = &block_data[32..];
-    parse_xattr_entries(entries_region, entries_region)
+    parse_xattr_entries(entries_region, block_data)
 }
 
 // ── Hash-tree (htree/DX) structures and algorithms ──────────────────────────
@@ -7035,14 +7034,15 @@ mod tests {
         let entry_start = ibody_start + 4;
         buf[entry_start] = 4; // name_len=4
         buf[entry_start + 1] = ffs_types::EXT4_XATTR_INDEX_USER;
-        buf[entry_start + 2..entry_start + 4].copy_from_slice(&80_u16.to_le_bytes()); // value_offs=80 (relative to ibody+4)
+        let value_offs = 4_u16 + 80; // value_offs from start of ibody (includes 4-byte header)
+        buf[entry_start + 2..entry_start + 4].copy_from_slice(&value_offs.to_le_bytes());
         // entry_start + 4..8 = e_value_block (unused, stays zero)
         buf[entry_start + 8..entry_start + 12].copy_from_slice(&5_u32.to_le_bytes()); // value_size=5
         // entry_start + 12..16 = e_hash (unused, stays zero)
         buf[entry_start + 16..entry_start + 20].copy_from_slice(b"mime");
 
-        // Value at ibody+4+80 = entry data area offset 80
-        let value_off = ibody_start + 4 + 80;
+        // Value at ibody_start + value_offs
+        let value_off = ibody_start + usize::from(value_offs);
         buf[value_off..value_off + 5].copy_from_slice(b"image");
 
         // Terminator
@@ -7074,12 +7074,12 @@ mod tests {
         // Entry at offset 32 (after header)
         block[32] = 3; // name_len=3
         block[33] = ffs_types::EXT4_XATTR_INDEX_SECURITY;
-        block[34..36].copy_from_slice(&200_u16.to_le_bytes()); // value_offs
+        block[34..36].copy_from_slice(&200_u16.to_le_bytes()); // value_offs from block start
         // block[36..40] = e_value_block (unused, stays zero)
         block[40..44].copy_from_slice(&4_u32.to_le_bytes()); // value_size
         // block[44..48] = e_hash (unused, stays zero)
         block[48..51].copy_from_slice(b"cap");
-        block[32 + 200..32 + 204].copy_from_slice(b"data");
+        block[200..204].copy_from_slice(b"data");
 
         // Terminator
         // Entry header is 16 bytes + 3 name = 19, rounded to 20
