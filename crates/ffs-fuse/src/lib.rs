@@ -331,6 +331,35 @@ struct AccessPredictorState {
     next_touch: u64,
 }
 
+impl AccessPredictorState {
+    fn rebase_touches(&mut self) {
+        if self.history.is_empty() {
+            self.lru.clear();
+            self.next_touch = 0;
+            return;
+        }
+
+        let mut entries: Vec<(u64, u64)> = self
+            .history
+            .iter()
+            .map(|(ino, entry)| (entry.last_touch, *ino))
+            .collect();
+        entries.sort_by_key(|(touch, _)| *touch);
+
+        self.lru.clear();
+        let mut next = 1_u64;
+        for (_touch, ino) in entries {
+            if let Some(entry) = self.history.get_mut(&ino) {
+                entry.last_touch = next;
+            }
+            self.lru.insert(next, ino);
+            next = next.saturating_add(1);
+        }
+
+        self.next_touch = next.saturating_sub(1);
+    }
+}
+
 #[derive(Debug)]
 struct AccessPredictor {
     state: Mutex<AccessPredictorState>,
@@ -394,6 +423,9 @@ impl AccessPredictor {
                 }
             };
 
+            if guard.next_touch == u64::MAX {
+                guard.rebase_touches();
+            }
             guard.next_touch = guard.next_touch.saturating_add(1);
             let touch = guard.next_touch;
             if let Some(old_touch) = guard.history.get(&ino.0).map(|old| old.last_touch) {
@@ -4836,6 +4868,56 @@ mod tests {
             guard.history.len()
         };
         assert_eq!(tracked, 3);
+    }
+
+    #[test]
+    fn access_predictor_rebases_on_touch_overflow() {
+        let predictor = AccessPredictor::new(3);
+        let size = 4096_u32;
+
+        {
+            let mut guard = match predictor.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.history.insert(
+                1,
+                AccessPattern {
+                    last_offset: 0,
+                    last_size: size,
+                    sequential_count: 1,
+                    direction: AccessDirection::Forward,
+                    last_touch: u64::MAX - 1,
+                },
+            );
+            guard.history.insert(
+                2,
+                AccessPattern {
+                    last_offset: u64::from(size),
+                    last_size: size,
+                    sequential_count: 1,
+                    direction: AccessDirection::Forward,
+                    last_touch: u64::MAX,
+                },
+            );
+            guard.lru.insert(u64::MAX - 1, 1);
+            guard.lru.insert(u64::MAX, 2);
+            guard.next_touch = u64::MAX;
+        }
+
+        predictor.record_read(InodeNumber(3), 0, size);
+
+        let (history_len, lru_len, next_touch) = {
+            let guard = match predictor.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            (guard.history.len(), guard.lru.len(), guard.next_touch)
+        };
+
+        assert_eq!(history_len, 3);
+        assert_eq!(lru_len, 3);
+        assert!(next_touch < u64::MAX);
     }
 
     #[test]
