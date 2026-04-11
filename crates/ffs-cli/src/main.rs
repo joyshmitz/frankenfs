@@ -5076,7 +5076,9 @@ fn mkfs_cmd_with_program(
         bail!("output file already exists: {}", output.display());
     }
 
-    let size_bytes = size_mb * 1024 * 1024;
+    let size_bytes = size_mb
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| anyhow::anyhow!("size_mb too large to represent bytes"))?;
 
     // Create sparse image file.
     let f = std::fs::File::create(output)
@@ -8052,6 +8054,36 @@ mod tests {
         let result =
             Cli::try_parse_from(["ffs", "mkfs", "--size-mb", "sixty-four", "/tmp/new.img"]);
         assert!(result.is_err(), "mkfs --size-mb must be numeric");
+    }
+
+    #[test]
+    fn mkfs_cmd_rejects_size_mb_overflow() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let mut output = std::env::temp_dir();
+        output.push(format!("ffs-cli-mkfs-overflow-{}-{ts}", std::process::id()));
+        let too_large = u64::MAX / (1024 * 1024) + 1;
+
+        let err = super::mkfs_cmd_with_program(
+            &output,
+            too_large,
+            1024,
+            "overflow",
+            false,
+            std::path::Path::new("mkfs.ext4"),
+        )
+        .expect_err("oversized mkfs requests should be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("size_mb too large"),
+            "expected overflow guardrail, got: {message}"
+        );
+        assert!(
+            !output.exists(),
+            "overflow check should run before creating the image file"
+        );
     }
 
     #[test]
