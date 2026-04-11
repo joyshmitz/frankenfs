@@ -672,21 +672,51 @@ fn resolve_raid10_stripes(
                 field: "stripe_len",
                 reason: "RAID10 stripe_len * data_stripes overflow",
             })?;
-    let base = usize::try_from(stripe_idx.saturating_mul(sub)).unwrap_or(usize::MAX);
-    let sub_usize = usize::try_from(sub).unwrap_or(0);
-    Ok((0..sub_usize)
-        .filter_map(|m| {
-            let s = chunk.stripes.get(base.checked_add(m)?)?;
-            let stripe_off = stripe_nr
-                .checked_mul(stripe_len)?
-                .checked_add(offset_in_stripe)?;
-            let physical = s.offset.checked_add(stripe_off)?;
-            Some(BtrfsPhysicalMapping {
-                devid: s.devid,
-                physical,
-            })
-        })
-        .collect())
+    let base = stripe_idx
+        .checked_mul(sub)
+        .ok_or(ParseError::InvalidField {
+            field: "stripe_index",
+            reason: "RAID10 stripe index overflow",
+        })?;
+    let base_usize = usize::try_from(base).map_err(|_| ParseError::InvalidField {
+        field: "stripe_index",
+        reason: "RAID10 stripe index overflow",
+    })?;
+    let sub_usize = usize::try_from(sub).map_err(|_| ParseError::InvalidField {
+        field: "sub_stripes",
+        reason: "RAID10 sub_stripes exceeds addressable range",
+    })?;
+    let stripe_off = stripe_nr
+        .checked_mul(stripe_len)
+        .and_then(|v| v.checked_add(offset_in_stripe))
+        .ok_or(ParseError::InvalidField {
+            field: "stripe_offset",
+            reason: "stripe offset overflow",
+        })?;
+
+    let mut stripes = Vec::with_capacity(sub_usize);
+    for m in 0..sub_usize {
+        let idx = base_usize.checked_add(m).ok_or(ParseError::InvalidField {
+            field: "stripe_index",
+            reason: "stripe index overflow",
+        })?;
+        let s = chunk.stripes.get(idx).ok_or(ParseError::InvalidField {
+            field: "stripe_index",
+            reason: "stripe index out of range",
+        })?;
+        let physical = s
+            .offset
+            .checked_add(stripe_off)
+            .ok_or(ParseError::InvalidField {
+                field: "stripe_offset",
+                reason: "physical address overflow",
+            })?;
+        stripes.push(BtrfsPhysicalMapping {
+            devid: s.devid,
+            physical,
+        });
+    }
+    Ok(stripes)
 }
 
 /// RAID5/6: return the data stripe (parity stripes excluded).
@@ -3421,6 +3451,27 @@ mod tests {
             err,
             ParseError::InvalidField {
                 field: "num_stripes",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stripe_resolve_raid10_overflow_reports_error() {
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            4096,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10,
+            vec![stripe(1, u64::MAX - 1), stripe(2, 0x20_0000)],
+            1,
+        )];
+
+        let err = map_logical_to_stripes(&chunks, 10).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "stripe_offset",
                 ..
             }
         ));
