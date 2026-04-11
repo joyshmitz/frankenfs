@@ -9883,7 +9883,9 @@ impl OpenFs {
                                 )
                             })?;
                         let partial_offset = usize::try_from(new_size % u64::from(block_size))
-                            .expect("block size modulo fits in usize");
+                            .map_err(|_| {
+                                FfsError::Format("truncation offset exceeds usize capacity".into())
+                            })?;
 
                         let mappings = ffs_extent::map_logical_to_physical(
                             cx,
@@ -13841,8 +13843,8 @@ impl FsOps for OpenFs {
                 }
                 // PATH_MAX is 4096 on Linux; symlinks cannot exceed this.
                 let capped = attr.size.min(LINUX_PATH_MAX);
-                let read_size =
-                    u32::try_from(capped).expect("PATH_MAX-capped symlink size must fit in u32");
+                let read_size = u32::try_from(capped)
+                    .map_err(|_| FfsError::Format("symlink size exceeds u32 capacity".into()))?;
                 let mut target = self.btrfs_read_file(cx, ino, 0, read_size)?;
                 if let Some(nul) = target.iter().position(|b| *b == 0) {
                     target.truncate(nul);
@@ -20611,13 +20613,15 @@ mod tests {
         crash_point: &str,
         outcome: &str,
     ) {
-        let event = logs
-            .iter()
-            .find(|entry| {
-                entry.get("message").and_then(Value::as_str) == Some("CRASH_MATRIX_EVENT")
-                    && entry.get("scenario_id").and_then(Value::as_str) == Some(scenario_id)
-            })
-            .unwrap_or_else(|| panic!("missing crash-matrix event for {scenario_id}: {logs:?}"));
+        let event = logs.iter().find(|entry| {
+            entry.get("message").and_then(Value::as_str) == Some("CRASH_MATRIX_EVENT")
+                && entry.get("scenario_id").and_then(Value::as_str) == Some(scenario_id)
+        });
+        assert!(
+            event.is_some(),
+            "missing crash-matrix event for {scenario_id}: {logs:?}"
+        );
+        let event = event.expect("crash-matrix event must be present after assert");
 
         assert_eq!(
             event.get("crash_point").and_then(Value::as_str),
@@ -22894,8 +22898,8 @@ mod tests {
         let mut created_names = Vec::new();
         for i in 0..count {
             let name = format!("multi_{i:03}.txt");
-            fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
-                .unwrap_or_else(|e| panic!("create {name}: {e}"));
+            let result = fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0);
+            assert!(result.is_ok(), "create {name}: {result:?}");
             created_names.push(name);
         }
 
@@ -22926,14 +22930,18 @@ mod tests {
         let count = 1_000u32;
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
-            fs.create(&cx, dir_attr.ino, OsStr::new(&name), 0o644, 0, 0)
-                .unwrap_or_else(|e| panic!("create {name}: {e}"));
+            let create_result = fs.create(&cx, dir_attr.ino, OsStr::new(&name), 0o644, 0, 0);
+            assert!(create_result.is_ok(), "create {name}: {create_result:?}");
             // Write a small payload.
-            let attr = fs
-                .lookup(&cx, dir_attr.ino, OsStr::new(&name))
-                .unwrap_or_else(|e| panic!("lookup after create {name}: {e}"));
-            fs.write(&cx, attr.ino, 0, format!("payload {i}\n").as_bytes())
-                .unwrap_or_else(|e| panic!("write {name}: {e}"));
+            let lookup_result = fs.lookup(&cx, dir_attr.ino, OsStr::new(&name));
+            assert!(
+                lookup_result.is_ok(),
+                "lookup after create {name}: {lookup_result:?}"
+            );
+            let attr =
+                lookup_result.expect("lookup should succeed after assert in bulk create test");
+            let write_result = fs.write(&cx, attr.ino, 0, format!("payload {i}\n").as_bytes());
+            assert!(write_result.is_ok(), "write {name}: {write_result:?}");
         }
 
         // Verify all files can be looked up and then unlinked.
@@ -22945,8 +22953,8 @@ mod tests {
                 "lookup file_{i:04}.txt failed: {:?}",
                 result.err()
             );
-            fs.unlink(&cx, dir_attr.ino, OsStr::new(&name))
-                .unwrap_or_else(|e| panic!("unlink {name}: {e}"));
+            let unlink_result = fs.unlink(&cx, dir_attr.ino, OsStr::new(&name));
+            assert!(unlink_result.is_ok(), "unlink {name}: {unlink_result:?}");
         }
     }
 
@@ -24174,8 +24182,8 @@ mod tests {
         let mut created_names = Vec::new();
         for i in 0..50 {
             let name = format!("file_{i:03}.txt");
-            fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0)
-                .unwrap_or_else(|e| panic!("create {name}: {e}"));
+            let result = fs.create(&cx, root, OsStr::new(&name), 0o644, 0, 0);
+            assert!(result.is_ok(), "create {name}: {result:?}");
             created_names.push(name);
         }
 
@@ -28452,27 +28460,24 @@ mod tests {
         }
 
         let logs = parse_json_logs(&buffer);
-        let applied = logs
-            .iter()
-            .find(|entry| {
-                entry.get("scenario_id").and_then(Value::as_str)
-                    == Some("btrfs_rw_fallocate_prealloc")
-                    && entry.get("outcome").and_then(Value::as_str) == Some("applied")
-                    && entry
-                        .get("operation_id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| value.starts_with("btrfs-fallocate-"))
-            })
-            .unwrap_or_else(
-                #[allow(clippy::significant_drop_tightening)]
-                || {
-                    let binding = buffer.inner.lock().unwrap();
-                    let raw = String::from_utf8_lossy(&binding);
-                    panic!(
-                        "expected btrfs fallocate success log event: {logs:?}\nRAW BUFFER: {raw}"
-                    );
-                },
-            );
+        let applied = logs.iter().find(|entry| {
+            entry.get("scenario_id").and_then(Value::as_str) == Some("btrfs_rw_fallocate_prealloc")
+                && entry.get("outcome").and_then(Value::as_str) == Some("applied")
+                && entry
+                    .get("operation_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.starts_with("btrfs-fallocate-"))
+        });
+        #[allow(clippy::significant_drop_tightening)]
+        let raw = {
+            let binding = buffer.inner.lock().unwrap();
+            String::from_utf8_lossy(&binding).to_string()
+        };
+        assert!(
+            applied.is_some(),
+            "expected btrfs fallocate success log event: {logs:?}\nRAW BUFFER: {raw}"
+        );
+        let applied = applied.expect("fallocate success log must be present after assert");
 
         assert_eq!(
             applied.get("scenario_id").and_then(Value::as_str),
@@ -28552,14 +28557,16 @@ mod tests {
         assert_eq!(err.to_errno(), libc::EINVAL);
 
         let logs = parse_json_logs(&buffer);
-        let rejected = logs
-            .iter()
-            .find(|entry| {
-                entry.get("message").and_then(Value::as_str) == Some("btrfs_fallocate_rejected")
-                    && entry.get("error_class").and_then(Value::as_str)
-                        == Some("invalid_punch_hole_mode")
-            })
-            .unwrap_or_else(|| panic!("expected btrfs_fallocate_rejected log for invalid punch-hole mode. Logs: {logs:?}"));
+        let rejected = logs.iter().find(|entry| {
+            entry.get("message").and_then(Value::as_str) == Some("btrfs_fallocate_rejected")
+                && entry.get("error_class").and_then(Value::as_str)
+                    == Some("invalid_punch_hole_mode")
+        });
+        assert!(
+            rejected.is_some(),
+            "expected btrfs_fallocate_rejected log for invalid punch-hole mode. Logs: {logs:?}"
+        );
+        let rejected = rejected.expect("btrfs_fallocate_rejected log must be present after assert");
 
         assert_eq!(
             rejected.get("outcome").and_then(Value::as_str),
@@ -32847,10 +32854,13 @@ mod tests {
         let count = 250_u32;
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
-            fs.create(&cx, dir_attr.ino, OsStr::new(&name), 0o644, 0, 0)
-                .unwrap_or_else(|e| panic!("create {name}: {e}"));
-            fs.lookup(&cx, dir_attr.ino, OsStr::new(&name))
-                .unwrap_or_else(|e| panic!("lookup after create {name}: {e}"));
+            let create_result = fs.create(&cx, dir_attr.ino, OsStr::new(&name), 0o644, 0, 0);
+            assert!(create_result.is_ok(), "create {name}: {create_result:?}");
+            let lookup_result = fs.lookup(&cx, dir_attr.ino, OsStr::new(&name));
+            assert!(
+                lookup_result.is_ok(),
+                "lookup after create {name}: {lookup_result:?}"
+            );
         }
 
         // Verify readdir returns all entries.
@@ -32866,10 +32876,10 @@ mod tests {
 
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
-            fs.lookup(&cx, dir_attr.ino, OsStr::new(&name))
-                .unwrap_or_else(|e| panic!("lookup {name}: {e}"));
-            fs.unlink(&cx, dir_attr.ino, OsStr::new(&name))
-                .unwrap_or_else(|e| panic!("unlink {name}: {e}"));
+            let lookup_result = fs.lookup(&cx, dir_attr.ino, OsStr::new(&name));
+            assert!(lookup_result.is_ok(), "lookup {name}: {lookup_result:?}");
+            let unlink_result = fs.unlink(&cx, dir_attr.ino, OsStr::new(&name));
+            assert!(unlink_result.is_ok(), "unlink {name}: {unlink_result:?}");
         }
     }
 
