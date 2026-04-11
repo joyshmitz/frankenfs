@@ -174,6 +174,7 @@ pub struct PerCoreConfig {
     pub cache_blocks_per_core: u32,
     /// Work-stealing threshold: steal when queue depth exceeds
     /// this multiple of the average across cores.
+    /// Non-finite or non-positive values are sanitized to the default.
     pub steal_threshold: f64,
     /// Whether to use advisory CPU affinity (thread naming only,
     /// since true pinning requires unsafe).
@@ -187,13 +188,15 @@ impl Default for PerCoreConfig {
         Self {
             num_cores,
             cache_blocks_per_core: 4096,
-            steal_threshold: 2.0,
+            steal_threshold: Self::DEFAULT_STEAL_THRESHOLD,
             advisory_affinity: true,
         }
     }
 }
 
 impl PerCoreConfig {
+    const DEFAULT_STEAL_THRESHOLD: f64 = 2.0;
+
     /// Resolved number of cores.
     #[must_use]
     #[expect(clippy::cast_possible_truncation)] // .min(16) always fits u32
@@ -202,6 +205,19 @@ impl PerCoreConfig {
             std::thread::available_parallelism().map_or(4, |n| n.get().min(16) as u32)
         } else {
             self.num_cores
+        }
+    }
+
+    /// Normalized work-stealing threshold.
+    ///
+    /// Non-finite or non-positive values are treated as the default
+    /// to avoid disabling stealing via NaN/negative division.
+    #[must_use]
+    pub fn normalized_steal_threshold(&self) -> f64 {
+        if self.steal_threshold.is_finite() && self.steal_threshold > 0.0 {
+            self.steal_threshold
+        } else {
+            Self::DEFAULT_STEAL_THRESHOLD
         }
     }
 
@@ -291,7 +307,7 @@ impl PerCoreDispatcher {
             .load(Ordering::Relaxed) as f64;
 
         // This core is idle relative to average queue depth — try to steal work.
-        mine < avg / self.config.steal_threshold
+        mine < avg / self.config.normalized_steal_threshold()
     }
 
     /// Aggregate metrics across all cores.
@@ -416,6 +432,25 @@ mod tests {
                 "core {core} got {count} requests (expected ~1250)"
             );
         }
+    }
+
+    #[test]
+    fn should_steal_sanitizes_invalid_thresholds() {
+        let config = PerCoreConfig {
+            num_cores: 2,
+            cache_blocks_per_core: 1,
+            steal_threshold: -1.0,
+            advisory_affinity: false,
+        };
+        let dispatcher = PerCoreDispatcher::new(config);
+        dispatcher.core_metrics[0]
+            .pending_requests
+            .store(1, Ordering::Relaxed);
+        dispatcher.core_metrics[1]
+            .pending_requests
+            .store(9, Ordering::Relaxed);
+
+        assert!(dispatcher.should_steal(0));
     }
 
     #[test]
