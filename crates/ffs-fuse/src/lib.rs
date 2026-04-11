@@ -2267,10 +2267,25 @@ impl MountHandle {
     #[must_use]
     pub fn wait(mut self) -> MetricsSnapshot {
         info!(mountpoint = %self.mountpoint.display(), "waiting for shutdown signal");
-        while !self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+        loop {
+            if self.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                info!(
+                    mountpoint = %self.mountpoint.display(),
+                    "shutdown signal received"
+                );
+                break;
+            }
+            if let Some(session) = self.session.as_ref() {
+                if session.guard.is_finished() {
+                    warn!(
+                        mountpoint = %self.mountpoint.display(),
+                        "fuse background session ended without explicit shutdown"
+                    );
+                    break;
+                }
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
-        info!(mountpoint = %self.mountpoint.display(), "shutdown signal received");
         self.do_unmount()
     }
 
@@ -2996,8 +3011,12 @@ mod tests {
         )));
 
         let response = fuse.dispatch_ioctl(11, 0, EXT4_IOC_GETFLAGS, &[], 4);
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected ioctl data response"
+        );
         let IoctlResult::Data(bytes) = response else {
-            panic!("expected ioctl data response");
+            unreachable!("asserted IoctlResult::Data above");
         };
         assert_eq!(bytes.len(), 4);
         assert_eq!(
