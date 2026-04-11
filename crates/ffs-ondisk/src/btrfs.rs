@@ -268,6 +268,13 @@ pub fn parse_sys_chunk_array(data: &[u8]) -> Result<Vec<BtrfsChunkEntry>, ParseE
         let sub_stripes = read_le_u16(data, cur + 46)?;
         cur += BTRFS_CHUNK_FIXED_SIZE;
 
+        let raid_bits = chunk_type & chunk_type_flags::RAID_MASK;
+        if raid_bits.count_ones() > 1 {
+            return Err(ParseError::InvalidField {
+                field: "chunk_type",
+                reason: "multiple RAID profiles set",
+            });
+        }
         if length == 0 {
             return Err(ParseError::InvalidField {
                 field: "chunk_length",
@@ -1567,6 +1574,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_sys_chunk_array_rejects_multiple_raid_profiles() {
+        let mut data = vec![0_u8; BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE + BTRFS_STRIPE_SIZE];
+        data[0..8].copy_from_slice(&256_u64.to_le_bytes());
+        data[8] = 228;
+        data[9..17].copy_from_slice(&0_u64.to_le_bytes());
+        let c = BTRFS_DISK_KEY_SIZE;
+        data[c..c + 8].copy_from_slice(&4096_u64.to_le_bytes());
+        data[c + 8..c + 16].copy_from_slice(&2_u64.to_le_bytes());
+        data[c + 16..c + 24].copy_from_slice(&4096_u64.to_le_bytes());
+        let chunk_type = chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1;
+        data[c + 24..c + 32].copy_from_slice(&chunk_type.to_le_bytes());
+        data[c + 32..c + 36].copy_from_slice(&4096_u32.to_le_bytes());
+        data[c + 36..c + 40].copy_from_slice(&4096_u32.to_le_bytes());
+        data[c + 40..c + 44].copy_from_slice(&4096_u32.to_le_bytes());
+        data[c + 44..c + 46].copy_from_slice(&1_u16.to_le_bytes());
+        data[c + 46..c + 48].copy_from_slice(&0_u16.to_le_bytes());
+        let s = c + BTRFS_CHUNK_FIXED_SIZE;
+        data[s..s + 8].copy_from_slice(&1_u64.to_le_bytes());
+        data[s + 8..s + 16].copy_from_slice(&0_u64.to_le_bytes());
+
+        let err = parse_sys_chunk_array(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "chunk_type",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parse_leaf_items_smoke() {
         let mut block = vec![0_u8; 512];
 
@@ -2575,6 +2615,13 @@ mod tests {
             let stripes_count = usize::from(num_stripes);
             let entry_len = BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE + stripes_count * BTRFS_STRIPE_SIZE;
             let mut data = vec![0_u8; entry_len];
+            let raid_bits = chunk_type & chunk_type_flags::RAID_MASK;
+            let raid_bit = if raid_bits == 0 {
+                0
+            } else {
+                1_u64 << raid_bits.trailing_zeros()
+            };
+            let sanitized_chunk_type = (chunk_type & !chunk_type_flags::RAID_MASK) | raid_bit;
 
             let key = BtrfsKey {
                 objectid: key_objectid,
@@ -2587,7 +2634,7 @@ mod tests {
             data[chunk_base..chunk_base + 8].copy_from_slice(&length.to_le_bytes());
             data[chunk_base + 8..chunk_base + 16].copy_from_slice(&owner.to_le_bytes());
             data[chunk_base + 16..chunk_base + 24].copy_from_slice(&stripe_len.to_le_bytes());
-            data[chunk_base + 24..chunk_base + 32].copy_from_slice(&chunk_type.to_le_bytes());
+            data[chunk_base + 24..chunk_base + 32].copy_from_slice(&sanitized_chunk_type.to_le_bytes());
             data[chunk_base + 32..chunk_base + 36].copy_from_slice(&io_align.to_le_bytes());
             data[chunk_base + 36..chunk_base + 40].copy_from_slice(&io_width.to_le_bytes());
             data[chunk_base + 40..chunk_base + 44].copy_from_slice(&sector_size.to_le_bytes());
@@ -2608,7 +2655,7 @@ mod tests {
             prop_assert_eq!(entry.length, length);
             prop_assert_eq!(entry.owner, owner);
             prop_assert_eq!(entry.stripe_len, stripe_len);
-            prop_assert_eq!(entry.chunk_type, chunk_type);
+            prop_assert_eq!(entry.chunk_type, sanitized_chunk_type);
             prop_assert_eq!(entry.io_align, io_align);
             prop_assert_eq!(entry.io_width, io_width);
             prop_assert_eq!(entry.sector_size, sector_size);
