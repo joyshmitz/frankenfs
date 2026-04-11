@@ -2706,21 +2706,40 @@ pub fn parse_dir_block(
                 field: "de_rec_len",
                 reason: "overflow",
             })?;
+        let is_tail =
+            inode == 0 && name_len == 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12;
+
+        // Detect checksum tail: inode=0, name_len=0, file_type=0xDE, rec_len=12
+        if is_tail {
+            if entry_end > block.len() {
+                return Err(ParseError::InsufficientData {
+                    needed: 12,
+                    offset,
+                    actual: block.len().saturating_sub(offset),
+                });
+            }
+            let tail_end = offset.checked_add(12).ok_or(ParseError::InvalidField {
+                field: "dir_block_tail",
+                reason: "overflow",
+            })?;
+            if tail_end < block.len() && block[tail_end..].iter().any(|&b| b != 0) {
+                return Err(ParseError::InvalidField {
+                    field: "dir_block_tail",
+                    reason: "non-zero padding after checksum tail",
+                });
+            }
+            tail = Some(Ext4DirEntryTail {
+                checksum: read_le_u32(block, offset + 8)?,
+            });
+            offset = block.len();
+            break;
+        }
+
         if entry_end > block.len() {
             return Err(ParseError::InvalidField {
                 field: "de_rec_len",
                 reason: "directory entry extends past block boundary",
             });
-        }
-
-        // Detect checksum tail: inode=0, name_len=0, file_type=0xDE, rec_len=12
-        if inode == 0 && name_len == 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12 {
-            if offset + 12 <= block.len() {
-                tail = Some(Ext4DirEntryTail {
-                    checksum: read_le_u32(block, offset + 8)?,
-                });
-            }
-            break;
         }
 
         // Skip deleted entries (inode == 0)
@@ -2748,6 +2767,14 @@ pub fn parse_dir_block(
         });
 
         offset = entry_end;
+    }
+
+    if offset != block.len() {
+        return Err(ParseError::InsufficientData {
+            needed: 8,
+            offset,
+            actual: block.len().saturating_sub(offset),
+        });
     }
 
     Ok((entries, tail))
@@ -2858,6 +2885,15 @@ impl Ext4DirEntryRef<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DirEntryHeader {
+    inode: u32,
+    rec_len: u32,
+    name_len: u8,
+    file_type_raw: u8,
+    entry_end: usize,
+}
+
 /// A zero-allocation iterator over ext4 directory entries in a block buffer.
 ///
 /// Yields `Result<Ext4DirEntryRef<'a>, ParseError>` for each live entry
@@ -2902,6 +2938,80 @@ impl<'a> DirBlockIter<'a> {
     pub fn checksum_tail(&self) -> Option<Ext4DirEntryTail> {
         self.tail
     }
+
+    fn read_header(&self) -> Result<DirEntryHeader, ParseError> {
+        let inode = read_le_u32(self.block, self.offset)?;
+        let rec_len_raw = read_le_u16(self.block, self.offset + 4)?;
+        let name_len = ensure_slice(self.block, self.offset + 6, 1)?[0];
+        let file_type_raw = ensure_slice(self.block, self.offset + 7, 1)?[0];
+
+        let rec_len = rec_len_from_disk(rec_len_raw, self.block_size);
+        if rec_len < 8 {
+            return Err(ParseError::InvalidField {
+                field: "de_rec_len",
+                reason: "directory entry rec_len < 8",
+            });
+        }
+
+        let entry_end =
+            self.offset
+                .checked_add(rec_len as usize)
+                .ok_or(ParseError::InvalidField {
+                    field: "de_rec_len",
+                    reason: "overflow",
+                })?;
+        if entry_end > self.block.len() {
+            let is_tail =
+                inode == 0 && name_len == 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12;
+            if !is_tail {
+                return Err(ParseError::InvalidField {
+                    field: "de_rec_len",
+                    reason: "directory entry extends past block boundary",
+                });
+            }
+        }
+
+        Ok(DirEntryHeader {
+            inode,
+            rec_len,
+            name_len,
+            file_type_raw,
+            entry_end,
+        })
+    }
+
+    fn is_checksum_tail(header: DirEntryHeader) -> bool {
+        header.inode == 0
+            && header.name_len == 0
+            && header.file_type_raw == EXT4_FT_DIR_CSUM
+            && header.rec_len == 12
+    }
+
+    fn consume_tail(&mut self) -> Result<(), ParseError> {
+        let Some(tail_end) = self.offset.checked_add(12) else {
+            return Err(ParseError::InvalidField {
+                field: "dir_block_tail",
+                reason: "overflow",
+            });
+        };
+        if tail_end > self.block.len() {
+            return Err(ParseError::InsufficientData {
+                needed: 12,
+                offset: self.offset,
+                actual: self.block.len().saturating_sub(self.offset),
+            });
+        }
+        if tail_end < self.block.len() && self.block[tail_end..].iter().any(|&b| b != 0) {
+            return Err(ParseError::InvalidField {
+                field: "dir_block_tail",
+                reason: "non-zero padding after checksum tail",
+            });
+        }
+        let csum = read_le_u32(self.block, self.offset + 8)?;
+        self.tail = Some(Ext4DirEntryTail { checksum: csum });
+        self.offset = self.block.len();
+        Ok(())
+    }
 }
 
 impl<'a> Iterator for DirBlockIter<'a> {
@@ -2909,89 +3019,47 @@ impl<'a> Iterator for DirBlockIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.done || self.offset + 8 > self.block.len() {
+            if self.done {
                 return None;
             }
-
-            let inode = match read_le_u32(self.block, self.offset) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(e));
-                }
-            };
-            let rec_len_raw = match read_le_u16(self.block, self.offset + 4) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(e));
-                }
-            };
-            let name_len = match ensure_slice(self.block, self.offset + 6, 1) {
-                Ok(s) => s[0],
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(e));
-                }
-            };
-            let file_type_raw = match ensure_slice(self.block, self.offset + 7, 1) {
-                Ok(s) => s[0],
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(e));
-                }
-            };
-
-            let rec_len = rec_len_from_disk(rec_len_raw, self.block_size);
-
-            // rec_len must be >= 8 (header size)
-            if rec_len < 8 {
+            if self.offset + 8 > self.block.len() {
                 self.done = true;
-                return Some(Err(ParseError::InvalidField {
-                    field: "de_rec_len",
-                    reason: "directory entry rec_len < 8",
+                if self.offset == self.block.len() {
+                    return None;
+                }
+                return Some(Err(ParseError::InsufficientData {
+                    needed: 8,
+                    offset: self.offset,
+                    actual: self.block.len().saturating_sub(self.offset),
                 }));
             }
 
-            // rec_len must not overflow or exceed block
-            let entry_end = match self.offset.checked_add(rec_len as usize) {
-                Some(end) if end <= self.block.len() => end,
-                Some(_) => {
+            let header = match self.read_header() {
+                Ok(header) => header,
+                Err(e) => {
                     self.done = true;
-                    return Some(Err(ParseError::InvalidField {
-                        field: "de_rec_len",
-                        reason: "directory entry extends past block boundary",
-                    }));
-                }
-                None => {
-                    self.done = true;
-                    return Some(Err(ParseError::InvalidField {
-                        field: "de_rec_len",
-                        reason: "overflow",
-                    }));
+                    return Some(Err(e));
                 }
             };
 
-            // Detect checksum tail sentinel
-            if inode == 0 && name_len == 0 && file_type_raw == EXT4_FT_DIR_CSUM && rec_len == 12 {
-                if self.offset + 12 <= self.block.len() {
-                    if let Ok(csum) = read_le_u32(self.block, self.offset + 8) {
-                        self.tail = Some(Ext4DirEntryTail { checksum: csum });
-                    }
-                }
+            // Detect checksum tail sentinel.
+            if Self::is_checksum_tail(header) {
                 self.done = true;
+                if let Err(err) = self.consume_tail() {
+                    return Some(Err(err));
+                }
                 return None;
             }
 
             // Skip deleted entries (inode == 0)
-            if inode == 0 {
-                self.offset = entry_end;
+            if header.inode == 0 {
+                self.offset = header.entry_end;
                 continue;
             }
 
             // Validate name_len fits within rec_len
-            let name_end = self.offset + 8 + usize::from(name_len);
-            if name_end > entry_end {
+            let name_end = self.offset + 8 + usize::from(header.name_len);
+            if name_end > header.entry_end {
                 self.done = true;
                 return Some(Err(ParseError::InvalidField {
                     field: "de_name_len",
@@ -3000,13 +3068,13 @@ impl<'a> Iterator for DirBlockIter<'a> {
             }
 
             let name = &self.block[self.offset + 8..name_end];
-            self.offset = entry_end;
+            self.offset = header.entry_end;
 
             return Some(Ok(Ext4DirEntryRef {
-                inode,
-                rec_len,
-                name_len,
-                file_type: Ext4FileType::from_raw(file_type_raw),
+                inode: header.inode,
+                rec_len: header.rec_len,
+                name_len: header.name_len,
+                file_type: Ext4FileType::from_raw(header.file_type_raw),
                 name,
             }));
         }
@@ -5082,14 +5150,13 @@ mod tests {
 
         let parsed_inode = Ext4Inode::parse_from_bytes(&inode).expect("inode parse");
         let (_, tree) = parse_inode_extent_tree(&parsed_inode).expect("extent parse");
-        match tree {
-            ExtentTree::Leaf(exts) => {
-                assert_eq!(exts.len(), 1);
-                assert_eq!(exts[0].logical_block, 0);
-                assert_eq!(exts[0].actual_len(), 8);
-                assert_eq!(exts[0].physical_start, 1234);
-            }
-            ExtentTree::Index(_) => panic!("expected leaf"),
+        if let ExtentTree::Leaf(exts) = tree {
+            assert_eq!(exts.len(), 1);
+            assert_eq!(exts[0].logical_block, 0);
+            assert_eq!(exts[0].actual_len(), 8);
+            assert_eq!(exts[0].physical_start, 1234);
+        } else {
+            unreachable!("expected leaf");
         }
     }
 
@@ -5291,6 +5358,79 @@ mod tests {
     }
 
     #[test]
+    fn parse_dir_block_rejects_truncated_checksum_tail() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; 30];
+
+        let entry_rec_len = u16::try_from(block_size - 12).unwrap();
+        write_dir_entry(&mut block, 0, 2, 2, b".", entry_rec_len);
+
+        let tail_off = (block_size - 12) as usize;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 0;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+
+        let err = parse_dir_block(&block, block_size).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn parse_dir_block_rejects_checksum_tail_not_at_end() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 12);
+
+        let tail_off = 12_usize;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 0;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+        block[tail_off + 8..tail_off + 12].copy_from_slice(&0xCAFE_BABE_u32.to_le_bytes());
+        block[tail_off + 12] = 1;
+
+        let err = parse_dir_block(&block, block_size).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block_tail",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_dir_block_allows_checksum_tail_with_zero_padding() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 12);
+
+        let tail_off = 12_usize;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 0;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+        block[tail_off + 8..tail_off + 12].copy_from_slice(&0xCAFE_BABE_u32.to_le_bytes());
+
+        let (entries, tail) = parse_dir_block(&block, block_size).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(tail.is_some());
+    }
+
+    #[test]
+    fn parse_dir_block_rejects_trailing_bytes() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 28);
+
+        let err = parse_dir_block(&block, block_size).unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn parse_dir_block_skips_deleted_entries() {
         let block_size = 1024_u32;
@@ -5414,6 +5554,87 @@ mod tests {
         assert!(e0.is_dot());
         assert!(iter.next().is_none());
         assert_eq!(iter.checksum_tail().unwrap().checksum, 0xCAFE_BABE);
+    }
+
+    #[test]
+    fn dir_iter_rejects_truncated_checksum_tail() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; 30];
+
+        let entry_rec_len = u16::try_from(block_size - 12).unwrap();
+        write_dir_entry(&mut block, 0, 2, 2, b".", entry_rec_len);
+
+        let tail_off = (block_size - 12) as usize;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 0;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+
+        let mut iter = iter_dir_block(&block, block_size);
+        assert!(iter.next().unwrap().is_ok());
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn dir_iter_rejects_checksum_tail_not_at_end() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 12);
+
+        let tail_off = 12_usize;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 0;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+        block[tail_off + 8..tail_off + 12].copy_from_slice(&0xCAFE_BABE_u32.to_le_bytes());
+        block[tail_off + 12] = 1;
+
+        let mut iter = iter_dir_block(&block, block_size);
+        assert!(iter.next().unwrap().is_ok());
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block_tail",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dir_iter_allows_checksum_tail_with_zero_padding() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 12);
+
+        let tail_off = 12_usize;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 0;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+        block[tail_off + 8..tail_off + 12].copy_from_slice(&0xCAFE_BABE_u32.to_le_bytes());
+
+        let mut iter = iter_dir_block(&block, block_size);
+        let entry = iter.next().unwrap().unwrap();
+        assert!(entry.is_dot());
+        assert!(iter.next().is_none());
+        assert!(iter.checksum_tail().is_some());
+    }
+
+    #[test]
+    fn dir_iter_rejects_trailing_bytes() {
+        let block_size = 32_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 28);
+
+        let mut iter = iter_dir_block(&block, block_size);
+        assert!(iter.next().unwrap().is_ok());
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(err, ParseError::InsufficientData { .. }));
     }
 
     #[test]
