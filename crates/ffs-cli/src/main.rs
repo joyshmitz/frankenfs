@@ -5058,6 +5058,30 @@ fn mkfs_cmd(output: &Path, size_mb: u64, block_size: u32, label: &str, json: boo
     )
 }
 
+fn emit_mkfs_output(result: &MkfsOutput, size_mb: u64, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(result).context("serialize mkfs output")?
+        );
+    } else {
+        println!("FrankenFS mkfs");
+        println!("  Path:        {}", result.path);
+        println!(
+            "  Size:        {} MiB ({} bytes)",
+            size_mb, result.size_bytes
+        );
+        println!("  Block size:  {}", result.block_size);
+        println!("  Label:       {}", result.label);
+        println!("  Blocks:      {}", result.block_count);
+        println!("  Groups:      {}", result.groups_count);
+        println!("  Inodes:      {}", result.inodes_count);
+        println!("Image created successfully.");
+    }
+
+    Ok(())
+}
+
 fn mkfs_cmd_with_program(
     output: &Path,
     size_mb: u64,
@@ -5072,31 +5096,36 @@ fn mkfs_cmd_with_program(
     if size_mb == 0 {
         bail!("size_mb must be > 0");
     }
-    if output.exists() {
-        bail!("output file already exists: {}", output.display());
-    }
-
     let size_bytes = size_mb
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("size_mb too large to represent bytes"))?;
 
     // Create sparse image file.
-    let f = std::fs::File::create(output)
-        .with_context(|| format!("create image file {}", output.display()))?;
+    let f = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+    {
+        Ok(f) => f,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("output file already exists: {}", output.display());
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("create image file {}", output.display()));
+        }
+    };
     f.set_len(size_bytes)
         .with_context(|| format!("set image size to {size_bytes}"))?;
     drop(f);
 
     // Run mkfs.ext4.
     let mkfs_output = std::process::Command::new(mkfs_program)
-        .args([
-            "-F",
-            "-b",
-            &block_size.to_string(),
-            "-L",
-            label,
-            &output.display().to_string(),
-        ])
+        .arg("-F")
+        .arg("-b")
+        .arg(block_size.to_string())
+        .arg("-L")
+        .arg(label)
+        .arg(output)
         .output()
         .with_context(|| {
             format!(
@@ -5147,25 +5176,7 @@ fn mkfs_cmd_with_program(
         }
     };
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&result).context("serialize mkfs output")?
-        );
-    } else {
-        println!("FrankenFS mkfs");
-        println!("  Path:        {}", result.path);
-        println!(
-            "  Size:        {} MiB ({} bytes)",
-            size_mb, result.size_bytes
-        );
-        println!("  Block size:  {}", result.block_size);
-        println!("  Label:       {}", result.label);
-        println!("  Blocks:      {}", result.block_count);
-        println!("  Groups:      {}", result.groups_count);
-        println!("  Inodes:      {}", result.inodes_count);
-        println!("Image created successfully.");
-    }
+    emit_mkfs_output(&result, size_mb, json)?;
 
     info!(
         target: "ffs::cli",
@@ -8084,6 +8095,43 @@ mod tests {
             !output.exists(),
             "overflow check should run before creating the image file"
         );
+    }
+
+    #[test]
+    fn mkfs_cmd_rejects_existing_output_without_truncation() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let mut output = std::env::temp_dir();
+        output.push(format!("ffs-cli-mkfs-exists-{}-{ts}", std::process::id()));
+
+        let payload = b"already-here";
+        std::fs::write(&output, payload).expect("seed existing output");
+
+        let err = super::mkfs_cmd_with_program(
+            &output,
+            8,
+            1024,
+            "exists",
+            false,
+            std::path::Path::new("mkfs.ext4"),
+        )
+        .expect_err("existing output path should be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("output file already exists"),
+            "expected existing-output guardrail, got: {message}"
+        );
+        assert_eq!(
+            std::fs::metadata(&output)
+                .expect("stat existing output")
+                .len(),
+            payload.len() as u64,
+            "existing output must not be truncated"
+        );
+
+        let _ = std::fs::remove_file(&output);
     }
 
     #[test]
