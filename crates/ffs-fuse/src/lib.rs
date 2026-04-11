@@ -510,6 +510,9 @@ impl ReadaheadManager {
     }
 
     fn take(&self, ino: InodeNumber, offset: u64, requested_len: usize) -> Option<Vec<u8>> {
+        if requested_len == 0 {
+            return None;
+        }
         let mut guard = match self.pending.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -3271,6 +3274,16 @@ mod tests {
 
         assert_eq!(manager.take(ino, 8, 2), None);
         assert_eq!(manager.take(ino, 4, 2), Some(vec![5, 6]));
+    }
+
+    #[test]
+    fn readahead_manager_zero_len_take_preserves_entry() {
+        let manager = ReadaheadManager::new(8);
+        let ino = InodeNumber(7);
+
+        manager.insert(ino, 0, vec![1, 2, 3]);
+        assert_eq!(manager.take(ino, 0, 0), None);
+        assert_eq!(manager.take(ino, 0, 3), Some(vec![1, 2, 3]));
     }
 
     #[test]
