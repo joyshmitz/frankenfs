@@ -352,6 +352,31 @@ pub fn map_logical_to_physical(
             })?;
 
         if logical >= chunk_start && logical < chunk_end {
+            let profile = BtrfsRaidProfile::from_chunk_type(chunk.chunk_type);
+            match profile {
+                BtrfsRaidProfile::Single => {
+                    if chunk.num_stripes != 1 || chunk.stripes.len() != 1 {
+                        return Err(ParseError::InvalidField {
+                            field: "num_stripes",
+                            reason: "single-device chunk must have exactly one stripe",
+                        });
+                    }
+                }
+                BtrfsRaidProfile::Dup => {
+                    if chunk.num_stripes < 2 || chunk.stripes.len() < 2 {
+                        return Err(ParseError::InvalidField {
+                            field: "num_stripes",
+                            reason: "DUP chunk must have at least two stripes",
+                        });
+                    }
+                }
+                _ => {
+                    return Err(ParseError::InvalidField {
+                        field: "chunk_type",
+                        reason: "multi-device RAID profile not supported",
+                    });
+                }
+            }
             let offset_within = logical - chunk_start;
             // Use the first stripe (single-device assumption).
             let stripe = chunk.stripes.first().ok_or(ParseError::InvalidField {
@@ -1377,6 +1402,88 @@ mod tests {
         // Miss: logical address outside the chunk range
         let result = map_logical_to_physical(&chunks, 0x200_0000).expect("no error");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn map_logical_to_physical_rejects_multi_device_profile() {
+        let chunks = vec![BtrfsChunkEntry {
+            key: BtrfsKey {
+                objectid: 256,
+                item_type: 228,
+                offset: 0x100_0000,
+            },
+            length: 0x80_0000,
+            owner: 2,
+            stripe_len: 0x1_0000,
+            chunk_type: chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+            io_align: 4096,
+            io_width: 4096,
+            sector_size: 4096,
+            num_stripes: 2,
+            sub_stripes: 0,
+            stripes: vec![
+                BtrfsStripe {
+                    devid: 1,
+                    offset: 0x20_0000,
+                    dev_uuid: [0; 16],
+                },
+                BtrfsStripe {
+                    devid: 2,
+                    offset: 0x30_0000,
+                    dev_uuid: [0; 16],
+                },
+            ],
+        }];
+
+        let err = map_logical_to_physical(&chunks, 0x100_0000).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "chunk_type",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn map_logical_to_physical_rejects_single_with_multiple_stripes() {
+        let chunks = vec![BtrfsChunkEntry {
+            key: BtrfsKey {
+                objectid: 256,
+                item_type: 228,
+                offset: 0x100_0000,
+            },
+            length: 0x80_0000,
+            owner: 2,
+            stripe_len: 0x1_0000,
+            chunk_type: chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+            io_align: 4096,
+            io_width: 4096,
+            sector_size: 4096,
+            num_stripes: 2,
+            sub_stripes: 0,
+            stripes: vec![
+                BtrfsStripe {
+                    devid: 1,
+                    offset: 0x20_0000,
+                    dev_uuid: [0; 16],
+                },
+                BtrfsStripe {
+                    devid: 1,
+                    offset: 0x28_0000,
+                    dev_uuid: [0; 16],
+                },
+            ],
+        }];
+
+        let err = map_logical_to_physical(&chunks, 0x100_0000).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "num_stripes",
+                ..
+            }
+        ));
     }
 
     #[test]
