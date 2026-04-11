@@ -270,6 +270,10 @@ impl PerCoreDispatcher {
         if n < 2 {
             return false;
         }
+        let core_idx = core as usize;
+        if core_idx >= n {
+            return false;
+        }
 
         let total: i64 = self
             .core_metrics
@@ -282,7 +286,7 @@ impl PerCoreDispatcher {
         }
 
         let avg = total as f64 / n as f64;
-        let mine = self.core_metrics[core as usize]
+        let mine = self.core_metrics[core_idx]
             .pending_requests
             .load(Ordering::Relaxed) as f64;
 
@@ -532,6 +536,17 @@ mod tests {
         assert!(disp.should_steal(1));
         // Core 0 is busy → should not steal.
         assert!(!disp.should_steal(0));
+    }
+
+    #[test]
+    fn should_steal_out_of_range_returns_false() {
+        let cfg = PerCoreConfig {
+            num_cores: 2,
+            steal_threshold: 2.0,
+            ..Default::default()
+        };
+        let disp = PerCoreDispatcher::new(cfg);
+        assert!(!disp.should_steal(9));
     }
 
     #[test]
