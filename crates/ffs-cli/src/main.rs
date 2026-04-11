@@ -348,9 +348,13 @@ enum Command {
         #[arg(long)]
         native: bool,
         /// Mount a specific btrfs subvolume by name.
+        ///
+        /// Not yet supported — passing this flag will return an error.
         #[arg(long)]
         subvol: Option<String>,
         /// Mount a specific btrfs snapshot by name.
+        ///
+        /// Not yet supported — passing this flag will return an error.
         #[arg(long)]
         snapshot: Option<String>,
     },
@@ -1322,14 +1326,7 @@ fn run() -> Result<()> {
             subvol,
             snapshot,
         } => {
-            if subvol.is_some() || snapshot.is_some() {
-                info!(
-                    target: "ffs::cli::mount",
-                    subvol = subvol.as_deref().unwrap_or("(none)"),
-                    snapshot = snapshot.as_deref().unwrap_or("(none)"),
-                    "btrfs_subvol_mount_requested"
-                );
-            }
+            validate_btrfs_mount_selection(subvol.as_deref(), snapshot.as_deref())?;
             mount_cmd(
                 &image,
                 &mountpoint,
@@ -4038,6 +4035,18 @@ fn mount_cmd(
     Ok(())
 }
 
+fn validate_btrfs_mount_selection(subvol: Option<&str>, snapshot: Option<&str>) -> Result<()> {
+    if subvol.is_some() || snapshot.is_some() {
+        let subvol = subvol.unwrap_or("(none)");
+        let snapshot = snapshot.unwrap_or("(none)");
+        bail!(
+            "btrfs subvolume/snapshot mounting is not yet supported (subvol={subvol}, snapshot={snapshot}); \
+             use `ffs inspect --subvolumes/--snapshots` to list and mount the default root subvolume"
+        );
+    }
+    Ok(())
+}
+
 // ── Scrub command ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -5235,7 +5244,7 @@ mod tests {
         ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
         log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
         read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
-        summarize_repair_staleness, unavailable_repair_info,
+        summarize_repair_staleness, unavailable_repair_info, validate_btrfs_mount_selection,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -6977,6 +6986,28 @@ mod tests {
         assert!(
             message.contains("failed to open filesystem image"),
             "expected image-open failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_rejects_subvol_flag() {
+        let err = validate_btrfs_mount_selection(Some("home"), None)
+            .expect_err("subvol mount should be rejected until supported");
+        let message = err.to_string();
+        assert!(
+            message.contains("not yet supported"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn mount_rejects_snapshot_flag() {
+        let err = validate_btrfs_mount_selection(None, Some("snap-1"))
+            .expect_err("snapshot mount should be rejected until supported");
+        let message = err.to_string();
+        assert!(
+            message.contains("not yet supported"),
+            "unexpected error message: {message}"
         );
     }
 
