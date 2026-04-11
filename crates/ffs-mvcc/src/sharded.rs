@@ -438,6 +438,19 @@ impl ShardedMvccStore {
         }
     }
 
+    fn next_commit_seq(&self) -> Result<CommitSeq, CommitError> {
+        match self
+            .next_commit
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(1)
+            }) {
+            Ok(prev) => Ok(CommitSeq(prev)),
+            Err(current) => Err(CommitError::DurabilityFailure {
+                detail: format!("commit sequence exhausted at {current}"),
+            }),
+        }
+    }
+
     /// Begin a new transaction at the current snapshot.
     pub fn begin(&self) -> Transaction {
         let id = TxnId(self.next_txn.fetch_add(1, Ordering::SeqCst));
@@ -490,7 +503,10 @@ impl ShardedMvccStore {
             return Err((error, txn));
         }
 
-        let commit_seq = CommitSeq(self.next_commit.fetch_add(1, Ordering::SeqCst));
+        let commit_seq = match self.next_commit_seq() {
+            Ok(seq) => seq,
+            Err(err) => return Err((err, txn)),
+        };
         trace!(
             commit_seq = commit_seq.0,
             shards_involved = shard_indices.len(),
@@ -558,7 +574,10 @@ impl ShardedMvccStore {
             return Err((error, txn));
         }
 
-        let commit_seq = CommitSeq(self.next_commit.fetch_add(1, Ordering::SeqCst));
+        let commit_seq = match self.next_commit_seq() {
+            Ok(seq) => seq,
+            Err(err) => return Err((err, txn)),
+        };
         let install_ctx = CommitInstallContext {
             snapshot: txn.snapshot(),
             commit_seq,
@@ -866,6 +885,27 @@ mod tests {
             let seq = store.commit(txn).expect("commit");
             assert_eq!(seq, CommitSeq(i));
         }
+    }
+
+    #[test]
+    fn commit_sequence_exhaustion_returns_error() {
+        let store = make_store(1);
+        store.next_commit.store(u64::MAX, Ordering::SeqCst);
+
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(1), vec![0xAA]);
+
+        let (err, _txn) = store
+            .commit(txn)
+            .expect_err("commit sequence should be exhausted");
+        match err {
+            CommitError::DurabilityFailure { detail } => {
+                assert!(detail.contains("commit sequence exhausted"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        assert_eq!(store.current_snapshot().high, CommitSeq(0));
     }
 
     #[test]

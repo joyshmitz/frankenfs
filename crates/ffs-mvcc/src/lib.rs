@@ -1470,18 +1470,31 @@ impl MvccStore {
     ///
     /// This avoids a second conflict check when an external durability phase
     /// (for example, journal I/O) must run between validation and visibility.
-    pub fn commit_fcw_prechecked(&mut self, txn: Transaction) -> CommitSeq {
+    ///
+    /// # Errors
+    ///
+    /// Returns `CommitError` if the commit sequence is exhausted or if the
+    /// prechecked commit fails while installing versions.
+    pub fn commit_fcw_prechecked(&mut self, txn: Transaction) -> Result<CommitSeq, CommitError> {
         let started = Instant::now();
         let txn_id = txn.id().0;
+        let read_set_size = txn.read_set().len();
         let write_set_size = txn.pending_writes();
         self.runtime_metrics.record_commit_attempt();
-        let (commit_seq, deferred) = self.apply_fcw_commit(txn);
-        debug_assert!(
-            deferred.is_empty(),
-            "commit_fcw_prechecked silently drops deferred COW frees"
-        );
-        self.emit_transaction_commit(txn_id, commit_seq, write_set_size, started);
-        commit_seq
+        match self.apply_fcw_commit(txn) {
+            Ok((commit_seq, deferred)) => {
+                debug_assert!(
+                    deferred.is_empty(),
+                    "commit_fcw_prechecked silently drops deferred COW frees"
+                );
+                self.emit_transaction_commit(txn_id, commit_seq, write_set_size, started);
+                Ok(commit_seq)
+            }
+            Err((error, _txn)) => {
+                self.record_commit_abort(txn_id, read_set_size, write_set_size, &error);
+                Err(error)
+            }
+        }
     }
 
     pub fn resolved_writes_for_commit(
@@ -1814,7 +1827,7 @@ impl MvccStore {
         if let Err(error) = self.preflight_fcw(&txn) {
             return Err((error, txn));
         }
-        Ok(self.apply_fcw_commit(txn))
+        self.apply_fcw_commit(txn)
     }
 
     fn version_bytes_at(&self, block: BlockNumber, visible_high: CommitSeq) -> Option<Vec<u8>> {
@@ -2038,7 +2051,26 @@ impl MvccStore {
         Ok(())
     }
 
-    fn apply_fcw_commit(&mut self, txn: Transaction) -> (CommitSeq, Vec<BlockNumber>) {
+    fn next_commit_seq(&mut self) -> Result<CommitSeq, CommitError> {
+        let current = self.next_commit;
+        let Some(next) = current.checked_add(1) else {
+            return Err(CommitError::DurabilityFailure {
+                detail: format!("commit sequence exhausted at {current}"),
+            });
+        };
+        self.next_commit = next;
+        Ok(CommitSeq(current))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn apply_fcw_commit(
+        &mut self,
+        txn: Transaction,
+    ) -> Result<(CommitSeq, Vec<BlockNumber>), (CommitError, Transaction)> {
+        let commit_seq = match self.next_commit_seq() {
+            Ok(seq) => seq,
+            Err(error) => return Err((error, txn)),
+        };
         let chain_cap = self.compression_policy.max_chain_length;
         let Transaction {
             id: txn_id,
@@ -2049,9 +2081,6 @@ impl MvccStore {
             cow_writes,
             cow_orphans,
         } = txn;
-
-        let commit_seq = CommitSeq(self.next_commit);
-        self.next_commit = self.next_commit.saturating_add(1);
         let dedup_enabled = self.compression_policy.dedup_identical;
 
         for (block, bytes) in writes {
@@ -2106,7 +2135,7 @@ impl MvccStore {
         }
 
         let deferred = Self::collect_cow_deferred_frees(&cow_writes, cow_orphans);
-        (commit_seq, deferred)
+        Ok((commit_seq, deferred))
     }
 
     #[allow(clippy::result_large_err)]
@@ -2124,6 +2153,11 @@ impl MvccStore {
             Err(e) => return Err((e, txn)),
         };
 
+        let commit_seq = match self.next_commit_seq() {
+            Ok(seq) => seq,
+            Err(error) => return Err((error, txn)),
+        };
+
         let Transaction {
             id: txn_id,
             snapshot,
@@ -2133,9 +2167,6 @@ impl MvccStore {
             cow_writes,
             cow_orphans,
         } = txn;
-
-        let commit_seq = CommitSeq(self.next_commit);
-        self.next_commit = self.next_commit.saturating_add(1);
         let dedup_enabled = self.compression_policy.dedup_identical;
 
         let write_keys: BTreeSet<BlockNumber> = writes.keys().copied().collect();
@@ -7346,13 +7377,35 @@ mod tests {
             .expect("preflight should pass");
 
         // Prechecked commit should succeed.
-        let commit_seq = store.commit_fcw_prechecked(txn);
+        let commit_seq = store
+            .commit_fcw_prechecked(txn)
+            .expect("prechecked commit should succeed");
         assert!(commit_seq.0 > 0);
 
         // Data should be visible.
         let snap = store.current_snapshot();
         let data = store.read_visible(block, snap).expect("must be visible");
         assert_eq!(data[0], 0xCC);
+    }
+
+    #[test]
+    fn commit_sequence_exhaustion_returns_error() {
+        let mut store = MvccStore::new();
+        store.next_commit = u64::MAX;
+
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(0), vec![0xAA; 8]);
+
+        let err = store
+            .commit(txn)
+            .expect_err("commit should fail at max sequence");
+        match err {
+            CommitError::DurabilityFailure { detail } => {
+                assert!(detail.contains("commit sequence exhausted"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(store.next_commit, u64::MAX);
     }
 
     #[test]

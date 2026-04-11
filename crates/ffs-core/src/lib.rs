@@ -3729,6 +3729,35 @@ impl OpenFs {
         self.btrfs_alloc_state.as_ref().ok_or(FfsError::ReadOnly)
     }
 
+    fn map_journal_commit_error(
+        txn_id: u64,
+        error: CommitError,
+        event: &'static str,
+        durability_context: &'static str,
+    ) -> FfsError {
+        warn!(
+            target: "ffs::journal",
+            txn_id,
+            error = %error,
+            "{event}"
+        );
+        match error {
+            CommitError::Conflict { block, .. } | CommitError::ChainBackpressure { block, .. } => {
+                FfsError::MvccConflict {
+                    tx: txn_id,
+                    block: block.0,
+                }
+            }
+            CommitError::SsiConflict { pivot_block, .. } => FfsError::MvccConflict {
+                tx: txn_id,
+                block: pivot_block.0,
+            },
+            CommitError::DurabilityFailure { detail } => FfsError::Io(std::io::Error::other(
+                format!("MVCC durability failure {durability_context}: {detail}"),
+            )),
+        }
+    }
+
     /// Commit an MVCC transaction with JBD2 journaling.
     ///
     /// The write path is:
@@ -3780,49 +3809,21 @@ impl OpenFs {
 
         // Phase 1: preflight conflict checks. This does not make versions visible.
         mvcc_guard.preflight_commit_fcw(&txn).map_err(|e| {
-            warn!(
-                target: "ffs::journal",
-                txn_id = txn_id.0,
-                error = %e,
-                "journaled_commit_mvcc_conflict"
-            );
-            match e {
-                CommitError::Conflict { block, .. }
-                | CommitError::ChainBackpressure { block, .. } => FfsError::MvccConflict {
-                    tx: txn_id.0,
-                    block: block.0,
-                },
-                CommitError::SsiConflict { pivot_block, .. } => FfsError::MvccConflict {
-                    tx: txn_id.0,
-                    block: pivot_block.0,
-                },
-                CommitError::DurabilityFailure { detail } => FfsError::Io(std::io::Error::other(
-                    format!("MVCC durability failure during preflight: {detail}"),
-                )),
-            }
+            Self::map_journal_commit_error(
+                txn_id.0,
+                e,
+                "journaled_commit_mvcc_conflict",
+                "during preflight",
+            )
         })?;
 
         let writes = mvcc_guard.resolved_writes_for_commit(&txn).map_err(|e| {
-            warn!(
-                target: "ffs::journal",
-                txn_id = txn_id.0,
-                error = %e,
-                "journaled_commit_merge_resolution_failed"
-            );
-            match e {
-                CommitError::Conflict { block, .. }
-                | CommitError::ChainBackpressure { block, .. } => FfsError::MvccConflict {
-                    tx: txn_id.0,
-                    block: block.0,
-                },
-                CommitError::SsiConflict { pivot_block, .. } => FfsError::MvccConflict {
-                    tx: txn_id.0,
-                    block: pivot_block.0,
-                },
-                CommitError::DurabilityFailure { detail } => FfsError::Io(std::io::Error::other(
-                    format!("MVCC durability failure during merge resolution: {detail}"),
-                )),
-            }
+            Self::map_journal_commit_error(
+                txn_id.0,
+                e,
+                "journaled_commit_merge_resolution_failed",
+                "during merge resolution",
+            )
         })?;
 
         // Phase 2: write all pending blocks to the JBD2 journal.
@@ -3851,7 +3852,14 @@ impl OpenFs {
         };
 
         // Phase 3: make preflighted writes visible in MVCC.
-        let commit_seq = mvcc_guard.commit_fcw_prechecked(txn);
+        let commit_seq = mvcc_guard.commit_fcw_prechecked(txn).map_err(|e| {
+            Self::map_journal_commit_error(
+                txn_id.0,
+                e,
+                "journaled_commit_mvcc_failed_after_jbd2",
+                "after JBD2 visibility phase",
+            )
+        })?;
         drop(mvcc_guard);
 
         info!(
