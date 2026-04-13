@@ -1155,6 +1155,8 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
         });
     }
 
+    header.validate(block.len(), None)?;
+
     let nritems = usize::try_from(header.nritems)
         .map_err(|_| ParseError::IntegerConversion { field: "nritems" })?;
 
