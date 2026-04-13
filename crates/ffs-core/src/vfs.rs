@@ -487,8 +487,8 @@ pub trait FsOps: Send + Sync {
     fn create(
         &self,
         _cx: &Cx,
-        _scope: &mut RequestScope,
-        _parent: InodeNumber,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
         _name: &OsStr,
         _mode: u16,
         _uid: u32,
@@ -502,8 +502,8 @@ pub trait FsOps: Send + Sync {
     fn mkdir(
         &self,
         _cx: &Cx,
-        _scope: &mut RequestScope,
-        _parent: InodeNumber,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
         _name: &OsStr,
         _mode: u16,
         _uid: u32,
@@ -516,8 +516,8 @@ pub trait FsOps: Send + Sync {
     fn unlink(
         &self,
         _cx: &Cx,
-        _scope: &mut RequestScope,
-        _parent: InodeNumber,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
         _name: &OsStr,
     ) -> ffs_error::Result<()> {
         Err(FfsError::ReadOnly)
@@ -527,8 +527,8 @@ pub trait FsOps: Send + Sync {
     fn rmdir(
         &self,
         _cx: &Cx,
-        _scope: &mut RequestScope,
-        _parent: InodeNumber,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
         _name: &OsStr,
     ) -> ffs_error::Result<()> {
         Err(FfsError::ReadOnly)
@@ -538,8 +538,8 @@ pub trait FsOps: Send + Sync {
     fn rename(
         &self,
         _cx: &Cx,
-        _scope: &mut RequestScope,
-        _parent: InodeNumber,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
         _name: &OsStr,
         _new_parent: InodeNumber,
         _new_name: &OsStr,
@@ -576,8 +576,8 @@ pub trait FsOps: Send + Sync {
     fn symlink(
         &self,
         _cx: &Cx,
-        _scope: &mut RequestScope,
-        _parent: InodeNumber,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
         _name: &OsStr,
         _target: &Path,
         _uid: u32,
@@ -729,6 +729,4 @@ pub trait FsOps: Send + Sync {
     /// data is materialised to the underlying image.  The default
     /// implementation is a no-op.
     fn flush_on_destroy(&self, _cx: &Cx) -> ffs_error::Result<()> {
-        Ok(())
-    }
-}
+                       

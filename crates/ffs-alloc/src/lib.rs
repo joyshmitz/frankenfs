@@ -719,6 +719,11 @@ fn try_alloc_in_group(
     let bitmap_buf = dev.read_block(cx, gs.block_bitmap_block)?;
     let mut bitmap = bitmap_buf.as_slice().to_vec();
 
+    let reserved = reserved_blocks_in_group(geo, groups, group);
+    for &r in &reserved {
+        bitmap_set(&mut bitmap, r);
+    }
+
     // Determine start position for search.
     let start = hint.goal_block.map_or(0, |goal| {
         let (g, off) = geo.absolute_to_group_block(goal);

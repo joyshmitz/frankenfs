@@ -567,6 +567,7 @@ fn configure_stream_timeouts(cx: &Cx, stream: &TcpStream, fallback: Duration) ->
 }
 
 fn sleep_with_budget(cx: &Cx, fallback: Duration) -> Result<()> {
+    cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
     let sleep = effective_timeout(cx, fallback)?;
     thread::sleep(sleep);
     cx.checkpoint().map_err(|_| FfsError::Cancelled)
@@ -581,6 +582,7 @@ where
     for attempt in 0..attempts {
         match op(attempt) {
             Ok(value) => return Ok(value),
+            Err(FfsError::Cancelled) => return Err(FfsError::Cancelled),
             Err(err) if attempt + 1 < attempts => {
                 sleep_with_budget(cx, backoff)?;
                 backoff = backoff.saturating_mul(2);

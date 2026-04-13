@@ -57,7 +57,6 @@ crates/ffs-block/tests/cache_workload_comparison.rs:623: .expect("seed file payl
 crates/ffs-block/tests/cache_workload_comparison.rs:633: .expect("warm hot");
 crates/ffs-block/tests/cache_workload_comparison.rs:643: .expect("scan cold");
 crates/ffs-block/tests/cache_workload_comparison.rs:653: .expect("probe hot");
-crates/ffs-block/src/io_engine.rs:242: #[expect(clippy::cast_possible_truncation)] // 64-bit offsets in memory engine
 crates/ffs-block/benches/arc_cache.rs:70: let dev = ByteBlockDevice::new(mem, block_size).expect("device");
 crates/ffs-block/benches/arc_cache.rs:71: ArcCache::new(dev, capacity).expect("cache")
 crates/ffs-block/benches/arc_cache.rs:81: let dev = ByteBlockDevice::new(mem, block_size).expect("device");
@@ -132,6 +131,29 @@ crates/ffs-harness/tests/kernel_reference.rs:874: let image = std::fs::read(&tmp
 crates/ffs-harness/tests/kernel_reference.rs:875: let reader = Ext4ImageReader::new(&image).expect("parse ext4 image");
 crates/ffs-harness/tests/kernel_reference.rs:922: let open_fs = OpenFs::open(&cx, &tmp).expect("open ext4 image");
 crates/ffs-harness/tests/kernel_reference.rs:925: .expect("compute free space summary");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:253: .expect("workspace root")
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:271: fs::create_dir_all(parent).expect("create parent directories");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:273: fs::write(path, contents).expect("write fixture file");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:283: let temp = TempDir::new().expect("create tempdir");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:285: fs::create_dir_all(&root).expect("create rootdir");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:289: let file = File::create(&image).expect("create image file");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:291: .expect("set image length");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:318: .expect("run mkfs.btrfs");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:332: return fs.getattr(cx, InodeNumber(1)).expect("getattr root");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:335: let mut attr = fs.getattr(cx, InodeNumber(1)).expect("getattr root");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:389: .expect("FS_TREE ROOT_ITEM");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:390: let parsed = parse_root_item(&root_item.data).expect("parse FS_TREE root item");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:392: .expect("walk default fs tree")
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:402: let size = u32::try_from(attr.size).expect("file size fits in u32");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:444: logical_bytes: u64::try_from(data.len()).expect("inline length fits u64"),
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:479: let root_ref = parse_root_ref(&entry.data).expect("parse root ref");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:511: let fs = OpenFs::open_with_options(&cx, image, &OpenOptions::default()).expect("open image");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:512: let superblock = fs.btrfs_superblock().expect("btrfs superblock");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:513: let context = fs.btrfs_context().expect("btrfs context");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:514: let root_entries = fs.walk_btrfs_root_tree(&cx).expect("walk root tree");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:586: let json = serde_json::to_string_pretty(observed).expect("serialize golden");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:588: fs::write(&path, json).expect("write golden json");
+crates/ffs-harness/tests/btrfs_kernel_reference.rs:635: u64::try_from(content_hex.len() / 2).expect("hex length fits u64"),
 crates/ffs-harness/tests/ext4_journal_recovery.rs:49: .expect("block offset should not overflow");
 crates/ffs-harness/tests/ext4_journal_recovery.rs:52: .expect("prefix end should not overflow");
 crates/ffs-harness/tests/ext4_journal_recovery.rs:53: let bytes = self.bytes.lock().expect("mem device lock");
@@ -171,342 +193,344 @@ crates/ffs-harness/tests/ext4_journal_recovery.rs:659: .expect("target block fit
 crates/ffs-harness/tests/ext4_journal_recovery.rs:679: .expect("target block2 fits u32")
 crates/ffs-harness/tests/ext4_journal_recovery.rs:703: let block_size: u32 = u32::try_from(BLOCK_SIZE).expect("block size should fit u32");
 crates/ffs-harness/tests/ext4_journal_recovery.rs:704: let image_size: u32 = u32::try_from(IMAGE_SIZE).expect("image size should fit u32");
-crates/ffs-harness/tests/fuse_e2e.rs:54: let f = fs::File::create(&image).expect("create image");
-crates/ffs-harness/tests/fuse_e2e.rs:55: f.set_len(image_size_bytes).expect("set image size");
-crates/ffs-harness/tests/fuse_e2e.rs:66: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:69: .expect("mkfs.ext4");
-crates/ffs-harness/tests/fuse_e2e.rs:82: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:85: .expect("debugfs chmod /");
-crates/ffs-harness/tests/fuse_e2e.rs:95: fs::write(&hello_path, b"Hello from FrankenFS E2E!\n").expect("write hello src");
-crates/ffs-harness/tests/fuse_e2e.rs:96: fs::write(&nested_path, b"Nested file content.\n").expect("write nested src");
-crates/ffs-harness/tests/fuse_e2e.rs:100: .args(["-w", "-R", "mkdir testdir", image.to_str().unwrap()])
-crates/ffs-harness/tests/fuse_e2e.rs:102: .expect("debugfs mkdir");
-crates/ffs-harness/tests/fuse_e2e.rs:114: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:117: .expect("debugfs chmod testdir");
-crates/ffs-harness/tests/fuse_e2e.rs:130: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:133: .expect("debugfs write hello.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:140: let uid_out = Command::new("id").arg("-u").output().unwrap();
-crates/ffs-harness/tests/fuse_e2e.rs:142: let gid_out = Command::new("id").arg("-g").output().unwrap();
-crates/ffs-harness/tests/fuse_e2e.rs:149: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:152: .unwrap();
-crates/ffs-harness/tests/fuse_e2e.rs:159: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:162: .unwrap();
-crates/ffs-harness/tests/fuse_e2e.rs:169: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:172: .unwrap();
-crates/ffs-harness/tests/fuse_e2e.rs:181: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:184: .expect("debugfs write nested.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:196: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:199: .unwrap();
-crates/ffs-harness/tests/fuse_e2e.rs:206: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:209: .unwrap();
-crates/ffs-harness/tests/fuse_e2e.rs:216: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:219: .unwrap();
-crates/ffs-harness/tests/fuse_e2e.rs:235: let fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
-crates/ffs-harness/tests/fuse_e2e.rs:261: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:264: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:271: let content = fs::read_to_string(mnt.join("hello.txt")).expect("read hello.txt via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:282: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:285: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:293: .expect("readdir root via FUSE")
-crates/ffs-harness/tests/fuse_e2e.rs:319: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:322: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:330: fs::read_to_string(mnt.join("testdir/nested.txt")).expect("read nested.txt via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:341: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:344: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:351: let meta = fs::metadata(mnt.join("hello.txt")).expect("stat hello.txt via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:360: let dir_meta = fs::metadata(mnt.join("testdir")).expect("stat testdir via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:371: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:380: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:383: .expect("debugfs symlink");
-crates/ffs-harness/tests/fuse_e2e.rs:391: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:398: let target = fs::read_link(mnt.join("link.txt")).expect("readlink via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:400: target.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:406: let content = fs::read_to_string(mnt.join("link.txt")).expect("read through symlink via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:423: let mut fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
-crates/ffs-harness/tests/fuse_e2e.rs:424: fs.enable_writes(&cx).expect("enable ext4 write support");
-crates/ffs-harness/tests/fuse_e2e.rs:452: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:455: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:517: path.to_str().expect("path utf8"),
-crates/ffs-harness/tests/fuse_e2e.rs:521: .expect("python3 fiemap ioctl");
-crates/ffs-harness/tests/fuse_e2e.rs:527: serde_json::from_slice(&output.stdout).expect("decode fiemap JSON")
-crates/ffs-harness/tests/fuse_e2e.rs:534: fs::write(&path, b"Created via FUSE write path!\n").expect("create file via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:536: let content = fs::read_to_string(&path).expect("read back created file");
-crates/ffs-harness/tests/fuse_e2e.rs:539: let meta = fs::metadata(&path).expect("stat created file");
-crates/ffs-harness/tests/fuse_e2e.rs:551: fs::write(&path, b"initial").expect("write initial");
-crates/ffs-harness/tests/fuse_e2e.rs:552: assert_eq!(fs::read_to_string(&path).expect("read initial"), "initial");
-crates/ffs-harness/tests/fuse_e2e.rs:555: fs::write(&path, b"overwritten content").expect("overwrite");
-crates/ffs-harness/tests/fuse_e2e.rs:557: fs::read_to_string(&path).expect("read overwritten"),
-crates/ffs-harness/tests/fuse_e2e.rs:565: .expect("open for append");
-crates/ffs-harness/tests/fuse_e2e.rs:566: file.write_all(b" + appended").expect("append write");
-crates/ffs-harness/tests/fuse_e2e.rs:569: fs::read_to_string(&path).expect("read appended"),
-crates/ffs-harness/tests/fuse_e2e.rs:584: .expect("create offset_write.bin");
-crates/ffs-harness/tests/fuse_e2e.rs:587: .expect("seek to sparse offset");
-crates/ffs-harness/tests/fuse_e2e.rs:588: file.write_all(b"abc").expect("write payload at offset");
-crates/ffs-harness/tests/fuse_e2e.rs:591: let bytes = fs::read(&path).expect("read sparse write result");
-crates/ffs-harness/tests/fuse_e2e.rs:602: fs::create_dir(&dir).expect("mkdir via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:604: let meta = fs::metadata(&dir).expect("stat newdir");
-crates/ffs-harness/tests/fuse_e2e.rs:609: fs::write(&nested, b"nested content\n").expect("write nested file");
-crates/ffs-harness/tests/fuse_e2e.rs:611: let content = fs::read_to_string(&nested).expect("read nested file");
-crates/ffs-harness/tests/fuse_e2e.rs:620: fs::create_dir(&dir).expect("initial mkdir should succeed");
-crates/ffs-harness/tests/fuse_e2e.rs:634: fs::remove_file(&path).expect("unlink hello.txt via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:652: fs::create_dir(&dir).expect("mkdir empty_dir");
-crates/ffs-harness/tests/fuse_e2e.rs:655: fs::remove_dir(&dir).expect("rmdir empty_dir via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:664: fs::create_dir(&dir).expect("mkdir non_empty_dir");
-crates/ffs-harness/tests/fuse_e2e.rs:665: fs::write(dir.join("child.txt"), b"child").expect("create child in non_empty_dir");
-crates/ffs-harness/tests/fuse_e2e.rs:681: fs::write(&src, b"from-src").expect("write src");
-crates/ffs-harness/tests/fuse_e2e.rs:682: fs::write(&dst, b"stale-dst").expect("write existing dst");
-crates/ffs-harness/tests/fuse_e2e.rs:684: fs::rename(&src, &dst).expect("rename over existing destination");
-crates/ffs-harness/tests/fuse_e2e.rs:687: fs::read_to_string(&dst).expect("read replaced dst"),
-crates/ffs-harness/tests/fuse_e2e.rs:700: fs::rename(&old, &new).expect("rename via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:704: let content = fs::read_to_string(&new).expect("read renamed file");
-crates/ffs-harness/tests/fuse_e2e.rs:716: fs::rename(&src, &dst).expect("rename across dirs via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:719: let content = fs::read_to_string(&dst).expect("read moved file");
-crates/ffs-harness/tests/fuse_e2e.rs:730: fs::hard_link(&original, &link).expect("hard link via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:732: let content = fs::read_to_string(&link).expect("read through hard link");
-crates/ffs-harness/tests/fuse_e2e.rs:736: let orig_ino = fs::metadata(&original).expect("stat original").ino();
-crates/ffs-harness/tests/fuse_e2e.rs:737: let link_ino = fs::metadata(&link).expect("stat link").ino();
-crates/ffs-harness/tests/fuse_e2e.rs:739: let orig_nlink = fs::metadata(&original).expect("stat original").nlink();
-crates/ffs-harness/tests/fuse_e2e.rs:740: let link_nlink = fs::metadata(&link).expect("stat link").nlink();
-crates/ffs-harness/tests/fuse_e2e.rs:752: std::os::unix::fs::symlink("hello.txt", &link).expect("symlink via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:755: let read_target = fs::read_link(&link).expect("readlink via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:756: assert_eq!(read_target.to_str().unwrap(), "hello.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:759: let content = fs::read_to_string(&link).expect("read through new symlink");
-crates/ffs-harness/tests/fuse_e2e.rs:763: let link_meta = fs::symlink_metadata(&link).expect("lstat symlink");
-crates/ffs-harness/tests/fuse_e2e.rs:773: let original_len = fs::metadata(&path).expect("stat").len();
-crates/ffs-harness/tests/fuse_e2e.rs:780: .expect("open for truncate");
-crates/ffs-harness/tests/fuse_e2e.rs:781: f.set_len(5).expect("truncate via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:784: let new_len = fs::metadata(&path).expect("stat after truncate").len();
-crates/ffs-harness/tests/fuse_e2e.rs:787: let content = fs::read_to_string(&path).expect("read truncated file");
-crates/ffs-harness/tests/fuse_e2e.rs:797: let orig_meta = fs::metadata(&path).expect("stat hello.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:802: fs::set_permissions(&path, new_perms).expect("chmod 755 via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:804: let meta = fs::metadata(&path).expect("stat after chmod");
-crates/ffs-harness/tests/fuse_e2e.rs:812: fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod 600 via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:814: let meta = fs::metadata(&path).expect("stat after second chmod");
-crates/ffs-harness/tests/fuse_e2e.rs:822: let content = fs::read_to_string(&path).expect("read after chmod");
-crates/ffs-harness/tests/fuse_e2e.rs:833: let meta = fs::metadata(&path).expect("stat hello.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:840: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:847: .expect("python3 chown");
-crates/ffs-harness/tests/fuse_e2e.rs:855: let meta2 = fs::metadata(&path).expect("stat after no-op chown");
-crates/ffs-harness/tests/fuse_e2e.rs:863: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:868: .expect("python3 chown to nobody");
-crates/ffs-harness/tests/fuse_e2e.rs:872: let meta3 = fs::metadata(&path).expect("stat after chown to nobody");
-crates/ffs-harness/tests/fuse_e2e.rs:888: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:893: .expect("python3 utime");
-crates/ffs-harness/tests/fuse_e2e.rs:900: let meta = fs::metadata(&path).expect("stat after utime");
-crates/ffs-harness/tests/fuse_e2e.rs:916: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:921: .expect("python3 utime second");
-crates/ffs-harness/tests/fuse_e2e.rs:928: let meta2 = fs::metadata(&path).expect("stat after second utime");
-crates/ffs-harness/tests/fuse_e2e.rs:938: fs::write(&path, b"").expect("create empty file");
-crates/ffs-harness/tests/fuse_e2e.rs:942: .args(["-l", "8192", path.to_str().unwrap()])
-crates/ffs-harness/tests/fuse_e2e.rs:944: .expect("fallocate command");
-crates/ffs-harness/tests/fuse_e2e.rs:951: let meta = fs::metadata(&path).expect("stat after fallocate");
-crates/ffs-harness/tests/fuse_e2e.rs:967: fs::write(&path, b"data in preallocated space").expect("write to preallocated");
-crates/ffs-harness/tests/fuse_e2e.rs:968: let content = fs::read_to_string(&path).expect("read preallocated");
-crates/ffs-harness/tests/fuse_e2e.rs:977: fs::write(&path, b"short").expect("create file with content");
-crates/ffs-harness/tests/fuse_e2e.rs:982: .args(["-l", "16384", "--keep-size", path.to_str().unwrap()])
-crates/ffs-harness/tests/fuse_e2e.rs:984: .expect("fallocate keep-size");
-crates/ffs-harness/tests/fuse_e2e.rs:991: let meta = fs::metadata(&path).expect("stat after keep-size fallocate");
-crates/ffs-harness/tests/fuse_e2e.rs:1007: let content = fs::read_to_string(&path).expect("read after keep-size");
-crates/ffs-harness/tests/fuse_e2e.rs:1019: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:1022: fs::write(&seed_src, vec![0x5A_u8; 12 * 1024]).expect("write fiemap seed src");
-crates/ffs-harness/tests/fuse_e2e.rs:1029: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:1032: .expect("debugfs write fiemap_seed.bin");
-crates/ffs-harness/tests/fuse_e2e.rs:1040: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:1046: let meta = fs::metadata(&path).expect("stat fiemap seed file");
-crates/ffs-harness/tests/fuse_e2e.rs:1055: let extents = report["extents"].as_array().expect("fiemap extents array");
-crates/ffs-harness/tests/fuse_e2e.rs:1071: let logical = extent["logical"].as_u64().expect("logical");
-crates/ffs-harness/tests/fuse_e2e.rs:1072: let physical = extent["physical"].as_u64().expect("physical");
-crates/ffs-harness/tests/fuse_e2e.rs:1073: let length = extent["length"].as_u64().expect("length");
-crates/ffs-harness/tests/fuse_e2e.rs:1074: let last = extent["last"].as_bool().expect("last flag");
-crates/ffs-harness/tests/fuse_e2e.rs:1106: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:1109: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:1117: .args(["-f", "-c", "%s %b %f %a %c %d %l", mnt.to_str().unwrap()])
-crates/ffs-harness/tests/fuse_e2e.rs:1119: .expect("stat -f on mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:1135: let block_size: u64 = fields[0].parse().expect("parse block_size");
-crates/ffs-harness/tests/fuse_e2e.rs:1136: let blocks: u64 = fields[1].parse().expect("parse blocks");
-crates/ffs-harness/tests/fuse_e2e.rs:1137: let blocks_free: u64 = fields[2].parse().expect("parse blocks_free");
-crates/ffs-harness/tests/fuse_e2e.rs:1138: let blocks_avail: u64 = fields[3].parse().expect("parse blocks_avail");
-crates/ffs-harness/tests/fuse_e2e.rs:1139: let files: u64 = fields[4].parse().expect("parse files");
-crates/ffs-harness/tests/fuse_e2e.rs:1140: let files_free: u64 = fields[5].parse().expect("parse files_free");
-crates/ffs-harness/tests/fuse_e2e.rs:1141: let namelen: u64 = fields[6].parse().expect("parse namelen");
-crates/ffs-harness/tests/fuse_e2e.rs:1181: .args(["-f", "-c", "%s %b %f %a %c %d", path.to_str().unwrap()])
-crates/ffs-harness/tests/fuse_e2e.rs:1183: .expect("stat -f snapshot");
-crates/ffs-harness/tests/fuse_e2e.rs:1198: let _block_size: u64 = fields[0].parse().expect("parse block_size");
-crates/ffs-harness/tests/fuse_e2e.rs:1199: let _blocks: u64 = fields[1].parse().expect("parse blocks");
-crates/ffs-harness/tests/fuse_e2e.rs:1200: let blocks_free: u64 = fields[2].parse().expect("parse blocks_free");
-crates/ffs-harness/tests/fuse_e2e.rs:1201: let _blocks_avail: u64 = fields[3].parse().expect("parse blocks_avail");
-crates/ffs-harness/tests/fuse_e2e.rs:1202: let _files: u64 = fields[4].parse().expect("parse files");
-crates/ffs-harness/tests/fuse_e2e.rs:1203: let files_free: u64 = fields[5].parse().expect("parse files_free");
-crates/ffs-harness/tests/fuse_e2e.rs:1217: fs::write(&path, &data).expect("write large file via FUSE");
-crates/ffs-harness/tests/fuse_e2e.rs:1219: let readback = fs::read(&path).expect("read large file");
-crates/ffs-harness/tests/fuse_e2e.rs:1232: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:1235: fs::create_dir_all(&mount_a).expect("create first mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:1248: .expect("create persist_i3.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:1250: .expect("write persistence payload");
-crates/ffs-harness/tests/fuse_e2e.rs:1251: file.sync_all().expect("sync persistence payload");
-crates/ffs-harness/tests/fuse_e2e.rs:1252: let out = Command::new("sync").output().expect("sync command");
-crates/ffs-harness/tests/fuse_e2e.rs:1263: fs::create_dir_all(&mount_b).expect("create second mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:1268: .expect("read persisted file after remount");
-crates/ffs-harness/tests/fuse_e2e.rs:1277: fs::create_dir(&batch_dir).expect("mkdir reclaim_batch");
-crates/ffs-harness/tests/fuse_e2e.rs:1303: fs::remove_dir(&batch_dir).expect("remove reclaim_batch");
-crates/ffs-harness/tests/fuse_e2e.rs:1355: fs::write(&path, expected.as_bytes()).expect("write concurrent thread file");
-crates/ffs-harness/tests/fuse_e2e.rs:1356: let readback = fs::read_to_string(&path).expect("read concurrent thread file");
-crates/ffs-harness/tests/fuse_e2e.rs:1364: .expect("concurrent writer thread should succeed");
-crates/ffs-harness/tests/fuse_e2e.rs:1369: let content = fs::read_to_string(&path).expect("final verify concurrent thread file");
-crates/ffs-harness/tests/fuse_e2e.rs:1391: fs::write(&path, b"old-version\n").expect("write old snapshot version");
-crates/ffs-harness/tests/fuse_e2e.rs:1397: fs::write(&replacement, payload.as_bytes()).expect("write replacement payload");
-crates/ffs-harness/tests/fuse_e2e.rs:1399: fs::rename(&replacement, &writer_path).expect("atomic replace for snapshot check");
-crates/ffs-harness/tests/fuse_e2e.rs:1404: let observed = fs::read_to_string(&path).expect("read pre-commit path view");
-crates/ffs-harness/tests/fuse_e2e.rs:1406: writer.join().expect("writer thread should succeed");
-crates/ffs-harness/tests/fuse_e2e.rs:1412: let latest = fs::read_to_string(&path).expect("read latest path version");
-crates/ffs-harness/tests/fuse_e2e.rs:1426: fs::create_dir(&dir).expect("mkdir bigdir");
-crates/ffs-harness/tests/fuse_e2e.rs:1438: .expect("readdir bigdir")
-crates/ffs-harness/tests/fuse_e2e.rs:1475: fs::create_dir(&dir).expect("mkdir boundary_dir");
-crates/ffs-harness/tests/fuse_e2e.rs:1500: fs::remove_dir(&dir).expect("remove boundary_dir");
-crates/ffs-harness/tests/fuse_e2e.rs:1511: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:1515: let f = fs::File::create(&image).expect("create tiny image");
-crates/ffs-harness/tests/fuse_e2e.rs:1516: f.set_len(1024 * 1024).expect("set tiny image size");
-crates/ffs-harness/tests/fuse_e2e.rs:1528: image.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:1531: .expect("mkfs.ext4 tiny");
-crates/ffs-harness/tests/fuse_e2e.rs:1539: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:1583: .expect("create synced.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:1586: .expect("write before fsync");
-crates/ffs-harness/tests/fuse_e2e.rs:1589: file.sync_all().expect("fsync via sync_all");
-crates/ffs-harness/tests/fuse_e2e.rs:1594: let content = fs::read_to_string(&path).expect("read after fsync");
-crates/ffs-harness/tests/fuse_e2e.rs:1609: .expect("create datasync.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:1612: .expect("write before sync_data");
-crates/ffs-harness/tests/fuse_e2e.rs:1615: file.sync_data().expect("sync_data");
-crates/ffs-harness/tests/fuse_e2e.rs:1619: let content = fs::read_to_string(&path).expect("read after sync_data");
-crates/ffs-harness/tests/fuse_e2e.rs:1636: .expect("create flushed.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:1638: file.write_all(b"flushed content\n").expect("write");
-crates/ffs-harness/tests/fuse_e2e.rs:1640: file.flush().expect("explicit flush");
-crates/ffs-harness/tests/fuse_e2e.rs:1643: let content = fs::read_to_string(&path).expect("read after flush+close");
-crates/ffs-harness/tests/fuse_e2e.rs:1658: .expect("create multi_write_sync.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:1661: file.write_all(b"chunk1 ").expect("write chunk1");
-crates/ffs-harness/tests/fuse_e2e.rs:1662: file.write_all(b"chunk2 ").expect("write chunk2");
-crates/ffs-harness/tests/fuse_e2e.rs:1663: file.write_all(b"chunk3").expect("write chunk3");
-crates/ffs-harness/tests/fuse_e2e.rs:1664: file.sync_all().expect("fsync after multiple writes");
-crates/ffs-harness/tests/fuse_e2e.rs:1668: let content = fs::read_to_string(&path).expect("read multi_write");
-crates/ffs-harness/tests/fuse_e2e.rs:1684: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:1691: .expect("python3 setxattr");
-crates/ffs-harness/tests/fuse_e2e.rs:1704: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:1710: .expect("python3 getxattr");
-crates/ffs-harness/tests/fuse_e2e.rs:1722: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:1727: .expect("python3 listxattr");
-crates/ffs-harness/tests/fuse_e2e.rs:1744: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:1750: .expect("python3 removexattr");
-crates/ffs-harness/tests/fuse_e2e.rs:1763: let val = py_getxattr(&path, "user.test_key").expect("xattr should exist after set");
-crates/ffs-harness/tests/fuse_e2e.rs:1805: assert_eq!(py_getxattr(&path, "user.alpha").unwrap(), b"aaa");
-crates/ffs-harness/tests/fuse_e2e.rs:1806: assert_eq!(py_getxattr(&path, "user.beta").unwrap(), b"bbb");
-crates/ffs-harness/tests/fuse_e2e.rs:1807: assert_eq!(py_getxattr(&path, "user.gamma").unwrap(), b"ccc");
-crates/ffs-harness/tests/fuse_e2e.rs:1827: assert_eq!(py_getxattr(&path, "user.mutable").unwrap(), b"original");
-crates/ffs-harness/tests/fuse_e2e.rs:1832: py_getxattr(&path, "user.mutable").unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:1846: let val = py_getxattr(&dir, "user.dir_attr").expect("xattr on dir should exist");
-crates/ffs-harness/tests/fuse_e2e.rs:1899: let f = fs::File::create(&image).expect("create btrfs image");
-crates/ffs-harness/tests/fuse_e2e.rs:1900: f.set_len(128 * 1024 * 1024).expect("set btrfs image size");
-crates/ffs-harness/tests/fuse_e2e.rs:1905: .args(["-f", "-L", "ffs-btrfs-e2e", image.to_str().unwrap()])
-crates/ffs-harness/tests/fuse_e2e.rs:1907: .expect("mkfs.btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:1925: let mut fs = OpenFs::open_with_options(&cx, image, &opts).expect("open btrfs image");
-crates/ffs-harness/tests/fuse_e2e.rs:1953: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:1956: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:1969: .expect("readdir btrfs root via FUSE")
-crates/ffs-harness/tests/fuse_e2e.rs:1983: fs::write(&path, b"Hello from btrfs FUSE!\n").expect("write file on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:1985: let content = fs::read_to_string(&path).expect("read file on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:1994: fs::create_dir(&dir).expect("mkdir on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:1997: fs::write(&nested, b"nested btrfs content\n").expect("write nested on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:1999: let content = fs::read_to_string(&nested).expect("read nested on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2009: fs::write(&path, b"temporary").expect("write temp");
-crates/ffs-harness/tests/fuse_e2e.rs:2011: fs::remove_file(&path).expect("unlink on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2016: fs::create_dir(&dir).expect("mkdir tempdir");
-crates/ffs-harness/tests/fuse_e2e.rs:2018: fs::remove_dir(&dir).expect("rmdir on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2028: fs::write(&old, b"rename test").expect("write for rename");
-crates/ffs-harness/tests/fuse_e2e.rs:2031: fs::rename(&old, &new).expect("rename on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2035: fs::read_to_string(&new).expect("read renamed"),
-crates/ffs-harness/tests/fuse_e2e.rs:2045: fs::write(&original, b"hard link content\n").expect("write original for hard link");
-crates/ffs-harness/tests/fuse_e2e.rs:2048: fs::hard_link(&original, &link).expect("hard link on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2050: let content = fs::read_to_string(&link).expect("read through hard link");
-crates/ffs-harness/tests/fuse_e2e.rs:2054: let orig_ino = fs::metadata(&original).expect("stat original").ino();
-crates/ffs-harness/tests/fuse_e2e.rs:2055: let link_ino = fs::metadata(&link).expect("stat link").ino();
-crates/ffs-harness/tests/fuse_e2e.rs:2058: let orig_nlink = fs::metadata(&original).expect("stat original").nlink();
-crates/ffs-harness/tests/fuse_e2e.rs:2059: let link_nlink = fs::metadata(&link).expect("stat link").nlink();
-crates/ffs-harness/tests/fuse_e2e.rs:2069: fs::write(&target, b"symlink target content\n").expect("write symlink target");
-crates/ffs-harness/tests/fuse_e2e.rs:2072: std::os::unix::fs::symlink("sym_target.txt", &link).expect("symlink on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2075: let read_target = fs::read_link(&link).expect("readlink on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2076: assert_eq!(read_target.to_str().unwrap(), "sym_target.txt");
-crates/ffs-harness/tests/fuse_e2e.rs:2079: let content = fs::read_to_string(&link).expect("read through symlink on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2083: let link_meta = fs::symlink_metadata(&link).expect("lstat symlink on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2092: fs::write(&path, b"Hello from btrfs truncate test!\n").expect("write for truncate");
-crates/ffs-harness/tests/fuse_e2e.rs:2094: let original_len = fs::metadata(&path).expect("stat").len();
-crates/ffs-harness/tests/fuse_e2e.rs:2101: .expect("open for truncate");
-crates/ffs-harness/tests/fuse_e2e.rs:2102: f.set_len(5).expect("truncate on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2105: let new_len = fs::metadata(&path).expect("stat after truncate").len();
-crates/ffs-harness/tests/fuse_e2e.rs:2108: let content = fs::read_to_string(&path).expect("read truncated file on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2117: fs::write(&path, b"chmod test content\n").expect("write for chmod");
-crates/ffs-harness/tests/fuse_e2e.rs:2121: fs::set_permissions(&path, new_perms).expect("chmod 755 on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2123: let meta = fs::metadata(&path).expect("stat after chmod");
-crates/ffs-harness/tests/fuse_e2e.rs:2131: fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod 600 on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2133: let meta = fs::metadata(&path).expect("stat after second chmod");
-crates/ffs-harness/tests/fuse_e2e.rs:2141: let content = fs::read_to_string(&path).expect("read after chmod on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2150: fs::write(&path, b"utimes test content\n").expect("write for utimes");
-crates/ffs-harness/tests/fuse_e2e.rs:2155: path = path.to_str().unwrap(),
-crates/ffs-harness/tests/fuse_e2e.rs:2160: .expect("python3 utime");
-crates/ffs-harness/tests/fuse_e2e.rs:2167: let meta = fs::metadata(&path).expect("stat after utime on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2188: let tmp = TempDir::new().expect("tmpdir");
-crates/ffs-harness/tests/fuse_e2e.rs:2191: fs::create_dir_all(&mnt).expect("create mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:2199: .args(["-f", "-c", "%s %b %f %a %c %d %l", mnt.to_str().unwrap()])
-crates/ffs-harness/tests/fuse_e2e.rs:2201: .expect("stat -f on btrfs mountpoint");
-crates/ffs-harness/tests/fuse_e2e.rs:2217: let block_size: u64 = fields[0].parse().expect("parse block_size");
-crates/ffs-harness/tests/fuse_e2e.rs:2218: let blocks: u64 = fields[1].parse().expect("parse blocks");
-crates/ffs-harness/tests/fuse_e2e.rs:2219: let blocks_free: u64 = fields[2].parse().expect("parse blocks_free");
-crates/ffs-harness/tests/fuse_e2e.rs:2220: let blocks_avail: u64 = fields[3].parse().expect("parse blocks_avail");
-crates/ffs-harness/tests/fuse_e2e.rs:2221: let files: u64 = fields[4].parse().expect("parse files");
-crates/ffs-harness/tests/fuse_e2e.rs:2222: let _files_free: u64 = fields[5].parse().expect("parse files_free");
-crates/ffs-harness/tests/fuse_e2e.rs:2223: let namelen: u64 = fields[6].parse().expect("parse namelen");
-crates/ffs-harness/tests/fuse_e2e.rs:2255: fs::write(&path, b"xattr test content\n").expect("write for xattr");
-crates/ffs-harness/tests/fuse_e2e.rs:2261: let val = py_getxattr(&path, "user.test_key").expect("xattr should exist after set");
-crates/ffs-harness/tests/fuse_e2e.rs:2289: fs::write(&path, b"multi xattr content\n").expect("write for multi xattr");
-crates/ffs-harness/tests/fuse_e2e.rs:2297: assert_eq!(py_getxattr(&path, "user.alpha").unwrap(), b"aaa");
-crates/ffs-harness/tests/fuse_e2e.rs:2298: assert_eq!(py_getxattr(&path, "user.beta").unwrap(), b"bbb");
-crates/ffs-harness/tests/fuse_e2e.rs:2299: assert_eq!(py_getxattr(&path, "user.gamma").unwrap(), b"ccc");
-crates/ffs-harness/tests/fuse_e2e.rs:2316: fs::create_dir(&dir).expect("mkdir for xattr");
-crates/ffs-harness/tests/fuse_e2e.rs:2321: let val = py_getxattr(&dir, "user.dir_attr").expect("xattr on btrfs dir should exist");
-crates/ffs-harness/tests/fuse_e2e.rs:2338: fs::write(&path, &data).expect("write large file on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2340: let readback = fs::read(&path).expect("read large file on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2356: .expect("create synced.txt on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2359: .expect("write before fsync on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2362: file.sync_all().expect("fsync via sync_all on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2367: let content = fs::read_to_string(&path).expect("read after fsync on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2377: fs::create_dir(&dir_a).expect("mkdir dir_a");
-crates/ffs-harness/tests/fuse_e2e.rs:2378: fs::create_dir(&dir_b).expect("mkdir dir_b");
-crates/ffs-harness/tests/fuse_e2e.rs:2382: fs::write(&src, b"cross-dir rename").expect("write for cross-dir rename");
-crates/ffs-harness/tests/fuse_e2e.rs:2384: fs::rename(&src, &dst).expect("rename across directories on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2388: fs::read_to_string(&dst).expect("read cross-dir renamed"),
-crates/ffs-harness/tests/fuse_e2e.rs:2399: fs::write(&src, b"new content").expect("write src");
-crates/ffs-harness/tests/fuse_e2e.rs:2400: fs::write(&dst, b"old content").expect("write dst");
-crates/ffs-harness/tests/fuse_e2e.rs:2402: fs::rename(&src, &dst).expect("rename overwrite on btrfs");
-crates/ffs-harness/tests/fuse_e2e.rs:2405: fs::read_to_string(&dst).expect("read overwritten"),
-crates/ffs-harness/tests/fuse_e2e.rs:2425: fs::write(&deep_file, b"deep content").expect("write deep file");
-crates/ffs-harness/tests/fuse_e2e.rs:2427: fs::read_to_string(&deep_file).expect("read deep file"),
-crates/ffs-harness/tests/fuse_e2e.rs:2432: let meta = fs::metadata(&deep_file).expect("stat deep file");
-crates/ffs-harness/tests/fuse_e2e.rs:2443: fs::create_dir(&dir).expect("mkdir many_files");
-crates/ffs-harness/tests/fuse_e2e.rs:2447: fs::write(&path, format!("content_{i}")).expect("write file");
-crates/ffs-harness/tests/fuse_e2e.rs:2451: .expect("readdir many_files")
-crates/ffs-harness/tests/fuse_e2e.rs:2457: let content = fs::read_to_string(dir.join("file_042.txt")).expect("read file_042");
-crates/ffs-harness/tests/fuse_e2e.rs:2467: fs::write(&path, b"").expect("create empty file");
-crates/ffs-harness/tests/fuse_e2e.rs:2469: let content = fs::read(&path).expect("read empty file");
-crates/ffs-harness/tests/fuse_e2e.rs:2472: let meta = fs::metadata(&path).expect("stat empty file");
-crates/ffs-harness/tests/fuse_e2e.rs:2482: fs::write(&file_a, b"chain content").expect("write chain_a");
-crates/ffs-harness/tests/fuse_e2e.rs:2485: fs::rename(&file_a, &file_b).expect("rename a -> b");
-crates/ffs-harness/tests/fuse_e2e.rs:2489: fs::rename(&file_b, &file_c).expect("rename b -> c");
-crates/ffs-harness/tests/fuse_e2e.rs:2493: fs::read_to_string(&file_c).expect("read chain_c"),
-crates/ffs-harness/tests/fuse_e2e.rs:2509: fs::write(&path, format!("thread_{i}")).expect("concurrent write");
-crates/ffs-harness/tests/fuse_e2e.rs:2515: h.join().expect("thread join");
-crates/ffs-harness/tests/fuse_e2e.rs:2521: let content = fs::read_to_string(&path).expect("read concurrent file");
-crates/ffs-harness/tests/fuse_e2e.rs:2543: fs::write(&path, b"first").expect("write first");
-crates/ffs-harness/tests/fuse_e2e.rs:2544: let ino_before = fs::metadata(&path).expect("stat before").ino();
-crates/ffs-harness/tests/fuse_e2e.rs:2547: fs::write(&path, b"second").expect("write second");
-crates/ffs-harness/tests/fuse_e2e.rs:2548: let ino_after = fs::metadata(&path).expect("stat after").ino();
-crates/ffs-harness/tests/fuse_e2e.rs:2555: fs::read_to_string(&path).expect("read after overwrite"),
+crates/ffs-harness/tests/fuse_e2e.rs:55: let f = fs::File::create(&image).expect("create image");
+crates/ffs-harness/tests/fuse_e2e.rs:56: f.set_len(image_size_bytes).expect("set image size");
+crates/ffs-harness/tests/fuse_e2e.rs:67: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:70: .expect("mkfs.ext4");
+crates/ffs-harness/tests/fuse_e2e.rs:83: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:86: .expect("debugfs chmod /");
+crates/ffs-harness/tests/fuse_e2e.rs:96: fs::write(&hello_path, b"Hello from FrankenFS E2E!\n").expect("write hello src");
+crates/ffs-harness/tests/fuse_e2e.rs:97: fs::write(&nested_path, b"Nested file content.\n").expect("write nested src");
+crates/ffs-harness/tests/fuse_e2e.rs:101: .args(["-w", "-R", "mkdir testdir", image.to_str().unwrap()])
+crates/ffs-harness/tests/fuse_e2e.rs:103: .expect("debugfs mkdir");
+crates/ffs-harness/tests/fuse_e2e.rs:115: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:118: .expect("debugfs chmod testdir");
+crates/ffs-harness/tests/fuse_e2e.rs:131: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:134: .expect("debugfs write hello.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:141: let uid_out = Command::new("id").arg("-u").output().unwrap();
+crates/ffs-harness/tests/fuse_e2e.rs:143: let gid_out = Command::new("id").arg("-g").output().unwrap();
+crates/ffs-harness/tests/fuse_e2e.rs:150: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:153: .unwrap();
+crates/ffs-harness/tests/fuse_e2e.rs:160: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:163: .unwrap();
+crates/ffs-harness/tests/fuse_e2e.rs:170: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:173: .unwrap();
+crates/ffs-harness/tests/fuse_e2e.rs:182: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:185: .expect("debugfs write nested.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:197: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:200: .unwrap();
+crates/ffs-harness/tests/fuse_e2e.rs:207: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:210: .unwrap();
+crates/ffs-harness/tests/fuse_e2e.rs:217: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:220: .unwrap();
+crates/ffs-harness/tests/fuse_e2e.rs:236: let fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
+crates/ffs-harness/tests/fuse_e2e.rs:262: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:265: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:272: let content = fs::read_to_string(mnt.join("hello.txt")).expect("read hello.txt via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:283: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:286: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:294: .expect("readdir root via FUSE")
+crates/ffs-harness/tests/fuse_e2e.rs:320: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:323: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:331: fs::read_to_string(mnt.join("testdir/nested.txt")).expect("read nested.txt via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:342: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:345: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:352: let meta = fs::metadata(mnt.join("hello.txt")).expect("stat hello.txt via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:361: let dir_meta = fs::metadata(mnt.join("testdir")).expect("stat testdir via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:372: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:381: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:384: .expect("debugfs symlink");
+crates/ffs-harness/tests/fuse_e2e.rs:392: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:399: let target = fs::read_link(mnt.join("link.txt")).expect("readlink via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:401: target.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:407: let content = fs::read_to_string(mnt.join("link.txt")).expect("read through symlink via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:424: let mut fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
+crates/ffs-harness/tests/fuse_e2e.rs:425: fs.enable_writes(&cx).expect("enable ext4 write support");
+crates/ffs-harness/tests/fuse_e2e.rs:453: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:456: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:518: path.to_str().expect("path utf8"),
+crates/ffs-harness/tests/fuse_e2e.rs:522: .expect("python3 fiemap ioctl");
+crates/ffs-harness/tests/fuse_e2e.rs:528: serde_json::from_slice(&output.stdout).expect("decode fiemap JSON")
+crates/ffs-harness/tests/fuse_e2e.rs:535: fs::write(&path, b"Created via FUSE write path!\n").expect("create file via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:537: let content = fs::read_to_string(&path).expect("read back created file");
+crates/ffs-harness/tests/fuse_e2e.rs:540: let meta = fs::metadata(&path).expect("stat created file");
+crates/ffs-harness/tests/fuse_e2e.rs:552: fs::write(&path, b"initial").expect("write initial");
+crates/ffs-harness/tests/fuse_e2e.rs:553: assert_eq!(fs::read_to_string(&path).expect("read initial"), "initial");
+crates/ffs-harness/tests/fuse_e2e.rs:556: fs::write(&path, b"overwritten content").expect("overwrite");
+crates/ffs-harness/tests/fuse_e2e.rs:558: fs::read_to_string(&path).expect("read overwritten"),
+crates/ffs-harness/tests/fuse_e2e.rs:566: .expect("open for append");
+crates/ffs-harness/tests/fuse_e2e.rs:567: file.write_all(b" + appended").expect("append write");
+crates/ffs-harness/tests/fuse_e2e.rs:570: fs::read_to_string(&path).expect("read appended"),
+crates/ffs-harness/tests/fuse_e2e.rs:585: .expect("create offset_write.bin");
+crates/ffs-harness/tests/fuse_e2e.rs:588: .expect("seek to sparse offset");
+crates/ffs-harness/tests/fuse_e2e.rs:589: file.write_all(b"abc").expect("write payload at offset");
+crates/ffs-harness/tests/fuse_e2e.rs:592: let bytes = fs::read(&path).expect("read sparse write result");
+crates/ffs-harness/tests/fuse_e2e.rs:603: fs::create_dir(&dir).expect("mkdir via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:605: let meta = fs::metadata(&dir).expect("stat newdir");
+crates/ffs-harness/tests/fuse_e2e.rs:610: fs::write(&nested, b"nested content\n").expect("write nested file");
+crates/ffs-harness/tests/fuse_e2e.rs:612: let content = fs::read_to_string(&nested).expect("read nested file");
+crates/ffs-harness/tests/fuse_e2e.rs:621: fs::create_dir(&dir).expect("initial mkdir should succeed");
+crates/ffs-harness/tests/fuse_e2e.rs:635: fs::remove_file(&path).expect("unlink hello.txt via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:653: fs::create_dir(&dir).expect("mkdir empty_dir");
+crates/ffs-harness/tests/fuse_e2e.rs:656: fs::remove_dir(&dir).expect("rmdir empty_dir via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:665: fs::create_dir(&dir).expect("mkdir non_empty_dir");
+crates/ffs-harness/tests/fuse_e2e.rs:666: fs::write(dir.join("child.txt"), b"child").expect("create child in non_empty_dir");
+crates/ffs-harness/tests/fuse_e2e.rs:682: fs::write(&src, b"from-src").expect("write src");
+crates/ffs-harness/tests/fuse_e2e.rs:683: fs::write(&dst, b"stale-dst").expect("write existing dst");
+crates/ffs-harness/tests/fuse_e2e.rs:685: fs::rename(&src, &dst).expect("rename over existing destination");
+crates/ffs-harness/tests/fuse_e2e.rs:688: fs::read_to_string(&dst).expect("read replaced dst"),
+crates/ffs-harness/tests/fuse_e2e.rs:701: fs::rename(&old, &new).expect("rename via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:705: let content = fs::read_to_string(&new).expect("read renamed file");
+crates/ffs-harness/tests/fuse_e2e.rs:717: fs::rename(&src, &dst).expect("rename across dirs via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:720: let content = fs::read_to_string(&dst).expect("read moved file");
+crates/ffs-harness/tests/fuse_e2e.rs:731: fs::hard_link(&original, &link).expect("hard link via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:733: let content = fs::read_to_string(&link).expect("read through hard link");
+crates/ffs-harness/tests/fuse_e2e.rs:737: let orig_ino = fs::metadata(&original).expect("stat original").ino();
+crates/ffs-harness/tests/fuse_e2e.rs:738: let link_ino = fs::metadata(&link).expect("stat link").ino();
+crates/ffs-harness/tests/fuse_e2e.rs:740: let orig_nlink = fs::metadata(&original).expect("stat original").nlink();
+crates/ffs-harness/tests/fuse_e2e.rs:741: let link_nlink = fs::metadata(&link).expect("stat link").nlink();
+crates/ffs-harness/tests/fuse_e2e.rs:753: std::os::unix::fs::symlink("hello.txt", &link).expect("symlink via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:756: let read_target = fs::read_link(&link).expect("readlink via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:757: assert_eq!(read_target.to_str().unwrap(), "hello.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:760: let content = fs::read_to_string(&link).expect("read through new symlink");
+crates/ffs-harness/tests/fuse_e2e.rs:764: let link_meta = fs::symlink_metadata(&link).expect("lstat symlink");
+crates/ffs-harness/tests/fuse_e2e.rs:774: let original_len = fs::metadata(&path).expect("stat").len();
+crates/ffs-harness/tests/fuse_e2e.rs:781: .expect("open for truncate");
+crates/ffs-harness/tests/fuse_e2e.rs:782: f.set_len(5).expect("truncate via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:785: let new_len = fs::metadata(&path).expect("stat after truncate").len();
+crates/ffs-harness/tests/fuse_e2e.rs:788: let content = fs::read_to_string(&path).expect("read truncated file");
+crates/ffs-harness/tests/fuse_e2e.rs:798: let orig_meta = fs::metadata(&path).expect("stat hello.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:803: fs::set_permissions(&path, new_perms).expect("chmod 755 via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:805: let meta = fs::metadata(&path).expect("stat after chmod");
+crates/ffs-harness/tests/fuse_e2e.rs:813: fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod 600 via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:815: let meta = fs::metadata(&path).expect("stat after second chmod");
+crates/ffs-harness/tests/fuse_e2e.rs:823: let content = fs::read_to_string(&path).expect("read after chmod");
+crates/ffs-harness/tests/fuse_e2e.rs:834: let meta = fs::metadata(&path).expect("stat hello.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:841: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:848: .expect("python3 chown");
+crates/ffs-harness/tests/fuse_e2e.rs:856: let meta2 = fs::metadata(&path).expect("stat after no-op chown");
+crates/ffs-harness/tests/fuse_e2e.rs:864: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:869: .expect("python3 chown to nobody");
+crates/ffs-harness/tests/fuse_e2e.rs:873: let meta3 = fs::metadata(&path).expect("stat after chown to nobody");
+crates/ffs-harness/tests/fuse_e2e.rs:889: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:894: .expect("python3 utime");
+crates/ffs-harness/tests/fuse_e2e.rs:901: let meta = fs::metadata(&path).expect("stat after utime");
+crates/ffs-harness/tests/fuse_e2e.rs:917: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:922: .expect("python3 utime second");
+crates/ffs-harness/tests/fuse_e2e.rs:929: let meta2 = fs::metadata(&path).expect("stat after second utime");
+crates/ffs-harness/tests/fuse_e2e.rs:939: fs::write(&path, b"").expect("create empty file");
+crates/ffs-harness/tests/fuse_e2e.rs:943: .args(["-l", "8192", path.to_str().unwrap()])
+crates/ffs-harness/tests/fuse_e2e.rs:945: .expect("fallocate command");
+crates/ffs-harness/tests/fuse_e2e.rs:952: let meta = fs::metadata(&path).expect("stat after fallocate");
+crates/ffs-harness/tests/fuse_e2e.rs:968: fs::write(&path, b"data in preallocated space").expect("write to preallocated");
+crates/ffs-harness/tests/fuse_e2e.rs:969: let content = fs::read_to_string(&path).expect("read preallocated");
+crates/ffs-harness/tests/fuse_e2e.rs:978: fs::write(&path, b"short").expect("create file with content");
+crates/ffs-harness/tests/fuse_e2e.rs:983: .args(["-l", "16384", "--keep-size", path.to_str().unwrap()])
+crates/ffs-harness/tests/fuse_e2e.rs:985: .expect("fallocate keep-size");
+crates/ffs-harness/tests/fuse_e2e.rs:992: let meta = fs::metadata(&path).expect("stat after keep-size fallocate");
+crates/ffs-harness/tests/fuse_e2e.rs:1008: let content = fs::read_to_string(&path).expect("read after keep-size");
+crates/ffs-harness/tests/fuse_e2e.rs:1020: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:1023: fs::write(&seed_src, vec![0x5A_u8; 12 * 1024]).expect("write fiemap seed src");
+crates/ffs-harness/tests/fuse_e2e.rs:1030: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1033: .expect("debugfs write fiemap_seed.bin");
+crates/ffs-harness/tests/fuse_e2e.rs:1041: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:1047: let meta = fs::metadata(&path).expect("stat fiemap seed file");
+crates/ffs-harness/tests/fuse_e2e.rs:1056: let extents = report["extents"].as_array().expect("fiemap extents array");
+crates/ffs-harness/tests/fuse_e2e.rs:1072: let logical = extent["logical"].as_u64().expect("logical");
+crates/ffs-harness/tests/fuse_e2e.rs:1073: let physical = extent["physical"].as_u64().expect("physical");
+crates/ffs-harness/tests/fuse_e2e.rs:1074: let length = extent["length"].as_u64().expect("length");
+crates/ffs-harness/tests/fuse_e2e.rs:1075: let last = extent["last"].as_bool().expect("last flag");
+crates/ffs-harness/tests/fuse_e2e.rs:1107: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:1110: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:1118: .args(["-f", "-c", "%s %b %f %a %c %d %l", mnt.to_str().unwrap()])
+crates/ffs-harness/tests/fuse_e2e.rs:1120: .expect("stat -f on mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:1136: let block_size: u64 = fields[0].parse().expect("parse block_size");
+crates/ffs-harness/tests/fuse_e2e.rs:1137: let blocks: u64 = fields[1].parse().expect("parse blocks");
+crates/ffs-harness/tests/fuse_e2e.rs:1138: let blocks_free: u64 = fields[2].parse().expect("parse blocks_free");
+crates/ffs-harness/tests/fuse_e2e.rs:1139: let blocks_avail: u64 = fields[3].parse().expect("parse blocks_avail");
+crates/ffs-harness/tests/fuse_e2e.rs:1140: let files: u64 = fields[4].parse().expect("parse files");
+crates/ffs-harness/tests/fuse_e2e.rs:1141: let files_free: u64 = fields[5].parse().expect("parse files_free");
+crates/ffs-harness/tests/fuse_e2e.rs:1142: let namelen: u64 = fields[6].parse().expect("parse namelen");
+crates/ffs-harness/tests/fuse_e2e.rs:1182: .args(["-f", "-c", "%s %b %f %a %c %d", path.to_str().unwrap()])
+crates/ffs-harness/tests/fuse_e2e.rs:1184: .expect("stat -f snapshot");
+crates/ffs-harness/tests/fuse_e2e.rs:1199: let _block_size: u64 = fields[0].parse().expect("parse block_size");
+crates/ffs-harness/tests/fuse_e2e.rs:1200: let _blocks: u64 = fields[1].parse().expect("parse blocks");
+crates/ffs-harness/tests/fuse_e2e.rs:1201: let blocks_free: u64 = fields[2].parse().expect("parse blocks_free");
+crates/ffs-harness/tests/fuse_e2e.rs:1202: let _blocks_avail: u64 = fields[3].parse().expect("parse blocks_avail");
+crates/ffs-harness/tests/fuse_e2e.rs:1203: let _files: u64 = fields[4].parse().expect("parse files");
+crates/ffs-harness/tests/fuse_e2e.rs:1204: let files_free: u64 = fields[5].parse().expect("parse files_free");
+crates/ffs-harness/tests/fuse_e2e.rs:1218: fs::write(&path, &data).expect("write large file via FUSE");
+crates/ffs-harness/tests/fuse_e2e.rs:1220: let readback = fs::read(&path).expect("read large file");
+crates/ffs-harness/tests/fuse_e2e.rs:1233: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:1236: fs::create_dir_all(&mount_a).expect("create first mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:1249: .expect("create persist_i3.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:1251: .expect("write persistence payload");
+crates/ffs-harness/tests/fuse_e2e.rs:1252: file.sync_all().expect("sync persistence payload");
+crates/ffs-harness/tests/fuse_e2e.rs:1253: let out = Command::new("sync").output().expect("sync command");
+crates/ffs-harness/tests/fuse_e2e.rs:1264: fs::create_dir_all(&mount_b).expect("create second mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:1269: .expect("read persisted file after remount");
+crates/ffs-harness/tests/fuse_e2e.rs:1278: fs::create_dir(&batch_dir).expect("mkdir reclaim_batch");
+crates/ffs-harness/tests/fuse_e2e.rs:1304: fs::remove_dir(&batch_dir).expect("remove reclaim_batch");
+crates/ffs-harness/tests/fuse_e2e.rs:1356: fs::write(&path, expected.as_bytes()).expect("write concurrent thread file");
+crates/ffs-harness/tests/fuse_e2e.rs:1357: let readback = fs::read_to_string(&path).expect("read concurrent thread file");
+crates/ffs-harness/tests/fuse_e2e.rs:1365: .expect("concurrent writer thread should succeed");
+crates/ffs-harness/tests/fuse_e2e.rs:1370: let content = fs::read_to_string(&path).expect("final verify concurrent thread file");
+crates/ffs-harness/tests/fuse_e2e.rs:1392: fs::write(&path, b"old-version\n").expect("write old snapshot version");
+crates/ffs-harness/tests/fuse_e2e.rs:1398: fs::write(&replacement, payload.as_bytes()).expect("write replacement payload");
+crates/ffs-harness/tests/fuse_e2e.rs:1400: fs::rename(&replacement, &writer_path).expect("atomic replace for snapshot check");
+crates/ffs-harness/tests/fuse_e2e.rs:1405: let observed = fs::read_to_string(&path).expect("read pre-commit path view");
+crates/ffs-harness/tests/fuse_e2e.rs:1407: writer.join().expect("writer thread should succeed");
+crates/ffs-harness/tests/fuse_e2e.rs:1413: let latest = fs::read_to_string(&path).expect("read latest path version");
+crates/ffs-harness/tests/fuse_e2e.rs:1427: fs::create_dir(&dir).expect("mkdir bigdir");
+crates/ffs-harness/tests/fuse_e2e.rs:1439: .expect("readdir bigdir")
+crates/ffs-harness/tests/fuse_e2e.rs:1476: fs::create_dir(&dir).expect("mkdir boundary_dir");
+crates/ffs-harness/tests/fuse_e2e.rs:1501: fs::remove_dir(&dir).expect("remove boundary_dir");
+crates/ffs-harness/tests/fuse_e2e.rs:1512: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:1516: let f = fs::File::create(&image).expect("create tiny image");
+crates/ffs-harness/tests/fuse_e2e.rs:1517: f.set_len(1024 * 1024).expect("set tiny image size");
+crates/ffs-harness/tests/fuse_e2e.rs:1529: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1532: .expect("mkfs.ext4 tiny");
+crates/ffs-harness/tests/fuse_e2e.rs:1540: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:1584: .expect("create synced.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:1587: .expect("write before fsync");
+crates/ffs-harness/tests/fuse_e2e.rs:1590: file.sync_all().expect("fsync via sync_all");
+crates/ffs-harness/tests/fuse_e2e.rs:1595: let content = fs::read_to_string(&path).expect("read after fsync");
+crates/ffs-harness/tests/fuse_e2e.rs:1610: .expect("create datasync.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:1613: .expect("write before sync_data");
+crates/ffs-harness/tests/fuse_e2e.rs:1616: file.sync_data().expect("sync_data");
+crates/ffs-harness/tests/fuse_e2e.rs:1620: let content = fs::read_to_string(&path).expect("read after sync_data");
+crates/ffs-harness/tests/fuse_e2e.rs:1637: .expect("create flushed.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:1639: file.write_all(b"flushed content\n").expect("write");
+crates/ffs-harness/tests/fuse_e2e.rs:1641: file.flush().expect("explicit flush");
+crates/ffs-harness/tests/fuse_e2e.rs:1644: let content = fs::read_to_string(&path).expect("read after flush+close");
+crates/ffs-harness/tests/fuse_e2e.rs:1659: .expect("create multi_write_sync.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:1662: file.write_all(b"chunk1 ").expect("write chunk1");
+crates/ffs-harness/tests/fuse_e2e.rs:1663: file.write_all(b"chunk2 ").expect("write chunk2");
+crates/ffs-harness/tests/fuse_e2e.rs:1664: file.write_all(b"chunk3").expect("write chunk3");
+crates/ffs-harness/tests/fuse_e2e.rs:1665: file.sync_all().expect("fsync after multiple writes");
+crates/ffs-harness/tests/fuse_e2e.rs:1669: let content = fs::read_to_string(&path).expect("read multi_write");
+crates/ffs-harness/tests/fuse_e2e.rs:1685: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1692: .expect("python3 setxattr");
+crates/ffs-harness/tests/fuse_e2e.rs:1705: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1711: .expect("python3 getxattr");
+crates/ffs-harness/tests/fuse_e2e.rs:1723: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1728: .expect("python3 listxattr");
+crates/ffs-harness/tests/fuse_e2e.rs:1745: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1751: .expect("python3 removexattr");
+crates/ffs-harness/tests/fuse_e2e.rs:1764: let val = py_getxattr(&path, "user.test_key").expect("xattr should exist after set");
+crates/ffs-harness/tests/fuse_e2e.rs:1806: assert_eq!(py_getxattr(&path, "user.alpha").unwrap(), b"aaa");
+crates/ffs-harness/tests/fuse_e2e.rs:1807: assert_eq!(py_getxattr(&path, "user.beta").unwrap(), b"bbb");
+crates/ffs-harness/tests/fuse_e2e.rs:1808: assert_eq!(py_getxattr(&path, "user.gamma").unwrap(), b"ccc");
+crates/ffs-harness/tests/fuse_e2e.rs:1828: assert_eq!(py_getxattr(&path, "user.mutable").unwrap(), b"original");
+crates/ffs-harness/tests/fuse_e2e.rs:1833: py_getxattr(&path, "user.mutable").unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1847: let val = py_getxattr(&dir, "user.dir_attr").expect("xattr on dir should exist");
+crates/ffs-harness/tests/fuse_e2e.rs:1902: let f = fs::File::create(&image).expect("create btrfs image");
+crates/ffs-harness/tests/fuse_e2e.rs:1903: f.set_len(128 * 1024 * 1024).expect("set btrfs image size");
+crates/ffs-harness/tests/fuse_e2e.rs:1908: fs::create_dir_all(&seed_workspace).expect("create btrfs seed workspace");
+crates/ffs-harness/tests/fuse_e2e.rs:1910: .expect("chmod btrfs seed root");
+crates/ffs-harness/tests/fuse_e2e.rs:1912: .expect("chmod btrfs seed workspace");
+crates/ffs-harness/tests/fuse_e2e.rs:1921: seed_root.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1922: image.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:1925: .expect("mkfs.btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:1943: let mut fs = OpenFs::open_with_options(&cx, image, &opts).expect("open btrfs image");
+crates/ffs-harness/tests/fuse_e2e.rs:1971: let tmp = TempDir::new().expect("tmpdir");
+crates/ffs-harness/tests/fuse_e2e.rs:1974: fs::create_dir_all(&mnt).expect("create mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:1999: .expect("readdir btrfs root via FUSE")
+crates/ffs-harness/tests/fuse_e2e.rs:2014: fs::write(&path, b"Hello from btrfs FUSE!\n").expect("write file on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2016: let content = fs::read_to_string(&path).expect("read file on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2025: fs::create_dir(&dir).expect("mkdir on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2028: fs::write(&nested, b"nested btrfs content\n").expect("write nested on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2030: let content = fs::read_to_string(&nested).expect("read nested on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2040: fs::write(&path, b"temporary").expect("write temp");
+crates/ffs-harness/tests/fuse_e2e.rs:2042: fs::remove_file(&path).expect("unlink on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2047: fs::create_dir(&dir).expect("mkdir tempdir");
+crates/ffs-harness/tests/fuse_e2e.rs:2049: fs::remove_dir(&dir).expect("rmdir on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2059: fs::write(&old, b"rename test").expect("write for rename");
+crates/ffs-harness/tests/fuse_e2e.rs:2062: fs::rename(&old, &new).expect("rename on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2066: fs::read_to_string(&new).expect("read renamed"),
+crates/ffs-harness/tests/fuse_e2e.rs:2076: fs::write(&original, b"hard link content\n").expect("write original for hard link");
+crates/ffs-harness/tests/fuse_e2e.rs:2079: fs::hard_link(&original, &link).expect("hard link on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2081: let content = fs::read_to_string(&link).expect("read through hard link");
+crates/ffs-harness/tests/fuse_e2e.rs:2085: let orig_ino = fs::metadata(&original).expect("stat original").ino();
+crates/ffs-harness/tests/fuse_e2e.rs:2086: let link_ino = fs::metadata(&link).expect("stat link").ino();
+crates/ffs-harness/tests/fuse_e2e.rs:2089: let orig_nlink = fs::metadata(&original).expect("stat original").nlink();
+crates/ffs-harness/tests/fuse_e2e.rs:2090: let link_nlink = fs::metadata(&link).expect("stat link").nlink();
+crates/ffs-harness/tests/fuse_e2e.rs:2100: fs::write(&target, b"symlink target content\n").expect("write symlink target");
+crates/ffs-harness/tests/fuse_e2e.rs:2103: std::os::unix::fs::symlink("sym_target.txt", &link).expect("symlink on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2106: let read_target = fs::read_link(&link).expect("readlink on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2107: assert_eq!(read_target.to_str().unwrap(), "sym_target.txt");
+crates/ffs-harness/tests/fuse_e2e.rs:2110: let content = fs::read_to_string(&link).expect("read through symlink on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2114: let link_meta = fs::symlink_metadata(&link).expect("lstat symlink on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2123: fs::write(&path, b"Hello from btrfs truncate test!\n").expect("write for truncate");
+crates/ffs-harness/tests/fuse_e2e.rs:2125: let original_len = fs::metadata(&path).expect("stat").len();
+crates/ffs-harness/tests/fuse_e2e.rs:2132: .expect("open for truncate");
+crates/ffs-harness/tests/fuse_e2e.rs:2133: f.set_len(5).expect("truncate on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2136: let new_len = fs::metadata(&path).expect("stat after truncate").len();
+crates/ffs-harness/tests/fuse_e2e.rs:2139: let content = fs::read_to_string(&path).expect("read truncated file on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2148: fs::write(&path, b"chmod test content\n").expect("write for chmod");
+crates/ffs-harness/tests/fuse_e2e.rs:2152: fs::set_permissions(&path, new_perms).expect("chmod 755 on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2154: let meta = fs::metadata(&path).expect("stat after chmod");
+crates/ffs-harness/tests/fuse_e2e.rs:2162: fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod 600 on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2164: let meta = fs::metadata(&path).expect("stat after second chmod");
+crates/ffs-harness/tests/fuse_e2e.rs:2172: let content = fs::read_to_string(&path).expect("read after chmod on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2181: fs::write(&path, b"utimes test content\n").expect("write for utimes");
+crates/ffs-harness/tests/fuse_e2e.rs:2186: path = path.to_str().unwrap(),
+crates/ffs-harness/tests/fuse_e2e.rs:2191: .expect("python3 utime");
+crates/ffs-harness/tests/fuse_e2e.rs:2198: let meta = fs::metadata(&path).expect("stat after utime on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2217: .args(["-f", "-c", "%s %b %f %a %c %d %l", mnt.to_str().unwrap()])
+crates/ffs-harness/tests/fuse_e2e.rs:2219: .expect("stat -f on btrfs mountpoint");
+crates/ffs-harness/tests/fuse_e2e.rs:2235: let block_size: u64 = fields[0].parse().expect("parse block_size");
+crates/ffs-harness/tests/fuse_e2e.rs:2236: let blocks: u64 = fields[1].parse().expect("parse blocks");
+crates/ffs-harness/tests/fuse_e2e.rs:2237: let blocks_free: u64 = fields[2].parse().expect("parse blocks_free");
+crates/ffs-harness/tests/fuse_e2e.rs:2238: let blocks_avail: u64 = fields[3].parse().expect("parse blocks_avail");
+crates/ffs-harness/tests/fuse_e2e.rs:2239: let files: u64 = fields[4].parse().expect("parse files");
+crates/ffs-harness/tests/fuse_e2e.rs:2240: let _files_free: u64 = fields[5].parse().expect("parse files_free");
+crates/ffs-harness/tests/fuse_e2e.rs:2241: let namelen: u64 = fields[6].parse().expect("parse namelen");
+crates/ffs-harness/tests/fuse_e2e.rs:2274: fs::write(&path, b"xattr test content\n").expect("write for xattr");
+crates/ffs-harness/tests/fuse_e2e.rs:2280: let val = py_getxattr(&path, "user.test_key").expect("xattr should exist after set");
+crates/ffs-harness/tests/fuse_e2e.rs:2308: fs::write(&path, b"multi xattr content\n").expect("write for multi xattr");
+crates/ffs-harness/tests/fuse_e2e.rs:2316: assert_eq!(py_getxattr(&path, "user.alpha").unwrap(), b"aaa");
+crates/ffs-harness/tests/fuse_e2e.rs:2317: assert_eq!(py_getxattr(&path, "user.beta").unwrap(), b"bbb");
+crates/ffs-harness/tests/fuse_e2e.rs:2318: assert_eq!(py_getxattr(&path, "user.gamma").unwrap(), b"ccc");
+crates/ffs-harness/tests/fuse_e2e.rs:2335: fs::create_dir(&dir).expect("mkdir for xattr");
+crates/ffs-harness/tests/fuse_e2e.rs:2340: let val = py_getxattr(&dir, "user.dir_attr").expect("xattr on btrfs dir should exist");
+crates/ffs-harness/tests/fuse_e2e.rs:2357: fs::write(&path, &data).expect("write large file on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2359: let readback = fs::read(&path).expect("read large file on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2375: .expect("create synced.txt on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2378: .expect("write before fsync on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2381: file.sync_all().expect("fsync via sync_all on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2386: let content = fs::read_to_string(&path).expect("read after fsync on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2396: fs::create_dir(&dir_a).expect("mkdir dir_a");
+crates/ffs-harness/tests/fuse_e2e.rs:2397: fs::create_dir(&dir_b).expect("mkdir dir_b");
+crates/ffs-harness/tests/fuse_e2e.rs:2401: fs::write(&src, b"cross-dir rename").expect("write for cross-dir rename");
+crates/ffs-harness/tests/fuse_e2e.rs:2403: fs::rename(&src, &dst).expect("rename across directories on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2407: fs::read_to_string(&dst).expect("read cross-dir renamed"),
+crates/ffs-harness/tests/fuse_e2e.rs:2418: fs::write(&src, b"new content").expect("write src");
+crates/ffs-harness/tests/fuse_e2e.rs:2419: fs::write(&dst, b"old content").expect("write dst");
+crates/ffs-harness/tests/fuse_e2e.rs:2421: fs::rename(&src, &dst).expect("rename overwrite on btrfs");
+crates/ffs-harness/tests/fuse_e2e.rs:2424: fs::read_to_string(&dst).expect("read overwritten"),
+crates/ffs-harness/tests/fuse_e2e.rs:2444: fs::write(&deep_file, b"deep content").expect("write deep file");
+crates/ffs-harness/tests/fuse_e2e.rs:2446: fs::read_to_string(&deep_file).expect("read deep file"),
+crates/ffs-harness/tests/fuse_e2e.rs:2451: let meta = fs::metadata(&deep_file).expect("stat deep file");
+crates/ffs-harness/tests/fuse_e2e.rs:2462: fs::create_dir(&dir).expect("mkdir many_files");
+crates/ffs-harness/tests/fuse_e2e.rs:2466: fs::write(&path, format!("content_{i}")).expect("write file");
+crates/ffs-harness/tests/fuse_e2e.rs:2470: .expect("readdir many_files")
+crates/ffs-harness/tests/fuse_e2e.rs:2476: let content = fs::read_to_string(dir.join("file_042.txt")).expect("read file_042");
+crates/ffs-harness/tests/fuse_e2e.rs:2486: fs::write(&path, b"").expect("create empty file");
+crates/ffs-harness/tests/fuse_e2e.rs:2488: let content = fs::read(&path).expect("read empty file");
+crates/ffs-harness/tests/fuse_e2e.rs:2491: let meta = fs::metadata(&path).expect("stat empty file");
+crates/ffs-harness/tests/fuse_e2e.rs:2501: fs::write(&file_a, b"chain content").expect("write chain_a");
+crates/ffs-harness/tests/fuse_e2e.rs:2504: fs::rename(&file_a, &file_b).expect("rename a -> b");
+crates/ffs-harness/tests/fuse_e2e.rs:2508: fs::rename(&file_b, &file_c).expect("rename b -> c");
+crates/ffs-harness/tests/fuse_e2e.rs:2512: fs::read_to_string(&file_c).expect("read chain_c"),
+crates/ffs-harness/tests/fuse_e2e.rs:2528: fs::write(&path, format!("thread_{i}")).expect("concurrent write");
+crates/ffs-harness/tests/fuse_e2e.rs:2534: h.join().expect("thread join");
+crates/ffs-harness/tests/fuse_e2e.rs:2540: let content = fs::read_to_string(&path).expect("read concurrent file");
+crates/ffs-harness/tests/fuse_e2e.rs:2562: fs::write(&path, b"first").expect("write first");
+crates/ffs-harness/tests/fuse_e2e.rs:2563: let ino_before = fs::metadata(&path).expect("stat before").ino();
+crates/ffs-harness/tests/fuse_e2e.rs:2566: fs::write(&path, b"second").expect("write second");
+crates/ffs-harness/tests/fuse_e2e.rs:2567: let ino_after = fs::metadata(&path).expect("stat after").ino();
+crates/ffs-harness/tests/fuse_e2e.rs:2574: fs::read_to_string(&path).expect("read after overwrite"),
 crates/ffs-harness/tests/conformance.rs:19: .expect("workspace root")
 crates/ffs-harness/tests/conformance.rs:28: .expect("ext4 sparse fixture");
 crates/ffs-harness/tests/conformance.rs:30: .expect("ext4 mkfs fixture");
@@ -564,14 +588,8 @@ crates/ffs-harness/benches/metadata_parse.rs:16: let ext4 = load_sparse_fixture(
 crates/ffs-harness/benches/metadata_parse.rs:17: let btrfs = load_sparse_fixture(&btrfs_path).expect("load btrfs fixture");
 crates/ffs-harness/benches/metadata_parse.rs:21: Ext4Superblock::parse_superblock_region(black_box(&ext4)).expect("ext4 parse in bench")
 crates/ffs-harness/benches/metadata_parse.rs:28: .expect("btrfs parse in bench")
-crates/ffs-cli/src/cmd_evidence.rs:959: let preset_name = preset.expect("metrics preset kind requires preset name");
-crates/ffs-cli/src/main.rs:3335: write!(&mut out, "{offset:08x}:").expect("write to String cannot fail");
-crates/ffs-cli/src/main.rs:3337: write!(&mut out, " {byte:02x}").expect("write to String cannot fail");
-crates/ffs-extent/src/lib.rs:179: #[expect(clippy::too_many_arguments)]
-crates/ffs-extent/src/lib.rs:207: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-extent/src/lib.rs:241: #[expect(clippy::too_many_arguments)]
-crates/ffs-extent/src/lib.rs:265: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-extent/src/lib.rs:516: #[expect(clippy::cast_possible_truncation)]
+crates/ffs-cli/src/main.rs:3332: write!(&mut out, "{offset:08x}:").expect("write to String cannot fail");
+crates/ffs-cli/src/main.rs:3334: write!(&mut out, " {byte:02x}").expect("write to String cannot fail");
 crates/ffs-extent/src/lib.rs:810: .expect("range end is explicitly clamped to u32::MAX");
 crates/ffs-extent/benches/extent_resolve.rs:208: .expect("resolve");
 crates/ffs-extent/benches/extent_resolve.rs:230: .expect("resolve");
@@ -581,9 +599,6 @@ crates/ffs-extent/benches/extent_resolve.rs:287: ffs_extent::cached_map_logical_
 crates/ffs-extent/benches/extent_resolve.rs:301: .expect("resolve");
 crates/ffs-extent/benches/extent_resolve.rs:323: .expect("resolve");
 crates/ffs-extent/benches/extent_resolve.rs:347: .expect("resolve");
-crates/ffs-fuse/src/per_core.rs:151: #[expect(clippy::cast_possible_truncation)] // intentional 64→32 fold
-crates/ffs-fuse/src/per_core.rs:184: #[expect(clippy::cast_possible_truncation)] // .min(16) always fits u32
-crates/ffs-fuse/src/per_core.rs:199: #[expect(clippy::cast_possible_truncation)] // .min(16) always fits u32
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:9: .expect("clock")
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:17: std::fs::remove_file(&ledger_path).expect("remove stale ledger file");
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:22: .expect("enable evidence ledger");
@@ -602,7 +617,6 @@ crates/ffs-mvcc/tests/evidence_ledger_integration.rs:124: let abort_detail = abo
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:135: store.commit(committed).expect("commit succeeds");
 crates/ffs-mvcc/tests/evidence_ledger_integration.rs:145: store.commit(winner).expect("winner commits");
 crates/ffs-mvcc/tests/mvcc_demo_integration.rs:6: let result = run_snapshot_isolation_demo().expect("demo should succeed");
-crates/ffs-mvcc/tests/mvcc_stress_suite.rs:79: #[expect(
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:99: store.commit(seed_txn).expect("seed commit should succeed");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:119: writer_patterns[usize::try_from(writer_id).expect("writer id fits in usize")];
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:131: let byte = u8::try_from((writer_id + op) % 251).expect("value fits in u8");
@@ -639,7 +653,6 @@ crates/ffs-mvcc/tests/mvcc_stress_suite.rs:517: guard.1.expect("txn_two complete
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:525: let guard = store.lock().expect("store lock");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:527: let a = guard.read_visible(block_a, snap).expect("A visible")[0];
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:528: let b = guard.read_visible(block_b, snap).expect("B visible")[0];
-crates/ffs-mvcc/tests/mvcc_stress_suite.rs:539: #[expect(
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:568: let mut guard = store.lock().expect("store lock");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:573: guard.commit(seed_txn).expect("seed commit");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:590: let mut guard = store.lock().expect("store lock");
@@ -658,277 +671,3 @@ crates/ffs-mvcc/tests/mvcc_stress_suite.rs:724: let byte = u8::try_from((writer_
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:738: .expect("create writer task");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:745: let mut guard = store.lock().expect("store lock");
 crates/ffs-mvcc/tests/mvcc_stress_suite.rs:797: store.commit(seed).expect("seed commit must succeed");
-crates/ffs-mvcc/tests/mvcc_stress_suite.rs:820: .expect("append block must be readable");
-crates/ffs-mvcc/tests/mvcc_stress_suite.rs:857: .expect("keys block must be readable");
-crates/ffs-mvcc/tests/mvcc_stress_suite.rs:891: .expect("disjoint block must be readable");
-crates/ffs-mvcc/tests/mvcc_stress_suite.rs:910: store.commit(conflict_a).expect("first write succeeds");
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:141: #[expect(
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:155: seed_store.commit(txn).expect("seed commit");
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:162: .expect("version 2 visible")
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:181: .expect("cache"),
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:186: .expect("stage dirty flush payload");
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:189: .expect("commit staged txn");
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:217: .expect("version 2 pinned during flush")
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:230: .expect("latest version visible")
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:240: .expect("flush thread join")
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:241: .expect("flush completes");
-crates/ffs-mvcc/tests/flush_epoch_guard_integration.rs:269: .expect("latest survives")
-crates/ffs-mvcc/src/crash_matrix.rs:178: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-mvcc/src/crash_matrix.rs:184: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-mvcc/src/crash_matrix.rs:209: data.extend_from_slice(&wal::encode_commit(c).expect("encode commit"));
-crates/ffs-mvcc/src/crash_matrix.rs:219: offset += wal::encode_commit(c).expect("encode").len();
-crates/ffs-mvcc/src/crash_matrix.rs:226: wal::encode_commit(&commits[n]).expect("encode").len()
-crates/ffs-mvcc/src/crash_matrix.rs:380: .expect("replay should not fail for clean data");
-crates/ffs-mvcc/src/crash_matrix.rs:428: .expect("TruncateToLastGood should not return Err");
-crates/ffs-mvcc/src/crash_matrix.rs:486: .expect("TruncateToLastGood should not return Err");
-crates/ffs-mvcc/src/crash_matrix.rs:534: .expect("replay should not fail for clean data");
-crates/ffs-mvcc/src/crash_matrix.rs:599: let partial = wal::encode_commit(&commits[crash_target]).expect("encode");
-crates/ffs-mvcc/src/crash_matrix.rs:601: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-mvcc/src/crash_matrix.rs:613: .expect("TruncateToLastGood should not return Err");
-crates/ffs-mvcc/src/wal_replay.rs:137: #[expect(clippy::too_many_lines)]
-crates/ffs-mvcc/src/lib.rs:1723: .expect("write_set keys must have staged bytes");
-crates/ffs-mvcc/src/lib.rs:1953: .expect("preflight_fcw must reject unmergeable conflicts")
-crates/ffs-mvcc/src/lib.rs:2033: .expect("preflight_fcw must reject unmergeable conflicts")
-crates/ffs-mvcc/src/wal.rs:249: #[expect(clippy::too_many_lines)]
-crates/ffs-mvcc/src/sharded.rs:149: let shard_count_u64 = u64::try_from(self.shard_count).expect("shard_count must fit in u64");
-crates/ffs-mvcc/src/sharded.rs:151: usize::try_from(rem).expect("remainder must fit in usize")
-crates/ffs-mvcc/src/sharded.rs:208: .expect("write_set keys must have staged bytes");
-crates/ffs-mvcc/src/sharded.rs:257: .expect("shard must be locked");
-crates/ffs-mvcc/src/sharded.rs:339: .expect("preflight must reject unmergeable conflicts")
-crates/ffs-mvcc/src/sharded.rs:392: .expect("shard must be locked");
-crates/ffs-mvcc/src/sharded.rs:501: .expect("shard must be locked");
-crates/ffs-mvcc/src/sharded.rs:562: .expect("shard must be locked");
-crates/ffs-mvcc/benches/wal_throughput.rs:37: let tmp = NamedTempFile::new().expect("temp file");
-crates/ffs-mvcc/benches/wal_throughput.rs:42: .expect("open");
-crates/ffs-mvcc/benches/wal_throughput.rs:49: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:55: let tmp = NamedTempFile::new().expect("temp file");
-crates/ffs-mvcc/benches/wal_throughput.rs:67: .expect("open");
-crates/ffs-mvcc/benches/wal_throughput.rs:74: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:81: let tmp = NamedTempFile::new().expect("temp file");
-crates/ffs-mvcc/benches/wal_throughput.rs:93: .expect("open");
-crates/ffs-mvcc/benches/wal_throughput.rs:102: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:122: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:136: store.commit_ssi(txn).expect("seed");
-crates/ffs-mvcc/benches/wal_throughput.rs:146: store.commit_ssi(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:159: store.commit_ssi(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:433: let attempts = ops_per_writer.saturating_mul(u64::try_from(writers).expect("fits"));
-crates/ffs-mvcc/benches/wal_throughput.rs:442: let seed = 0xBEEF_0000_u64.saturating_add(u64::try_from(idx).expect("fits"));
-crates/ffs-mvcc/benches/wal_throughput.rs:452: let (c, f, g) = handle.join().expect("writer thread");
-crates/ffs-mvcc/benches/wal_throughput.rs:506: guard.commit(seed_txn).expect("seed");
-crates/ffs-mvcc/benches/wal_throughput.rs:514: let attempts = ops_per_writer.saturating_mul(u64::try_from(writers).expect("fits"));
-crates/ffs-mvcc/benches/wal_throughput.rs:519: let seed = 0xCAFE_1000_u64.saturating_add(u64::try_from(idx).expect("fits"));
-crates/ffs-mvcc/benches/wal_throughput.rs:529: let (c, f, g) = handle.join().expect("writer thread");
-crates/ffs-mvcc/benches/wal_throughput.rs:592: let attempts = ops_per_writer.saturating_mul(u64::try_from(writers).expect("fits"));
-crates/ffs-mvcc/benches/wal_throughput.rs:601: let seed = 0xFEED_2000_u64.saturating_add(u64::try_from(idx).expect("fits"));
-crates/ffs-mvcc/benches/wal_throughput.rs:612: let (c, f, g) = handle.join().expect("writer thread");
-crates/ffs-mvcc/benches/wal_throughput.rs:814: let reads_per_thread = total_reads / u64::try_from(readers).expect("fits");
-crates/ffs-mvcc/benches/wal_throughput.rs:848: .map(|h| h.join().expect("reader thread"))
-crates/ffs-mvcc/benches/wal_throughput.rs:859: let reads_per_thread = total_reads / u64::try_from(readers).expect("fits");
-crates/ffs-mvcc/benches/wal_throughput.rs:891: .map(|h| h.join().expect("reader thread"))
-crates/ffs-mvcc/benches/wal_throughput.rs:902: let reads_per_thread = total_reads / u64::try_from(readers).expect("fits");
-crates/ffs-mvcc/benches/wal_throughput.rs:934: .map(|h| h.join().expect("reader thread"))
-crates/ffs-mvcc/benches/wal_throughput.rs:950: let tmp = NamedTempFile::new().expect("temp file");
-crates/ffs-mvcc/benches/wal_throughput.rs:955: .expect("open");
-crates/ffs-mvcc/benches/wal_throughput.rs:962: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:969: let tmp = NamedTempFile::new().expect("temp file");
-crates/ffs-mvcc/benches/wal_throughput.rs:974: .expect("open");
-crates/ffs-mvcc/benches/wal_throughput.rs:983: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:999: let ops_per_writer = iters / u64::try_from(writers).expect("fits");
-crates/ffs-mvcc/benches/wal_throughput.rs:1012: (u64::try_from(writer_id).expect("fits") * 1024 + i) % 4096,
-crates/ffs-mvcc/benches/wal_throughput.rs:1026: .map(|h| h.join().expect("writer thread"))
-crates/ffs-mvcc/benches/wal_throughput.rs:1049: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:1080: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:1106: store.commit(txn).expect("commit");
-crates/ffs-mvcc/benches/wal_throughput.rs:1134: let tmp = tempfile::NamedTempFile::new().unwrap();
-crates/ffs-mvcc/benches/wal_throughput.rs:1143: let mut w = WalWriter::create(&path, cfg).unwrap();
-crates/ffs-mvcc/benches/wal_throughput.rs:1156: w.append_commit(&commit).unwrap();
-crates/ffs-mvcc/benches/wal_throughput.rs:1166: let tmp = tempfile::NamedTempFile::new().unwrap();
-crates/ffs-mvcc/benches/wal_throughput.rs:1175: let mut w = WalWriter::create(&path, cfg).unwrap();
-crates/ffs-mvcc/benches/wal_throughput.rs:1193: w.append_commits_coalesced(&commits).unwrap();
-crates/ffs-alloc/src/lib.rs:72: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/src/lib.rs:363: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/src/lib.rs:377: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/src/lib.rs:478: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/src/lib.rs:672: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-crates/ffs-alloc/src/lib.rs:836: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-crates/ffs-alloc/src/lib.rs:863: #[expect(clippy::too_many_arguments)]
-crates/ffs-alloc/src/lib.rs:1061: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-crates/ffs-alloc/src/lib.rs:1088: .expect("batch allocation count is bounded by requested u32 count");
-crates/ffs-alloc/src/lib.rs:1107: #[expect(clippy::too_many_arguments)]
-crates/ffs-alloc/src/lib.rs:1170: u32::try_from(allocated.len()).expect("group allocation count is bounded by u32 request");
-crates/ffs-alloc/src/lib.rs:1212: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-crates/ffs-alloc/src/lib.rs:1354: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-crates/ffs-alloc/src/lib.rs:1422: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/src/succinct.rs:116: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/src/succinct.rs:210: #[expect(clippy::cast_possible_truncation)] // indices bounded by self.len (u32)
-crates/ffs-alloc/src/succinct.rs:271: #[expect(clippy::cast_possible_truncation)] // indices bounded by self.len (u32)
-crates/ffs-alloc/src/succinct.rs:455: .expect("8 bytes");
-crates/ffs-alloc/src/succinct.rs:485: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/src/succinct.rs:506: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/src/succinct.rs:521: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-alloc/benches/batch_alloc.rs:37: let guard = self.blocks.lock().unwrap();
-crates/ffs-alloc/benches/batch_alloc.rs:45: self.blocks.lock().unwrap().insert(block.0, data.to_vec());
-crates/ffs-alloc/benches/batch_alloc.rs:135: .unwrap();
-crates/ffs-alloc/benches/batch_alloc.rs:153: .unwrap();
-crates/ffs-alloc/benches/batch_alloc.rs:183: .unwrap();
-crates/ffs-alloc/benches/batch_alloc.rs:201: .unwrap();
-crates/ffs-repair/tests/self_heal_demo.rs:8: .expect("self_heal_demo should repair corrupted blocks");
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:62: .expect("failed to run ffs-demo binary");
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:73: let stdout = String::from_utf8(output.stdout).expect("stdout must be utf8");
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:263: .expect("corrupted_blocks fits u32"),
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:275: .expect("append corruption");
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:290: ledger.append(&repair_record).expect("append repair");
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:299: let corruption = records[0].corruption.as_ref().expect("corruption detail");
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:302: u32::try_from(result.corrupted_blocks).unwrap()
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:308: let repair = records[1].repair.as_ref().expect("repair detail");
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:315: let json = record.to_json().expect("serialize record");
-crates/ffs-repair/tests/self_healing_demo_e2e.rs:316: let parsed = EvidenceRecord::from_json(&json).expect("deserialize record");
-crates/ffs-repair/src/lrc.rs:66: #[expect(clippy::cast_possible_truncation)] // val is always < 256 after reduction
-crates/ffs-repair/src/por.rs:349: #[expect(clippy::cast_possible_truncation)] // challenge count bounded by u32 total_blocks
-crates/ffs-repair/src/por.rs:429: #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-crates/ffs-repair/benches/scrub_codec.rs:67: ByteBlockDevice::new(mem, BLOCK_SIZE).expect("device")
-crates/ffs-repair/benches/scrub_codec.rs:81: .expect("write");
-crates/ffs-repair/benches/scrub_codec.rs:119: .expect("scrub");
-crates/ffs-repair/benches/scrub_codec.rs:131: .expect("scrub");
-crates/ffs-repair/benches/scrub_codec.rs:162: .expect("encode");
-crates/ffs-repair/benches/scrub_codec.rs:177: .expect("encode for decode");
-crates/ffs-repair/benches/scrub_codec.rs:201: .expect("decode");
-crates/ffs-journal/tests/parallel_wal_e2e.rs:46: self.entries.lock().unwrap().extend(entries.iter().cloned());
-crates/ffs-journal/tests/parallel_wal_e2e.rs:143: .flat_map(|h| h.join().expect("no panic"))
-crates/ffs-journal/tests/parallel_wal_e2e.rs:184: let max_epoch = entries.iter().map(|e| e.epoch).max().unwrap();
-crates/ffs-journal/tests/parallel_wal_e2e.rs:189: let (_, rest) = coord.flush_epoch(remaining, epoch).expect("flush");
-crates/ffs-journal/tests/parallel_wal_e2e.rs:249: let (_, remaining) = coord.flush_epoch(all_entries, 1).expect("flush epoch 1");
-crates/ffs-journal/tests/parallel_wal_e2e.rs:250: let (_, remaining) = coord.flush_epoch(remaining, 2).expect("flush epoch 2");
-crates/ffs-journal/tests/parallel_wal_e2e.rs:315: let (result, remaining) = coord.flush_epoch(all_entries, 1).expect("flush epoch 1");
-crates/ffs-journal/tests/parallel_wal_e2e.rs:377: .flat_map(|h| h.join().expect("no panic"))
-crates/ffs-journal/tests/parallel_wal_e2e.rs:385: let (result, remaining) = coord.flush_epoch(all_entries, 1).expect("flush");
-crates/ffs-journal/tests/parallel_wal_e2e.rs:426: coord.flush_epoch(entries, 1).expect("flush");
-crates/ffs-journal/tests/parallel_wal_e2e.rs:430: assert_eq!(h.join().expect("no panic"), DurabilityOutcome::Durable);
-crates/ffs-journal/tests/parallel_wal_e2e.rs:488: .map(|h| h.join().expect("no panic"))
-crates/ffs-journal/tests/parallel_wal_e2e.rs:549: let max_epoch = entries.iter().map(|e| e.epoch).max().unwrap();
-crates/ffs-journal/tests/parallel_wal_e2e.rs:554: let (result, rest) = coord.flush_epoch(remaining, epoch).expect("flush");
-crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:48: .expect("workspace root")
-crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:57: let raw = std::fs::read_to_string(&path).expect("fixture json");
-crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:58: serde_json::from_str(&raw).expect("valid fixture json")
-crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:63: hex::decode(compact).expect("valid fast-commit hex payload")
-crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:105: let replay = replay_fast_commit(&bytes).expect("replay should succeed");
-crates/ffs-journal/tests/ext4_fast_commit_corpus.rs:134: let replay = replay_fast_commit(&bytes).expect("replay should succeed");
-crates/ffs-journal/src/lib.rs:836: #[expect(clippy::too_many_lines)]
-crates/ffs-journal/src/wal_buffer.rs:345: .expect("WAL buffer not initialized — call init_thread_buffer first");
-crates/ffs-journal/src/wal_buffer.rs:541: .expect("force advance must return epoch")
-crates/ffs-journal/src/wal_buffer.rs:998: let err = last_err.expect("at least one attempt was made");
-crates/ffs-btree/src/lib.rs:634: #[expect(clippy::cast_possible_truncation, clippy::too_many_lines)]
-crates/ffs-btree/src/lib.rs:886: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-btree/src/lib.rs:1197: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-btree/src/lib.rs:1238: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-btree/src/lib.rs:1256: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-btree/src/lib.rs:1278: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-btree/src/lib.rs:1299: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-btree/src/lib.rs:1327: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-btree/src/lib.rs:1337: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-btree/benches/bwtree_vs_locked.rs:92: let page = table.allocate_page().expect("alloc");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:94: table.insert(page, BwKey(i), BwValue(i)).expect("insert");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:135: let page = table.allocate_page().expect("alloc");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:137: table.insert(page, BwKey(i), BwValue(i)).expect("insert");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:177: let page = table.allocate_page().expect("alloc");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:179: table.insert(page, BwKey(i), BwValue(i)).expect("insert");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:220: let page = table.allocate_page().expect("alloc");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:222: table.insert(page, BwKey(i), BwValue(i)).expect("insert");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:228: table.consolidate_page(page, &cfg).expect("consolidate");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:275: h.join().expect("no panic");
-crates/ffs-btree/benches/bwtree_vs_locked.rs:314: h.join().expect("no panic");
-crates/ffs-core/tests/cross_crate_integration.rs:81: ByteBlockDevice::new(mem, block_size).expect("valid device")
-crates/ffs-core/tests/cross_crate_integration.rs:152: let name_len = u16::try_from(name.len()).expect("test name length should fit in u16");
-crates/ffs-core/tests/cross_crate_integration.rs:324: OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).expect("open btrfs");
-crates/ffs-core/tests/cross_crate_integration.rs:325: fs.enable_writes(&cx).expect("enable btrfs writes");
-crates/ffs-core/tests/cross_crate_integration.rs:344: let seq1 = store.commit(txn1).expect("commit 1");
-crates/ffs-core/tests/cross_crate_integration.rs:349: let seq2 = store.commit(txn2).expect("commit 2");
-crates/ffs-core/tests/cross_crate_integration.rs:358: let data = store.read_visible(block, snap).expect("should be visible");
-crates/ffs-core/tests/cross_crate_integration.rs:372: store.commit(txn1).expect("commit initial");
-crates/ffs-core/tests/cross_crate_integration.rs:380: store.commit(txn2).expect("commit second");
-crates/ffs-core/tests/cross_crate_integration.rs:385: .expect("visible at old snapshot");
-crates/ffs-core/tests/cross_crate_integration.rs:392: .expect("visible at new snapshot");
-crates/ffs-core/tests/cross_crate_integration.rs:405: store.commit(seed).expect("seed");
-crates/ffs-core/tests/cross_crate_integration.rs:416: store.commit(txn_a).expect("txn_a should succeed");
-crates/ffs-core/tests/cross_crate_integration.rs:432: store.commit(txn).expect("multi-block commit");
-crates/ffs-core/tests/cross_crate_integration.rs:436: let data = store.read_visible(BlockNumber(i), snap).expect("visible");
-crates/ffs-core/tests/cross_crate_integration.rs:473: let first = bitmap_find_free(&bitmap, total, 0).expect("find free");
-crates/ffs-core/tests/cross_crate_integration.rs:496: allocated.last().unwrap() + 1
-crates/ffs-core/tests/cross_crate_integration.rs:498: let blk = bitmap_find_free(&bitmap, total, start).expect("find free");
-crates/ffs-core/tests/cross_crate_integration.rs:524: let free = bitmap_find_free(&bitmap, total, 0).expect("find in fragment");
-crates/ffs-core/tests/cross_crate_integration.rs:549: let free = bitmap_find_free(&bitmap, total, 100).expect("find after wraparound");
-crates/ffs-core/tests/cross_crate_integration.rs:567: let found = bitmap_find_free(&bitmap, total, 5).expect("find freed");
-crates/ffs-core/tests/cross_crate_integration.rs:578: .expect("create");
-crates/ffs-core/tests/cross_crate_integration.rs:580: let names = fs.listxattr(cx, created.ino).expect("initial listxattr");
-crates/ffs-core/tests/cross_crate_integration.rs:584: .expect("initial getxattr"),
-crates/ffs-core/tests/cross_crate_integration.rs:595: .expect("setxattr");
-crates/ffs-core/tests/cross_crate_integration.rs:597: let names = fs.listxattr(cx, created.ino).expect("listxattr after set");
-crates/ffs-core/tests/cross_crate_integration.rs:601: .expect("getxattr after set"),
-crates/ffs-core/tests/cross_crate_integration.rs:607: .expect("removexattr");
-crates/ffs-core/tests/cross_crate_integration.rs:611: .expect("getxattr after remove"),
-crates/ffs-core/tests/cross_crate_integration.rs:616: .expect("listxattr after remove");
-crates/ffs-core/tests/cross_crate_integration.rs:635: .expect("create");
-crates/ffs-core/tests/cross_crate_integration.rs:636: let written = fs.write(&cx, created.ino, 0, payload).expect("write");
-crates/ffs-core/tests/cross_crate_integration.rs:639: let looked_up = fs.lookup(&cx, root, name).expect("lookup");
-crates/ffs-core/tests/cross_crate_integration.rs:647: u32::try_from(payload.len()).expect("len fits u32"),
-crates/ffs-core/tests/cross_crate_integration.rs:649: .expect("read");
-crates/ffs-core/tests/cross_crate_integration.rs:652: let entries = fs.readdir(&cx, root, 0).expect("readdir");
-crates/ffs-core/tests/cross_crate_integration.rs:671: .expect("create");
-crates/ffs-core/tests/cross_crate_integration.rs:672: let written = fs.write(&cx, created.ino, 0, payload).expect("write");
-crates/ffs-core/tests/cross_crate_integration.rs:675: let looked_up = fs.lookup(&cx, root, name).expect("lookup");
-crates/ffs-core/tests/cross_crate_integration.rs:683: u32::try_from(payload.len()).expect("len fits u32"),
-crates/ffs-core/tests/cross_crate_integration.rs:685: .expect("read");
-crates/ffs-core/tests/cross_crate_integration.rs:688: let entries = fs.readdir(&cx, root, 0).expect("readdir");
-crates/ffs-core/tests/cross_crate_integration.rs:725: dev.write_block(&cx, BlockNumber(50), &data).expect("write");
-crates/ffs-core/tests/cross_crate_integration.rs:727: let buf = dev.read_block(&cx, BlockNumber(50)).expect("read");
-crates/ffs-core/tests/cross_crate_integration.rs:739: dev.write_block(&cx, BlockNumber(i), &data).expect("write");
-crates/ffs-core/tests/cross_crate_integration.rs:744: let buf = dev.read_block(&cx, BlockNumber(i)).expect("read");
-crates/ffs-core/tests/cross_crate_integration.rs:756: .expect("write 1");
-crates/ffs-core/tests/cross_crate_integration.rs:760: .expect("write 2");
-crates/ffs-core/tests/cross_crate_integration.rs:762: let buf = dev.read_block(&cx, BlockNumber(0)).expect("read");
-crates/ffs-core/tests/cross_crate_integration.rs:771: let buf = dev.read_block(&cx, BlockNumber(5)).expect("read");
-crates/ffs-core/tests/cross_crate_integration.rs:789: dev.write_block(&cx, BlockNumber(0), &data).expect("write");
-crates/ffs-core/tests/cross_crate_integration.rs:790: let buf = dev.read_block(&cx, BlockNumber(0)).expect("read");
-crates/ffs-core/tests/cross_crate_integration.rs:841: ffs_extent::map_logical_to_physical(&cx, &dev, &root, 50, 1).expect("resolve");
-crates/ffs-core/tests/cross_crate_integration.rs:856: .expect("resolve range crossing boundary");
-crates/ffs-core/tests/cross_crate_integration.rs:877: ffs_extent::map_logical_to_physical(&cx, &dev, &root, 20, 1).expect("resolve hole");
-crates/ffs-core/tests/cross_crate_integration.rs:892: ffs_extent::map_logical_to_physical(&cx, &dev, &root, 0, 0).expect("empty range");
-crates/ffs-core/tests/cross_crate_integration.rs:904: ffs_extent::map_logical_to_physical(&cx, &dev, &root, 0, 100).expect("resolve all");
-crates/ffs-core/tests/repro_create.rs:17: let mut fs = OpenFs::open_with_options(&cx, &img_path, &opts).unwrap();
-crates/ffs-core/tests/repro_create.rs:18: fs.enable_writes(&cx).unwrap();
-crates/ffs-core/tests/repro_create.rs:29: .unwrap();
-crates/ffs-core/tests/repro_create.rs:31: let inode = fs.read_inode(&cx, attr.ino).unwrap();
-crates/ffs-core/tests/repro_create.rs:47: let mut fs = OpenFs::open_with_options(&cx, &img_path, &opts).unwrap();
-crates/ffs-core/tests/repro_create.rs:48: fs.enable_writes(&cx).unwrap();
-crates/ffs-core/tests/repro_create.rs:59: .unwrap();
-crates/ffs-core/tests/repro_create.rs:61: let inode = fs.read_inode(&cx, attr.ino).unwrap();
-crates/ffs-core/tests/repro_create.rs:77: let mut fs = OpenFs::open_with_options(&cx, &img_path, &opts).unwrap();
-crates/ffs-core/tests/repro_create.rs:78: fs.enable_writes(&cx).unwrap();
-crates/ffs-core/tests/repro_create.rs:89: .unwrap();
-crates/ffs-core/tests/repro_create.rs:91: let target = fs.readlink(&cx, attr.ino).unwrap();
-crates/ffs-ondisk/tests/adversarial_corpus.rs:40: .expect("workspace root")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:113: Ext4Superblock::parse_superblock_region(&sb).expect("valid ext4 superblock")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:177: let rec_len_u16 = u16::try_from(*rec_len).expect("dir rec_len fits in u16");
-crates/ffs-ondisk/tests/adversarial_corpus.rs:178: let name_len_u8 = u8::try_from(name.len()).expect("name length is bounded");
-crates/ffs-ondisk/tests/adversarial_corpus.rs:228: .expect("structured superblock should parse");
-crates/ffs-ondisk/tests/adversarial_corpus.rs:234: .expect("structured image should parse");
-crates/ffs-ondisk/tests/adversarial_corpus.rs:255: u32::try_from(EXT4_TEST_DIR_BLOCK_SIZE).expect("fixed block size fits in u32")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:256: ).expect("synthesized directory block should parse");
-crates/ffs-ondisk/tests/adversarial_corpus.rs:260: u32::try_from(EXT4_TEST_DIR_BLOCK_SIZE).expect("fixed block size fits in u32")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:265: .expect("iterator should parse synthesized block")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:476: let mut inode = Ext4Inode::parse_from_bytes(&[0_u8; 128]).expect("minimal inode parses");
-crates/ffs-ondisk/tests/adversarial_corpus.rs:525: .expect("workspace root")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:538: fs::read_to_string(&fuzz_manifest).expect("failed to read fuzz/Cargo.toml");
-crates/ffs-ondisk/tests/adversarial_corpus.rs:555: .expect("failed to read fuzz/fuzz_targets/")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:589: .expect("workspace root")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:626: .expect("workspace root")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:650: .expect("workspace root")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:667: .expect("read nightly script metadata")
-crates/ffs-ondisk/tests/adversarial_corpus.rs:691: .expect("workspace root")
-crates/ffs-ondisk/src/ext4.rs:487: #[expect(clippy::too_many_lines)]
-crates/ffs-ondisk/src/ext4.rs:1372: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-inode/src/lib.rs:39: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-inode/src/lib.rs:115: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-inode/src/lib.rs:135: #[expect(clippy::cast_possible_truncation)]
-crates/ffs-inode/src/lib.rs:271: #[expect(clippy::too_many_arguments)]
-crates/ffs-inode/src/lib.rs:378: #[expect(clippy::too_many_arguments)]
