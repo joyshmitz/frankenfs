@@ -3777,28 +3777,55 @@ impl Ext4ImageReader {
         // Hash the name using the hash version from the DX root
         let (hash, _minor) = dx_hash(dx_root.hash_version, name, &self.sb.hash_seed);
 
-        // Binary search the DX entries for the target hash
-        let target_block = dx_find_leaf(&dx_root.entries, hash);
+        let mut root_idx = dx_find_leaf_idx(&dx_root.entries, hash);
+        loop {
+            let target_block = dx_root.entries[root_idx].block;
 
-        // If there's an indirect level, we need to read the inner index block
-        let leaf_block = if dx_root.indirect_levels > 0 {
-            let Some(inner_phys) = self.resolve_extent(image, dir_inode, target_block)? else {
-                return Ok(None);
+            let leaf_found = if dx_root.indirect_levels > 0 {
+                let Some(inner_phys) = self.resolve_extent(image, dir_inode, target_block)? else {
+                    break;
+                };
+                let inner_data = self.read_block(image, ffs_types::BlockNumber(inner_phys))?;
+                let inner_entries = parse_dx_entries(inner_data, 8)?;
+
+                let mut inner_idx = dx_find_leaf_idx(&inner_entries, hash);
+                let mut found_inner = None;
+                loop {
+                    let leaf_block = inner_entries[inner_idx].block;
+                    let Some(leaf_phys) = self.resolve_extent(image, dir_inode, leaf_block)? else {
+                        break;
+                    };
+                    let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
+                    if let Some(entry) = lookup_in_dir_block(leaf_data, self.sb.block_size, name)? {
+                        found_inner = Some(entry);
+                        break;
+                    }
+
+                    inner_idx += 1;
+                    if inner_idx >= inner_entries.len() || (inner_entries[inner_idx].hash & 1) == 0 {
+                        break;
+                    }
+                }
+                found_inner
+            } else {
+                let Some(leaf_phys) = self.resolve_extent(image, dir_inode, target_block)? else {
+                    break;
+                };
+                let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
+                lookup_in_dir_block(leaf_data, self.sb.block_size, name)?
             };
-            let inner_data = self.read_block(image, ffs_types::BlockNumber(inner_phys))?;
-            let inner_entries = parse_dx_entries(inner_data, 8)?;
 
-            dx_find_leaf(&inner_entries, hash)
-        } else {
-            target_block
-        };
+            if let Some(entry) = leaf_found {
+                return Ok(Some(entry));
+            }
 
-        // Read the leaf directory block and do a linear scan
-        let Some(leaf_phys) = self.resolve_extent(image, dir_inode, leaf_block)? else {
-            return Ok(None);
-        };
-        let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
-        lookup_in_dir_block(leaf_data, self.sb.block_size, name)
+            root_idx += 1;
+            if root_idx >= dx_root.entries.len() || (dx_root.entries[root_idx].hash & 1) == 0 {
+                break;
+            }
+        }
+
+        Ok(None)
     }
 
     /// Read a directory block and parse its entries.
@@ -4088,12 +4115,8 @@ fn parse_dx_entries(
     Ok(entries)
 }
 
-/// Find the leaf block for a given hash in a sorted DX entry list.
-///
-/// The entries are sorted by hash. We find the last entry whose hash <= target.
-/// Entry 0 is the sentinel (hash=0, points to the first data block), so
-/// for any hash, we always have at least one candidate.
-fn dx_find_leaf(entries: &[Ext4DxEntry], hash: u32) -> u32 {
+/// Find the rightmost entry index whose hash is <= target_hash.
+fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
     // Binary search: find rightmost entry where entry.hash <= hash
     let mut lo = 0_usize;
     let mut hi = entries.len();
@@ -4106,11 +4129,13 @@ fn dx_find_leaf(entries: &[Ext4DxEntry], hash: u32) -> u32 {
         }
     }
     // lo-1 is the rightmost entry with hash <= target (lo >= 1 due to sentinel)
-    if lo > 0 {
-        entries[lo - 1].block
-    } else {
-        entries[0].block
-    }
+    if lo > 0 { lo - 1 } else { 0 }
+}
+
+/// Find the leaf block for a given hash in a sorted DX entry list.
+fn dx_find_leaf(entries: &[Ext4DxEntry], hash: u32) -> u32 {
+    let idx = dx_find_leaf_idx(entries, hash);
+    entries[idx].block
 }
 
 // ── ext4 directory hash functions ───────────────────────────────────────────

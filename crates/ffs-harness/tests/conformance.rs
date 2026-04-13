@@ -5,10 +5,11 @@ use ffs_core::{OpenFs, OpenOptions};
 use ffs_harness::{
     GoldenReference, ParityReport,
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
-    validate_btrfs_chunk_fixture, validate_btrfs_fixture, validate_btrfs_leaf_fixture,
-    validate_dir_block_fixture, validate_ext4_fixture, validate_group_desc_fixture,
-    validate_inode_fixture,
+    load_sparse_fixture, validate_btrfs_chunk_fixture, validate_btrfs_fixture,
+    validate_btrfs_leaf_fixture, validate_dir_block_fixture, validate_ext4_fixture,
+    validate_group_desc_fixture, validate_inode_fixture,
 };
+use ffs_ondisk::{lookup_in_dir_block_casefold, parse_dir_block};
 use serde_json::Value;
 use std::path::Path;
 
@@ -80,6 +81,37 @@ fn ext4_dir_block_fixture_conforms() {
         validate_dir_block_fixture(&fixture_path("ext4_dir_block.json"), 4096).expect("dir block");
     assert!(entries.len() >= 3, "should have at least 3 entries");
     assert!(entries.iter().any(|e| e.name_str() == "hello.txt"));
+}
+
+#[test]
+fn ext4_dir_block_with_tail_fixture_conforms() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_with_tail.json"))
+        .expect("load tail fixture");
+    let (entries, tail) = parse_dir_block(&data, 4096).expect("parse dir block with tail");
+    assert_eq!(entries.len(), 3, "expected 3 directory entries");
+    assert_eq!(
+        entries.last().map(|e| e.name_str()).as_deref(),
+        Some("hello.txt"),
+        "last entry should be hello.txt"
+    );
+    assert_eq!(
+        entries.last().map(|e| e.rec_len),
+        Some(4060),
+        "last entry rec_len should leave room for tail"
+    );
+    let tail = tail.expect("expected checksum tail");
+    assert_eq!(tail.checksum, 0x1234_5678);
+}
+
+#[test]
+fn ext4_dir_block_casefold_lookup_conforms() {
+    let data =
+        load_sparse_fixture(&fixture_path("ext4_dir_block.json")).expect("load dir block fixture");
+    let entry = lookup_in_dir_block_casefold(&data, 4096, b"HELLO.TXT").expect("casefold lookup");
+    assert!(
+        entry.as_ref().is_some_and(|e| e.name_str() == "hello.txt"),
+        "casefold lookup should match hello.txt"
+    );
 }
 
 #[test]
@@ -376,6 +408,8 @@ fn full_conformance_gate_pass() {
     ext4_group_desc_fixtures_conform();
     ext4_inode_fixtures_conform();
     ext4_dir_block_fixture_conforms();
+    ext4_dir_block_with_tail_fixture_conforms();
+    ext4_dir_block_casefold_lookup_conforms();
     btrfs_chunk_mapping_fixture_conforms();
     btrfs_leaf_fixture_conforms();
     btrfs_fstree_leaf_fixture_conforms();

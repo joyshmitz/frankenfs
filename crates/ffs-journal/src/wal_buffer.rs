@@ -787,9 +787,9 @@ impl DurabilityNotifier {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Keep the highest failed epoch.
+            // Keep the lowest failed epoch.
             match &state.failed {
-                Some((prev, _)) if *prev >= epoch => {}
+                Some((prev, _)) if *prev <= epoch => {}
                 _ => state.failed = Some((epoch, error)),
             }
         }
@@ -1691,6 +1691,22 @@ mod tests {
             outcome,
             DurabilityOutcome::Failed("disk on fire".to_string())
         );
+    }
+
+    #[test]
+    fn durability_notifier_keeps_lowest_failed_epoch() {
+        let notifier = DurabilityNotifier::new();
+        notifier.notify_failed(5, "late".to_string());
+        notifier.notify_failed(3, "early".to_string());
+
+        let outcome = notifier.await_epoch_timeout(4, std::time::Duration::from_millis(10));
+        assert_eq!(
+            outcome,
+            Some(DurabilityOutcome::Failed("early".to_string()))
+        );
+
+        let none = notifier.await_epoch_timeout(2, std::time::Duration::from_millis(10));
+        assert!(none.is_none());
     }
 
     #[test]

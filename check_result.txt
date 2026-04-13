@@ -1,0 +1,10 @@
+  [2m2026-04-13T20:47:38.715774Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ts2 at ubuntu@192.168.1.124 (30 slots, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:289 [2;3mon[0m ThreadId(1)
+
+[*] Job j-29792617399061433 submitted to ts2 (slots 30, speed 50.0)
+  [2m2026-04-13T20:47:38.959170Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenfs (hash: 453fecb331589a73)[0m
+    [2;3mat[0m rch/src/hook.rs:4645 [2;3mon[0m ThreadId(1)
+
+  [2m2026-04-13T20:47:38.959205Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 22 roots[0m
+    [2;3mat[0m rch/src/hook.rs:4667 [2;3mon[0m ThreadId(1)
+

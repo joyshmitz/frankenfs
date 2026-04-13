@@ -21,7 +21,10 @@ const JBD2_BLOCKTYPE_SUPERBLOCK_V1: u32 = 3;
 const JBD2_BLOCKTYPE_SUPERBLOCK_V2: u32 = 4;
 const JBD2_BLOCKTYPE_REVOKE: u32 = 5;
 
+const JBD2_FEATURE_COMPAT_CHECKSUM: u32 = 0x0000_0001;
 const JBD2_FEATURE_INCOMPAT_64BIT: u32 = 0x0000_0002;
+const JBD2_FEATURE_INCOMPAT_CSUM_V2: u32 = 0x0000_0008;
+const JBD2_FEATURE_INCOMPAT_CSUM_V3: u32 = 0x0000_0010;
 const JBD2_FEATURE_INCOMPAT_FAST_COMMIT: u32 = 0x0000_0020;
 
 const JBD2_HEADER_SIZE: usize = 12;
@@ -93,6 +96,24 @@ impl Jbd2Superblock {
     #[must_use]
     pub fn is_64bit(&self) -> bool {
         (self.feature_incompat & JBD2_FEATURE_INCOMPAT_64BIT) != 0
+    }
+
+    #[must_use]
+    pub fn has_checksum(&self) -> bool {
+        (self.feature_compat & JBD2_FEATURE_COMPAT_CHECKSUM) != 0
+            || (self.feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V2) != 0
+            || (self.feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V3) != 0
+    }
+
+    #[must_use]
+    pub fn csum_seed(&self) -> u32 {
+        if (self.feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V3) != 0 {
+            // JBD2 V3: seed is crc32c(!0, uuid)
+            !crc32c::crc32c_append(!0u32, &self.uuid)
+        } else {
+            // Older JBD2 uses 0 as seed for checksums
+            0
+        }
     }
 
     #[must_use]
@@ -238,6 +259,49 @@ impl DescriptorTag {
     }
 }
 
+const JBD2_COMMIT_CHKSUM_OFFSET: usize = 16;
+
+fn verify_jbd2_block_checksum(block: &[u8], sb: &Jbd2Superblock) -> bool {
+    if !sb.has_checksum() {
+        return true;
+    }
+
+    let Some(header) = Jbd2Header::parse(block) else {
+        return false;
+    };
+
+    match header.block_type {
+        JBD2_BLOCKTYPE_DESCRIPTOR | JBD2_BLOCKTYPE_REVOKE => {
+            // Checksum is in the 4-byte tail at the end of the block.
+            let bs = block.len();
+            if bs < 4 {
+                return false;
+            }
+            let stored = read_be_u32(block, bs - 4).unwrap_or(0);
+            let seed = sb.csum_seed();
+            // JBD2 checksum covers the block up to the tail.
+            let computed = !crc32c::crc32c_append(!seed, &block[..bs - 4]);
+            stored == computed
+        }
+        JBD2_BLOCKTYPE_COMMIT => {
+            // Commit block checksum is at offset 16.
+            if block.len() < JBD2_COMMIT_CHKSUM_OFFSET + 4 {
+                return false;
+            }
+            let stored = read_be_u32(block, JBD2_COMMIT_CHKSUM_OFFSET).unwrap_or(0);
+            let mut temp = block.to_vec();
+            // Zero out the checksum field before computing.
+            for i in 0..4 {
+                temp[JBD2_COMMIT_CHKSUM_OFFSET + i] = 0;
+            }
+            let seed = sb.csum_seed();
+            let computed = !crc32c::crc32c_append(!seed, &temp);
+            stored == computed
+        }
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StagedWrite {
     journal_idx: u64,
@@ -340,6 +404,7 @@ fn replay_jbd2_inner(
     let mut idx = 0_u64;
     let mut expected_seq = None;
     let mut is_64bit = false;
+    let mut journal_sb = None;
 
     // Try to find JBD2 superblock at the beginning of the journal.
     if total_blocks > 0 {
@@ -349,11 +414,13 @@ fn replay_jbd2_inner(
             idx = u64::from(sb.start_block);
             expected_seq = Some(sb.start_sequence);
             is_64bit = sb.is_64bit();
+            journal_sb = Some(sb);
             tracing::info!(
                 target: "ffs::journal",
                 start_block = sb.start_block,
                 start_sequence = sb.start_sequence,
                 is_64bit,
+                has_checksum = sb.has_checksum(),
                 "jbd2_superblock_found"
             );
         }
@@ -385,6 +452,20 @@ fn replay_jbd2_inner(
             continue;
         }
 
+        // Verify checksum if enabled.
+        if let Some(sb) = &journal_sb {
+            if !verify_jbd2_block_checksum(raw.as_slice(), sb) {
+                tracing::warn!(
+                    target: "ffs::journal",
+                    block_idx = current_idx,
+                    sequence = header.sequence,
+                    block_type = header.block_type,
+                    "jbd2_block_checksum_mismatch"
+                );
+                break;
+            }
+        }
+
         // Check sequence if following guided scan.
         if let Some(expected) = expected_seq {
             if header.sequence != expected && header.sequence != expected.wrapping_add(1) {
@@ -392,16 +473,19 @@ fn replay_jbd2_inner(
             }
         }
 
+        let has_tail = journal_sb.as_ref().map_or(false, |sb| sb.has_checksum());
+
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
                 if committed_sequences.contains(&header.sequence) {
                     break;
                 }
                 stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
-                let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit) else {
+                let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit, has_tail)
+                else {
                     break;
                 };
-                let tags = parse_descriptor_tags(raw.as_slice(), is_64bit);
+                let tags = parse_descriptor_tags(raw.as_slice(), is_64bit, has_tail);
                 debug_assert_eq!(tags.len(), tag_count);
                 stats.descriptor_tags = stats
                     .descriptor_tags
@@ -456,7 +540,7 @@ fn replay_jbd2_inner(
                     break;
                 }
                 stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
-                let Some(revokes) = strict_revoke_entries(raw.as_slice(), is_64bit) else {
+                let Some(revokes) = strict_revoke_entries(raw.as_slice(), is_64bit, has_tail) else {
                     break;
                 };
                 stats.revoke_entries = stats
@@ -1829,8 +1913,7 @@ fn resolve_segment_block(
     )))
 }
 
-#[must_use]
-fn parse_descriptor_tags(block: &[u8], is_64bit: bool) -> Vec<DescriptorTag> {
+fn parse_descriptor_tags(block: &[u8], is_64bit: bool, has_tail: bool) -> Vec<DescriptorTag> {
     let mut tags = Vec::new();
     let mut offset = JBD2_HEADER_SIZE;
     let tag_size = if is_64bit {
@@ -1838,8 +1921,13 @@ fn parse_descriptor_tags(block: &[u8], is_64bit: bool) -> Vec<DescriptorTag> {
     } else {
         JBD2_TAG_SIZE_32
     };
+    let limit = if has_tail {
+        block.len().saturating_sub(4)
+    } else {
+        block.len()
+    };
 
-    while offset.saturating_add(tag_size) <= block.len() {
+    while offset.saturating_add(tag_size) <= limit {
         let Some(target_low) = read_be_u32(block, offset) else {
             break;
         };
@@ -1872,7 +1960,7 @@ fn parse_descriptor_tags(block: &[u8], is_64bit: bool) -> Vec<DescriptorTag> {
     tags
 }
 
-fn strict_descriptor_tag_count(block: &[u8], is_64bit: bool) -> Option<usize> {
+fn strict_descriptor_tag_count(block: &[u8], is_64bit: bool, has_tail: bool) -> Option<usize> {
     let tag_size = if is_64bit {
         JBD2_TAG_SIZE_64
     } else {
@@ -1881,8 +1969,13 @@ fn strict_descriptor_tag_count(block: &[u8], is_64bit: bool) -> Option<usize> {
 
     let mut offset = JBD2_HEADER_SIZE;
     let mut count = 0_usize;
+    let limit = if has_tail {
+        block.len().saturating_sub(4)
+    } else {
+        block.len()
+    };
 
-    while offset.checked_add(tag_size)? <= block.len() {
+    while offset.checked_add(tag_size)? <= limit {
         let flags = read_be_u32(block, offset.checked_add(4)?)?;
         count = count.checked_add(1)?;
         if (flags & JBD2_TAG_FLAG_LAST) != 0 {
@@ -1907,6 +2000,16 @@ fn scan_committed_tail_transaction(
     let mut idx = start_idx;
     let mut sequence = None;
     let mut saw_body = false;
+    let mut has_tail = false;
+
+    // Try to find if checksums are enabled to determine tail presence.
+    if let Ok(first_abs) = resolve_region_block(region, 0) {
+        if let Ok(first_raw) = dev.read_block(cx, first_abs) {
+            if let Some(sb) = Jbd2Superblock::parse(first_raw.as_slice()) {
+                has_tail = sb.has_checksum();
+            }
+        }
+    }
 
     while idx < region.blocks {
         let block = resolve_region_block(region, idx)?;
@@ -1926,7 +2029,8 @@ fn scan_committed_tail_transaction(
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
                 saw_body = true;
-                let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit) else {
+                let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit, has_tail)
+                else {
                     return Ok(None);
                 };
                 let advance = 1_u64
@@ -1966,10 +2070,16 @@ fn scan_committed_tail_transaction(
     Ok(None)
 }
 
-fn strict_revoke_entries(block: &[u8], is_64bit: bool) -> Option<Vec<BlockNumber>> {
+fn strict_revoke_entries(block: &[u8], is_64bit: bool, has_tail: bool) -> Option<Vec<BlockNumber>> {
     let r_count = usize::try_from(read_be_u32(block, 12)?).ok()?;
     let entry_size = if is_64bit { 8 } else { 4 };
-    if r_count < JBD2_REVOKE_HEADER_SIZE || r_count > block.len() {
+    let limit = if has_tail {
+        block.len().saturating_sub(4)
+    } else {
+        block.len()
+    };
+
+    if r_count < JBD2_REVOKE_HEADER_SIZE || r_count > limit {
         return None;
     }
     if (r_count - JBD2_REVOKE_HEADER_SIZE) % entry_size != 0 {

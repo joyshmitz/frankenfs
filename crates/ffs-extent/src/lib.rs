@@ -706,7 +706,6 @@ impl ExtentCache {
         Self {
             inner: RwLock::new(ExtentCacheInner {
                 entries: BTreeMap::new(),
-                lru: BTreeMap::new(),
                 capacity,
                 generation: 0,
                 hits: 0,

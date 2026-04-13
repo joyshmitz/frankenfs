@@ -1,0 +1,22 @@
+Traceback (most recent call last):
+  File "/data/projects/frankenfs/fix_tests.py", line 100, in <module>
+    fix_file('crates/ffs-core/src/lib.rs')
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/projects/frankenfs/fix_tests.py", line 91, in fix_file
+    content = re.sub(
+        r'(\.read\([^,]+,\s*[^,]+,\s*[^,]+,\s*)u32::try_from\([^)]+\)\.unwrap\(\)\)',
+        r'\1u64::from(u32::try_from(\2).unwrap()))',
+        content
+    )
+  File "/usr/lib/python3.13/re/__init__.py", line 208, in sub
+    return _compile(pattern, flags).sub(repl, string, count)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/re/__init__.py", line 377, in _compile_template
+    return _sre.template(pattern, _parser.parse_template(repl, pattern))
+                                  ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/re/_parser.py", line 1070, in parse_template
+    addgroup(int(this[1:]), len(this) - 1)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/re/_parser.py", line 1015, in addgroup
+    raise s.error("invalid group reference %d" % index, pos)
+re.PatternError: invalid group reference 2 at position 27

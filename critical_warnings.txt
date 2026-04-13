@@ -1,0 +1,214 @@
+
+• Mutation during iteration
+  ⚠ Warning (1 found)
+    Possible mutation during iteration
+    Examples: third_party/xfstests-dev/src/perf/FioCompare.py:68
+
+• len(x) comparisons
+---
+
+• Resource lifecycle correlation
+  🔥 CRITICAL (1 found)
+    File handles opened without context manager/close [third_party/xfstests-dev/src/perf/fio-insert-and-compare.py:26]
+    File handle json_data opened without context manager or close()
+  🔥 CRITICAL (1 found)
+    File handles opened without context manager/close [third_party/xfstests-dev/src/perf/generate-schema.py:31]
+---
+    File handles opened without context manager/close [third_party/xfstests-dev/src/perf/fio-insert-and-compare.py:26]
+    File handle json_data opened without context manager or close()
+  🔥 CRITICAL (1 found)
+    File handles opened without context manager/close [third_party/xfstests-dev/src/perf/generate-schema.py:31]
+    File handle json_data opened without context manager or close()
+  🔥 CRITICAL (1 found)
+    File handles opened without context manager/close [third_party/xfstests-dev/src/popattr.py:42]
+---
+    File handles opened without context manager/close [third_party/xfstests-dev/src/perf/generate-schema.py:31]
+    File handle json_data opened without context manager or close()
+  🔥 CRITICAL (1 found)
+    File handles opened without context manager/close [third_party/xfstests-dev/src/popattr.py:42]
+    File handle fp opened without context manager or close()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+---
+
+• ast-grep rule-pack summary
+  🔥 CRITICAL (1 found)
+    py.bare-except: Bare 'except' catches all exceptions including SystemExit/KeyboardInterrupt
+      /data/projects/frankenfs/third_party/xfstests-dev/src/popattr.py:41 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/third_party/xfstests-dev/src/popattr.py#L41)
+      try:
+  ⚠ Warning (18 found)
+---
+      /data/projects/frankenfs/third_party/xfstests-dev/src/popattr.py:41 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/third_party/xfstests-dev/src/popattr.py#L41)
+      try:
+  ⚠ Warning (18 found)
+    py.open-no-with: open() outside of a 'with' block; risk of leaking file handles
+      /data/projects/frankenfs/fix_dev.py:3 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/fix_dev.py#L3)
+      with open("crates/ffs-core/src/lib.rs", "r") as f:
+      /data/projects/frankenfs/fix_dev.py:21 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/fix_dev.py#L21)
+---
+      /data/projects/frankenfs/refactor.py:32 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/refactor.py#L32)
+      with open("crates/ffs-core/src/lib.rs", "r") as f:
+  ⚠ Warning (3 found)
+    py.json.loads-no-try: json.loads without exception handling
+      /data/projects/frankenfs/fix_fuse_errors.py:10 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/fix_fuse_errors.py#L10)
+      msg = json.loads(line)
+      /data/projects/frankenfs/fix_compiler_errors.py:10 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/fix_compiler_errors.py#L10)
+---
+      /data/projects/frankenfs/fix_test_errors.py:10 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/fix_test_errors.py#L10)
+      msg = json.loads(line)
+  ⚠ Warning (1 found)
+    py.none-eq: Use 'is (not) None' instead of '== None' or '!= None'
+      /data/projects/frankenfs/third_party/xfstests-dev/src/parse-free-space.py:33 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/third_party/xfstests-dev/src/parse-free-space.py#L33)
+      if match == None:
+  ⚠ Warning (1 found)
+---
+      /data/projects/frankenfs/third_party/xfstests-dev/src/parse-free-space.py:33 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/third_party/xfstests-dev/src/parse-free-space.py#L33)
+      if match == None:
+  ⚠ Warning (1 found)
+    py.os-system: os.system is shell-invocation; prefer subprocess without shell
+      /data/projects/frankenfs/third_party/xfstests-dev/src/btrfs_crc32c_forged_name.py:100 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/third_party/xfstests-dev/src/btrfs_crc32c_forged_name.py#L100)
+      os.system('btrfs fi sync %s' % (dirpath))
+  ℹ Info (18 found)
+---
+  Files scanned:    14
+  Critical issues:  4
+  Warning issues:   24
+  Info items:       36
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+---
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+  These cause crashes, security vulnerabilities, or data corruption
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+---
+
+• Division by variable (check non-zero)
+  ⚠ Warning (45 found)
+    Division by variable - add guards
+      /data/projects/frankenfs/third_party/xfstests-dev/ltp/doio.h:1 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/third_party/xfstests-dev/ltp/doio.h#L1)
+      // SPDX-License-Identifier: GPL-2.0
+      /data/projects/frankenfs/third_party/xfstests-dev/ltp/doio.h:65 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/third_party/xfstests-dev/ltp/doio.h#L65)
+---
+    Set CMAKE_CXX_STANDARD 20 and/or target_compile_features(... cxx_std_20)
+
+• Warnings enabled (-Wall -Wextra -Wpedantic)
+  ℹ Info (1 found)
+    No common warnings in CMake found
+
+• Sanitizers configured (ASan/UBSan)
+---
+  Files scanned:    0
+  Critical issues:  0
+  Warning issues:   45
+  Info items:       23
+
+Priority Actions:
+  ⚠ Review and fix WARNING items
+---
+
+• unwrap()/expect() usage
+  ⚠ Warning (12595 found)
+    Potential panics via unwrap/expect
+    Prefer `?` or match to propagate/handle errors
+      /data/projects/frankenfs/crates/ffs-alloc/benches/batch_alloc.rs:37 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/crates/ffs-alloc/benches/batch_alloc.rs#L37)
+              let guard = self.blocks.lock().unwrap();
+---
+
+• panic!/unreachable!/todo!/unimplemented!
+  🔥 CRITICAL (217 found)
+    panic! macro(s) present
+    Avoid panic! in library code
+      /data/projects/frankenfs/crates/ffs-block/src/io_engine.rs:350 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/crates/ffs-block/src/io_engine.rs#L350)
+                  other => panic!("expected Read, got {other:?}"),
+---
+      /data/projects/frankenfs/crates/ffs-types/src/lib.rs:1253 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/crates/ffs-types/src/lib.rs#L1253)
+                  other => panic!("expected InvalidField, got {other:?}"),
+  ⚠ Warning (11 found)
+    unreachable! may panic if reached
+    Double-check logic
+
+• dbg!/println!/eprintln!
+---
+
+• Mutex::lock().unwrap()/expect()
+  ⚠ Warning (283 found)
+    Poisoned lock handling via unwrap/expect
+      /data/projects/frankenfs/test_mut.rs:8 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/test_mut.rs#L8)
+              m.lock().unwrap().mutate();
+      /data/projects/frankenfs/repro_jbd2_wrap.rs:29 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/repro_jbd2_wrap.rs#L29)
+---
+
+• Blocking ops inside async (thread::sleep, std::fs)
+  ⚠ Warning (36 found)
+    thread::sleep in async
+  ℹ Info (183 found)
+    Blocking std::fs in async code
+
+---
+
+• Hardcoded secrets/credentials (heuristic)
+  🔥 CRITICAL (3 found)
+    Possible hardcoded secrets
+      /data/projects/frankenfs/crates/ffs-block/src/lib.rs:7501 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/crates/ffs-block/src/lib.rs#L7501)
+              let token = FlushPinToken::default();
+      /data/projects/frankenfs/crates/ffs-cli/src/cmd_repair.rs:254 (https://github.com/Dicklesworthstone/frankenfs/blob/6396f832870960b701fad32985a6ea83c28025ab/crates/ffs-cli/src/cmd_repair.rs#L254)
+---
+
+• Resource lifecycle correlation
+  🔥 CRITICAL (5 found)
+    std::thread::spawn without join() [37m[[0mcrates/ffs-btree/src/bw_tree.rs[37m][0m
+    Store the JoinHandle and call join() or detach intentionally (acquire=11, release=6)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+---
+
+• assert!/assert_eq!/assert_ne! inventory
+  ⚠ Warning (10691 found)
+    assert! macros present (panic surface)
+    If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
+
+• unreachable_unchecked / unwrap_unchecked
+---
+
+• try_into().unwrap()/expect() (panic on conversion failure)
+  ⚠ Warning (28 found)
+    try_into().unwrap()/expect() present
+    Handle conversion errors explicitly; panics can be input-dependent
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+---
+
+• serde_json::from_str(...).unwrap()/expect()
+  ⚠ Warning (111 found)
+    serde_json::from_str(...).unwrap()/expect()
+    Add context, validation, and schema checks; avoid panics on malformed JSON
+
+• std::env::var(...).unwrap()/expect()
+---
+  Files scanned:    123
+  Critical issues:  225
+  Warning issues:   23755
+  Info items:       5242
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+---
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+  These cause crashes, security vulnerabilities, or data corruption
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+---
+Files: 137
+Critical: 229
+Warning: 23824
+Info: 5301
+
+---

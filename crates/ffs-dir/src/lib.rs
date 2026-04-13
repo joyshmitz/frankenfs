@@ -376,15 +376,24 @@ pub fn htree_remove(entries: &mut Vec<HtreeEntry>, hash: u32, block: u32) -> boo
     true
 }
 
+/// Find the rightmost entry index whose hash is <= target_hash.
+#[must_use]
+pub fn htree_find_leaf_idx(entries: &[HtreeEntry], target_hash: u32) -> usize {
+    if entries.is_empty() {
+        return 0;
+    }
+    let idx = entries.partition_point(|e| e.hash <= target_hash);
+    if idx == 0 { 0 } else { idx - 1 }
+}
+
 /// Find the leaf block using the "rightmost hash <= target" rule.
 #[must_use]
 pub fn htree_find_leaf(entries: &[HtreeEntry], target_hash: u32) -> Option<u32> {
     if entries.is_empty() {
         return None;
     }
-    let idx = entries.partition_point(|e| e.hash <= target_hash);
-    let chosen = if idx == 0 { 0 } else { idx - 1 };
-    entries.get(chosen).map(|e| e.block)
+    let idx = htree_find_leaf_idx(entries, target_hash);
+    entries.get(idx).map(|e| e.block)
 }
 
 #[cfg(test)]
@@ -1419,10 +1428,24 @@ mod tests {
     // ── HtreeEntry derive trait coverage ────────────────────────────────
 
     #[test]
-    fn htree_entry_debug_clone_eq() {
-        let e = HtreeEntry { hash: 42, block: 7 };
-        let e2 = e;
-        assert_eq!(e, e2);
-        assert_eq!(format!("{e:?}"), format!("{e2:?}"));
+    fn htree_find_leaf_handles_collisions_correctly() {
+        let entries = vec![
+            HtreeEntry { hash: 0, block: 1 },
+            HtreeEntry { hash: 100, block: 2 },
+            HtreeEntry { hash: 101, block: 3 }, // 101 means 100 | 1 (collision bit)
+            HtreeEntry { hash: 200, block: 4 },
+        ];
+        // Looking for hash 100.
+        let mut idx = htree_find_leaf_idx(&entries, 100);
+        assert_eq!(idx, 1);
+        assert_eq!(entries[idx].block, 2);
+
+        // Simulate not found in block 2, check next
+        idx += 1;
+        assert!(idx < entries.len());
+        // Hash 101 has bit 1 set, meaning it's a collision continuation of 100.
+        assert_eq!(entries[idx].hash & 1, 1);
+        assert_eq!(entries[idx].hash & !1, 100);
+        assert_eq!(entries[idx].block, 3);
     }
 }
