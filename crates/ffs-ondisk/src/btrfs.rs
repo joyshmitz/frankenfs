@@ -869,15 +869,17 @@ fn resolve_raid56_stripe(
                 reason: "RAID5/6 stripe_len * data_stripes overflow",
             })?;
 
-    // Build set of parity positions for this row.
-    // RAID5: P at (stripe_nr % num)
-    // RAID6: P at (stripe_nr % num), Q at ((stripe_nr + 1) % num)
-    let p_pos = stripe_nr % num;
+    // Btrfs parity rotation: P and Q rotate left (decreasing device index)
+    // by 1 for each stripe_nr row. For stripe_nr=0, P is at num-1, Q at num-2.
+    let rot = stripe_nr % num;
+    let p_pos = (num - 1).saturating_sub(rot) % num;
+    let q_pos = (num.saturating_sub(2) + num - rot) % num;
+
     let is_parity = |pos: u64| -> bool {
         if pos == p_pos {
             return true;
         }
-        if parity_count >= 2 && pos == (p_pos + 1) % num {
+        if parity_count >= 2 && pos == q_pos {
             return true;
         }
         false
@@ -3883,7 +3885,7 @@ mod tests {
     #[test]
     fn stripe_resolve_raid6_parity_wraparound() {
         // 4 devices, RAID6 (2 parity), stripe_len=65536
-        // This tests the case where P is at the last device and Q wraps to device 0.
+        // This tests the case where P is at device 0 and Q wraps to the last device.
         let chunks = vec![make_chunk(
             0,
             // Large enough to cover multiple stripe rows
@@ -3899,16 +3901,16 @@ mod tests {
             0,
         )];
 
-        // Row 3 (stripe_nr=3): P at pos 3 (dev 4), Q at pos 0 (dev 1).
+        // Row 3 (stripe_nr=3): P at pos 0 (dev 1), Q at pos 3 (dev 4).
         // Data should be at pos 1 (dev 2) and pos 2 (dev 3).
         // offset for row 3, data stripe 0 = 3 * 65536 * 2 + 0 = 393216
         let r = map_logical_to_stripes(&chunks, 393_216).unwrap().unwrap();
         assert_eq!(r.profile, BtrfsRaidProfile::Raid6);
         assert_eq!(r.stripes.len(), 1);
-        // Should NOT be dev 1 (which is Q in this row)
+        // Should NOT be dev 1 or 4
         assert_ne!(
             r.stripes[0].devid, 1,
-            "stripe_nr=3: position 0 is Q parity, data should not map there"
+            "stripe_nr=3: position 0 is P parity, data should not map there"
         );
         assert_eq!(
             r.stripes[0].devid, 2,
