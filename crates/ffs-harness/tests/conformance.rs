@@ -9,7 +9,11 @@ use ffs_harness::{
     validate_btrfs_leaf_fixture, validate_dir_block_fixture, validate_ext4_fixture,
     validate_group_desc_fixture, validate_inode_fixture,
 };
-use ffs_ondisk::{lookup_in_dir_block_casefold, parse_dir_block};
+use ffs_ondisk::{
+    lookup_in_dir_block_casefold, parse_dir_block, stamp_dir_block_checksum,
+    verify_dir_block_checksum,
+};
+use ffs_types::ParseError;
 use serde_json::Value;
 use std::path::Path;
 
@@ -90,7 +94,10 @@ fn ext4_dir_block_with_tail_fixture_conforms() {
     let (entries, tail) = parse_dir_block(&data, 4096).expect("parse dir block with tail");
     assert_eq!(entries.len(), 3, "expected 3 directory entries");
     assert_eq!(
-        entries.last().map(|e| e.name_str()).as_deref(),
+        entries
+            .last()
+            .map(ffs_ondisk::Ext4DirEntry::name_str)
+            .as_deref(),
         Some("hello.txt"),
         "last entry should be hello.txt"
     );
@@ -101,6 +108,163 @@ fn ext4_dir_block_with_tail_fixture_conforms() {
     );
     let tail = tail.expect("expected checksum tail");
     assert_eq!(tail.checksum, 0x1234_5678);
+}
+
+#[test]
+fn ext4_dir_block_deleted_entry_fixture_conforms() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_deleted_entry.json"))
+        .expect("load deleted entry fixture");
+    let (entries, tail) = parse_dir_block(&data, 4096).expect("parse dir block");
+    assert!(tail.is_none(), "deleted-entry fixture should have no tail");
+    assert_eq!(entries.len(), 3, "expected 3 live directory entries");
+    assert!(entries.iter().all(|e| e.inode != 0));
+    assert!(entries.iter().any(|e| e.name_str() == "hello.txt"));
+}
+
+#[test]
+fn ext4_dir_block_truncated_tail_fixture_rejected() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_truncated_tail.json"))
+        .expect("load truncated tail fixture");
+    let err = parse_dir_block(&data, 4096).unwrap_err();
+    assert!(
+        matches!(err, ParseError::InsufficientData { .. }),
+        "expected InsufficientData error, got {err:?}"
+    );
+}
+
+#[test]
+fn ext4_dir_block_checksum_stamp_and_verify_fixture_conforms() {
+    let mut data = load_sparse_fixture(&fixture_path("ext4_dir_block_with_tail.json"))
+        .expect("load checksum tail fixture");
+    let csum_seed = 0xA5A5_5A5A;
+    let inode = 2_u32;
+    let generation = 1_u32;
+    stamp_dir_block_checksum(&mut data, csum_seed, inode, generation);
+    verify_dir_block_checksum(&data, csum_seed, inode, generation).expect("checksum should verify");
+}
+
+#[test]
+fn ext4_dir_block_checksum_detects_corruption() {
+    let mut data = load_sparse_fixture(&fixture_path("ext4_dir_block_with_tail.json"))
+        .expect("load checksum tail fixture");
+    let csum_seed = 0xA5A5_5A5A;
+    let inode = 2_u32;
+    let generation = 1_u32;
+    stamp_dir_block_checksum(&mut data, csum_seed, inode, generation);
+    data[0] ^= 0xFF;
+    let err = verify_dir_block_checksum(&data, csum_seed, inode, generation).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_checksum",
+                ..
+            }
+        ),
+        "expected InvalidField(dir_checksum), got {err:?}"
+    );
+}
+
+#[test]
+fn ext4_dir_block_rec_len_too_small_fixture_rejected() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_rec_len_too_small.json"))
+        .expect("load rec_len fixture");
+    let err = parse_dir_block(&data, 4096).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "de_rec_len",
+                ..
+            }
+        ),
+        "expected InvalidField(de_rec_len), got {err:?}"
+    );
+}
+
+#[test]
+fn ext4_dir_block_name_len_overflow_fixture_rejected() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_name_len_overflow.json"))
+        .expect("load name_len fixture");
+    let err = parse_dir_block(&data, 4096).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "de_name_len",
+                ..
+            }
+        ),
+        "expected InvalidField(de_name_len), got {err:?}"
+    );
+}
+
+#[test]
+fn ext4_dir_block_rec_len_min12_fixture_rejected() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_rec_len_too_small_min12.json"))
+        .expect("load rec_len min12 fixture");
+    let err = parse_dir_block(&data, 4096).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "de_rec_len",
+                ..
+            }
+        ),
+        "expected InvalidField(de_rec_len), got {err:?}"
+    );
+}
+
+#[test]
+fn ext4_dir_block_rec_len_unaligned_fixture_rejected() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_rec_len_unaligned.json"))
+        .expect("load rec_len unaligned fixture");
+    let err = parse_dir_block(&data, 4096).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "de_rec_len",
+                ..
+            }
+        ),
+        "expected InvalidField(de_rec_len), got {err:?}"
+    );
+}
+
+#[test]
+fn ext4_dir_block_tail_padding_nonzero_fixture_rejected() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_tail_padding_nonzero.json"))
+        .expect("load tail padding fixture");
+    let err = parse_dir_block(&data, 32).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block_tail",
+                ..
+            }
+        ),
+        "expected InvalidField(dir_block_tail), got {err:?}"
+    );
+}
+
+#[test]
+fn ext4_dir_block_tail_bad_header_fixture_rejected() {
+    let data = load_sparse_fixture(&fixture_path("ext4_dir_block_tail_bad_header.json"))
+        .expect("load tail bad header fixture");
+    let err = verify_dir_block_checksum(&data, 0, 2, 1).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block_tail",
+                ..
+            }
+        ),
+        "expected InvalidField(dir_block_tail), got {err:?}"
+    );
 }
 
 #[test]
@@ -403,12 +567,22 @@ fn golden_checksum_manifest_is_complete() {
 fn full_conformance_gate_pass() {
     let start = std::time::Instant::now();
 
-    // 1) All fixture parsers + spot checks (12 total fixture JSONs).
+    // 1) All fixture parsers + spot checks (21 total fixture JSONs).
     ext4_and_btrfs_fixtures_conform();
     ext4_group_desc_fixtures_conform();
     ext4_inode_fixtures_conform();
     ext4_dir_block_fixture_conforms();
     ext4_dir_block_with_tail_fixture_conforms();
+    ext4_dir_block_deleted_entry_fixture_conforms();
+    ext4_dir_block_truncated_tail_fixture_rejected();
+    ext4_dir_block_checksum_stamp_and_verify_fixture_conforms();
+    ext4_dir_block_checksum_detects_corruption();
+    ext4_dir_block_rec_len_too_small_fixture_rejected();
+    ext4_dir_block_name_len_overflow_fixture_rejected();
+    ext4_dir_block_rec_len_min12_fixture_rejected();
+    ext4_dir_block_rec_len_unaligned_fixture_rejected();
+    ext4_dir_block_tail_padding_nonzero_fixture_rejected();
+    ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
     btrfs_chunk_mapping_fixture_conforms();
     btrfs_leaf_fixture_conforms();

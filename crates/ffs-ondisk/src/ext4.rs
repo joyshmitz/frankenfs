@@ -1610,6 +1610,18 @@ pub fn verify_dir_block_checksum(
     //   [7]     det_reserved_ft (0xDE)
     //   [8..12] det_checksum
     // Stored checksum is at block_size - 4.
+    let tail_off = bs - 12;
+    let tail_inode = read_le_u32(dir_block, tail_off)?;
+    let tail_rec_len = read_le_u16(dir_block, tail_off + 4)?;
+    let tail_name_len = dir_block[tail_off + 6];
+    let tail_ft = dir_block[tail_off + 7];
+    if tail_inode != 0 || tail_rec_len != 12 || tail_name_len != 0 || tail_ft != EXT4_FT_DIR_CSUM {
+        return Err(ParseError::InvalidField {
+            field: "dir_block_tail",
+            reason: "missing or malformed checksum tail",
+        });
+    }
+
     let stored = read_le_u32(dir_block, bs - 4)?;
 
     // Per-inode seed: i_csum_seed = ext4_chksum(ext4_chksum(csum_seed, le_ino), le_gen)
@@ -2691,13 +2703,19 @@ pub fn parse_dir_block(
         let name_len = ensure_slice(block, offset + 6, 1)?[0];
         let file_type_raw = ensure_slice(block, offset + 7, 1)?[0];
 
-        let rec_len = rec_len_from_disk(rec_len_raw, block_size);
-
-        // Sanity: rec_len must be >= 8 and must not go past end of block
-        if rec_len < 8 {
+        if block_size <= 65536 && (rec_len_raw & 0x3) != 0 {
             return Err(ParseError::InvalidField {
                 field: "de_rec_len",
-                reason: "directory entry rec_len < 8",
+                reason: "directory entry rec_len not 4-byte aligned",
+            });
+        }
+        let rec_len = rec_len_from_disk(rec_len_raw, block_size);
+
+        // Sanity: rec_len must be >= 12 and must not go past end of block
+        if rec_len < 12 {
+            return Err(ParseError::InvalidField {
+                field: "de_rec_len",
+                reason: "directory entry rec_len < 12",
             });
         }
         let entry_end = offset
@@ -2945,11 +2963,17 @@ impl<'a> DirBlockIter<'a> {
         let name_len = ensure_slice(self.block, self.offset + 6, 1)?[0];
         let file_type_raw = ensure_slice(self.block, self.offset + 7, 1)?[0];
 
-        let rec_len = rec_len_from_disk(rec_len_raw, self.block_size);
-        if rec_len < 8 {
+        if self.block_size <= 65536 && (rec_len_raw & 0x3) != 0 {
             return Err(ParseError::InvalidField {
                 field: "de_rec_len",
-                reason: "directory entry rec_len < 8",
+                reason: "directory entry rec_len not 4-byte aligned",
+            });
+        }
+        let rec_len = rec_len_from_disk(rec_len_raw, self.block_size);
+        if rec_len < 12 {
+            return Err(ParseError::InvalidField {
+                field: "de_rec_len",
+                reason: "directory entry rec_len < 12",
             });
         }
 
@@ -3802,7 +3826,8 @@ impl Ext4ImageReader {
                     }
 
                     inner_idx += 1;
-                    if inner_idx >= inner_entries.len() || (inner_entries[inner_idx].hash & 1) == 0 {
+                    if inner_idx >= inner_entries.len() || (inner_entries[inner_idx].hash & 1) == 0
+                    {
                         break;
                     }
                 }
@@ -4133,6 +4158,7 @@ fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
 }
 
 /// Find the leaf block for a given hash in a sorted DX entry list.
+#[cfg(test)]
 fn dx_find_leaf(entries: &[Ext4DxEntry], hash: u32) -> u32 {
     let idx = dx_find_leaf_idx(entries, hash);
     entries[idx].block
@@ -5702,7 +5728,7 @@ mod tests {
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn dir_iter_rec_len_too_small() {
-        // rec_len=4 on disk → rec_len_from_disk(4, 1024) = 4, which is < 8.
+        // rec_len=4 on disk → rec_len_from_disk(4, 1024) = 4, which is < 12.
         let mut block = vec![0_u8; 1024];
         block[0..4].copy_from_slice(&5_u32.to_le_bytes()); // inode=5
         block[4..6].copy_from_slice(&4_u16.to_le_bytes()); // rec_len=4
@@ -5721,7 +5747,7 @@ mod tests {
                     ..
                 }
             ),
-            "expected rec_len < 8 error, got {err:?}",
+            "expected rec_len < 12 error, got {err:?}",
         );
     }
 
@@ -7672,6 +7698,38 @@ mod tests {
         // Corrupt one byte in the block → should fail
         block[10] ^= 0xFF;
         assert!(verify_dir_block_checksum(&block, csum_seed, ino, generation).is_err());
+    }
+
+    #[test]
+    fn dir_block_checksum_rejects_bad_tail_header() {
+        let csum_seed = 0xDEAD_BEEF_u32;
+        let ino: u32 = 2;
+        let generation: u32 = 42;
+        let block_size = 4096_usize;
+
+        let mut block = vec![0_u8; block_size];
+        let entry_rec_len = u16::try_from(block_size - 12).unwrap();
+        write_dir_entry(&mut block, 0, 2, 2, b".", entry_rec_len);
+
+        let tail_off = block_size - 12;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 1; // invalid name_len
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+
+        let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
+        let seed = ext4_chksum(seed, &generation.to_le_bytes());
+        let checksum = ext4_chksum(seed, &block[..block_size - 12]);
+        block[block_size - 4..].copy_from_slice(&checksum.to_le_bytes());
+
+        let err = verify_dir_block_checksum(&block, csum_seed, ino, generation).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_block_tail",
+                ..
+            }
+        ));
     }
 
     #[test]

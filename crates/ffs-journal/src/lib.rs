@@ -473,7 +473,9 @@ fn replay_jbd2_inner(
             }
         }
 
-        let has_tail = journal_sb.as_ref().map_or(false, |sb| sb.has_checksum());
+        let has_tail = journal_sb
+            .as_ref()
+            .is_some_and(Jbd2Superblock::has_checksum);
 
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
@@ -481,7 +483,8 @@ fn replay_jbd2_inner(
                     break;
                 }
                 stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
-                let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit, has_tail)
+                let Some(tag_count) =
+                    strict_descriptor_tag_count(raw.as_slice(), is_64bit, has_tail)
                 else {
                     break;
                 };
@@ -540,7 +543,8 @@ fn replay_jbd2_inner(
                     break;
                 }
                 stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
-                let Some(revokes) = strict_revoke_entries(raw.as_slice(), is_64bit, has_tail) else {
+                let Some(revokes) = strict_revoke_entries(raw.as_slice(), is_64bit, has_tail)
+                else {
                     break;
                 };
                 stats.revoke_entries = stats
@@ -2029,7 +2033,8 @@ fn scan_committed_tail_transaction(
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
                 saw_body = true;
-                let Some(tag_count) = strict_descriptor_tag_count(raw.as_slice(), is_64bit, has_tail)
+                let Some(tag_count) =
+                    strict_descriptor_tag_count(raw.as_slice(), is_64bit, has_tail)
                 else {
                     return Ok(None);
                 };
@@ -2052,7 +2057,7 @@ fn scan_committed_tail_transaction(
             }
             JBD2_BLOCKTYPE_REVOKE => {
                 saw_body = true;
-                if strict_revoke_entries(raw.as_slice(), is_64bit).is_none() {
+                if strict_revoke_entries(raw.as_slice(), is_64bit, has_tail).is_none() {
                     return Ok(None);
                 }
                 idx = idx.saturating_add(1);
@@ -3388,7 +3393,7 @@ mod tests {
         assert_eq!(header.block_type, JBD2_BLOCKTYPE_DESCRIPTOR);
         assert_eq!(header.sequence, 42);
 
-        let tags = parse_descriptor_tags(desc_raw.as_slice(), false);
+        let tags = parse_descriptor_tags(desc_raw.as_slice(), false, false);
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0].target, BlockNumber(7));
         assert_eq!(tags[0].flags & JBD2_TAG_FLAG_LAST, 0); // Not last.
@@ -5711,7 +5716,7 @@ mod tests {
         fn proptest_parse_descriptor_tags_no_panic(
             data in prop::collection::vec(any::<u8>(), 0..1024),
         ) {
-            let _ = parse_descriptor_tags(&data, false);
+            let _ = parse_descriptor_tags(&data, false, false);
         }
 
         /// parse_revoke_entries never panics on arbitrary byte input.

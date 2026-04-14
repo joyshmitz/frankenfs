@@ -1431,9 +1431,18 @@ mod tests {
     fn htree_find_leaf_handles_collisions_correctly() {
         let entries = vec![
             HtreeEntry { hash: 0, block: 1 },
-            HtreeEntry { hash: 100, block: 2 },
-            HtreeEntry { hash: 101, block: 3 }, // 101 means 100 | 1 (collision bit)
-            HtreeEntry { hash: 200, block: 4 },
+            HtreeEntry {
+                hash: 100,
+                block: 2,
+            },
+            HtreeEntry {
+                hash: 101,
+                block: 3,
+            }, // 101 means 100 | 1 (collision bit)
+            HtreeEntry {
+                hash: 200,
+                block: 4,
+            },
         ];
         // Looking for hash 100.
         let mut idx = htree_find_leaf_idx(&entries, 100);
