@@ -2486,6 +2486,50 @@ mod tests {
         out
     }
 
+    fn checksum_v2_superblock() -> Jbd2Superblock {
+        Jbd2Superblock {
+            block_size: 512,
+            max_len: 0,
+            first_log_block: 0,
+            start_sequence: 0,
+            start_block: 0,
+            num_fc_blocks: 0,
+            feature_compat: JBD2_FEATURE_COMPAT_CHECKSUM,
+            feature_incompat: 0,
+            feature_ro_compat: 0,
+            uuid: [0; 16],
+        }
+    }
+
+    fn checksum_v3_superblock(uuid: [u8; 16]) -> Jbd2Superblock {
+        Jbd2Superblock {
+            block_size: 512,
+            max_len: 0,
+            first_log_block: 0,
+            start_sequence: 0,
+            start_block: 0,
+            num_fc_blocks: 0,
+            feature_compat: 0,
+            feature_incompat: JBD2_FEATURE_INCOMPAT_CSUM_V3,
+            feature_ro_compat: 0,
+            uuid,
+        }
+    }
+
+    fn stamp_descriptor_or_revoke_checksum(block: &mut [u8], sb: &Jbd2Superblock) {
+        let checksum = !crc32c::crc32c_append(!sb.csum_seed(), &block[..block.len() - 4]);
+        let tail = block.len() - 4;
+        block[tail..].copy_from_slice(&checksum.to_be_bytes());
+    }
+
+    fn stamp_commit_checksum(block: &mut [u8], sb: &Jbd2Superblock) {
+        block[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + 4]
+            .copy_from_slice(&0_u32.to_be_bytes());
+        let checksum = !crc32c::crc32c_append(!sb.csum_seed(), block);
+        block[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + 4]
+            .copy_from_slice(&checksum.to_be_bytes());
+    }
+
     #[test]
     fn replay_jbd2_committed_descriptor_replays_payload() {
         let cx = test_cx();
@@ -2509,6 +2553,44 @@ mod tests {
         assert_eq!(out.committed_sequences, vec![11]);
         assert_eq!(out.stats.replayed_blocks, 1);
         assert_eq!(out.stats.skipped_revoked_blocks, 0);
+    }
+
+    #[test]
+    fn verify_jbd2_descriptor_checksum_v2_roundtrip_and_tamper_detection() {
+        let sb = checksum_v2_superblock();
+        let mut descriptor = descriptor_block(512, 3, &[(7, JBD2_TAG_FLAG_LAST)]);
+        stamp_descriptor_or_revoke_checksum(&mut descriptor, &sb);
+        assert!(verify_jbd2_block_checksum(&descriptor, &sb));
+
+        descriptor[24] ^= 0x5A;
+        assert!(!verify_jbd2_block_checksum(&descriptor, &sb));
+    }
+
+    #[test]
+    fn verify_jbd2_revoke_checksum_v2_roundtrip_and_tamper_detection() {
+        let sb = checksum_v2_superblock();
+        let mut revoke = revoke_block(512, 5, &[7, 9]);
+        stamp_descriptor_or_revoke_checksum(&mut revoke, &sb);
+        assert!(verify_jbd2_block_checksum(&revoke, &sb));
+
+        revoke[20] ^= 0x11;
+        assert!(!verify_jbd2_block_checksum(&revoke, &sb));
+    }
+
+    #[test]
+    fn verify_jbd2_commit_checksum_v3_uses_uuid_seed() {
+        let good_uuid = *b"ffs-jbd2-v3-seed";
+        let bad_uuid = *b"ffs-jbd2-v3-alt!";
+        let good_sb = checksum_v3_superblock(good_uuid);
+        let bad_sb = checksum_v3_superblock(bad_uuid);
+        let mut commit = commit_block(512, 8);
+        stamp_commit_checksum(&mut commit, &good_sb);
+
+        assert!(verify_jbd2_block_checksum(&commit, &good_sb));
+        assert!(!verify_jbd2_block_checksum(&commit, &bad_sb));
+
+        commit[8] ^= 0x01;
+        assert!(!verify_jbd2_block_checksum(&commit, &good_sb));
     }
 
     #[test]
