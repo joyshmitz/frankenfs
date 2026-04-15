@@ -3797,60 +3797,90 @@ impl Ext4ImageReader {
         let Ok(dx_root) = parse_dx_root(block0) else {
             return self.lookup(image, dir_inode, name);
         };
+        if dx_root.entries.is_empty() {
+            return self.lookup(image, dir_inode, name);
+        }
 
         // Hash the name using the hash version from the DX root
         let (hash, _minor) = dx_hash(dx_root.hash_version, name, &self.sb.hash_seed);
+        #[derive(Debug, Clone)]
+        struct Frame {
+            entries: Vec<Ext4DxEntry>,
+            idx: usize,
+        }
 
-        let mut root_idx = dx_find_leaf_idx(&dx_root.entries, hash);
-        loop {
-            let target_block = dx_root.entries[root_idx].block;
+        let indirect_levels = usize::from(dx_root.indirect_levels);
+        let root_entries = dx_root.entries;
+        let root_idx = dx_find_leaf_idx(&root_entries, hash);
+        let mut frames = vec![Frame {
+            entries: root_entries,
+            idx: root_idx,
+        }];
 
-            let leaf_found = if dx_root.indirect_levels > 0 {
-                let Some(inner_phys) = self.resolve_extent(image, dir_inode, target_block)? else {
-                    break;
-                };
-                let inner_data = self.read_block(image, ffs_types::BlockNumber(inner_phys))?;
-                let inner_entries = parse_dx_entries(inner_data, 8)?;
-
-                let mut inner_idx = dx_find_leaf_idx(&inner_entries, hash);
-                let mut found_inner = None;
-                loop {
-                    let leaf_block = inner_entries[inner_idx].block;
-                    let Some(leaf_phys) = self.resolve_extent(image, dir_inode, leaf_block)? else {
-                        break;
-                    };
-                    let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
-                    if let Some(entry) = lookup_in_dir_block(leaf_data, self.sb.block_size, name)? {
-                        found_inner = Some(entry);
-                        break;
-                    }
-
-                    inner_idx += 1;
-                    if inner_idx >= inner_entries.len() || (inner_entries[inner_idx].hash & 1) == 0
-                    {
-                        break;
-                    }
-                }
-                found_inner
-            } else {
-                let Some(leaf_phys) = self.resolve_extent(image, dir_inode, target_block)? else {
-                    break;
-                };
-                let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
-                lookup_in_dir_block(leaf_data, self.sb.block_size, name)?
+        for _ in 0..indirect_levels {
+            let child_block = frames.last().expect("root frame").entries
+                [frames.last().expect("root frame").idx]
+                .block;
+            let Some(child_phys) = self.resolve_extent(image, dir_inode, child_block)? else {
+                return Ok(None);
             };
+            let child_data = self.read_block(image, ffs_types::BlockNumber(child_phys))?;
+            let child_entries = parse_dx_entries(child_data, 8)?;
+            if child_entries.is_empty() {
+                return Ok(None);
+            }
+            let child_idx = dx_find_leaf_idx(&child_entries, hash);
+            frames.push(Frame {
+                entries: child_entries,
+                idx: child_idx,
+            });
+        }
 
-            if let Some(entry) = leaf_found {
+        loop {
+            let leaf_block = frames.last().expect("leaf frame").entries
+                [frames.last().expect("leaf frame").idx]
+                .block;
+            let Some(leaf_phys) = self.resolve_extent(image, dir_inode, leaf_block)? else {
+                return Ok(None);
+            };
+            let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
+            let (entries, _) = parse_dir_block(leaf_data, self.sb.block_size)?;
+            if let Some(entry) = entries.into_iter().find(|entry| entry.name == name) {
                 return Ok(Some(entry));
             }
 
-            root_idx += 1;
-            if root_idx >= dx_root.entries.len() || (dx_root.entries[root_idx].hash & 1) == 0 {
-                break;
+            let mut level = frames.len() - 1;
+            loop {
+                frames[level].idx += 1;
+                if frames[level].idx < frames[level].entries.len() {
+                    break;
+                }
+                if level == 0 {
+                    return Ok(None);
+                }
+                level -= 1;
+            }
+
+            let next_hash = frames[level].entries[frames[level].idx].hash;
+            if (hash & 1) == 0 && (next_hash & !1) != hash {
+                return Ok(None);
+            }
+
+            while level + 1 < frames.len() {
+                let child_block = frames[level].entries[frames[level].idx].block;
+                let Some(child_phys) = self.resolve_extent(image, dir_inode, child_block)? else {
+                    return Ok(None);
+                };
+                let child_data = self.read_block(image, ffs_types::BlockNumber(child_phys))?;
+                let child_entries = parse_dx_entries(child_data, 8)?;
+                if child_entries.is_empty() {
+                    return Ok(None);
+                }
+                level += 1;
+                frames[level].entries = child_entries;
+                frames[level].idx = 0;
             }
         }
-
-        Ok(None)
     }
 
     /// Read a directory block and parse its entries.
