@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
 use asupersync::Cx;
+use ffs_alloc::{FsGeometry, GroupStats};
+use ffs_block::{BlockDevice, ByteBlockDevice, FileByteDevice};
 use ffs_btrfs::{
     BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
     BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC, BtrfsDeviceSet, SendCommand, parse_send_stream,
     replay_tree_log, walk_chunk_tree, walk_device_tree,
 };
-use ffs_core::{OpenFs, OpenOptions};
+use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
 use ffs_harness::{
     GoldenReference, ParityReport,
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
@@ -19,7 +21,10 @@ use ffs_ondisk::{
     ExtentTree, lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block,
     stamp_dir_block_checksum, verify_dir_block_checksum,
 };
-use ffs_types::{EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, InodeNumber, ParseError};
+use ffs_types::{
+    EXT4_COMPR_FL, EXT4_COMPRBLK_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
+    InodeNumber, ParseError,
+};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -588,6 +593,164 @@ fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
     image[dir + 8..dir + 8 + raw_name.len()].copy_from_slice(raw_name);
 
     image
+}
+
+fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for writable ext4");
+    let image = tmp.path().join("conformance.ext4");
+    let file = std::fs::File::create(&image).expect("create ext4 image");
+    file.set_len(size_mb * 1024 * 1024)
+        .expect("size ext4 image");
+    drop(file);
+
+    let mkfs = std::process::Command::new("mkfs.ext4")
+        .args(["-F", "-b", "4096", image.to_str().expect("utf8 image path")])
+        .output()
+        .expect("spawn mkfs.ext4");
+    assert!(
+        mkfs.status.success(),
+        "mkfs.ext4 failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&mkfs.stdout),
+        String::from_utf8_lossy(&mkfs.stderr)
+    );
+
+    let debugfs = std::process::Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            "set_inode_field / mode 040777",
+            image.to_str().expect("utf8 image path"),
+        ])
+        .output()
+        .expect("spawn debugfs");
+    assert!(
+        debugfs.status.success(),
+        "debugfs failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&debugfs.stdout),
+        String::from_utf8_lossy(&debugfs.stderr)
+    );
+
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+        ..OpenOptions::default()
+    };
+    let mut fs = OpenFs::open_with_options(&cx, &image, &opts).expect("open writable ext4 image");
+    fs.enable_writes(&cx).expect("enable writes on ext4 image");
+    assert!(fs.is_writable(), "test ext4 image should be writable");
+    (fs, tmp, image)
+}
+
+fn enable_e2compr_for_inode(
+    fs: &OpenFs,
+    image_path: &Path,
+    cx: &Cx,
+    ino: InodeNumber,
+    cluster_shift: u32,
+    method_idx: u8,
+) {
+    let mut inode = fs.read_inode(cx, ino).expect("read inode for e2compr");
+    inode.flags |= EXT4_COMPR_FL;
+    inode.flags &= !((0x7_u32 << 23) | (0x1F_u32 << 26));
+    inode.flags |= (cluster_shift & 0x7) << 23;
+    inode.flags |= u32::from(method_idx & 0x1F) << 26;
+
+    let sb = fs.ext4_superblock().expect("ext4 superblock");
+    let geo = FsGeometry::from_superblock(sb);
+    let groups = (0..sb.groups_count())
+        .map(|group| {
+            let group = GroupNumber(group);
+            let gd = fs.read_group_desc(cx, group).expect("read group desc");
+            GroupStats::from_group_desc(group, &gd)
+        })
+        .collect::<Vec<_>>();
+    let block_dev = ByteBlockDevice::new(
+        FileByteDevice::open(image_path).expect("open raw ext4 image"),
+        fs.block_size(),
+    )
+    .expect("create block device adapter");
+
+    ffs_inode::write_inode(cx, &block_dev, &geo, &groups, ino, &inode, sb.csum_seed())
+        .expect("persist e2compr inode flags");
+    block_dev.sync(cx).expect("sync e2compr inode flags");
+}
+
+#[test]
+fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, image_path) = open_writable_ext4_mkfs(64);
+    let root = InodeNumber(2);
+
+    for (method_idx, label, byte) in [(20_u8, "gzip", b'G'), (10_u8, "lzo", b'L')] {
+        let name = std::ffi::OsString::from(format!("e2compr_{label}.bin"));
+        let attr = fs
+            .create(&cx, root, &name, 0o644, 0, 0)
+            .expect("create compressed ext4 file");
+        enable_e2compr_for_inode(&fs, &image_path, &cx, attr.ino, 2, method_idx);
+
+        let baseline = fs
+            .free_space_summary(&cx)
+            .expect("baseline free space before compressed write");
+        let first = vec![byte; 4096];
+        fs.write(&cx, attr.ino, 0, &first)
+            .expect("first compressed write");
+
+        let after_first = fs
+            .free_space_summary(&cx)
+            .expect("free space after first compressed write");
+        let inode_after_first = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after first compressed write");
+        let readback_first = fs
+            .read(&cx, attr.ino, 0, 4096)
+            .expect("readback after first compressed write");
+
+        assert!(
+            inode_after_first.flags & EXT4_COMPRBLK_FL != 0,
+            "{label}: compressed write should mark COMPRBLK"
+        );
+        assert!(
+            after_first.free_blocks_total < baseline.free_blocks_total,
+            "{label}: compressed write should consume at least one block"
+        );
+        assert_eq!(
+            &readback_first[..first.len()],
+            first.as_slice(),
+            "{label}: read path should return first compressed payload"
+        );
+
+        let second = vec![byte.wrapping_add(1); 4096];
+        fs.write(&cx, attr.ino, 0, &second)
+            .expect("second compressed write");
+
+        let after_second = fs
+            .free_space_summary(&cx)
+            .expect("free space after compressed rewrite");
+        let inode_after_second = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after compressed rewrite");
+        let readback_second = fs
+            .read(&cx, attr.ino, 0, 4096)
+            .expect("readback after compressed rewrite");
+
+        assert_eq!(
+            after_second.free_blocks_total, after_first.free_blocks_total,
+            "{label}: rewrite should reuse compressed blocks without leaking space"
+        );
+        assert_eq!(
+            after_second.gd_free_blocks_total, after_first.gd_free_blocks_total,
+            "{label}: group descriptor free-block counters should remain stable on rewrite"
+        );
+        assert_eq!(
+            inode_after_second.blocks, inode_after_first.blocks,
+            "{label}: rewrite should preserve inode i_blocks accounting"
+        );
+        assert_eq!(
+            &readback_second[..second.len()],
+            second.as_slice(),
+            "{label}: read path should return rewritten compressed payload"
+        );
+    }
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -1579,6 +1742,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
+    ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
     btrfs_send_stream_multi_command_conforms();
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
     btrfs_tree_log_replay_multilevel_conforms();
