@@ -20,10 +20,10 @@ pub mod xfstests;
 
 use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
-    BtrfsHeader, BtrfsItem, BtrfsSuperblock, Ext4DirEntry, Ext4DxRoot, Ext4ExtentHeader,
-    Ext4GroupDesc, Ext4Inode, Ext4Superblock, Ext4Xattr, ExtentTree, map_logical_to_physical,
-    parse_dir_block, parse_dx_root, parse_extent_tree, parse_leaf_items, parse_sys_chunk_array,
-    parse_xattr_block,
+    BtrfsDevItem, BtrfsHeader, BtrfsItem, BtrfsSuperblock, Ext4DirEntry, Ext4DxRoot,
+    Ext4ExtentHeader, Ext4GroupDesc, Ext4Inode, Ext4Superblock, Ext4Xattr, ExtentTree,
+    map_logical_to_physical, parse_dev_item, parse_dir_block, parse_dx_root, parse_extent_tree,
+    parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -390,6 +390,14 @@ pub fn validate_xattr_block_fixture(path: &Path) -> Result<Vec<Ext4Xattr>> {
     let xattrs = parse_xattr_block(&data)
         .with_context(|| format!("failed xattr block parse for fixture {}", path.display()))?;
     Ok(xattrs)
+}
+
+/// Validate a btrfs device item fixture.
+pub fn validate_btrfs_devitem_fixture(path: &Path) -> Result<BtrfsDevItem> {
+    let data = load_sparse_fixture(path)?;
+    let devitem = parse_dev_item(&data)
+        .with_context(|| format!("failed devitem parse for fixture {}", path.display()))?;
+    Ok(devitem)
 }
 
 // ── Golden reference types ────────────────────────────────────────

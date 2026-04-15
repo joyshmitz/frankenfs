@@ -33,23 +33,21 @@
 | BtrfsItem | ✅ | ✅ | 4 | 4 | 100% | via leaf fixtures |
 | BtrfsKey | ✅ | ✅ | 3 | 3 | 100% | via leaf fixtures |
 | BtrfsKeyPtr | ✅ | ✅ | 2 | 2 | 100% | internal node pointers |
-| BtrfsDevItem | ❌ | ❌ | 4 | 0 | 0% | **MISSING** - device tree items |
+| BtrfsDevItem | ✅ | ✅ | 4 | 4 | 100% | 1TB device with 512GB used |
 | BtrfsRootItem | ✅ | ✅ | 5 | 5 | 100% | via roottree_leaf fixture |
 | BtrfsInodeItem | ✅ | ✅ | 6 | 6 | 100% | via fstree_leaf fixture |
 | BtrfsDirItem | ✅ | ✅ | 4 | 4 | 100% | via fstree_leaf fixture |
 | BtrfsExtentData | ✅ | ✅ | 5 | 5 | 100% | via fstree_leaf fixture |
 
-**btrfs Total: 62 MUST clauses, 58 passing = 93.5%**
+**btrfs Total: 62 MUST clauses, 62 passing = 100.0%**
 
 ## Priority Gaps
 
 1. **ext4 MMP Block** - Multi-mount protection (2 MUST clauses)
-2. **btrfs DevItem** - Multi-device support (4 MUST clauses)
 
 ## Next Actions
 
 - [ ] Add ext4_mmp_block.json fixture
-- [ ] Add btrfs_devitem.json fixture
 
 ---
 

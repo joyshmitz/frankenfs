@@ -589,6 +589,35 @@ fn btrfs_roottree_leaf_fixture_conforms() {
 }
 
 #[test]
+fn btrfs_devitem_fixture_conforms() {
+    let devitem =
+        ffs_harness::validate_btrfs_devitem_fixture(&fixture_path("btrfs_devitem.json"))
+            .expect("btrfs devitem fixture");
+
+    assert_eq!(devitem.devid, 1, "devid should be 1");
+    assert_eq!(
+        devitem.total_bytes,
+        1024 * 1024 * 1024 * 1024,
+        "total_bytes should be 1TB"
+    );
+    assert_eq!(
+        devitem.bytes_used,
+        512 * 1024 * 1024 * 1024,
+        "bytes_used should be 512GB"
+    );
+    assert_eq!(devitem.sector_size, 4096, "sector_size should be 4096");
+    assert_eq!(devitem.io_align, 4096, "io_align should be 4096");
+    assert_eq!(devitem.io_width, 4096, "io_width should be 4096");
+    assert_eq!(devitem.generation, 100, "generation should be 100");
+    assert_eq!(
+        devitem.start_offset,
+        1024 * 1024,
+        "start_offset should be 1MiB"
+    );
+    assert_eq!(devitem.dev_type, 0, "dev_type should be 0 (regular)");
+}
+
+#[test]
 fn parity_report_totals_are_consistent() {
     let report = ParityReport::current();
     let implemented_sum: u32 = report.domains.iter().map(|d| d.implemented).sum();
@@ -759,6 +788,7 @@ fn full_conformance_gate_pass() {
     btrfs_leaf_fixture_conforms();
     btrfs_fstree_leaf_fixture_conforms();
     btrfs_roottree_leaf_fixture_conforms();
+    btrfs_devitem_fixture_conforms();
 
     // 2) Checksum manifests are bidirectionally complete.
     fixture_checksum_manifest_is_complete();
