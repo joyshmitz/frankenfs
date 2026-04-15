@@ -731,6 +731,10 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
             after_first_free_blocks < baseline_free_blocks,
             "{label}: compressed write should consume at least one block"
         );
+        assert!(
+            after_first_gd_free_blocks < baseline_gd_free_blocks,
+            "{label}: compressed write should update group descriptor free-block counters"
+        );
         assert_eq!(
             &readback_first[..first.len()],
             first.as_slice(),
