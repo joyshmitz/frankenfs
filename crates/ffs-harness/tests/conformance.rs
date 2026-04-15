@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use asupersync::Cx;
+use ffs_btrfs::{BTRFS_SEND_STREAM_MAGIC, SendCommand, parse_send_stream};
 use ffs_core::{OpenFs, OpenOptions};
 use ffs_harness::{
     GoldenReference, ParityReport,
@@ -568,6 +569,63 @@ fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
     image
 }
 
+#[allow(clippy::cast_possible_truncation)]
+fn append_send_stream_command(stream: &mut Vec<u8>, cmd: u16, attrs: &[(u16, &[u8])]) {
+    let payload_len: usize = attrs.iter().map(|(_, value)| 4 + value.len()).sum();
+    stream.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    stream.extend_from_slice(&cmd.to_le_bytes());
+    stream.extend_from_slice(&0_u32.to_le_bytes());
+    for (attr, value) in attrs {
+        stream.extend_from_slice(&attr.to_le_bytes());
+        stream.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        stream.extend_from_slice(value);
+    }
+}
+
+#[test]
+fn btrfs_send_stream_multi_command_conforms() {
+    let mut data = Vec::new();
+    data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+    data.extend_from_slice(&1_u32.to_le_bytes());
+
+    let uuid = *b"ffs-send-subvol!";
+    append_send_stream_command(&mut data, SendCommand::Subvol as u16, &[(1, &uuid), (15, b"/sv")]);
+    append_send_stream_command(
+        &mut data,
+        SendCommand::Write as u16,
+        &[(15, b"/sv/file.txt"), (18, &0_u64.to_le_bytes()), (19, b"hello")],
+    );
+    append_send_stream_command(&mut data, SendCommand::End as u16, &[]);
+
+    let result = parse_send_stream(&data).expect("parse multi-command send stream");
+    assert_eq!(result.version, 1);
+    assert_eq!(result.commands.len(), 3);
+    assert_eq!(result.commands[0].cmd, SendCommand::Subvol);
+    assert_eq!(result.commands[0].attrs[0], (1, uuid.to_vec()));
+    assert_eq!(result.commands[0].attrs[1], (15, b"/sv".to_vec()));
+    assert_eq!(result.commands[1].cmd, SendCommand::Write);
+    assert_eq!(result.commands[1].attrs[0], (15, b"/sv/file.txt".to_vec()));
+    assert_eq!(result.commands[1].attrs[1], (18, 0_u64.to_le_bytes().to_vec()));
+    assert_eq!(result.commands[1].attrs[2], (19, b"hello".to_vec()));
+    assert_eq!(result.commands[2].cmd, SendCommand::End);
+    assert!(result.commands[2].attrs.is_empty());
+}
+
+#[test]
+fn btrfs_send_stream_unknown_command_preserves_attrs_as_unspec() {
+    let mut data = Vec::new();
+    data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+    data.extend_from_slice(&1_u32.to_le_bytes());
+    append_send_stream_command(&mut data, 0xFFFE, &[(15, b"/mystery")]);
+    append_send_stream_command(&mut data, SendCommand::End as u16, &[]);
+
+    let result = parse_send_stream(&data).expect("parse send stream with unknown command");
+    assert_eq!(result.commands.len(), 2);
+    assert_eq!(result.commands[0].cmd, SendCommand::Unspec);
+    assert_eq!(result.commands[0].attrs, vec![(15, b"/mystery".to_vec())]);
+    assert_eq!(result.commands[1].cmd, SendCommand::End);
+}
+
 #[test]
 fn btrfs_chunk_mapping_fixture_conforms() {
     let (sb, chunks) =
@@ -924,6 +982,8 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
+    btrfs_send_stream_multi_command_conforms();
+    btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
     btrfs_chunk_mapping_fixture_conforms();
     btrfs_leaf_fixture_conforms();
     btrfs_fstree_leaf_fixture_conforms();
