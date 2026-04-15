@@ -23,7 +23,8 @@
 
 use ffs_harness::{GoldenDirEntry, GoldenReference};
 use ffs_ondisk::{
-    dx_hash, parse_dx_root, stamp_dir_block_checksum, verify_dir_block_checksum, Ext4ImageReader,
+    dx_hash, parse_dx_root, stamp_dir_block_checksum, verify_dir_block_checksum,
+    verify_inode_checksum, Ext4ImageReader,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -513,6 +514,29 @@ fn assert_directory_block_checksums_match_reference(
         verified_blocks > 0,
         "expected at least one directory block for {path}"
     );
+}
+
+fn assert_inode_checksum_matches_reference(image: &[u8], reader: &Ext4ImageReader, path: &str) {
+    let (ino, _) = reader
+        .resolve_path(image, path)
+        .unwrap_or_else(|err| panic!("resolve {path}: {err}"));
+    let (group, _index, byte_offset_in_table) = reader.sb.inode_table_offset(ino);
+    let gd = reader
+        .read_group_desc(image, group)
+        .unwrap_or_else(|err| panic!("read group desc for {path}: {err}"));
+    let inode_table_start = gd
+        .inode_table
+        .checked_mul(u64::from(reader.sb.block_size))
+        .and_then(|offset| offset.checked_add(byte_offset_in_table))
+        .unwrap_or_else(|| panic!("inode table offset overflow for {path}"));
+    let inode_offset =
+        usize::try_from(inode_table_start).unwrap_or_else(|_| panic!("inode offset too large"));
+    let inode_size = usize::from(reader.sb.inode_size);
+    let raw_inode = &image[inode_offset..inode_offset + inode_size];
+    let ext4_ino = ino.to_ext4().expect("ext4 inode number").0;
+
+    verify_inode_checksum(raw_inode, reader.sb.csum_seed(), ext4_ino, reader.sb.inode_size)
+        .unwrap_or_else(|err| panic!("verify_inode_checksum {path}: {err}"));
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -1189,6 +1213,32 @@ fn ext4_kernel_vs_ffs_dir_block_checksum_reference() {
     let indexed_reader = Ext4ImageReader::new(&indexed_image).expect("parse indexed ext4 image");
     assert_directory_block_checksums_match_reference(&indexed_image, &indexed_reader, "/");
     assert_directory_block_checksums_match_reference(&indexed_image, &indexed_reader, "/htree");
+}
+
+#[test]
+fn ext4_kernel_vs_ffs_inode_checksum_reference() {
+    if !ext4_tools_available() {
+        eprintln!("SKIPPED: ext4 kernel tools not available");
+        return;
+    }
+
+    let simple = std::env::temp_dir().join("ffs_ref_inode_checksum.ext4");
+    create_reference_image(&simple);
+
+    let simple_image = std::fs::read(&simple).expect("read simple ext4 image");
+    let simple_reader = Ext4ImageReader::new(&simple_image).expect("parse simple ext4 image");
+    for path in ["/", "/testdir", "/testdir/hello.txt", "/readme.txt"] {
+        assert_inode_checksum_matches_reference(&simple_image, &simple_reader, path);
+    }
+
+    let indexed = std::env::temp_dir().join("ffs_ref_inode_checksum_dx.ext4");
+    create_dir_index_reference_image(&indexed);
+
+    let indexed_image = std::fs::read(&indexed).expect("read indexed ext4 image");
+    let indexed_reader = Ext4ImageReader::new(&indexed_image).expect("parse indexed ext4 image");
+    for path in ["/", "/htree", "/htree/file_000.txt", "/htree/file_179.txt"] {
+        assert_inode_checksum_matches_reference(&indexed_image, &indexed_reader, path);
+    }
 }
 
 /// E2E: verify OpenFs bitmap-based free space counting matches kernel tools.
