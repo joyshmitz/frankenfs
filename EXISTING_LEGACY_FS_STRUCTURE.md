@@ -1,12 +1,13 @@
 # EXISTING_LEGACY_FS_STRUCTURE
 
-> Extracted structure overview from `legacy_ext4_and_btrfs_code/linux-fs`.
+> Extracted structure overview from Linux kernel v6.19 (`git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git`).
+> The original source is gitignored locally due to size; this document captures the extracted behavioral contracts.
 
 ## 1. Legacy Corpus Inventory
 
 ### ext4
 
-Path: `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4`
+Path: Linux v6.19 `fs/ext4/`
 
 - File count: 52
 - Key files:
@@ -20,7 +21,7 @@ Path: `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4`
 
 ### btrfs
 
-Path: `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs`
+Path: Linux v6.19 `fs/btrfs/`
 
 - File count: 130
 - Key files:
@@ -36,7 +37,7 @@ Path: `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs`
 
 ### `struct ext4_super_block`
 
-Source: `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/ext4.h`
+Source: Linux v6.19 `fs/ext4/ext4.h`
 
 Current parser extracts:
 
@@ -50,7 +51,7 @@ Current parser extracts:
 
 ### `struct ext4_inode`
 
-Source: `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/ext4.h`
+Source: Linux v6.19 `fs/ext4/ext4.h`
 
 Current parser extracts:
 
@@ -64,7 +65,7 @@ Current parser extracts:
 
 ### Extent structs
 
-Source: `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/ext4_extents.h`
+Source: Linux v6.19 `fs/ext4/ext4_extents.h`
 
 - `ext4_extent_header`
 - `ext4_extent`

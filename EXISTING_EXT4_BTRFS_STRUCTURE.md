@@ -1,10 +1,9 @@
 # Behavioral Extraction Spec: ext4 and btrfs On-Disk Structures
 
-> Extracted from the Linux kernel source tree at
-> `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/` and
-> `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs/`.
-> All byte offsets, sizes, magic numbers, flag values, and algorithmic
-> behaviors are taken directly from the C header and implementation files.
+> Extracted from the Linux kernel v6.19 source tree (`fs/ext4/` and `fs/btrfs/`).
+> Source: `git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git` (tag v6.19).
+> The original corpus is gitignored locally due to size; this document captures
+> all byte offsets, sizes, magic numbers, flag values, and algorithmic behaviors.
 
 ---
 

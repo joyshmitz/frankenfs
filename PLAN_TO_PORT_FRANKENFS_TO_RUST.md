@@ -198,7 +198,7 @@ exclusion is deliberate and documented to prevent scope creep.
 
 ### 3.1 Legacy ext4 Source
 
-Source location: `/data/projects/frankenfs/legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/`
+Source: Linux v6.19 `fs/ext4/` (kernel.org; gitignored locally due to size)
 
 | Category | Files | Approx. LOC | Notes |
 |---|---|---|---|
@@ -214,7 +214,7 @@ Source location: `/data/projects/frankenfs/legacy_ext4_and_btrfs_code/linux-fs/f
 
 ### 3.2 Legacy btrfs Source
 
-Source location: `/data/projects/frankenfs/legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs/`
+Source: Linux v6.19 `fs/btrfs/` (kernel.org; gitignored locally due to size)
 
 | Category | Files | Approx. LOC | Notes |
 |---|---|---|---|
@@ -1334,8 +1334,8 @@ These are not hard requirements but targets for acceptable performance:
 
 | Resource | Relevance |
 |---|---|
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/` | Primary source for ext4 on-disk format and algorithms |
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs/` | Reference for COW B-tree, MVCC, and scrub concepts |
+| Linux v6.19 `fs/ext4/` (kernel.org) | Primary source for ext4 on-disk format and algorithms |
+| Linux v6.19 `fs/btrfs/` (kernel.org) | Reference for COW B-tree, MVCC, and scrub concepts |
 | ext4 wiki: https://ext4.wiki.kernel.org/ | On-disk format documentation |
 | `man 5 ext4` | ext4 filesystem format specification |
 | Megiddo & Modha, "ARC: A Self-Tuning, Low Overhead Replacement Cache" (2003) | ARC algorithm reference |

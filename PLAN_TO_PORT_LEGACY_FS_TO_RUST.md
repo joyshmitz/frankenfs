@@ -2,7 +2,7 @@
 
 ## 1. Mission
 
-Port legacy ext4 + btrfs behavior from `legacy_ext4_and_btrfs_code/linux-fs` into a memory-safe Rust workspace (`FrankenFS`) with:
+Port legacy ext4 + btrfs behavior from Linux kernel v6.19 into a memory-safe Rust workspace (`FrankenFS`) with:
 
 - mount-compatible semantics for in-scope features,
 - MVCC/COW internals,
@@ -10,9 +10,9 @@ Port legacy ext4 + btrfs behavior from `legacy_ext4_and_btrfs_code/linux-fs` int
 
 ## 2. Source of Truth and Inputs
 
-- Legacy source corpus:
-  - `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4`
-  - `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs`
+- Legacy source corpus (Linux v6.19 from kernel.org; gitignored locally due to size):
+  - `fs/ext4` (ext4 filesystem implementation)
+  - `fs/btrfs` (btrfs filesystem implementation)
 - Reference architecture:
   - `/dp/frankensqlite`
   - `/dp/asupersync`
@@ -20,11 +20,9 @@ Port legacy ext4 + btrfs behavior from `legacy_ext4_and_btrfs_code/linux-fs` int
 - Canonical target spec:
   - `COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md`
 
-## 3. Clarification: `legacy_glib_code`
+## 3. Clarification: Legacy Corpus
 
-The repository currently contains `legacy_ext4_and_btrfs_code` and does **not** contain a separate `legacy_glib_code` path.
-
-For this port plan, `legacy_ext4_and_btrfs_code` is treated as the active legacy corpus.
+The repository references a `legacy_ext4_and_btrfs_code/` directory which is gitignored (not committed due to size). The behavioral contracts were extracted from Linux v6.19 and are captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md). For the original source, see `git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git` at tag v6.19.
 
 ## 4. Explicit Exclusions (Current Iteration)
 

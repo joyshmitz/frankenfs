@@ -5196,8 +5196,8 @@ Block-level MVCC provides significant concurrency benefits for real workloads: f
 ## 19. C ext4/btrfs Behavioral Reference
 
 This section summarizes key behavioral patterns extracted from the Linux
-kernel C source code (v6.19, `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/`
-and `.../btrfs/`) that FrankenFS MUST replicate faithfully for compatibility
+kernel C source code (v6.19, `fs/ext4/` and `fs/btrfs/` from kernel.org)
+that FrankenFS MUST replicate faithfully for compatibility
 or MUST explicitly diverge from with documented rationale. Each subsection
 references the canonical C function, describes the behavioral contract, and
 specifies FrankenFS's conformance posture.

@@ -1374,7 +1374,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 - **Kernel FUSE writeback-cache mode is intentionally unsupported in V1.x.** The epoch barrier design is implemented and crash-tested, but `writeback_cache` is not enabled in mount options. `flush` is a non-durability lifecycle hook; `fsync` / `fsyncdir` are the explicit durability boundaries.
 - **Default CLI mount path does not enable optional backpressure/per-core scheduling hooks.** `ffs-cli mount` currently uses the standard `ffs-fuse` mount path without wiring `BackpressureGate` controls.
 - **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.
-- **Legacy reference corpus is checked in.** The Linux kernel ext4/btrfs source used for behavioral extraction is available under `legacy_ext4_and_btrfs_code/linux-fs/`. The extracted behavior is fully captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md).
+- **Legacy reference corpus is not included.** The Linux kernel ext4/btrfs source used for behavioral extraction (~205K lines) is gitignored due to size. The extracted behavioral contracts are fully captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md). For the original source, see `git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git` at tag v6.19.
 
 ---
 
@@ -1435,7 +1435,7 @@ FrankenFS was designed by extracting behavior from Linux kernel v6.19 filesystem
 - **ext4**: superblock, inode, extent tree, journal (JBD2), block allocation (mballoc)
 - **btrfs**: B-tree, transaction, delayed refs, scrub, extent allocation
 
-The legacy kernel source corpus is present in this repository under `legacy_ext4_and_btrfs_code/linux-fs/`. All extracted behavioral contracts are captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md) (95KB).
+The original kernel source is not included (gitignored due to size); for reference, use `git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git` at tag v6.19. All extracted behavioral contracts are captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md) (95KB).
 
 ---
 

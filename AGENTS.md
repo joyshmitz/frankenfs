@@ -302,7 +302,7 @@ frankenfs/
 │   ├── fixtures/                  # Generated images + golden inspect outputs
 │   └── fuzz_corpus/               # Shared fuzz seeds
 ├── benches/                       # Performance benchmarks
-└── legacy_ext4_and_btrfs_code/    # Original C source for behavior extraction
+└── (legacy_ext4_and_btrfs_code/)  # Original C source (gitignored; see kernel.org v6.19)
 ```
 
 ### Key Files by Crate
@@ -401,17 +401,19 @@ Hidden exclusions are not allowed.
 
 ### Legacy Source Navigation
 
-Primary legacy modules for extraction:
+Primary legacy kernel modules (Linux v6.19 from `git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git`):
 
-| Legacy Path | Domain |
+| Kernel Path | Domain |
 |-------------|--------|
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/super.c` | ext4 superblock and mount behavior |
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/inode.c` | ext4 inode lifecycle |
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/ext4/extents.c` | ext4 extent tree operations |
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs/super.c` | btrfs superblock and mount behavior |
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs/ctree.c` | btrfs tree ops |
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs/extent-tree.c` | extent allocation/reference logic |
-| `legacy_ext4_and_btrfs_code/linux-fs/fs/btrfs/transaction.c` | transaction semantics |
+| `fs/ext4/super.c` | ext4 superblock and mount behavior |
+| `fs/ext4/inode.c` | ext4 inode lifecycle |
+| `fs/ext4/extents.c` | ext4 extent tree operations |
+| `fs/btrfs/super.c` | btrfs superblock and mount behavior |
+| `fs/btrfs/ctree.c` | btrfs tree ops |
+| `fs/btrfs/extent-tree.c` | extent allocation/reference logic |
+| `fs/btrfs/transaction.c` | transaction semantics |
+
+> **Note:** The kernel source corpus is gitignored due to size (~205K lines). Extracted behavioral contracts are in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md).
 
 ---
 
