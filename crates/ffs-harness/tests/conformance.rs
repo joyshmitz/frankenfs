@@ -200,6 +200,35 @@ fn ext4_extent_tree_index_fixture_conforms() {
 }
 
 #[test]
+fn ext4_htree_dx_root_fixture_conforms() {
+    let dx_root = ffs_harness::validate_htree_dx_root_fixture(&fixture_path(
+        "ext4_htree_dx_root.json",
+    ))
+    .expect("htree DX root");
+
+    assert_eq!(dx_root.hash_version, 1, "should use half_md4 (1)");
+    assert_eq!(
+        dx_root.indirect_levels, 0,
+        "should be single-level (indirect_levels=0)"
+    );
+
+    // Should have 3 DX entries: sentinel + 2 real entries
+    assert_eq!(dx_root.entries.len(), 3, "should have 3 DX entries");
+
+    // Entry 0: sentinel (hash implicitly 0, block 1)
+    assert_eq!(dx_root.entries[0].hash, 0);
+    assert_eq!(dx_root.entries[0].block, 1);
+
+    // Entry 1: hash=0x1000, block=2
+    assert_eq!(dx_root.entries[1].hash, 0x1000);
+    assert_eq!(dx_root.entries[1].block, 2);
+
+    // Entry 2: hash=0x8000, block=3
+    assert_eq!(dx_root.entries[2].hash, 0x8000);
+    assert_eq!(dx_root.entries[2].block, 3);
+}
+
+#[test]
 fn ext4_dir_block_fixture_conforms() {
     let entries =
         validate_dir_block_fixture(&fixture_path("ext4_dir_block.json"), 4096).expect("dir block");

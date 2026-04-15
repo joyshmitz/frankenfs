@@ -20,9 +20,9 @@ pub mod xfstests;
 
 use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
-    BtrfsHeader, BtrfsItem, BtrfsSuperblock, Ext4DirEntry, Ext4ExtentHeader, Ext4GroupDesc,
-    Ext4Inode, Ext4Superblock, ExtentTree, map_logical_to_physical, parse_dir_block,
-    parse_extent_tree, parse_leaf_items, parse_sys_chunk_array,
+    BtrfsHeader, BtrfsItem, BtrfsSuperblock, Ext4DirEntry, Ext4DxRoot, Ext4ExtentHeader,
+    Ext4GroupDesc, Ext4Inode, Ext4Superblock, ExtentTree, map_logical_to_physical, parse_dir_block,
+    parse_dx_root, parse_extent_tree, parse_leaf_items, parse_sys_chunk_array,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -373,6 +373,14 @@ pub fn validate_extent_tree_fixture(path: &Path) -> Result<(Ext4ExtentHeader, Ex
     let (header, tree) = parse_extent_tree(&data)
         .with_context(|| format!("failed extent tree parse for fixture {}", path.display()))?;
     Ok((header, tree))
+}
+
+/// Validate an ext4 htree DX root fixture (block 0 of a hash-indexed directory).
+pub fn validate_htree_dx_root_fixture(path: &Path) -> Result<Ext4DxRoot> {
+    let data = load_sparse_fixture(path)?;
+    let dx_root = parse_dx_root(&data)
+        .with_context(|| format!("failed htree DX root parse for fixture {}", path.display()))?;
+    Ok(dx_root)
 }
 
 // ── Golden reference types ────────────────────────────────────────

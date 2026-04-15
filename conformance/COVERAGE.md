@@ -11,16 +11,16 @@
 | Ext4Inode | ✅ | ✅ | 10 | 10 | 100% | regular file + directory + inline data |
 | Ext4DirEntry | ✅ | ✅ | 6 | 6 | 100% | with tail, deleted, edge cases |
 | Ext4DirEntryTail | ✅ | ✅ | 3 | 3 | 100% | checksum verification |
-| Ext4Extent | ❌ | ❌ | 5 | 0 | 0% | **MISSING** - critical for file data |
-| Ext4ExtentHeader | ❌ | ❌ | 4 | 0 | 0% | **MISSING** |
-| Ext4ExtentIndex | ❌ | ❌ | 3 | 0 | 0% | **MISSING** |
+| Ext4Extent | ✅ | ✅ | 5 | 5 | 100% | leaf + unwritten extent |
+| Ext4ExtentHeader | ✅ | ✅ | 4 | 4 | 100% | via leaf + index fixtures |
+| Ext4ExtentIndex | ✅ | ✅ | 3 | 3 | 100% | via index fixture |
 | Ext4Xattr (ibody) | ✅ | ✅ | 4 | 4 | 100% | via inline_data_with_continuation |
 | Ext4Xattr (block) | ❌ | ❌ | 4 | 0 | 0% | **MISSING** - external xattr blocks |
-| Ext4DxRoot | ❌ | ❌ | 3 | 0 | 0% | **MISSING** - htree root |
-| Ext4DxEntry | ❌ | ❌ | 2 | 0 | 0% | **MISSING** - htree entries |
+| Ext4DxRoot | ✅ | ✅ | 3 | 3 | 100% | htree DX root with 3 entries |
+| Ext4DxEntry | ✅ | ✅ | 2 | 2 | 100% | via dx_root fixture |
 | Ext4MmpBlock | ❌ | ❌ | 2 | 0 | 0% | **MISSING** - multi-mount protection |
 
-**ext4 Total: 66 MUST clauses, 43 passing = 65.2%**
+**ext4 Total: 66 MUST clauses, 60 passing = 90.9%**
 
 ## btrfs On-Disk Structures
 
@@ -43,16 +43,14 @@
 
 ## Priority Gaps
 
-1. **ext4 Extent Tree** - Critical for file data mapping, no fixtures
-2. **ext4 HTree (DxRoot/DxEntry)** - Large directory support
-3. **ext4 External Xattr Blocks** - Extended attributes > 60 bytes
-4. **btrfs DevItem** - Multi-device support
+1. **ext4 External Xattr Blocks** - Extended attributes > 60 bytes
+2. **ext4 MMP Block** - Multi-mount protection
+3. **btrfs DevItem** - Multi-device support
 
 ## Next Actions
 
-- [ ] Add ext4_extent_tree.json fixture (leaf + internal node)
-- [ ] Add ext4_htree_dir.json fixture (DxRoot + DxEntry)
 - [ ] Add ext4_xattr_block.json fixture
+- [ ] Add ext4_mmp_block.json fixture
 - [ ] Add btrfs_devitem.json fixture
 
 ---
