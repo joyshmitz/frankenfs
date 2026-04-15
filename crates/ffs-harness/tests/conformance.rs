@@ -10,12 +10,12 @@ use ffs_harness::{
     validate_extent_tree_fixture, validate_group_desc_fixture, validate_inode_fixture,
 };
 use ffs_ondisk::{
-    ExtentTree, lookup_in_dir_block_casefold, parse_dir_block, stamp_dir_block_checksum,
-    verify_dir_block_checksum,
+    Ext4IncompatFeatures, Ext4Superblock, ExtentTree, lookup_in_dir_block_casefold,
+    parse_dir_block, stamp_dir_block_checksum, verify_dir_block_checksum,
 };
-use ffs_types::ParseError;
+use ffs_types::{EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, InodeNumber, ParseError};
 use serde_json::Value;
-use std::path::Path;
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -450,6 +450,125 @@ fn ext4_dir_block_casefold_lookup_conforms() {
 }
 
 #[test]
+fn ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes() {
+    let raw_name = b"\xFFenc\x80";
+    let image = build_ext4_encrypt_image_with_dir(raw_name);
+    let superblock = Ext4Superblock::parse_from_image(&image).expect("parse encrypted superblock");
+    assert!(
+        superblock.has_incompat(Ext4IncompatFeatures::ENCRYPT),
+        "test image should advertise ENCRYPT incompat"
+    );
+
+    let tmp = tempfile::NamedTempFile::new().expect("create encrypted ext4 temp image");
+    std::fs::write(tmp.path(), &image).expect("write encrypted ext4 image");
+
+    let cx = Cx::for_testing();
+    let fs = OpenFs::open_with_options(&cx, tmp.path(), &OpenOptions::default())
+        .expect("open encrypted ext4 image in nokey mode");
+
+    let raw_entries = fs.readdir(&cx, InodeNumber(2), 0).expect("readdir raw bytes");
+    let encrypted = raw_entries
+        .iter()
+        .find(|entry| entry.name == raw_name)
+        .expect("encrypted entry should preserve raw bytes in readdir");
+    assert_eq!(encrypted.ino, InodeNumber(11));
+
+    let attr = fs
+        .lookup(&cx, InodeNumber(2), OsStr::from_bytes(raw_name))
+        .expect("lookup should accept raw encrypted filename bytes");
+    assert_eq!(attr.ino, InodeNumber(11));
+
+    let root = fs.read_inode(&cx, InodeNumber(2)).expect("read root inode");
+    let raw_lookup = fs
+        .lookup_name(&cx, &root, raw_name)
+        .expect("device lookup should parse encrypted entry")
+        .expect("encrypted entry should be found");
+    assert_eq!(raw_lookup.name, raw_name);
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
+    assert!(
+        raw_name.len() < 256,
+        "raw encrypted ext4 name must fit in a single dirent"
+    );
+
+    let block_size: u32 = 4096;
+    let image_size: u32 = 256 * 1024;
+    let mut image = vec![0_u8; image_size as usize];
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+    image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+    image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+    let blocks_count = image_size / block_size;
+    image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+    image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+    image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+    let incompat = (Ext4IncompatFeatures::FILETYPE.0
+        | Ext4IncompatFeatures::EXTENTS.0
+        | Ext4IncompatFeatures::ENCRYPT.0)
+        .to_le_bytes();
+    image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat);
+    image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+    let gd_off: usize = 4096;
+    image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+    image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+    let ino2 = 4 * 4096 + 256;
+    image[ino2..ino2 + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+    image[ino2 + 4..ino2 + 8].copy_from_slice(&4096_u32.to_le_bytes());
+    image[ino2 + 0x1A..ino2 + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+    image[ino2 + 0x20..ino2 + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+    image[ino2 + 0x80..ino2 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let root_extent = ino2 + 0x28;
+    image[root_extent..root_extent + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[root_extent + 2..root_extent + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 4..root_extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[root_extent + 6..root_extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 12..root_extent + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[root_extent + 16..root_extent + 18].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 18..root_extent + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 20..root_extent + 24].copy_from_slice(&10_u32.to_le_bytes());
+
+    let ino11 = 4 * 4096 + 10 * 256;
+    image[ino11..ino11 + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+    image[ino11 + 4..ino11 + 8].copy_from_slice(&5_u32.to_le_bytes());
+    image[ino11 + 0x1A..ino11 + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+    image[ino11 + 0x80..ino11 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let dir = 10 * 4096;
+    image[dir..dir + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir + 6] = 1;
+    image[dir + 7] = 2;
+    image[dir + 8] = b'.';
+
+    let dir = dir + 12;
+    image[dir..dir + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir + 6] = 2;
+    image[dir + 7] = 2;
+    image[dir + 8] = b'.';
+    image[dir + 9] = b'.';
+
+    let dir = dir + 12;
+    image[dir..dir + 4].copy_from_slice(&11_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&4072_u16.to_le_bytes());
+    image[dir + 6] = raw_name.len() as u8;
+    image[dir + 7] = 1;
+    image[dir + 8..dir + 8 + raw_name.len()].copy_from_slice(raw_name);
+
+    image
+}
+
+#[test]
 fn btrfs_chunk_mapping_fixture_conforms() {
     let (sb, chunks) =
         validate_btrfs_chunk_fixture(&fixture_path("btrfs_superblock_with_chunks.json"))
@@ -804,6 +923,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_padding_nonzero_fixture_rejected();
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
+    ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
     btrfs_chunk_mapping_fixture_conforms();
     btrfs_leaf_fixture_conforms();
     btrfs_fstree_leaf_fixture_conforms();
