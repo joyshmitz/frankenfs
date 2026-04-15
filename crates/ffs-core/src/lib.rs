@@ -11,7 +11,7 @@ pub use degradation::{
 };
 pub use vfs::{
     DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat,
-    InodeAttr, RequestOp, RequestScope, SetAttrRequest, XattrSetMode,
+    InodeAttr, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
 };
 
 use asupersync::{Cx, RaptorQConfig};
@@ -13670,6 +13670,186 @@ impl OpenFs {
         }
         Ok(result)
     }
+
+    /// ext4 SEEK_DATA: find the next data region at or after `offset`.
+    fn ext4_lseek_data(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+    ) -> ffs_error::Result<u64> {
+        let FsFlavor::Ext4(sb) = &self.flavor else {
+            return Err(FfsError::Format("not an ext4 filesystem".into()));
+        };
+
+        let inode = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+        let file_size = inode.size;
+
+        // Offset at or beyond EOF returns ENXIO.
+        if offset >= file_size {
+            return Err(FfsError::Format("ENXIO: offset at or beyond EOF, or no data/hole found".into()));
+        }
+
+        // Non-extent based files (indirect block mapping) are treated as fully allocated.
+        if inode.flags & ffs_types::EXT4_EXTENTS_FL == 0 {
+            return Ok(offset);
+        }
+
+        let block_size = u64::from(sb.block_size);
+        let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
+
+        for ext in &extents {
+            let ext_logical_byte = u64::from(ext.logical_block) * block_size;
+            let ext_len_byte = u64::from(ext.actual_len()) * block_size;
+            let ext_end = ext_logical_byte + ext_len_byte;
+
+            // If extent ends before offset, skip.
+            if ext_end <= offset {
+                continue;
+            }
+
+            // If extent starts after offset, return start of this extent (it's data).
+            // If extent contains offset, return offset (we're in data).
+            if ext_logical_byte <= offset {
+                return Ok(offset);
+            }
+            return Ok(ext_logical_byte);
+        }
+
+        // No data found after offset.
+        Err(FfsError::Format("ENXIO: offset at or beyond EOF, or no data/hole found".into()))
+    }
+
+    /// ext4 SEEK_HOLE: find the next hole at or after `offset`.
+    fn ext4_lseek_hole(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+    ) -> ffs_error::Result<u64> {
+        let FsFlavor::Ext4(sb) = &self.flavor else {
+            return Err(FfsError::Format("not an ext4 filesystem".into()));
+        };
+
+        let inode = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+        let file_size = inode.size;
+
+        // Offset at or beyond EOF returns ENXIO.
+        if offset >= file_size {
+            return Err(FfsError::Format("ENXIO: offset at or beyond EOF, or no data/hole found".into()));
+        }
+
+        // Non-extent based files (indirect block mapping) are treated as fully allocated.
+        // The only hole is the virtual hole at EOF.
+        if inode.flags & ffs_types::EXT4_EXTENTS_FL == 0 {
+            return Ok(file_size);
+        }
+
+        let block_size = u64::from(sb.block_size);
+        let extents = self.collect_extents_with_scope(cx, scope, &inode)?;
+
+        // Track where we've seen contiguous data.
+        let mut covered_until = 0_u64;
+
+        for ext in &extents {
+            let ext_logical_byte = u64::from(ext.logical_block) * block_size;
+            let ext_len_byte = u64::from(ext.actual_len()) * block_size;
+
+            // Gap before this extent?
+            if ext_logical_byte > covered_until && ext_logical_byte > offset {
+                // There's a hole starting at covered_until.
+                return Ok(covered_until.max(offset));
+            }
+
+            // If offset is in a gap before this extent, return offset.
+            if offset < ext_logical_byte && offset >= covered_until {
+                return Ok(offset);
+            }
+
+            covered_until = ext_logical_byte + ext_len_byte;
+        }
+
+        // After all extents, the virtual hole at EOF.
+        if offset >= covered_until {
+            return Ok(offset);
+        }
+        Ok(covered_until.max(offset).min(file_size))
+    }
+
+    /// btrfs SEEK_DATA: find the next data region at or after `offset`.
+    fn btrfs_lseek_data(&self, cx: &Cx, ino: InodeNumber, offset: u64) -> ffs_error::Result<u64> {
+        let canonical = self.btrfs_canonical_inode(ino)?;
+        let attr = self.btrfs_read_inode_attr(cx, ino)?;
+        let file_size = attr.size;
+
+        // Offset at or beyond EOF returns ENXIO.
+        if offset >= file_size {
+            return Err(FfsError::Format("ENXIO: offset at or beyond EOF, or no data/hole found".into()));
+        }
+
+        let extents = self.btrfs_fiemap_extent_items(cx, canonical)?;
+
+        for (file_offset, extent) in &extents {
+            let ext_len = Self::btrfs_extent_logical_len(extent)?;
+            let ext_end = file_offset.saturating_add(ext_len);
+
+            // If extent ends before offset, skip.
+            if ext_end <= offset {
+                continue;
+            }
+
+            // If extent starts after offset, return start of this extent.
+            // If extent contains offset, return offset.
+            if *file_offset <= offset {
+                return Ok(offset);
+            }
+            return Ok(*file_offset);
+        }
+
+        // No data found after offset.
+        Err(FfsError::Format("ENXIO: offset at or beyond EOF, or no data/hole found".into()))
+    }
+
+    /// btrfs SEEK_HOLE: find the next hole at or after `offset`.
+    fn btrfs_lseek_hole(&self, cx: &Cx, ino: InodeNumber, offset: u64) -> ffs_error::Result<u64> {
+        let canonical = self.btrfs_canonical_inode(ino)?;
+        let attr = self.btrfs_read_inode_attr(cx, ino)?;
+        let file_size = attr.size;
+
+        // Offset at or beyond EOF returns ENXIO.
+        if offset >= file_size {
+            return Err(FfsError::Format("ENXIO: offset at or beyond EOF, or no data/hole found".into()));
+        }
+
+        let extents = self.btrfs_fiemap_extent_items(cx, canonical)?;
+
+        // Track where we've seen contiguous data.
+        let mut covered_until = 0_u64;
+
+        for (file_offset, extent) in &extents {
+            let ext_len = Self::btrfs_extent_logical_len(extent)?;
+
+            // Gap before this extent?
+            if *file_offset > covered_until && *file_offset > offset {
+                return Ok(covered_until.max(offset));
+            }
+
+            // If offset is in a gap before this extent.
+            if offset < *file_offset && offset >= covered_until {
+                return Ok(offset);
+            }
+
+            covered_until = file_offset.saturating_add(ext_len);
+        }
+
+        // After all extents, the virtual hole at EOF.
+        if offset >= covered_until {
+            return Ok(offset);
+        }
+        Ok(covered_until.max(offset).min(file_size))
+    }
 }
 
 impl FsOps for OpenFs {
@@ -14222,6 +14402,30 @@ impl FsOps for OpenFs {
         match &self.flavor {
             FsFlavor::Ext4(_) => self.ext4_fiemap(cx, scope, ino, start, length),
             FsFlavor::Btrfs(_) => self.btrfs_fiemap(cx, ino, start, length),
+        }
+    }
+
+    fn lseek(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+        whence: SeekWhence,
+    ) -> ffs_error::Result<u64> {
+        match whence {
+            SeekWhence::Data => match &self.flavor {
+                FsFlavor::Ext4(_) => self.ext4_lseek_data(cx, scope, ino, offset),
+                FsFlavor::Btrfs(_) => self.btrfs_lseek_data(cx, ino, offset),
+            },
+            SeekWhence::Hole => match &self.flavor {
+                FsFlavor::Ext4(_) => self.ext4_lseek_hole(cx, scope, ino, offset),
+                FsFlavor::Btrfs(_) => self.btrfs_lseek_hole(cx, ino, offset),
+            },
+            // SEEK_SET/CUR/END are handled by the FUSE layer directly.
+            SeekWhence::Set | SeekWhence::Cur | SeekWhence::End => {
+                Err(FfsError::Format("ENXIO: offset at or beyond EOF, or no data/hole found".into()))
+            }
         }
     }
 
@@ -17785,6 +17989,67 @@ mod tests {
 
         let mut scope = RequestScope::empty();
         let result = fs.fiemap(&cx, &mut scope, InodeNumber(2), 0, u64::MAX);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn lseek_data_returns_offset_when_in_data() {
+        // File inode 11 is a regular file with size=14 and one extent starting at logical 0.
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let mut scope = RequestScope::empty();
+        // SEEK_DATA at offset 0 should return 0 (we're already at data).
+        let offset = fs
+            .lseek(&cx, &mut scope, InodeNumber(11), 0, SeekWhence::Data)
+            .unwrap();
+        assert_eq!(offset, 0);
+
+        // SEEK_DATA at offset 5 (within the file, within data) should return 5.
+        let offset = fs
+            .lseek(&cx, &mut scope, InodeNumber(11), 5, SeekWhence::Data)
+            .unwrap();
+        assert_eq!(offset, 5);
+    }
+
+    #[test]
+    fn lseek_hole_returns_file_size_for_fully_allocated() {
+        // File inode 11 has one extent covering the entire file.
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        // Get file size.
+        let mut scope = RequestScope::empty();
+        let attr = fs.getattr(&cx, InodeNumber(11)).unwrap();
+
+        // SEEK_HOLE at offset 0 should return file_size (virtual hole at EOF).
+        let offset = fs
+            .lseek(&cx, &mut scope, InodeNumber(11), 0, SeekWhence::Hole)
+            .unwrap();
+        assert_eq!(offset, attr.size);
+    }
+
+    #[test]
+    fn lseek_beyond_eof_returns_error() {
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        // Get file size.
+        let mut scope = RequestScope::empty();
+        let attr = fs.getattr(&cx, InodeNumber(11)).unwrap();
+
+        // SEEK_DATA at file_size should return error.
+        let result = fs.lseek(&cx, &mut scope, InodeNumber(11), attr.size, SeekWhence::Data);
+        assert!(result.is_err());
+
+        // SEEK_HOLE at file_size should return error.
+        let result = fs.lseek(&cx, &mut scope, InodeNumber(11), attr.size, SeekWhence::Hole);
         assert!(result.is_err());
     }
 

@@ -136,6 +136,50 @@ pub const FIEMAP_EXTENT_LAST: u32 = 0x0001;
 /// FIEMAP extent flag: this extent is unwritten / preallocated.
 pub const FIEMAP_EXTENT_UNWRITTEN: u32 = 0x0800;
 
+/// Seek whence for [`FsOps::lseek`].
+///
+/// Standard POSIX whence values plus `SEEK_DATA`/`SEEK_HOLE` for sparse file
+/// support (FUSE 7.24+). Required for efficient sparse file handling in
+/// `cp --sparse`, `rsync`, and `tar`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SeekWhence {
+    /// Seek relative to start of file.
+    Set,
+    /// Seek relative to current position (not used by FUSE lseek, but included
+    /// for completeness).
+    Cur,
+    /// Seek relative to end of file.
+    End,
+    /// Find the next data (non-hole) region at or after the offset.
+    Data,
+    /// Find the next hole (unallocated) region at or after the offset.
+    Hole,
+}
+
+impl SeekWhence {
+    // POSIX whence constants (from <unistd.h> / libc)
+    const SEEK_SET: i32 = 0;
+    const SEEK_CUR: i32 = 1;
+    const SEEK_END: i32 = 2;
+    const SEEK_DATA: i32 = 3;
+    const SEEK_HOLE: i32 = 4;
+
+    /// Convert from raw POSIX whence value.
+    ///
+    /// Returns `None` for unrecognized values.
+    #[must_use]
+    pub fn from_raw(whence: i32) -> Option<Self> {
+        match whence {
+            Self::SEEK_SET => Some(Self::Set),
+            Self::SEEK_CUR => Some(Self::Cur),
+            Self::SEEK_END => Some(Self::End),
+            Self::SEEK_DATA => Some(Self::Data),
+            Self::SEEK_HOLE => Some(Self::Hole),
+            _ => None,
+        }
+    }
+}
+
 /// FUSE/VFS operation kind used for MVCC request-scope hooks.
 ///
 /// These operation tags let `FsOps` implementations choose an MVCC policy per
@@ -155,6 +199,7 @@ pub enum RequestOp {
     Read,
     Readdir,
     Readlink,
+    Lseek,
     // Write operations
     Create,
     Mkdir,
@@ -614,6 +659,35 @@ pub trait FsOps: Send + Sync {
     ) -> ffs_error::Result<Vec<FiemapExtent>> {
         Err(FfsError::UnsupportedFeature(
             "fiemap is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Reposition read offset for SEEK_HOLE/SEEK_DATA support.
+    ///
+    /// Implements the `lseek(2)` system call semantics for sparse file queries:
+    ///
+    /// - `SeekWhence::Data`: Returns the offset of the next data (non-hole) region
+    ///   at or after `offset`. If `offset` points to data, returns `offset`.
+    /// - `SeekWhence::Hole`: Returns the offset of the next hole (unallocated) region
+    ///   at or after `offset`. If `offset` points to a hole, returns `offset`.
+    ///   The virtual hole at EOF counts as a hole.
+    ///
+    /// Returns `FfsError::InvalidArgument` (maps to `ENXIO`) if:
+    /// - `offset` is at or beyond the file size
+    /// - No data/hole exists after `offset` (for `SEEK_DATA`/`SEEK_HOLE` respectively)
+    ///
+    /// Standard `SEEK_SET`/`SEEK_CUR`/`SEEK_END` are handled by the FUSE layer
+    /// and do not call this method.
+    fn lseek(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _offset: u64,
+        _whence: SeekWhence,
+    ) -> ffs_error::Result<u64> {
+        Err(FfsError::UnsupportedFeature(
+            "lseek SEEK_HOLE/SEEK_DATA is not supported by this backend".to_owned(),
         ))
     }
 

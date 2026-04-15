@@ -12,14 +12,14 @@ pub mod per_core;
 use asupersync::Cx;
 use ffs_core::{
     BackpressureDecision, BackpressureGate, FiemapExtent, FileType as FfsFileType, FsOps,
-    InodeAttr, RequestOp, RequestScope, SetAttrRequest, XattrSetMode,
+    InodeAttr, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::InodeNumber;
 use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyOpen, ReplyStatfs, ReplyWrite,
-    ReplyXattr, Request, TimeOrNow,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLseek, ReplyOpen, ReplyStatfs,
+    ReplyWrite, ReplyXattr, Request, TimeOrNow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1997,6 +1997,60 @@ impl Filesystem for FrankenFuse {
                 if errno == libc::ENOTTY {
                     debug!(ino, cmd, "ioctl: unsupported command");
                 }
+                reply.error(errno);
+            }
+        }
+    }
+
+    fn lseek(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        whence: i32,
+        reply: ReplyLseek,
+    ) {
+        // SEEK_SET/CUR/END are handled by the kernel; only SEEK_DATA/SEEK_HOLE
+        // reach this handler.
+        let Some(seek_whence) = SeekWhence::from_raw(whence) else {
+            debug!(ino, whence, "lseek: unsupported whence");
+            reply.error(libc::EINVAL);
+            return;
+        };
+
+        // Convert offset to u64 (SEEK_DATA/SEEK_HOLE require non-negative offset).
+        let Ok(offset_u64) = u64::try_from(offset) else {
+            reply.error(libc::EINVAL);
+            return;
+        };
+
+        let cx = Self::cx_for_request();
+        match self.with_request_scope(&cx, RequestOp::Lseek, |cx, scope| {
+            self.inner
+                .ops
+                .lseek(cx, scope, InodeNumber(ino), offset_u64, seek_whence)
+        }) {
+            Ok(new_offset) => {
+                // ReplyLseek::offset expects i64.
+                match i64::try_from(new_offset) {
+                    Ok(v) => reply.offset(v),
+                    Err(_) => reply.error(libc::EOVERFLOW),
+                }
+            }
+            Err(e) => {
+                // For SEEK_DATA/SEEK_HOLE, Format errors with "ENXIO" message map to ENXIO.
+                // This handles "offset >= file_size" and "no data/hole found" cases.
+                let errno = if let FfsError::Format(msg) = &e {
+                    if msg.contains("ENXIO") {
+                        libc::ENXIO
+                    } else {
+                        e.to_errno()
+                    }
+                } else {
+                    e.to_errno()
+                };
+                trace!(ino, offset, whence, errno, "lseek failed");
                 reply.error(errno);
             }
         }
