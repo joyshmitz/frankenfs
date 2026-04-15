@@ -22,7 +22,7 @@ use ffs_ondisk::{
     stamp_dir_block_checksum, verify_dir_block_checksum,
 };
 use ffs_types::{
-    EXT4_COMPR_FL, EXT4_COMPRBLK_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
+    EXT4_COMPRBLK_FL, EXT4_COMPR_FL, EXT4_EXTENTS_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
     InodeNumber, ParseError,
 };
 use serde_json::Value;
@@ -694,6 +694,96 @@ fn ext4_free_block_counters(fs: &OpenFs, cx: &Cx) -> (u64, u64) {
     }
 
     (bitmap_total, gd_total)
+}
+
+fn open_writable_ext4_mkfs_no_extents(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for writable ext4 no extents");
+    let image = tmp.path().join("conformance_no_extents.ext4");
+    let file = std::fs::File::create(&image).expect("create ext4 image");
+    file.set_len(size_mb * 1024 * 1024)
+        .expect("size ext4 image");
+    drop(file);
+
+    let mkfs = std::process::Command::new("mkfs.ext4")
+        .args(["-F", "-b", "4096", "-O", "^extents", image.to_str().expect("utf8 image path")])
+        .output()
+        .expect("spawn mkfs.ext4");
+    assert!(
+        mkfs.status.success(),
+        "mkfs.ext4 failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&mkfs.stdout),
+        String::from_utf8_lossy(&mkfs.stderr)
+    );
+
+    let debugfs = std::process::Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            "set_inode_field / mode 040777",
+            image.to_str().expect("utf8 image path"),
+        ])
+        .output()
+        .expect("spawn debugfs");
+    assert!(
+        debugfs.status.success(),
+        "debugfs failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&debugfs.stdout),
+        String::from_utf8_lossy(&debugfs.stderr)
+    );
+
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+        ..OpenOptions::default()
+    };
+    let mut fs = OpenFs::open_with_options(&cx, &image, &opts).expect("open writable ext4 image");
+    fs.enable_writes(&cx).expect("enable writes on ext4 image");
+    assert!(fs.is_writable(), "test ext4 image should be writable");
+    (fs, tmp, image)
+}
+
+#[test]
+fn ext4_indirect_block_addressing_conforms() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, _image_path) = open_writable_ext4_mkfs_no_extents(64);
+    let root = InodeNumber(2);
+
+    let name = std::ffi::OsString::from("large_indirect.bin");
+    let attr = fs
+        .create(&cx, root, &name, 0o644, 0, 0)
+        .expect("create ext4 file");
+
+    let inode = fs.read_inode(&cx, attr.ino).expect("read inode");
+    assert_eq!(
+        inode.flags & ffs_types::EXT4_EXTENTS_FL,
+        0,
+        "inode must not have extents flag (indirect block addressing)"
+    );
+
+    // 12 direct blocks (48 KB).
+    // Write 8KB crossing from direct block 11 to single-indirect block 12.
+    // 11 * 4096 = 45056
+    let payload1 = vec![0xBB_u8; 8192];
+    fs.write(&cx, attr.ino, 45056, &payload1).expect("write direct to single-indirect boundary");
+
+    // 12 direct + 1024 single indirect = 1036 blocks = 4243456 bytes.
+    // Write 8KB crossing from single-indirect to double-indirect.
+    let payload2 = vec![0xDD_u8; 8192];
+    fs.write(&cx, attr.ino, 4240000, &payload2).expect("write single to double-indirect boundary");
+
+    let readback1 = fs.read(&cx, attr.ino, 45056, 8192).expect("read direct to single-indirect boundary");
+    assert_eq!(
+        &readback1[..],
+        payload1.as_slice(),
+        "readback from single-indirect must match"
+    );
+
+    let readback2 = fs.read(&cx, attr.ino, 4240000, 8192).expect("read single to double-indirect boundary");
+    assert_eq!(
+        &readback2[..],
+        payload2.as_slice(),
+        "readback from double-indirect must match"
+    );
 }
 
 #[test]
@@ -1764,6 +1854,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
     ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
+    ext4_indirect_block_addressing_conforms();
     btrfs_send_stream_multi_command_conforms();
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
     btrfs_tree_log_replay_multilevel_conforms();
