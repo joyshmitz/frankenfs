@@ -675,6 +675,27 @@ fn enable_e2compr_for_inode(
     block_dev.sync(cx).expect("sync e2compr inode flags");
 }
 
+fn ext4_free_block_counters(fs: &OpenFs, cx: &Cx) -> (u64, u64) {
+    let sb = fs.ext4_superblock().expect("ext4 superblock");
+    let mut bitmap_total = 0_u64;
+    let mut gd_total = 0_u64;
+
+    for group in 0..sb.groups_count() {
+        let group = GroupNumber(group);
+        bitmap_total += u64::from(
+            fs.count_free_blocks_in_group(cx, group)
+                .expect("count free blocks in group"),
+        );
+        gd_total += u64::from(
+            fs.read_group_desc(cx, group)
+                .expect("read group desc for block counters")
+                .free_blocks_count,
+        );
+    }
+
+    (bitmap_total, gd_total)
+}
+
 #[test]
 fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
     let cx = Cx::for_testing();
@@ -688,16 +709,13 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
             .expect("create compressed ext4 file");
         enable_e2compr_for_inode(&fs, &image_path, &cx, attr.ino, 2, method_idx);
 
-        let baseline = fs
-            .free_space_summary(&cx)
-            .expect("baseline free space before compressed write");
+        let (baseline_free_blocks, baseline_gd_free_blocks) = ext4_free_block_counters(&fs, &cx);
         let first = vec![byte; 4096];
         fs.write(&cx, attr.ino, 0, &first)
             .expect("first compressed write");
 
-        let after_first = fs
-            .free_space_summary(&cx)
-            .expect("free space after first compressed write");
+        let (after_first_free_blocks, after_first_gd_free_blocks) =
+            ext4_free_block_counters(&fs, &cx);
         let inode_after_first = fs
             .read_inode(&cx, attr.ino)
             .expect("inode after first compressed write");
@@ -710,7 +728,7 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
             "{label}: compressed write should mark COMPRBLK"
         );
         assert!(
-            after_first.free_blocks_total < baseline.free_blocks_total,
+            after_first_free_blocks < baseline_free_blocks,
             "{label}: compressed write should consume at least one block"
         );
         assert_eq!(
@@ -723,9 +741,8 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         fs.write(&cx, attr.ino, 0, &second)
             .expect("second compressed write");
 
-        let after_second = fs
-            .free_space_summary(&cx)
-            .expect("free space after compressed rewrite");
+        let (after_second_free_blocks, after_second_gd_free_blocks) =
+            ext4_free_block_counters(&fs, &cx);
         let inode_after_second = fs
             .read_inode(&cx, attr.ino)
             .expect("inode after compressed rewrite");
@@ -734,11 +751,11 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
             .expect("readback after compressed rewrite");
 
         assert_eq!(
-            after_second.free_blocks_total, after_first.free_blocks_total,
+            after_second_free_blocks, after_first_free_blocks,
             "{label}: rewrite should reuse compressed blocks without leaking space"
         );
         assert_eq!(
-            after_second.gd_free_blocks_total, after_first.gd_free_blocks_total,
+            after_second_gd_free_blocks, after_first_gd_free_blocks,
             "{label}: group descriptor free-block counters should remain stable on rewrite"
         );
         assert_eq!(
