@@ -2,8 +2,8 @@
 
 use asupersync::Cx;
 use ffs_btrfs::{
-    BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC, BtrfsDeviceSet, SendCommand, parse_send_stream,
-    replay_tree_log,
+    BTRFS_CHUNK_TREE_OBJECTID, BTRFS_ITEM_CHUNK, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
+    BtrfsDeviceSet, SendCommand, parse_send_stream, replay_tree_log, walk_chunk_tree,
 };
 use ffs_core::{OpenFs, OpenOptions};
 use ffs_harness::{
@@ -638,6 +638,37 @@ fn build_btrfs_tree_log_superblock(log_root: u64, log_root_level: u8) -> BtrfsSu
     }
 }
 
+fn build_btrfs_chunk_tree_superblock(chunk_root: u64) -> BtrfsSuperblock {
+    BtrfsSuperblock {
+        csum: [0; 32],
+        fsid: [0; 16],
+        bytenr: chunk_root,
+        flags: 0,
+        magic: 0,
+        generation: 77,
+        root: 0,
+        chunk_root,
+        log_root: 0,
+        total_bytes: 0,
+        bytes_used: 0,
+        root_dir_objectid: 0,
+        num_devices: 1,
+        sectorsize: BTRFS_TEST_NODESIZE,
+        nodesize: BTRFS_TEST_NODESIZE,
+        stripesize: 0,
+        compat_flags: 0,
+        compat_ro_flags: 0,
+        incompat_flags: 0,
+        csum_type: 0,
+        root_level: 0,
+        chunk_root_level: 0,
+        log_root_level: 0,
+        label: String::new(),
+        sys_chunk_array_size: 0,
+        sys_chunk_array: Vec::new(),
+    }
+}
+
 fn build_single_stripe_chunk(
     logical_start: u64,
     length: u64,
@@ -716,6 +747,32 @@ fn write_btrfs_key_ptr(
     block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
     block[base + 17..base + 25].copy_from_slice(&blockptr.to_le_bytes());
     block[base + 25..base + 33].copy_from_slice(&generation.to_le_bytes());
+}
+
+fn build_chunk_item_payload(
+    length: u64,
+    owner: u64,
+    stripe_len: u64,
+    chunk_type: u64,
+    io_align: u32,
+    io_width: u32,
+    sector_size: u32,
+    devid: u64,
+    physical_offset: u64,
+) -> Vec<u8> {
+    let mut data = vec![0_u8; 48 + 32];
+    data[0..8].copy_from_slice(&length.to_le_bytes());
+    data[8..16].copy_from_slice(&owner.to_le_bytes());
+    data[16..24].copy_from_slice(&stripe_len.to_le_bytes());
+    data[24..32].copy_from_slice(&chunk_type.to_le_bytes());
+    data[32..36].copy_from_slice(&io_align.to_le_bytes());
+    data[36..40].copy_from_slice(&io_width.to_le_bytes());
+    data[40..44].copy_from_slice(&sector_size.to_le_bytes());
+    data[44..46].copy_from_slice(&1_u16.to_le_bytes());
+    data[46..48].copy_from_slice(&0_u16.to_le_bytes());
+    data[48..56].copy_from_slice(&devid.to_le_bytes());
+    data[56..64].copy_from_slice(&physical_offset.to_le_bytes());
+    data
 }
 
 #[test]
@@ -843,6 +900,70 @@ fn btrfs_tree_log_replay_skips_when_log_root_absent() {
     assert!(!replay.replayed);
     assert_eq!(replay.items_count, 0);
     assert!(replay.items.is_empty());
+}
+
+#[test]
+fn btrfs_chunk_tree_walk_adds_and_sorts_new_chunks() {
+    let chunk_root_logical = 0x10_000_u64;
+    let bootstrap = vec![build_single_stripe_chunk(
+        chunk_root_logical,
+        u64::from(BTRFS_TEST_NODESIZE),
+        0x80_000,
+    )];
+
+    let mut leaf = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
+    write_btrfs_header(
+        &mut leaf,
+        chunk_root_logical,
+        1,
+        0,
+        BTRFS_CHUNK_TREE_OBJECTID,
+        77,
+    );
+    let payload = build_chunk_item_payload(
+        0x20_000,
+        2,
+        0x10_000,
+        1,
+        BTRFS_TEST_NODESIZE,
+        BTRFS_TEST_NODESIZE,
+        BTRFS_TEST_NODESIZE,
+        2,
+        0x90_000,
+    );
+    let data_off = 3500_u32;
+    write_btrfs_leaf_item(
+        &mut leaf,
+        0,
+        256,
+        BTRFS_ITEM_CHUNK,
+        data_off,
+        u32::try_from(payload.len()).expect("payload length should fit in u32"),
+    );
+    let end = data_off as usize + payload.len();
+    leaf[data_off as usize..end].copy_from_slice(&payload);
+    let blocks: HashMap<u64, Vec<u8>> = [(0x80_000_u64, leaf)].into_iter().collect();
+    let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
+        blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+            field: "physical",
+            reason: "block not in test image",
+        })
+    };
+
+    let sb = build_btrfs_chunk_tree_superblock(chunk_root_logical);
+    let chunks = walk_chunk_tree(&mut read, &sb, &bootstrap).expect("walk chunk tree");
+    assert_eq!(
+        chunks.len(),
+        2,
+        "bootstrap + chunk-tree entry should be returned"
+    );
+    assert_eq!(chunks[0].key.offset, chunk_root_logical);
+    assert_eq!(chunks[0].stripes[0].offset, 0x80_000);
+    assert_eq!(chunks[1].key.offset, 0x20_000);
+    assert_eq!(chunks[1].length, 0x20_000);
+    assert_eq!(chunks[1].stripe_len, 0x10_000);
+    assert_eq!(chunks[1].stripes[0].devid, 2);
+    assert_eq!(chunks[1].stripes[0].offset, 0x90_000);
 }
 
 #[test]
@@ -1341,6 +1462,7 @@ fn full_conformance_gate_pass() {
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
     btrfs_tree_log_replay_multilevel_conforms();
     btrfs_tree_log_replay_skips_when_log_root_absent();
+    btrfs_chunk_tree_walk_adds_and_sorts_new_chunks();
     btrfs_multi_device_raid1_read_falls_back_to_second_mirror();
     btrfs_multi_device_raid0_dispatches_to_correct_stripe();
     btrfs_chunk_mapping_fixture_conforms();
