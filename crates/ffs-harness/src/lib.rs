@@ -21,9 +21,9 @@ pub mod xfstests;
 use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
     BtrfsDevItem, BtrfsHeader, BtrfsItem, BtrfsSuperblock, Ext4DirEntry, Ext4DxRoot,
-    Ext4ExtentHeader, Ext4GroupDesc, Ext4Inode, Ext4Superblock, Ext4Xattr, ExtentTree,
-    map_logical_to_physical, parse_dev_item, parse_dir_block, parse_dx_root, parse_extent_tree,
-    parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
+    Ext4ExtentHeader, Ext4GroupDesc, Ext4Inode, Ext4MmpBlock, Ext4Superblock, Ext4Xattr,
+    ExtentTree, map_logical_to_physical, parse_dev_item, parse_dir_block, parse_dx_root,
+    parse_extent_tree, parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -398,6 +398,14 @@ pub fn validate_btrfs_devitem_fixture(path: &Path) -> Result<BtrfsDevItem> {
     let devitem = parse_dev_item(&data)
         .with_context(|| format!("failed devitem parse for fixture {}", path.display()))?;
     Ok(devitem)
+}
+
+/// Validate an ext4 MMP (multi-mount protection) block fixture.
+pub fn validate_mmp_block_fixture(path: &Path) -> Result<Ext4MmpBlock> {
+    let data = load_sparse_fixture(path)?;
+    let mmp = Ext4MmpBlock::parse_from_bytes(&data)
+        .with_context(|| format!("failed MMP block parse for fixture {}", path.display()))?;
+    Ok(mmp)
 }
 
 // ── Golden reference types ────────────────────────────────────────

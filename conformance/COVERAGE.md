@@ -18,9 +18,9 @@
 | Ext4Xattr (block) | ✅ | ✅ | 4 | 4 | 100% | user + security attrs |
 | Ext4DxRoot | ✅ | ✅ | 3 | 3 | 100% | htree DX root with 3 entries |
 | Ext4DxEntry | ✅ | ✅ | 2 | 2 | 100% | via dx_root fixture |
-| Ext4MmpBlock | ❌ | ❌ | 2 | 0 | 0% | **MISSING** - multi-mount protection |
+| Ext4MmpBlock | ✅ | ✅ | 2 | 2 | 100% | clean state, status decoding |
 
-**ext4 Total: 66 MUST clauses, 64 passing = 97.0%**
+**ext4 Total: 66 MUST clauses, 66 passing = 100.0%**
 
 ## btrfs On-Disk Structures
 
@@ -43,11 +43,13 @@
 
 ## Priority Gaps
 
-1. **ext4 MMP Block** - Multi-mount protection (2 MUST clauses)
+None. All identified on-disk structures have conformance fixtures.
 
 ## Next Actions
 
-- [ ] Add ext4_mmp_block.json fixture
+- [x] Add ext4_mmp_block.json fixture - DONE
+- [ ] Consider additional edge cases (malformed structures, boundary conditions)
+- [ ] Add more adversarial corpus entries for fuzzing
 
 ---
 

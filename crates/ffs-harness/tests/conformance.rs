@@ -618,6 +618,26 @@ fn btrfs_devitem_fixture_conforms() {
 }
 
 #[test]
+fn ext4_mmp_block_fixture_conforms() {
+    let mmp = ffs_harness::validate_mmp_block_fixture(&fixture_path("ext4_mmp_block.json"))
+        .expect("MMP block");
+
+    assert_eq!(mmp.magic, 0x004D_4D50, "should have MMP magic");
+    assert_eq!(mmp.seq, 0xFF4D_4D50, "should have clean seq");
+    assert_eq!(mmp.time, 1700000000, "time should be 1700000000");
+    assert_eq!(mmp.nodename, "ffs-node-01", "nodename should match");
+    assert_eq!(mmp.bdevname, "/dev/nvme0n1", "bdevname should match");
+    assert_eq!(mmp.check_interval, 5, "check_interval should be 5");
+
+    // Verify status decoding
+    assert_eq!(
+        mmp.status(),
+        ffs_ondisk::Ext4MmpStatus::Clean,
+        "status should be Clean"
+    );
+}
+
+#[test]
 fn parity_report_totals_are_consistent() {
     let report = ParityReport::current();
     let implemented_sum: u32 = report.domains.iter().map(|d| d.implemented).sum();
@@ -789,6 +809,7 @@ fn full_conformance_gate_pass() {
     btrfs_fstree_leaf_fixture_conforms();
     btrfs_roottree_leaf_fixture_conforms();
     btrfs_devitem_fixture_conforms();
+    ext4_mmp_block_fixture_conforms();
 
     // 2) Checksum manifests are bidirectionally complete.
     fixture_checksum_manifest_is_complete();
