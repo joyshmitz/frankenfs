@@ -13,12 +13,14 @@ pub use vfs::{
     DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat,
     InodeAttr, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
 };
+// Re-export repair lifecycle for convenient wiring.
+pub use ffs_block::RepairFlushLifecycle;
 
 use asupersync::{Cx, RaptorQConfig};
 use ffs_alloc::{AllocHint, FsGeometry, GroupStats, PersistCtx, bitmap_count_free, bitmap_get};
 use ffs_block::{
-    BlockBuf, BlockDevice, ByteDevice, FileByteDevice, read_btrfs_superblock_region,
-    read_ext4_superblock_region,
+    BlockBuf, BlockDevice, ByteDevice, FileByteDevice, RepairFlushLifecycle,
+    read_btrfs_superblock_region, read_ext4_superblock_region,
 };
 use ffs_btrfs::{
     BTRFS_BLOCK_GROUP_DATA, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
@@ -503,6 +505,13 @@ pub struct OpenFs {
     /// LRU cache for extent tree lookups, avoiding repeated tree traversals
     /// for sequential reads. Invalidated on write/truncate/punch_hole.
     extent_cache: ffs_extent::ExtentCache,
+    /// Optional repair lifecycle hook for notifying when blocks are committed.
+    ///
+    /// When present, `commit_transaction` and `commit_transaction_ssi` call
+    /// `on_flush_committed` with the set of blocks in the transaction's write
+    /// set. This allows the repair subsystem to mark the corresponding groups
+    /// as dirty and queue repair symbol refresh (per spec §12.1.3).
+    repair_flush_lifecycle: Option<Arc<dyn RepairFlushLifecycle>>,
 }
 
 // Compile-time assertion: OpenFs must be Send + Sync for multi-threaded FUSE dispatch.
@@ -528,6 +537,7 @@ impl std::fmt::Debug for OpenFs {
             .field("mvcc_active_snapshots", &mvcc_guard.active_snapshot_count())
             .field("jbd2_writer", &self.jbd2_writer.is_some())
             .field("writable", &self.is_writable())
+            .field("repair_lifecycle", &self.repair_flush_lifecycle.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -2217,6 +2227,7 @@ impl OpenFs {
             ext4_alloc_state: None,
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
+            repair_flush_lifecycle: None,
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -3386,6 +3397,8 @@ impl OpenFs {
         let txn_id = txn.id;
         let write_set_size = txn.pending_writes();
         let read_set_size = txn.read_set().len();
+        // Capture write set blocks before commit consumes the transaction.
+        let write_blocks: Vec<BlockNumber> = txn.write_set().keys().copied().collect();
 
         debug!(
             target: "ffs::mvcc",
@@ -3469,6 +3482,29 @@ impl OpenFs {
             }
         }
 
+        // Notify repair lifecycle on successful commit (spec §12.1.3).
+        if result.is_ok() && !write_blocks.is_empty() {
+            if let Some(ref lifecycle) = self.repair_flush_lifecycle {
+                if let Some(cx) = Cx::current() {
+                    if let Err(e) = lifecycle.on_flush_committed(&cx, &write_blocks) {
+                        warn!(
+                            target: "ffs::repair",
+                            txn_id = txn_id.0,
+                            block_count = write_blocks.len(),
+                            error = %e,
+                            "repair_lifecycle_notify_failed"
+                        );
+                    }
+                } else {
+                    trace!(
+                        target: "ffs::repair",
+                        txn_id = txn_id.0,
+                        "repair_lifecycle_skipped_no_cx"
+                    );
+                }
+            }
+        }
+
         result
     }
 
@@ -3485,6 +3521,8 @@ impl OpenFs {
         let txn_id = txn.id;
         let write_set_size = txn.pending_writes();
         let read_set_size = txn.read_set().len();
+        // Capture write set blocks before commit consumes the transaction.
+        let write_blocks: Vec<BlockNumber> = txn.write_set().keys().copied().collect();
 
         debug!(
             target: "ffs::mvcc",
@@ -3522,6 +3560,29 @@ impl OpenFs {
             }
         }
 
+        // Notify repair lifecycle on successful commit (spec §12.1.3).
+        if result.is_ok() && !write_blocks.is_empty() {
+            if let Some(ref lifecycle) = self.repair_flush_lifecycle {
+                if let Some(cx) = Cx::current() {
+                    if let Err(e) = lifecycle.on_flush_committed(&cx, &write_blocks) {
+                        warn!(
+                            target: "ffs::repair",
+                            txn_id = txn_id.0,
+                            block_count = write_blocks.len(),
+                            error = %e,
+                            "repair_lifecycle_notify_failed"
+                        );
+                    }
+                } else {
+                    trace!(
+                        target: "ffs::repair",
+                        txn_id = txn_id.0,
+                        "repair_lifecycle_skipped_no_cx"
+                    );
+                }
+            }
+        }
+
         result
     }
 
@@ -3538,6 +3599,21 @@ impl OpenFs {
     #[must_use]
     pub fn has_jbd2_writer(&self) -> bool {
         self.jbd2_writer.is_some()
+    }
+
+    /// Attach a repair flush lifecycle for spec §12.1.3 compliance.
+    ///
+    /// Once attached, `commit_transaction` and `commit_transaction_ssi` will
+    /// call `on_flush_committed` with the set of committed blocks, allowing
+    /// the repair subsystem to queue symbol refresh for affected groups.
+    pub fn attach_repair_flush_lifecycle(&mut self, lifecycle: Arc<dyn RepairFlushLifecycle>) {
+        self.repair_flush_lifecycle = Some(lifecycle);
+    }
+
+    /// Whether a repair flush lifecycle is attached.
+    #[must_use]
+    pub fn has_repair_flush_lifecycle(&self) -> bool {
+        self.repair_flush_lifecycle.is_some()
     }
 
     /// Whether write operations are enabled.
@@ -3827,11 +3903,14 @@ impl OpenFs {
         })?;
 
         // Phase 2: write all pending blocks to the JBD2 journal.
+        // Capture block numbers for repair lifecycle notification.
+        let mut write_blocks: Vec<BlockNumber> = Vec::with_capacity(writes.len());
         let jbd2_stats = {
             let mut jbd2_writer = jbd2_mutex.lock();
             let mut jbd2_txn = jbd2_writer.begin_transaction();
 
             for (block, payload) in writes {
+                write_blocks.push(block);
                 jbd2_txn.add_write(block, payload);
             }
 
@@ -3869,6 +3948,21 @@ impl OpenFs {
             data_blocks = jbd2_stats.data_blocks,
             "journaled_commit_success"
         );
+
+        // Notify repair lifecycle on successful commit (spec §12.1.3).
+        if !write_blocks.is_empty() {
+            if let Some(ref lifecycle) = self.repair_flush_lifecycle {
+                if let Err(e) = lifecycle.on_flush_committed(cx, &write_blocks) {
+                    warn!(
+                        target: "ffs::repair",
+                        txn_id = txn_id.0,
+                        block_count = write_blocks.len(),
+                        error = %e,
+                        "repair_lifecycle_notify_failed"
+                    );
+                }
+            }
+        }
 
         Ok((commit_seq, jbd2_stats))
     }
