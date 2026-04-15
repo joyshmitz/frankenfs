@@ -229,6 +229,28 @@ fn ext4_htree_dx_root_fixture_conforms() {
 }
 
 #[test]
+fn ext4_xattr_block_fixture_conforms() {
+    let xattrs =
+        ffs_harness::validate_xattr_block_fixture(&fixture_path("ext4_xattr_block.json"))
+            .expect("xattr block");
+
+    assert_eq!(xattrs.len(), 2, "should have 2 xattrs");
+
+    // user.mime = "text/plain"
+    let mime = xattrs.iter().find(|x| x.full_name() == "user.mime");
+    assert!(mime.is_some(), "should have user.mime xattr");
+    assert_eq!(mime.unwrap().value, b"text/plain");
+
+    // security.selinux = "system_u:object_r:user_home_t:s0"
+    let selinux = xattrs.iter().find(|x| x.full_name() == "security.selinux");
+    assert!(selinux.is_some(), "should have security.selinux xattr");
+    assert_eq!(
+        std::str::from_utf8(&selinux.unwrap().value).unwrap(),
+        "system_u:object_r:user_home_t:s0"
+    );
+}
+
+#[test]
 fn ext4_dir_block_fixture_conforms() {
     let entries =
         validate_dir_block_fixture(&fixture_path("ext4_dir_block.json"), 4096).expect("dir block");
