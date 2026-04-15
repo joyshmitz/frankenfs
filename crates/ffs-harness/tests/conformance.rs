@@ -2,7 +2,8 @@
 
 use asupersync::Cx;
 use ffs_btrfs::{
-    BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC, SendCommand, parse_send_stream, replay_tree_log,
+    BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC, BtrfsDeviceSet, SendCommand, parse_send_stream,
+    replay_tree_log,
 };
 use ffs_core::{OpenFs, OpenOptions};
 use ffs_harness::{
@@ -19,7 +20,16 @@ use ffs_ondisk::{
 };
 use ffs_types::{EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, InodeNumber, ParseError};
 use serde_json::Value;
-use std::{collections::HashMap, ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
+use std::{
+    collections::HashMap,
+    ffi::OsStr,
+    os::unix::ffi::OsStrExt,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    },
+};
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -836,6 +846,143 @@ fn btrfs_tree_log_replay_skips_when_log_root_absent() {
 }
 
 #[test]
+fn btrfs_multi_device_raid1_read_falls_back_to_second_mirror() {
+    let logical = 0x40_000_u64;
+    let stripe_len = 0x10_000_u64;
+    let chunks = vec![BtrfsChunkEntry {
+        key: BtrfsKey {
+            objectid: 256,
+            item_type: 228,
+            offset: logical,
+        },
+        length: stripe_len,
+        owner: 2,
+        stripe_len,
+        chunk_type: ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+            | ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1,
+        io_align: BTRFS_TEST_NODESIZE,
+        io_width: BTRFS_TEST_NODESIZE,
+        sector_size: BTRFS_TEST_NODESIZE,
+        num_stripes: 2,
+        sub_stripes: 0,
+        stripes: vec![
+            BtrfsStripe {
+                devid: 1,
+                offset: 0x100_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 2,
+                offset: 0x200_000,
+                dev_uuid: [0; 16],
+            },
+        ],
+    }];
+
+    let mut devices = BtrfsDeviceSet::new();
+    let first_reads = Arc::new(AtomicUsize::new(0));
+    let second_reads = Arc::new(AtomicUsize::new(0));
+
+    let first_reads_for_closure = Arc::clone(&first_reads);
+    devices.add_device(
+        1,
+        Box::new(move |physical, len| {
+            first_reads_for_closure.fetch_add(1, AtomicOrdering::SeqCst);
+            assert_eq!(physical, 0x100_000);
+            assert_eq!(len, 4);
+            Err(ParseError::InvalidField {
+                field: "device",
+                reason: "simulated mirror read failure",
+            })
+        }),
+    );
+
+    let second_reads_for_closure = Arc::clone(&second_reads);
+    devices.add_device(
+        2,
+        Box::new(move |physical, len| {
+            second_reads_for_closure.fetch_add(1, AtomicOrdering::SeqCst);
+            assert_eq!(physical, 0x200_000);
+            assert_eq!(len, 4);
+            Ok(b"raid".to_vec())
+        }),
+    );
+
+    let data = devices
+        .read_logical(&chunks, logical, 4)
+        .expect("second RAID1 mirror should satisfy read");
+    assert_eq!(data, b"raid");
+    assert_eq!(first_reads.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(second_reads.load(AtomicOrdering::SeqCst), 1);
+}
+
+#[test]
+fn btrfs_multi_device_raid0_dispatches_to_correct_stripe() {
+    let logical = 0x80_000_u64;
+    let stripe_len = 0x10_000_u64;
+    let chunks = vec![BtrfsChunkEntry {
+        key: BtrfsKey {
+            objectid: 256,
+            item_type: 228,
+            offset: logical,
+        },
+        length: stripe_len * 2,
+        owner: 2,
+        stripe_len,
+        chunk_type: ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+            | ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0,
+        io_align: BTRFS_TEST_NODESIZE,
+        io_width: BTRFS_TEST_NODESIZE,
+        sector_size: BTRFS_TEST_NODESIZE,
+        num_stripes: 2,
+        sub_stripes: 0,
+        stripes: vec![
+            BtrfsStripe {
+                devid: 1,
+                offset: 0x300_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 2,
+                offset: 0x400_000,
+                dev_uuid: [0; 16],
+            },
+        ],
+    }];
+
+    let mut devices = BtrfsDeviceSet::new();
+    let first_reads = Arc::new(AtomicUsize::new(0));
+    let second_reads = Arc::new(AtomicUsize::new(0));
+
+    let first_reads_for_closure = Arc::clone(&first_reads);
+    devices.add_device(
+        1,
+        Box::new(move |_physical, _len| {
+            first_reads_for_closure.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(b"first".to_vec())
+        }),
+    );
+
+    let second_reads_for_closure = Arc::clone(&second_reads);
+    devices.add_device(
+        2,
+        Box::new(move |physical, len| {
+            second_reads_for_closure.fetch_add(1, AtomicOrdering::SeqCst);
+            assert_eq!(physical, 0x400_000);
+            assert_eq!(len, 5);
+            Ok(b"strip".to_vec())
+        }),
+    );
+
+    let data = devices
+        .read_logical(&chunks, logical + stripe_len, 5)
+        .expect("RAID0 second stripe should dispatch to device 2");
+    assert_eq!(data, b"strip");
+    assert_eq!(first_reads.load(AtomicOrdering::SeqCst), 0);
+    assert_eq!(second_reads.load(AtomicOrdering::SeqCst), 1);
+}
+
+#[test]
 fn btrfs_chunk_mapping_fixture_conforms() {
     let (sb, chunks) =
         validate_btrfs_chunk_fixture(&fixture_path("btrfs_superblock_with_chunks.json"))
@@ -1194,6 +1341,8 @@ fn full_conformance_gate_pass() {
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
     btrfs_tree_log_replay_multilevel_conforms();
     btrfs_tree_log_replay_skips_when_log_root_absent();
+    btrfs_multi_device_raid1_read_falls_back_to_second_mirror();
+    btrfs_multi_device_raid0_dispatches_to_correct_stripe();
     btrfs_chunk_mapping_fixture_conforms();
     btrfs_leaf_fixture_conforms();
     btrfs_fstree_leaf_fixture_conforms();
