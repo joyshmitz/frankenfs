@@ -717,6 +717,7 @@ fn write_btrfs_leaf_item(
     idx: usize,
     objectid: u64,
     item_type: u8,
+    key_offset: u64,
     data_off: u32,
     data_sz: u32,
 ) {
@@ -728,7 +729,7 @@ fn write_btrfs_leaf_item(
         .expect("btrfs test payload should follow the header");
     block[base..base + 8].copy_from_slice(&objectid.to_le_bytes());
     block[base + 8] = item_type;
-    block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
+    block[base + 9..base + 17].copy_from_slice(&key_offset.to_le_bytes());
     block[base + 17..base + 21].copy_from_slice(&encoded_data_off.to_le_bytes());
     block[base + 21..base + 25].copy_from_slice(&data_sz.to_le_bytes());
 }
@@ -852,9 +853,9 @@ fn btrfs_tree_log_replay_multilevel_conforms() {
     write_btrfs_header(&mut leaf, leaf_logical, 2, 0, 5, 77);
     let alpha_off = 3600_u32;
     let beta_off = 3605_u32;
-    write_btrfs_leaf_item(&mut leaf, 0, 256, BTRFS_ITEM_INODE_ITEM, alpha_off, 5);
+    write_btrfs_leaf_item(&mut leaf, 0, 256, BTRFS_ITEM_INODE_ITEM, 0, alpha_off, 5);
     leaf[alpha_off as usize..(alpha_off + 5) as usize].copy_from_slice(b"alpha");
-    write_btrfs_leaf_item(&mut leaf, 1, 257, BTRFS_ITEM_INODE_ITEM, beta_off, 4);
+    write_btrfs_leaf_item(&mut leaf, 1, 257, BTRFS_ITEM_INODE_ITEM, 0, beta_off, 4);
     leaf[beta_off as usize..(beta_off + 4) as usize].copy_from_slice(b"beta");
 
     let blocks: HashMap<u64, Vec<u8>> = [(root_physical, root), (leaf_physical, leaf)]
@@ -937,6 +938,7 @@ fn btrfs_chunk_tree_walk_adds_and_sorts_new_chunks() {
         0,
         256,
         BTRFS_ITEM_CHUNK,
+        0x20_000,
         data_off,
         u32::try_from(payload.len()).expect("payload length should fit in u32"),
     );
