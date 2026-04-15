@@ -4303,7 +4303,7 @@ fn dx_hash_half_md4(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
         offset += chunk_len;
     }
 
-    (b, c)
+    (normalize_dx_major_hash(b), c)
 }
 
 /// TEA (Tiny Encryption Algorithm) hash — an alternative ext4 hash.
@@ -4319,7 +4319,7 @@ fn dx_hash_tea(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
         offset += chunk_len;
     }
 
-    (a, b)
+    (normalize_dx_major_hash(a), b)
 }
 
 /// Convert a filename chunk to a u32 buffer for hashing.
