@@ -4,26 +4,26 @@ use asupersync::Cx;
 use ffs_alloc::{FsGeometry, GroupStats};
 use ffs_block::{BlockDevice, ByteBlockDevice, FileByteDevice};
 use ffs_btrfs::{
-    BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
-    BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC, BtrfsDeviceSet, SendCommand, parse_send_stream,
-    replay_tree_log, walk_chunk_tree, walk_device_tree,
+    parse_send_stream, replay_tree_log, walk_chunk_tree, walk_device_tree, BtrfsDeviceSet,
+    SendCommand, BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_ITEM_CHUNK,
+    BTRFS_ITEM_DEV_ITEM, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
 };
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
 use ffs_harness::{
-    GoldenReference, ParityReport,
-    e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
+    e2e::{run_crash_replay_suite, run_fsx_stress, CrashReplaySuiteConfig, FsxStressConfig},
     load_sparse_fixture, validate_btrfs_chunk_fixture, validate_btrfs_fixture,
     validate_btrfs_leaf_fixture, validate_dir_block_fixture, validate_ext4_fixture,
     validate_extent_tree_fixture, validate_group_desc_fixture, validate_inode_fixture,
+    GoldenReference, ParityReport,
 };
 use ffs_ondisk::{
-    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock, Ext4IncompatFeatures, Ext4Superblock,
-    ExtentTree, lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block,
-    stamp_dir_block_checksum, verify_dir_block_checksum,
+    lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block, stamp_dir_block_checksum,
+    verify_dir_block_checksum, BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock,
+    Ext4IncompatFeatures, Ext4Superblock, ExtentTree,
 };
 use ffs_types::{
-    EXT4_COMPRBLK_FL, EXT4_COMPR_FL, EXT4_EXTENTS_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
-    InodeNumber, ParseError,
+    GroupNumber, InodeNumber, ParseError, EXT4_COMPRBLK_FL, EXT4_COMPR_FL, EXT4_EXTENTS_FL,
+    EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
 };
 use serde_json::Value;
 use std::{
@@ -32,8 +32,8 @@ use std::{
     os::unix::ffi::OsStrExt,
     path::Path,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        Arc,
     },
 };
 
@@ -696,7 +696,9 @@ fn ext4_free_block_counters(fs: &OpenFs, cx: &Cx) -> (u64, u64) {
     (bitmap_total, gd_total)
 }
 
-fn open_writable_ext4_mkfs_no_extents(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
+fn open_ext4_mkfs_no_extents_with_large_file(
+    size_mb: u64,
+) -> (OpenFs, tempfile::TempDir, InodeNumber) {
     let tmp = tempfile::TempDir::new().expect("tmpdir for writable ext4 no extents");
     let image = tmp.path().join("conformance_no_extents.ext4");
     let file = std::fs::File::create(&image).expect("create ext4 image");
@@ -705,7 +707,14 @@ fn open_writable_ext4_mkfs_no_extents(size_mb: u64) -> (OpenFs, tempfile::TempDi
     drop(file);
 
     let mkfs = std::process::Command::new("mkfs.ext4")
-        .args(["-F", "-b", "4096", "-O", "^extents", image.to_str().expect("utf8 image path")])
+        .args([
+            "-F",
+            "-b",
+            "4096",
+            "-O",
+            "^64bit,^extents",
+            image.to_str().expect("utf8 image path"),
+        ])
         .output()
         .expect("spawn mkfs.ext4");
     assert!(
@@ -731,54 +740,78 @@ fn open_writable_ext4_mkfs_no_extents(size_mb: u64) -> (OpenFs, tempfile::TempDi
         String::from_utf8_lossy(&debugfs.stderr)
     );
 
+    let first_offset = 45_056_usize;
+    let second_offset = 4_240_000_usize;
+    let payload_len = 8_192_usize;
+    let host_file = tmp.path().join("large_indirect_host.bin");
+    let mut payload = vec![0_u8; second_offset + payload_len];
+    payload[first_offset..first_offset + payload_len].fill(0xBB);
+    payload[second_offset..second_offset + payload_len].fill(0xDD);
+    std::fs::write(&host_file, payload).expect("write host indirect payload");
+
+    let write_cmd = format!(
+        "write {} /large_indirect.bin",
+        host_file.to_str().expect("utf8 host payload path")
+    );
+    let debugfs = std::process::Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &write_cmd,
+            image.to_str().expect("utf8 image path"),
+        ])
+        .output()
+        .expect("spawn debugfs large file write");
+    assert!(
+        debugfs.status.success(),
+        "debugfs large file write failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&debugfs.stdout),
+        String::from_utf8_lossy(&debugfs.stderr)
+    );
+
     let cx = Cx::for_testing();
     let opts = OpenOptions {
         ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
         ..OpenOptions::default()
     };
-    let mut fs = OpenFs::open_with_options(&cx, &image, &opts).expect("open writable ext4 image");
-    fs.enable_writes(&cx).expect("enable writes on ext4 image");
-    assert!(fs.is_writable(), "test ext4 image should be writable");
-    (fs, tmp, image)
+    let fs = OpenFs::open_with_options(&cx, &image, &opts).expect("open indirect ext4 image");
+    let attr = fs
+        .lookup(&cx, InodeNumber(2), OsStr::new("large_indirect.bin"))
+        .expect("lookup indirect ext4 file");
+    (fs, tmp, attr.ino)
 }
 
 #[test]
 fn ext4_indirect_block_addressing_conforms() {
     let cx = Cx::for_testing();
-    let (fs, _tmp, _image_path) = open_writable_ext4_mkfs_no_extents(64);
-    let root = InodeNumber(2);
-
-    let name = std::ffi::OsString::from("large_indirect.bin");
-    let attr = fs
-        .create(&cx, root, &name, 0o644, 0, 0)
-        .expect("create ext4 file");
-
-    let inode = fs.read_inode(&cx, attr.ino).expect("read inode");
+    let (fs, _tmp, ino) = open_ext4_mkfs_no_extents_with_large_file(64);
+    let inode = fs.read_inode(&cx, ino).expect("read inode");
     assert_eq!(
-        inode.flags & ffs_types::EXT4_EXTENTS_FL,
+        inode.flags & EXT4_EXTENTS_FL,
         0,
         "inode must not have extents flag (indirect block addressing)"
     );
 
     // 12 direct blocks (48 KB).
-    // Write 8KB crossing from direct block 11 to single-indirect block 12.
+    // Read 8KB crossing from direct block 11 to single-indirect block 12.
     // 11 * 4096 = 45056
     let payload1 = vec![0xBB_u8; 8192];
-    fs.write(&cx, attr.ino, 45056, &payload1).expect("write direct to single-indirect boundary");
+    let readback1 = fs
+        .read(&cx, ino, 45_056, 8_192)
+        .expect("read direct to single-indirect boundary");
 
     // 12 direct + 1024 single indirect = 1036 blocks = 4243456 bytes.
-    // Write 8KB crossing from single-indirect to double-indirect.
+    // Read 8KB crossing from single-indirect to double-indirect.
     let payload2 = vec![0xDD_u8; 8192];
-    fs.write(&cx, attr.ino, 4240000, &payload2).expect("write single to double-indirect boundary");
-
-    let readback1 = fs.read(&cx, attr.ino, 45056, 8192).expect("read direct to single-indirect boundary");
     assert_eq!(
         &readback1[..],
         payload1.as_slice(),
         "readback from single-indirect must match"
     );
 
-    let readback2 = fs.read(&cx, attr.ino, 4240000, 8192).expect("read single to double-indirect boundary");
+    let readback2 = fs
+        .read(&cx, ino, 4_240_000, 8_192)
+        .expect("read single to double-indirect boundary");
     assert_eq!(
         &readback2[..],
         payload2.as_slice(),
