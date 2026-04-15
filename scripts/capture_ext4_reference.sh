@@ -105,6 +105,7 @@ printf 'hello from FrankenFS 64mb geometry variant\n' > "$METRICS_CONTENT_FILE"
 printf 'hello from FrankenFS dir_index variant\n' > "$DIR_INDEX_CONTENT_FILE"
 
 DIR_INDEX_FILE_COUNT=256
+DIR_INDEX_HASH_SEED="11111111-2222-3333-4444-555555555555"
 
 log "Tool versions:"
 log "mkfs.ext4: $(mkfs.ext4 -V 2>&1 | sed -n '1p')"
@@ -293,6 +294,9 @@ generate_variant() {
         run mkfs.ext4 -L "$label" -b "$block_size" -q -O "$mkfs_feature_opt" "$image"
     else
         run mkfs.ext4 -L "$label" -b "$block_size" -q "$image"
+    fi
+    if [[ "$variant" = "ext4_dir_index_reference" ]]; then
+        run debugfs -w -R "set_super_value hash_seed $DIR_INDEX_HASH_SEED" "$image"
     fi
 
     for cmd in "${mkdir_cmds[@]}"; do

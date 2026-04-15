@@ -51,9 +51,14 @@ fn ext4_tools_available() -> bool {
 const FILE_CONTENT: &[u8] = b"hello from FrankenFS reference test\n";
 const LARGE_FILE_CONTENT: &[u8] = b"hello from FrankenFS 64mb geometry variant\n";
 const DIR_INDEX_FILE_CONTENT: &[u8] = b"hello from FrankenFS dir_index variant\n";
+const DIR_INDEX_HASH_SEED: &str = "11111111-2222-3333-4444-555555555555";
 // Keep this large enough that e2fsck -D reliably promotes /htree into a real
 // hash-indexed directory across supported e2fsprogs versions.
 const DIR_INDEX_FILE_COUNT: usize = 256;
+
+fn trace_ext4_tools() -> bool {
+    std::env::var_os("FFS_TRACE_EXT4_TOOLS").is_some()
+}
 
 fn create_reference_image(image_path: &Path) -> PathBuf {
     // Create 8MB zero file
@@ -62,10 +67,12 @@ fn create_reference_image(image_path: &Path) -> PathBuf {
     drop(f);
 
     // Format as ext4
-    eprintln!(
-        "mkfs.ext4 params: -L ffs-ref -b 4096 -q {}",
-        image_path.display()
-    );
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-ref -b 4096 -q {}",
+            image_path.display()
+        );
+    }
     let st = Command::new("mkfs.ext4")
         .args(["-L", "ffs-ref", "-b", "4096", "-q"])
         .arg(image_path)
@@ -96,7 +103,9 @@ fn create_reference_image(image_path: &Path) -> PathBuf {
 }
 
 fn run_debugfs_w(image: &Path, cmd: &str) {
-    eprintln!("debugfs params: -w -R {cmd:?} {}", image.display());
+    if trace_ext4_tools() {
+        eprintln!("debugfs params: -w -R {cmd:?} {}", image.display());
+    }
     let st = Command::new("debugfs")
         .args(["-w", "-R", cmd])
         .arg(image)
@@ -108,7 +117,9 @@ fn run_debugfs_w(image: &Path, cmd: &str) {
 }
 
 fn run_e2fsck_dir_index(image: &Path) {
-    eprintln!("e2fsck params: -fyD {}", image.display());
+    if trace_ext4_tools() {
+        eprintln!("e2fsck params: -fyD {}", image.display());
+    }
     let st = Command::new("e2fsck")
         .args(["-fyD"])
         .arg(image)
@@ -130,10 +141,12 @@ fn create_large_reference_image(image_path: &Path) -> PathBuf {
     f.set_len(64 * 1024 * 1024).expect("set image length");
     drop(f);
 
-    eprintln!(
-        "mkfs.ext4 params: -L ffs-ref-64 -b 4096 -q {}",
-        image_path.display()
-    );
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-ref-64 -b 4096 -q {}",
+            image_path.display()
+        );
+    }
     let st = Command::new("mkfs.ext4")
         .args(["-L", "ffs-ref-64", "-b", "4096", "-q"])
         .arg(image_path)
@@ -166,10 +179,12 @@ fn create_dir_index_reference_image(image_path: &Path) -> PathBuf {
     f.set_len(64 * 1024 * 1024).expect("set image length");
     drop(f);
 
-    eprintln!(
-        "mkfs.ext4 params: -L ffs-ref-dx -b 4096 -q -O dir_index {}",
-        image_path.display()
-    );
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-ref-dx -b 4096 -q -O dir_index {}",
+            image_path.display()
+        );
+    }
     let st = Command::new("mkfs.ext4")
         .args(["-L", "ffs-ref-dx", "-b", "4096", "-q", "-O", "dir_index"])
         .arg(image_path)
@@ -177,6 +192,10 @@ fn create_dir_index_reference_image(image_path: &Path) -> PathBuf {
         .status()
         .expect("run mkfs.ext4");
     assert!(st.success(), "mkfs.ext4 -O dir_index failed");
+    run_debugfs_w(
+        image_path,
+        &format!("set_super_value hash_seed {DIR_INDEX_HASH_SEED}"),
+    );
 
     run_debugfs_w(image_path, "mkdir /htree");
 
@@ -208,10 +227,12 @@ fn create_nojournal_image(image_path: &Path) -> PathBuf {
     drop(f);
 
     // Format as ext4 without journal (-O ^has_journal)
-    eprintln!(
-        "mkfs.ext4 params: -L ffs-nojournal -b 4096 -q -O ^has_journal {}",
-        image_path.display()
-    );
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-nojournal -b 4096 -q -O ^has_journal {}",
+            image_path.display()
+        );
+    }
     let st = Command::new("mkfs.ext4")
         .args([
             "-L",
@@ -1006,6 +1027,11 @@ fn ext4_dir_index_reference_image_materializes_real_htree() {
 
     let image = std::fs::read(&tmp).expect("read image");
     let reader = Ext4ImageReader::new(&image).expect("parse ext4 image");
+    assert_eq!(
+        reader.sb.hash_seed,
+        [0x11111111, 0x33332222, 0x55554444, 0x55555555],
+        "dir_index reference image should pin the hash seed for reproducibility"
+    );
     assert_eq!(
         reader.sb.def_hash_version, 1,
         "mkfs.ext4 dir_index reference should default to half_md4"

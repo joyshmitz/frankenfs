@@ -3822,12 +3822,12 @@ impl Ext4ImageReader {
                 [frames.last().expect("root frame").idx]
                 .block;
             let Some(child_phys) = self.resolve_extent(image, dir_inode, child_block)? else {
-                return Ok(None);
+                return self.lookup(image, dir_inode, name);
             };
             let child_data = self.read_block(image, ffs_types::BlockNumber(child_phys))?;
             let child_entries = parse_dx_entries(child_data, 8)?;
             if child_entries.is_empty() {
-                return Ok(None);
+                return self.lookup(image, dir_inode, name);
             }
             let child_idx = dx_find_leaf_idx(&child_entries, hash);
             frames.push(Frame {
@@ -3841,7 +3841,7 @@ impl Ext4ImageReader {
                 [frames.last().expect("leaf frame").idx]
                 .block;
             let Some(leaf_phys) = self.resolve_extent(image, dir_inode, leaf_block)? else {
-                return Ok(None);
+                return self.lookup(image, dir_inode, name);
             };
             let leaf_data = self.read_block(image, ffs_types::BlockNumber(leaf_phys))?;
             let (entries, _) = parse_dir_block(leaf_data, self.sb.block_size)?;
@@ -3856,31 +3856,36 @@ impl Ext4ImageReader {
                     break;
                 }
                 if level == 0 {
-                    return Ok(None);
+                    break;
                 }
                 level -= 1;
+            }
+            if level == 0 && frames[level].idx >= frames[level].entries.len() {
+                break;
             }
 
             let next_hash = frames[level].entries[frames[level].idx].hash;
             if (hash & 1) == 0 && (next_hash & !1) != hash {
-                return Ok(None);
+                break;
             }
 
             while level + 1 < frames.len() {
                 let child_block = frames[level].entries[frames[level].idx].block;
                 let Some(child_phys) = self.resolve_extent(image, dir_inode, child_block)? else {
-                    return Ok(None);
+                    return self.lookup(image, dir_inode, name);
                 };
                 let child_data = self.read_block(image, ffs_types::BlockNumber(child_phys))?;
                 let child_entries = parse_dx_entries(child_data, 8)?;
                 if child_entries.is_empty() {
-                    return Ok(None);
+                    return self.lookup(image, dir_inode, name);
                 }
                 level += 1;
                 frames[level].entries = child_entries;
                 frames[level].idx = 0;
             }
         }
+
+        self.lookup(image, dir_inode, name)
     }
 
     /// Read a directory block and parse its entries.
