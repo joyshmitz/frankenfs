@@ -2,8 +2,9 @@
 
 use asupersync::Cx;
 use ffs_btrfs::{
-    BTRFS_CHUNK_TREE_OBJECTID, BTRFS_ITEM_CHUNK, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
-    BtrfsDeviceSet, SendCommand, parse_send_stream, replay_tree_log, walk_chunk_tree,
+    BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
+    BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC, BtrfsDeviceSet, SendCommand, parse_send_stream,
+    replay_tree_log, walk_chunk_tree, walk_device_tree,
 };
 use ffs_core::{OpenFs, OpenOptions};
 use ffs_harness::{
@@ -15,8 +16,8 @@ use ffs_harness::{
 };
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock, Ext4IncompatFeatures, Ext4Superblock,
-    ExtentTree, lookup_in_dir_block_casefold, parse_dir_block, stamp_dir_block_checksum,
-    verify_dir_block_checksum,
+    ExtentTree, lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block,
+    stamp_dir_block_checksum, verify_dir_block_checksum,
 };
 use ffs_types::{EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, InodeNumber, ParseError};
 use serde_json::Value;
@@ -776,6 +777,30 @@ fn build_chunk_item_payload(
     data
 }
 
+fn build_dev_item_payload(
+    devid: u64,
+    total_bytes: u64,
+    bytes_used: u64,
+    generation: u64,
+    start_offset: u64,
+) -> Vec<u8> {
+    let mut data = vec![0_u8; 98];
+    data[0..8].copy_from_slice(&devid.to_le_bytes());
+    data[8..16].copy_from_slice(&total_bytes.to_le_bytes());
+    data[16..24].copy_from_slice(&bytes_used.to_le_bytes());
+    data[24..28].copy_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    data[28..32].copy_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    data[32..36].copy_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    data[44..52].copy_from_slice(&generation.to_le_bytes());
+    data[52..60].copy_from_slice(&start_offset.to_le_bytes());
+    let devid_byte = u8::try_from(devid).expect("test devid should fit in u8");
+    data[64] = devid_byte;
+    data[65] = 100_u8.saturating_add(devid_byte);
+    data[66..82].fill(devid_byte);
+    data[82..98].fill(0xF0_u8.saturating_add(devid_byte));
+    data
+}
+
 #[test]
 fn btrfs_send_stream_multi_command_conforms() {
     let mut data = Vec::new();
@@ -966,6 +991,100 @@ fn btrfs_chunk_tree_walk_adds_and_sorts_new_chunks() {
     assert_eq!(chunks[1].stripe_len, 0x10_000);
     assert_eq!(chunks[1].stripes[0].devid, 2);
     assert_eq!(chunks[1].stripes[0].offset, 0x90_000);
+}
+
+#[test]
+fn btrfs_device_tree_walk_enumerates_all_devices() {
+    let root_logical = 0x20_000_u64;
+    let leaf_logical = 0x30_000_u64;
+    let physical_start = 0xA0_000_u64;
+    let chunk_length = leaf_logical + u64::from(BTRFS_TEST_NODESIZE) - root_logical;
+    let chunks = vec![build_single_stripe_chunk(
+        root_logical,
+        chunk_length,
+        physical_start,
+    )];
+    let root_physical = physical_start;
+    let leaf_physical = physical_start + (leaf_logical - root_logical);
+
+    let mut root = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
+    write_btrfs_header(&mut root, root_logical, 1, 1, BTRFS_DEV_TREE_OBJECTID, 88);
+    write_btrfs_key_ptr(&mut root, 0, 1, BTRFS_ITEM_DEV_ITEM, leaf_logical, 88);
+
+    let mut leaf = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
+    write_btrfs_header(&mut leaf, leaf_logical, 2, 0, BTRFS_DEV_TREE_OBJECTID, 88);
+    let first_payload = build_dev_item_payload(
+        1,
+        1024 * 1024 * 1024 * 1024_u64,
+        512 * 1024 * 1024 * 1024_u64,
+        88,
+        1024 * 1024_u64,
+    );
+    let second_payload = build_dev_item_payload(
+        2,
+        2 * 1024 * 1024 * 1024 * 1024_u64,
+        1024 * 1024 * 1024 * 1024_u64,
+        89,
+        2 * 1024 * 1024_u64,
+    );
+    let first_off = 3600_u32;
+    let second_off = 3490_u32;
+    write_btrfs_leaf_item(
+        &mut leaf,
+        0,
+        1,
+        BTRFS_ITEM_DEV_ITEM,
+        1,
+        first_off,
+        u32::try_from(first_payload.len()).expect("payload length should fit in u32"),
+    );
+    write_btrfs_leaf_item(
+        &mut leaf,
+        1,
+        2,
+        BTRFS_ITEM_DEV_ITEM,
+        2,
+        second_off,
+        u32::try_from(second_payload.len()).expect("payload length should fit in u32"),
+    );
+    let first_end = first_off as usize + first_payload.len();
+    leaf[first_off as usize..first_end].copy_from_slice(&first_payload);
+    let second_end = second_off as usize + second_payload.len();
+    leaf[second_off as usize..second_end].copy_from_slice(&second_payload);
+
+    let blocks: HashMap<u64, Vec<u8>> = [(root_physical, root), (leaf_physical, leaf)]
+        .into_iter()
+        .collect();
+    let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
+        blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+            field: "physical",
+            reason: "block not in test image",
+        })
+    };
+
+    let items = walk_device_tree(&mut read, root_logical, &chunks, BTRFS_TEST_NODESIZE)
+        .expect("walk device tree");
+    assert_eq!(
+        items.len(),
+        2,
+        "device tree should return both DEV_ITEM entries"
+    );
+    assert_eq!(items[0].key.objectid, 1);
+    assert_eq!(items[0].key.item_type, BTRFS_ITEM_DEV_ITEM);
+    assert_eq!(items[1].key.objectid, 2);
+    assert_eq!(items[1].key.item_type, BTRFS_ITEM_DEV_ITEM);
+
+    let first_dev = parse_dev_item(&items[0].data).expect("first DEV_ITEM should parse");
+    assert_eq!(first_dev.devid, 1);
+    assert_eq!(first_dev.total_bytes, 1024 * 1024 * 1024 * 1024_u64);
+    assert_eq!(first_dev.bytes_used, 512 * 1024 * 1024 * 1024_u64);
+    assert_eq!(first_dev.start_offset, 1024 * 1024_u64);
+
+    let second_dev = parse_dev_item(&items[1].data).expect("second DEV_ITEM should parse");
+    assert_eq!(second_dev.devid, 2);
+    assert_eq!(second_dev.total_bytes, 2 * 1024 * 1024 * 1024 * 1024_u64);
+    assert_eq!(second_dev.bytes_used, 1024 * 1024 * 1024 * 1024_u64);
+    assert_eq!(second_dev.start_offset, 2 * 1024 * 1024_u64);
 }
 
 #[test]
@@ -1465,6 +1584,7 @@ fn full_conformance_gate_pass() {
     btrfs_tree_log_replay_multilevel_conforms();
     btrfs_tree_log_replay_skips_when_log_root_absent();
     btrfs_chunk_tree_walk_adds_and_sorts_new_chunks();
+    btrfs_device_tree_walk_enumerates_all_devices();
     btrfs_multi_device_raid1_read_falls_back_to_second_mirror();
     btrfs_multi_device_raid0_dispatches_to_correct_stripe();
     btrfs_chunk_mapping_fixture_conforms();
