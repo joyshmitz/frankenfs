@@ -2,11 +2,11 @@
 
 use ffs_types as crc32c;
 use ffs_types::{
-    EXT4_EXTENTS_FL, EXT4_FAST_SYMLINK_MAX, EXT4_HUGE_FILE_FL, EXT4_INDEX_FL,
-    EXT4_SB_CHECKSUM_OFFSET, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE,
-    EXT4_XATTR_MAGIC, GroupNumber, InodeNumber, ParseError, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
-    S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, ensure_slice, ext4_block_size_from_log, read_fixed,
-    read_le_u16, read_le_u32, trim_nul_padded,
+    ensure_slice, ext4_block_size_from_log, read_fixed, read_le_u16, read_le_u32, trim_nul_padded,
+    GroupNumber, InodeNumber, ParseError, EXT4_EXTENTS_FL, EXT4_FAST_SYMLINK_MAX,
+    EXT4_HUGE_FILE_FL, EXT4_INDEX_FL, EXT4_SB_CHECKSUM_OFFSET, EXT4_SUPERBLOCK_OFFSET,
+    EXT4_SUPERBLOCK_SIZE, EXT4_SUPER_MAGIC, EXT4_XATTR_MAGIC, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
+    S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1277,7 +1277,11 @@ pub fn block_bitmap_checksum_value(
 ) -> u32 {
     let checksum_len = (clusters_per_group / 8) as usize;
     let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, checksum_len);
-    if desc_size >= 64 { csum } else { csum & 0xFFFF }
+    if desc_size >= 64 {
+        csum
+    } else {
+        csum & 0xFFFF
+    }
 }
 
 #[must_use]
@@ -1289,7 +1293,11 @@ pub fn inode_bitmap_checksum_value(
 ) -> u32 {
     let checksum_len = (inodes_per_group / 8) as usize;
     let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, checksum_len);
-    if desc_size >= 64 { csum } else { csum & 0xFFFF }
+    if desc_size >= 64 {
+        csum
+    } else {
+        csum & 0xFFFF
+    }
 }
 
 pub fn verify_block_bitmap_checksum(
@@ -3803,16 +3811,11 @@ impl Ext4ImageReader {
 
         // Hash the name using the hash version from the DX root
         let (hash, _minor) = dx_hash(dx_root.hash_version, name, &self.sb.hash_seed);
-        #[derive(Debug, Clone)]
-        struct Frame {
-            entries: Vec<Ext4DxEntry>,
-            idx: usize,
-        }
 
         let indirect_levels = usize::from(dx_root.indirect_levels);
         let root_entries = dx_root.entries;
         let root_idx = dx_find_leaf_idx(&root_entries, hash);
-        let mut frames = vec![Frame {
+        let mut frames = vec![Ext4DxFrame {
             entries: root_entries,
             idx: root_idx,
         }];
@@ -3830,7 +3833,7 @@ impl Ext4ImageReader {
                 return self.lookup(image, dir_inode, name);
             }
             let child_idx = dx_find_leaf_idx(&child_entries, hash);
-            frames.push(Frame {
+            frames.push(Ext4DxFrame {
                 entries: child_entries,
                 idx: child_idx,
             });
@@ -4189,7 +4192,11 @@ fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
         }
     }
     // lo-1 is the rightmost entry with hash <= target (lo >= 1 due to sentinel)
-    if lo > 0 { lo - 1 } else { 0 }
+    if lo > 0 {
+        lo - 1
+    } else {
+        0
+    }
 }
 
 /// Find the leaf block for a given hash in a sorted DX entry list.
@@ -4197,6 +4204,12 @@ fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
 fn dx_find_leaf(entries: &[Ext4DxEntry], hash: u32) -> u32 {
     let idx = dx_find_leaf_idx(entries, hash);
     entries[idx].block
+}
+
+#[derive(Debug, Clone)]
+struct Ext4DxFrame {
+    entries: Vec<Ext4DxEntry>,
+    idx: usize,
 }
 
 // ── ext4 directory hash functions ───────────────────────────────────────────
@@ -4209,6 +4222,8 @@ const DX_HASH_LEGACY_UNSIGNED: u8 = 3;
 const _DX_HASH_HALF_MD4_UNSIGNED: u8 = 4;
 const DX_HASH_TEA_UNSIGNED: u8 = 5;
 const _DX_HASH_SIPHASH: u8 = 6;
+const EXT4_HTREE_EOF_32BIT: u32 = (1_u32 << 31) - 1;
+const DX_HASH_DEFAULT_SEED: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
 
 /// Compute the ext4 directory hash for a filename.
 ///
@@ -4216,7 +4231,7 @@ const _DX_HASH_SIPHASH: u8 = 6;
 /// and whether characters are treated as signed or unsigned.
 #[must_use]
 pub fn dx_hash(hash_version: u8, name: &[u8], seed: &[u32; 4]) -> (u32, u32) {
-    match hash_version {
+    let (major_hash, minor_hash) = match hash_version {
         DX_HASH_LEGACY => dx_hash_legacy(name, true),
         DX_HASH_LEGACY_UNSIGNED => dx_hash_legacy(name, false),
         DX_HASH_HALF_MD4 => dx_hash_half_md4(name, seed, true),
@@ -4224,10 +4239,33 @@ pub fn dx_hash(hash_version: u8, name: &[u8], seed: &[u32; 4]) -> (u32, u32) {
         DX_HASH_TEA_UNSIGNED => dx_hash_tea(name, seed, false),
         // DX_HASH_HALF_MD4_UNSIGNED and any unknown versions default to half_md4 unsigned
         _ => dx_hash_half_md4(name, seed, false),
+    };
+
+    (normalize_dx_major_hash(major_hash), minor_hash)
+}
+
+/// ext4 stores directory hash cursors as signed 32-bit values, so the major
+/// hash reserves the low bit and skips the sentinel EOF position.
+#[must_use]
+fn normalize_dx_major_hash(hash: u32) -> u32 {
+    let hash = hash & !1;
+    if hash == (EXT4_HTREE_EOF_32BIT << 1) {
+        (EXT4_HTREE_EOF_32BIT - 1) << 1
+    } else {
+        hash
     }
 }
 
-/// Legacy (r5) hash function — simple polynomial hash.
+#[must_use]
+fn dx_hash_seed_state(seed: &[u32; 4]) -> [u32; 4] {
+    if seed.iter().any(|word| *word != 0) {
+        *seed
+    } else {
+        DX_HASH_DEFAULT_SEED
+    }
+}
+
+/// Legacy (r5) hash function — matches the kernel's `dx_hack_hash_*` helpers.
 #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)] // intentional signed char semantics
 fn dx_hash_legacy(name: &[u8], signed: bool) -> (u32, u32) {
     let mut h0: u32 = 0x12a3_fe2d;
@@ -4239,12 +4277,15 @@ fn dx_hash_legacy(name: &[u8], signed: bool) -> (u32, u32) {
         } else {
             u32::from(b)
         };
-        h0 = h0.wrapping_add(h0.wrapping_shl(4)).wrapping_add(val);
-        h1 = h1.wrapping_add(h1.wrapping_shl(4)).wrapping_add(val);
+        let mut hash = h1.wrapping_add(h0 ^ val.wrapping_mul(7_152_373));
+        if (hash & 0x8000_0000) != 0 {
+            hash = hash.wrapping_sub(0x7fff_ffff);
+        }
+        h1 = h0;
+        h0 = hash;
     }
 
-    // Fold to produce major/minor
-    (h0 & !1, h1) // clear low bit of major (reserved by ext4)
+    (h0.wrapping_shl(1), 0)
 }
 
 /// Half-MD4 hash function — used by most ext4 filesystems.
@@ -4252,10 +4293,7 @@ fn dx_hash_legacy(name: &[u8], signed: bool) -> (u32, u32) {
 /// This implements the str2hashbuf + half-MD4 transform from the kernel.
 #[allow(clippy::cast_possible_wrap)] // intentional signed char semantics
 fn dx_hash_half_md4(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
-    let mut a = seed[0];
-    let mut b = seed[1];
-    let mut c = seed[2];
-    let mut d = seed[3];
+    let [mut a, mut b, mut c, mut d] = dx_hash_seed_state(seed);
 
     let mut offset = 0;
     while offset < name.len() {
@@ -4265,14 +4303,13 @@ fn dx_hash_half_md4(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
         offset += chunk_len;
     }
 
-    (a & !1, b) // clear low bit of major
+    (b, c)
 }
 
 /// TEA (Tiny Encryption Algorithm) hash — an alternative ext4 hash.
 #[allow(clippy::cast_possible_wrap)]
 fn dx_hash_tea(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
-    let mut a = seed[0];
-    let mut b = seed[1];
+    let [mut a, mut b, _, _] = dx_hash_seed_state(seed);
 
     let mut offset = 0;
     while offset < name.len() {
@@ -4282,7 +4319,7 @@ fn dx_hash_tea(name: &[u8], seed: &[u32; 4], signed: bool) -> (u32, u32) {
         offset += chunk_len;
     }
 
-    (a & !1, b)
+    (a, b)
 }
 
 /// Convert a filename chunk to a u32 buffer for hashing.
@@ -4353,6 +4390,10 @@ fn half_md4_transform(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, buf: &
 
     // Ensure we have 8 words; pad with zero if shorter
     let get = |i: usize| -> u32 { buf.get(i).copied().unwrap_or(0) };
+    let orig_a = *a;
+    let orig_b = *b;
+    let orig_c = *c;
+    let orig_d = *d;
 
     // Round 1: F(x,y,z) = (x & y) | (!x & z)
     macro_rules! ff {
@@ -4404,14 +4445,19 @@ fn half_md4_transform(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, buf: &
         };
     }
 
-    hh!(*a, *b, *c, *d, 0, 3);
-    hh!(*d, *a, *b, *c, 4, 9);
-    hh!(*c, *d, *a, *b, 7, 11);
-    hh!(*b, *c, *d, *a, 2, 15);
-    hh!(*a, *b, *c, *d, 6, 3);
-    hh!(*d, *a, *b, *c, 1, 9);
-    hh!(*c, *d, *a, *b, 3, 11);
-    hh!(*b, *c, *d, *a, 5, 15);
+    hh!(*a, *b, *c, *d, 3, 3);
+    hh!(*d, *a, *b, *c, 7, 9);
+    hh!(*c, *d, *a, *b, 2, 11);
+    hh!(*b, *c, *d, *a, 6, 15);
+    hh!(*a, *b, *c, *d, 1, 3);
+    hh!(*d, *a, *b, *c, 5, 9);
+    hh!(*c, *d, *a, *b, 0, 11);
+    hh!(*b, *c, *d, *a, 4, 15);
+
+    *a = orig_a.wrapping_add(*a);
+    *b = orig_b.wrapping_add(*b);
+    *c = orig_c.wrapping_add(*c);
+    *d = orig_d.wrapping_add(*d);
 }
 
 /// TEA (Tiny Encryption Algorithm) transform.
@@ -4711,8 +4757,8 @@ mod tests {
         sb[0x18..0x1C].copy_from_slice(&0_u32.to_le_bytes()); // log_block_size=0 -> 1K
         sb[0x1C..0x20].copy_from_slice(&0_u32.to_le_bytes()); // log_cluster_size=0
         sb[0x14..0x18].copy_from_slice(&0_u32.to_le_bytes()); // first_data_block = 0 (wrong)
-        // Adjust blocks_per_group and inodes_per_group for 1K blocks.
-        // 1K * 8 = 8192 max blocks per group.
+                                                              // Adjust blocks_per_group and inodes_per_group for 1K blocks.
+                                                              // 1K * 8 = 8192 max blocks per group.
         sb[0x20..0x24].copy_from_slice(&8192_u32.to_le_bytes());
         sb[0x24..0x28].copy_from_slice(&8192_u32.to_le_bytes());
         sb[0x28..0x2C].copy_from_slice(&2048_u32.to_le_bytes()); // inodes_per_group
@@ -5960,11 +6006,9 @@ mod tests {
         assert_eq!(inode.generation, 1);
 
         // Inode 0 should be rejected
-        assert!(
-            reader
-                .read_inode(&image, ffs_types::InodeNumber(0))
-                .is_err()
-        );
+        assert!(reader
+            .read_inode(&image, ffs_types::InodeNumber(0))
+            .is_err());
 
         // Read a block
         let block_data = reader
@@ -7025,7 +7069,7 @@ mod tests {
         data[4..8].copy_from_slice(&0_u32.to_le_bytes()); // value_block (unused)
         data[8..12].copy_from_slice(&3_u32.to_le_bytes()); // value_size=3
         data[12..16].copy_from_slice(&0_u32.to_le_bytes()); // hash (unused)
-        // Name: "test" at byte 16
+                                                            // Name: "test" at byte 16
         data[16..20].copy_from_slice(b"test");
 
         // Value at offset 128: "val"
@@ -7124,7 +7168,7 @@ mod tests {
         buf[entry_start + 2..entry_start + 4].copy_from_slice(&value_offs.to_le_bytes());
         // entry_start + 4..8 = e_value_block (unused, stays zero)
         buf[entry_start + 8..entry_start + 12].copy_from_slice(&5_u32.to_le_bytes()); // value_size=5
-        // entry_start + 12..16 = e_hash (unused, stays zero)
+                                                                                      // entry_start + 12..16 = e_hash (unused, stays zero)
         buf[entry_start + 16..entry_start + 20].copy_from_slice(b"mime");
 
         // Value at ibody_start + value_offs
@@ -7161,9 +7205,9 @@ mod tests {
         block[32] = 3; // name_len=3
         block[33] = ffs_types::EXT4_XATTR_INDEX_SECURITY;
         block[34..36].copy_from_slice(&200_u16.to_le_bytes()); // value_offs from block start
-        // block[36..40] = e_value_block (unused, stays zero)
+                                                               // block[36..40] = e_value_block (unused, stays zero)
         block[40..44].copy_from_slice(&4_u32.to_le_bytes()); // value_size
-        // block[44..48] = e_hash (unused, stays zero)
+                                                             // block[44..48] = e_hash (unused, stays zero)
         block[48..51].copy_from_slice(b"cap");
         block[200..204].copy_from_slice(b"data");
 
@@ -7263,6 +7307,40 @@ mod tests {
         let (h_tea, _) = super::dx_hash(2, name, &seed);
         let (h_tea_direct, _) = super::dx_hash_tea(name, &seed, true);
         assert_eq!(h_tea, h_tea_direct);
+    }
+
+    #[test]
+    fn dx_hash_matches_kernel_reference_vectors() {
+        let seed = [0x1111_1111, 0x3333_2222, 0x5555_4444, 0x5555_5555];
+        let name = b"alpha_0000_xyz.dat";
+
+        assert_eq!(
+            super::dx_hash(DX_HASH_LEGACY, name, &seed),
+            (0xd1ef_1dde, 0)
+        );
+        assert_eq!(
+            super::dx_hash(DX_HASH_HALF_MD4, name, &seed),
+            (0x07b9_5998, 0x3c57_f807)
+        );
+        assert_eq!(
+            super::dx_hash(DX_HASH_TEA, name, &seed),
+            (0xc135_30d0, 0x8558_264c)
+        );
+    }
+
+    #[test]
+    fn dx_hash_uses_ext4_default_seed_when_superblock_seed_is_zero() {
+        let name = b"default-seed-check";
+        let zero_seed = [0_u32; 4];
+
+        assert_eq!(
+            super::dx_hash_half_md4(name, &zero_seed, true),
+            super::dx_hash_half_md4(name, &DX_HASH_DEFAULT_SEED, true)
+        );
+        assert_eq!(
+            super::dx_hash_tea(name, &zero_seed, true),
+            super::dx_hash_tea(name, &DX_HASH_DEFAULT_SEED, true)
+        );
     }
 
     // ── DX root parsing tests ───────────────────────────────────────────
@@ -8178,7 +8256,7 @@ mod tests {
         // Set blocks_count to a huge 64-bit value (via the 64-bit extension field).
         // blocks_count_lo = u32::MAX, blocks_count_hi = 1 → total > u32::MAX * bpg
         sb[0x04..0x08].copy_from_slice(&u32::MAX.to_le_bytes()); // blocks_count_lo
-        // Enable 64BIT feature so the hi field is honored.
+                                                                 // Enable 64BIT feature so the hi field is honored.
         let incompat = (Ext4IncompatFeatures::FILETYPE.0
             | Ext4IncompatFeatures::EXTENTS.0
             | Ext4IncompatFeatures::BIT64.0)

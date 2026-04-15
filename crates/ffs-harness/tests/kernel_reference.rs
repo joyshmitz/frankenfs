@@ -22,7 +22,7 @@
 //! - Extent mapping: collect_extents produces non-empty results for files
 
 use ffs_harness::{GoldenDirEntry, GoldenReference};
-use ffs_ondisk::{Ext4ImageReader, dx_hash, parse_dx_root};
+use ffs_ondisk::{dx_hash, parse_dx_root, Ext4ImageReader};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -370,8 +370,7 @@ fn capture_dx_hash_batch(
     for name in names {
         match hash_alg {
             Some(hash_alg) => {
-                writeln!(commands, "dx_hash -h {hash_alg} {name}")
-                    .expect("write dx_hash command");
+                writeln!(commands, "dx_hash -h {hash_alg} {name}").expect("write dx_hash command");
             }
             None => writeln!(commands, "dx_hash {name}").expect("write dx_hash command"),
         }
@@ -1101,7 +1100,11 @@ fn ext4_kernel_vs_ffs_dx_hash_reference() {
 
     let default_hashes = capture_dx_hash_batch(&tmp, None, &corpus);
     for (name, kernel_hash) in corpus.iter().zip(default_hashes.iter()) {
-        let actual = dx_hash(reader.sb.def_hash_version, name.as_bytes(), &reader.sb.hash_seed);
+        let actual = dx_hash(
+            reader.sb.def_hash_version,
+            name.as_bytes(),
+            &reader.sb.hash_seed,
+        );
         assert_eq!(
             actual,
             (kernel_hash.major, kernel_hash.minor),
