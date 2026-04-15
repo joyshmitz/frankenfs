@@ -20,9 +20,9 @@ pub mod xfstests;
 
 use anyhow::{Context, Result, bail};
 use ffs_ondisk::{
-    BtrfsHeader, BtrfsItem, BtrfsSuperblock, Ext4DirEntry, Ext4GroupDesc, Ext4Inode,
-    Ext4Superblock, map_logical_to_physical, parse_dir_block, parse_leaf_items,
-    parse_sys_chunk_array,
+    BtrfsHeader, BtrfsItem, BtrfsSuperblock, Ext4DirEntry, Ext4ExtentHeader, Ext4GroupDesc,
+    Ext4Inode, Ext4Superblock, ExtentTree, map_logical_to_physical, parse_dir_block,
+    parse_extent_tree, parse_leaf_items, parse_sys_chunk_array,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -365,6 +365,14 @@ pub fn validate_btrfs_leaf_fixture(path: &Path) -> Result<(BtrfsHeader, Vec<Btrf
         .validate(data.len(), None)
         .with_context(|| format!("header validation failed for fixture {}", path.display()))?;
     Ok((header, items))
+}
+
+/// Validate an ext4 extent tree fixture (leaf or internal node).
+pub fn validate_extent_tree_fixture(path: &Path) -> Result<(Ext4ExtentHeader, ExtentTree)> {
+    let data = load_sparse_fixture(path)?;
+    let (header, tree) = parse_extent_tree(&data)
+        .with_context(|| format!("failed extent tree parse for fixture {}", path.display()))?;
+    Ok((header, tree))
 }
 
 // ── Golden reference types ────────────────────────────────────────

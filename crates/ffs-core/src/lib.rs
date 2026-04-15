@@ -19,8 +19,8 @@ pub use ffs_block::RepairFlushLifecycle;
 use asupersync::{Cx, RaptorQConfig};
 use ffs_alloc::{AllocHint, FsGeometry, GroupStats, PersistCtx, bitmap_count_free, bitmap_get};
 use ffs_block::{
-    BlockBuf, BlockDevice, ByteDevice, FileByteDevice, RepairFlushLifecycle,
-    read_btrfs_superblock_region, read_ext4_superblock_region,
+    BlockBuf, BlockDevice, ByteDevice, FileByteDevice, read_btrfs_superblock_region,
+    read_ext4_superblock_region,
 };
 use ffs_btrfs::{
     BTRFS_BLOCK_GROUP_DATA, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,

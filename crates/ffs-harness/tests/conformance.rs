@@ -7,10 +7,10 @@ use ffs_harness::{
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     load_sparse_fixture, validate_btrfs_chunk_fixture, validate_btrfs_fixture,
     validate_btrfs_leaf_fixture, validate_dir_block_fixture, validate_ext4_fixture,
-    validate_group_desc_fixture, validate_inode_fixture,
+    validate_extent_tree_fixture, validate_group_desc_fixture, validate_inode_fixture,
 };
 use ffs_ondisk::{
-    lookup_in_dir_block_casefold, parse_dir_block, stamp_dir_block_checksum,
+    ExtentTree, lookup_in_dir_block_casefold, parse_dir_block, stamp_dir_block_checksum,
     verify_dir_block_checksum,
 };
 use ffs_types::ParseError;
@@ -134,6 +134,69 @@ fn ext4_inline_data_with_continuation_fixture_conforms() {
         continuation.value.iter().all(|&b| b == b'B'),
         "continuation should contain 'B' bytes"
     );
+}
+
+#[test]
+fn ext4_extent_tree_leaf_fixture_conforms() {
+    let (header, tree) = validate_extent_tree_fixture(&fixture_path("ext4_extent_tree_leaf.json"))
+        .expect("extent tree leaf");
+
+    assert_eq!(header.magic, 0xF30A, "should have extent magic");
+    assert_eq!(header.entries, 3, "should have 3 extents");
+    assert_eq!(header.max_entries, 4, "max_entries should be 4");
+    assert_eq!(header.depth, 0, "should be leaf (depth=0)");
+
+    let extents = match tree {
+        ExtentTree::Leaf(extents) => extents,
+        ExtentTree::Index(_) => panic!("expected leaf, got index"),
+    };
+
+    assert_eq!(extents.len(), 3, "should have 3 extents");
+
+    // Extent 0: logical 0, len 8, physical 256
+    assert_eq!(extents[0].logical_block, 0);
+    assert_eq!(extents[0].actual_len(), 8);
+    assert_eq!(extents[0].physical_start, 256);
+    assert!(!extents[0].is_unwritten());
+
+    // Extent 1: logical 8, len 16, physical 264
+    assert_eq!(extents[1].logical_block, 8);
+    assert_eq!(extents[1].actual_len(), 16);
+    assert_eq!(extents[1].physical_start, 264);
+    assert!(!extents[1].is_unwritten());
+
+    // Extent 2: logical 24, len 4 (unwritten), physical 280
+    assert_eq!(extents[2].logical_block, 24);
+    assert_eq!(extents[2].actual_len(), 4);
+    assert_eq!(extents[2].physical_start, 280);
+    assert!(extents[2].is_unwritten(), "extent 2 should be unwritten");
+}
+
+#[test]
+fn ext4_extent_tree_index_fixture_conforms() {
+    let (header, tree) = validate_extent_tree_fixture(&fixture_path("ext4_extent_tree_index.json"))
+        .expect("extent tree index");
+
+    assert_eq!(header.magic, 0xF30A, "should have extent magic");
+    assert_eq!(header.entries, 2, "should have 2 index entries");
+    assert_eq!(header.max_entries, 3, "max_entries should be 3");
+    assert_eq!(header.depth, 1, "should be internal node (depth=1)");
+    assert_eq!(header.generation, 1, "generation should be 1");
+
+    let indices = match tree {
+        ExtentTree::Index(indices) => indices,
+        ExtentTree::Leaf(_) => panic!("expected index, got leaf"),
+    };
+
+    assert_eq!(indices.len(), 2, "should have 2 index entries");
+
+    // Index 0: logical 0, leaf block 512
+    assert_eq!(indices[0].logical_block, 0);
+    assert_eq!(indices[0].leaf_block, 512);
+
+    // Index 1: logical 4096, leaf block 513
+    assert_eq!(indices[1].logical_block, 4096);
+    assert_eq!(indices[1].leaf_block, 513);
 }
 
 #[test]

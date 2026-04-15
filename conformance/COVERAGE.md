@@ -1,0 +1,60 @@
+# Conformance Coverage Matrix
+
+> Tracks what's tested vs what's not. Score < 0.95 for MUST clauses = NOT conformant.
+
+## ext4 On-Disk Structures
+
+| Structure | Fixture | Test | MUST Clauses | Passing | Score | Notes |
+|-----------|:-------:|:----:|:------------:|:-------:|:-----:|-------|
+| Ext4Superblock | ✅ | ✅ | 12 | 12 | 100% | sparse + mkfs variants |
+| Ext4GroupDesc | ✅ | ✅ | 8 | 8 | 100% | 32-byte + 64-byte variants |
+| Ext4Inode | ✅ | ✅ | 10 | 10 | 100% | regular file + directory + inline data |
+| Ext4DirEntry | ✅ | ✅ | 6 | 6 | 100% | with tail, deleted, edge cases |
+| Ext4DirEntryTail | ✅ | ✅ | 3 | 3 | 100% | checksum verification |
+| Ext4Extent | ❌ | ❌ | 5 | 0 | 0% | **MISSING** - critical for file data |
+| Ext4ExtentHeader | ❌ | ❌ | 4 | 0 | 0% | **MISSING** |
+| Ext4ExtentIndex | ❌ | ❌ | 3 | 0 | 0% | **MISSING** |
+| Ext4Xattr (ibody) | ✅ | ✅ | 4 | 4 | 100% | via inline_data_with_continuation |
+| Ext4Xattr (block) | ❌ | ❌ | 4 | 0 | 0% | **MISSING** - external xattr blocks |
+| Ext4DxRoot | ❌ | ❌ | 3 | 0 | 0% | **MISSING** - htree root |
+| Ext4DxEntry | ❌ | ❌ | 2 | 0 | 0% | **MISSING** - htree entries |
+| Ext4MmpBlock | ❌ | ❌ | 2 | 0 | 0% | **MISSING** - multi-mount protection |
+
+**ext4 Total: 66 MUST clauses, 43 passing = 65.2%**
+
+## btrfs On-Disk Structures
+
+| Structure | Fixture | Test | MUST Clauses | Passing | Score | Notes |
+|-----------|:-------:|:----:|:------------:|:-------:|:-----:|-------|
+| BtrfsSuperblock | ✅ | ✅ | 15 | 15 | 100% | sparse + with_chunks variants |
+| BtrfsChunkEntry | ✅ | ✅ | 6 | 6 | 100% | via superblock sys_chunk_array |
+| BtrfsStripe | ✅ | ✅ | 3 | 3 | 100% | via chunk entries |
+| BtrfsHeader | ✅ | ✅ | 5 | 5 | 100% | via leaf fixtures |
+| BtrfsItem | ✅ | ✅ | 4 | 4 | 100% | via leaf fixtures |
+| BtrfsKey | ✅ | ✅ | 3 | 3 | 100% | via leaf fixtures |
+| BtrfsKeyPtr | ✅ | ✅ | 2 | 2 | 100% | internal node pointers |
+| BtrfsDevItem | ❌ | ❌ | 4 | 0 | 0% | **MISSING** - device tree items |
+| BtrfsRootItem | ✅ | ✅ | 5 | 5 | 100% | via roottree_leaf fixture |
+| BtrfsInodeItem | ✅ | ✅ | 6 | 6 | 100% | via fstree_leaf fixture |
+| BtrfsDirItem | ✅ | ✅ | 4 | 4 | 100% | via fstree_leaf fixture |
+| BtrfsExtentData | ✅ | ✅ | 5 | 5 | 100% | via fstree_leaf fixture |
+
+**btrfs Total: 62 MUST clauses, 58 passing = 93.5%**
+
+## Priority Gaps
+
+1. **ext4 Extent Tree** - Critical for file data mapping, no fixtures
+2. **ext4 HTree (DxRoot/DxEntry)** - Large directory support
+3. **ext4 External Xattr Blocks** - Extended attributes > 60 bytes
+4. **btrfs DevItem** - Multi-device support
+
+## Next Actions
+
+- [ ] Add ext4_extent_tree.json fixture (leaf + internal node)
+- [ ] Add ext4_htree_dir.json fixture (DxRoot + DxEntry)
+- [ ] Add ext4_xattr_block.json fixture
+- [ ] Add btrfs_devitem.json fixture
+
+---
+
+*Last updated: 2026-04-15*
