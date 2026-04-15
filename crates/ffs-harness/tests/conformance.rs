@@ -80,6 +80,63 @@ fn ext4_inode_fixtures_conform() {
 }
 
 #[test]
+fn ext4_inline_data_fixture_conforms() {
+    // Simple inline data inode (data fits in i_block field)
+    let inode = validate_inode_fixture(&fixture_path("ext4_inode_inline_data.json"))
+        .expect("inline data inode");
+    assert_eq!(
+        inode.mode & 0o17_0000,
+        0o10_0000,
+        "should be regular file"
+    );
+    assert_eq!(inode.size, 23, "inline data size should be 23 bytes");
+    assert_ne!(
+        inode.flags & ffs_types::EXT4_INLINE_DATA_FL,
+        0,
+        "should have INLINE_DATA flag"
+    );
+
+    // Check that extent_bytes contains the inline data ("Hello from inline data!")
+    let expected = b"Hello from inline data!";
+    assert_eq!(
+        &inode.extent_bytes[..expected.len()],
+        expected,
+        "i_block should contain inline data"
+    );
+}
+
+#[test]
+fn ext4_inline_data_with_continuation_fixture_conforms() {
+    // Inline data inode with system.data xattr continuation
+    let inode = validate_inode_fixture(&fixture_path("ext4_inode_inline_data_with_continuation.json"))
+        .expect("inline data inode with continuation");
+    assert_eq!(inode.size, 76, "inline data size should be 76 bytes (60 + 16)");
+    assert_ne!(
+        inode.flags & ffs_types::EXT4_INLINE_DATA_FL,
+        0,
+        "should have INLINE_DATA flag"
+    );
+
+    // Check i_block contains 60 bytes of 'A'
+    assert!(
+        inode.extent_bytes.iter().all(|&b| b == b'A'),
+        "i_block should contain 60 bytes of 'A'"
+    );
+
+    // Parse ibody xattrs to find system.data continuation
+    let xattrs = ffs_ondisk::parse_ibody_xattrs(&inode).expect("parse ibody xattrs");
+    let system_data = xattrs.iter().find(|x| x.name_index == 7 && x.name == b"data");
+    assert!(system_data.is_some(), "should have system.data xattr");
+
+    let continuation = system_data.unwrap();
+    assert_eq!(continuation.value.len(), 16, "continuation should be 16 bytes");
+    assert!(
+        continuation.value.iter().all(|&b| b == b'B'),
+        "continuation should contain 'B' bytes"
+    );
+}
+
+#[test]
 fn ext4_dir_block_fixture_conforms() {
     let entries =
         validate_dir_block_fixture(&fixture_path("ext4_dir_block.json"), 4096).expect("dir block");
