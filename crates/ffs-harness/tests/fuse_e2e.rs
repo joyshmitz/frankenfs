@@ -29,17 +29,27 @@ use tempfile::TempDir;
 const EOPNOTSUPP_ERRNO: i64 = 95;
 const BTRFS_TEST_WORKSPACE: &str = "testdir";
 
+fn command_available(name: &str) -> bool {
+    Command::new("which")
+        .arg(name)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn emit_scenario_result(scenario_id: &str, outcome: &str, detail: Option<&str>) {
+    match detail {
+        Some(detail) => {
+            eprintln!("SCENARIO_RESULT|scenario_id={scenario_id}|outcome={outcome}|detail={detail}")
+        }
+        None => eprintln!("SCENARIO_RESULT|scenario_id={scenario_id}|outcome={outcome}"),
+    }
+}
+
 /// Check if FUSE E2E prerequisites are met.
 fn fuse_available() -> bool {
     Path::new("/dev/fuse").exists()
-        && Command::new("which")
-            .arg("mkfs.ext4")
-            .output()
-            .is_ok_and(|o| o.status.success())
-        && Command::new("which")
-            .arg("debugfs")
-            .output()
-            .is_ok_and(|o| o.status.success())
+        && command_available("mkfs.ext4")
+        && command_available("debugfs")
 }
 
 /// Create a small ext4 image and populate it with test files using debugfs.
@@ -1885,11 +1895,7 @@ fn fuse_xattr_remove_nonexistent_fails() {
 
 /// Check if btrfs FUSE prerequisites are met.
 fn btrfs_fuse_available() -> bool {
-    Path::new("/dev/fuse").exists()
-        && Command::new("which")
-            .arg("mkfs.btrfs")
-            .output()
-            .is_ok_and(|o| o.status.success())
+    Path::new("/dev/fuse").exists() && command_available("mkfs.btrfs")
 }
 
 /// Create a small btrfs image and populate it with test files.
@@ -2359,6 +2365,166 @@ fn btrfs_fuse_write_large_file() {
         let readback = fs::read(&path).expect("read large file on btrfs");
         assert_eq!(readback.len(), 65536);
         assert_eq!(readback, data, "large file content should match on btrfs");
+    });
+}
+
+#[test]
+fn btrfs_fuse_fallocate_punch_hole_keep_size_zeroes_range() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fallocate_punch_hole_keep_size_zeroes_range";
+        let path = mnt.join("punch_hole.bin");
+        let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 251) + 1) as u8).collect();
+        fs::write(&path, &data).expect("seed punch-hole file on btrfs");
+
+        let out = Command::new("fallocate")
+            .args([
+                "--keep-size",
+                "--punch-hole",
+                "-o",
+                "4096",
+                "-l",
+                "4096",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("run fallocate --punch-hole --keep-size on btrfs");
+        assert!(
+            out.status.success(),
+            "btrfs keep-size punch-hole failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let meta = fs::metadata(&path).expect("stat after btrfs keep-size punch-hole");
+        assert_eq!(
+            meta.len(),
+            data.len() as u64,
+            "punch hole must preserve file size"
+        );
+
+        let readback = fs::read(&path).expect("read after btrfs keep-size punch-hole");
+        assert_eq!(&readback[..4096], &data[..4096], "prefix must be preserved");
+        assert!(
+            readback[4096..8192].iter().all(|&byte| byte == 0),
+            "punched range must read back as zeros"
+        );
+        assert_eq!(&readback[8192..], &data[8192..], "suffix must be preserved");
+        emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
+fn btrfs_fuse_fallocate_zero_range_zeroes_range() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fallocate_zero_range_zeroes_range";
+        let path = mnt.join("zero_range.bin");
+        let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 253) + 1) as u8).collect();
+        fs::write(&path, &data).expect("seed zero-range file on btrfs");
+
+        let out = Command::new("fallocate")
+            .args([
+                "--zero-range",
+                "-o",
+                "4096",
+                "-l",
+                "4096",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("run fallocate --zero-range on btrfs");
+        assert!(
+            out.status.success(),
+            "btrfs zero-range failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let meta = fs::metadata(&path).expect("stat after btrfs zero-range");
+        assert_eq!(
+            meta.len(),
+            data.len() as u64,
+            "zero-range must preserve file size"
+        );
+
+        let readback = fs::read(&path).expect("read after btrfs zero-range");
+        assert_eq!(&readback[..4096], &data[..4096], "prefix must be preserved");
+        assert!(
+            readback[4096..8192].iter().all(|&byte| byte == 0),
+            "zero-range span must read back as zeros"
+        );
+        assert_eq!(&readback[8192..], &data[8192..], "suffix must be preserved");
+        emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
+fn btrfs_fuse_unsupported_fallocate_mode_bits_errno_eopnotsupp() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_unsupported_fallocate_mode_bits_errno_eopnotsupp";
+        let path = mnt.join("unsupported_mode_bits.bin");
+        let data = b"keep-intact-on-unsupported-mode".to_vec();
+        fs::write(&path, &data).expect("seed unsupported-mode file on btrfs");
+
+        let script = r#"
+import ctypes
+import errno
+import os
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDWR)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong]
+libc.fallocate.restype = ctypes.c_int
+res = libc.fallocate(fd, 0x20, 0, 4096)
+err = ctypes.get_errno()
+os.close(fd)
+if res == 0:
+    print("res=0")
+    sys.exit(0)
+print(f"errno={err}")
+print(errno.errorcode.get(err, "UNKNOWN"))
+sys.exit(1)
+"#;
+        let out = Command::new("python3")
+            .args(["-c", script, path.to_str().unwrap()])
+            .output()
+            .expect("run unsupported-mode fallocate probe on btrfs");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !out.status.success(),
+            "unsupported mode bits should fail, got stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains(&format!("errno={EOPNOTSUPP_ERRNO}")),
+            "unsupported mode bits should surface errno {EOPNOTSUPP_ERRNO}, got: {stdout}"
+        );
+        assert!(
+            stdout.contains("EOPNOTSUPP") || stdout.contains("ENOTSUP"),
+            "unsupported mode bits should surface the errno-95 not-supported alias, got: {stdout}"
+        );
+
+        let meta = fs::metadata(&path).expect("stat after unsupported-mode rejection");
+        assert_eq!(
+            meta.len(),
+            data.len() as u64,
+            "unsupported mode rejection must preserve file size"
+        );
+        let readback = fs::read(&path).expect("read after unsupported-mode rejection");
+        assert_eq!(
+            readback, data,
+            "unsupported mode rejection must preserve file data"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=95"));
     });
 }
 
