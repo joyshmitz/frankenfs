@@ -22,9 +22,11 @@
 //! - Extent mapping: collect_extents produces non-empty results for files
 
 use ffs_harness::{GoldenDirEntry, GoldenReference};
-use ffs_ondisk::Ext4ImageReader;
+use ffs_ondisk::{Ext4ImageReader, dx_hash, parse_dx_root};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::NamedTempFile;
 
 // ── Tool availability ───────────────────────────────────────────
 
@@ -38,7 +40,10 @@ fn has_command(name: &str) -> bool {
 }
 
 fn ext4_tools_available() -> bool {
-    has_command("mkfs.ext4") && has_command("debugfs") && has_command("dumpe2fs")
+    has_command("mkfs.ext4")
+        && has_command("debugfs")
+        && has_command("dumpe2fs")
+        && has_command("e2fsck")
 }
 
 // ── Image creation ──────────────────────────────────────────────
@@ -46,7 +51,9 @@ fn ext4_tools_available() -> bool {
 const FILE_CONTENT: &[u8] = b"hello from FrankenFS reference test\n";
 const LARGE_FILE_CONTENT: &[u8] = b"hello from FrankenFS 64mb geometry variant\n";
 const DIR_INDEX_FILE_CONTENT: &[u8] = b"hello from FrankenFS dir_index variant\n";
-const DIR_INDEX_FILE_COUNT: usize = 180;
+// Keep this large enough that e2fsck -D reliably promotes /htree into a real
+// hash-indexed directory across supported e2fsprogs versions.
+const DIR_INDEX_FILE_COUNT: usize = 256;
 
 fn create_reference_image(image_path: &Path) -> PathBuf {
     // Create 8MB zero file
@@ -98,6 +105,23 @@ fn run_debugfs_w(image: &Path, cmd: &str) {
         .status()
         .expect("run debugfs");
     assert!(st.success(), "debugfs -w -R {cmd:?} failed");
+}
+
+fn run_e2fsck_dir_index(image: &Path) {
+    eprintln!("e2fsck params: -fyD {}", image.display());
+    let st = Command::new("e2fsck")
+        .args(["-fyD"])
+        .arg(image)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run e2fsck");
+
+    let code = st.code().unwrap_or(-1);
+    assert!(
+        matches!(code, 0 | 1),
+        "e2fsck -fyD failed with exit code {code}"
+    );
 }
 
 /// Create a larger ext4 image variant (64 MiB, 4 KiB blocks) for golden tests.
@@ -167,6 +191,10 @@ fn create_dir_index_reference_image(image_path: &Path) -> PathBuf {
         image_path,
         &format!("write {} /readme-dx.txt", content_path.display()),
     );
+    // debugfs population alone does not guarantee that /htree materializes an
+    // on-disk DX root. e2fsck -D rebuilds the directory index so the reference
+    // image actually exercises ext4's hash-tree lookup contract.
+    run_e2fsck_dir_index(image_path);
 
     std::fs::remove_file(&content_path).ok();
     image_path.to_path_buf()
@@ -291,6 +319,79 @@ fn capture_directory(image: &Path, dir: &str) -> Vec<KernelDirEntry> {
         });
     }
     entries
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KernelDxHash {
+    major: u32,
+    minor: u32,
+}
+
+fn parse_dx_hash_line(line: &str) -> Option<KernelDxHash> {
+    let major_marker = " is 0x";
+    let major_start = line.find(major_marker)? + major_marker.len();
+    let major_end = line[major_start..].find(' ')? + major_start;
+    let minor_marker = "(minor 0x";
+    let minor_start = line.find(minor_marker)? + minor_marker.len();
+    let minor_end = line[minor_start..].find(')')? + minor_start;
+    Some(KernelDxHash {
+        major: u32::from_str_radix(&line[major_start..major_end], 16).ok()?,
+        minor: u32::from_str_radix(&line[minor_start..minor_end], 16).ok()?,
+    })
+}
+
+fn capture_dx_hash_batch(
+    image: &Path,
+    hash_alg: Option<&str>,
+    names: &[String],
+) -> Vec<KernelDxHash> {
+    let mut commands = NamedTempFile::new().expect("create temp debugfs command file");
+    for name in names {
+        match hash_alg {
+            Some(hash_alg) => {
+                writeln!(commands, "dx_hash -h {hash_alg} {name}")
+                    .expect("write dx_hash command");
+            }
+            None => writeln!(commands, "dx_hash {name}").expect("write dx_hash command"),
+        }
+    }
+    commands.flush().expect("flush temp debugfs command file");
+
+    let out = Command::new("debugfs")
+        .args(["-f"])
+        .arg(commands.path())
+        .arg(image)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("run debugfs dx_hash batch");
+    assert!(out.status.success(), "debugfs dx_hash batch failed");
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let hashes: Vec<_> = text.lines().filter_map(parse_dx_hash_line).collect();
+    assert_eq!(
+        hashes.len(),
+        names.len(),
+        "expected {} dx_hash results, got {}.\n{text}",
+        names.len(),
+        hashes.len()
+    );
+    hashes
+}
+
+fn dx_hash_reference_corpus() -> Vec<String> {
+    (0..1000)
+        .map(|idx| {
+            let family = match idx % 5 {
+                0 => "alpha",
+                1 => "BETA",
+                2 => "gamma-branch",
+                3 => "delta.segment",
+                _ => "mix_42",
+            };
+            let repeated = "xyz".repeat((idx % 7) + 1);
+            format!("{family}_{idx:04}_{repeated}.dat")
+        })
+        .collect()
 }
 
 // ── Golden JSON helpers ─────────────────────────────────────────
@@ -891,6 +992,99 @@ fn ext4_variant_goldens_match_generated_images() {
     for variant in ext4_golden_variants() {
         assert_variant_matches_generated_image(&variant);
     }
+}
+
+#[test]
+fn ext4_dir_index_reference_image_materializes_real_htree() {
+    if !ext4_tools_available() {
+        eprintln!("SKIPPED: ext4 kernel tools not available");
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join("ffs_ref_real_htree.ext4");
+    create_dir_index_reference_image(&tmp);
+
+    let image = std::fs::read(&tmp).expect("read image");
+    let reader = Ext4ImageReader::new(&image).expect("parse ext4 image");
+    assert_eq!(
+        reader.sb.def_hash_version, 1,
+        "mkfs.ext4 dir_index reference should default to half_md4"
+    );
+
+    let (_, htree_inode) = reader
+        .resolve_path(&image, "/htree")
+        .expect("resolve /htree");
+    assert!(
+        htree_inode.has_htree_index(),
+        "/htree should have EXT4_INDEX_FL after e2fsck -D"
+    );
+
+    let block0 = reader
+        .resolve_extent(&image, &htree_inode, 0)
+        .expect("resolve htree logical block 0")
+        .expect("/htree should have a first data block");
+    let dx_root = parse_dx_root(
+        reader
+            .read_block(&image, ffs_types::BlockNumber(block0))
+            .expect("read htree root block"),
+    )
+    .expect("parse real dx_root");
+    assert_eq!(dx_root.hash_version, reader.sb.def_hash_version);
+    assert_eq!(dx_root.indirect_levels, 0);
+    assert!(
+        dx_root.entries.len() >= 2,
+        "htree root should have at least a sentinel plus one leaf entry"
+    );
+
+    for name in ["file_000.txt", "file_090.txt", "file_179.txt"] {
+        let entry = reader
+            .htree_lookup(&image, &htree_inode, name.as_bytes())
+            .unwrap_or_else(|err| panic!("htree_lookup {name}: {err}"))
+            .unwrap_or_else(|| panic!("htree_lookup {name} should find an entry"));
+        assert_eq!(entry.name_str(), name, "unexpected htree match for {name}");
+    }
+
+    std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
+fn ext4_kernel_vs_ffs_dx_hash_reference() {
+    if !ext4_tools_available() {
+        eprintln!("SKIPPED: ext4 kernel tools not available");
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join("ffs_ref_dx_hash.ext4");
+    create_dir_index_reference_image(&tmp);
+
+    let image = std::fs::read(&tmp).expect("read image");
+    let reader = Ext4ImageReader::new(&image).expect("parse ext4 image");
+    let corpus = dx_hash_reference_corpus();
+
+    for (hash_alg, version) in [("legacy", 0_u8), ("half_md4", 1_u8), ("tea", 2_u8)] {
+        let kernel_hashes = capture_dx_hash_batch(&tmp, Some(hash_alg), &corpus);
+        for (name, kernel_hash) in corpus.iter().zip(kernel_hashes.iter()) {
+            let actual = dx_hash(version, name.as_bytes(), &reader.sb.hash_seed);
+            assert_eq!(
+                actual,
+                (kernel_hash.major, kernel_hash.minor),
+                "dx_hash mismatch for alg={hash_alg} version={version} name={name}"
+            );
+        }
+    }
+
+    let default_hashes = capture_dx_hash_batch(&tmp, None, &corpus);
+    for (name, kernel_hash) in corpus.iter().zip(default_hashes.iter()) {
+        let actual = dx_hash(reader.sb.def_hash_version, name.as_bytes(), &reader.sb.hash_seed);
+        assert_eq!(
+            actual,
+            (kernel_hash.major, kernel_hash.minor),
+            "default dx_hash mismatch for version={} name={name}",
+            reader.sb.def_hash_version
+        );
+    }
+
+    std::fs::remove_file(&tmp).ok();
 }
 
 /// E2E: verify OpenFs bitmap-based free space counting matches kernel tools.

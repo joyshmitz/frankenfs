@@ -31,6 +31,18 @@ run() {
     "$@"
 }
 
+run_e2fsck_dir_index() {
+    log "RUN: e2fsck -fyD $1"
+    set +e
+    e2fsck -fyD "$1"
+    local rc=$?
+    set -e
+    if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+        log "e2fsck -fyD failed with exit code $rc"
+        exit "$rc"
+    fi
+}
+
 capture() {
     log "RUN (capture): $*"
     "$@"
@@ -92,7 +104,7 @@ printf 'hello from FrankenFS reference test\n' > "$BASE_CONTENT_FILE"
 printf 'hello from FrankenFS 64mb geometry variant\n' > "$METRICS_CONTENT_FILE"
 printf 'hello from FrankenFS dir_index variant\n' > "$DIR_INDEX_CONTENT_FILE"
 
-DIR_INDEX_FILE_COUNT=180
+DIR_INDEX_FILE_COUNT=256
 
 log "Tool versions:"
 log "mkfs.ext4: $(mkfs.ext4 -V 2>&1 | sed -n '1p')"
@@ -289,6 +301,12 @@ generate_variant() {
     for idx in "${!file_targets[@]}"; do
         run debugfs -w -R "write ${file_sources[$idx]} ${file_targets[$idx]}" "$image"
     done
+    if [[ "$variant" = "ext4_dir_index_reference" ]]; then
+        # debugfs population alone does not guarantee an on-disk DX root.
+        # Rebuild the directory index so the reference image actually exercises
+        # ext4 htree lookup behavior.
+        run_e2fsck_dir_index "$image"
+    fi
 
     local dumpe2fs_out
     dumpe2fs_out="$(capture dumpe2fs -h "$image")"
