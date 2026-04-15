@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use asupersync::Cx;
-use ffs_btrfs::{BTRFS_SEND_STREAM_MAGIC, SendCommand, parse_send_stream};
+use ffs_btrfs::{
+    BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC, SendCommand, parse_send_stream, replay_tree_log,
+};
 use ffs_core::{OpenFs, OpenOptions};
 use ffs_harness::{
     GoldenReference, ParityReport,
@@ -11,12 +13,13 @@ use ffs_harness::{
     validate_extent_tree_fixture, validate_group_desc_fixture, validate_inode_fixture,
 };
 use ffs_ondisk::{
-    Ext4IncompatFeatures, Ext4Superblock, ExtentTree, lookup_in_dir_block_casefold,
-    parse_dir_block, stamp_dir_block_checksum, verify_dir_block_checksum,
+    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock, Ext4IncompatFeatures, Ext4Superblock,
+    ExtentTree, lookup_in_dir_block_casefold, parse_dir_block, stamp_dir_block_checksum,
+    verify_dir_block_checksum,
 };
 use ffs_types::{EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, InodeNumber, ParseError};
 use serde_json::Value;
-use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
+use std::{collections::HashMap, ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -85,11 +88,7 @@ fn ext4_inline_data_fixture_conforms() {
     // Simple inline data inode (data fits in i_block field)
     let inode = validate_inode_fixture(&fixture_path("ext4_inode_inline_data.json"))
         .expect("inline data inode");
-    assert_eq!(
-        inode.mode & 0o17_0000,
-        0o10_0000,
-        "should be regular file"
-    );
+    assert_eq!(inode.mode & 0o17_0000, 0o10_0000, "should be regular file");
     assert_eq!(inode.size, 23, "inline data size should be 23 bytes");
     assert_ne!(
         inode.flags & ffs_types::EXT4_INLINE_DATA_FL,
@@ -109,9 +108,14 @@ fn ext4_inline_data_fixture_conforms() {
 #[test]
 fn ext4_inline_data_with_continuation_fixture_conforms() {
     // Inline data inode with system.data xattr continuation
-    let inode = validate_inode_fixture(&fixture_path("ext4_inode_inline_data_with_continuation.json"))
-        .expect("inline data inode with continuation");
-    assert_eq!(inode.size, 76, "inline data size should be 76 bytes (60 + 16)");
+    let inode = validate_inode_fixture(&fixture_path(
+        "ext4_inode_inline_data_with_continuation.json",
+    ))
+    .expect("inline data inode with continuation");
+    assert_eq!(
+        inode.size, 76,
+        "inline data size should be 76 bytes (60 + 16)"
+    );
     assert_ne!(
         inode.flags & ffs_types::EXT4_INLINE_DATA_FL,
         0,
@@ -126,11 +130,17 @@ fn ext4_inline_data_with_continuation_fixture_conforms() {
 
     // Parse ibody xattrs to find system.data continuation
     let xattrs = ffs_ondisk::parse_ibody_xattrs(&inode).expect("parse ibody xattrs");
-    let system_data = xattrs.iter().find(|x| x.name_index == 7 && x.name == b"data");
+    let system_data = xattrs
+        .iter()
+        .find(|x| x.name_index == 7 && x.name == b"data");
     assert!(system_data.is_some(), "should have system.data xattr");
 
     let continuation = system_data.unwrap();
-    assert_eq!(continuation.value.len(), 16, "continuation should be 16 bytes");
+    assert_eq!(
+        continuation.value.len(),
+        16,
+        "continuation should be 16 bytes"
+    );
     assert!(
         continuation.value.iter().all(|&b| b == b'B'),
         "continuation should contain 'B' bytes"
@@ -202,10 +212,9 @@ fn ext4_extent_tree_index_fixture_conforms() {
 
 #[test]
 fn ext4_htree_dx_root_fixture_conforms() {
-    let dx_root = ffs_harness::validate_htree_dx_root_fixture(&fixture_path(
-        "ext4_htree_dx_root.json",
-    ))
-    .expect("htree DX root");
+    let dx_root =
+        ffs_harness::validate_htree_dx_root_fixture(&fixture_path("ext4_htree_dx_root.json"))
+            .expect("htree DX root");
 
     assert_eq!(dx_root.hash_version, 1, "should use half_md4 (1)");
     assert_eq!(
@@ -231,9 +240,8 @@ fn ext4_htree_dx_root_fixture_conforms() {
 
 #[test]
 fn ext4_xattr_block_fixture_conforms() {
-    let xattrs =
-        ffs_harness::validate_xattr_block_fixture(&fixture_path("ext4_xattr_block.json"))
-            .expect("xattr block");
+    let xattrs = ffs_harness::validate_xattr_block_fixture(&fixture_path("ext4_xattr_block.json"))
+        .expect("xattr block");
 
     assert_eq!(xattrs.len(), 2, "should have 2 xattrs");
 
@@ -467,7 +475,9 @@ fn ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes() {
     let fs = OpenFs::open_with_options(&cx, tmp.path(), &OpenOptions::default())
         .expect("open encrypted ext4 image in nokey mode");
 
-    let raw_entries = fs.readdir(&cx, InodeNumber(2), 0).expect("readdir raw bytes");
+    let raw_entries = fs
+        .readdir(&cx, InodeNumber(2), 0)
+        .expect("readdir raw bytes");
     let encrypted = raw_entries
         .iter()
         .find(|entry| entry.name == raw_name)
@@ -582,6 +592,122 @@ fn append_send_stream_command(stream: &mut Vec<u8>, cmd: u16, attrs: &[(u16, &[u
     }
 }
 
+const BTRFS_TEST_NODESIZE: u32 = 4096;
+const BTRFS_TEST_HEADER_SIZE: usize = 101;
+const BTRFS_TEST_ITEM_SIZE: usize = 25;
+const BTRFS_TEST_KEY_PTR_SIZE: usize = 33;
+
+fn build_btrfs_tree_log_superblock(log_root: u64, log_root_level: u8) -> BtrfsSuperblock {
+    BtrfsSuperblock {
+        csum: [0; 32],
+        fsid: [0; 16],
+        bytenr: 0,
+        flags: 0,
+        magic: 0,
+        generation: 77,
+        root: 0,
+        chunk_root: 0,
+        log_root,
+        total_bytes: 0,
+        bytes_used: 0,
+        root_dir_objectid: 0,
+        num_devices: 1,
+        sectorsize: BTRFS_TEST_NODESIZE,
+        nodesize: BTRFS_TEST_NODESIZE,
+        stripesize: 0,
+        compat_flags: 0,
+        compat_ro_flags: 0,
+        incompat_flags: 0,
+        csum_type: 0,
+        root_level: 0,
+        chunk_root_level: 0,
+        log_root_level,
+        label: String::new(),
+        sys_chunk_array_size: 0,
+        sys_chunk_array: Vec::new(),
+    }
+}
+
+fn build_single_stripe_chunk(
+    logical_start: u64,
+    length: u64,
+    physical_start: u64,
+) -> BtrfsChunkEntry {
+    BtrfsChunkEntry {
+        key: BtrfsKey {
+            objectid: 256,
+            item_type: 228,
+            offset: logical_start,
+        },
+        length,
+        owner: 2,
+        stripe_len: u64::from(BTRFS_TEST_NODESIZE),
+        chunk_type: 1,
+        io_align: BTRFS_TEST_NODESIZE,
+        io_width: BTRFS_TEST_NODESIZE,
+        sector_size: BTRFS_TEST_NODESIZE,
+        num_stripes: 1,
+        sub_stripes: 0,
+        stripes: vec![BtrfsStripe {
+            devid: 1,
+            offset: physical_start,
+            dev_uuid: [0; 16],
+        }],
+    }
+}
+
+fn write_btrfs_header(
+    block: &mut [u8],
+    bytenr: u64,
+    nritems: u32,
+    level: u8,
+    owner: u64,
+    generation: u64,
+) {
+    block[0x30..0x38].copy_from_slice(&bytenr.to_le_bytes());
+    block[0x50..0x58].copy_from_slice(&generation.to_le_bytes());
+    block[0x58..0x60].copy_from_slice(&owner.to_le_bytes());
+    block[0x60..0x64].copy_from_slice(&nritems.to_le_bytes());
+    block[0x64] = level;
+}
+
+fn write_btrfs_leaf_item(
+    block: &mut [u8],
+    idx: usize,
+    objectid: u64,
+    item_type: u8,
+    data_off: u32,
+    data_sz: u32,
+) {
+    let base = BTRFS_TEST_HEADER_SIZE + idx * BTRFS_TEST_ITEM_SIZE;
+    let header_size =
+        u32::try_from(BTRFS_TEST_HEADER_SIZE).expect("btrfs test header size should fit in u32");
+    let encoded_data_off = data_off
+        .checked_sub(header_size)
+        .expect("btrfs test payload should follow the header");
+    block[base..base + 8].copy_from_slice(&objectid.to_le_bytes());
+    block[base + 8] = item_type;
+    block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
+    block[base + 17..base + 21].copy_from_slice(&encoded_data_off.to_le_bytes());
+    block[base + 21..base + 25].copy_from_slice(&data_sz.to_le_bytes());
+}
+
+fn write_btrfs_key_ptr(
+    block: &mut [u8],
+    idx: usize,
+    objectid: u64,
+    item_type: u8,
+    blockptr: u64,
+    generation: u64,
+) {
+    let base = BTRFS_TEST_HEADER_SIZE + idx * BTRFS_TEST_KEY_PTR_SIZE;
+    block[base..base + 8].copy_from_slice(&objectid.to_le_bytes());
+    block[base + 8] = item_type;
+    block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
+    block[base + 17..base + 25].copy_from_slice(&blockptr.to_le_bytes());
+    block[base + 25..base + 33].copy_from_slice(&generation.to_le_bytes());
+}
+
 #[test]
 fn btrfs_send_stream_multi_command_conforms() {
     let mut data = Vec::new();
@@ -589,11 +715,19 @@ fn btrfs_send_stream_multi_command_conforms() {
     data.extend_from_slice(&1_u32.to_le_bytes());
 
     let uuid = *b"ffs-send-subvol!";
-    append_send_stream_command(&mut data, SendCommand::Subvol as u16, &[(1, &uuid), (15, b"/sv")]);
+    append_send_stream_command(
+        &mut data,
+        SendCommand::Subvol as u16,
+        &[(1, &uuid), (15, b"/sv")],
+    );
     append_send_stream_command(
         &mut data,
         SendCommand::Write as u16,
-        &[(15, b"/sv/file.txt"), (18, &0_u64.to_le_bytes()), (19, b"hello")],
+        &[
+            (15, b"/sv/file.txt"),
+            (18, &0_u64.to_le_bytes()),
+            (19, b"hello"),
+        ],
     );
     append_send_stream_command(&mut data, SendCommand::End as u16, &[]);
 
@@ -605,7 +739,10 @@ fn btrfs_send_stream_multi_command_conforms() {
     assert_eq!(result.commands[0].attrs[1], (15, b"/sv".to_vec()));
     assert_eq!(result.commands[1].cmd, SendCommand::Write);
     assert_eq!(result.commands[1].attrs[0], (15, b"/sv/file.txt".to_vec()));
-    assert_eq!(result.commands[1].attrs[1], (18, 0_u64.to_le_bytes().to_vec()));
+    assert_eq!(
+        result.commands[1].attrs[1],
+        (18, 0_u64.to_le_bytes().to_vec())
+    );
     assert_eq!(result.commands[1].attrs[2], (19, b"hello".to_vec()));
     assert_eq!(result.commands[2].cmd, SendCommand::End);
     assert!(result.commands[2].attrs.is_empty());
@@ -624,6 +761,78 @@ fn btrfs_send_stream_unknown_command_preserves_attrs_as_unspec() {
     assert_eq!(result.commands[0].cmd, SendCommand::Unspec);
     assert_eq!(result.commands[0].attrs, vec![(15, b"/mystery".to_vec())]);
     assert_eq!(result.commands[1].cmd, SendCommand::End);
+}
+
+#[test]
+fn btrfs_tree_log_replay_multilevel_conforms() {
+    let root_logical = 0x10_000_u64;
+    let leaf_logical = 0x20_000_u64;
+    let physical_start = 0x80_000_u64;
+    let root_physical = physical_start;
+    let leaf_physical = physical_start + (leaf_logical - root_logical);
+    let chunk_length = leaf_logical + u64::from(BTRFS_TEST_NODESIZE) - root_logical;
+    let chunks = vec![build_single_stripe_chunk(
+        root_logical,
+        chunk_length,
+        physical_start,
+    )];
+
+    let mut root = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
+    write_btrfs_header(&mut root, root_logical, 1, 1, 5, 77);
+    write_btrfs_key_ptr(&mut root, 0, 256, BTRFS_ITEM_INODE_ITEM, leaf_logical, 77);
+
+    let mut leaf = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
+    write_btrfs_header(&mut leaf, leaf_logical, 2, 0, 5, 77);
+    let alpha_off = 3600_u32;
+    let beta_off = 3605_u32;
+    write_btrfs_leaf_item(&mut leaf, 0, 256, BTRFS_ITEM_INODE_ITEM, alpha_off, 5);
+    leaf[alpha_off as usize..(alpha_off + 5) as usize].copy_from_slice(b"alpha");
+    write_btrfs_leaf_item(&mut leaf, 1, 257, BTRFS_ITEM_INODE_ITEM, beta_off, 4);
+    leaf[beta_off as usize..(beta_off + 4) as usize].copy_from_slice(b"beta");
+
+    let blocks: HashMap<u64, Vec<u8>> = [(root_physical, root), (leaf_physical, leaf)]
+        .into_iter()
+        .collect();
+    let mut reads = Vec::new();
+    let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
+        reads.push(phys);
+        blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
+            field: "physical",
+            reason: "block not in test image",
+        })
+    };
+
+    let sb = build_btrfs_tree_log_superblock(root_logical, 1);
+    let replay = replay_tree_log(&mut read, &sb, &chunks).expect("replay tree-log");
+    assert!(replay.replayed, "tree-log with log_root should replay");
+    assert_eq!(reads, vec![root_physical, leaf_physical]);
+    assert_eq!(replay.items_count, 2);
+    assert_eq!(replay.items.len(), 2);
+    assert_eq!(replay.items[0].key.objectid, 256);
+    assert_eq!(replay.items[0].key.item_type, BTRFS_ITEM_INODE_ITEM);
+    assert_eq!(replay.items[0].data, b"alpha");
+    assert_eq!(replay.items[1].key.objectid, 257);
+    assert_eq!(replay.items[1].key.item_type, BTRFS_ITEM_INODE_ITEM);
+    assert_eq!(replay.items[1].data, b"beta");
+}
+
+#[test]
+fn btrfs_tree_log_replay_skips_when_log_root_absent() {
+    let sb = build_btrfs_tree_log_superblock(0, 0);
+    let mut read_calls = 0_usize;
+    let mut read = |_phys: u64| -> Result<Vec<u8>, ParseError> {
+        read_calls += 1;
+        Err(ParseError::InvalidField {
+            field: "physical",
+            reason: "tree-log replay should not read when log_root is absent",
+        })
+    };
+
+    let replay = replay_tree_log(&mut read, &sb, &[]).expect("tree-log absent fast path");
+    assert_eq!(read_calls, 0, "no physical reads should occur");
+    assert!(!replay.replayed);
+    assert_eq!(replay.items_count, 0);
+    assert!(replay.items.is_empty());
 }
 
 #[test]
@@ -767,9 +976,8 @@ fn btrfs_roottree_leaf_fixture_conforms() {
 
 #[test]
 fn btrfs_devitem_fixture_conforms() {
-    let devitem =
-        ffs_harness::validate_btrfs_devitem_fixture(&fixture_path("btrfs_devitem.json"))
-            .expect("btrfs devitem fixture");
+    let devitem = ffs_harness::validate_btrfs_devitem_fixture(&fixture_path("btrfs_devitem.json"))
+        .expect("btrfs devitem fixture");
 
     assert_eq!(devitem.devid, 1, "devid should be 1");
     assert_eq!(
@@ -984,6 +1192,8 @@ fn full_conformance_gate_pass() {
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
     btrfs_send_stream_multi_command_conforms();
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
+    btrfs_tree_log_replay_multilevel_conforms();
+    btrfs_tree_log_replay_skips_when_log_root_absent();
     btrfs_chunk_mapping_fixture_conforms();
     btrfs_leaf_fixture_conforms();
     btrfs_fstree_leaf_fixture_conforms();
