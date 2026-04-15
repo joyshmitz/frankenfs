@@ -56,6 +56,34 @@ All fixtures are hand-crafted JSON files that encode sparse binary data using th
 - **Description:** Directory blocks with various edge cases and malformed data
 - **Verification:** Checksum algorithm verified against kernel ext4_dir_csum()
 
+### ext4_extent_tree_leaf.json / ext4_extent_tree_index.json
+- **Created:** 2026-04-15
+- **Author:** Claude Opus 4.5
+- **Reference:** ext4.h `struct ext4_extent_header`, `struct ext4_extent`
+- **Description:** Extent tree leaf with 3 extents (incl. unwritten), index node
+- **Verification:** Magic 0xF30A, extent flags, depth levels verified
+
+### ext4_htree_dx_root.json
+- **Created:** 2026-04-15
+- **Author:** Claude Opus 4.5
+- **Reference:** ext4.h `struct dx_root_info`, `struct dx_entry`
+- **Description:** Hash-indexed directory root with 3 DX entries
+- **Verification:** hash_version, indirect_levels, entry format verified
+
+### ext4_xattr_block.json
+- **Created:** 2026-04-15
+- **Author:** Claude Opus 4.5
+- **Reference:** ext4.h `struct ext4_xattr_header`, `struct ext4_xattr_entry`
+- **Description:** External xattr block with user.mime and security.selinux
+- **Verification:** Magic 0xEA020000, entry offsets, value storage verified
+
+### ext4_mmp_block.json
+- **Created:** 2026-04-15
+- **Author:** Claude Opus 4.5
+- **Reference:** ext4.h `struct mmp_struct`
+- **Description:** Multi-mount protection block in clean state
+- **Verification:** Magic 0x004D4D50, SEQ_CLEAN 0xFF4D4D50 verified
+
 ## btrfs Fixtures
 
 ### btrfs_superblock_sparse.json / btrfs_superblock_with_chunks.json
@@ -71,6 +99,13 @@ All fixtures are hand-crafted JSON files that encode sparse binary data using th
 - **Reference:** ctree.h `struct btrfs_header`, `struct btrfs_item`
 - **Description:** Leaf nodes from root tree and FS tree
 - **Verification:** Item offsets and key formats verified against kernel
+
+### btrfs_devitem.json
+- **Created:** 2026-04-15
+- **Author:** Claude Opus 4.5
+- **Reference:** btrfs_tree.h `struct btrfs_dev_item`
+- **Description:** Device item for 1TB device with 512GB used
+- **Verification:** devid, total_bytes, bytes_used, sector_size verified
 
 ## Golden Files
 
