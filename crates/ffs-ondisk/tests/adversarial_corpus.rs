@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
 use ffs_ondisk::{
-    BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock,
-    iter_dir_block, map_logical_to_physical, parse_dir_block, parse_dx_root, parse_extent_tree,
-    parse_internal_items, parse_leaf_items, parse_sys_chunk_array, parse_xattr_block,
-    verify_btrfs_superblock_checksum, verify_btrfs_tree_block_checksum, verify_dir_block_checksum,
-    verify_extent_block_checksum, verify_group_desc_checksum, verify_inode_checksum,
+    BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4MmpBlock,
+    Ext4Superblock, iter_dir_block, map_logical_to_physical, parse_dev_item, parse_dir_block,
+    parse_dx_root, parse_extent_tree, parse_internal_items, parse_leaf_items,
+    parse_sys_chunk_array, parse_xattr_block, verify_btrfs_superblock_checksum,
+    verify_btrfs_tree_block_checksum, verify_dir_block_checksum, verify_extent_block_checksum,
+    verify_group_desc_checksum, verify_inode_checksum,
 };
 use ffs_types::{BTRFS_CSUM_TYPE_CRC32C, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_SIZE, ParseError};
 use proptest::prelude::*;
@@ -353,6 +354,13 @@ fn adversarial_corpus_is_panic_free_and_exercises_parse_error_variants() {
         );
         sample_had_error |= run_parser(
             name,
+            "ext4_parse_mmp_block",
+            &mut parser_hits,
+            &mut coverage,
+            || Ext4MmpBlock::parse_from_bytes(bytes),
+        );
+        sample_had_error |= run_parser(
+            name,
             "ext4_verify_group_desc_checksum",
             &mut parser_hits,
             &mut coverage,
@@ -442,6 +450,13 @@ fn adversarial_corpus_is_panic_free_and_exercises_parse_error_variants() {
             &mut parser_hits,
             &mut coverage,
             || parse_internal_items(bytes),
+        );
+        sample_had_error |= run_parser(
+            name,
+            "btrfs_parse_dev_item",
+            &mut parser_hits,
+            &mut coverage,
+            || parse_dev_item(bytes),
         );
         sample_had_error |= run_parser(
             name,
