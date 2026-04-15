@@ -5,7 +5,7 @@ use ffs_block::ByteDevice;
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
 use ffs_error::{FfsError, Result};
 use ffs_ondisk::{EXT4_ERROR_FS, EXT4_VALID_FS};
-use ffs_types::{BlockNumber, ByteOffset, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET};
+use ffs_types::{BlockNumber, ByteOffset, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC};
 use std::sync::{Arc, Mutex};
 
 const BLOCK_SIZE: usize = 4096;
@@ -274,6 +274,109 @@ fn ext4_journal_recovery_honors_revoke_before_commit() {
     );
 }
 
+#[test]
+fn ext4_external_journal_recovery_replays_committed_transaction() {
+    let uuid = *b"journal-uuid-000";
+    let mut image = build_ext4_image_with_extents();
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+    let compat = u32::from_le_bytes([
+        image[sb_off + 0x5C],
+        image[sb_off + 0x5D],
+        image[sb_off + 0x5E],
+        image[sb_off + 0x5F],
+    ]);
+    image[sb_off + 0x5C..sb_off + 0x60].copy_from_slice(&(compat | 0x0004).to_le_bytes());
+    image[sb_off + 0xE4..sb_off + 0xE8].copy_from_slice(&1_u32.to_le_bytes());
+    set_test_journal_uuid(&mut image, uuid);
+
+    let journal =
+        build_external_journal_image(BLOCK_SIZE, uuid, TARGET_BLOCK as u32, b"EXT-JBD2-REPLAY!");
+    let tmp = tempfile::NamedTempFile::new().expect("create temp journal");
+    std::fs::write(tmp.path(), &journal).expect("write external journal");
+
+    let dev = MemByteDevice::new(image);
+    let inspector = dev.clone();
+    let cx = Cx::for_testing();
+    let options = OpenOptions {
+        external_journal_path: Some(tmp.path().to_path_buf()),
+        ..OpenOptions::default()
+    };
+
+    let fs = OpenFs::from_device(&cx, Box::new(dev), &options)
+        .expect("open ext4 with paired external journal");
+    let replay = fs
+        .ext4_journal_replay()
+        .expect("external journal replay outcome should be present");
+
+    assert_eq!(replay.committed_sequences, vec![1]);
+    assert_eq!(replay.stats.replayed_blocks, 1);
+    assert_eq!(
+        inspector.read_block_prefix(TARGET_BLOCK, TARGET_PREFIX_LEN),
+        b"EXT-JBD2-REPLAY!"
+    );
+}
+
+#[test]
+fn ext4_external_journal_missing_for_dirty_fs_is_rejected() {
+    let uuid = *b"journal-uuid-000";
+    let mut image = build_ext4_image_with_extents();
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+    let compat = u32::from_le_bytes([
+        image[sb_off + 0x5C],
+        image[sb_off + 0x5D],
+        image[sb_off + 0x5E],
+        image[sb_off + 0x5F],
+    ]);
+    image[sb_off + 0x5C..sb_off + 0x60].copy_from_slice(&(compat | 0x0004).to_le_bytes());
+    image[sb_off + 0xE4..sb_off + 0xE8].copy_from_slice(&1_u32.to_le_bytes());
+    set_test_journal_uuid(&mut image, uuid);
+    set_test_ext4_state(&mut image, 0);
+
+    let dev = MemByteDevice::new(image);
+    let cx = Cx::for_testing();
+    let err = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+        .expect_err("dirty external-journal fs should reject missing journal device");
+
+    assert!(matches!(err, FfsError::UnsupportedFeature(_)));
+}
+
+#[test]
+fn ext4_external_journal_uuid_mismatch_is_rejected() {
+    let data_uuid = *b"journal-uuid-000";
+    let other_uuid = *b"journal-uuid-999";
+    let mut image = build_ext4_image_with_extents();
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+    let compat = u32::from_le_bytes([
+        image[sb_off + 0x5C],
+        image[sb_off + 0x5D],
+        image[sb_off + 0x5E],
+        image[sb_off + 0x5F],
+    ]);
+    image[sb_off + 0x5C..sb_off + 0x60].copy_from_slice(&(compat | 0x0004).to_le_bytes());
+    image[sb_off + 0xE4..sb_off + 0xE8].copy_from_slice(&1_u32.to_le_bytes());
+    set_test_journal_uuid(&mut image, data_uuid);
+
+    let journal = build_external_journal_image(
+        BLOCK_SIZE,
+        other_uuid,
+        TARGET_BLOCK as u32,
+        b"EXT-JBD2-REPLAY!",
+    );
+    let tmp = tempfile::NamedTempFile::new().expect("create temp journal");
+    std::fs::write(tmp.path(), &journal).expect("write external journal");
+
+    let dev = MemByteDevice::new(image);
+    let cx = Cx::for_testing();
+    let options = OpenOptions {
+        external_journal_path: Some(tmp.path().to_path_buf()),
+        ..OpenOptions::default()
+    };
+    let err = OpenFs::from_device(&cx, Box::new(dev), &options)
+        .expect_err("mismatched external journal UUID should reject paired-open");
+
+    assert!(matches!(err, FfsError::Format(_)));
+}
+
 #[allow(clippy::cast_possible_truncation)]
 fn build_ext4_image_with_journal(scenario: JournalScenario) -> Vec<u8> {
     let mut image = build_ext4_image_with_extents();
@@ -429,6 +532,79 @@ fn write_jbd2_header(block: &mut [u8], block_type: u32, sequence: u32) {
     block[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
     block[4..8].copy_from_slice(&block_type.to_be_bytes());
     block[8..12].copy_from_slice(&sequence.to_be_bytes());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_jbd2_superblock_v2(
+    block: &mut [u8],
+    block_size: u32,
+    max_len: u32,
+    first_log_block: u32,
+    start_sequence: u32,
+    start_block: u32,
+    num_fc_blocks: u32,
+    feature_incompat: u32,
+) {
+    write_jbd2_header(block, 4, 0);
+    block[12..16].copy_from_slice(&block_size.to_be_bytes());
+    block[16..20].copy_from_slice(&max_len.to_be_bytes());
+    block[20..24].copy_from_slice(&first_log_block.to_be_bytes());
+    block[24..28].copy_from_slice(&start_sequence.to_be_bytes());
+    block[28..32].copy_from_slice(&start_block.to_be_bytes());
+    block[40..44].copy_from_slice(&feature_incompat.to_be_bytes());
+    block[84..88].copy_from_slice(&num_fc_blocks.to_be_bytes());
+}
+
+fn set_test_journal_uuid(image: &mut [u8], uuid: [u8; 16]) {
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+    image[sb_off + 0xD0..sb_off + 0xE0].copy_from_slice(&uuid);
+}
+
+fn set_test_ext4_state(image: &mut [u8], state: u16) {
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+    image[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&state.to_le_bytes());
+}
+
+fn build_external_journal_image(
+    block_size: usize,
+    uuid: [u8; 16],
+    target_block: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    let blocks = 8usize;
+    let mut image = vec![0u8; block_size * blocks];
+    write_jbd2_superblock_v2(
+        &mut image[..block_size],
+        u32::try_from(block_size).expect("block_size fits u32"),
+        u32::try_from(blocks).expect("block count fits u32"),
+        1,
+        1,
+        1,
+        0,
+        0,
+    );
+    image[48..64].copy_from_slice(&uuid);
+
+    let desc = block_size;
+    write_jbd2_header(
+        &mut image[desc..desc + block_size],
+        JBD2_BLOCKTYPE_DESCRIPTOR,
+        1,
+    );
+    image[desc + 12..desc + 16].copy_from_slice(&target_block.to_be_bytes());
+    image[desc + 16..desc + 20].copy_from_slice(&JBD2_LAST_TAG.to_be_bytes());
+
+    let data = 2 * block_size;
+    image[data..data + payload.len()].copy_from_slice(payload);
+
+    let commit = 3 * block_size;
+    write_jbd2_header(
+        &mut image[commit..commit + block_size],
+        JBD2_BLOCKTYPE_COMMIT,
+        1,
+    );
+
+    image
 }
 
 // ── Multi-transaction and crash recovery integration tests ──────────
