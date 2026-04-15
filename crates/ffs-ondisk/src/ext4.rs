@@ -10129,10 +10129,14 @@ mod tests {
             for (i, b) in block.iter_mut().enumerate() {
                 *b = u8::try_from(i & 0xFF).unwrap();
             }
-            let seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
-            let seed = ext4_chksum(seed, &generation.to_le_bytes());
-            let csum = ext4_chksum(seed, &block[..block_size - 12]);
-            block[block_size - 4..].copy_from_slice(&csum.to_le_bytes());
+
+            let tail_off = block_size - 12;
+            block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+            block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+            block[tail_off + 6] = 0;
+            block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+            stamp_dir_block_checksum(&mut block, csum_seed, ino, generation);
+
             prop_assert!(verify_dir_block_checksum(&block, csum_seed, ino, generation).is_ok());
         }
 

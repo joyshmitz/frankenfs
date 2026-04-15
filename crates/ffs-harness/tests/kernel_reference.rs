@@ -22,7 +22,9 @@
 //! - Extent mapping: collect_extents produces non-empty results for files
 
 use ffs_harness::{GoldenDirEntry, GoldenReference};
-use ffs_ondisk::{dx_hash, parse_dx_root, Ext4ImageReader};
+use ffs_ondisk::{
+    dx_hash, parse_dx_root, stamp_dir_block_checksum, verify_dir_block_checksum, Ext4ImageReader,
+};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -462,6 +464,55 @@ fn ext4_file_type_str(mode: u16) -> &'static str {
         0o12_0000 => "symlink",
         _ => "unknown",
     }
+}
+
+fn assert_directory_block_checksums_match_reference(
+    image: &[u8],
+    reader: &Ext4ImageReader,
+    path: &str,
+) {
+    let (ino, inode) = reader
+        .resolve_path(image, path)
+        .unwrap_or_else(|err| panic!("resolve {path}: {err}"));
+    let ext4_ino = ino.to_ext4().expect("ext4 inode number").0;
+    let csum_seed = reader.sb.csum_seed();
+    let block_count = inode.size.div_ceil(u64::from(reader.sb.block_size));
+    let mut verified_blocks = 0_u64;
+
+    for logical_block in 0..block_count {
+        let logical_block = u32::try_from(logical_block).expect("logical block fits in u32");
+        let phys = reader
+            .resolve_extent(image, &inode, logical_block)
+            .unwrap_or_else(|err| panic!("resolve extent {path}:{logical_block}: {err}"))
+            .unwrap_or_else(|| panic!("missing extent for {path} logical block {logical_block}"));
+        let block = reader
+            .read_block(image, ffs_types::BlockNumber(phys))
+            .unwrap_or_else(|err| panic!("read block {path}:{logical_block}: {err}"));
+
+        match verify_dir_block_checksum(block, csum_seed, ext4_ino, inode.generation) {
+            Ok(()) => {}
+            Err(ffs_types::ParseError::InvalidField {
+                field: "dir_block_tail",
+                ..
+            }) if logical_block == 0 && inode.has_htree_index() && parse_dx_root(block).is_ok() => {
+                continue;
+            }
+            Err(err) => panic!("verify_dir_block_checksum {path}:{logical_block}: {err}"),
+        }
+
+        let mut restamped = block.to_vec();
+        stamp_dir_block_checksum(&mut restamped, csum_seed, ext4_ino, inode.generation);
+        assert_eq!(
+            restamped, block,
+            "restamped checksum diverged from ext4 reference block for {path}:{logical_block}"
+        );
+        verified_blocks += 1;
+    }
+
+    assert!(
+        verified_blocks > 0,
+        "expected at least one directory block for {path}"
+    );
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -1114,6 +1165,30 @@ fn ext4_kernel_vs_ffs_dx_hash_reference() {
     }
 
     std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
+fn ext4_kernel_vs_ffs_dir_block_checksum_reference() {
+    if !ext4_tools_available() {
+        eprintln!("SKIPPED: ext4 kernel tools not available");
+        return;
+    }
+
+    let simple = std::env::temp_dir().join("ffs_ref_dir_checksum.ext4");
+    create_reference_image(&simple);
+
+    let simple_image = std::fs::read(&simple).expect("read simple ext4 image");
+    let simple_reader = Ext4ImageReader::new(&simple_image).expect("parse simple ext4 image");
+    assert_directory_block_checksums_match_reference(&simple_image, &simple_reader, "/");
+    assert_directory_block_checksums_match_reference(&simple_image, &simple_reader, "/testdir");
+
+    let indexed = std::env::temp_dir().join("ffs_ref_dir_checksum_dx.ext4");
+    create_dir_index_reference_image(&indexed);
+
+    let indexed_image = std::fs::read(&indexed).expect("read indexed ext4 image");
+    let indexed_reader = Ext4ImageReader::new(&indexed_image).expect("parse indexed ext4 image");
+    assert_directory_block_checksums_match_reference(&indexed_image, &indexed_reader, "/");
+    assert_directory_block_checksums_match_reference(&indexed_image, &indexed_reader, "/htree");
 }
 
 /// E2E: verify OpenFs bitmap-based free space counting matches kernel tools.
