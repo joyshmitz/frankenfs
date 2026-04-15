@@ -66,3 +66,13 @@ doc = false
 name = "fuzz_ext4_checksums"
 path = "fuzz_targets/fuzz_ext4_checksums.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_ext4_htree_mmp"
+path = "fuzz_targets/fuzz_ext4_htree_mmp.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_btrfs_devitem"
+path = "fuzz_targets/fuzz_btrfs_devitem.rs"
+doc = false
