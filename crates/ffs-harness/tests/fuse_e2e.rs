@@ -2571,6 +2571,83 @@ fn btrfs_fuse_write_large_file() {
 }
 
 #[test]
+fn btrfs_fuse_fallocate_preallocate_extends_size() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fallocate_preallocate_extends_size";
+        let path = mnt.join("btrfs_preallocated.bin");
+        fs::write(&path, b"").expect("create empty btrfs file");
+
+        let out = Command::new("fallocate")
+            .args(["-l", "8192", path.to_str().unwrap()])
+            .output()
+            .expect("run fallocate preallocate on btrfs");
+        assert!(
+            out.status.success(),
+            "btrfs preallocate fallocate failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let meta = fs::metadata(&path).expect("stat after btrfs preallocate fallocate");
+        assert_eq!(
+            meta.len(),
+            8192,
+            "btrfs preallocate should extend apparent file size to 8192"
+        );
+        assert!(
+            meta.blocks() * 512 >= 8192,
+            "allocated disk space ({}*512={}) should be >= 8192 after btrfs preallocation",
+            meta.blocks(),
+            meta.blocks() * 512
+        );
+
+        fs::write(&path, b"data in btrfs preallocated space").expect("write to btrfs preallocated");
+        let content = fs::read_to_string(&path).expect("read btrfs preallocated");
+        assert_eq!(content, "data in btrfs preallocated space");
+        emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
+fn btrfs_fuse_fallocate_keep_size_preserves_size() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fallocate_keep_size_preserves_size";
+        let path = mnt.join("btrfs_keep_size.bin");
+        fs::write(&path, b"short").expect("create btrfs file with content");
+
+        let out = Command::new("fallocate")
+            .args(["-l", "16384", "--keep-size", path.to_str().unwrap()])
+            .output()
+            .expect("run keep-size fallocate on btrfs");
+        assert!(
+            out.status.success(),
+            "btrfs keep-size fallocate failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let meta = fs::metadata(&path).expect("stat after btrfs keep-size fallocate");
+        assert_eq!(
+            meta.len(),
+            5,
+            "btrfs keep-size fallocate should preserve apparent file size"
+        );
+
+        let content = fs::read_to_string(&path).expect("read after btrfs keep-size fallocate");
+        assert_eq!(content, "short");
+        emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
 fn btrfs_fuse_fallocate_punch_hole_keep_size_zeroes_range() {
     if !command_available("fallocate") {
         eprintln!("fallocate not available, skipping");
