@@ -1584,6 +1584,7 @@ fn fuse_write_enospc_on_full_filesystem() {
 #[test]
 fn fuse_fsync_persists_written_data() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_fsync";
         let path = mnt.join("synced.txt");
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -1604,6 +1605,42 @@ fn fuse_fsync_persists_written_data() {
         // Read back and verify.
         let content = fs::read_to_string(&path).expect("read after fsync");
         assert_eq!(content, "data before fsync\n");
+        emit_scenario_result(scenario_id, "PASS", Some("sync_all"));
+    });
+}
+
+#[test]
+fn fuse_fsyncdir_emits_scenario_result_and_preserves_dirent() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_fsyncdir";
+        let dir = mnt.join("synced_dir");
+        fs::create_dir(&dir).expect("mkdir for ext4 fsyncdir");
+
+        let child = dir.join("child.txt");
+        fs::write(&child, b"directory sync payload\n").expect("write child before ext4 fsyncdir");
+
+        let dirfd = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(&dir)
+            .expect("open directory fd for ext4 fsyncdir");
+        dirfd.sync_all().expect("fsyncdir via sync_all on ext4");
+        drop(dirfd);
+
+        let entries: HashSet<String> = fs::read_dir(&dir)
+            .expect("readdir after ext4 fsyncdir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.contains("child.txt"),
+            "directory entry should remain visible after ext4 fsyncdir, got: {entries:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&child).expect("read child after ext4 fsyncdir"),
+            "directory sync payload\n"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("dirfd_sync_all"));
     });
 }
 
