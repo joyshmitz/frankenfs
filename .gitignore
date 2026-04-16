@@ -153,3 +153,11 @@ unwraps*.txt
 
 # Root-level scratch source files
 /get_hash.rs
+
+# Root-level agent-generated scripts and scratch output
+# (commit helpers, status checkers, diff runners, log captures, etc.)
+*.log
+/*.py
+/*.txt
+/*.json
+!package.json
