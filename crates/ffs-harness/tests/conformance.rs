@@ -1262,7 +1262,7 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         let first = vec![byte; 4096];
         fs.write(&cx, attr.ino, 0, &first)
             .expect("first compressed write");
-        fs.sync(&cx).expect("sync after first write");
+        fs.fsync(&cx, attr.ino, 0, false).expect("sync after first write");
 
         let (after_first_free_blocks, after_first_gd_free_blocks) =
             ext4_free_block_counters(&fs, &cx);
@@ -1294,6 +1294,7 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         let second = vec![byte.wrapping_add(1); 4096];
         fs.write(&cx, attr.ino, 0, &second)
             .expect("second compressed write");
+        fs.fsync(&cx, attr.ino, 0, false).expect("sync after second write");
 
         let (after_second_free_blocks, after_second_gd_free_blocks) =
             ext4_free_block_counters(&fs, &cx);
