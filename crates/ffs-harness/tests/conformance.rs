@@ -2459,6 +2459,196 @@ fn btrfs_device_tree_walk_enumerates_all_devices() {
 }
 
 #[test]
+fn btrfs_multi_device_raid6_read_conforms() {
+    let logical = 0x70_000_u64;
+    let stripe_len = 0x10_000_u64;
+    // RAID6 with 4 devices: 2 data stripes, 2 parity stripes (P+Q).
+    // Length is 2 * stripe_len = 0x20_000.
+    let chunks = vec![BtrfsChunkEntry {
+        key: BtrfsKey {
+            objectid: 256,
+            item_type: 228,
+            offset: logical,
+        },
+        length: stripe_len * 2,
+        owner: 2,
+        stripe_len,
+        chunk_type: ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+            | ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_RAID6,
+        io_align: BTRFS_TEST_NODESIZE,
+        io_width: BTRFS_TEST_NODESIZE,
+        sector_size: BTRFS_TEST_NODESIZE,
+        num_stripes: 4,
+        sub_stripes: 0,
+        stripes: vec![
+            BtrfsStripe {
+                devid: 1,
+                offset: 0x100_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 2,
+                offset: 0x200_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 3,
+                offset: 0x300_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 4,
+                offset: 0x400_000,
+                dev_uuid: [0; 16],
+            },
+        ],
+    }];
+
+    let mut devices = BtrfsDeviceSet::new();
+    let data1 = Arc::new(vec![0x66_u8; 4]);
+    let data2 = Arc::new(vec![0x77_u8; 4]);
+
+    // In RAID6, P and Q rotate.
+    // For stripe_nr=0, P=dev4, Q=dev3. Data at dev1, dev2.
+    let d1 = Arc::clone(&data1);
+    devices.add_device(
+        1,
+        Box::new(move |physical, len| {
+            assert_eq!(len, 4);
+            if physical == 0x100_000 {
+                Ok((*d1).clone())
+            } else {
+                Err(ParseError::InvalidField {
+                    field: "device",
+                    reason: "unexpected physical offset",
+                })
+            }
+        }),
+    );
+
+    // For stripe_nr=1, rot=1. p_pos=(4-1-1)%4=2 (dev3), q_pos=(4-2+4-1)%4=1 (dev2).
+    // Data at dev1, dev4.
+    let d2 = Arc::clone(&data2);
+    devices.add_device(
+        4,
+        Box::new(move |physical, len| {
+            assert_eq!(len, 4);
+            if physical == 0x410_000 {
+                Ok((*d2).clone())
+            } else {
+                Err(ParseError::InvalidField {
+                    field: "device",
+                    reason: "unexpected physical offset",
+                })
+            }
+        }),
+    );
+
+    let cx = Cx::for_testing();
+    // Read stripe 0 (data1)
+    let res1 = devices
+        .read_logical(&chunks, logical, 4)
+        .expect("read RAID6 data1");
+    assert_eq!(res1, vec![0x66_u8; 4]);
+
+    // Read stripe 1 (data2)
+    let res2 = devices
+        .read_logical(&chunks, logical + stripe_len, 4)
+        .expect("read RAID6 data2");
+    assert_eq!(res2, vec![0x77_u8; 4]);
+}
+
+#[test]
+fn btrfs_multi_device_raid10_read_conforms() {
+    let logical = 0xA0_000_u64;
+    let stripe_len = 0x10_000_u64;
+    // RAID10 with 4 devices: 2 mirrors of 2 stripes.
+    // Length is 2 * stripe_len = 0x20_000.
+    let chunks = vec![BtrfsChunkEntry {
+        key: BtrfsKey {
+            objectid: 256,
+            item_type: 228,
+            offset: logical,
+        },
+        length: stripe_len * 2,
+        owner: 2,
+        stripe_len,
+        chunk_type: ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+            | ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_RAID10,
+        io_align: BTRFS_TEST_NODESIZE,
+        io_width: BTRFS_TEST_NODESIZE,
+        sector_size: BTRFS_TEST_NODESIZE,
+        num_stripes: 4,
+        sub_stripes: 2,
+        stripes: vec![
+            BtrfsStripe {
+                devid: 1,
+                offset: 0x100_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 2,
+                offset: 0x200_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 3,
+                offset: 0x300_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 4,
+                offset: 0x400_000,
+                dev_uuid: [0; 16],
+            },
+        ],
+    }];
+
+    let mut devices = BtrfsDeviceSet::new();
+    // Stripe 0: dev1, dev2 (mirrors)
+    // Stripe 1: dev3, dev4 (mirrors)
+
+    devices.add_device(
+        1,
+        Box::new(move |_physical, _len| {
+            Err(ParseError::InvalidField {
+                field: "device",
+                reason: "simulated failure dev1",
+            })
+        }),
+    );
+    devices.add_device(
+        2,
+        Box::new(move |physical, len| {
+            assert_eq!(physical, 0x100_000);
+            assert_eq!(len, 4);
+            Ok(b"mir0".to_vec())
+        }),
+    );
+    devices.add_device(
+        4,
+        Box::new(move |physical, len| {
+            assert_eq!(physical, 0x300_000);
+            assert_eq!(len, 4);
+            Ok(b"mir1".to_vec())
+        }),
+    );
+
+    let cx = Cx::for_testing();
+    // Read from stripe 0 (should fall back to dev2)
+    let res1 = devices
+        .read_logical(&chunks, logical, 4)
+        .expect("read RAID10 stripe 0");
+    assert_eq!(res1, b"mir0");
+
+    // Read from stripe 1 (device 4)
+    let res2 = devices
+        .read_logical(&chunks, logical + stripe_len, 4)
+        .expect("read RAID10 stripe 1");
+    assert_eq!(res2, b"mir1");
+}
+
+#[test]
 fn btrfs_multi_device_raid5_read_conforms() {
     let logical = 0x50_000_u64;
     let stripe_len = 0x10_000_u64;
@@ -3073,6 +3263,8 @@ fn full_conformance_gate_pass() {
     btrfs_tree_log_replay_skips_when_log_root_absent();
     btrfs_chunk_tree_walk_adds_and_sorts_new_chunks();
     btrfs_device_tree_walk_enumerates_all_devices();
+    btrfs_multi_device_raid6_read_conforms();
+    btrfs_multi_device_raid10_read_conforms();
     btrfs_multi_device_raid5_read_conforms();
     btrfs_multi_device_raid1_read_falls_back_to_second_mirror();
     btrfs_multi_device_raid0_dispatches_to_correct_stripe();

@@ -1334,6 +1334,70 @@ fn fuse_ioctl_fiemap_reports_valid_extents() {
 }
 
 #[test]
+fn btrfs_fuse_ioctl_fiemap_reports_valid_extents() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("fiemap_seed.bin");
+        let payload = vec![0xA5_u8; 24 * 1024];
+        fs::write(&path, &payload).expect("write btrfs fiemap seed file");
+
+        let meta = fs::metadata(&path).expect("stat btrfs fiemap seed file");
+        let report = query_fiemap(&path, 16);
+        if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+            eprintln!(
+                "btrfs FIEMAP ioctl skipped: current FUSE transport reports EOPNOTSUPP before FrankenFS \
+                 receives unrestricted ioctl requests"
+            );
+            return;
+        }
+
+        let extents = report["extents"]
+            .as_array()
+            .expect("btrfs fiemap extents array");
+
+        assert!(
+            report["mapped_extents"].as_u64().unwrap_or(0) >= 1,
+            "expected at least one mapped btrfs extent: {report}"
+        );
+        assert_eq!(
+            report["requested_extents"].as_u64().unwrap_or(0),
+            16,
+            "kernel should preserve requested btrfs extent count in response header"
+        );
+
+        let mut covered = 0_u64;
+        let mut expected_logical = 0_u64;
+        let mut saw_last = false;
+        for extent in extents {
+            let logical = extent["logical"].as_u64().expect("logical");
+            let physical = extent["physical"].as_u64().expect("physical");
+            let length = extent["length"].as_u64().expect("length");
+            let last = extent["last"].as_bool().expect("last flag");
+
+            assert_eq!(
+                logical, expected_logical,
+                "expected btrfs extents to begin at logical offset 0 and remain contiguous: {report}"
+            );
+            assert!(physical > 0, "physical offset should be non-zero: {report}");
+            assert!(length > 0, "extent length should be non-zero: {report}");
+
+            covered = covered.saturating_add(length);
+            expected_logical = expected_logical.saturating_add(length);
+            saw_last |= last;
+        }
+
+        assert!(
+            covered >= meta.len(),
+            "btrfs fiemap extents should cover file length (covered={covered}, len={}): {report}",
+            meta.len()
+        );
+        assert!(
+            saw_last,
+            "expected FIEMAP_EXTENT_LAST in returned btrfs extents: {report}"
+        );
+    });
+}
+
+#[test]
 fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
     with_rw_mount(|mnt| {
         let scenario_id = "ext4_ioctl_getflags_setflags_roundtrip";
