@@ -769,16 +769,36 @@ fn open_ext4_mkfs_no_extents_with_large_file(
         String::from_utf8_lossy(&debugfs.stderr)
     );
 
+    let debugfs = std::process::Command::new("debugfs")
+        .args([
+            "-R",
+            "stat /large_indirect.bin",
+            image.to_str().expect("utf8 image path"),
+        ])
+        .output()
+        .expect("spawn debugfs stat");
+    assert!(
+        debugfs.status.success(),
+        "debugfs stat failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&debugfs.stdout),
+        String::from_utf8_lossy(&debugfs.stderr)
+    );
+    let stat_stdout = String::from_utf8_lossy(&debugfs.stdout);
+    let ino = stat_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Inode:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|token| token.parse::<u64>().ok())
+        .map(InodeNumber)
+        .expect("extract inode number from debugfs stat output");
+
     let cx = Cx::for_testing();
     let opts = OpenOptions {
         ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
         ..OpenOptions::default()
     };
     let fs = OpenFs::open_with_options(&cx, &image, &opts).expect("open indirect ext4 image");
-    let attr = fs
-        .lookup(&cx, InodeNumber(2), OsStr::new("large_indirect.bin"))
-        .expect("lookup indirect ext4 file");
-    (fs, tmp, attr.ino)
+    (fs, tmp, ino)
 }
 
 #[test]
