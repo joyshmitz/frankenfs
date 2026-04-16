@@ -22,8 +22,8 @@ use ffs_ondisk::{
     Ext4IncompatFeatures, Ext4Superblock, ExtentTree,
 };
 use ffs_types::{
-    GroupNumber, InodeNumber, ParseError, EXT4_COMPRBLK_FL, EXT4_COMPR_FL, EXT4_EXTENTS_FL,
-    EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
+    GroupNumber, InodeNumber, ParseError, EXT4_CASEFOLD_FL, EXT4_COMPRBLK_FL, EXT4_COMPR_FL,
+    EXT4_EXTENTS_FL, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
 };
 use serde_json::Value;
 use std::{
@@ -475,6 +475,54 @@ fn ext4_dir_block_casefold_lookup_conforms() {
 }
 
 #[test]
+fn ext4_casefold_openfs_lookup_is_case_insensitive() {
+    let image = build_ext4_casefold_image_with_dir(b"hello.txt");
+    let superblock = Ext4Superblock::parse_from_image(&image).expect("parse casefold superblock");
+    assert!(
+        superblock.has_incompat(Ext4IncompatFeatures::CASEFOLD),
+        "test image should advertise CASEFOLD incompat"
+    );
+
+    let tmp = tempfile::NamedTempFile::new().expect("create casefold ext4 temp image");
+    std::fs::write(tmp.path(), &image).expect("write casefold ext4 image");
+
+    let cx = Cx::for_testing();
+    let fs = OpenFs::open_with_options(&cx, tmp.path(), &OpenOptions::default())
+        .expect("open casefold ext4 image");
+
+    let root = fs
+        .read_inode(&cx, InodeNumber(2))
+        .expect("read casefold root");
+    assert_ne!(
+        root.flags & EXT4_CASEFOLD_FL,
+        0,
+        "root inode should carry CASEFOLD flag"
+    );
+
+    let attr = fs
+        .lookup(&cx, InodeNumber(2), OsStr::new("HELLO.TXT"))
+        .expect("lookup uppercase casefold name");
+    assert_eq!(attr.ino, InodeNumber(11));
+
+    let raw_lookup = fs
+        .lookup_name(&cx, &root, b"HeLlO.TxT")
+        .expect("device lookup should accept mixed-case bytes")
+        .expect("mixed-case lookup should resolve");
+    assert_eq!(raw_lookup.inode, 11);
+    assert_eq!(raw_lookup.name_str(), "hello.txt");
+
+    let entries = fs
+        .readdir(&cx, InodeNumber(2), 0)
+        .expect("readdir casefold directory");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.ino == InodeNumber(11) && entry.name == b"hello.txt"),
+        "readdir should expose the original case-preserved filename"
+    );
+}
+
+#[test]
 fn ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes() {
     let raw_name = b"\xFFenc\x80";
     let image = build_ext4_encrypt_image_with_dir(raw_name);
@@ -514,7 +562,11 @@ fn ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes() {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
+fn build_ext4_featured_dir_image(
+    raw_name: &[u8],
+    incompat_feature: u32,
+    root_inode_flags: u32,
+) -> Vec<u8> {
     assert!(
         raw_name.len() < 256,
         "raw encrypted ext4 name must fit in a single dirent"
@@ -535,10 +587,9 @@ fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
     image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
     image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
     image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
-    let incompat = (Ext4IncompatFeatures::FILETYPE.0
-        | Ext4IncompatFeatures::EXTENTS.0
-        | Ext4IncompatFeatures::ENCRYPT.0)
-        .to_le_bytes();
+    let incompat =
+        (Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0 | incompat_feature)
+            .to_le_bytes();
     image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat);
     image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
 
@@ -551,7 +602,7 @@ fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
     image[ino2..ino2 + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
     image[ino2 + 4..ino2 + 8].copy_from_slice(&4096_u32.to_le_bytes());
     image[ino2 + 0x1A..ino2 + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
-    image[ino2 + 0x20..ino2 + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+    image[ino2 + 0x20..ino2 + 0x24].copy_from_slice(&root_inode_flags.to_le_bytes());
     image[ino2 + 0x80..ino2 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
 
     let root_extent = ino2 + 0x28;
@@ -593,6 +644,14 @@ fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
     image[dir + 8..dir + 8 + raw_name.len()].copy_from_slice(raw_name);
 
     image
+}
+
+fn build_ext4_casefold_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
+    build_ext4_featured_dir_image(raw_name, Ext4IncompatFeatures::CASEFOLD.0, EXT4_CASEFOLD_FL)
+}
+
+fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
+    build_ext4_featured_dir_image(raw_name, Ext4IncompatFeatures::ENCRYPT.0, 0x0008_0000)
 }
 
 fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
