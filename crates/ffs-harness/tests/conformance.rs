@@ -9,7 +9,7 @@ use ffs_btrfs::{
     BTRFS_FS_TREE_OBJECTID, BTRFS_FT_REG_FILE, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
     BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
 };
-use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
+use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions, RequestScope};
 use ffs_harness::{
     e2e::{run_crash_replay_suite, run_fsx_stress, CrashReplaySuiteConfig, FsxStressConfig},
     load_sparse_fixture, validate_btrfs_chunk_fixture, validate_btrfs_fixture,
@@ -467,7 +467,7 @@ fn ext4_dir_block_rec_len_unaligned_fixture_rejected() {
 #[test]
 fn ext4_orphan_recovery_conforms() {
     let cx = Cx::for_testing();
-    let (mut fs, _tmp, image_path) = open_writable_ext4_mkfs(64);
+    let (fs, _tmp, image_path) = open_writable_ext4_mkfs(64);
     let root = InodeNumber(2);
 
     let name = std::ffi::OsString::from("orphan_me.txt");
@@ -504,7 +504,8 @@ fn ext4_orphan_recovery_conforms() {
         ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
         ..OpenOptions::default()
     };
-    let fs2 = OpenFs::open_with_options(&cx, &image_path, &opts).expect("open with orphan recovery");
+    let fs2 =
+        OpenFs::open_with_options(&cx, &image_path, &opts).expect("open with orphan recovery");
 
     let res = fs2.read_inode(&cx, ino);
     assert!(
@@ -516,26 +517,42 @@ fn ext4_orphan_recovery_conforms() {
 #[test]
 fn ext4_path_resolution_conforms() {
     let cx = Cx::for_testing();
-    let (mut fs, _tmp, _image_path) = open_writable_ext4_mkfs(64);
+    let (fs, _tmp, _image_path) = open_writable_ext4_mkfs(64);
     let root = InodeNumber(2);
+    let scope = RequestScope::empty();
 
-    // 1. Create a nested structure: /a/b/c.txt
     let name_a = std::ffi::OsString::from("a");
     let attr_a = fs.mkdir(&cx, root, &name_a, 0o755, 0, 0).expect("mkdir a");
-    
+
     let name_b = std::ffi::OsString::from("b");
-    let attr_b = fs.mkdir(&cx, attr_a.ino, &name_b, 0o755, 0, 0).expect("mkdir b");
-    
+    let attr_b = fs
+        .mkdir(&cx, attr_a.ino, &name_b, 0o755, 0, 0)
+        .expect("mkdir b");
+
     let name_c = std::ffi::OsString::from("c.txt");
-    let attr_c = fs.create(&cx, attr_b.ino, &name_c, 0o644, 0, 0).expect("create c.txt");
+    let attr_c = fs
+        .create(&cx, attr_b.ino, &name_c, 0o644, 0, 0)
+        .expect("create c.txt");
 
-    // 2. Resolve path "/a/b/c.txt"
-    let resolved = fs.resolve_path(&cx, "/a/b/c.txt").expect("resolve /a/b/c.txt");
-    assert_eq!(resolved, attr_c.ino, "Resolved inode should match created inode");
+    let (resolved_ino, resolved_inode) = fs
+        .resolve_path(&cx, &scope, "/a/b/c.txt")
+        .expect("resolve /a/b/c.txt");
+    assert_eq!(
+        resolved_ino, attr_c.ino,
+        "resolved inode number should match created file"
+    );
+    assert!(
+        !resolved_inode.is_dir(),
+        "resolved inode should be the regular file, not a directory"
+    );
 
-    // 3. Resolve path "a/b/../b/c.txt"
-    let resolved_dots = fs.resolve_path(&cx, "a/b/../b/c.txt").expect("resolve with dots");
-    assert_eq!(resolved_dots, attr_c.ino, "Resolved inode with dots should match");
+    let (resolved_parent_ino, _) = fs
+        .resolve_path(&cx, &scope, "/a/b/../b/c.txt")
+        .expect("resolve absolute path with parent traversal");
+    assert_eq!(
+        resolved_parent_ino, attr_c.ino,
+        "absolute path containing '..' should resolve back to the same file"
+    );
 }
 
 #[test]
@@ -547,9 +564,7 @@ fn btrfs_tree_block_checksum_tamper_detection_conforms() {
     let root_logical = sb.root;
 
     let ctx = fs.btrfs_context().expect("btrfs context");
-    let mapping = fs
-        .btrfs_context()
-        .expect("btrfs context");
+    let mapping = fs.btrfs_context().expect("btrfs context");
     let mapping = ffs_ondisk::map_logical_to_physical(&mapping.chunks, root_logical)
         .expect("map root logical")
         .expect("root logical covered");
@@ -2923,7 +2938,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
-    ext4_block_bitmap_checksum_tamper_detection_conforms();
+    btrfs_tree_block_checksum_tamper_detection_conforms();
     ext4_orphan_recovery_conforms();
     ext4_path_resolution_conforms();
     ext4_fallocate_zero_range_zeroes_target_range();
