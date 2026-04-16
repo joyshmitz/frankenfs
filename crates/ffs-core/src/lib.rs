@@ -330,6 +330,8 @@ pub struct BtrfsContext {
     pub chunks: Vec<BtrfsChunkEntry>,
     /// Tree node size in bytes.
     pub nodesize: u32,
+    /// Checksum algorithm used (0 = CRC32C).
+    pub csum_type: u16,
     /// Root objectid of the mounted subvolume (default: `BTRFS_FS_TREE_OBJECTID` = 5).
     pub subvol_objectid: u64,
     /// Root inode objectid inside the mounted subvolume's filesystem tree.
@@ -2161,7 +2163,7 @@ impl OpenFs {
                             Ok(buf)
                         };
 
-                    match walk_tree(&mut read_phys, chunks_ref, sb.root, sb.nodesize)
+                    match walk_tree(&mut read_phys, chunks_ref, sb.root, sb.nodesize, sb.csum_type)
                         .and_then(|items| {
                             items
                                 .into_iter()
@@ -2191,6 +2193,7 @@ impl OpenFs {
                 let ctx = BtrfsContext {
                     chunks,
                     nodesize: sb.nodesize,
+                    csum_type: sb.csum_type,
                     subvol_objectid,
                     subvol_root_dirid,
                 };
@@ -4167,7 +4170,7 @@ impl OpenFs {
             Ok(buf)
         };
 
-        walk_tree(&mut read_fn, &ctx.chunks, root_logical, nodesize)
+        walk_tree(&mut read_fn, &ctx.chunks, root_logical, nodesize, ctx.csum_type)
             .map_err(|e| parse_to_ffs_error(&e))
     }
 

@@ -886,6 +886,7 @@ pub fn walk_tree(
     chunks: &[BtrfsChunkEntry],
     root_logical: u64,
     nodesize: u32,
+    csum_type: u16,
 ) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
     let mut results = Vec::new();
     let mut active_path = HashSet::new();
@@ -895,6 +896,7 @@ pub fn walk_tree(
         chunks,
         root_logical,
         nodesize,
+        csum_type,
         &mut results,
         &mut active_path,
         &mut visited_nodes,
@@ -907,6 +909,7 @@ fn walk_node(
     chunks: &[BtrfsChunkEntry],
     logical: u64,
     nodesize: u32,
+    csum_type: u16,
     out: &mut Vec<BtrfsLeafEntry>,
     active_path: &mut HashSet<u64>,
     visited_nodes: &mut HashSet<u64>,
@@ -953,6 +956,9 @@ fn walk_node(
         });
     }
 
+    // Verify checksum before parsing.
+    ffs_ondisk::verify_btrfs_tree_block_checksum(&block, csum_type)?;
+
     let header = BtrfsHeader::parse_from_block(&block)?;
     header.validate(block.len(), Some(logical))?;
 
@@ -972,6 +978,7 @@ fn walk_node(
                 chunks,
                 kp.blockptr,
                 nodesize,
+                csum_type,
                 out,
                 active_path,
                 visited_nodes,
@@ -3071,7 +3078,13 @@ pub fn walk_chunk_tree(
     sb: &BtrfsSuperblock,
     bootstrap_chunks: &[BtrfsChunkEntry],
 ) -> Result<Vec<BtrfsChunkEntry>, ParseError> {
-    let items = walk_tree(read_physical, bootstrap_chunks, sb.chunk_root, sb.nodesize)?;
+    let items = walk_tree(
+        read_physical,
+        bootstrap_chunks,
+        sb.chunk_root,
+        sb.nodesize,
+        sb.csum_type,
+    )?;
 
     let mut chunks = bootstrap_chunks.to_vec();
     for item in &items {
@@ -3099,8 +3112,9 @@ pub fn walk_device_tree(
     dev_root_bytenr: u64,
     chunks: &[BtrfsChunkEntry],
     nodesize: u32,
+    csum_type: u16,
 ) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
-    walk_tree(read_physical, chunks, dev_root_bytenr, nodesize)
+    walk_tree(read_physical, chunks, dev_root_bytenr, nodesize, csum_type)
 }
 
 /// Each device is identified by its `devid` (from `DEV_ITEM` in the device tree).
@@ -3476,7 +3490,7 @@ pub fn replay_tree_log(
         "btrfs tree-log replay start"
     );
 
-    let items = walk_tree(read_physical, chunks, sb.log_root, sb.nodesize)?;
+    let items = walk_tree(read_physical, chunks, sb.log_root, sb.nodesize, sb.csum_type)?;
 
     tracing::info!(
         items_replayed = items.len(),
@@ -3665,7 +3679,7 @@ mod tests {
             })
         };
 
-        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE).expect("walk");
+        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE, 0).expect("walk");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].key.objectid, 256);
         assert_eq!(entries[0].data, vec![0xAA; 10]);
@@ -3711,7 +3725,7 @@ mod tests {
             })
         };
 
-        let entries = walk_tree(&mut read, &chunks, root_logical, NODESIZE).expect("walk");
+        let entries = walk_tree(&mut read, &chunks, root_logical, NODESIZE, 0).expect("walk");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].key.objectid, 256);
         assert_eq!(entries[0].data, vec![1, 2, 3, 4]);
@@ -3730,7 +3744,7 @@ mod tests {
                 reason: "should not be called",
             })
         };
-        let err = walk_tree(&mut read, &chunks, far_logical, NODESIZE).unwrap_err();
+        let err = walk_tree(&mut read, &chunks, far_logical, NODESIZE, 0).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -3753,7 +3767,7 @@ mod tests {
                 reason: "should not be called",
             })
         };
-        let err = walk_tree(&mut read, &chunks, unaligned, NODESIZE).unwrap_err();
+        let err = walk_tree(&mut read, &chunks, unaligned, NODESIZE, 0).unwrap_err();
         assert!(matches!(
             err,
             ParseError::InvalidField {
@@ -3781,7 +3795,7 @@ mod tests {
             })
         };
 
-        let err = walk_tree(&mut read, &chunks, root_logical, NODESIZE).unwrap_err();
+        let err = walk_tree(&mut read, &chunks, root_logical, NODESIZE, 0).unwrap_err();
         assert!(matches!(
             err,
             ParseError::InvalidField {
@@ -3807,7 +3821,7 @@ mod tests {
             })
         };
 
-        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE).expect("walk");
+        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE, 0).expect("walk");
         assert!(entries.is_empty());
     }
 
@@ -3828,7 +3842,7 @@ mod tests {
             })
         };
 
-        let err = walk_tree(&mut read, &chunks, root_logical, NODESIZE).unwrap_err();
+        let err = walk_tree(&mut read, &chunks, root_logical, NODESIZE, 0).unwrap_err();
         assert!(matches!(
             err,
             ParseError::InvalidField {
@@ -3860,7 +3874,7 @@ mod tests {
             })
         };
 
-        let err = walk_tree(&mut read, &chunks, a_logical, NODESIZE).unwrap_err();
+        let err = walk_tree(&mut read, &chunks, a_logical, NODESIZE, 0).unwrap_err();
         assert!(matches!(
             err,
             ParseError::InvalidField {
@@ -3892,7 +3906,7 @@ mod tests {
             })
         };
 
-        let err = walk_tree(&mut read, &chunks, root_logical, NODESIZE).unwrap_err();
+        let err = walk_tree(&mut read, &chunks, root_logical, NODESIZE, 0).unwrap_err();
         assert!(matches!(
             err,
             ParseError::InvalidField {
@@ -5746,7 +5760,7 @@ mod tests {
             })
         };
 
-        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE).expect("walk root tree");
+        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE, 0).expect("walk root tree");
         assert_eq!(entries.len(), 3, "expected 3 root tree items");
 
         // Verify strict key ordering: objectid 2 < 3 < 5
@@ -5825,7 +5839,7 @@ mod tests {
             })
         };
 
-        let all_entries = walk_tree(&mut read, &chunks, logical, NODESIZE).expect("walk");
+        let all_entries = walk_tree(&mut read, &chunks, logical, NODESIZE, 0).expect("walk");
 
         // Filter for inode 256 EXTENT_DATA items
         let extents: Vec<_> = all_entries
@@ -5949,7 +5963,7 @@ mod tests {
             })
         };
 
-        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE).expect("walk");
+        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE, 0).expect("walk");
 
         // Filter DIR_ITEM entries
         let dir_entries: Vec<_> = entries
@@ -6021,7 +6035,7 @@ mod tests {
             })
         };
 
-        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE).expect("walk empty tree");
+        let entries = walk_tree(&mut read, &chunks, logical, NODESIZE, 0).expect("walk empty tree");
         assert!(entries.is_empty(), "empty tree should yield no items");
     }
 
