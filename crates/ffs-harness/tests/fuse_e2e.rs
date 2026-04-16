@@ -14,12 +14,12 @@
 
 use asupersync::Cx;
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
-use ffs_fuse::{MountOptions, mount_background};
+use ffs_fuse::{mount_background, MountOptions};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -2529,8 +2529,9 @@ sys.exit(1)
 }
 
 #[test]
-fn btrfs_fuse_fsync_persists_written_data() {
+fn btrfs_fuse_fsync_emits_scenario_result_and_persists_written_data() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fsync";
         let path = mnt.join("synced.txt");
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -2551,6 +2552,42 @@ fn btrfs_fuse_fsync_persists_written_data() {
         // Read back and verify.
         let content = fs::read_to_string(&path).expect("read after fsync on btrfs");
         assert_eq!(content, "data before fsync\n");
+        emit_scenario_result(scenario_id, "PASS", Some("sync_all"));
+    });
+}
+
+#[test]
+fn btrfs_fuse_fsyncdir_emits_scenario_result_and_preserves_dirent() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fsyncdir";
+        let dir = mnt.join("synced_dir");
+        fs::create_dir(&dir).expect("mkdir for btrfs fsyncdir");
+
+        let child = dir.join("child.txt");
+        fs::write(&child, b"directory sync payload\n").expect("write child before btrfs fsyncdir");
+
+        let dirfd = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(&dir)
+            .expect("open directory fd for btrfs fsyncdir");
+        dirfd.sync_all().expect("fsyncdir via sync_all on btrfs");
+        drop(dirfd);
+
+        let entries: HashSet<String> = fs::read_dir(&dir)
+            .expect("readdir after btrfs fsyncdir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.contains("child.txt"),
+            "directory entry should remain visible after fsyncdir, got: {entries:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&child).expect("read child after btrfs fsyncdir"),
+            "directory sync payload\n"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("dirfd_sync_all"));
     });
 }
 
