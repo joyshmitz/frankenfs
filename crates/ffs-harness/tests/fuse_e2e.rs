@@ -1118,6 +1118,69 @@ fn ext4_fuse_fallocate_punch_hole_keep_size_zeroes_range() {
 }
 
 #[test]
+fn ext4_fuse_unsupported_fallocate_mode_bits_errno_eopnotsupp() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_unsupported_fallocate_mode_bits_errno_eopnotsupp";
+        let path = mnt.join("ext4_unsupported_mode_bits.bin");
+        let data = b"keep-intact-on-ext4-unsupported-mode".to_vec();
+        fs::write(&path, &data).expect("seed unsupported-mode file on ext4");
+
+        let script = r#"
+import ctypes
+import errno
+import os
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDWR)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong]
+libc.fallocate.restype = ctypes.c_int
+res = libc.fallocate(fd, 0x08, 0, 4096)
+err = ctypes.get_errno()
+os.close(fd)
+if res == 0:
+    print("res=0")
+    sys.exit(0)
+print(f"errno={err}")
+print(errno.errorcode.get(err, "UNKNOWN"))
+sys.exit(1)
+"#;
+        let out = Command::new("python3")
+            .args(["-c", script, path.to_str().unwrap()])
+            .output()
+            .expect("run unsupported-mode fallocate probe on ext4");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !out.status.success(),
+            "unsupported mode bits should fail, got stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains(&format!("errno={EOPNOTSUPP_ERRNO}")),
+            "unsupported mode bits should surface errno {EOPNOTSUPP_ERRNO}, got: {stdout}"
+        );
+        assert!(
+            stdout.contains("EOPNOTSUPP") || stdout.contains("ENOTSUP"),
+            "unsupported mode bits should surface the errno-95 not-supported alias, got: {stdout}"
+        );
+
+        let meta = fs::metadata(&path).expect("stat after unsupported-mode rejection");
+        assert_eq!(
+            meta.len(),
+            data.len() as u64,
+            "unsupported mode rejection must preserve file size"
+        );
+        let readback = fs::read(&path).expect("read after unsupported-mode rejection");
+        assert_eq!(
+            readback, data,
+            "unsupported mode rejection must preserve file data"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=95"));
+    });
+}
+
+#[test]
 fn fuse_ioctl_fiemap_reports_valid_extents() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
