@@ -599,6 +599,143 @@ with open(path, 'r+b', buffering=0) as fh:
     serde_json::from_slice(&output.stdout).expect("decode ext4 ioctl JSON")
 }
 
+fn query_seek(path: &Path, offset: u64, whence: &str) -> Value {
+    let script = r"
+import json, os, sys
+
+path = sys.argv[1]
+offset = int(sys.argv[2])
+whence = getattr(os, sys.argv[3])
+fd = os.open(path, os.O_RDONLY)
+try:
+    print(json.dumps({'offset': os.lseek(fd, offset, whence)}))
+except OSError as exc:
+    print(json.dumps({
+        'errno': exc.errno,
+        'message': str(exc),
+    }))
+finally:
+    os.close(fd)
+    ";
+
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            script,
+            path.to_str().expect("path utf8"),
+            &offset.to_string(),
+            whence,
+        ])
+        .output()
+        .expect("python3 seek probe");
+    assert!(
+        output.status.success(),
+        "python3 seek probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode seek probe JSON")
+}
+
+fn assert_seek_data_hole_contract(path: &Path, scenario_id: &str) {
+    let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 251) + 1) as u8).collect();
+    fs::write(path, &data).expect("seed seek test file");
+
+    let out = Command::new("fallocate")
+        .args([
+            "--keep-size",
+            "--punch-hole",
+            "-o",
+            "4096",
+            "-l",
+            "4096",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run fallocate --punch-hole --keep-size for seek test");
+    assert!(
+        out.status.success(),
+        "seek-layout punch-hole failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let readback = fs::read(path).expect("read punched-hole seek test file");
+    assert_eq!(
+        &readback[..4096],
+        &data[..4096],
+        "seek test prefix must be preserved"
+    );
+    assert!(
+        readback[4096..8192].iter().all(|&byte| byte == 0),
+        "seek test middle hole must read back as zeros"
+    );
+    assert_eq!(
+        &readback[8192..],
+        &data[8192..],
+        "seek test suffix must be preserved"
+    );
+
+    let data0 = query_seek(path, 0, "SEEK_DATA");
+    if let Some(errno) = data0["errno"].as_i64() {
+        if errno == i64::from(libc::EINVAL)
+            || errno == i64::from(libc::ENOSYS)
+            || errno == EOPNOTSUPP_ERRNO
+        {
+            eprintln!(
+                "SEEK_DATA/SEEK_HOLE skipped: current kernel/FUSE stack reports errno {errno} \
+                 before FrankenFS can prove mounted seek semantics"
+            );
+            return;
+        }
+    }
+
+    assert_eq!(
+        data0["offset"].as_u64(),
+        Some(0),
+        "SEEK_DATA at file start should return the first data byte: {data0}"
+    );
+
+    let hole0 = query_seek(path, 0, "SEEK_HOLE");
+    assert_eq!(
+        hole0["offset"].as_u64(),
+        Some(4096),
+        "SEEK_HOLE from file start should stop at the punched range: {hole0}"
+    );
+
+    let data_middle = query_seek(path, 4096, "SEEK_DATA");
+    assert_eq!(
+        data_middle["offset"].as_u64(),
+        Some(8192),
+        "SEEK_DATA from inside the punched range should advance to the next extent: {data_middle}"
+    );
+
+    let hole_middle = query_seek(path, 4096, "SEEK_HOLE");
+    assert_eq!(
+        hole_middle["offset"].as_u64(),
+        Some(4096),
+        "SEEK_HOLE from the punched range should return the hole start: {hole_middle}"
+    );
+
+    let hole_tail = query_seek(path, 8192, "SEEK_HOLE");
+    assert_eq!(
+        hole_tail["offset"].as_u64(),
+        Some(data.len() as u64),
+        "SEEK_HOLE from the tail extent should report the virtual EOF hole: {hole_tail}"
+    );
+
+    let eof_data = query_seek(path, data.len() as u64, "SEEK_DATA");
+    assert_eq!(
+        eof_data["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_DATA at EOF should surface ENXIO: {eof_data}"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("punch_hole_seek_offsets_verified"),
+    );
+}
+
 #[test]
 fn fuse_create_and_read_file() {
     with_rw_mount(|mnt| {
@@ -1461,6 +1598,20 @@ fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
             "PASS",
             Some("user_bits_applied_system_bits_preserved"),
         );
+    });
+}
+
+#[test]
+fn ext4_fuse_seek_data_hole_reports_punched_range_offsets() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_seek_data_hole";
+        let path = mnt.join("ext4_seek_layout.bin");
+        assert_seek_data_hole_contract(&path, scenario_id);
     });
 }
 
@@ -2668,6 +2819,20 @@ fn btrfs_fuse_statfs() {
 
         // Max filename length: btrfs is 255.
         assert_eq!(namelen, 255, "btrfs max filename length should be 255");
+    });
+}
+
+#[test]
+fn btrfs_fuse_seek_data_hole_reports_punched_range_offsets() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_seek_data_hole";
+        let path = mnt.join("btrfs_seek_layout.bin");
+        assert_seek_data_hole_contract(&path, scenario_id);
     });
 }
 
