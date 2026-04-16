@@ -140,6 +140,17 @@ third_party/
 # One-off migration/fix scripts (agent-generated)
 fix_*.py
 
+# Agent commit-helper detritus (one-off task scripts and captured output).
+# These are produced by parallel agents driving `git commit`/`cargo check`
+# wrappers and writing logs back to /tmp; they have no place in the repo.
+nohup.out
+/do_*.sh
+/*.out
+/final_commit_*
+scripts/do_*.py
+scripts/*_helper.py
+scripts/final_*.py
+
 # NTM session state
 .ntm/
 
