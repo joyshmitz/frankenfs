@@ -514,6 +514,31 @@ fn ext4_orphan_recovery_conforms() {
 }
 
 #[test]
+fn ext4_path_resolution_conforms() {
+    let cx = Cx::for_testing();
+    let (mut fs, _tmp, _image_path) = open_writable_ext4_mkfs(64);
+    let root = InodeNumber(2);
+
+    // 1. Create a nested structure: /a/b/c.txt
+    let name_a = std::ffi::OsString::from("a");
+    let attr_a = fs.mkdir(&cx, root, &name_a, 0o755, 0, 0).expect("mkdir a");
+    
+    let name_b = std::ffi::OsString::from("b");
+    let attr_b = fs.mkdir(&cx, attr_a.ino, &name_b, 0o755, 0, 0).expect("mkdir b");
+    
+    let name_c = std::ffi::OsString::from("c.txt");
+    let attr_c = fs.create(&cx, attr_b.ino, &name_c, 0o644, 0, 0).expect("create c.txt");
+
+    // 2. Resolve path "/a/b/c.txt"
+    let resolved = fs.resolve_path(&cx, "/a/b/c.txt").expect("resolve /a/b/c.txt");
+    assert_eq!(resolved, attr_c.ino, "Resolved inode should match created inode");
+
+    // 3. Resolve path "a/b/../b/c.txt"
+    let resolved_dots = fs.resolve_path(&cx, "a/b/../b/c.txt").expect("resolve with dots");
+    assert_eq!(resolved_dots, attr_c.ino, "Resolved inode with dots should match");
+}
+
+#[test]
 fn btrfs_tree_block_checksum_tamper_detection_conforms() {
     let cx = Cx::for_testing();
     let (fs, _tmp, image_path) = open_btrfs_mkfs(128);
@@ -2898,8 +2923,9 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
-    btrfs_tree_block_checksum_tamper_detection_conforms();
+    ext4_block_bitmap_checksum_tamper_detection_conforms();
     ext4_orphan_recovery_conforms();
+    ext4_path_resolution_conforms();
     ext4_fallocate_zero_range_zeroes_target_range();
     ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
     ext4_indirect_block_addressing_conforms();
