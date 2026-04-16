@@ -5,8 +5,9 @@ use ffs_alloc::{FsGeometry, GroupStats};
 use ffs_block::{BlockDevice, ByteBlockDevice, FileByteDevice};
 use ffs_btrfs::{
     parse_send_stream, replay_tree_log, walk_chunk_tree, walk_device_tree, BtrfsDeviceSet,
-    SendCommand, BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_ITEM_CHUNK,
-    BTRFS_ITEM_DEV_ITEM, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
+    SendCommand, BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
+    BTRFS_FS_TREE_OBJECTID, BTRFS_FT_REG_FILE, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
+    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
 };
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
 use ffs_harness::{
@@ -22,8 +23,8 @@ use ffs_ondisk::{
     Ext4IncompatFeatures, Ext4Superblock, ExtentTree,
 };
 use ffs_types::{
-    GroupNumber, InodeNumber, ParseError, EXT4_CASEFOLD_FL, EXT4_COMPRBLK_FL, EXT4_COMPR_FL,
-    EXT4_EXTENTS_FL, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
+    GroupNumber, InodeNumber, ParseError, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL,
+    EXT4_COMPRBLK_FL, EXT4_COMPR_FL, EXT4_EXTENTS_FL, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
 };
 use serde_json::Value;
 use std::{
@@ -1620,6 +1621,204 @@ fn build_dev_item_payload(
     data
 }
 
+fn encode_btrfs_inode_item(mode: u32, size: u64, nbytes: u64, nlink: u32) -> [u8; 160] {
+    let mut inode = [0_u8; 160];
+    inode[0..8].copy_from_slice(&1_u64.to_le_bytes());
+    inode[8..16].copy_from_slice(&1_u64.to_le_bytes());
+    inode[16..24].copy_from_slice(&size.to_le_bytes());
+    inode[24..32].copy_from_slice(&nbytes.to_le_bytes());
+    inode[40..44].copy_from_slice(&nlink.to_le_bytes());
+    inode[44..48].copy_from_slice(&1000_u32.to_le_bytes());
+    inode[48..52].copy_from_slice(&1000_u32.to_le_bytes());
+    inode[52..56].copy_from_slice(&mode.to_le_bytes());
+    inode[112..120].copy_from_slice(&10_u64.to_le_bytes());
+    inode[124..132].copy_from_slice(&10_u64.to_le_bytes());
+    inode[136..144].copy_from_slice(&10_u64.to_le_bytes());
+    inode[148..156].copy_from_slice(&10_u64.to_le_bytes());
+    inode
+}
+
+fn encode_btrfs_dir_index_entry(name: &[u8], child_objectid: u64, file_type: u8) -> Vec<u8> {
+    let mut entry = vec![0_u8; 30 + name.len()];
+    entry[0..8].copy_from_slice(&child_objectid.to_le_bytes());
+    entry[8] = BTRFS_ITEM_INODE_ITEM;
+    entry[9..17].copy_from_slice(&0_u64.to_le_bytes());
+    entry[17..25].copy_from_slice(&1_u64.to_le_bytes());
+    entry[25..27].copy_from_slice(&0_u16.to_le_bytes());
+    let name_len = u16::try_from(name.len()).expect("test name length should fit in u16");
+    entry[27..29].copy_from_slice(&name_len.to_le_bytes());
+    entry[29] = file_type;
+    entry[30..30 + name.len()].copy_from_slice(name);
+    entry
+}
+
+fn encode_btrfs_extent_regular(disk_bytenr: u64, num_bytes: u64) -> [u8; 53] {
+    let mut extent = [0_u8; 53];
+    extent[0..8].copy_from_slice(&1_u64.to_le_bytes());
+    extent[8..16].copy_from_slice(&num_bytes.to_le_bytes());
+    extent[20] = BTRFS_FILE_EXTENT_REG;
+    extent[21..29].copy_from_slice(&disk_bytenr.to_le_bytes());
+    extent[29..37].copy_from_slice(&num_bytes.to_le_bytes());
+    extent[37..45].copy_from_slice(&0_u64.to_le_bytes());
+    extent[45..53].copy_from_slice(&num_bytes.to_le_bytes());
+    extent
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
+    let image_size: usize = 512 * 1024;
+    let mut image = vec![0_u8; image_size];
+    let sb_off = BTRFS_SUPER_INFO_OFFSET;
+
+    let root_tree_logical = 0x4_000_u64;
+    let fs_tree_logical = 0x8_000_u64;
+    let file_data_logical = 0x12_000_u64;
+    let file_bytes = b"hello from btrfs fsops";
+
+    image[sb_off + 0x40..sb_off + 0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+    image[sb_off + 0x48..sb_off + 0x50].copy_from_slice(&1_u64.to_le_bytes());
+    image[sb_off + 0x50..sb_off + 0x58].copy_from_slice(&root_tree_logical.to_le_bytes());
+    image[sb_off + 0x58..sb_off + 0x60].copy_from_slice(&0_u64.to_le_bytes());
+    image[sb_off + 0x70..sb_off + 0x78].copy_from_slice(&(image_size as u64).to_le_bytes());
+    image[sb_off + 0x80..sb_off + 0x88].copy_from_slice(&256_u64.to_le_bytes());
+    image[sb_off + 0x88..sb_off + 0x90].copy_from_slice(&1_u64.to_le_bytes());
+    image[sb_off + 0x90..sb_off + 0x94].copy_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    image[sb_off + 0x94..sb_off + 0x98].copy_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    image[sb_off + 0x9C..sb_off + 0xA0].copy_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    image[sb_off + 0xC6] = 0;
+
+    let mut chunk_array = Vec::new();
+    chunk_array.extend_from_slice(&256_u64.to_le_bytes());
+    chunk_array.push(BTRFS_ITEM_CHUNK);
+    chunk_array.extend_from_slice(&0_u64.to_le_bytes());
+    chunk_array.extend_from_slice(&(image_size as u64).to_le_bytes());
+    chunk_array.extend_from_slice(&2_u64.to_le_bytes());
+    chunk_array.extend_from_slice(&0x1_0000_u64.to_le_bytes());
+    chunk_array.extend_from_slice(&1_u64.to_le_bytes());
+    chunk_array.extend_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    chunk_array.extend_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    chunk_array.extend_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
+    chunk_array.extend_from_slice(&1_u16.to_le_bytes());
+    chunk_array.extend_from_slice(&0_u16.to_le_bytes());
+    chunk_array.extend_from_slice(&1_u64.to_le_bytes());
+    chunk_array.extend_from_slice(&0_u64.to_le_bytes());
+    chunk_array.extend_from_slice(&[0_u8; 16]);
+    image[sb_off + 0xA0..sb_off + 0xA4].copy_from_slice(&(chunk_array.len() as u32).to_le_bytes());
+    let array_start = sb_off + 0x32B;
+    image[array_start..array_start + chunk_array.len()].copy_from_slice(&chunk_array);
+
+    let mut root_leaf = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
+    write_btrfs_header(&mut root_leaf, root_tree_logical, 1, 0, 1, 1);
+    let root_item_offset = 3000_u32;
+    let root_item_size = 239_u32;
+    write_btrfs_leaf_item(
+        &mut root_leaf,
+        0,
+        BTRFS_FS_TREE_OBJECTID,
+        132,
+        0,
+        root_item_offset,
+        root_item_size,
+    );
+    let mut root_item = vec![0_u8; root_item_size as usize];
+    root_item[168..176].copy_from_slice(&256_u64.to_le_bytes());
+    root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
+    let last = root_item.len() - 1;
+    root_item[last] = 0;
+    let root_item_end = root_item_offset as usize + root_item.len();
+    root_leaf[root_item_offset as usize..root_item_end].copy_from_slice(&root_item);
+    let root_leaf_off = root_tree_logical as usize;
+    image[root_leaf_off..root_leaf_off + root_leaf.len()].copy_from_slice(&root_leaf);
+
+    let mut fs_leaf = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
+    write_btrfs_header(
+        &mut fs_leaf,
+        fs_tree_logical,
+        4,
+        0,
+        BTRFS_FS_TREE_OBJECTID,
+        1,
+    );
+
+    let root_inode = encode_btrfs_inode_item(0o040_755, 4096, 4096, 2);
+    let file_inode = encode_btrfs_inode_item(
+        0o100_644,
+        file_bytes.len() as u64,
+        file_bytes.len() as u64,
+        1,
+    );
+    let dir_index = encode_btrfs_dir_index_entry(b"hello.txt", 257, BTRFS_FT_REG_FILE);
+    let extent = encode_btrfs_extent_regular(file_data_logical, file_bytes.len() as u64);
+
+    let root_inode_off = 3200_u32;
+    let dir_index_off = 3060_u32;
+    let file_inode_off = 2860_u32;
+    let extent_off = 2780_u32;
+
+    write_btrfs_leaf_item(
+        &mut fs_leaf,
+        0,
+        256,
+        BTRFS_ITEM_INODE_ITEM,
+        0,
+        root_inode_off,
+        root_inode.len() as u32,
+    );
+    write_btrfs_leaf_item(
+        &mut fs_leaf,
+        1,
+        256,
+        BTRFS_ITEM_DIR_INDEX,
+        2,
+        dir_index_off,
+        dir_index.len() as u32,
+    );
+    write_btrfs_leaf_item(
+        &mut fs_leaf,
+        2,
+        257,
+        BTRFS_ITEM_INODE_ITEM,
+        0,
+        file_inode_off,
+        file_inode.len() as u32,
+    );
+    write_btrfs_leaf_item(
+        &mut fs_leaf,
+        3,
+        257,
+        BTRFS_ITEM_EXTENT_DATA,
+        0,
+        extent_off,
+        extent.len() as u32,
+    );
+
+    let root_inode_end = root_inode_off as usize + root_inode.len();
+    fs_leaf[root_inode_off as usize..root_inode_end].copy_from_slice(&root_inode);
+    let dir_index_end = dir_index_off as usize + dir_index.len();
+    fs_leaf[dir_index_off as usize..dir_index_end].copy_from_slice(&dir_index);
+    let file_inode_end = file_inode_off as usize + file_inode.len();
+    fs_leaf[file_inode_off as usize..file_inode_end].copy_from_slice(&file_inode);
+    let extent_end = extent_off as usize + extent.len();
+    fs_leaf[extent_off as usize..extent_end].copy_from_slice(&extent);
+    let fs_leaf_off = fs_tree_logical as usize;
+    image[fs_leaf_off..fs_leaf_off + fs_leaf.len()].copy_from_slice(&fs_leaf);
+
+    let file_data_off = file_data_logical as usize;
+    image[file_data_off..file_data_off + file_bytes.len()].copy_from_slice(file_bytes);
+    image
+}
+
+fn open_btrfs_subvolume_mount_image() -> (OpenFs, tempfile::TempDir) {
+    let image = build_btrfs_subvolume_mount_image();
+    let tmp = tempfile::TempDir::new().expect("tmpdir for btrfs subvolume mount image");
+    let image_path = tmp.path().join("subvolume-mount.btrfs");
+    std::fs::write(&image_path, &image).expect("write btrfs subvolume mount image");
+    let cx = Cx::for_testing();
+    let fs = OpenFs::open_with_options(&cx, &image_path, &OpenOptions::default())
+        .expect("open btrfs subvolume mount image");
+    (fs, tmp)
+}
+
 #[test]
 fn btrfs_send_stream_multi_command_conforms() {
     let mut data = Vec::new();
@@ -1673,6 +1872,39 @@ fn btrfs_send_stream_unknown_command_preserves_attrs_as_unspec() {
     assert_eq!(result.commands[0].cmd, SendCommand::Unspec);
     assert_eq!(result.commands[0].attrs, vec![(15, b"/mystery".to_vec())]);
     assert_eq!(result.commands[1].cmd, SendCommand::End);
+}
+
+#[test]
+fn btrfs_subvolume_mount_root_alias_conforms() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp) = open_btrfs_subvolume_mount_image();
+
+    let ctx = fs.btrfs_context().expect("btrfs context should be present");
+    assert_eq!(ctx.subvol_objectid, BTRFS_FS_TREE_OBJECTID);
+    assert_eq!(ctx.subvol_root_dirid, 256);
+
+    let root_attr = fs.getattr(&cx, InodeNumber(1)).expect("get mounted root");
+    assert_eq!(root_attr.ino, InodeNumber(1));
+    assert_eq!(root_attr.perm, 0o755);
+
+    let child = fs
+        .lookup(&cx, InodeNumber(1), OsStr::new("hello.txt"))
+        .expect("lookup file through mounted subvolume root");
+    assert_eq!(child.ino, InodeNumber(257));
+    assert_eq!(child.size, 22);
+
+    let entries = fs
+        .readdir(&cx, InodeNumber(1), 0)
+        .expect("readdir mounted subvolume root");
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].name, b".");
+    assert_eq!(entries[1].name, b"..");
+    assert_eq!(entries[2].name, b"hello.txt");
+
+    let data = fs
+        .read(&cx, InodeNumber(257), 0, 128)
+        .expect("read file from mounted subvolume");
+    assert_eq!(&data, b"hello from btrfs fsops");
 }
 
 #[test]
@@ -2405,6 +2637,7 @@ fn full_conformance_gate_pass() {
     ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only();
     btrfs_send_stream_multi_command_conforms();
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
+    btrfs_subvolume_mount_root_alias_conforms();
     btrfs_tree_log_replay_multilevel_conforms();
     btrfs_tree_log_replay_skips_when_log_root_absent();
     btrfs_chunk_tree_walk_adds_and_sorts_new_chunks();
