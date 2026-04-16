@@ -9222,12 +9222,6 @@ impl OpenFs {
         if inode.is_symlink() {
             return Err(FfsError::Format("cannot write to a symlink".into()));
         }
-        if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
-            return Err(FfsError::UnsupportedFeature(
-                "writing to non-extent (indirect block) files is not supported".into(),
-            ));
-        }
-
         // e2compr compressed write: route to cluster-based write path.
         if inode.flags & ffs_types::EXT4_COMPR_FL != 0 {
             return self.ext4_write_compressed(
@@ -9243,6 +9237,12 @@ impl OpenFs {
                 tstamp_secs,
                 tstamp_nanos,
             );
+        }
+
+        if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
+            return Err(FfsError::UnsupportedFeature(
+                "writing to non-extent (indirect block) files is not supported".into(),
+            ));
         }
 
         let mut alloc = alloc_mutex.lock();

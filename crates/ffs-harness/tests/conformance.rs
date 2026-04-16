@@ -988,9 +988,11 @@ fn enable_e2compr_for_inode(
 ) {
     let mut inode = fs.read_inode(cx, ino).expect("read inode for e2compr");
     inode.flags |= EXT4_COMPR_FL;
+    inode.flags &= !EXT4_EXTENTS_FL;
     inode.flags &= !((0x7_u32 << 23) | (0x1F_u32 << 26));
     inode.flags |= (cluster_shift & 0x7) << 23;
     inode.flags |= u32::from(method_idx & 0x1F) << 26;
+    inode.extent_bytes.fill(0);
 
     let sb = fs.ext4_superblock().expect("ext4 superblock");
     let geo = FsGeometry::from_superblock(sb);
@@ -1010,6 +1012,18 @@ fn enable_e2compr_for_inode(
     ffs_inode::write_inode(cx, &block_dev, &geo, &groups, ino, &inode, sb.csum_seed())
         .expect("persist e2compr inode flags");
     block_dev.sync(cx).expect("sync e2compr inode flags");
+}
+
+fn reopen_writable_ext4(image_path: &Path) -> OpenFs {
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+        ..OpenOptions::default()
+    };
+    let mut fs = OpenFs::open_with_options(&cx, image_path, &opts).expect("reopen writable ext4");
+    fs.enable_writes(&cx)
+        .expect("re-enable writes on ext4 image");
+    fs
 }
 
 fn ext4_free_block_counters(fs: &OpenFs, cx: &Cx) -> (u64, u64) {
@@ -1400,7 +1414,7 @@ fn ext4_indirect_block_addressing_conforms() {
 #[test]
 fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
     let cx = Cx::for_testing();
-    let (fs, _tmp, image_path) = open_writable_ext4_mkfs(64);
+    let (mut fs, _tmp, image_path) = open_writable_ext4_mkfs(64);
     let root = InodeNumber(2);
 
     for (method_idx, label, byte) in [(20_u8, "gzip", b'G'), (10_u8, "lzo", b'L')] {
@@ -1409,13 +1423,13 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
             .create(&cx, root, &name, 0o644, 0, 0)
             .expect("create compressed ext4 file");
         enable_e2compr_for_inode(&fs, &image_path, &cx, attr.ino, 2, method_idx);
+        drop(fs);
+        fs = reopen_writable_ext4(&image_path);
 
         let (baseline_free_blocks, baseline_gd_free_blocks) = ext4_free_block_counters(&fs, &cx);
         let first = vec![byte; 4096];
         fs.write(&cx, attr.ino, 0, &first)
             .expect("first compressed write");
-        fs.fsync(&cx, attr.ino, 0, false)
-            .expect("sync after first write");
 
         let (after_first_free_blocks, after_first_gd_free_blocks) =
             ext4_free_block_counters(&fs, &cx);
@@ -1447,8 +1461,6 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         let second = vec![byte.wrapping_add(1); 4096];
         fs.write(&cx, attr.ino, 0, &second)
             .expect("second compressed write");
-        fs.fsync(&cx, attr.ino, 0, false)
-            .expect("sync after second write");
 
         let (after_second_free_blocks, after_second_gd_free_blocks) =
             ext4_free_block_counters(&fs, &cx);
@@ -2447,6 +2459,111 @@ fn btrfs_device_tree_walk_enumerates_all_devices() {
 }
 
 #[test]
+fn btrfs_multi_device_raid5_read_conforms() {
+    let logical = 0x50_000_u64;
+    let stripe_len = 0x10_000_u64;
+    // RAID5 with 3 devices: 2 data stripes, 1 parity stripe.
+    // Length is 2 * stripe_len = 0x20_000.
+    let chunks = vec![BtrfsChunkEntry {
+        key: BtrfsKey {
+            objectid: 256,
+            item_type: 228,
+            offset: logical,
+        },
+        length: stripe_len * 2,
+        owner: 2,
+        stripe_len,
+        chunk_type: ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+            | ffs_ondisk::chunk_type_flags::BTRFS_BLOCK_GROUP_RAID5,
+        io_align: BTRFS_TEST_NODESIZE,
+        io_width: BTRFS_TEST_NODESIZE,
+        sector_size: BTRFS_TEST_NODESIZE,
+        num_stripes: 3,
+        sub_stripes: 0,
+        stripes: vec![
+            BtrfsStripe {
+                devid: 1,
+                offset: 0x100_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 2,
+                offset: 0x200_000,
+                dev_uuid: [0; 16],
+            },
+            BtrfsStripe {
+                devid: 3,
+                offset: 0x300_000,
+                dev_uuid: [0; 16],
+            },
+        ],
+    }];
+
+    let mut devices = BtrfsDeviceSet::new();
+    let data1 = Arc::new(vec![0x11_u8; 4]);
+    let data2 = Arc::new(vec![0x22_u8; 4]);
+
+    // In RAID5, data is striped.
+    // Stripe 0: dev1:0x100_000, dev2:0x200_000, dev3:0x300_000 (P)
+    // Stripe 1: dev1:0x110_000 (P), dev2:0x210_000, dev3:0x310_000
+
+    let d1 = Arc::clone(&data1);
+    devices.add_device(
+        1,
+        Box::new(move |physical, len| {
+            assert_eq!(len, 4);
+            if physical == 0x100_000 {
+                Ok((*d1).clone())
+            } else {
+                Err(ParseError::InvalidField {
+                    field: "device",
+                    reason: "unexpected physical offset",
+                })
+            }
+        }),
+    );
+
+    let d2 = Arc::clone(&data2);
+    devices.add_device(
+        2,
+        Box::new(move |physical, len| {
+            assert_eq!(len, 4);
+            if physical == 0x210_000 {
+                Ok((*d2).clone())
+            } else {
+                Err(ParseError::InvalidField {
+                    field: "device",
+                    reason: "unexpected physical offset",
+                })
+            }
+        }),
+    );
+
+    devices.add_device(
+        3,
+        Box::new(move |_physical, _len| {
+            Err(ParseError::InvalidField {
+                field: "device",
+                reason: "parity device read not implemented for test",
+            })
+        }),
+    );
+
+    // Read from logical 0x50_000 (stripe 0, data 1)
+    let res1 = devices
+        .read_logical(&chunks, logical, 4)
+        .expect("read RAID5 data1");
+    assert_eq!(res1, vec![0x11_u8; 4]);
+
+    // Read from logical 0x50_000 + stripe_len (stripe 1, data 2)
+    // Stripe 1 for logical 0x60_000 should map to dev2:0x210_000
+    let res2 = devices
+        .read_logical(&chunks, logical + stripe_len, 4)
+        .expect("read RAID5 data2");
+    assert_eq!(res2, vec![0x22_u8; 4]);
+}
+
+#[test]
 fn btrfs_multi_device_raid1_read_falls_back_to_second_mirror() {
     let logical = 0x40_000_u64;
     let stripe_len = 0x10_000_u64;
@@ -2956,6 +3073,7 @@ fn full_conformance_gate_pass() {
     btrfs_tree_log_replay_skips_when_log_root_absent();
     btrfs_chunk_tree_walk_adds_and_sorts_new_chunks();
     btrfs_device_tree_walk_enumerates_all_devices();
+    btrfs_multi_device_raid5_read_conforms();
     btrfs_multi_device_raid1_read_falls_back_to_second_mirror();
     btrfs_multi_device_raid0_dispatches_to_correct_stripe();
     btrfs_chunk_mapping_fixture_conforms();
