@@ -1664,22 +1664,42 @@ fn encode_btrfs_extent_regular(disk_bytenr: u64, num_bytes: u64) -> [u8; 53] {
     extent
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
-    let image_size: usize = 512 * 1024;
-    let mut image = vec![0_u8; image_size];
-    let sb_off = BTRFS_SUPER_INFO_OFFSET;
+const BTRFS_TEST_IMAGE_SIZE: usize = 512 * 1024;
+const BTRFS_TEST_ROOT_TREE_LOGICAL: u64 = 0x4_000;
+const BTRFS_TEST_FS_TREE_LOGICAL: u64 = 0x8_000;
+const BTRFS_TEST_FILE_DATA_LOGICAL: u64 = 0x12_000;
+const BTRFS_TEST_ROOT_ITEM_OFF: u32 = 3000;
+const BTRFS_TEST_ROOT_INODE_OFF: u32 = 3200;
+const BTRFS_TEST_DIR_INDEX_OFF: u32 = 3060;
+const BTRFS_TEST_FILE_INODE_OFF: u32 = 2860;
+const BTRFS_TEST_EXTENT_OFF: u32 = 2780;
 
-    let root_tree_logical = 0x4_000_u64;
-    let fs_tree_logical = 0x8_000_u64;
-    let file_data_logical = 0x12_000_u64;
-    let file_bytes = b"hello from btrfs fsops";
+#[allow(clippy::too_many_lines)]
+fn build_btrfs_regular_extent_mount_image(
+    file_name: &[u8],
+    logical_file_bytes: &[u8],
+    extent_bytes: &[u8],
+    compression: u8,
+) -> Vec<u8> {
+    let mut image = vec![0_u8; BTRFS_TEST_IMAGE_SIZE];
+    let sb_off = BTRFS_SUPER_INFO_OFFSET;
+    let nodesize =
+        usize::try_from(BTRFS_TEST_NODESIZE).expect("btrfs test nodesize should fit in usize");
+    let file_size =
+        u64::try_from(logical_file_bytes.len()).expect("logical file size should fit in u64");
+    let extent_size =
+        u64::try_from(extent_bytes.len()).expect("extent payload size should fit in u64");
 
     image[sb_off + 0x40..sb_off + 0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
     image[sb_off + 0x48..sb_off + 0x50].copy_from_slice(&1_u64.to_le_bytes());
-    image[sb_off + 0x50..sb_off + 0x58].copy_from_slice(&root_tree_logical.to_le_bytes());
+    image[sb_off + 0x50..sb_off + 0x58]
+        .copy_from_slice(&BTRFS_TEST_ROOT_TREE_LOGICAL.to_le_bytes());
     image[sb_off + 0x58..sb_off + 0x60].copy_from_slice(&0_u64.to_le_bytes());
-    image[sb_off + 0x70..sb_off + 0x78].copy_from_slice(&(image_size as u64).to_le_bytes());
+    image[sb_off + 0x70..sb_off + 0x78].copy_from_slice(
+        &u64::try_from(BTRFS_TEST_IMAGE_SIZE)
+            .expect("test image size")
+            .to_le_bytes(),
+    );
     image[sb_off + 0x80..sb_off + 0x88].copy_from_slice(&256_u64.to_le_bytes());
     image[sb_off + 0x88..sb_off + 0x90].copy_from_slice(&1_u64.to_le_bytes());
     image[sb_off + 0x90..sb_off + 0x94].copy_from_slice(&BTRFS_TEST_NODESIZE.to_le_bytes());
@@ -1691,7 +1711,11 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
     chunk_array.extend_from_slice(&256_u64.to_le_bytes());
     chunk_array.push(BTRFS_ITEM_CHUNK);
     chunk_array.extend_from_slice(&0_u64.to_le_bytes());
-    chunk_array.extend_from_slice(&(image_size as u64).to_le_bytes());
+    chunk_array.extend_from_slice(
+        &u64::try_from(BTRFS_TEST_IMAGE_SIZE)
+            .expect("test image size should fit in u64")
+            .to_le_bytes(),
+    );
     chunk_array.extend_from_slice(&2_u64.to_le_bytes());
     chunk_array.extend_from_slice(&0x1_0000_u64.to_le_bytes());
     chunk_array.extend_from_slice(&1_u64.to_le_bytes());
@@ -1703,13 +1727,16 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
     chunk_array.extend_from_slice(&1_u64.to_le_bytes());
     chunk_array.extend_from_slice(&0_u64.to_le_bytes());
     chunk_array.extend_from_slice(&[0_u8; 16]);
-    image[sb_off + 0xA0..sb_off + 0xA4].copy_from_slice(&(chunk_array.len() as u32).to_le_bytes());
+    image[sb_off + 0xA0..sb_off + 0xA4].copy_from_slice(
+        &u32::try_from(chunk_array.len())
+            .expect("chunk array should fit in u32")
+            .to_le_bytes(),
+    );
     let array_start = sb_off + 0x32B;
     image[array_start..array_start + chunk_array.len()].copy_from_slice(&chunk_array);
 
-    let mut root_leaf = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
-    write_btrfs_header(&mut root_leaf, root_tree_logical, 1, 0, 1, 1);
-    let root_item_offset = 3000_u32;
+    let mut root_leaf = vec![0_u8; nodesize];
+    write_btrfs_header(&mut root_leaf, BTRFS_TEST_ROOT_TREE_LOGICAL, 1, 0, 1, 1);
     let root_item_size = 239_u32;
     write_btrfs_leaf_item(
         &mut root_leaf,
@@ -1717,23 +1744,24 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
         BTRFS_FS_TREE_OBJECTID,
         132,
         0,
-        root_item_offset,
+        BTRFS_TEST_ROOT_ITEM_OFF,
         root_item_size,
     );
-    let mut root_item = vec![0_u8; root_item_size as usize];
+    let mut root_item = vec![0_u8; usize::try_from(root_item_size).expect("root item size")];
     root_item[168..176].copy_from_slice(&256_u64.to_le_bytes());
-    root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
+    root_item[176..184].copy_from_slice(&BTRFS_TEST_FS_TREE_LOGICAL.to_le_bytes());
     let last = root_item.len() - 1;
     root_item[last] = 0;
-    let root_item_end = root_item_offset as usize + root_item.len();
-    root_leaf[root_item_offset as usize..root_item_end].copy_from_slice(&root_item);
-    let root_leaf_off = root_tree_logical as usize;
+    let root_item_off = usize::try_from(BTRFS_TEST_ROOT_ITEM_OFF).expect("root item offset");
+    root_leaf[root_item_off..root_item_off + root_item.len()].copy_from_slice(&root_item);
+    let root_leaf_off =
+        usize::try_from(BTRFS_TEST_ROOT_TREE_LOGICAL).expect("root tree logical should fit");
     image[root_leaf_off..root_leaf_off + root_leaf.len()].copy_from_slice(&root_leaf);
 
-    let mut fs_leaf = vec![0_u8; BTRFS_TEST_NODESIZE as usize];
+    let mut fs_leaf = vec![0_u8; nodesize];
     write_btrfs_header(
         &mut fs_leaf,
-        fs_tree_logical,
+        BTRFS_TEST_FS_TREE_LOGICAL,
         4,
         0,
         BTRFS_FS_TREE_OBJECTID,
@@ -1741,19 +1769,11 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
     );
 
     let root_inode = encode_btrfs_inode_item(0o040_755, 4096, 4096, 2);
-    let file_inode = encode_btrfs_inode_item(
-        0o100_644,
-        file_bytes.len() as u64,
-        file_bytes.len() as u64,
-        1,
-    );
-    let dir_index = encode_btrfs_dir_index_entry(b"hello.txt", 257, BTRFS_FT_REG_FILE);
-    let extent = encode_btrfs_extent_regular(file_data_logical, file_bytes.len() as u64);
-
-    let root_inode_off = 3200_u32;
-    let dir_index_off = 3060_u32;
-    let file_inode_off = 2860_u32;
-    let extent_off = 2780_u32;
+    let file_inode = encode_btrfs_inode_item(0o100_644, file_size, file_size, 1);
+    let dir_index = encode_btrfs_dir_index_entry(file_name, 257, BTRFS_FT_REG_FILE);
+    let mut extent = encode_btrfs_extent_regular(BTRFS_TEST_FILE_DATA_LOGICAL, file_size);
+    extent[16] = compression;
+    extent[29..37].copy_from_slice(&extent_size.to_le_bytes());
 
     write_btrfs_leaf_item(
         &mut fs_leaf,
@@ -1761,8 +1781,8 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
         256,
         BTRFS_ITEM_INODE_ITEM,
         0,
-        root_inode_off,
-        root_inode.len() as u32,
+        BTRFS_TEST_ROOT_INODE_OFF,
+        u32::try_from(root_inode.len()).expect("root inode size should fit in u32"),
     );
     write_btrfs_leaf_item(
         &mut fs_leaf,
@@ -1770,8 +1790,8 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
         256,
         BTRFS_ITEM_DIR_INDEX,
         2,
-        dir_index_off,
-        dir_index.len() as u32,
+        BTRFS_TEST_DIR_INDEX_OFF,
+        u32::try_from(dir_index.len()).expect("dir index size should fit in u32"),
     );
     write_btrfs_leaf_item(
         &mut fs_leaf,
@@ -1779,8 +1799,8 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
         257,
         BTRFS_ITEM_INODE_ITEM,
         0,
-        file_inode_off,
-        file_inode.len() as u32,
+        BTRFS_TEST_FILE_INODE_OFF,
+        u32::try_from(file_inode.len()).expect("file inode size should fit in u32"),
     );
     write_btrfs_leaf_item(
         &mut fs_leaf,
@@ -1788,35 +1808,105 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
         257,
         BTRFS_ITEM_EXTENT_DATA,
         0,
-        extent_off,
-        extent.len() as u32,
+        BTRFS_TEST_EXTENT_OFF,
+        u32::try_from(extent.len()).expect("extent size should fit in u32"),
     );
 
-    let root_inode_end = root_inode_off as usize + root_inode.len();
-    fs_leaf[root_inode_off as usize..root_inode_end].copy_from_slice(&root_inode);
-    let dir_index_end = dir_index_off as usize + dir_index.len();
-    fs_leaf[dir_index_off as usize..dir_index_end].copy_from_slice(&dir_index);
-    let file_inode_end = file_inode_off as usize + file_inode.len();
-    fs_leaf[file_inode_off as usize..file_inode_end].copy_from_slice(&file_inode);
-    let extent_end = extent_off as usize + extent.len();
-    fs_leaf[extent_off as usize..extent_end].copy_from_slice(&extent);
-    let fs_leaf_off = fs_tree_logical as usize;
+    let root_inode_off = usize::try_from(BTRFS_TEST_ROOT_INODE_OFF).expect("root inode offset");
+    fs_leaf[root_inode_off..root_inode_off + root_inode.len()].copy_from_slice(&root_inode);
+    let dir_index_off = usize::try_from(BTRFS_TEST_DIR_INDEX_OFF).expect("dir index offset");
+    fs_leaf[dir_index_off..dir_index_off + dir_index.len()].copy_from_slice(&dir_index);
+    let file_inode_off = usize::try_from(BTRFS_TEST_FILE_INODE_OFF).expect("file inode offset");
+    fs_leaf[file_inode_off..file_inode_off + file_inode.len()].copy_from_slice(&file_inode);
+    let extent_off = usize::try_from(BTRFS_TEST_EXTENT_OFF).expect("extent offset");
+    fs_leaf[extent_off..extent_off + extent.len()].copy_from_slice(&extent);
+    let fs_leaf_off =
+        usize::try_from(BTRFS_TEST_FS_TREE_LOGICAL).expect("fs tree logical should fit");
     image[fs_leaf_off..fs_leaf_off + fs_leaf.len()].copy_from_slice(&fs_leaf);
 
-    let file_data_off = file_data_logical as usize;
-    image[file_data_off..file_data_off + file_bytes.len()].copy_from_slice(file_bytes);
+    let file_data_off =
+        usize::try_from(BTRFS_TEST_FILE_DATA_LOGICAL).expect("file data logical should fit");
+    image[file_data_off..file_data_off + extent_bytes.len()].copy_from_slice(extent_bytes);
     image
 }
 
-fn open_btrfs_subvolume_mount_image() -> (OpenFs, tempfile::TempDir) {
-    let image = build_btrfs_subvolume_mount_image();
-    let tmp = tempfile::TempDir::new().expect("tmpdir for btrfs subvolume mount image");
-    let image_path = tmp.path().join("subvolume-mount.btrfs");
-    std::fs::write(&image_path, &image).expect("write btrfs subvolume mount image");
+#[allow(clippy::cast_possible_truncation)]
+fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
+    let file_bytes = b"hello from btrfs fsops";
+    build_btrfs_regular_extent_mount_image(b"hello.txt", file_bytes, file_bytes, 0)
+}
+
+fn open_btrfs_test_image(image_name: &str, image: Vec<u8>) -> (OpenFs, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for btrfs test image");
+    let image_path = tmp.path().join(image_name);
+    std::fs::write(&image_path, &image).expect("write btrfs test image");
     let cx = Cx::for_testing();
     let fs = OpenFs::open_with_options(&cx, &image_path, &OpenOptions::default())
-        .expect("open btrfs subvolume mount image");
+        .expect("open btrfs test image");
     (fs, tmp)
+}
+
+fn btrfs_transparent_decompression_payload() -> Vec<u8> {
+    let mut payload = Vec::new();
+    for _ in 0..128 {
+        payload.extend_from_slice(b"FrankenFS btrfs transparent decompression harness payload.\n");
+    }
+    payload.extend_from_slice(b"tail-marker:transparent-decompression");
+    payload
+}
+
+fn compress_btrfs_zlib_payload(data: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(data)
+        .expect("zlib encoder should accept test payload");
+    encoder.finish().expect("zlib encoder should finish")
+}
+
+fn compress_btrfs_lzo_payload(data: &[u8]) -> Vec<u8> {
+    let page_size =
+        usize::try_from(BTRFS_TEST_NODESIZE).expect("btrfs test nodesize should fit in usize");
+    let mut framed = vec![0_u8; 4];
+    for chunk in data.chunks(page_size) {
+        let compressed = lzokay_native::compress(chunk).expect("compress lzo test payload");
+        framed.extend_from_slice(
+            &u32::try_from(compressed.len())
+                .expect("lzo segment should fit in u32")
+                .to_le_bytes(),
+        );
+        framed.extend_from_slice(&compressed);
+    }
+    let total_len = u32::try_from(framed.len()).expect("lzo payload should fit in u32");
+    framed[0..4].copy_from_slice(&total_len.to_le_bytes());
+    framed
+}
+
+fn compress_btrfs_zstd_payload(data: &[u8]) -> Vec<u8> {
+    zstd::stream::encode_all(data, 0).expect("compress zstd test payload")
+}
+
+fn open_btrfs_transparent_decompression_image(
+    image_name: &str,
+    file_name: &str,
+    codec: u8,
+) -> (OpenFs, tempfile::TempDir, Vec<u8>) {
+    let logical = btrfs_transparent_decompression_payload();
+    let compressed = match codec {
+        1 => compress_btrfs_zlib_payload(&logical),
+        2 => compress_btrfs_lzo_payload(&logical),
+        3 => compress_btrfs_zstd_payload(&logical),
+        other => panic!("unexpected compression codec {other}"),
+    };
+    let image =
+        build_btrfs_regular_extent_mount_image(file_name.as_bytes(), &logical, &compressed, codec);
+    let (fs, tmp) = open_btrfs_test_image(image_name, image);
+    (fs, tmp, logical)
+}
+
+fn open_btrfs_subvolume_mount_image() -> (OpenFs, tempfile::TempDir) {
+    open_btrfs_test_image("subvolume-mount.btrfs", build_btrfs_subvolume_mount_image())
 }
 
 #[test]
@@ -1905,6 +1995,61 @@ fn btrfs_subvolume_mount_root_alias_conforms() {
         .read(&cx, InodeNumber(257), 0, 128)
         .expect("read file from mounted subvolume");
     assert_eq!(&data, b"hello from btrfs fsops");
+}
+
+fn assert_btrfs_transparent_decompression_conforms(
+    image_name: &str,
+    file_name: &str,
+    codec_label: &str,
+    codec: u8,
+) {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, expected) =
+        open_btrfs_transparent_decompression_image(image_name, file_name, codec);
+
+    let entry = fs
+        .lookup(&cx, InodeNumber(1), OsStr::new(file_name))
+        .unwrap_or_else(|err| panic!("lookup {codec_label} file through mounted root: {err}"));
+    assert_eq!(entry.ino, InodeNumber(257));
+    assert_eq!(
+        entry.size,
+        u64::try_from(expected.len()).expect("expected payload should fit in u64")
+    );
+
+    let data = fs
+        .read(
+            &cx,
+            entry.ino,
+            0,
+            u32::try_from(expected.len() + 128).expect("read size should fit in u32"),
+        )
+        .unwrap_or_else(|err| panic!("read {codec_label} compressed extent: {err}"));
+    assert_eq!(data, expected);
+
+    let boundary_offset = 4080_u64;
+    let boundary = fs
+        .read(&cx, entry.ino, boundary_offset, 96)
+        .unwrap_or_else(|err| panic!("read {codec_label} boundary slice: {err}"));
+    assert_eq!(
+        boundary,
+        expected[usize::try_from(boundary_offset).expect("boundary offset")
+            ..usize::try_from(boundary_offset + 96).expect("boundary end")]
+    );
+}
+
+#[test]
+fn btrfs_transparent_decompression_zlib_regular_extent_conforms() {
+    assert_btrfs_transparent_decompression_conforms("btrfs-zlib.btrfs", "zlib.bin", "zlib", 1);
+}
+
+#[test]
+fn btrfs_transparent_decompression_lzo_regular_extent_conforms() {
+    assert_btrfs_transparent_decompression_conforms("btrfs-lzo.btrfs", "lzo.bin", "lzo", 2);
+}
+
+#[test]
+fn btrfs_transparent_decompression_zstd_regular_extent_conforms() {
+    assert_btrfs_transparent_decompression_conforms("btrfs-zstd.btrfs", "zstd.bin", "zstd", 3);
 }
 
 #[test]
@@ -2637,6 +2782,9 @@ fn full_conformance_gate_pass() {
     ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only();
     btrfs_send_stream_multi_command_conforms();
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
+    btrfs_transparent_decompression_zlib_regular_extent_conforms();
+    btrfs_transparent_decompression_lzo_regular_extent_conforms();
+    btrfs_transparent_decompression_zstd_regular_extent_conforms();
     btrfs_subvolume_mount_root_alias_conforms();
     btrfs_tree_log_replay_multilevel_conforms();
     btrfs_tree_log_replay_skips_when_log_root_absent();

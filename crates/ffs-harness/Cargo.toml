@@ -28,10 +28,13 @@ ffs-btrfs = { workspace = true }
 ffs-error = { workspace = true }
 ffs-fuse = { workspace = true }
 ffs-inode = { workspace = true }
+flate2 = { workspace = true }
 fuser = { workspace = true }
 libc = { workspace = true }
+lzokay-native = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber.workspace = true
+zstd = { workspace = true }
 
 [[bench]]
 name = "metadata_parse"

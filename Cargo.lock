@@ -778,9 +778,11 @@ dependencies = [
  "ffs-inode",
  "ffs-ondisk",
  "ffs-types",
+ "flate2",
  "fuser",
  "hex",
  "libc",
+ "lzokay-native",
  "parking_lot",
  "serde",
  "serde_json",
@@ -788,6 +790,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
