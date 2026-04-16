@@ -465,6 +465,40 @@ fn ext4_dir_block_rec_len_unaligned_fixture_rejected() {
 }
 
 #[test]
+fn btrfs_tree_block_checksum_tamper_detection_conforms() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, image_path) = open_btrfs_mkfs(128);
+
+    // 1. Find the root tree block.
+    let sb = fs.superblock().btrfs().expect("btrfs sb");
+    let root_logical = sb.root;
+
+    // 2. Map logical to physical.
+    let mapping = fs
+        .map_logical_to_physical(root_logical)
+        .expect("map root logical")
+        .expect("root logical covered");
+
+    // 3. Corrupt the block on disk.
+    let mut data = std::fs::read(&image_path).unwrap();
+    let offset = mapping.physical as usize;
+    // Btrfs header checksum is at 0..32. Payload starts at 0x65 (item table).
+    // Let's corrupt a byte in the item table area.
+    data[offset + 0x80] ^= 0xFF;
+    std::fs::write(&image_path, data).unwrap();
+
+    // 4. Re-open and try to read through the FS tree.
+    let fs = open_btrfs_image(&image_path);
+    let res = fs.readdir(&cx, InodeNumber(1), 0);
+
+    // 5. Should fail with Corruption or checksum error.
+    assert!(
+        res.is_err(),
+        "Reading corrupted btrfs tree block should fail checksum verification"
+    );
+}
+
+#[test]
 fn ext4_dir_block_tail_padding_nonzero_fixture_rejected() {
     let data = load_sparse_fixture(&fixture_path("ext4_dir_block_tail_padding_nonzero.json"))
         .expect("load tail padding fixture");
@@ -771,6 +805,38 @@ fn open_ext4_inline_data_image(inode_fixture: &str) -> OpenFs {
     let cx = Cx::for_testing();
     OpenFs::open_with_options(&cx, tmp.path(), &OpenOptions::default())
         .expect("open inline-data ext4 image")
+}
+
+fn open_btrfs_image(image: &Path) -> OpenFs {
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    OpenFs::open_with_options(&cx, image, &opts).expect("open btrfs image")
+}
+
+fn open_btrfs_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::TempDir::new().expect("tmpdir for btrfs");
+    let image = tmp.path().join("conformance.btrfs");
+    let file = std::fs::File::create(&image).expect("create btrfs image");
+    file.set_len(size_mb.max(128) * 1024 * 1024)
+        .expect("size btrfs image");
+    drop(file);
+
+    let mkfs = std::process::Command::new("mkfs.btrfs")
+        .args(["-f", image.to_str().expect("utf8 image path")])
+        .output()
+        .expect("spawn mkfs.btrfs");
+    assert!(
+        mkfs.status.success(),
+        "mkfs.btrfs failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&mkfs.stdout),
+        String::from_utf8_lossy(&mkfs.stderr)
+    );
+
+    let fs = open_btrfs_image(&image);
+    (fs, tmp, image)
 }
 
 fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
@@ -1262,7 +1328,8 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         let first = vec![byte; 4096];
         fs.write(&cx, attr.ino, 0, &first)
             .expect("first compressed write");
-        fs.fsync(&cx, attr.ino, 0, false).expect("sync after first write");
+        fs.fsync(&cx, attr.ino, 0, false)
+            .expect("sync after first write");
 
         let (after_first_free_blocks, after_first_gd_free_blocks) =
             ext4_free_block_counters(&fs, &cx);
@@ -1294,7 +1361,8 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         let second = vec![byte.wrapping_add(1); 4096];
         fs.write(&cx, attr.ino, 0, &second)
             .expect("second compressed write");
-        fs.fsync(&cx, attr.ino, 0, false).expect("sync after second write");
+        fs.fsync(&cx, attr.ino, 0, false)
+            .expect("sync after second write");
 
         let (after_second_free_blocks, after_second_gd_free_blocks) =
             ext4_free_block_counters(&fs, &cx);
@@ -2784,6 +2852,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
+    btrfs_tree_block_checksum_tamper_detection_conforms();
     ext4_fallocate_zero_range_zeroes_target_range();
     ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
     ext4_indirect_block_addressing_conforms();
