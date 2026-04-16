@@ -873,6 +873,227 @@ fn ext4_free_block_counters(fs: &OpenFs, cx: &Cx) -> (u64, u64) {
     (bitmap_total, gd_total)
 }
 
+#[allow(clippy::cast_possible_truncation)]
+fn build_ext4_extent_test_image() -> Vec<u8> {
+    let block_size: u32 = 4096;
+    let image_size: u32 = 256 * 1024;
+    let mut image = vec![0_u8; image_size as usize];
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+    image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+    image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+    let blocks_count = image_size / block_size;
+    image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+    image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+    image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+    let incompat: u32 = Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0;
+    image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
+    image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+    image[sb_off + 0xFE..sb_off + 0x100].copy_from_slice(&32_u16.to_le_bytes());
+
+    let gd_off: usize = 4096;
+    image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+    image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+    image[gd_off + 0x0C..gd_off + 0x0E].copy_from_slice(&64_u16.to_le_bytes());
+    image[gd_off + 0x0E..gd_off + 0x10].copy_from_slice(&128_u16.to_le_bytes());
+
+    let ino11_off: usize = 4 * 4096 + 10 * 256;
+    image[ino11_off..ino11_off + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+    image[ino11_off + 4..ino11_off + 8].copy_from_slice(&14_u32.to_le_bytes());
+    image[ino11_off + 0x1A..ino11_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+    image[ino11_off + 0x20..ino11_off + 0x24].copy_from_slice(&EXT4_EXTENTS_FL.to_le_bytes());
+    image[ino11_off + 0x80..ino11_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let e = ino11_off + 0x28;
+    image[e..e + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[e + 2..e + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[e + 4..e + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[e + 6..e + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[e + 12..e + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[e + 16..e + 18].copy_from_slice(&1_u16.to_le_bytes());
+    image[e + 18..e + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[e + 20..e + 24].copy_from_slice(&13_u32.to_le_bytes());
+
+    let d = 13 * 4096;
+    image[d..d + 14].copy_from_slice(b"Hello, extent!");
+
+    let ino12_off: usize = 4 * 4096 + 11 * 256;
+    image[ino12_off..ino12_off + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+    image[ino12_off + 4..ino12_off + 8].copy_from_slice(&14_u32.to_le_bytes());
+    image[ino12_off + 0x1A..ino12_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+    image[ino12_off + 0x20..ino12_off + 0x24].copy_from_slice(&EXT4_EXTENTS_FL.to_le_bytes());
+    image[ino12_off + 0x80..ino12_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let e = ino12_off + 0x28;
+    image[e..e + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[e + 2..e + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[e + 4..e + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[e + 6..e + 8].copy_from_slice(&1_u16.to_le_bytes());
+    image[e + 12..e + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[e + 16..e + 20].copy_from_slice(&14_u32.to_le_bytes());
+    image[e + 20..e + 22].copy_from_slice(&0_u16.to_le_bytes());
+
+    let leaf = 14 * 4096;
+    image[leaf..leaf + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[leaf + 2..leaf + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[leaf + 4..leaf + 6].copy_from_slice(&340_u16.to_le_bytes());
+    image[leaf + 6..leaf + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[leaf + 12..leaf + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[leaf + 16..leaf + 18].copy_from_slice(&1_u16.to_le_bytes());
+    image[leaf + 18..leaf + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[leaf + 20..leaf + 24].copy_from_slice(&15_u32.to_le_bytes());
+
+    let d = 15 * 4096;
+    image[d..d + 14].copy_from_slice(b"Index extent!\n");
+
+    let bitmap = 2 * 4096;
+    image[bitmap + 1] = 0xE0;
+
+    image
+}
+
+fn write_jbd2_header(block: &mut [u8], block_type: u32, sequence: u32) {
+    const JBD2_MAGIC: u32 = 0xC03B_3998;
+    block[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+    block[4..8].copy_from_slice(&block_type.to_be_bytes());
+    block[8..12].copy_from_slice(&sequence.to_be_bytes());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_jbd2_superblock_v2(
+    block: &mut [u8],
+    block_size: u32,
+    max_len: u32,
+    first_log_block: u32,
+    start_sequence: u32,
+    start_block: u32,
+    num_fc_blocks: u32,
+    feature_incompat: u32,
+) {
+    write_jbd2_header(block, 4, 0);
+    block[12..16].copy_from_slice(&block_size.to_be_bytes());
+    block[16..20].copy_from_slice(&max_len.to_be_bytes());
+    block[20..24].copy_from_slice(&first_log_block.to_be_bytes());
+    block[24..28].copy_from_slice(&start_sequence.to_be_bytes());
+    block[28..32].copy_from_slice(&start_block.to_be_bytes());
+    block[40..44].copy_from_slice(&feature_incompat.to_be_bytes());
+    block[84..88].copy_from_slice(&num_fc_blocks.to_be_bytes());
+}
+
+fn build_fc_tag(tag_type: u16, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(4 + payload.len());
+    bytes.extend_from_slice(&tag_type.to_le_bytes());
+    bytes.extend_from_slice(
+        &u16::try_from(payload.len())
+            .expect("fast-commit payload length should fit")
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn build_ext4_fast_commit_test_image() -> Vec<u8> {
+    const JBD2_FEATURE_INCOMPAT_FAST_COMMIT: u32 = 0x0000_0020;
+    const EXT4_COMPAT_HAS_JOURNAL: u32 = 0x0000_0004;
+    const EXT4_COMPAT_FAST_COMMIT: u32 = 0x0000_0400;
+
+    let mut image = build_ext4_extent_test_image();
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+    let compat = u32::from_le_bytes([
+        image[sb_off + 0x5C],
+        image[sb_off + 0x5D],
+        image[sb_off + 0x5E],
+        image[sb_off + 0x5F],
+    ]);
+    image[sb_off + 0x5C..sb_off + 0x60].copy_from_slice(
+        &(compat | EXT4_COMPAT_HAS_JOURNAL | EXT4_COMPAT_FAST_COMMIT).to_le_bytes(),
+    );
+    image[sb_off + 0xE0..sb_off + 0xE4].copy_from_slice(&8_u32.to_le_bytes());
+
+    let ino8_off: usize = 4 * 4096 + 7 * 256;
+    image[ino8_off..ino8_off + 2].copy_from_slice(&0o100_600_u16.to_le_bytes());
+    image[ino8_off + 4..ino8_off + 8].copy_from_slice(&(6_u32 * 4096).to_le_bytes());
+    image[ino8_off + 0x1A..ino8_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+    image[ino8_off + 0x20..ino8_off + 0x24].copy_from_slice(&EXT4_EXTENTS_FL.to_le_bytes());
+    image[ino8_off + 0x80..ino8_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let extent = ino8_off + 0x28;
+    image[extent..extent + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[extent + 2..extent + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[extent + 4..extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[extent + 6..extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[extent + 12..extent + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[extent + 16..extent + 18].copy_from_slice(&6_u16.to_le_bytes());
+    image[extent + 18..extent + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[extent + 20..extent + 24].copy_from_slice(&20_u32.to_le_bytes());
+
+    let journal_sb = 20 * 4096;
+    write_jbd2_superblock_v2(
+        &mut image[journal_sb..journal_sb + 4096],
+        4096,
+        6,
+        1,
+        1,
+        1,
+        2,
+        JBD2_FEATURE_INCOMPAT_FAST_COMMIT,
+    );
+
+    let j_desc = 21 * 4096;
+    write_jbd2_header(&mut image[j_desc..j_desc + 4096], 1, 1);
+    image[j_desc + 12..j_desc + 16].copy_from_slice(&15_u32.to_be_bytes());
+    image[j_desc + 16..j_desc + 20].copy_from_slice(&0x0000_0008_u32.to_be_bytes());
+
+    let j_data = 22 * 4096;
+    image[j_data..j_data + 16].copy_from_slice(b"JBD2-REPLAY-TEST");
+
+    let j_commit = 23 * 4096;
+    write_jbd2_header(&mut image[j_commit..j_commit + 4096], 2, 1);
+
+    let mut fc_payload = Vec::new();
+    fc_payload.extend(build_fc_tag(0x0A, &[0; 16]));
+    fc_payload.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
+    fc_payload.extend(build_fc_tag(0x09, &[1, 0, 0, 0, 0, 0, 0, 0]));
+    let fc_block = 24 * 4096;
+    image[fc_block..fc_block + fc_payload.len()].copy_from_slice(&fc_payload);
+
+    image
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn build_ext4_truncated_fast_commit_test_image() -> Vec<u8> {
+    let mut image = build_ext4_fast_commit_test_image();
+    let fc_block = 24 * 4096;
+    let mut truncated = Vec::new();
+    truncated.extend(build_fc_tag(0x0A, &[0; 16]));
+    truncated.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
+    image[fc_block..fc_block + 4096].fill(0);
+    image[fc_block..fc_block + truncated.len()].copy_from_slice(&truncated);
+    image
+}
+
+fn open_ext4_fast_commit_image(truncated: bool) -> (OpenFs, tempfile::TempDir) {
+    let image = if truncated {
+        build_ext4_truncated_fast_commit_test_image()
+    } else {
+        build_ext4_fast_commit_test_image()
+    };
+    let tmp = tempfile::TempDir::new().expect("tmpdir for ext4 fast-commit image");
+    let image_path = tmp.path().join("fast-commit.ext4");
+    std::fs::write(&image_path, &image).expect("write ext4 fast-commit image");
+    let cx = Cx::for_testing();
+    let fs = OpenFs::open_with_options(&cx, &image_path, &OpenOptions::default())
+        .expect("open ext4 fast-commit image");
+    (fs, tmp)
+}
+
 fn open_ext4_mkfs_no_extents_with_large_file(
     size_mb: u64,
 ) -> (OpenFs, tempfile::TempDir, InodeNumber) {
@@ -1128,6 +1349,64 @@ fn ext4_fallocate_zero_range_zeroes_target_range() {
         payload.len() as u64,
         "ZERO_RANGE without KEEP_SIZE should preserve size when the range stays within EOF"
     );
+}
+
+#[test]
+fn ext4_fast_commit_replay_openfs_evidence_conforms() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp) = open_ext4_fast_commit_image(false);
+
+    let replay = fs
+        .ext4_journal_replay()
+        .expect("journal replay outcome should be present");
+    let fc = fs
+        .ext4_fast_commit_replay()
+        .expect("fast-commit evidence should be present");
+
+    assert_eq!(replay.committed_sequences, vec![1]);
+    assert_eq!(replay.stats.replayed_blocks, 1);
+    assert_eq!(fc.reserved_fc_blocks, 2);
+    assert!(fc.bytes_collected >= 32);
+    assert_eq!(fc.replay.transactions_found, 1);
+    assert_eq!(fc.replay.last_tid, 1);
+    assert_eq!(fc.replay.operations.len(), 1);
+    assert_eq!(format!("{:?}", fc.replay.operations), "[InodeUpdate(42)]");
+    assert_eq!(fc.replay.incomplete_transactions, 0);
+    assert!(!fc.replay.fallback_required);
+    assert_eq!(fc.replay.blocks_scanned, 1);
+
+    let target = fs
+        .read_block_vec(&cx, ffs_types::BlockNumber(15))
+        .expect("read replayed data block");
+    assert_eq!(&target[..16], b"JBD2-REPLAY-TEST");
+}
+
+#[test]
+fn ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp) = open_ext4_fast_commit_image(true);
+
+    let replay = fs
+        .ext4_journal_replay()
+        .expect("journal replay outcome should be present");
+    let fc = fs
+        .ext4_fast_commit_replay()
+        .expect("fast-commit evidence should be present");
+
+    assert_eq!(replay.committed_sequences, vec![1]);
+    assert_eq!(replay.stats.replayed_blocks, 1);
+    assert_eq!(fc.reserved_fc_blocks, 2);
+    assert_eq!(fc.replay.transactions_found, 0);
+    assert_eq!(fc.replay.last_tid, 0);
+    assert!(fc.replay.operations.is_empty());
+    assert_eq!(fc.replay.incomplete_transactions, 1);
+    assert!(fc.replay.fallback_required);
+    assert_eq!(fc.replay.blocks_scanned, 1);
+
+    let target = fs
+        .read_block_vec(&cx, ffs_types::BlockNumber(15))
+        .expect("read replayed data block after fallback");
+    assert_eq!(&target[..16], b"JBD2-REPLAY-TEST");
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -2121,6 +2400,8 @@ fn full_conformance_gate_pass() {
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
     ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
     ext4_indirect_block_addressing_conforms();
+    ext4_fast_commit_replay_openfs_evidence_conforms();
+    ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only();
     btrfs_send_stream_multi_command_conforms();
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
     btrfs_tree_log_replay_multilevel_conforms();
