@@ -782,7 +782,14 @@ fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::pat
     drop(file);
 
     let mkfs = std::process::Command::new("mkfs.ext4")
-        .args(["-F", "-b", "4096", image.to_str().expect("utf8 image path")])
+        .args([
+            "-F",
+            "-b",
+            "4096",
+            "-O",
+            "^metadata_csum,^64bit",
+            image.to_str().expect("utf8 image path"),
+        ])
         .output()
         .expect("spawn mkfs.ext4");
     assert!(
@@ -1255,6 +1262,7 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         let first = vec![byte; 4096];
         fs.write(&cx, attr.ino, 0, &first)
             .expect("first compressed write");
+        fs.sync(&cx).expect("sync after first write");
 
         let (after_first_free_blocks, after_first_gd_free_blocks) =
             ext4_free_block_counters(&fs, &cx);
