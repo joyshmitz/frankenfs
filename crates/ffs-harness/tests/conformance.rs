@@ -2433,7 +2433,7 @@ fn btrfs_device_tree_walk_enumerates_all_devices() {
         })
     };
 
-    let items = walk_device_tree(&mut read, root_logical, &chunks, BTRFS_TEST_NODESIZE)
+    let items = walk_device_tree(&mut read, root_logical, &chunks, BTRFS_TEST_NODESIZE, 0)
         .expect("walk device tree");
     assert_eq!(
         items.len(),
