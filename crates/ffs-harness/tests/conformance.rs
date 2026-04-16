@@ -2398,6 +2398,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
+    ext4_fallocate_zero_range_zeroes_target_range();
     ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
     ext4_indirect_block_addressing_conforms();
     ext4_fast_commit_replay_openfs_evidence_conforms();
