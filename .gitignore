@@ -172,3 +172,4 @@ unwraps*.txt
 /*.txt
 /*.json
 !package.json
+.env
