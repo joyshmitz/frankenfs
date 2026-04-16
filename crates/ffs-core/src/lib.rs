@@ -28631,6 +28631,9 @@ mod tests {
         let _guard = log_contract_guard();
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
+        let stat_before = ops
+            .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
+            .unwrap();
 
         let attr = ops
             .create(
@@ -28649,6 +28652,10 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .unwrap();
         assert_eq!(before.size, 8);
+        assert_eq!(
+            before.blocks, 0,
+            "inline-only payload should not consume regular-extent block accounting yet"
+        );
 
         ops.fallocate(
             &cx,
@@ -28664,10 +28671,23 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .unwrap();
         assert_eq!(after.size, 8);
+        assert!(
+            after.blocks > before.blocks,
+            "KEEP_SIZE preallocation should reserve backing extent blocks"
+        );
         let data = ops
             .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 4096)
             .unwrap();
         assert_eq!(&data[..8], b"existing");
+        let stat_after = ops
+            .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
+            .unwrap();
+        assert!(
+            stat_after.blocks_free < stat_before.blocks_free,
+            "KEEP_SIZE preallocation should reduce free space: before={}, after={}",
+            stat_before.blocks_free,
+            stat_after.blocks_free
+        );
     }
 
     #[test]
