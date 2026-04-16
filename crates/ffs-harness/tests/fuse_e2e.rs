@@ -943,12 +943,17 @@ fn fuse_setattr_utimes() {
 }
 
 #[test]
-fn fuse_fallocate_preallocate() {
+fn ext4_fuse_fallocate_preallocate_extends_size() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_fallocate_preallocate_extends_size";
         let path = mnt.join("preallocated.bin");
         fs::write(&path, b"").expect("create empty file");
 
-        // Use `fallocate -l 8192` to preallocate 8 KiB.
         let out = Command::new("fallocate")
             .args(["-l", "8192", path.to_str().unwrap()])
             .output()
@@ -960,13 +965,11 @@ fn fuse_fallocate_preallocate() {
         );
 
         let meta = fs::metadata(&path).expect("stat after fallocate");
-        // Apparent size should be 8192 after fallocate.
         assert_eq!(
             meta.len(),
             8192,
             "file apparent size should be 8192 after fallocate"
         );
-        // blocks * 512 should be >= 8192 (disk allocation happened).
         assert!(
             meta.blocks() * 512 >= 8192,
             "allocated disk space ({}*512={}) should be >= 8192",
@@ -974,21 +977,25 @@ fn fuse_fallocate_preallocate() {
             meta.blocks() * 512
         );
 
-        // Writing to the preallocated region should work.
         fs::write(&path, b"data in preallocated space").expect("write to preallocated");
         let content = fs::read_to_string(&path).expect("read preallocated");
         assert_eq!(content, "data in preallocated space");
+        emit_scenario_result(scenario_id, "PASS", None);
     });
 }
 
 #[test]
-fn fuse_fallocate_keep_size() {
+fn ext4_fuse_fallocate_keep_size_preserves_size() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_fallocate_keep_size_preserves_size";
         let path = mnt.join("keepsize.bin");
         fs::write(&path, b"short").expect("create file with content");
 
-        // FALLOC_FL_KEEP_SIZE = 0x01: allocate space without changing file size.
-        // Use `fallocate -l 16384 --keep-size` to allocate without growing.
         let out = Command::new("fallocate")
             .args(["-l", "16384", "--keep-size", path.to_str().unwrap()])
             .output()
@@ -1000,13 +1007,11 @@ fn fuse_fallocate_keep_size() {
         );
 
         let meta = fs::metadata(&path).expect("stat after keep-size fallocate");
-        // Apparent size should still be 5 ("short").
         assert_eq!(
             meta.len(),
             5,
             "file size should remain 5 with KEEP_SIZE flag"
         );
-        // But disk allocation should have increased.
         assert!(
             meta.blocks() * 512 >= 16384,
             "allocated disk space ({}*512={}) should be >= 16384 after keep-size fallocate",
@@ -1014,9 +1019,9 @@ fn fuse_fallocate_keep_size() {
             meta.blocks() * 512
         );
 
-        // Content should be unchanged.
         let content = fs::read_to_string(&path).expect("read after keep-size");
         assert_eq!(content, "short");
+        emit_scenario_result(scenario_id, "PASS", None);
     });
 }
 
