@@ -465,33 +465,79 @@ fn ext4_dir_block_rec_len_unaligned_fixture_rejected() {
 }
 
 #[test]
+fn ext4_orphan_recovery_conforms() {
+    let cx = Cx::for_testing();
+    let (mut fs, _tmp, image_path) = open_writable_ext4_mkfs(64);
+    let root = InodeNumber(2);
+
+    let name = std::ffi::OsString::from("orphan_me.txt");
+    let attr = fs
+        .create(&cx, root, &name, 0o644, 0, 0)
+        .expect("create file");
+    let ino = attr.ino;
+
+    drop(fs);
+
+    for command in [
+        format!("set_inode_field <{}> links_count 0", ino.0),
+        format!("set_super_value last_orphan {}", ino.0),
+        "set_super_value state 4".to_owned(),
+    ] {
+        let debugfs = std::process::Command::new("debugfs")
+            .args([
+                "-w",
+                "-R",
+                &command,
+                image_path.to_str().expect("utf8 image path"),
+            ])
+            .output()
+            .expect("spawn debugfs for orphan injection");
+        assert!(
+            debugfs.status.success(),
+            "debugfs command {command:?} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&debugfs.stdout),
+            String::from_utf8_lossy(&debugfs.stderr)
+        );
+    }
+
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+        ..OpenOptions::default()
+    };
+    let fs2 = OpenFs::open_with_options(&cx, &image_path, &opts).expect("open with orphan recovery");
+
+    let res = fs2.read_inode(&cx, ino);
+    assert!(
+        matches!(res, Err(ffs_error::FfsError::NotFound(_))),
+        "Orphaned inode should be deleted during recovery, got {res:?}"
+    );
+}
+
+#[test]
 fn btrfs_tree_block_checksum_tamper_detection_conforms() {
     let cx = Cx::for_testing();
     let (fs, _tmp, image_path) = open_btrfs_mkfs(128);
 
-    // 1. Find the root tree block.
-    let sb = fs.superblock().btrfs().expect("btrfs sb");
+    let sb = fs.btrfs_superblock().expect("btrfs sb");
     let root_logical = sb.root;
 
-    // 2. Map logical to physical.
+    let ctx = fs.btrfs_context().expect("btrfs context");
     let mapping = fs
-        .map_logical_to_physical(root_logical)
+        .btrfs_context()
+        .expect("btrfs context");
+    let mapping = ffs_ondisk::map_logical_to_physical(&mapping.chunks, root_logical)
         .expect("map root logical")
         .expect("root logical covered");
 
-    // 3. Corrupt the block on disk.
     let mut data = std::fs::read(&image_path).unwrap();
     let offset = mapping.physical as usize;
-    // Btrfs header checksum is at 0..32. Payload starts at 0x65 (item table).
-    // Let's corrupt a byte in the item table area.
-    data[offset + 0x80] ^= 0xFF;
+    let corrupt_offset = offset + usize::try_from(ctx.nodesize.min(0x80)).expect("nodesize usize");
+    data[corrupt_offset] ^= 0xFF;
     std::fs::write(&image_path, data).unwrap();
 
-    // 4. Re-open and try to read through the FS tree.
     let fs = open_btrfs_image(&image_path);
     let res = fs.readdir(&cx, InodeNumber(1), 0);
 
-    // 5. Should fail with Corruption or checksum error.
     assert!(
         res.is_err(),
         "Reading corrupted btrfs tree block should fail checksum verification"
@@ -2853,6 +2899,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
     btrfs_tree_block_checksum_tamper_detection_conforms();
+    ext4_orphan_recovery_conforms();
     ext4_fallocate_zero_range_zeroes_target_range();
     ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
     ext4_indirect_block_addressing_conforms();
