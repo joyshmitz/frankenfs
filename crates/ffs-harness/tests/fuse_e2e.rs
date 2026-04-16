@@ -1835,8 +1835,9 @@ fn fuse_sync_data_without_metadata() {
 }
 
 #[test]
-fn fuse_flush_on_close_preserves_data() {
+fn ext4_fuse_flush_emits_scenario_result_and_preserves_data() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_flush";
         let path = mnt.join("flushed.txt");
 
         // Write and explicitly flush (triggers FUSE flush).
@@ -1855,6 +1856,7 @@ fn fuse_flush_on_close_preserves_data() {
 
         let content = fs::read_to_string(&path).expect("read after flush+close");
         assert_eq!(content, "flushed content\n");
+        emit_scenario_result(scenario_id, "PASS", Some("explicit_flush_and_close"));
     });
 }
 
@@ -2867,6 +2869,32 @@ fn btrfs_fuse_fsyncdir_emits_scenario_result_and_preserves_dirent() {
             "directory sync payload\n"
         );
         emit_scenario_result(scenario_id, "PASS", Some("dirfd_sync_all"));
+    });
+}
+
+#[test]
+fn btrfs_fuse_flush_emits_scenario_result_and_preserves_data() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_flush";
+        let path = mnt.join("flushed.txt");
+
+        {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&path)
+                .expect("create flushed.txt on btrfs");
+
+            file.write_all(b"flushed content\n")
+                .expect("write flushed content on btrfs");
+            // std::io::Write::flush triggers the FUSE flush handler.
+            file.flush().expect("explicit flush on btrfs");
+        } // drop/close triggers another FUSE flush+release
+
+        let content = fs::read_to_string(&path).expect("read after btrfs flush+close");
+        assert_eq!(content, "flushed content\n");
+        emit_scenario_result(scenario_id, "PASS", Some("explicit_flush_and_close"));
     });
 }
 
