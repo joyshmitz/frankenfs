@@ -538,6 +538,67 @@ print(json.dumps({
     serde_json::from_slice(&output.stdout).expect("decode fiemap JSON")
 }
 
+fn ext4_inode_flags_ioctl(path: &Path, command: &str, flags: Option<u32>) -> Value {
+    let script = r"
+import fcntl, json, struct, sys
+
+EXT4_IOC_GETFLAGS = 0x80086601
+EXT4_IOC_SETFLAGS = 0x40086602
+
+command = sys.argv[1]
+path = sys.argv[2]
+word_size = struct.calcsize('@L')
+
+def setflags_buffer(flags: int) -> bytes:
+    if word_size >= 8:
+        return struct.pack('@Q', flags)
+    return struct.pack('@I', flags)
+
+with open(path, 'r+b', buffering=0) as fh:
+    try:
+        if command == 'get':
+            buffer = bytearray(word_size)
+            fcntl.ioctl(fh.fileno(), EXT4_IOC_GETFLAGS, buffer, True)
+            print(json.dumps({
+                'flags': struct.unpack_from('@I', buffer, 0)[0],
+            }))
+        elif command == 'set':
+            flags = int(sys.argv[3], 0)
+            buffer = setflags_buffer(flags)
+            fcntl.ioctl(fh.fileno(), EXT4_IOC_SETFLAGS, buffer)
+            print(json.dumps({'ok': True}))
+        else:
+            raise ValueError(f'unsupported ioctl command: {command}')
+    except OSError as exc:
+        print(json.dumps({
+            'errno': exc.errno,
+            'message': str(exc),
+        }))
+        sys.exit(0)
+    ";
+
+    let mut args = vec![
+        "-c".to_owned(),
+        script.to_owned(),
+        command.to_owned(),
+        path.to_str().expect("path utf8").to_owned(),
+    ];
+    if let Some(flags) = flags {
+        args.push(flags.to_string());
+    }
+
+    let output = Command::new("python3")
+        .args(args)
+        .output()
+        .expect("python3 ext4 ioctl");
+    assert!(
+        output.status.success(),
+        "python3 ext4 ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode ext4 ioctl JSON")
+}
+
 #[test]
 fn fuse_create_and_read_file() {
     with_rw_mount(|mnt| {
@@ -1270,6 +1331,66 @@ fn fuse_ioctl_fiemap_reports_valid_extents() {
         saw_last,
         "expected FIEMAP_EXTENT_LAST in returned extents: {report}"
     );
+}
+
+#[test]
+fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_ioctl_getflags_setflags_roundtrip";
+        let path = mnt.join("inode_flags.bin");
+        fs::write(&path, b"ext4 ioctl flags payload\n").expect("write ext4 ioctl seed file");
+
+        let original_report = ext4_inode_flags_ioctl(&path, "get", None);
+        if original_report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+            eprintln!(
+                "EXT4 GETFLAGS ioctl skipped: current FUSE transport reports EOPNOTSUPP before FrankenFS \
+                 receives unrestricted ioctl requests"
+            );
+            return;
+        }
+        let original = original_report["flags"]
+            .as_u64()
+            .expect("original flags u64") as u32;
+        assert_ne!(
+            original & ffs_types::EXT4_EXTENTS_FL,
+            0,
+            "default rw ext4 file should start extent-based: {original_report}"
+        );
+
+        let requested = (original
+            | ffs_types::EXT4_NOATIME_FL
+            | ffs_types::EXT4_NODUMP_FL
+            | ffs_types::EXT4_HUGE_FILE_FL)
+            & !ffs_types::EXT4_EXTENTS_FL;
+        let set_report = ext4_inode_flags_ioctl(&path, "set", Some(requested));
+        assert!(
+            set_report["errno"].is_null(),
+            "EXT4 SETFLAGS ioctl should succeed on rw mount: {set_report}"
+        );
+
+        let updated_report = ext4_inode_flags_ioctl(&path, "get", None);
+        let updated = updated_report["flags"].as_u64().expect("updated flags u64") as u32;
+        assert_eq!(
+            updated & (ffs_types::EXT4_NOATIME_FL | ffs_types::EXT4_NODUMP_FL),
+            ffs_types::EXT4_NOATIME_FL | ffs_types::EXT4_NODUMP_FL,
+            "SETFLAGS should apply user-settable NOATIME/NODUMP bits: {updated_report}"
+        );
+        assert_eq!(
+            updated & ffs_types::EXT4_EXTENTS_FL,
+            original & ffs_types::EXT4_EXTENTS_FL,
+            "SETFLAGS must not clear system-managed EXTENTS bit: {updated_report}"
+        );
+        assert_eq!(
+            updated & ffs_types::EXT4_HUGE_FILE_FL,
+            original & ffs_types::EXT4_HUGE_FILE_FL,
+            "SETFLAGS must not introduce system-managed HUGE_FILE bit: {updated_report}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("user_bits_applied_system_bits_preserved"),
+        );
+    });
 }
 
 #[test]
