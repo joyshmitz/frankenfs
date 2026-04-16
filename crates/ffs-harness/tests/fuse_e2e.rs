@@ -1021,6 +1021,54 @@ fn fuse_fallocate_keep_size() {
 }
 
 #[test]
+fn ext4_fuse_fallocate_zero_range_zeroes_range() {
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_fallocate_zero_range_zeroes_range";
+        let path = mnt.join("ext4_zero_range.bin");
+        let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 253) + 1) as u8).collect();
+        fs::write(&path, &data).expect("seed zero-range file on ext4");
+
+        let out = Command::new("fallocate")
+            .args([
+                "--zero-range",
+                "-o",
+                "4096",
+                "-l",
+                "4096",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("run fallocate --zero-range on ext4");
+        assert!(
+            out.status.success(),
+            "ext4 zero-range failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let meta = fs::metadata(&path).expect("stat after ext4 zero-range");
+        assert_eq!(
+            meta.len(),
+            data.len() as u64,
+            "zero-range must preserve file size"
+        );
+
+        let readback = fs::read(&path).expect("read after ext4 zero-range");
+        assert_eq!(&readback[..4096], &data[..4096], "prefix must be preserved");
+        assert!(
+            readback[4096..8192].iter().all(|&byte| byte == 0),
+            "zero-range span must read back as zeros"
+        );
+        assert_eq!(&readback[8192..], &data[8192..], "suffix must be preserved");
+        emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
 fn fuse_ioctl_fiemap_reports_valid_extents() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
