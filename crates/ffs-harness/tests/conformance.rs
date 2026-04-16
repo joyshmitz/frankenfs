@@ -1094,6 +1094,42 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
     }
 }
 
+#[test]
+fn ext4_fallocate_zero_range_zeroes_target_range() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, _image_path) = open_writable_ext4_mkfs(64);
+    let root = InodeNumber(2);
+
+    let attr = fs
+        .create(&cx, root, OsStr::new("zero_range.bin"), 0o644, 0, 0)
+        .expect("create ext4 zero-range file");
+    let ino = attr.ino;
+
+    let mut payload = vec![b'A'; 12 * 1024];
+    payload[4096..8192].fill(b'B');
+    payload[8192..].fill(b'C');
+    fs.write(&cx, ino, 0, &payload)
+        .expect("seed ext4 zero-range file");
+
+    fs.fallocate(&cx, ino, 4096, 4096, libc::FALLOC_FL_ZERO_RANGE)
+        .expect("zero-range middle block");
+
+    let readback = fs
+        .read(&cx, ino, 0, payload.len() as u32)
+        .expect("read zero-range ext4 file");
+    assert_eq!(readback.len(), payload.len());
+    assert_eq!(&readback[..4096], &payload[..4096]);
+    assert!(readback[4096..8192].iter().all(|&byte| byte == 0));
+    assert_eq!(&readback[8192..], &payload[8192..]);
+
+    let inode = fs.read_inode(&cx, ino).expect("read zero-range inode");
+    assert_eq!(
+        inode.size,
+        payload.len() as u64,
+        "ZERO_RANGE without KEEP_SIZE should preserve size when the range stays within EOF"
+    );
+}
+
 #[allow(clippy::cast_possible_truncation)]
 fn append_send_stream_command(stream: &mut Vec<u8>, cmd: u16, attrs: &[(u16, &[u8])]) {
     let payload_len: usize = attrs.iter().map(|(_, value)| 4 + value.len()).sum();
