@@ -79,7 +79,7 @@ fn btrfs_multi_device_raid5_read_conforms() {
         Err(ParseError::InvalidField { field: "device", reason: "parity device read not implemented for test" })
     }));
 
-    let cx = Cx::for_testing();
+    let _cx = Cx::for_testing();
     
     // Read from logical 0x50_000 (stripe 0, data 1)
     let res1 = devices.read_logical(&chunks, logical, 4).expect("read RAID5 data1");
