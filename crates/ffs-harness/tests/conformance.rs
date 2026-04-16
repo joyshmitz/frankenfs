@@ -164,6 +164,40 @@ fn ext4_inline_data_with_continuation_fixture_conforms() {
 }
 
 #[test]
+fn ext4_inline_data_openfs_read_conforms() {
+    let fs = open_ext4_inline_data_image("ext4_inode_inline_data.json");
+    let cx = Cx::for_testing();
+
+    let data = fs
+        .read(&cx, InodeNumber(11), 0, 128)
+        .expect("read inline-data file");
+    assert_eq!(&data, b"Hello from inline data!");
+
+    let offset = fs
+        .read(&cx, InodeNumber(11), 6, 64)
+        .expect("read inline-data file at offset");
+    assert_eq!(&offset, b"from inline data!");
+}
+
+#[test]
+fn ext4_inline_data_xattr_continuation_openfs_read_conforms() {
+    let fs = open_ext4_inline_data_image("ext4_inode_inline_data_with_continuation.json");
+    let cx = Cx::for_testing();
+
+    let data = fs
+        .read(&cx, InodeNumber(11), 0, 128)
+        .expect("read inline-data continuation file");
+    let mut expected = vec![b'A'; 60];
+    expected.extend(std::iter::repeat_n(b'B', 16));
+    assert_eq!(data, expected);
+
+    let tail = fs
+        .read(&cx, InodeNumber(11), 56, 32)
+        .expect("read inline-data continuation tail");
+    assert_eq!(tail, b"AAAABBBBBBBBBBBBBBBB");
+}
+
+#[test]
 fn ext4_extent_tree_leaf_fixture_conforms() {
     let (header, tree) = validate_extent_tree_fixture(&fixture_path("ext4_extent_tree_leaf.json"))
         .expect("extent tree leaf");
@@ -652,6 +686,90 @@ fn build_ext4_casefold_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
 
 fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
     build_ext4_featured_dir_image(raw_name, Ext4IncompatFeatures::ENCRYPT.0, 0x0008_0000)
+}
+
+fn build_ext4_inline_data_image(inode_fixture: &str) -> Vec<u8> {
+    let block_size: u32 = 4096;
+    let image_size: u32 = 256 * 1024;
+    let mut image = vec![0_u8; image_size as usize];
+    let sb_off = EXT4_SUPERBLOCK_OFFSET;
+
+    image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+    image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+    let blocks_count = image_size / block_size;
+    image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+    image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+    image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+    let incompat = (Ext4IncompatFeatures::FILETYPE.0
+        | Ext4IncompatFeatures::EXTENTS.0
+        | Ext4IncompatFeatures::INLINE_DATA.0)
+        .to_le_bytes();
+    image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat);
+    image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+    let gd_off: usize = 4096;
+    image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+    image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+    let ino2 = 4 * 4096 + 256;
+    image[ino2..ino2 + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+    image[ino2 + 4..ino2 + 8].copy_from_slice(&4096_u32.to_le_bytes());
+    image[ino2 + 0x1A..ino2 + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+    image[ino2 + 0x80..ino2 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let root_extent = ino2 + 0x28;
+    image[root_extent..root_extent + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[root_extent + 2..root_extent + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 4..root_extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[root_extent + 6..root_extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 12..root_extent + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[root_extent + 16..root_extent + 18].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 18..root_extent + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 20..root_extent + 24].copy_from_slice(&10_u32.to_le_bytes());
+
+    let inline_inode =
+        load_sparse_fixture(&fixture_path(inode_fixture)).expect("load inline inode fixture");
+    let ino11 = 4 * 4096 + 10 * 256;
+    image[ino11..ino11 + inline_inode.len()].copy_from_slice(&inline_inode);
+
+    let dir = 10 * 4096;
+    image[dir..dir + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir + 6] = 1;
+    image[dir + 7] = 2;
+    image[dir + 8] = b'.';
+
+    let dir = dir + 12;
+    image[dir..dir + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir + 6] = 2;
+    image[dir + 7] = 2;
+    image[dir + 8] = b'.';
+    image[dir + 9] = b'.';
+
+    let name = b"inline.bin";
+    let dir = dir + 12;
+    image[dir..dir + 4].copy_from_slice(&11_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&4072_u16.to_le_bytes());
+    image[dir + 6] = name.len() as u8;
+    image[dir + 7] = 1;
+    image[dir + 8..dir + 8 + name.len()].copy_from_slice(name);
+
+    image
+}
+
+fn open_ext4_inline_data_image(inode_fixture: &str) -> OpenFs {
+    let image = build_ext4_inline_data_image(inode_fixture);
+    let tmp = tempfile::NamedTempFile::new().expect("create inline-data ext4 temp image");
+    std::fs::write(tmp.path(), &image).expect("write inline-data ext4 image");
+    let cx = Cx::for_testing();
+    OpenFs::open_with_options(&cx, tmp.path(), &OpenOptions::default())
+        .expect("open inline-data ext4 image")
 }
 
 fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
