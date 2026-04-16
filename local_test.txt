@@ -1,5 +1,0 @@
-   Compiling syn v2.0.116
-   Compiling tracing-core v0.1.36
-   Compiling ppv-lite86 v0.2.21
-   Compiling rayon v1.11.0
-   Compiling rand_chacha v0.9.0

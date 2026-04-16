@@ -1,4 +1,0 @@
-{"type":"scanner","project":"/data/projects/frankenfs","language":"cpp","files":0,"critical":0,"warning":45,"info":23,"timestamp":"2026-04-02 20:11:20"}
-{"type":"scanner","project":"/data/projects/frankenfs","language":"python","files":17,"critical":4,"warning":30,"info":44,"timestamp":"2026-04-02 20:11:22"}
-{"type":"scanner","project":"/data/projects/frankenfs","language":"rust","files":123,"critical":221,"warning":24252,"info":5301,"timestamp":"2026-04-02T20:11:42Z"}
-{"type":"totals","project":"/data/projects/frankenfs","files":140,"critical":225,"warning":24327,"info":5368,"timestamp":"2026-04-02 20:11:42"}

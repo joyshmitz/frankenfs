@@ -1,1 +1,0 @@
-✓ RCH is ready (9/9 workers healthy)
