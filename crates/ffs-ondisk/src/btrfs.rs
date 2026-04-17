@@ -2928,6 +2928,204 @@ mod tests {
         }
 
         #[test]
+        fn btrfs_proptest_logical_mapping_translation_covariant(
+            chunk_start in 0_u64..=1_000_000_u64,
+            length in 1_u64..=1_000_000_u64,
+            stripe_offset in 0_u64..=1_000_000_u64,
+            logical_shift in 0_u64..=1_000_000_u64,
+            physical_shift in 0_u64..=1_000_000_u64,
+            delta in 0_u64..=1_000_000_u64,
+        ) {
+            prop_assume!(delta < length);
+
+            let logical = chunk_start
+                .checked_add(delta)
+                .expect("bounded logical address");
+            let shifted_start = chunk_start
+                .checked_add(logical_shift)
+                .expect("bounded shifted chunk start");
+            let shifted_logical = shifted_start
+                .checked_add(delta)
+                .expect("bounded shifted logical address");
+            let shifted_offset = stripe_offset
+                .checked_add(physical_shift)
+                .expect("bounded shifted stripe offset");
+
+            let chunks = vec![make_chunk(
+                chunk_start,
+                length,
+                64 * 1024,
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+                vec![stripe(7, stripe_offset)],
+                0,
+            )];
+            let shifted_chunks = vec![make_chunk(
+                shifted_start,
+                length,
+                64 * 1024,
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+                vec![stripe(7, shifted_offset)],
+                0,
+            )];
+
+            let base_physical =
+                map_logical_to_physical(&chunks, logical).expect("map should succeed");
+            let shifted_physical = map_logical_to_physical(&shifted_chunks, shifted_logical)
+                .expect("shifted map should succeed");
+            let base_stripes = map_logical_to_stripes(&chunks, logical)
+                .expect("stripe map should succeed")
+                .expect("logical should be covered");
+            let shifted_stripes = map_logical_to_stripes(&shifted_chunks, shifted_logical)
+                .expect("shifted stripe map should succeed")
+                .expect("shifted logical should be covered");
+
+            prop_assert_eq!(
+                base_physical,
+                Some(BtrfsPhysicalMapping {
+                    devid: 7,
+                    physical: stripe_offset
+                        .checked_add(delta)
+                        .expect("bounded base physical address"),
+                })
+            );
+            prop_assert_eq!(
+                shifted_physical,
+                Some(BtrfsPhysicalMapping {
+                    devid: 7,
+                    physical: shifted_offset
+                        .checked_add(delta)
+                        .expect("bounded shifted physical address"),
+                })
+            );
+            prop_assert_eq!(base_stripes.profile, shifted_stripes.profile);
+            prop_assert_eq!(base_stripes.stripes.len(), shifted_stripes.stripes.len());
+            for (base, shifted) in base_stripes.stripes.iter().zip(&shifted_stripes.stripes) {
+                prop_assert_eq!(shifted.devid, base.devid);
+                prop_assert_eq!(
+                    shifted.physical,
+                    base.physical
+                        .checked_add(physical_shift)
+                        .expect("bounded translated stripe physical")
+                );
+            }
+        }
+
+        #[test]
+        fn btrfs_proptest_mapping_chunk_order_permutation_invariant(
+            first_start in 0_u64..=1_000_000_u64,
+            first_length in 1_u64..=1_000_000_u64,
+            gap in 1_u64..=1_000_000_u64,
+            second_length in 1_u64..=1_000_000_u64,
+            first_offset in 0_u64..=1_000_000_u64,
+            second_offset in 0_u64..=1_000_000_u64,
+            delta in 0_u64..=1_000_000_u64,
+            query_second in any::<bool>(),
+        ) {
+            let first_end = first_start
+                .checked_add(first_length)
+                .expect("bounded first chunk end");
+            let second_start = first_end
+                .checked_add(gap)
+                .expect("bounded second chunk start");
+            let target_start = if query_second { second_start } else { first_start };
+            let target_length = if query_second { second_length } else { first_length };
+            prop_assume!(delta < target_length);
+
+            let logical = target_start
+                .checked_add(delta)
+                .expect("bounded query logical address");
+
+            let first_chunk = make_chunk(
+                first_start,
+                first_length,
+                64 * 1024,
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+                vec![stripe(11, first_offset)],
+                0,
+            );
+            let second_chunk = make_chunk(
+                second_start,
+                second_length,
+                64 * 1024,
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+                vec![stripe(22, second_offset)],
+                0,
+            );
+
+            let ordered = vec![first_chunk.clone(), second_chunk.clone()];
+            let permuted = vec![second_chunk, first_chunk];
+
+            prop_assert_eq!(
+                map_logical_to_physical(&ordered, logical),
+                map_logical_to_physical(&permuted, logical)
+            );
+            prop_assert_eq!(
+                map_logical_to_stripes(&ordered, logical),
+                map_logical_to_stripes(&permuted, logical)
+            );
+        }
+
+        #[test]
+        fn btrfs_proptest_dup_primary_mapping_matches_single(
+            chunk_start in 0_u64..=1_000_000_u64,
+            length in 1_u64..=1_000_000_u64,
+            first_offset in 0_u64..=1_000_000_u64,
+            second_offset in 0_u64..=1_000_000_u64,
+            delta in 0_u64..=1_000_000_u64,
+        ) {
+            prop_assume!(delta < length);
+
+            let logical = chunk_start
+                .checked_add(delta)
+                .expect("bounded logical address");
+            let single_chunk = vec![make_chunk(
+                chunk_start,
+                length,
+                64 * 1024,
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA,
+                vec![stripe(5, first_offset)],
+                0,
+            )];
+            let dup_chunk = vec![make_chunk(
+                chunk_start,
+                length,
+                64 * 1024,
+                chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_DUP,
+                vec![stripe(5, first_offset), stripe(5, second_offset)],
+                0,
+            )];
+
+            let single_physical = map_logical_to_physical(&single_chunk, logical)
+                .expect("single map should succeed")
+                .expect("single chunk should cover the logical address");
+            let dup_physical = map_logical_to_physical(&dup_chunk, logical)
+                .expect("dup map should succeed")
+                .expect("dup chunk should cover the logical address");
+            let single_stripes = map_logical_to_stripes(&single_chunk, logical)
+                .expect("single stripe map should succeed")
+                .expect("single chunk should cover the logical address");
+            let dup_stripes = map_logical_to_stripes(&dup_chunk, logical)
+                .expect("dup stripe map should succeed")
+                .expect("dup chunk should cover the logical address");
+
+            prop_assert_eq!(dup_physical, single_physical);
+            prop_assert_eq!(single_stripes.profile, BtrfsRaidProfile::Single);
+            prop_assert_eq!(dup_stripes.profile, BtrfsRaidProfile::Dup);
+            prop_assert_eq!(single_stripes.stripes.len(), 1);
+            prop_assert_eq!(dup_stripes.stripes.len(), 2);
+            prop_assert_eq!(dup_stripes.stripes[0], single_stripes.stripes[0]);
+            prop_assert_eq!(
+                dup_stripes.stripes[1],
+                BtrfsPhysicalMapping {
+                    devid: 5,
+                    physical: second_offset
+                        .checked_add(delta)
+                        .expect("bounded dup replica physical")
+                }
+            );
+        }
+
+        #[test]
         fn btrfs_proptest_superblock_checksum_roundtrip_with_tamper_detection(
             sector_shift in 12_u32..=16,
             node_shift in 12_u32..=16,
