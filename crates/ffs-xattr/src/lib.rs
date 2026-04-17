@@ -6,11 +6,11 @@
 //! system, security, and trusted attribute namespaces.
 
 use ffs_error::{FfsError, Result};
-use ffs_ondisk::{Ext4Inode, Ext4Xattr, parse_ibody_xattrs, parse_xattr_block};
+use ffs_ondisk::{parse_ibody_xattrs, parse_xattr_block, Ext4Inode, Ext4Xattr};
 use ffs_types::{
-    EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
+    ParseError, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
     EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_SYSTEM, EXT4_XATTR_INDEX_TRUSTED,
-    EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC, ParseError,
+    EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC,
 };
 
 const INLINE_HEADER_LEN: usize = 4;
@@ -18,6 +18,8 @@ const EXTERNAL_HEADER_LEN: usize = 32;
 const XATTR_ENTRY_HEADER_LEN: usize = 16;
 const XATTR_NAME_MAX: usize = u8::MAX as usize;
 const XATTR_VALUE_MAX: usize = 65_536;
+const NAME_HASH_SHIFT: u32 = 5;
+const VALUE_HASH_SHIFT: u32 = 16;
 
 fn align4(n: usize) -> usize {
     (n + 3) & !3
@@ -64,10 +66,45 @@ fn entry_index(entries: &[Ext4Xattr], name_index: u8, name: &[u8]) -> Option<usi
         .position(|e| e.name_index == name_index && e.name == name)
 }
 
+fn ext4_xattr_hash_step(hash: u32, shift: u32, value: u32) -> u32 {
+    (hash << shift) ^ (hash >> (u32::BITS - shift)) ^ value
+}
+
+fn ext4_xattr_entry_hash(entry: &Ext4Xattr) -> u32 {
+    let mut hash = 0_u32;
+    for &byte in &entry.name {
+        hash = ext4_xattr_hash_step(hash, NAME_HASH_SHIFT, u32::from(byte));
+    }
+    for chunk in entry.value.chunks(4) {
+        let mut word = [0_u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        hash = ext4_xattr_hash_step(hash, VALUE_HASH_SHIFT, u32::from_le_bytes(word));
+    }
+    hash
+}
+
+fn sort_external_entries(entries: &mut [Ext4Xattr]) {
+    entries.sort_by(|left, right| {
+        left.name_index
+            .cmp(&right.name_index)
+            .then(left.name.len().cmp(&right.name.len()))
+            .then(left.name.cmp(&right.name))
+    });
+}
+
 fn encode_entries_region(
     region_capacity: usize,
     entries: &[Ext4Xattr],
     value_offset_base: usize,
+) -> Result<Vec<u8>> {
+    encode_entries_region_with_hashes(region_capacity, entries, value_offset_base, false)
+}
+
+fn encode_entries_region_with_hashes(
+    region_capacity: usize,
+    entries: &[Ext4Xattr],
+    value_offset_base: usize,
+    write_entry_hashes: bool,
 ) -> Result<Vec<u8>> {
     let mut data = vec![0_u8; region_capacity];
     let mut next_entry = 0_usize;
@@ -124,8 +161,12 @@ fn encode_entries_region(
                 .map_err(|_| FfsError::Format("xattr value size exceeds u32".to_owned()))?
                 .to_le_bytes(),
         );
-        // e_hash is at offset 12 (0 for now)
-        data[next_entry + 12..next_entry + 16].copy_from_slice(&0_u32.to_le_bytes());
+        let entry_hash = if write_entry_hashes {
+            ext4_xattr_entry_hash(entry)
+        } else {
+            0
+        };
+        data[next_entry + 12..next_entry + 16].copy_from_slice(&entry_hash.to_le_bytes());
 
         data[next_entry + XATTR_ENTRY_HEADER_LEN
             ..next_entry + XATTR_ENTRY_HEADER_LEN + entry.name.len()]
@@ -156,8 +197,20 @@ fn build_inline_ibody(ibody_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u8>
     }
 
     out[0..4].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
-    let encoded = encode_entries_region(ibody_len - INLINE_HEADER_LEN, entries, INLINE_HEADER_LEN)?;
+    let encoded = encode_entries_region(ibody_len - INLINE_HEADER_LEN, entries, 0)?;
     out[INLINE_HEADER_LEN..].copy_from_slice(&encoded);
+    Ok(out)
+}
+
+fn build_inline_ibody_for_inode_state(
+    ibody_len: usize,
+    entries: &[Ext4Xattr],
+    has_external_xattrs: bool,
+) -> Result<Vec<u8>> {
+    let mut out = build_inline_ibody(ibody_len, entries)?;
+    if entries.is_empty() && has_external_xattrs && ibody_len >= INLINE_HEADER_LEN {
+        out[0..INLINE_HEADER_LEN].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
+    }
     Ok(out)
 }
 
@@ -173,14 +226,20 @@ fn build_external_block(block_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u
         return Ok(out);
     }
 
+    let mut sorted_entries = entries.to_vec();
+    sort_external_entries(&mut sorted_entries);
+
     out[0..4].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
     out[4..8].copy_from_slice(&1_u32.to_le_bytes()); // h_refcount
     out[8..12].copy_from_slice(&1_u32.to_le_bytes()); // h_blocks
+                                                      // e2fsprogs/debugfs leaves h_hash unset when writing fresh EA blocks.
+    out[12..16].copy_from_slice(&0_u32.to_le_bytes());
 
-    let encoded = encode_entries_region(
+    let encoded = encode_entries_region_with_hashes(
         block_len - EXTERNAL_HEADER_LEN,
-        entries,
+        &sorted_entries,
         EXTERNAL_HEADER_LEN,
+        true,
     )?;
     out[EXTERNAL_HEADER_LEN..].copy_from_slice(&encoded);
     Ok(out)
@@ -325,6 +384,8 @@ pub fn set_xattr(
         };
         let block = &mut **block;
         let new_block = build_external_block(block.len(), &external_entries)?;
+        inode.xattr_ibody =
+            build_inline_ibody_for_inode_state(inode.xattr_ibody.len(), &inline_entries, true)?;
         block.copy_from_slice(&new_block);
         return Ok(XattrStorage::External);
     }
@@ -338,7 +399,11 @@ pub fn set_xattr(
 
         let mut inline_without_target = inline_entries;
         inline_without_target.remove(pos);
-        let new_ibody = build_inline_ibody(inode.xattr_ibody.len(), &inline_without_target)?;
+        let new_ibody = build_inline_ibody_for_inode_state(
+            inode.xattr_ibody.len(),
+            &inline_without_target,
+            true,
+        )?;
 
         let Some(block) = external_block.as_mut() else {
             return Err(FfsError::NoSpace);
@@ -356,7 +421,7 @@ pub fn set_xattr(
         return Ok(XattrStorage::External);
     }
 
-    let mut inline_candidate = inline_entries;
+    let mut inline_candidate = inline_entries.clone();
     inline_candidate.push(Ext4Xattr {
         name_index,
         name: name.clone(),
@@ -377,6 +442,8 @@ pub fn set_xattr(
         value: value.to_vec(),
     });
     let new_block = build_external_block(block.len(), &external_entries)?;
+    inode.xattr_ibody =
+        build_inline_ibody_for_inode_state(inode.xattr_ibody.len(), &inline_entries, true)?;
     block.copy_from_slice(&new_block);
     Ok(XattrStorage::External)
 }
@@ -396,7 +463,11 @@ pub fn remove_xattr(
     let mut inline_entries = parse_inline_entries(inode)?;
     if let Some(pos) = entry_index(&inline_entries, name_index, &name) {
         inline_entries.remove(pos);
-        inode.xattr_ibody = build_inline_ibody(inode.xattr_ibody.len(), &inline_entries)?;
+        inode.xattr_ibody = build_inline_ibody_for_inode_state(
+            inode.xattr_ibody.len(),
+            &inline_entries,
+            inode.file_acl != 0,
+        )?;
         return Ok(true);
     }
 
@@ -417,6 +488,11 @@ pub fn remove_xattr(
     external_entries.remove(pos);
 
     let new_block = build_external_block(block.len(), &external_entries)?;
+    inode.xattr_ibody = build_inline_ibody_for_inode_state(
+        inode.xattr_ibody.len(),
+        &inline_entries,
+        !external_entries.is_empty(),
+    )?;
     block.copy_from_slice(&new_block);
     if external_entries.is_empty() {
         inode.file_acl = 0;
@@ -1436,14 +1512,16 @@ mod tests {
                     value: v.clone(),
                 }
             }).collect();
+            let mut expected = entries.clone();
+            sort_external_entries(&mut expected);
 
             // Build an external block and parse it back.
             let block_len = 4096;
             let block = build_external_block(block_len, &entries).unwrap();
             let parsed = parse_external_entries(&block, false).unwrap();
 
-            prop_assert_eq!(parsed.len(), entries.len());
-            for (orig, parsed_e) in entries.iter().zip(parsed.iter()) {
+            prop_assert_eq!(parsed.len(), expected.len());
+            for (orig, parsed_e) in expected.iter().zip(parsed.iter()) {
                 prop_assert_eq!(orig.name_index, parsed_e.name_index);
                 prop_assert_eq!(&orig.name, &parsed_e.name);
                 prop_assert_eq!(&orig.value, &parsed_e.value);
@@ -1500,6 +1578,49 @@ mod tests {
     }
 
     #[test]
+    fn build_external_block_populates_entry_hash_and_leaves_block_hash_zero() {
+        let entry = Ext4Xattr {
+            name_index: EXT4_XATTR_INDEX_USER,
+            name: b"mime".to_vec(),
+            value: b"image/png".to_vec(),
+        };
+
+        let block = build_external_block(1024, std::slice::from_ref(&entry)).unwrap();
+        let block_hash = u32::from_le_bytes([block[12], block[13], block[14], block[15]]);
+        let entry_hash = u32::from_le_bytes([block[44], block[45], block[46], block[47]]);
+
+        assert_eq!(entry_hash, ext4_xattr_entry_hash(&entry));
+        assert_eq!(block_hash, 0);
+        assert_ne!(entry_hash, 0);
+    }
+
+    #[test]
+    fn build_external_block_sorts_entries_by_ext4_order() {
+        let entries = vec![
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_TRUSTED,
+                name: b"zeta".to_vec(),
+                value: b"trusted".to_vec(),
+            },
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"alpha".to_vec(),
+                value: b"user-a".to_vec(),
+            },
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"b".to_vec(),
+                value: b"user-b".to_vec(),
+            },
+        ];
+
+        let block = build_external_block(1024, &entries).unwrap();
+        let parsed = parse_xattr_block(&block).expect("parse sorted external block");
+        let names: Vec<String> = parsed.into_iter().map(|entry| entry.full_name()).collect();
+        assert_eq!(names, vec!["user.b", "user.alpha", "trusted.zeta"]);
+    }
+
+    #[test]
     fn build_inline_ibody_zero_length_empty_entries() {
         let out = build_inline_ibody(0, &[]).unwrap();
         assert!(out.is_empty());
@@ -1526,6 +1647,30 @@ mod tests {
         let out = build_inline_ibody(128, &[entry]).unwrap();
         let magic = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
         assert_eq!(magic, EXT4_XATTR_MAGIC);
+    }
+
+    #[test]
+    fn build_inline_ibody_value_offset_is_relative_to_post_magic_region() {
+        let entry = Ext4Xattr {
+            name_index: EXT4_XATTR_INDEX_USER,
+            name: b"mime".to_vec(),
+            value: b"image".to_vec(),
+        };
+        let out = build_inline_ibody(96, &[entry]).unwrap();
+        let value_offs = u16::from_le_bytes([out[6], out[7]]);
+        assert_eq!(value_offs, 84);
+        assert_eq!(
+            &out[4 + usize::from(value_offs)..4 + usize::from(value_offs) + 5],
+            b"image"
+        );
+    }
+
+    #[test]
+    fn build_inline_ibody_for_inode_state_stamps_magic_for_external_only_xattrs() {
+        let out = build_inline_ibody_for_inode_state(32, &[], true).unwrap();
+        let magic = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
+        assert_eq!(magic, EXT4_XATTR_MAGIC);
+        assert!(out[4..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
@@ -1631,6 +1776,61 @@ mod tests {
 
         let val = get_xattr(&inode, Some(&external), "user.key").unwrap();
         assert_eq!(val, Some(b"updated".to_vec()));
+    }
+
+    #[test]
+    fn set_xattr_external_only_stamps_ibody_magic() {
+        let mut inode = make_inode(20);
+        inode.file_acl = 123;
+        let mut external = vec![0_u8; 1024];
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+
+        let stored = set_xattr(
+            &mut inode,
+            Some(&mut external),
+            "user.big",
+            &[b'X'; 128],
+            access,
+        )
+        .unwrap();
+        assert_eq!(stored, XattrStorage::External);
+        assert_eq!(
+            u32::from_le_bytes([
+                inode.xattr_ibody[0],
+                inode.xattr_ibody[1],
+                inode.xattr_ibody[2],
+                inode.xattr_ibody[3],
+            ]),
+            EXT4_XATTR_MAGIC
+        );
+        assert_eq!(parse_ibody_xattrs(&inode).unwrap(), Vec::<Ext4Xattr>::new());
+    }
+
+    #[test]
+    fn remove_last_external_xattr_clears_header_only_ibody_magic() {
+        let mut inode = make_inode(20);
+        inode.file_acl = 321;
+        inode.xattr_ibody[0..4].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
+        let mut external = vec![0_u8; 1024];
+        let access = XattrWriteAccess {
+            is_owner: true,
+            ..Default::default()
+        };
+
+        set_xattr(
+            &mut inode,
+            Some(&mut external),
+            "user.big",
+            &[b'Y'; 128],
+            access,
+        )
+        .unwrap();
+        assert!(remove_xattr(&mut inode, Some(&mut external), "user.big", access).unwrap());
+        assert_eq!(inode.file_acl, 0);
+        assert!(inode.xattr_ibody.iter().all(|byte| *byte == 0));
     }
 
     #[test]

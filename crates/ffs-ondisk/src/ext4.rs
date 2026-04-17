@@ -2,11 +2,11 @@
 
 use ffs_types as crc32c;
 use ffs_types::{
-    ensure_slice, ext4_block_size_from_log, read_fixed, read_le_u16, read_le_u32, trim_nul_padded,
-    GroupNumber, InodeNumber, ParseError, EXT4_EXTENTS_FL, EXT4_FAST_SYMLINK_MAX,
-    EXT4_HUGE_FILE_FL, EXT4_INDEX_FL, EXT4_SB_CHECKSUM_OFFSET, EXT4_SUPERBLOCK_OFFSET,
-    EXT4_SUPERBLOCK_SIZE, EXT4_SUPER_MAGIC, EXT4_XATTR_MAGIC, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
-    S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK,
+    EXT4_EXTENTS_FL, EXT4_FAST_SYMLINK_MAX, EXT4_HUGE_FILE_FL, EXT4_INDEX_FL,
+    EXT4_SB_CHECKSUM_OFFSET, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE,
+    EXT4_XATTR_MAGIC, GroupNumber, InodeNumber, ParseError, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO,
+    S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, ensure_slice, ext4_block_size_from_log, read_fixed,
+    read_le_u16, read_le_u32, trim_nul_padded,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1277,11 +1277,7 @@ pub fn block_bitmap_checksum_value(
 ) -> u32 {
     let checksum_len = (clusters_per_group / 8) as usize;
     let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, checksum_len);
-    if desc_size >= 64 {
-        csum
-    } else {
-        csum & 0xFFFF
-    }
+    if desc_size >= 64 { csum } else { csum & 0xFFFF }
 }
 
 #[must_use]
@@ -1293,11 +1289,7 @@ pub fn inode_bitmap_checksum_value(
 ) -> u32 {
     let checksum_len = (inodes_per_group / 8) as usize;
     let csum = ext4_bitmap_checksum(raw_bitmap, csum_seed, checksum_len);
-    if desc_size >= 64 {
-        csum
-    } else {
-        csum & 0xFFFF
-    }
+    if desc_size >= 64 { csum } else { csum & 0xFFFF }
 }
 
 pub fn verify_block_bitmap_checksum(
@@ -3700,7 +3692,8 @@ impl Ext4ImageReader {
     /// Read inline xattrs from the inode body (ibody region).
     ///
     /// The inline xattr area starts after `128 + extra_isize` and contains
-    /// entries prefixed with a 4-byte magic header.
+    /// entries prefixed with a 4-byte magic header. Inline `e_value_offs`
+    /// values are relative to the post-header region, matching ext4/debugfs.
     pub fn read_xattrs_ibody(&self, inode: &Ext4Inode) -> Result<Vec<Ext4Xattr>, ParseError> {
         if inode.xattr_ibody.len() < 4 {
             return Ok(Vec::new());
@@ -3712,7 +3705,7 @@ impl Ext4ImageReader {
             return Ok(Vec::new());
         }
         let entries = &inode.xattr_ibody[4..];
-        parse_xattr_entries(entries, &inode.xattr_ibody)
+        parse_xattr_entries(entries, entries)
     }
 
     /// Read xattrs from an external xattr block (pointed to by `i_file_acl`).
@@ -3937,7 +3930,7 @@ impl Ext4Xattr {
 /// Each entry is:
 ///   - u8 name_len
 ///   - u8 name_index
-///   - u16 value_offs (offset from start of the block/ibody xattr area)
+///   - u16 value_offs (offset from the caller-provided value base)
 ///   - u32 value_size
 ///   - u32 hash (we ignore this)
 ///   - [u8; name_len] name
@@ -4030,7 +4023,7 @@ pub fn parse_ibody_xattrs(inode: &Ext4Inode) -> Result<Vec<Ext4Xattr>, ParseErro
         return Ok(Vec::new());
     }
     let entries = &inode.xattr_ibody[4..];
-    parse_xattr_entries(entries, &inode.xattr_ibody)
+    parse_xattr_entries(entries, entries)
 }
 
 /// Parse xattrs from an external xattr block (raw block data).
@@ -4192,11 +4185,7 @@ fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
         }
     }
     // lo-1 is the rightmost entry with hash <= target (lo >= 1 due to sentinel)
-    if lo > 0 {
-        lo - 1
-    } else {
-        0
-    }
+    if lo > 0 { lo - 1 } else { 0 }
 }
 
 /// Find the leaf block for a given hash in a sorted DX entry list.
@@ -4757,8 +4746,8 @@ mod tests {
         sb[0x18..0x1C].copy_from_slice(&0_u32.to_le_bytes()); // log_block_size=0 -> 1K
         sb[0x1C..0x20].copy_from_slice(&0_u32.to_le_bytes()); // log_cluster_size=0
         sb[0x14..0x18].copy_from_slice(&0_u32.to_le_bytes()); // first_data_block = 0 (wrong)
-                                                              // Adjust blocks_per_group and inodes_per_group for 1K blocks.
-                                                              // 1K * 8 = 8192 max blocks per group.
+        // Adjust blocks_per_group and inodes_per_group for 1K blocks.
+        // 1K * 8 = 8192 max blocks per group.
         sb[0x20..0x24].copy_from_slice(&8192_u32.to_le_bytes());
         sb[0x24..0x28].copy_from_slice(&8192_u32.to_le_bytes());
         sb[0x28..0x2C].copy_from_slice(&2048_u32.to_le_bytes()); // inodes_per_group
@@ -6006,9 +5995,11 @@ mod tests {
         assert_eq!(inode.generation, 1);
 
         // Inode 0 should be rejected
-        assert!(reader
-            .read_inode(&image, ffs_types::InodeNumber(0))
-            .is_err());
+        assert!(
+            reader
+                .read_inode(&image, ffs_types::InodeNumber(0))
+                .is_err()
+        );
 
         // Read a block
         let block_data = reader
@@ -7069,7 +7060,7 @@ mod tests {
         data[4..8].copy_from_slice(&0_u32.to_le_bytes()); // value_block (unused)
         data[8..12].copy_from_slice(&3_u32.to_le_bytes()); // value_size=3
         data[12..16].copy_from_slice(&0_u32.to_le_bytes()); // hash (unused)
-                                                            // Name: "test" at byte 16
+        // Name: "test" at byte 16
         data[16..20].copy_from_slice(b"test");
 
         // Value at offset 128: "val"
@@ -7164,15 +7155,15 @@ mod tests {
         let entry_start = ibody_start + 4;
         buf[entry_start] = 4; // name_len=4
         buf[entry_start + 1] = ffs_types::EXT4_XATTR_INDEX_USER;
-        let value_offs = 4_u16 + 80; // value_offs from start of ibody (includes 4-byte header)
+        let value_offs = 80_u16; // value_offs from start of the post-magic ibody region
         buf[entry_start + 2..entry_start + 4].copy_from_slice(&value_offs.to_le_bytes());
         // entry_start + 4..8 = e_value_block (unused, stays zero)
         buf[entry_start + 8..entry_start + 12].copy_from_slice(&5_u32.to_le_bytes()); // value_size=5
-                                                                                      // entry_start + 12..16 = e_hash (unused, stays zero)
+        // entry_start + 12..16 = e_hash (unused, stays zero)
         buf[entry_start + 16..entry_start + 20].copy_from_slice(b"mime");
 
-        // Value at ibody_start + value_offs
-        let value_off = ibody_start + usize::from(value_offs);
+        // Value at entry_start + value_offs (post-magic region base)
+        let value_off = entry_start + usize::from(value_offs);
         buf[value_off..value_off + 5].copy_from_slice(b"image");
 
         // Terminator
@@ -7205,9 +7196,9 @@ mod tests {
         block[32] = 3; // name_len=3
         block[33] = ffs_types::EXT4_XATTR_INDEX_SECURITY;
         block[34..36].copy_from_slice(&200_u16.to_le_bytes()); // value_offs from block start
-                                                               // block[36..40] = e_value_block (unused, stays zero)
+        // block[36..40] = e_value_block (unused, stays zero)
         block[40..44].copy_from_slice(&4_u32.to_le_bytes()); // value_size
-                                                             // block[44..48] = e_hash (unused, stays zero)
+        // block[44..48] = e_hash (unused, stays zero)
         block[48..51].copy_from_slice(b"cap");
         block[200..204].copy_from_slice(b"data");
 
@@ -8256,7 +8247,7 @@ mod tests {
         // Set blocks_count to a huge 64-bit value (via the 64-bit extension field).
         // blocks_count_lo = u32::MAX, blocks_count_hi = 1 → total > u32::MAX * bpg
         sb[0x04..0x08].copy_from_slice(&u32::MAX.to_le_bytes()); // blocks_count_lo
-                                                                 // Enable 64BIT feature so the hi field is honored.
+        // Enable 64BIT feature so the hi field is honored.
         let incompat = (Ext4IncompatFeatures::FILETYPE.0
             | Ext4IncompatFeatures::EXTENTS.0
             | Ext4IncompatFeatures::BIT64.0)
