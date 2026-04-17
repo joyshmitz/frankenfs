@@ -14,7 +14,7 @@
 
 use asupersync::Cx;
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
-use ffs_fuse::{mount_background, MountOptions};
+use ffs_fuse::{MountOptions, mount_background};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;

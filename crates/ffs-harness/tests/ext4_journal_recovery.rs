@@ -5,7 +5,7 @@ use ffs_block::ByteDevice;
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
 use ffs_error::{FfsError, Result};
 use ffs_ondisk::{EXT4_ERROR_FS, EXT4_VALID_FS};
-use ffs_types::{BlockNumber, ByteOffset, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC};
+use ffs_types::{BlockNumber, ByteOffset, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET};
 use std::sync::{Arc, Mutex};
 
 const BLOCK_SIZE: usize = 4096;
