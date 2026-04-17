@@ -23,12 +23,14 @@
 
 use ffs_harness::{GoldenDirEntry, GoldenReference};
 use ffs_ondisk::{
-    dx_hash, parse_dx_root, stamp_dir_block_checksum, verify_dir_block_checksum,
-    verify_inode_checksum, Ext4ImageReader,
+    dx_hash, parse_dx_root, parse_ibody_xattrs, parse_xattr_block, stamp_dir_block_checksum,
+    verify_dir_block_checksum, verify_inode_checksum, Ext4ImageReader,
 };
+use ffs_types::{BlockNumber, EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_USER};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 
 // ── Tool availability ───────────────────────────────────────────
@@ -55,6 +57,9 @@ const FILE_CONTENT: &[u8] = b"hello from FrankenFS reference test\n";
 const LARGE_FILE_CONTENT: &[u8] = b"hello from FrankenFS 64mb geometry variant\n";
 const DIR_INDEX_FILE_CONTENT: &[u8] = b"hello from FrankenFS dir_index variant\n";
 const DIR_INDEX_HASH_SEED: &str = "11111111-2222-3333-4444-555555555555";
+const INLINE_XATTR_USER_VALUE: &str = "image/png";
+const INLINE_XATTR_SECURITY_VALUE: &str = "system_u:object_r:tmp_t:s0";
+const EXTERNAL_XATTR_VALUE_LEN: usize = 512;
 // Keep this large enough that e2fsck -D reliably promotes /htree into a real
 // hash-indexed directory across supported e2fsprogs versions.
 const DIR_INDEX_FILE_COUNT: usize = 256;
@@ -255,6 +260,74 @@ fn create_nojournal_image(image_path: &Path) -> PathBuf {
     image_path.to_path_buf()
 }
 
+fn create_xattr_base_image(image_path: &Path) -> PathBuf {
+    let f = std::fs::File::create(image_path).expect("create image file");
+    f.set_len(8 * 1024 * 1024).expect("set image length");
+    drop(f);
+
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-xattr-ref -b 4096 -q {}",
+            image_path.display()
+        );
+    }
+    let st = Command::new("mkfs.ext4")
+        .args(["-L", "ffs-xattr-ref", "-b", "4096", "-q"])
+        .arg(image_path)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run mkfs.ext4");
+    assert!(st.success(), "mkfs.ext4 failed");
+
+    let payload_path = image_path.with_extension("xattr.content.tmp");
+    std::fs::write(&payload_path, FILE_CONTENT).expect("write xattr content file");
+
+    run_debugfs_w(image_path, "mkdir /xattrs");
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /xattrs/inline.txt", payload_path.display()),
+    );
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /xattrs/external.txt", payload_path.display()),
+    );
+    std::fs::remove_file(&payload_path).ok();
+    image_path.to_path_buf()
+}
+
+fn apply_xattr_reference_mutations(image_path: &Path) {
+    run_debugfs_w(
+        image_path,
+        &format!("ea_set /xattrs/inline.txt user.mime {INLINE_XATTR_USER_VALUE}"),
+    );
+    run_debugfs_w(
+        image_path,
+        &format!("ea_set /xattrs/inline.txt security.selinux {INLINE_XATTR_SECURITY_VALUE}"),
+    );
+
+    let external_value = "X".repeat(EXTERNAL_XATTR_VALUE_LEN);
+    run_debugfs_w(
+        image_path,
+        &format!("ea_set /xattrs/external.txt user.big {external_value}"),
+    );
+}
+
+fn canonicalize_xattr_block_for_writer_reference(block: &[u8]) -> Vec<u8> {
+    let mut canonical = block.to_vec();
+    if canonical.len() >= 20 {
+        // `ffs_xattr::set_xattr` does not know the checksum seed or physical
+        // block number, so h_checksum cannot be reproduced at this layer.
+        canonical[16..20].fill(0);
+    }
+    canonical
+}
+
+fn create_xattr_reference_image(image_path: &Path) -> PathBuf {
+    create_xattr_base_image(image_path);
+    apply_xattr_reference_mutations(image_path);
+    image_path.to_path_buf()
+}
+
 // ── Kernel tool output capture ──────────────────────────────────
 
 struct KernelSuperblock {
@@ -295,6 +368,12 @@ fn capture_superblock(image: &Path) -> KernelSuperblock {
 struct KernelDirEntry {
     name: String,
     file_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct KernelXattr {
+    name: String,
+    value: String,
 }
 
 fn capture_directory(image: &Path, dir: &str) -> Vec<KernelDirEntry> {
@@ -343,6 +422,109 @@ fn capture_directory(image: &Path, dir: &str) -> Vec<KernelDirEntry> {
         });
     }
     entries
+}
+
+fn parse_kernel_xattr_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with("debugfs") || line == "Extended attributes:" {
+        return None;
+    }
+
+    let (name, _) = line.split_once(" (")?;
+    Some(name.to_string())
+}
+
+fn capture_xattrs(image: &Path, path: &str) -> Vec<KernelXattr> {
+    let out = Command::new("debugfs")
+        .args(["-R", &format!("ea_list {path}")])
+        .arg(image)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("run debugfs ea_list");
+    assert!(out.status.success(), "debugfs ea_list failed for {path}");
+
+    let mut attrs: Vec<_> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(parse_kernel_xattr_name)
+        .map(|name| KernelXattr {
+            value: capture_xattr_value(image, path, &name),
+            name,
+        })
+        .collect();
+    attrs.sort_unstable();
+    attrs
+}
+
+fn capture_xattr_value(image: &Path, path: &str, name: &str) -> String {
+    let out = Command::new("debugfs")
+        .args(["-R", &format!("ea_get {path} {name}")])
+        .arg(image)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("run debugfs ea_get");
+    assert!(
+        out.status.success(),
+        "debugfs ea_get failed for {path} {name}"
+    );
+
+    let attr = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("debugfs") {
+                return None;
+            }
+            let (lhs, rhs) = line.split_once(" = ")?;
+            let (attr_name, _) = lhs.split_once(" (")?;
+            Some(KernelXattr {
+                name: attr_name.to_string(),
+                value: rhs.trim().trim_matches('"').to_string(),
+            })
+        })
+        .next()
+        .unwrap_or_else(|| panic!("debugfs ea_get returned no xattr for {path} {name}"));
+    assert_eq!(attr.name, name, "debugfs ea_get returned wrong xattr");
+    attr.value
+}
+
+fn normalize_ffs_xattrs(xattrs: Vec<ffs_ondisk::Ext4Xattr>) -> Vec<KernelXattr> {
+    let mut normalized: Vec<_> = xattrs
+        .into_iter()
+        .map(|xattr| KernelXattr {
+            name: xattr.full_name(),
+            value: String::from_utf8(xattr.value).unwrap_or_else(|err| {
+                panic!("xattr value should be utf-8 for test fixture: {err}")
+            }),
+        })
+        .collect();
+    normalized.sort_unstable();
+    normalized
+}
+
+fn xattr_writer_access() -> ffs_xattr::XattrWriteAccess {
+    ffs_xattr::XattrWriteAccess {
+        is_owner: true,
+        has_cap_fowner: true,
+        has_cap_sys_admin: true,
+    }
+}
+
+fn unique_temp_ext4_path(tag: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("ffs_{tag}_{}_{}.ext4", std::process::id(), nanos))
+}
+
+fn parse_reference_xattr_name(full_name: &str) -> (u8, Vec<u8>) {
+    if let Some(name) = full_name.strip_prefix("user.") {
+        return (EXT4_XATTR_INDEX_USER, name.as_bytes().to_vec());
+    }
+    if let Some(name) = full_name.strip_prefix("security.") {
+        return (EXT4_XATTR_INDEX_SECURITY, name.as_bytes().to_vec());
+    }
+    panic!("unsupported reference xattr name {full_name}");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,8 +717,13 @@ fn assert_inode_checksum_matches_reference(image: &[u8], reader: &Ext4ImageReade
     let raw_inode = &image[inode_offset..inode_offset + inode_size];
     let ext4_ino = ino.to_ext4().expect("ext4 inode number").0;
 
-    verify_inode_checksum(raw_inode, reader.sb.csum_seed(), ext4_ino, reader.sb.inode_size)
-        .unwrap_or_else(|err| panic!("verify_inode_checksum {path}: {err}"));
+    verify_inode_checksum(
+        raw_inode,
+        reader.sb.csum_seed(),
+        ext4_ino,
+        reader.sb.inode_size,
+    )
+    .unwrap_or_else(|err| panic!("verify_inode_checksum {path}: {err}"));
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -801,6 +988,199 @@ fn ext4_kernel_vs_ffs_inode_metadata() {
     assert_eq!(readme.size, expected_size, "readme.txt size");
 
     std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
+fn ext4_kernel_vs_ffs_xattr_reference() {
+    if !ext4_tools_available() {
+        eprintln!("SKIPPED: ext4 kernel tools not available");
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join("ffs_ref_xattr_test.ext4");
+    create_xattr_reference_image(&tmp);
+
+    let image = std::fs::read(&tmp).expect("read image");
+    let reader = Ext4ImageReader::new(&image).expect("parse ext4 image");
+
+    for (path, expect_external) in [
+        ("/xattrs/inline.txt", false),
+        ("/xattrs/external.txt", true),
+    ] {
+        let kernel_attrs = capture_xattrs(&tmp, path);
+        let (_, inode) = reader
+            .resolve_path(&image, path)
+            .unwrap_or_else(|err| panic!("resolve {path}: {err}"));
+
+        let inline_attrs = normalize_ffs_xattrs(
+            reader
+                .read_xattrs_ibody(&inode)
+                .unwrap_or_else(|err| panic!("read_xattrs_ibody {path}: {err}")),
+        );
+        let block_attrs = normalize_ffs_xattrs(
+            reader
+                .read_xattrs_block(&image, &inode)
+                .unwrap_or_else(|err| panic!("read_xattrs_block {path}: {err}")),
+        );
+        let all_attrs = normalize_ffs_xattrs(
+            reader
+                .list_xattrs(&image, &inode)
+                .unwrap_or_else(|err| panic!("list_xattrs {path}: {err}")),
+        );
+
+        if expect_external {
+            assert_ne!(
+                inode.file_acl, 0,
+                "{path} should use an external xattr block"
+            );
+            assert!(
+                inline_attrs.is_empty(),
+                "{path} should not store test xattrs inline"
+            );
+            assert_eq!(block_attrs, kernel_attrs, "{path}: block xattrs mismatch");
+        } else {
+            assert_eq!(
+                inode.file_acl, 0,
+                "{path} should not use an external xattr block"
+            );
+            assert_eq!(inline_attrs, kernel_attrs, "{path}: inline xattrs mismatch");
+            assert!(
+                block_attrs.is_empty(),
+                "{path} should not expose block xattrs"
+            );
+        }
+
+        assert_eq!(all_attrs, kernel_attrs, "{path}: combined xattrs mismatch");
+
+        for kernel_attr in &kernel_attrs {
+            let (name_index, name) = parse_reference_xattr_name(&kernel_attr.name);
+            let observed = reader
+                .get_xattr(&image, &inode, name_index, &name)
+                .unwrap_or_else(|err| panic!("get_xattr {path} {}: {err}", kernel_attr.name))
+                .unwrap_or_else(|| panic!("missing xattr {} in ffs-ondisk", kernel_attr.name));
+            assert_eq!(
+                observed,
+                kernel_attr.value.as_bytes(),
+                "{path}: get_xattr mismatch for {}",
+                kernel_attr.name
+            );
+        }
+    }
+
+    std::fs::remove_file(&tmp).ok();
+}
+
+#[test]
+fn ext4_debugfs_vs_ffs_xattr_writer_reference() {
+    if !ext4_tools_available() {
+        eprintln!("SKIPPED: ext4 kernel tools not available");
+        return;
+    }
+
+    let base_path = unique_temp_ext4_path("xattr_writer_base");
+    let reference_path = unique_temp_ext4_path("xattr_writer_reference");
+
+    create_xattr_base_image(&base_path);
+    std::fs::copy(&base_path, &reference_path).expect("copy base xattr image");
+    apply_xattr_reference_mutations(&reference_path);
+
+    let base_image = std::fs::read(&base_path).expect("read base image");
+    let reference_image = std::fs::read(&reference_path).expect("read reference image");
+
+    let base_reader = Ext4ImageReader::new(&base_image).expect("parse base ext4 image");
+    let reference_reader = Ext4ImageReader::new(&reference_image).expect("parse reference image");
+    let access = xattr_writer_access();
+
+    let inline_kernel_attrs = capture_xattrs(&reference_path, "/xattrs/inline.txt");
+    let (_, mut inline_inode) = base_reader
+        .resolve_path(&base_image, "/xattrs/inline.txt")
+        .expect("resolve base inline.txt");
+    let (_, reference_inline_inode) = reference_reader
+        .resolve_path(&reference_image, "/xattrs/inline.txt")
+        .expect("resolve reference inline.txt");
+
+    let inline_storage = ffs_xattr::set_xattr(
+        &mut inline_inode,
+        None,
+        "user.mime",
+        INLINE_XATTR_USER_VALUE.as_bytes(),
+        access,
+    )
+    .expect("write inline user xattr");
+    assert_eq!(inline_storage, ffs_xattr::XattrStorage::Inline);
+    let inline_storage = ffs_xattr::set_xattr(
+        &mut inline_inode,
+        None,
+        "security.selinux",
+        INLINE_XATTR_SECURITY_VALUE.as_bytes(),
+        access,
+    )
+    .expect("write inline security xattr");
+    assert_eq!(inline_storage, ffs_xattr::XattrStorage::Inline);
+    assert_eq!(
+        inline_inode.file_acl, reference_inline_inode.file_acl,
+        "inline file_acl pointer mismatch"
+    );
+    assert_eq!(
+        inline_inode.xattr_ibody, reference_inline_inode.xattr_ibody,
+        "inline xattr ibody bytes diverged from debugfs reference"
+    );
+    assert_eq!(
+        normalize_ffs_xattrs(
+            parse_ibody_xattrs(&inline_inode).expect("parse written inline xattrs")
+        ),
+        inline_kernel_attrs,
+        "inline written xattrs diverged from debugfs reference"
+    );
+
+    let external_kernel_attrs = capture_xattrs(&reference_path, "/xattrs/external.txt");
+    let (_, mut external_inode) = base_reader
+        .resolve_path(&base_image, "/xattrs/external.txt")
+        .expect("resolve base external.txt");
+    let (_, reference_external_inode) = reference_reader
+        .resolve_path(&reference_image, "/xattrs/external.txt")
+        .expect("resolve reference external.txt");
+    external_inode.file_acl = reference_external_inode.file_acl;
+    let mut external_block =
+        vec![0_u8; usize::try_from(reference_reader.sb.block_size).expect("block size fits usize")];
+
+    let external_value = "X".repeat(EXTERNAL_XATTR_VALUE_LEN);
+    let external_storage = ffs_xattr::set_xattr(
+        &mut external_inode,
+        Some(&mut external_block),
+        "user.big",
+        external_value.as_bytes(),
+        access,
+    )
+    .expect("write external xattr");
+    assert_eq!(external_storage, ffs_xattr::XattrStorage::External);
+    assert_eq!(
+        external_inode.file_acl, reference_external_inode.file_acl,
+        "external file_acl pointer mismatch"
+    );
+    assert_eq!(
+        external_inode.xattr_ibody, reference_external_inode.xattr_ibody,
+        "external inode ibody bytes diverged from debugfs reference"
+    );
+    assert_eq!(
+        normalize_ffs_xattrs(
+            parse_xattr_block(&external_block).expect("parse written external block")
+        ),
+        external_kernel_attrs,
+        "external written xattrs diverged from debugfs reference"
+    );
+
+    let reference_block = reference_reader
+        .read_block(
+            &reference_image,
+            BlockNumber(reference_external_inode.file_acl),
+        )
+        .expect("read reference external xattr block");
+    assert_eq!(
+        canonicalize_xattr_block_for_writer_reference(&external_block),
+        canonicalize_xattr_block_for_writer_reference(&reference_block),
+        "external xattr block bytes diverged from debugfs reference after checksum normalization"
+    );
 }
 
 /// E2E: verify extent mapping produces valid results for files with content.

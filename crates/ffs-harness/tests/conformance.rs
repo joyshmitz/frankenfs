@@ -4,37 +4,41 @@ use asupersync::Cx;
 use ffs_alloc::{FsGeometry, GroupStats};
 use ffs_block::{BlockDevice, ByteBlockDevice, FileByteDevice};
 use ffs_btrfs::{
-    parse_send_stream, replay_tree_log, walk_chunk_tree, walk_device_tree, BtrfsDeviceSet,
-    SendCommand, BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
+    BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
     BTRFS_FS_TREE_OBJECTID, BTRFS_FT_REG_FILE, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
     BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
+    BtrfsDeviceSet, SendCommand, parse_send_stream, replay_tree_log, walk_chunk_tree,
+    walk_device_tree,
 };
 use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions, RequestScope};
 use ffs_harness::{
-    e2e::{run_crash_replay_suite, run_fsx_stress, CrashReplaySuiteConfig, FsxStressConfig},
+    GoldenReference, ParityReport,
+    e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     load_sparse_fixture, validate_btrfs_chunk_fixture, validate_btrfs_fixture,
     validate_btrfs_leaf_fixture, validate_dir_block_fixture, validate_ext4_fixture,
     validate_extent_tree_fixture, validate_group_desc_fixture, validate_inode_fixture,
-    GoldenReference, ParityReport,
 };
 use ffs_ondisk::{
-    lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block, stamp_dir_block_checksum,
-    verify_dir_block_checksum, BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock,
-    Ext4IncompatFeatures, Ext4Superblock, ExtentTree,
+    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock, Ext4IncompatFeatures, Ext4Superblock,
+    ExtentTree, lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block,
+    stamp_dir_block_checksum, verify_dir_block_checksum,
 };
 use ffs_types::{
-    GroupNumber, InodeNumber, ParseError, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL,
-    EXT4_COMPRBLK_FL, EXT4_COMPR_FL, EXT4_EXTENTS_FL, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
+    BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL, EXT4_COMPR_FL, EXT4_COMPRBLK_FL,
+    EXT4_EXTENTS_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber, InodeNumber,
+    ParseError,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsStr,
+    fs,
     os::unix::ffi::OsStrExt,
     path::Path,
     sync::{
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
         Arc,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
     },
 };
 
@@ -3192,105 +3196,91 @@ fn ext4_reference_image_opens_with_journal_replay_segments() {
     );
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    hex::encode(digest)
+}
+
+fn validate_checksum_manifest_artifacts(
+    manifest_path: &Path,
+    artifacts_dir: &Path,
+    artifact_kind: &str,
+) {
+    let listed_files = parse_checksum_inventory(manifest_path);
+    assert!(
+        !listed_files.is_empty(),
+        "{} should list {} files",
+        manifest_path.display(),
+        artifact_kind
+    );
+
+    for (filename, expected_digest) in &listed_files {
+        assert!(
+            Path::new(filename)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json")),
+            "{artifact_kind} checksum manifest should only track .json files: {filename}"
+        );
+        let path = artifacts_dir.join(filename);
+        let data = fs::read(&path)
+            .unwrap_or_else(|e| panic!("{artifact_kind} {filename} missing or unreadable: {e}"));
+        assert!(
+            !data.is_empty(),
+            "{artifact_kind} {filename} should be non-empty"
+        );
+        let actual_digest = sha256_hex(&data);
+        assert_eq!(
+            actual_digest, *expected_digest,
+            "{artifact_kind} {filename} digest mismatch"
+        );
+    }
+
+    let actual_jsons = fs::read_dir(artifacts_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", artifacts_dir.display()))
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    for json_file in &actual_jsons {
+        assert!(
+            listed_files.contains_key(json_file),
+            "{artifact_kind} {json_file} exists but is not listed in {}",
+            manifest_path.display()
+        );
+    }
+}
+
 /// CI gate: verify that every fixture listed in checksums.sha256 exists,
-/// is non-empty, and parses successfully. The actual SHA-256 comparison
-/// is done by `scripts/verify_golden.sh` (which calls `sha256sum -c`).
+/// is non-empty, and that its SHA-256 digest matches the committed manifest.
 #[test]
 fn fixture_checksum_manifest_is_complete() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let checksums_path = workspace.join("conformance/fixtures/checksums.sha256");
-    let checksums_text = std::fs::read_to_string(&checksums_path)
-        .expect("read conformance/fixtures/checksums.sha256");
-
-    let listed_files: Vec<&str> = checksums_text
-        .lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(|l| l.split_once("  ").map(|(_, f)| f))
-        .collect();
-
-    assert!(
-        !listed_files.is_empty(),
-        "checksums.sha256 should list fixture files"
+    validate_checksum_manifest_artifacts(
+        &workspace.join("conformance/fixtures/checksums.sha256"),
+        &workspace.join("conformance/fixtures"),
+        "fixture",
     );
-
-    let fixtures_dir = workspace.join("conformance/fixtures");
-    for filename in &listed_files {
-        let path = fixtures_dir.join(filename);
-        let data = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("fixture {filename} missing or unreadable: {e}"));
-        assert!(!data.is_empty(), "fixture {filename} should be non-empty");
-    }
-
-    // Verify all .json fixture files are listed in the manifest
-    let actual_jsons: Vec<_> = std::fs::read_dir(&fixtures_dir)
-        .expect("read fixtures dir")
-        .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
-
-    for json_file in &actual_jsons {
-        assert!(
-            listed_files.contains(&json_file.as_str()),
-            "fixture {json_file} exists but is not listed in checksums.sha256"
-        );
-    }
 }
 
 /// CI gate: verify that every golden file listed in checksums.sha256 exists,
-/// is non-empty, and that every golden JSON is present in the manifest.
+/// is non-empty, and that its SHA-256 digest matches the committed manifest.
 #[test]
 fn golden_checksum_manifest_is_complete() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let checksums_path = workspace.join("conformance/golden/checksums.sha256");
-    let checksums_text =
-        std::fs::read_to_string(&checksums_path).expect("read conformance/golden/checksums.sha256");
-
-    let listed_files: Vec<&str> = checksums_text
-        .lines()
-        .filter(|l| !l.is_empty())
-        .filter_map(|l| l.split_once("  ").map(|(_, f)| f))
-        .collect();
-
-    assert!(
-        !listed_files.is_empty(),
-        "checksums.sha256 should list golden files"
+    validate_checksum_manifest_artifacts(
+        &workspace.join("conformance/golden/checksums.sha256"),
+        &workspace.join("conformance/golden"),
+        "golden",
     );
-
-    let golden_dir = workspace.join("conformance/golden");
-    for filename in &listed_files {
-        assert!(
-            Path::new(filename)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("json")),
-            "golden checksum manifest should only track .json files: {filename}"
-        );
-        let path = golden_dir.join(filename);
-        let data = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("golden {filename} missing or unreadable: {e}"));
-        assert!(!data.is_empty(), "golden {filename} should be non-empty");
-    }
-
-    let mut actual_jsons: Vec<_> = std::fs::read_dir(&golden_dir)
-        .expect("read golden dir")
-        .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
-    actual_jsons.sort();
-
-    for json_file in &actual_jsons {
-        assert!(
-            listed_files.contains(&json_file.as_str()),
-            "golden {json_file} exists but is not listed in checksums.sha256"
-        );
-    }
 }
 
 /// Full conformance gate pass (bd-2jk.14).
@@ -3429,6 +3419,235 @@ fn validate_golden_jsons(workspace: &Path) {
             "golden {name} label should be non-empty"
         );
     }
+}
+
+fn parse_checksum_inventory(path: &Path) -> HashMap<String, String> {
+    let raw = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("checksum inventory {} unreadable: {err}", path.display()));
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut parts = line.split_whitespace();
+            let digest = parts
+                .next()
+                .unwrap_or_else(|| panic!("checksum line missing digest: {line}"));
+            let file_name = parts
+                .next()
+                .unwrap_or_else(|| panic!("checksum line missing file name: {line}"));
+            assert!(
+                parts.next().is_none(),
+                "checksum line should have exactly two fields: {line}"
+            );
+            (file_name.to_owned(), digest.to_owned())
+        })
+        .collect()
+}
+
+fn sorted_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut names = names.into_iter().collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn require_positive_numeric_field(golden: &Value, file_name: &str, field: &str) {
+    let value = golden
+        .get(field)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("golden {file_name} missing numeric field {field}"));
+    assert!(value > 0, "golden {file_name} field {field} should be > 0");
+}
+
+fn require_nonempty_string_field<'a>(golden: &'a Value, file_name: &str, field: &str) -> &'a str {
+    let value = golden
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("golden {file_name} missing string field {field}"));
+    assert!(
+        !value.is_empty(),
+        "golden {file_name} field {field} should be non-empty"
+    );
+    value
+}
+
+fn validate_legacy_ext4_inspect_golden(file_name: &str, golden: &Value) {
+    assert_eq!(
+        golden.get("filesystem").and_then(Value::as_str),
+        Some("ext4"),
+        "golden {file_name} filesystem should be ext4"
+    );
+    for field in ["block_size", "blocks_count", "inodes_count"] {
+        require_positive_numeric_field(golden, file_name, field);
+    }
+    require_nonempty_string_field(golden, file_name, "volume_name");
+}
+
+fn validate_legacy_btrfs_inspect_golden(file_name: &str, golden: &Value) {
+    assert_eq!(
+        golden.get("filesystem").and_then(Value::as_str),
+        Some("btrfs"),
+        "golden {file_name} filesystem should be btrfs"
+    );
+    for field in ["sectorsize", "nodesize", "generation"] {
+        require_positive_numeric_field(golden, file_name, field);
+    }
+    require_nonempty_string_field(golden, file_name, "label");
+}
+
+fn validate_fast_commit_fixture_golden(file_name: &str, golden: &Value) {
+    let scenario_id = require_nonempty_string_field(golden, file_name, "scenario_id");
+    assert_eq!(
+        scenario_id,
+        file_name.trim_end_matches(".json"),
+        "golden {file_name} scenario_id should match file stem"
+    );
+    require_nonempty_string_field(golden, file_name, "description");
+
+    let payload = require_nonempty_string_field(golden, file_name, "fast_commit_hex");
+    let compact = payload
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect::<String>();
+    assert!(
+        compact.len() % 2 == 0,
+        "golden {file_name} fast_commit_hex should have even hex length"
+    );
+    assert!(
+        compact.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "golden {file_name} fast_commit_hex should contain only hex digits"
+    );
+
+    let expected = golden
+        .get("expected")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("golden {file_name} missing expected object"));
+    for field in [
+        "transactions_found",
+        "last_tid",
+        "blocks_scanned",
+        "incomplete_transactions",
+    ] {
+        assert!(
+            expected.get(field).and_then(Value::as_u64).is_some(),
+            "golden {file_name} expected.{field} should be numeric"
+        );
+    }
+    assert!(
+        expected
+            .get("fallback_required")
+            .and_then(Value::as_bool)
+            .is_some(),
+        "golden {file_name} expected.fallback_required should be boolean"
+    );
+
+    let operations = expected
+        .get("operations")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("golden {file_name} expected.operations should be an array"));
+    for (idx, operation) in operations.iter().enumerate() {
+        let kind = operation
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("golden {file_name} operation[{idx}] missing kind"));
+        match kind {
+            "inode_update" => {
+                assert!(
+                    operation.get("ino").and_then(Value::as_u64).is_some(),
+                    "golden {file_name} inode_update[{idx}] should include ino"
+                );
+            }
+            "add_range" => {
+                for field in ["ino", "logical_block", "len", "physical_block"] {
+                    assert!(
+                        operation.get(field).and_then(Value::as_u64).is_some(),
+                        "golden {file_name} add_range[{idx}] missing numeric field {field}"
+                    );
+                }
+            }
+            "create" => {
+                for field in ["parent_ino", "ino"] {
+                    assert!(
+                        operation.get(field).and_then(Value::as_u64).is_some(),
+                        "golden {file_name} create[{idx}] missing numeric field {field}"
+                    );
+                }
+                let name = operation
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("golden {file_name} create[{idx}] missing name"));
+                assert!(
+                    !name.is_empty(),
+                    "golden {file_name} create[{idx}] name should be non-empty"
+                );
+            }
+            _ => panic!("golden {file_name} operation[{idx}] has unknown kind {kind}"),
+        }
+    }
+}
+
+fn validate_legacy_fixture_goldens(workspace: &Path) {
+    let golden_dir = workspace.join("tests/fixtures/golden");
+    let checksum_inventory = parse_checksum_inventory(&golden_dir.join("checksums.txt"));
+    let actual_json_files = sorted_names(
+        fs::read_dir(&golden_dir)
+            .unwrap_or_else(|err| panic!("read legacy golden dir {}: {err}", golden_dir.display()))
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().is_some_and(|ext| ext == "json")).then(|| {
+                    entry.file_name().into_string().unwrap_or_else(|_| {
+                        panic!("non-utf8 file name in {}", golden_dir.display())
+                    })
+                })
+            }),
+    );
+    let actual_json_set = actual_json_files.iter().cloned().collect::<HashSet<_>>();
+    let checksum_json_set = checksum_inventory.keys().cloned().collect::<HashSet<_>>();
+
+    let missing_from_checksums = sorted_names(
+        actual_json_set
+            .difference(&checksum_json_set)
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        missing_from_checksums.is_empty(),
+        "tests/fixtures/golden/checksums.txt is missing entries for: {}",
+        missing_from_checksums.join(", ")
+    );
+
+    let extra_checksum_entries = sorted_names(
+        checksum_json_set
+            .difference(&actual_json_set)
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        extra_checksum_entries.is_empty(),
+        "tests/fixtures/golden/checksums.txt references missing files: {}",
+        extra_checksum_entries.join(", ")
+    );
+
+    for file_name in actual_json_files {
+        let text = fs::read_to_string(golden_dir.join(&file_name))
+            .unwrap_or_else(|err| panic!("legacy golden {file_name} unreadable: {err}"));
+        let golden: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("legacy golden {file_name} invalid: {err}"));
+
+        if file_name.starts_with("ext4_fast_commit_") {
+            validate_fast_commit_fixture_golden(&file_name, &golden);
+        } else if file_name.starts_with("ext4_") {
+            validate_legacy_ext4_inspect_golden(&file_name, &golden);
+        } else if file_name.starts_with("btrfs_") {
+            validate_legacy_btrfs_inspect_golden(&file_name, &golden);
+        } else {
+            panic!("unexpected legacy golden fixture {file_name}");
+        }
+    }
+}
+
+#[test]
+fn legacy_fixture_goldens_are_checksum_covered_and_structurally_valid() {
+    validate_legacy_fixture_goldens(workspace_root());
 }
 
 fn assert_fuzz_corpus_populated(workspace: &Path) {

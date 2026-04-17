@@ -13,8 +13,9 @@
 use asupersync::Cx;
 use ffs_btrfs::{
     BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID,
-    BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_ROOT_REF, BtrfsExtentData,
-    BtrfsLeafEntry, enumerate_subvolumes, parse_extent_data, parse_root_item, parse_root_ref,
+    BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_ROOT_REF, BTRFS_SEND_STREAM_MAGIC,
+    BtrfsExtentData, BtrfsLeafEntry, SendAttr, SendCommand, enumerate_subvolumes,
+    parse_extent_data, parse_root_item, parse_root_ref, parse_send_stream,
 };
 use ffs_core::{FileType, InodeAttr, OpenFs, OpenOptions};
 use ffs_types::InodeNumber;
@@ -611,6 +612,245 @@ fn find_file<'a>(golden: &'a BtrfsGoldenReference, path: &str) -> &'a BtrfsFileS
         .unwrap_or_else(|| panic!("missing file {path} in golden"))
 }
 
+const BTRFS_SEND_CRC32C_POLY: u32 = 0x82F6_3B78;
+const BTRFS_SEND_STREAM_TEST_UUID: [u8; 16] = [
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+];
+
+// btrfs-progs computes command CRC32C over the command header with the CRC
+// field zeroed plus the payload bytes (`common/send-stream.c`).
+fn btrfs_send_crc32c(seed: u32, data: &[u8]) -> u32 {
+    let mut crc = seed;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ BTRFS_SEND_CRC32C_POLY
+            };
+        }
+    }
+    crc
+}
+
+fn send_attr_bytes(attr: SendAttr, value: &[u8]) -> (SendAttr, Vec<u8>) {
+    (attr, value.to_vec())
+}
+
+fn send_attr_u64(attr: SendAttr, value: u64) -> (SendAttr, Vec<u8>) {
+    (attr, value.to_le_bytes().to_vec())
+}
+
+fn append_crc_valid_send_stream_command(
+    stream: &mut Vec<u8>,
+    cmd: SendCommand,
+    attrs: &[(SendAttr, Vec<u8>)],
+) {
+    let mut payload = Vec::new();
+    for (attr, value) in attrs {
+        payload.extend_from_slice(&(*attr as u16).to_le_bytes());
+        let value_len = u16::try_from(value.len()).expect("send attr length should fit in u16");
+        payload.extend_from_slice(&value_len.to_le_bytes());
+        payload.extend_from_slice(value);
+    }
+
+    let payload_len = u32::try_from(payload.len()).expect("send payload length should fit in u32");
+    let mut command = Vec::with_capacity(10 + payload.len());
+    command.extend_from_slice(&payload_len.to_le_bytes());
+    command.extend_from_slice(&(cmd as u16).to_le_bytes());
+    command.extend_from_slice(&0_u32.to_le_bytes());
+    command.extend_from_slice(&payload);
+    let crc = btrfs_send_crc32c(0, &command);
+    command[6..10].copy_from_slice(&crc.to_le_bytes());
+    stream.extend_from_slice(&command);
+}
+
+fn send_stream_attr<'a>(command: &'a ffs_btrfs::SendStreamCommand, attr: SendAttr) -> &'a [u8] {
+    command
+        .attrs
+        .iter()
+        .find_map(|(attr_id, value)| (*attr_id == attr as u16).then_some(value.as_slice()))
+        .unwrap_or_else(|| panic!("missing send attr {:?}", attr))
+}
+
+fn send_stream_attr_u64(command: &ffs_btrfs::SendStreamCommand, attr: SendAttr) -> u64 {
+    let raw = send_stream_attr(command, attr);
+    let bytes: [u8; 8] = raw
+        .try_into()
+        .unwrap_or_else(|_| panic!("send attr {:?} should be 8 bytes, got {}", attr, raw.len()));
+    u64::from_le_bytes(bytes)
+}
+
+fn send_stream_attr_string<'a>(
+    command: &'a ffs_btrfs::SendStreamCommand,
+    attr: SendAttr,
+) -> &'a str {
+    std::str::from_utf8(send_stream_attr(command, attr))
+        .unwrap_or_else(|err| panic!("send attr {:?} should be utf-8: {err}", attr))
+}
+
+fn format_btrfs_send_uuid(uuid: &[u8]) -> String {
+    assert_eq!(uuid.len(), 16, "uuid should be 16 bytes");
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        uuid[0],
+        uuid[1],
+        uuid[2],
+        uuid[3],
+        uuid[4],
+        uuid[5],
+        uuid[6],
+        uuid[7],
+        uuid[8],
+        uuid[9],
+        uuid[10],
+        uuid[11],
+        uuid[12],
+        uuid[13],
+        uuid[14],
+        uuid[15]
+    )
+}
+
+fn normalize_btrfs_receive_dump(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+fn normalize_send_stream_path(subvolume: &str, relative_path: &str) -> String {
+    if relative_path.is_empty() {
+        format!("./{subvolume}")
+    } else {
+        format!("./{subvolume}/{relative_path}")
+    }
+}
+
+fn normalize_send_stream_for_btrfs_dump(parsed: &ffs_btrfs::SendStreamParseResult) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut current_subvolume = None::<String>;
+
+    for command in &parsed.commands {
+        match command.cmd {
+            SendCommand::Subvol => {
+                let path = send_stream_attr_string(command, SendAttr::Path).to_owned();
+                let uuid = format_btrfs_send_uuid(send_stream_attr(command, SendAttr::Uuid));
+                let ctransid = send_stream_attr_u64(command, SendAttr::Ctransid);
+                normalized.push(format!("subvol ./{path} uuid={uuid} transid={ctransid}"));
+                current_subvolume = Some(path);
+            }
+            SendCommand::Mkdir => {
+                let subvolume = current_subvolume
+                    .as_deref()
+                    .expect("subvolume command should precede mkdir");
+                let path = normalize_send_stream_path(
+                    subvolume,
+                    send_stream_attr_string(command, SendAttr::Path),
+                );
+                normalized.push(format!("mkdir {path}"));
+            }
+            SendCommand::Mkfile => {
+                let subvolume = current_subvolume
+                    .as_deref()
+                    .expect("subvolume command should precede mkfile");
+                let path = normalize_send_stream_path(
+                    subvolume,
+                    send_stream_attr_string(command, SendAttr::Path),
+                );
+                normalized.push(format!("mkfile {path}"));
+            }
+            SendCommand::Write => {
+                let subvolume = current_subvolume
+                    .as_deref()
+                    .expect("subvolume command should precede write");
+                let path = normalize_send_stream_path(
+                    subvolume,
+                    send_stream_attr_string(command, SendAttr::Path),
+                );
+                let offset = send_stream_attr_u64(command, SendAttr::FileOffset);
+                let len = send_stream_attr(command, SendAttr::Data).len();
+                normalized.push(format!("write {path} offset={offset} len={len}"));
+            }
+            SendCommand::Chmod => {
+                let subvolume = current_subvolume
+                    .as_deref()
+                    .expect("subvolume command should precede chmod");
+                let path = normalize_send_stream_path(
+                    subvolume,
+                    send_stream_attr_string(command, SendAttr::Path),
+                );
+                let mode = send_stream_attr_u64(command, SendAttr::Mode);
+                normalized.push(format!("chmod {path} mode={mode:o}"));
+            }
+            SendCommand::Chown => {
+                let subvolume = current_subvolume
+                    .as_deref()
+                    .expect("subvolume command should precede chown");
+                let path = normalize_send_stream_path(
+                    subvolume,
+                    send_stream_attr_string(command, SendAttr::Path),
+                );
+                let gid = send_stream_attr_u64(command, SendAttr::Gid);
+                let uid = send_stream_attr_u64(command, SendAttr::Uid);
+                normalized.push(format!("chown {path} gid={gid} uid={uid}"));
+            }
+            SendCommand::Truncate => {
+                let subvolume = current_subvolume
+                    .as_deref()
+                    .expect("subvolume command should precede truncate");
+                let path = normalize_send_stream_path(
+                    subvolume,
+                    send_stream_attr_string(command, SendAttr::Path),
+                );
+                let size = send_stream_attr_u64(command, SendAttr::Size);
+                normalized.push(format!("truncate {path} size={size}"));
+            }
+            SendCommand::Rename => {
+                let subvolume = current_subvolume
+                    .as_deref()
+                    .expect("subvolume command should precede rename");
+                let path = normalize_send_stream_path(
+                    subvolume,
+                    send_stream_attr_string(command, SendAttr::Path),
+                );
+                let dest = normalize_send_stream_path(
+                    subvolume,
+                    send_stream_attr_string(command, SendAttr::PathTo),
+                );
+                normalized.push(format!("rename {path} dest={dest}"));
+            }
+            SendCommand::End => break,
+            other => panic!("unexpected send command in reference stream: {:?}", other),
+        }
+    }
+
+    normalized
+}
+
+fn run_btrfs_receive_dump(stream: &[u8]) -> Vec<String> {
+    let temp = TempDir::new().expect("tempdir for btrfs send stream");
+    let stream_path = temp.path().join("reference.send");
+    fs::write(&stream_path, stream).expect("write btrfs send stream fixture");
+
+    let output = Command::new("btrfs")
+        .args(["receive", "--dump", "-e", "-f"])
+        .arg(&stream_path)
+        .output()
+        .expect("run btrfs receive --dump");
+    assert!(
+        output.status.success(),
+        "btrfs receive --dump failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    normalize_btrfs_receive_dump(&String::from_utf8_lossy(&output.stdout))
+}
+
 #[test]
 fn btrfs_golden_json_parses_and_is_consistent() {
     if regen_requested() {
@@ -762,4 +1002,90 @@ fn btrfs_large_subvolume_catalog_matches_golden() {
         obs_subvols.iter().any(|subvolume| subvolume.read_only),
         "expected at least one read-only subvolume"
     );
+}
+
+#[test]
+fn btrfs_send_stream_matches_btrfs_receive_dump_reference() {
+    if !has_command("btrfs") {
+        eprintln!("btrfs tool unavailable, skipping");
+        return;
+    }
+
+    let mut stream = Vec::new();
+    stream.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+    stream.extend_from_slice(&1_u32.to_le_bytes());
+    append_crc_valid_send_stream_command(
+        &mut stream,
+        SendCommand::Subvol,
+        &[
+            send_attr_bytes(SendAttr::Path, b"snap"),
+            send_attr_bytes(SendAttr::Uuid, &BTRFS_SEND_STREAM_TEST_UUID),
+            send_attr_u64(SendAttr::Ctransid, 7),
+        ],
+    );
+    append_crc_valid_send_stream_command(
+        &mut stream,
+        SendCommand::Mkdir,
+        &[
+            send_attr_bytes(SendAttr::Path, b"dir"),
+            send_attr_u64(SendAttr::Ino, 257),
+        ],
+    );
+    append_crc_valid_send_stream_command(
+        &mut stream,
+        SendCommand::Mkfile,
+        &[
+            send_attr_bytes(SendAttr::Path, b"dir/file.txt"),
+            send_attr_u64(SendAttr::Ino, 258),
+        ],
+    );
+    append_crc_valid_send_stream_command(
+        &mut stream,
+        SendCommand::Write,
+        &[
+            send_attr_bytes(SendAttr::Path, b"dir/file.txt"),
+            send_attr_u64(SendAttr::FileOffset, 0),
+            send_attr_bytes(SendAttr::Data, b"hello"),
+        ],
+    );
+    append_crc_valid_send_stream_command(
+        &mut stream,
+        SendCommand::Chmod,
+        &[
+            send_attr_bytes(SendAttr::Path, b"dir/file.txt"),
+            send_attr_u64(SendAttr::Mode, 0o644),
+        ],
+    );
+    append_crc_valid_send_stream_command(
+        &mut stream,
+        SendCommand::Chown,
+        &[
+            send_attr_bytes(SendAttr::Path, b"dir/file.txt"),
+            send_attr_u64(SendAttr::Uid, 1000),
+            send_attr_u64(SendAttr::Gid, 1001),
+        ],
+    );
+    append_crc_valid_send_stream_command(
+        &mut stream,
+        SendCommand::Truncate,
+        &[
+            send_attr_bytes(SendAttr::Path, b"dir/file.txt"),
+            send_attr_u64(SendAttr::Size, 2),
+        ],
+    );
+    append_crc_valid_send_stream_command(
+        &mut stream,
+        SendCommand::Rename,
+        &[
+            send_attr_bytes(SendAttr::Path, b"dir/file.txt"),
+            send_attr_bytes(SendAttr::PathTo, b"dir/file2.txt"),
+        ],
+    );
+    append_crc_valid_send_stream_command(&mut stream, SendCommand::End, &[]);
+
+    let reference = run_btrfs_receive_dump(&stream);
+    let parsed = parse_send_stream(&stream).expect("parse CRC-valid btrfs send stream");
+    let observed = normalize_send_stream_for_btrfs_dump(&parsed);
+
+    assert_eq!(observed, reference);
 }

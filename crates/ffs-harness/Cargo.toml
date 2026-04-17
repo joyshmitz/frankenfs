@@ -28,10 +28,12 @@ ffs-btrfs = { workspace = true }
 ffs-error = { workspace = true }
 ffs-fuse = { workspace = true }
 ffs-inode = { workspace = true }
+ffs-xattr = { workspace = true }
 flate2 = { workspace = true }
 fuser = { workspace = true }
 libc = { workspace = true }
 lzokay-native = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber.workspace = true
 zstd = { workspace = true }
