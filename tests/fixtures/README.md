@@ -1,9 +1,10 @@
 # FrankenFS Test Fixtures
 
 This directory contains generated filesystem images plus legacy inspect-output
-goldens used by targeted tests and local fixture regeneration workflows. The
-canonical repository-wide golden/conformance gate lives under
-`conformance/{fixtures,golden}` and is run via `./scripts/verify_golden.sh`.
+goldens used by targeted tests and local fixture regeneration workflows.
+`./scripts/verify_golden.sh` verifies both the canonical artifacts under
+`conformance/{fixtures,golden}` and the committed JSON fixtures in
+`tests/fixtures/golden`.
 
 ## Directory Structure
 
@@ -102,13 +103,13 @@ Use `--with-content` (requires sudo) to populate with the same structure as ext4
 
 ## Verification
 
-For the canonical repository-wide golden/conformance gate, run:
+For the repository-wide golden/conformance gate, run:
 
 ```bash
 ./scripts/verify_golden.sh
 ```
 
-To verify only the legacy inspect-output artifacts in `tests/fixtures/golden`:
+To verify only the legacy committed JSON fixtures in `tests/fixtures/golden`:
 
 ```bash
 cd tests/fixtures/golden

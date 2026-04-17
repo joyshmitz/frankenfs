@@ -37,6 +37,12 @@ if [ "${1:-}" = "--update" ]; then
     echo "Updating checksums..."
     (cd conformance/fixtures && sha256sum *.json > checksums.sha256)
     (cd conformance/golden && sha256sum *.json > checksums.sha256)
+    (
+        cd tests/fixtures/golden
+        find . -maxdepth 1 -type f -name '*.json' -printf '%f\n' \
+            | sort \
+            | xargs sha256sum > checksums.txt
+    )
     echo "Checksums updated. Review and commit."
     exit 0
 fi
@@ -62,7 +68,16 @@ else
     echo "  Run: scripts/verify_golden.sh --update  (after verifying changes are correct)"
 fi
 
-# ── 3. Parity report consistency ─────────────────────────────────
+# ── 3. Legacy fixture checksums ───────────────────────────────────
+echo "--- Legacy fixture checksums ---"
+if (cd tests/fixtures/golden && sha256sum -c checksums.txt --quiet 2>/dev/null); then
+    pass "tests/fixtures/golden/ checksums match"
+else
+    fail "tests/fixtures/golden/ checksums MISMATCH"
+    echo "  Run: scripts/verify_golden.sh --update  (after verifying changes are correct)"
+fi
+
+# ── 4. Parity report consistency ─────────────────────────────────
 echo "--- Parity report ---"
 if cargo_exec test -p ffs-harness -- parity_report_matches_feature_parity_md --quiet 2>/dev/null; then
     pass "ParityReport matches FEATURE_PARITY.md"
@@ -70,7 +85,7 @@ else
     fail "ParityReport vs FEATURE_PARITY.md mismatch"
 fi
 
-# ── 4. Conformance fixture validation ────────────────────────────
+# ── 5. Conformance fixture validation ────────────────────────────
 echo "--- Conformance fixtures ---"
 if cargo_exec test -p ffs-harness --test conformance --quiet 2>/dev/null; then
     pass "all conformance fixtures validate"
@@ -78,7 +93,7 @@ else
     fail "conformance fixture validation failed"
 fi
 
-# ── 5. Golden JSON structural validation ─────────────────────────
+# ── 6. Golden JSON structural validation ─────────────────────────
 echo "--- Golden JSON validation ---"
 if cargo_exec test -p ffs-harness --test kernel_reference golden_json_parses_and_is_consistent --quiet 2>/dev/null; then
     pass "golden JSON parses and is consistent"
@@ -86,7 +101,7 @@ else
     fail "golden JSON validation failed"
 fi
 
-# ── 6. Summary ───────────────────────────────────────────────────
+# ── 7. Summary ───────────────────────────────────────────────────
 echo ""
 if [ "$FAILED" -eq 0 ]; then
     echo -e "${GREEN}All golden output checks passed.${NC}"

@@ -28,6 +28,18 @@ LOG_FILE="${GOLDEN_DIR}/generation.log"
 # Ensure directories exist
 mkdir -p "$IMAGES_DIR" "$GOLDEN_DIR"
 
+write_golden_checksums() {
+    (
+        cd "$GOLDEN_DIR"
+        mapfile -t json_files < <(find . -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sort)
+        if [[ ${#json_files[@]} -eq 0 ]]; then
+            echo "ERROR: no JSON fixtures found in $GOLDEN_DIR" >&2
+            return 1
+        fi
+        sha256sum "${json_files[@]}" > checksums.txt
+    )
+}
+
 # Start logging
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -166,8 +178,8 @@ done
 echo "=== Phase 4: Creating Checksums ==="
 echo ""
 
+write_golden_checksums
 cd "$GOLDEN_DIR"
-sha256sum ext4_*.json > checksums.txt
 echo "Checksums:"
 cat checksums.txt
 echo ""

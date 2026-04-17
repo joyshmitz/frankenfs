@@ -17,6 +17,18 @@ IMAGES_DIR="tests/fixtures/images"
 GOLDEN_DIR="tests/fixtures/golden"
 CHECKSUM_FILE="$GOLDEN_DIR/checksums.txt"
 
+write_golden_checksums() {
+    (
+        cd "$GOLDEN_DIR"
+        mapfile -t json_files < <(find . -maxdepth 1 -type f -name '*.json' -printf '%f\n' | sort)
+        if [[ ${#json_files[@]} -eq 0 ]]; then
+            echo "ERROR: no JSON fixtures found in $GOLDEN_DIR" >&2
+            return 1
+        fi
+        sha256sum "${json_files[@]}" > checksums.txt
+    )
+}
+
 echo "=============================================="
 echo "Golden Output Update"
 echo "=============================================="
@@ -68,8 +80,8 @@ echo ""
 
 # Update checksums
 echo "=== Updating Checksums ==="
+write_golden_checksums
 cd "$GOLDEN_DIR"
-sha256sum *.json > checksums.txt
 echo "Updated checksums:"
 cat checksums.txt
 echo ""
