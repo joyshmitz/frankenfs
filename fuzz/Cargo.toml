@@ -117,3 +117,8 @@ doc = false
 name = "fuzz_btrfs_tree_log"
 path = "fuzz_targets/fuzz_btrfs_tree_log.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_btrfs_tree_items"
+path = "fuzz_targets/fuzz_btrfs_tree_items.rs"
+doc = false
