@@ -19,12 +19,13 @@
 //! - Directory listing: entry names and file types for / and /testdir
 //! - Inode metadata: mode, size, links_count for files and directories
 //! - File content: byte-exact read via extent mapping
-//! - Extent mapping: collect_extents produces non-empty results for files
+//! - Extent mapping: `collect_extents` matches `debugfs blocks`, including a
+//!   deterministic fragmented two-extent file
 
 use ffs_harness::{GoldenDirEntry, GoldenReference};
 use ffs_ondisk::{
-    dx_hash, parse_dx_root, parse_ibody_xattrs, parse_xattr_block, stamp_dir_block_checksum,
-    verify_dir_block_checksum, verify_inode_checksum, Ext4ImageReader,
+    Ext4ImageReader, dx_hash, parse_dx_root, parse_ibody_xattrs, parse_xattr_block,
+    stamp_dir_block_checksum, verify_dir_block_checksum, verify_inode_checksum,
 };
 use ffs_types::{BlockNumber, EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_USER};
 use std::io::Write;
@@ -260,6 +261,54 @@ fn create_nojournal_image(image_path: &Path) -> PathBuf {
     image_path.to_path_buf()
 }
 
+fn create_fragmented_extent_reference_image(image_path: &Path) -> PathBuf {
+    let f = std::fs::File::create(image_path).expect("create image file");
+    f.set_len(32 * 1024 * 1024).expect("set image length");
+    drop(f);
+
+    if trace_ext4_tools() {
+        eprintln!(
+            "mkfs.ext4 params: -L ffs-extents -b 4096 -q {}",
+            image_path.display()
+        );
+    }
+    let st = Command::new("mkfs.ext4")
+        .args(["-L", "ffs-extents", "-b", "4096", "-q"])
+        .arg(image_path)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run mkfs.ext4");
+    assert!(st.success(), "mkfs.ext4 failed");
+
+    let first_path = image_path.with_extension("extent.first.tmp");
+    let second_path = image_path.with_extension("extent.second.tmp");
+    let target_path = image_path.with_extension("extent.target.tmp");
+    std::fs::write(&first_path, vec![b'A'; 4 * 4096]).expect("write first extent payload");
+    std::fs::write(&second_path, vec![b'B'; 4 * 4096]).expect("write second extent payload");
+    std::fs::write(&target_path, vec![b'C'; (6 * 4096) + 123])
+        .expect("write fragmented target payload");
+
+    run_debugfs_w(image_path, "mkdir /frag");
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /frag/a.bin", first_path.display()),
+    );
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /frag/b.bin", second_path.display()),
+    );
+    run_debugfs_w(image_path, "rm /frag/a.bin");
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /frag/target.bin", target_path.display()),
+    );
+
+    std::fs::remove_file(&first_path).ok();
+    std::fs::remove_file(&second_path).ok();
+    std::fs::remove_file(&target_path).ok();
+    image_path.to_path_buf()
+}
+
 fn create_xattr_base_image(image_path: &Path) -> PathBuf {
     let f = std::fs::File::create(image_path).expect("create image file");
     f.set_len(8 * 1024 * 1024).expect("set image length");
@@ -376,6 +425,13 @@ struct KernelXattr {
     value: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KernelExtentMapping {
+    logical_block: u32,
+    physical_start: u64,
+    len: u16,
+}
+
 fn capture_directory(image: &Path, dir: &str) -> Vec<KernelDirEntry> {
     let out = Command::new("debugfs")
         .args(["-R", &format!("ls -l {dir}")])
@@ -422,6 +478,79 @@ fn capture_directory(image: &Path, dir: &str) -> Vec<KernelDirEntry> {
         });
     }
     entries
+}
+
+fn capture_block_map(image: &Path, path: &str) -> Vec<u64> {
+    let out = Command::new("debugfs")
+        .args(["-R", &format!("blocks {path}")])
+        .arg(image)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("run debugfs blocks");
+    assert!(out.status.success(), "debugfs blocks failed for {path}");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with("debugfs")
+        })
+        .unwrap_or_else(|| panic!("debugfs blocks returned no block list for {path}"));
+    let blocks: Vec<_> = line
+        .split_whitespace()
+        .map(|token| {
+            token
+                .parse::<u64>()
+                .unwrap_or_else(|err| panic!("parse debugfs block {token} for {path}: {err}"))
+        })
+        .collect();
+    assert!(!blocks.is_empty(), "expected at least one block for {path}");
+    blocks
+}
+
+fn collapse_block_map_to_extents(blocks: &[u64]) -> Vec<KernelExtentMapping> {
+    assert!(!blocks.is_empty(), "block map must not be empty");
+
+    let mut extents = Vec::new();
+    let mut run_start = 0_usize;
+    for idx in 1..=blocks.len() {
+        let continues = idx < blocks.len() && blocks[idx] == blocks[idx - 1] + 1;
+        if continues {
+            continue;
+        }
+
+        extents.push(KernelExtentMapping {
+            logical_block: u32::try_from(run_start).expect("logical block fits u32"),
+            physical_start: blocks[run_start],
+            len: u16::try_from(idx - run_start).expect("extent length fits u16"),
+        });
+        run_start = idx;
+    }
+
+    extents
+}
+
+fn normalize_ffs_extent_map(extents: &[ffs_ondisk::Ext4Extent]) -> Vec<KernelExtentMapping> {
+    extents
+        .iter()
+        .map(|extent| KernelExtentMapping {
+            logical_block: extent.logical_block,
+            physical_start: extent.physical_start,
+            len: extent.actual_len(),
+        })
+        .collect()
+}
+
+fn expand_ffs_extent_blocks(extents: &[ffs_ondisk::Ext4Extent]) -> Vec<u64> {
+    let mut blocks = Vec::new();
+    for extent in extents {
+        for delta in 0..u64::from(extent.actual_len()) {
+            blocks.push(extent.physical_start + delta);
+        }
+    }
+    blocks
 }
 
 fn parse_kernel_xattr_name(line: &str) -> Option<String> {
@@ -724,6 +853,38 @@ fn assert_inode_checksum_matches_reference(image: &[u8], reader: &Ext4ImageReade
         reader.sb.inode_size,
     )
     .unwrap_or_else(|err| panic!("verify_inode_checksum {path}: {err}"));
+}
+
+fn assert_extent_mapping_matches_kernel(
+    image_path: &Path,
+    image: &[u8],
+    reader: &Ext4ImageReader,
+    path: &str,
+) {
+    let kernel_blocks = capture_block_map(image_path, path);
+    let kernel_extents = collapse_block_map_to_extents(&kernel_blocks);
+    let (_, inode) = reader
+        .resolve_path(image, path)
+        .unwrap_or_else(|err| panic!("resolve {path}: {err}"));
+    let extents = reader
+        .collect_extents(image, &inode)
+        .unwrap_or_else(|err| panic!("collect_extents {path}: {err}"));
+
+    assert!(!extents.is_empty(), "{path}: expected at least one extent");
+    assert!(
+        extents.iter().all(|extent| !extent.is_unwritten()),
+        "{path}: expected initialized extents for reference file"
+    );
+    assert_eq!(
+        expand_ffs_extent_blocks(&extents),
+        kernel_blocks,
+        "{path}: debugfs blocks vs collect_extents block map mismatch"
+    );
+    assert_eq!(
+        normalize_ffs_extent_map(&extents),
+        kernel_extents,
+        "{path}: debugfs blocks vs collect_extents extent ranges mismatch"
+    );
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -1183,7 +1344,8 @@ fn ext4_debugfs_vs_ffs_xattr_writer_reference() {
     );
 }
 
-/// E2E: verify extent mapping produces valid results for files with content.
+/// E2E: compare `collect_extents` against `debugfs blocks` on contiguous and
+/// deterministically fragmented reference files.
 #[test]
 fn ext4_kernel_vs_ffs_extent_mapping() {
     if !ext4_tools_available() {
@@ -1191,33 +1353,32 @@ fn ext4_kernel_vs_ffs_extent_mapping() {
         return;
     }
 
-    let tmp = std::env::temp_dir().join("ffs_ref_extent_test.ext4");
-    create_reference_image(&tmp);
+    let simple = unique_temp_ext4_path("extent_reference_simple");
+    create_reference_image(&simple);
 
-    let image = std::fs::read(&tmp).expect("read image");
-    let reader = Ext4ImageReader::new(&image).expect("parse ext4 image");
+    let simple_image = std::fs::read(&simple).expect("read image");
+    let simple_reader = Ext4ImageReader::new(&simple_image).expect("parse ext4 image");
+    for path in ["/testdir/hello.txt", "/readme.txt"] {
+        assert_extent_mapping_matches_kernel(&simple, &simple_image, &simple_reader, path);
+    }
 
-    // hello.txt has content, so it should have at least one extent
-    let (_, hello) = reader
-        .resolve_path(&image, "/testdir/hello.txt")
-        .expect("resolve hello.txt");
-    let extents = reader
-        .collect_extents(&image, &hello)
-        .expect("collect extents");
-    assert!(
-        !extents.is_empty(),
-        "hello.txt should have at least one extent"
-    );
-    assert_eq!(
-        extents[0].logical_block, 0,
-        "first extent starts at block 0"
-    );
-    assert!(
-        extents[0].raw_len > 0,
-        "extent should cover at least one block"
-    );
+    let fragmented = unique_temp_ext4_path("extent_reference_fragmented");
+    create_fragmented_extent_reference_image(&fragmented);
 
-    std::fs::remove_file(&tmp).ok();
+    let fragmented_image = std::fs::read(&fragmented).expect("read fragmented image");
+    let fragmented_reader =
+        Ext4ImageReader::new(&fragmented_image).expect("parse fragmented ext4 image");
+    for path in ["/frag/b.bin", "/frag/target.bin"] {
+        assert_extent_mapping_matches_kernel(
+            &fragmented,
+            &fragmented_image,
+            &fragmented_reader,
+            path,
+        );
+    }
+
+    std::fs::remove_file(&simple).ok();
+    std::fs::remove_file(&fragmented).ok();
 }
 
 /// Verify the checked-in golden JSON parses and is internally consistent.
