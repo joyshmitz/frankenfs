@@ -25,7 +25,11 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
-EXPECTED_TARGETS="fuzz_btrfs_metadata fuzz_ext4_dir_extent fuzz_ext4_metadata fuzz_ext4_xattr"
+mapfile -t EXPECTED_TARGETS < <(
+    find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' \
+        | sed 's/\.rs$//' \
+        | sort
+)
 PASS_COUNT=0
 FAIL_COUNT=0
 TOTAL=0
@@ -52,7 +56,7 @@ e2e_step "Scenario 1: Verify fuzz target listing"
 
 FUZZ_LIST_OUTPUT=$(cargo fuzz list --fuzz-dir fuzz 2>&1 || true)
 ALL_FOUND=true
-for target in $EXPECTED_TARGETS; do
+for target in "${EXPECTED_TARGETS[@]}"; do
     if ! echo "$FUZZ_LIST_OUTPUT" | grep -q "^${target}$"; then
         ALL_FOUND=false
         scenario_result "fuzz_list_${target}" "FAIL" "Target '${target}' not found in cargo fuzz list output"
@@ -87,7 +91,7 @@ rm -f "$BUILD_LOG"
 #######################################
 e2e_step "Scenario 3: Smoke-run fuzz targets"
 
-for target in $EXPECTED_TARGETS; do
+for target in "${EXPECTED_TARGETS[@]}"; do
     SMOKE_LOG=$(mktemp)
     if cargo fuzz run "$target" --fuzz-dir fuzz -- -runs=100 -max_total_time=10 >"$SMOKE_LOG" 2>&1; then
         scenario_result "fuzz_smoke_${target}" "PASS" "100 iterations completed without crash"
@@ -108,7 +112,7 @@ done
 #######################################
 e2e_step "Scenario 4: Verify seed corpus"
 
-for target in $EXPECTED_TARGETS; do
+for target in "${EXPECTED_TARGETS[@]}"; do
     CORPUS_DIR="fuzz/corpus/${target}"
     if [[ -d "$CORPUS_DIR" ]]; then
         SAMPLE_COUNT=$(find "$CORPUS_DIR" -type f | wc -l)

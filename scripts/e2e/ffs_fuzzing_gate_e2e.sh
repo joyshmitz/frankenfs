@@ -28,6 +28,11 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+mapfile -t FUZZ_TARGETS < <(
+    find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' \
+        | sed 's/\.rs$//' \
+        | sort
+)
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -89,19 +94,19 @@ else
 fi
 
 #######################################
-# Scenario 3: All 4 fuzz target source files (bd-h6nz.4.1)
+# Scenario 3: All registered fuzz target source files (bd-h6nz.4.1)
 #######################################
 e2e_step "Scenario 3: Fuzz target source files"
 
 TARGETS_FOUND=0
-for target in fuzz_btrfs_metadata fuzz_ext4_dir_extent fuzz_ext4_metadata fuzz_ext4_xattr; do
+for target in "${FUZZ_TARGETS[@]}"; do
     [[ -f "fuzz/fuzz_targets/${target}.rs" ]] && TARGETS_FOUND=$((TARGETS_FOUND + 1))
 done
 
-if [[ $TARGETS_FOUND -eq 4 ]]; then
-    scenario_result "gate_fuzz_targets" "PASS" "All 4 fuzz target source files present"
+if [[ $TARGETS_FOUND -eq ${#FUZZ_TARGETS[@]} ]]; then
+    scenario_result "gate_fuzz_targets" "PASS" "All ${#FUZZ_TARGETS[@]} fuzz target source files present"
 else
-    scenario_result "gate_fuzz_targets" "FAIL" "Only ${TARGETS_FOUND}/4 targets found"
+    scenario_result "gate_fuzz_targets" "FAIL" "Only ${TARGETS_FOUND}/${#FUZZ_TARGETS[@]} targets found"
 fi
 
 #######################################
@@ -113,7 +118,7 @@ CORPUS_CHECKS=0
 
 # Seed corpus directories exist with samples
 CORPUS_DIRS=0
-for target in fuzz_btrfs_metadata fuzz_ext4_dir_extent fuzz_ext4_metadata fuzz_ext4_xattr; do
+for target in "${FUZZ_TARGETS[@]}"; do
     dir="fuzz/corpus/${target}"
     if [[ -d "$dir" ]]; then
         count=$(find "$dir" -maxdepth 1 -type f | wc -l)
@@ -122,7 +127,7 @@ for target in fuzz_btrfs_metadata fuzz_ext4_dir_extent fuzz_ext4_metadata fuzz_e
         fi
     fi
 done
-[[ $CORPUS_DIRS -eq 4 ]] && CORPUS_CHECKS=$((CORPUS_CHECKS + 1))
+[[ $CORPUS_DIRS -eq ${#FUZZ_TARGETS[@]} ]] && CORPUS_CHECKS=$((CORPUS_CHECKS + 1))
 
 # Dictionaries exist with tokens
 DICT_OK=0
@@ -147,7 +152,7 @@ fi
 [[ -x "fuzz/scripts/generate_seeds.sh" ]] && CORPUS_CHECKS=$((CORPUS_CHECKS + 1))
 
 if [[ $CORPUS_CHECKS -eq 4 ]]; then
-    scenario_result "gate_corpus_infra" "PASS" "4 corpus dirs, 2 dictionaries, adversarial seeds, generation script"
+    scenario_result "gate_corpus_infra" "PASS" "${#FUZZ_TARGETS[@]} corpus dirs, 2 dictionaries, adversarial seeds, generation script"
 else
     scenario_result "gate_corpus_infra" "FAIL" "Only ${CORPUS_CHECKS}/4 corpus checks pass"
 fi

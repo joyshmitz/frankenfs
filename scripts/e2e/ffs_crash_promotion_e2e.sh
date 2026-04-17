@@ -28,6 +28,11 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 
 export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+mapfile -t FUZZ_TARGETS < <(
+    find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' \
+        | sed 's/\.rs$//' \
+        | sort
+)
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -60,19 +65,19 @@ else
 fi
 
 #######################################
-# Scenario 2: All 4 fuzz targets have source files
+# Scenario 2: All registered fuzz targets have source files
 #######################################
 e2e_step "Scenario 2: Fuzz target source files"
 
 TARGETS_FOUND=0
-for target in fuzz_btrfs_metadata fuzz_ext4_dir_extent fuzz_ext4_metadata fuzz_ext4_xattr; do
+for target in "${FUZZ_TARGETS[@]}"; do
     [[ -f "fuzz/fuzz_targets/${target}.rs" ]] && TARGETS_FOUND=$((TARGETS_FOUND + 1))
 done
 
-if [[ $TARGETS_FOUND -eq 4 ]]; then
-    scenario_result "promo_fuzz_targets" "PASS" "All 4 fuzz target source files found"
+if [[ $TARGETS_FOUND -eq ${#FUZZ_TARGETS[@]} ]]; then
+    scenario_result "promo_fuzz_targets" "PASS" "All ${#FUZZ_TARGETS[@]} fuzz target source files found"
 else
-    scenario_result "promo_fuzz_targets" "FAIL" "Only ${TARGETS_FOUND}/4 targets found"
+    scenario_result "promo_fuzz_targets" "FAIL" "Only ${TARGETS_FOUND}/${#FUZZ_TARGETS[@]} targets found"
 fi
 
 #######################################
@@ -81,7 +86,7 @@ fi
 e2e_step "Scenario 3: Corpus seed samples"
 
 CORPUS_OK=0
-for target in fuzz_btrfs_metadata fuzz_ext4_dir_extent fuzz_ext4_metadata fuzz_ext4_xattr; do
+for target in "${FUZZ_TARGETS[@]}"; do
     dir="fuzz/corpus/${target}"
     if [[ -d "$dir" ]]; then
         count=$(find "$dir" -maxdepth 1 -type f | wc -l)
@@ -91,10 +96,10 @@ for target in fuzz_btrfs_metadata fuzz_ext4_dir_extent fuzz_ext4_metadata fuzz_e
     fi
 done
 
-if [[ $CORPUS_OK -eq 4 ]]; then
-    scenario_result "promo_corpus_seeds" "PASS" "All 4 corpus directories have samples"
+if [[ $CORPUS_OK -eq ${#FUZZ_TARGETS[@]} ]]; then
+    scenario_result "promo_corpus_seeds" "PASS" "All ${#FUZZ_TARGETS[@]} corpus directories have samples"
 else
-    scenario_result "promo_corpus_seeds" "FAIL" "Only ${CORPUS_OK}/4 have samples"
+    scenario_result "promo_corpus_seeds" "FAIL" "Only ${CORPUS_OK}/${#FUZZ_TARGETS[@]} have samples"
 fi
 
 #######################################

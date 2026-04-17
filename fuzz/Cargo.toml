@@ -8,13 +8,29 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
+asupersync = "0.2.5"
 libfuzzer-sys = "0.4"
+
+[dependencies.ffs-block]
+path = "../crates/ffs-block"
+
+[dependencies.ffs-error]
+path = "../crates/ffs-error"
 
 [dependencies.ffs-ondisk]
 path = "../crates/ffs-ondisk"
 
+[dependencies.ffs-btrfs]
+path = "../crates/ffs-btrfs"
+
 [dependencies.ffs-mvcc]
 path = "../crates/ffs-mvcc"
+
+[dependencies.ffs-journal]
+path = "../crates/ffs-journal"
+
+[dependencies.ffs-repair]
+path = "../crates/ffs-repair"
 
 [dependencies.ffs-types]
 path = "../crates/ffs-types"
@@ -75,4 +91,24 @@ doc = false
 [[bin]]
 name = "fuzz_btrfs_devitem"
 path = "fuzz_targets/fuzz_btrfs_devitem.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_btrfs_send_stream"
+path = "fuzz_targets/fuzz_btrfs_send_stream.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ext4_fast_commit"
+path = "fuzz_targets/fuzz_ext4_fast_commit.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_repair_symbols"
+path = "fuzz_targets/fuzz_repair_symbols.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_jbd2_replay"
+path = "fuzz_targets/fuzz_jbd2_replay.rs"
 doc = false

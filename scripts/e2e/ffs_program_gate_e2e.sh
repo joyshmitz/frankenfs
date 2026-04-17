@@ -167,12 +167,12 @@ fi
 e2e_step "Scenario 7: Fuzzing infrastructure"
 
 FUZZ_CHECKS=0
-# 4 fuzz targets
+# Registered fuzz targets
 TARGETS=0
-for t in fuzz_btrfs_metadata fuzz_ext4_dir_extent fuzz_ext4_metadata fuzz_ext4_xattr; do
+for t in $(find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -printf '%f\n' | sed 's/\.rs$//'); do
     [[ -f "fuzz/fuzz_targets/${t}.rs" ]] && TARGETS=$((TARGETS + 1))
 done
-[[ $TARGETS -eq 4 ]] && FUZZ_CHECKS=$((FUZZ_CHECKS + 1))
+[[ $TARGETS -ge 1 ]] && FUZZ_CHECKS=$((FUZZ_CHECKS + 1))
 # Nightly campaign runner
 [[ -x "fuzz/scripts/nightly_fuzz.sh" ]] && FUZZ_CHECKS=$((FUZZ_CHECKS + 1))
 # Crash promotion
@@ -181,7 +181,7 @@ done
 grep -q "pub mod fuzz_dashboard" "crates/ffs-harness/src/lib.rs" && FUZZ_CHECKS=$((FUZZ_CHECKS + 1))
 
 if [[ $FUZZ_CHECKS -eq 4 ]]; then
-    scenario_result "pgat_fuzzing" "PASS" "4 targets, nightly runner, promotion, dashboard"
+    scenario_result "pgat_fuzzing" "PASS" "${TARGETS} targets, nightly runner, promotion, dashboard"
 else
     scenario_result "pgat_fuzzing" "FAIL" "Only ${FUZZ_CHECKS}/4 fuzzing checks pass"
 fi

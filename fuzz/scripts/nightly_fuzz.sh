@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # nightly_fuzz.sh - Run all fuzz targets for a campaign and produce JSON summary.
 #
-# Usage: ./fuzz/scripts/nightly_fuzz.sh [duration_per_target_secs]
+# Usage: ./fuzz/scripts/nightly_fuzz.sh [--duration <seconds>] [duration_per_target_secs]
 #
 # Default: 300 seconds (5 minutes) per target.
-# For a full 24-hour campaign: 12342 seconds per target (7 targets * 12342 ≈ 86400).
 
 set -euo pipefail
 
@@ -12,20 +11,38 @@ FUZZ_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_ROOT="$(cd "$FUZZ_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-DURATION="${1:-300}"
+usage() {
+    cat <<'EOF'
+Usage: nightly_fuzz.sh [--duration <seconds>] [duration_per_target_secs]
+
+Runs every registered cargo-fuzz target and writes a campaign summary JSON.
+EOF
+}
+
+DURATION="300"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --duration)
+            DURATION="${2:?--duration requires a value}"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            DURATION="$1"
+            shift
+            ;;
+    esac
+done
+
 CAMPAIGN_ID="nightly_$(date +%Y%m%d_%H%M%S)"
-RESULTS_DIR="$FUZZ_DIR/campaigns/$CAMPAIGN_ID"
+RESULTS_ROOT="${FUZZ_ARTIFACTS_DIR:-$FUZZ_DIR/campaigns}"
+RESULTS_DIR="$RESULTS_ROOT/$CAMPAIGN_ID"
 mkdir -p "$RESULTS_DIR"
 
-TARGETS=(
-    fuzz_ext4_metadata
-    fuzz_btrfs_metadata
-    fuzz_ext4_xattr
-    fuzz_ext4_dir_extent
-    fuzz_wal_replay
-    fuzz_mvcc_operations
-    fuzz_extent_tree
-)
+mapfile -t TARGETS < <(cargo fuzz list --fuzz-dir fuzz | sed '/^$/d' | sort)
 
 echo "=== Nightly Fuzz Campaign: $CAMPAIGN_ID ==="
 echo "Targets: ${#TARGETS[@]}"
@@ -33,7 +50,7 @@ echo "Duration per target: ${DURATION}s"
 echo "Results: $RESULTS_DIR"
 echo ""
 
-SUMMARY_JSON="$RESULTS_DIR/summary.json"
+SUMMARY_JSON="$RESULTS_DIR/campaign_summary.json"
 RESULTS=()
 TOTAL_CRASHES=0
 CAMPAIGN_START=$(date +%s)

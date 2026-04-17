@@ -42,6 +42,24 @@ fn corpus_dir() -> PathBuf {
         .join("tests/fuzz_corpus")
 }
 
+fn manifest_fuzz_targets(workspace_root: &std::path::Path) -> Vec<String> {
+    let fuzz_manifest = workspace_root.join("fuzz").join("Cargo.toml");
+    let manifest_contents = fs::read_to_string(&fuzz_manifest)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", fuzz_manifest.display()));
+
+    let mut targets = manifest_contents
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let name = trimmed.strip_prefix("name = \"")?.strip_suffix('"')?;
+            name.starts_with("fuzz_").then(|| name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
 fn load_corpus_samples() -> Vec<(String, Vec<u8>)> {
     let dir = corpus_dir();
     let mut entries = fs::read_dir(&dir)
@@ -560,7 +578,13 @@ fn fuzz_workspace_structure_is_valid() {
         "fuzz/Cargo.toml must depend on libfuzzer-sys"
     );
 
-    // fuzz_targets/ directory must exist with at least 3 targets
+    let manifest_targets = manifest_fuzz_targets(&workspace_root);
+    assert!(
+        !manifest_targets.is_empty(),
+        "fuzz/Cargo.toml must register at least one fuzz target"
+    );
+
+    // fuzz_targets/ directory must exist and match the manifest target count
     let targets_dir = fuzz_dir.join("fuzz_targets");
     assert!(
         targets_dir.is_dir(),
@@ -572,9 +596,10 @@ fn fuzz_workspace_structure_is_valid() {
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
         .collect();
     assert!(
-        target_files.len() >= 3,
-        "need at least 3 fuzz targets, found {}",
-        target_files.len()
+        target_files.len() == manifest_targets.len(),
+        "fuzz/fuzz_targets count ({}) must match manifest target count ({})",
+        target_files.len(),
+        manifest_targets.len()
     );
 
     // Each target must contain fuzz_target! macro
@@ -706,12 +731,7 @@ fn fuzz_seed_corpus_covers_all_targets() {
         .expect("workspace root")
         .to_path_buf();
 
-    let expected_targets = [
-        "fuzz_ext4_metadata",
-        "fuzz_btrfs_metadata",
-        "fuzz_ext4_dir_extent",
-        "fuzz_ext4_xattr",
-    ];
+    let expected_targets = manifest_fuzz_targets(&workspace_root);
 
     for target in &expected_targets {
         let corpus_path = workspace_root.join("fuzz").join("corpus").join(target);

@@ -328,6 +328,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffs-btrfs"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "ffs-mvcc",
+ "ffs-ondisk",
+ "ffs-types",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ffs-error"
 version = "0.1.0"
 dependencies = [
@@ -339,10 +351,29 @@ dependencies = [
 name = "ffs-fuzz"
 version = "0.0.0"
 dependencies = [
+ "asupersync",
+ "ffs-block",
+ "ffs-btrfs",
+ "ffs-error",
+ "ffs-journal",
  "ffs-mvcc",
  "ffs-ondisk",
+ "ffs-repair",
  "ffs-types",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "ffs-journal"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "crc32c",
+ "ffs-block",
+ "ffs-error",
+ "ffs-types",
+ "serde",
+ "tracing",
 ]
 
 [[package]]

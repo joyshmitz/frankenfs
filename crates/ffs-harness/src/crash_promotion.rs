@@ -14,16 +14,46 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Number of fuzz targets in the workspace.
-pub const FUZZ_TARGET_COUNT: usize = 4;
+fn manifest_fuzz_targets(repo_root: &Path) -> Vec<String> {
+    let manifest_path = repo_root.join("fuzz").join("Cargo.toml");
+    let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
+        return Vec::new();
+    };
 
-/// Expected fuzz targets (canonical list).
-pub const FUZZ_TARGETS: &[&str] = &[
-    "fuzz_btrfs_metadata",
-    "fuzz_ext4_dir_extent",
-    "fuzz_ext4_metadata",
-    "fuzz_ext4_xattr",
-];
+    let mut targets = contents
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let name = trimmed.strip_prefix("name = \"")?.strip_suffix('"')?;
+            name.starts_with("fuzz_").then(|| name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn source_fuzz_targets(repo_root: &Path) -> Vec<String> {
+    let targets_dir = repo_root.join("fuzz").join("fuzz_targets");
+    let Ok(entries) = std::fs::read_dir(&targets_dir) else {
+        return Vec::new();
+    };
+
+    let mut targets = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().is_some_and(|ext| ext == "rs")).then(|| {
+                path.file_stem()
+                    .expect("fuzz target source files must have a file stem")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets
+}
 
 /// A discovered crash artifact from a fuzz campaign.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,27 +130,46 @@ pub fn discover_crashes(campaign_dir: &Path) -> Vec<CrashArtifact> {
         return crashes;
     }
 
-    for target in FUZZ_TARGETS {
-        let crashes_dir = campaign_dir.join(target).join("crashes");
-        if !crashes_dir.exists() {
+    let Ok(entries) = std::fs::read_dir(campaign_dir) else {
+        return crashes;
+    };
+
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
             continue;
         }
-        if let Ok(entries) = std::fs::read_dir(&crashes_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let size = std::fs::metadata(&path).map_or(0, |m| m.len());
-                    crashes.push(CrashArtifact {
-                        target: (*target).to_owned(),
-                        crash_path: path,
-                        campaign_id: campaign_dir
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned()),
-                        commit_sha: None,
-                        minimized: false,
-                        input_size: size,
-                    });
+        let target = entry.file_name().to_string_lossy().into_owned();
+        if !target.starts_with("fuzz_") {
+            continue;
+        }
+
+        let target_dir = entry.path();
+        let candidate_dirs = [target_dir.join("crashes"), target_dir];
+
+        for search_dir in candidate_dirs {
+            let Ok(dir_entries) = std::fs::read_dir(&search_dir) else {
+                continue;
+            };
+            for candidate in dir_entries.flatten() {
+                let path = candidate.path();
+                let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if !path.is_file() || !file_name.starts_with("crash-") {
+                    continue;
                 }
+
+                let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+                crashes.push(CrashArtifact {
+                    target: target.clone(),
+                    crash_path: path,
+                    campaign_id: campaign_dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned()),
+                    commit_sha: None,
+                    minimized: false,
+                    input_size: size,
+                });
             }
         }
     }
@@ -214,33 +263,39 @@ fn {test_name}() {{
 #[must_use]
 pub fn validate_pipeline(repo_root: &str) -> Vec<PipelineCheck> {
     let mut checks = Vec::new();
+    let repo_root_path = Path::new(repo_root);
+    let manifest_targets = manifest_fuzz_targets(repo_root_path);
+    let source_targets = source_fuzz_targets(repo_root_path);
+    let target_count = manifest_targets.len();
+    let missing_source_targets = manifest_targets
+        .iter()
+        .filter(|target| !source_targets.contains(target))
+        .cloned()
+        .collect::<Vec<_>>();
 
     // Check fuzz targets exist
-    let targets_dir = format!("{repo_root}/fuzz/fuzz_targets");
-    let targets_exist = Path::new(&targets_dir).is_dir();
-    let target_count = if targets_exist {
-        FUZZ_TARGETS
-            .iter()
-            .filter(|t| Path::new(&format!("{targets_dir}/{t}.rs")).exists())
-            .count()
-    } else {
-        0
-    };
     checks.push(PipelineCheck {
         component: "fuzz_targets".to_owned(),
-        passed: target_count == FUZZ_TARGET_COUNT,
-        detail: format!("{target_count}/{FUZZ_TARGET_COUNT} fuzz targets found"),
+        passed: target_count > 0 && missing_source_targets.is_empty(),
+        detail: if missing_source_targets.is_empty() {
+            format!("{target_count} manifest targets have matching source files")
+        } else {
+            format!(
+                "{target_count} manifest targets, missing source files for {}",
+                missing_source_targets.join(", ")
+            )
+        },
     });
 
     // Check corpus directories exist
-    let corpus_count = FUZZ_TARGETS
+    let corpus_count = manifest_targets
         .iter()
         .filter(|t| Path::new(&format!("{repo_root}/fuzz/corpus/{t}")).is_dir())
         .count();
     checks.push(PipelineCheck {
         component: "corpus_dirs".to_owned(),
-        passed: corpus_count == FUZZ_TARGET_COUNT,
-        detail: format!("{corpus_count}/{FUZZ_TARGET_COUNT} corpus directories found"),
+        passed: target_count > 0 && corpus_count == target_count,
+        detail: format!("{corpus_count}/{target_count} corpus directories found"),
     });
 
     // Check minimize script exists
@@ -328,9 +383,14 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_targets_constant_matches_actual() {
+    fn manifest_targets_match_source_files() {
         let root = repo_root();
-        for target in FUZZ_TARGETS {
+        let targets = manifest_fuzz_targets(Path::new(&root));
+        assert!(
+            !targets.is_empty(),
+            "fuzz/Cargo.toml should register at least one fuzz target"
+        );
+        for target in &targets {
             let path = format!("{root}/fuzz/fuzz_targets/{target}.rs");
             assert!(
                 Path::new(&path).exists(),
@@ -342,7 +402,8 @@ mod tests {
     #[test]
     fn corpus_directories_exist() {
         let root = repo_root();
-        for target in FUZZ_TARGETS {
+        let targets = manifest_fuzz_targets(Path::new(&root));
+        for target in &targets {
             let path = format!("{root}/fuzz/corpus/{target}");
             assert!(
                 Path::new(&path).is_dir(),
