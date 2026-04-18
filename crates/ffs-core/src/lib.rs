@@ -5223,6 +5223,20 @@ impl OpenFs {
 
         let loc = sb.locate_inode(ino).map_err(|e| parse_to_ffs_error(&e))?;
         let gd = self.read_group_desc_with_scope(cx, scope, loc.group)?;
+        let inode_bitmap = self.read_block_with_scope(cx, scope, BlockNumber(gd.inode_bitmap))?;
+        if sb.has_metadata_csum() {
+            ffs_ondisk::ext4::verify_inode_bitmap_checksum(
+                inode_bitmap.as_slice(),
+                sb.csum_seed(),
+                sb.inodes_per_group,
+                &gd,
+                sb.group_desc_size(),
+            )
+            .map_err(|e| parse_to_ffs_error(&e))?;
+        }
+        if !bitmap_get(inode_bitmap.as_slice(), loc.index) {
+            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
+        }
 
         let bs = u64::from(sb.block_size);
         let inode_table_start_byte =
@@ -16643,10 +16657,8 @@ mod tests {
         let recovery = fs.crash_recovery().expect("ext4 crash recovery outcome");
         assert!(recovery.had_orphans);
 
-        let inode11 = fs.read_inode(&cx, InodeNumber(11)).unwrap();
-        assert_eq!(inode11.links_count, 0);
-        assert_eq!(inode11.size, 0);
-        assert_ne!(inode11.dtime, 12);
+        let err = fs.read_inode(&cx, InodeNumber(11)).unwrap_err();
+        assert!(matches!(err, FfsError::NotFound(_)));
 
         let orphan_list = fs.read_ext4_orphan_list(&cx).unwrap();
         assert!(orphan_list.inodes.is_empty());

@@ -3693,7 +3693,7 @@ impl Ext4ImageReader {
     ///
     /// The inline xattr area starts after `128 + extra_isize` and contains
     /// entries prefixed with a 4-byte magic header. Inline `e_value_offs`
-    /// values are relative to the post-header region, matching ext4/debugfs.
+    /// values are relative to the start of the ibody xattr header.
     pub fn read_xattrs_ibody(&self, inode: &Ext4Inode) -> Result<Vec<Ext4Xattr>, ParseError> {
         if inode.xattr_ibody.len() < 4 {
             return Ok(Vec::new());
@@ -3705,7 +3705,7 @@ impl Ext4ImageReader {
             return Ok(Vec::new());
         }
         let entries = &inode.xattr_ibody[4..];
-        parse_xattr_entries(entries, entries)
+        parse_xattr_entries(entries, &inode.xattr_ibody)
     }
 
     /// Read xattrs from an external xattr block (pointed to by `i_file_acl`).
@@ -4023,7 +4023,7 @@ pub fn parse_ibody_xattrs(inode: &Ext4Inode) -> Result<Vec<Ext4Xattr>, ParseErro
         return Ok(Vec::new());
     }
     let entries = &inode.xattr_ibody[4..];
-    parse_xattr_entries(entries, entries)
+    parse_xattr_entries(entries, &inode.xattr_ibody)
 }
 
 /// Parse xattrs from an external xattr block (raw block data).
@@ -7169,15 +7169,15 @@ mod tests {
         let entry_start = ibody_start + 4;
         buf[entry_start] = 4; // name_len=4
         buf[entry_start + 1] = ffs_types::EXT4_XATTR_INDEX_USER;
-        let value_offs = 80_u16; // value_offs from start of the post-magic ibody region
+        let value_offs = 80_u16; // value_offs from start of the ibody xattr header
         buf[entry_start + 2..entry_start + 4].copy_from_slice(&value_offs.to_le_bytes());
         // entry_start + 4..8 = e_value_block (unused, stays zero)
         buf[entry_start + 8..entry_start + 12].copy_from_slice(&5_u32.to_le_bytes()); // value_size=5
         // entry_start + 12..16 = e_hash (unused, stays zero)
         buf[entry_start + 16..entry_start + 20].copy_from_slice(b"mime");
 
-        // Value at entry_start + value_offs (post-magic region base)
-        let value_off = entry_start + usize::from(value_offs);
+        // Value at ibody_start + value_offs (ibody xattr header base)
+        let value_off = ibody_start + usize::from(value_offs);
         buf[value_off..value_off + 5].copy_from_slice(b"image");
 
         // Terminator
