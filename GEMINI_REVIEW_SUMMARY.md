@@ -5,7 +5,7 @@
 
 ## Overview
 
-I performed a spontaneous exploratory code review of the MVCC WAL subsystem (`crates/ffs-mvcc/src/wal.rs`, `wal_writer.rs`, `wal_replay.rs`) and the `ffs-ondisk` btrfs RAID parser (`crates/ffs-ondisk/src/btrfs.rs`), checking for undefined behavior, memory leaks, panics, and edge-case correctness.
+I performed a spontaneous exploratory code review of the MVCC WAL subsystem (`crates/ffs-mvcc/src/wal.rs`, `wal_writer.rs`, `wal_replay.rs`), the concurrency components (`crates/ffs-mvcc/src/rcu.rs`), and the `ffs-ondisk` btrfs RAID parser (`crates/ffs-ondisk/src/btrfs.rs`), checking for undefined behavior, memory leaks, panics, lock-free safety, and edge-case correctness.
 
 ## Findings
 
@@ -34,6 +34,11 @@ I performed a spontaneous exploratory code review of the MVCC WAL subsystem (`cr
 * **Root Cause:** In `verify_or_rollback_coalesced_write`, if `verify_written_record` fails, the code restores `self.write_pos` to `base_offset` and truncates the file. This is fully correct. However, `self.appends_since_sync` is not incremented until *after* this call. This means on failure, the pending sync count remains accurate, which is great.
 * **Suggested Fix:** No fix needed; explicitly noting this as highly robust code.
 
+### 4. `crates/ffs-mvcc/src/rcu.rs`
+* **Severity:** Nit
+* **Root Cause:** The `RcuMap` tracks updates using `update_count.fetch_add` and invokes a `warn!` log when the modulo of the count hits the configured `churn_threshold`. This is properly implemented in `RcuMap::insert`. However, `RcuMap::replace` and `RcuMap::clear` bulk-replace the map and increment `update_count` but do *not* check for the `churn_threshold`. If an application is repeatedly calling `replace` at high frequencies, the churn warning metric will fail to trigger.
+* **Suggested Fix:** Copy the churn threshold logging block from `insert` into `replace` and `clear` to ensure consistent observability across all write-path methods.
+
 ## Conclusion
 
-The WAL persistence and BTRFS RAID logical-to-physical mapping logic are exceptionally robust. I did not find any instances of unsafe `unwrap()` usage in production paths that lacked proper bounds analysis, nor did I identify any OOM vectors in WAL replay. The explicit bounds checking and early-rejection of huge allocations in `decode_commit` are well implemented.
+The WAL persistence, concurrency layers, and BTRFS RAID logical-to-physical mapping logic are exceptionally robust. I did not find any instances of unsafe `unwrap()` usage in production paths that lacked proper bounds analysis, nor did I identify any OOM vectors in WAL replay. The `arc-swap` structures in `rcu.rs` enforce `unsafe_code = "forbid"` and properly lock-free read access perfectly.
