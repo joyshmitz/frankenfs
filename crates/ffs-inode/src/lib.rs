@@ -434,6 +434,7 @@ pub fn delete_inode(
         inode.dtime = now_secs as u32;
     }
     inode.links_count = 0;
+    inode.mode = 0;
     inode.size = 0;
     inode.blocks = 0;
 
@@ -1926,6 +1927,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(inode.links_count, 0);
+        assert_eq!(inode.mode, 0, "mode should be cleared");
         assert_eq!(inode.size, 0, "size should be zeroed");
         assert_eq!(inode.blocks, 0, "blocks should be zeroed");
         assert_eq!(inode.dtime, 1_700_000_999);

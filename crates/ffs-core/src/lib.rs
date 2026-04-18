@@ -5223,21 +5223,6 @@ impl OpenFs {
 
         let loc = sb.locate_inode(ino).map_err(|e| parse_to_ffs_error(&e))?;
         let gd = self.read_group_desc_with_scope(cx, scope, loc.group)?;
-        let inode_bitmap = self.read_block_with_scope(cx, scope, BlockNumber(gd.inode_bitmap))?;
-        if sb.has_metadata_csum() {
-            ffs_ondisk::ext4::verify_inode_bitmap_checksum(
-                inode_bitmap.as_slice(),
-                sb.csum_seed(),
-                sb.inodes_per_group,
-                &gd,
-                sb.group_desc_size(),
-            )
-            .map_err(|e| parse_to_ffs_error(&e))?;
-        }
-        if !bitmap_get(inode_bitmap.as_slice(), loc.index) {
-            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
-        }
-
         let bs = u64::from(sb.block_size);
         let inode_table_start_byte =
             gd.inode_table
@@ -5264,8 +5249,13 @@ impl OpenFs {
             });
         }
 
-        Ext4Inode::parse_from_bytes(&block_data[offset_in_block..offset_in_block + inode_size])
-            .map_err(|e| parse_to_ffs_error(&e))
+        let inode =
+            Ext4Inode::parse_from_bytes(&block_data[offset_in_block..offset_in_block + inode_size])
+                .map_err(|e| parse_to_ffs_error(&e))?;
+        if inode.mode == 0 {
+            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
+        }
+        Ok(inode)
     }
 
     /// Read an ext4 inode and return its VFS attributes, respecting MVCC isolation.
