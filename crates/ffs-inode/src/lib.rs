@@ -2469,6 +2469,47 @@ mod tests {
             prop_assert!(result.is_ok(), "checksum verification failed for seed={csum_seed:#x} ino={ino}: {result:?}");
         }
 
+        /// Restamping must ignore any previous checksum-field contents because those
+        /// bytes are logically zeroed before the CRC is computed.
+        #[test]
+        fn proptest_checksum_stamping_ignores_previous_checksum_field_contents(
+            csum_seed in any::<u32>(),
+            ino in 1_u32..100_000,
+            generation in any::<u32>(),
+            checksum_lo_garbage in any::<u16>(),
+            checksum_hi_garbage in any::<u16>(),
+        ) {
+            let inode = Ext4Inode {
+                mode: 0o100_644, uid: 1000, gid: 1000, size: 4096,
+                links_count: 1, blocks: 8, flags: EXT4_EXTENTS_FL, version: 0, generation,
+                file_acl: 0, atime: 1_700_000_000, ctime: 1_700_000_000,
+                mtime: 1_700_000_000, dtime: 0,
+                atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
+                crtime: 1_700_000_000, crtime_extra: 0, extra_isize: 32,
+                checksum: 0, version_hi: 0, projid: 0,
+                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+            };
+
+            let mut stamped_from_clean = serialize_inode(&inode, 256);
+            let mut stamped_from_dirty = stamped_from_clean.clone();
+            stamped_from_dirty[INODE_CHECKSUM_LO_OFFSET..INODE_CHECKSUM_LO_OFFSET + 2]
+                .copy_from_slice(&checksum_lo_garbage.to_le_bytes());
+            stamped_from_dirty[INODE_CHECKSUM_HI_OFFSET..INODE_CHECKSUM_HI_OFFSET + 2]
+                .copy_from_slice(&checksum_hi_garbage.to_le_bytes());
+
+            compute_and_set_checksum(&mut stamped_from_clean, csum_seed, ino);
+            compute_and_set_checksum(&mut stamped_from_dirty, csum_seed, ino);
+
+            prop_assert_eq!(&stamped_from_dirty, &stamped_from_clean);
+            let result = ffs_ondisk::verify_inode_checksum(
+                &stamped_from_dirty,
+                csum_seed,
+                ino,
+                256,
+            );
+            prop_assert!(result.is_ok(), "checksum verification failed after dirty-field restamp: {result:?}");
+        }
+
         /// write_inode → read_inode preserves all core inode fields.
         #[test]
         fn proptest_write_read_roundtrip(

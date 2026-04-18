@@ -261,6 +261,17 @@ impl DescriptorTag {
 
 const JBD2_COMMIT_CHKSUM_OFFSET: usize = 16;
 
+fn checksum_jbd2_tail_zeroed_block(block: &[u8], seed: u32) -> Option<u32> {
+    if block.len() < 4 {
+        return None;
+    }
+
+    let tail = block.len() - 4;
+    let checksum = crc32c::crc32c_append(!seed, &block[..tail]);
+    let checksum = crc32c::crc32c_append(checksum, &[0_u8; 4]);
+    Some(!checksum)
+}
+
 fn verify_jbd2_block_checksum(block: &[u8], sb: &Jbd2Superblock) -> bool {
     if !sb.has_checksum() {
         return true;
@@ -279,8 +290,8 @@ fn verify_jbd2_block_checksum(block: &[u8], sb: &Jbd2Superblock) -> bool {
             }
             let stored = read_be_u32(block, bs - 4).unwrap_or(0);
             let seed = sb.csum_seed();
-            // JBD2 checksum covers the block up to the tail.
-            let computed = !crc32c::crc32c_append(!seed, &block[..bs - 4]);
+            // Linux JBD2 zeroes the 4-byte tail field and hashes the full block.
+            let computed = checksum_jbd2_tail_zeroed_block(block, seed).unwrap_or(0);
             stored == computed
         }
         JBD2_BLOCKTYPE_COMMIT => {
@@ -2517,9 +2528,14 @@ mod tests {
     }
 
     fn stamp_descriptor_or_revoke_checksum(block: &mut [u8], sb: &Jbd2Superblock) {
-        let checksum = !crc32c::crc32c_append(!sb.csum_seed(), &block[..block.len() - 4]);
+        let checksum =
+            checksum_jbd2_tail_zeroed_block(block, sb.csum_seed()).expect("descriptor has tail");
         let tail = block.len() - 4;
         block[tail..].copy_from_slice(&checksum.to_be_bytes());
+    }
+
+    fn legacy_omitted_tail_checksum(block: &[u8], sb: &Jbd2Superblock) -> u32 {
+        !crc32c::crc32c_append(!sb.csum_seed(), &block[..block.len() - 4])
     }
 
     fn stamp_commit_checksum(block: &mut [u8], sb: &Jbd2Superblock) {
@@ -2575,6 +2591,27 @@ mod tests {
 
         revoke[20] ^= 0x11;
         assert!(!verify_jbd2_block_checksum(&revoke, &sb));
+    }
+
+    #[test]
+    fn verify_jbd2_descriptor_and_revoke_checksum_require_zeroed_tail() {
+        let sb = checksum_v2_superblock();
+
+        let mut descriptor = descriptor_block(512, 3, &[(7, JBD2_TAG_FLAG_LAST)]);
+        let legacy_descriptor_checksum = legacy_omitted_tail_checksum(&descriptor, &sb);
+        let descriptor_tail = descriptor.len() - 4;
+        descriptor[descriptor_tail..].copy_from_slice(&legacy_descriptor_checksum.to_be_bytes());
+        assert!(!verify_jbd2_block_checksum(&descriptor, &sb));
+        stamp_descriptor_or_revoke_checksum(&mut descriptor, &sb);
+        assert!(verify_jbd2_block_checksum(&descriptor, &sb));
+
+        let mut revoke = revoke_block(512, 5, &[7, 9]);
+        let legacy_revoke_checksum = legacy_omitted_tail_checksum(&revoke, &sb);
+        let revoke_tail = revoke.len() - 4;
+        revoke[revoke_tail..].copy_from_slice(&legacy_revoke_checksum.to_be_bytes());
+        assert!(!verify_jbd2_block_checksum(&revoke, &sb));
+        stamp_descriptor_or_revoke_checksum(&mut revoke, &sb);
+        assert!(verify_jbd2_block_checksum(&revoke, &sb));
     }
 
     #[test]
@@ -5612,6 +5649,89 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn proptest_commit_checksum_zeroed_field_is_field_invariant(
+            sequence in 1_u32..1024,
+            checksum_bytes_a in any::<[u8; 4]>(),
+            checksum_bytes_b in any::<[u8; 4]>(),
+        ) {
+            let sb = checksum_v3_superblock(*b"ffs-jbd2-v3-seed");
+            let mut left = commit_block(512, sequence);
+            let mut right = left.clone();
+
+            left[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + 4]
+                .copy_from_slice(&checksum_bytes_a);
+            right[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + 4]
+                .copy_from_slice(&checksum_bytes_b);
+
+            stamp_commit_checksum(&mut left, &sb);
+            stamp_commit_checksum(&mut right, &sb);
+
+            prop_assert_eq!(
+                &left,
+                &right,
+                "commit checksum stamping must ignore preexisting checksum-field bytes"
+            );
+            prop_assert!(verify_jbd2_block_checksum(&left, &sb));
+            prop_assert!(verify_jbd2_block_checksum(&right, &sb));
+        }
+
+        #[test]
+        fn proptest_descriptor_checksum_zeroed_tail_is_tail_invariant(
+            sequence in 1_u32..1024,
+            target_block in 1_u32..4096,
+            tail_a in any::<[u8; 4]>(),
+            tail_b in any::<[u8; 4]>(),
+        ) {
+            let sb = checksum_v2_superblock();
+            let mut left = descriptor_block(
+                512,
+                sequence,
+                &[(target_block, JBD2_TAG_FLAG_LAST)],
+            );
+            let mut right = left.clone();
+            let tail = left.len() - 4;
+
+            left[tail..].copy_from_slice(&tail_a);
+            right[tail..].copy_from_slice(&tail_b);
+
+            stamp_descriptor_or_revoke_checksum(&mut left, &sb);
+            stamp_descriptor_or_revoke_checksum(&mut right, &sb);
+
+            prop_assert_eq!(
+                &left, &right,
+                "descriptor checksum stamping must ignore preexisting tail bytes"
+            );
+            prop_assert!(verify_jbd2_block_checksum(&left, &sb));
+            prop_assert!(verify_jbd2_block_checksum(&right, &sb));
+        }
+
+        #[test]
+        fn proptest_revoke_checksum_zeroed_tail_is_tail_invariant(
+            sequence in 1_u32..1024,
+            revoked in prop::collection::vec(1_u32..4096, 1..4),
+            tail_a in any::<[u8; 4]>(),
+            tail_b in any::<[u8; 4]>(),
+        ) {
+            let sb = checksum_v2_superblock();
+            let mut left = revoke_block(512, sequence, &revoked);
+            let mut right = left.clone();
+            let tail = left.len() - 4;
+
+            left[tail..].copy_from_slice(&tail_a);
+            right[tail..].copy_from_slice(&tail_b);
+
+            stamp_descriptor_or_revoke_checksum(&mut left, &sb);
+            stamp_descriptor_or_revoke_checksum(&mut right, &sb);
+
+            prop_assert_eq!(
+                &left, &right,
+                "revoke checksum stamping must ignore preexisting tail bytes"
+            );
+            prop_assert!(verify_jbd2_block_checksum(&left, &sb));
+            prop_assert!(verify_jbd2_block_checksum(&right, &sb));
+        }
 
         /// JBD2 write → replay roundtrip: committed writes appear at target blocks.
         #[test]

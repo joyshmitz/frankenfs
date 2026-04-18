@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 
 use asupersync::Cx;
-use ffs_alloc::{FsGeometry, GroupStats};
-use ffs_block::{BlockDevice, ByteBlockDevice, FileByteDevice};
 use ffs_btrfs::{
     BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
     BTRFS_FS_TREE_OBJECTID, BTRFS_FT_REG_FILE, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
@@ -1180,40 +1178,23 @@ fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::pat
     (fs, tmp, image)
 }
 
-fn enable_e2compr_for_inode(
-    fs: &OpenFs,
-    image_path: &Path,
-    cx: &Cx,
-    ino: InodeNumber,
-    cluster_shift: u32,
-    method_idx: u8,
-) {
-    let mut inode = fs.read_inode(cx, ino).expect("read inode for e2compr");
-    inode.flags |= EXT4_COMPR_FL;
-    inode.flags &= !EXT4_EXTENTS_FL;
-    inode.flags &= !((0x7_u32 << 23) | (0x1F_u32 << 26));
-    inode.flags |= (cluster_shift & 0x7) << 23;
-    inode.flags |= u32::from(method_idx & 0x1F) << 26;
-    inode.extent_bytes.fill(0);
-
-    let sb = fs.ext4_superblock().expect("ext4 superblock");
-    let geo = FsGeometry::from_superblock(sb);
-    let groups = (0..sb.groups_count())
-        .map(|group| {
-            let group = GroupNumber(group);
-            let gd = fs.read_group_desc(cx, group).expect("read group desc");
-            GroupStats::from_group_desc(group, &gd)
-        })
-        .collect::<Vec<_>>();
-    let block_dev = ByteBlockDevice::new(
-        FileByteDevice::open(image_path).expect("open raw ext4 image"),
-        fs.block_size(),
-    )
-    .expect("create block device adapter");
-
-    ffs_inode::write_inode(cx, &block_dev, &geo, &groups, ino, &inode, sb.csum_seed())
-        .expect("persist e2compr inode flags");
-    block_dev.sync(cx).expect("sync e2compr inode flags");
+fn enable_e2compr_for_inode(image_path: &Path, ino: InodeNumber, flags: u32) {
+    let command = format!("set_inode_field <{}> flags {}", ino.0, flags);
+    let debugfs = std::process::Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &command,
+            image_path.to_str().expect("utf8 image path"),
+        ])
+        .output()
+        .expect("spawn debugfs for e2compr inode flags");
+    assert!(
+        debugfs.status.success(),
+        "debugfs command {command:?} failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&debugfs.stdout),
+        String::from_utf8_lossy(&debugfs.stderr)
+    );
 }
 
 fn reopen_writable_ext4(image_path: &Path) -> OpenFs {
@@ -1247,6 +1228,109 @@ fn ext4_free_block_counters(fs: &OpenFs, cx: &Cx) -> (u64, u64) {
     }
 
     (bitmap_total, gd_total)
+}
+
+fn assert_generic_112_preallocation_contract(
+    label: &str,
+    cx: &Cx,
+    fs: OpenFs,
+    root: InodeNumber,
+    image_path: &Path,
+    reopen: Option<fn(&Path) -> OpenFs>,
+) {
+    const PREALLOC_LEN: usize = 16 * 1024;
+    const FIRST_WRITE_OFFSET: usize = 4096;
+    const SECOND_WRITE_OFFSET: usize = 12 * 1024;
+    let file_name = OsStr::new("generic112_prealloc.bin");
+
+    let attr = fs
+        .create(cx, root, file_name, 0o644, 0, 0)
+        .expect("create generic/112 prealloc probe file");
+    let ino = attr.ino;
+
+    fs.fallocate(cx, ino, 0, PREALLOC_LEN as u64, 0)
+        .expect("preallocate generic/112 contract range");
+
+    let after_prealloc = fs.getattr(cx, ino).expect("getattr after prealloc");
+    assert_eq!(
+        after_prealloc.size, PREALLOC_LEN as u64,
+        "{label}: plain preallocation should extend the visible file size"
+    );
+
+    let zeroed = fs
+        .read(
+            cx,
+            ino,
+            0,
+            u32::try_from(PREALLOC_LEN).expect("prealloc len should fit u32"),
+        )
+        .expect("read freshly preallocated file");
+    assert_eq!(
+        zeroed,
+        vec![0; PREALLOC_LEN],
+        "{label}: freshly preallocated extents should read back as zeroes"
+    );
+
+    let first_payload = b"generic-112-middle-write";
+    let second_payload = b"generic-112-tail-write";
+    fs.write(cx, ino, FIRST_WRITE_OFFSET as u64, first_payload)
+        .expect("write first generic/112 payload");
+    fs.write(cx, ino, SECOND_WRITE_OFFSET as u64, second_payload)
+        .expect("write second generic/112 payload");
+    fs.fsync(cx, ino, 0, false)
+        .expect("fsync generic/112 probe file");
+
+    let mut expected = vec![0; PREALLOC_LEN];
+    expected[FIRST_WRITE_OFFSET..FIRST_WRITE_OFFSET + first_payload.len()]
+        .copy_from_slice(first_payload);
+    expected[SECOND_WRITE_OFFSET..SECOND_WRITE_OFFSET + second_payload.len()]
+        .copy_from_slice(second_payload);
+
+    let readback = fs
+        .read(
+            cx,
+            ino,
+            0,
+            u32::try_from(PREALLOC_LEN).expect("prealloc len should fit u32"),
+        )
+        .expect("read generic/112 probe after writes");
+    assert_eq!(
+        readback, expected,
+        "{label}: writes into preallocated space must preserve surrounding zero-fill"
+    );
+
+    let Some(reopen) = reopen else {
+        return;
+    };
+
+    fs.fsyncdir(cx, root, 0, false)
+        .expect("fsync generic/112 parent directory before reopen");
+    fs.flush_mvcc_to_device(cx)
+        .expect("flush generic/112 mutations before reopen");
+    drop(fs);
+
+    let reopened = reopen(image_path);
+    let reopened_attr = reopened
+        .lookup(cx, root, file_name)
+        .expect("lookup generic/112 probe after reopen");
+    let reopened_ino = reopened_attr.ino;
+    assert_eq!(
+        reopened_attr.size, PREALLOC_LEN as u64,
+        "{label}: preallocation size contract must survive reopen"
+    );
+
+    let reopened_readback = reopened
+        .read(
+            cx,
+            reopened_ino,
+            0,
+            u32::try_from(PREALLOC_LEN).expect("prealloc len should fit u32"),
+        )
+        .expect("read generic/112 probe after reopen");
+    assert_eq!(
+        reopened_readback, expected,
+        "{label}: preallocated unwritten extents and later writes must survive reopen"
+    );
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -1613,6 +1697,7 @@ fn ext4_indirect_block_addressing_conforms() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
     let cx = Cx::for_testing();
@@ -1621,12 +1706,52 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
 
     for (method_idx, label, byte) in [(20_u8, "gzip", b'G'), (10_u8, "lzo", b'L')] {
         let name = std::ffi::OsString::from(format!("e2compr_{label}.bin"));
-        let attr = fs
-            .create(&cx, root, &name, 0o644, 0, 0)
+        fs.create(&cx, root, &name, 0o644, 0, 0)
             .expect("create compressed ext4 file");
-        enable_e2compr_for_inode(&fs, &image_path, &cx, attr.ino, 2, method_idx);
+        fs.flush_mvcc_to_device(&cx)
+            .expect("flush created ext4 file before e2compr rewrite");
         drop(fs);
         fs = reopen_writable_ext4(&image_path);
+
+        let attr = fs
+            .lookup(&cx, root, &name)
+            .expect("lookup created ext4 file before e2compr rewrite");
+        let mut e2compr_flags = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode before e2compr setup")
+            .flags;
+        e2compr_flags |= EXT4_COMPR_FL;
+        e2compr_flags &= !EXT4_INLINE_DATA_FL;
+        e2compr_flags &= !EXT4_EXTENTS_FL;
+        e2compr_flags &= !((0x7_u32 << 23) | (0x1F_u32 << 26));
+        e2compr_flags |= 2_u32 << 23;
+        e2compr_flags |= u32::from(method_idx & 0x1F) << 26;
+
+        drop(fs);
+        enable_e2compr_for_inode(&image_path, attr.ino, e2compr_flags);
+        fs = reopen_writable_ext4(&image_path);
+
+        let attr = fs
+            .lookup(&cx, root, &name)
+            .expect("lookup e2compr test file after reopen");
+        let inode_after_setup = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after e2compr test setup");
+        assert_eq!(
+            inode_after_setup.flags & EXT4_INLINE_DATA_FL,
+            0,
+            "{label}: e2compr setup must clear inline-data before write-side conformance",
+        );
+        assert_ne!(
+            inode_after_setup.flags & EXT4_COMPR_FL,
+            0,
+            "{label}: e2compr setup must set COMPR_FL before write-side conformance",
+        );
+        assert_eq!(
+            inode_after_setup.flags & EXT4_EXTENTS_FL,
+            0,
+            "{label}: e2compr setup must clear EXTENTS_FL before write-side conformance",
+        );
 
         let (baseline_free_blocks, baseline_gd_free_blocks) = ext4_free_block_counters(&fs, &cx);
         let first = vec![byte; 4096];
@@ -1732,6 +1857,33 @@ fn ext4_fallocate_zero_range_zeroes_target_range() {
         payload.len() as u64,
         "ZERO_RANGE without KEEP_SIZE should preserve size when the range stays within EOF"
     );
+}
+
+#[test]
+fn ext4_generic_112_preallocation_contract_conforms() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, image_path) = open_writable_ext4_mkfs(64);
+    assert_generic_112_preallocation_contract(
+        "ext4",
+        &cx,
+        fs,
+        InodeNumber(2),
+        &image_path,
+        Some(reopen_writable_ext4),
+    );
+}
+
+#[test]
+fn btrfs_generic_112_preallocation_contract_conforms() {
+    let cx = Cx::for_testing();
+    let (mut fs, _tmp, image_path) = open_btrfs_mkfs(128);
+    fs.enable_writes(&cx)
+        .expect("enable writes on btrfs generic/112 image");
+    assert!(
+        fs.is_writable(),
+        "btrfs generic/112 image should be writable"
+    );
+    assert_generic_112_preallocation_contract("btrfs", &cx, fs, InodeNumber(1), &image_path, None);
 }
 
 #[test]

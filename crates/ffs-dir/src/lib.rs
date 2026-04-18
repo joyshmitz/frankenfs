@@ -426,6 +426,12 @@ mod tests {
             .boxed()
     }
 
+    fn unique_htree_entries_strategy() -> BoxedStrategy<Vec<(u32, u32)>> {
+        proptest::collection::btree_map(any::<u32>(), 1_u32..=u32::MAX, 1..32)
+            .prop_map(|entries| entries.into_iter().collect())
+            .boxed()
+    }
+
     fn live_name_set(block: &[u8]) -> BTreeSet<Vec<u8>> {
         parse_dir_block(block, u32::try_from(block.len()).unwrap())
             .unwrap()
@@ -592,6 +598,38 @@ mod tests {
             };
 
             prop_assert_eq!(htree_find_leaf(&entries, target_hash), expected);
+        }
+
+        #[test]
+        fn proptest_htree_insert_order_invariance_for_unique_hashes(
+            canonical_entries in unique_htree_entries_strategy(),
+            queries in proptest::collection::vec(any::<u32>(), 0..32),
+        ) {
+            let mut forward = Vec::new();
+            for (hash, block) in &canonical_entries {
+                htree_insert(&mut forward, *hash, *block);
+            }
+
+            let mut reversed = Vec::new();
+            for (hash, block) in canonical_entries.iter().rev() {
+                htree_insert(&mut reversed, *hash, *block);
+            }
+
+            let expected: Vec<HtreeEntry> = canonical_entries
+                .iter()
+                .map(|(hash, block)| HtreeEntry {
+                    hash: *hash,
+                    block: *block,
+                })
+                .collect();
+
+            prop_assert_eq!(&forward, &expected);
+            prop_assert_eq!(&reversed, &expected);
+
+            for query in queries {
+                prop_assert_eq!(htree_find_leaf_idx(&forward, query), htree_find_leaf_idx(&reversed, query));
+                prop_assert_eq!(htree_find_leaf(&forward, query), htree_find_leaf(&reversed, query));
+            }
         }
     }
 

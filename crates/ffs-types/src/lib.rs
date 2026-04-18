@@ -1502,6 +1502,75 @@ mod tests {
     }
 
     #[test]
+    fn representative_scalar_and_parse_error_exact_golden_contract() {
+        let device_id = DeviceId::from_uuid_bytes_be([
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        ]);
+        let actual = [
+            format!("mount_mode.compat={}", MountMode::Compat),
+            format!("mount_mode.native={}", MountMode::Native),
+            format!("block_number.answer={}", BlockNumber(42)),
+            format!("inode_number.root={}", InodeNumber::ROOT),
+            format!("block_size.4k={}", BlockSize::new(4096).unwrap()),
+            format!("group_number.sample={}", GroupNumber(7)),
+            format!("byte_offset.sample={}", ByteOffset(8192)),
+            format!("generation.sample={}", Generation(42)),
+            format!("device_id.sample={device_id}"),
+            format!("ext4_inode.root={}", Ext4InodeNumber::ROOT),
+            format!("btrfs_object.sample={}", BtrfsObjectId(256)),
+            format!(
+                "parse.insufficient_data={}",
+                ParseError::InsufficientData {
+                    needed: 8,
+                    offset: 1024,
+                    actual: 3,
+                }
+            ),
+            format!(
+                "parse.invalid_magic={}",
+                ParseError::InvalidMagic {
+                    expected: u64::from(EXT4_SUPER_MAGIC),
+                    actual: 0,
+                }
+            ),
+            format!(
+                "parse.invalid_field={}",
+                ParseError::InvalidField {
+                    field: "block_size",
+                    reason: "must be power of two in 1024..=65536",
+                }
+            ),
+            format!(
+                "parse.integer_conversion={}",
+                ParseError::IntegerConversion {
+                    field: "block_number",
+                }
+            ),
+        ]
+        .join("\n");
+
+        let expected = concat!(
+            "mount_mode.compat=compat\n",
+            "mount_mode.native=native\n",
+            "block_number.answer=42\n",
+            "inode_number.root=2\n",
+            "block_size.4k=4096\n",
+            "group_number.sample=7\n",
+            "byte_offset.sample=8192\n",
+            "generation.sample=42\n",
+            "device_id.sample=0123456789abcdeffedcba9876543210\n",
+            "ext4_inode.root=2\n",
+            "btrfs_object.sample=256\n",
+            "parse.insufficient_data=insufficient data: need 8 bytes at offset 1024, got 3\n",
+            "parse.invalid_magic=invalid magic: expected 0xef53, got 0x0\n",
+            "parse.invalid_field=invalid field: block_size (must be power of two in 1024..=65536)\n",
+            "parse.integer_conversion=integer conversion failed: block_number",
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn newtype_ordering() {
         assert!(BlockNumber(1) < BlockNumber(2));
         assert!(InodeNumber(10) > InodeNumber(5));

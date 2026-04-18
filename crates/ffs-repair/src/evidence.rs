@@ -1345,6 +1345,41 @@ mod tests {
     }
 
     #[test]
+    fn representative_evidence_ledger_jsonl_exact_golden_contract() {
+        let mut buf = Vec::new();
+        {
+            let mut ledger = EvidenceLedger::new(&mut buf);
+            ledger
+                .append(
+                    &EvidenceRecord::corruption_detected(0, sample_corruption_detail())
+                        .with_block_range(10, 20)
+                        .with_timestamp(42),
+                )
+                .expect("append corruption");
+            ledger
+                .append(
+                    &EvidenceRecord::txn_aborted(sample_txn_aborted_detail())
+                        .with_timestamp(7_000_000),
+                )
+                .expect("append txn aborted");
+            ledger
+                .append(
+                    &EvidenceRecord::refresh_policy_changed(sample_refresh_policy_changed_detail())
+                        .with_timestamp(11_000_000),
+                )
+                .expect("append refresh policy change");
+        }
+
+        let actual = String::from_utf8(buf).expect("utf8");
+        let expected = concat!(
+            "{\"timestamp_ns\":42,\"event_type\":\"corruption_detected\",\"block_group\":0,\"block_range\":[10,20],\"corruption\":{\"blocks_affected\":3,\"corruption_kind\":\"checksum_mismatch\",\"severity\":\"error\",\"detail\":\"CRC32C expected 0x1234, got 0x5678\"}}\n",
+            "{\"timestamp_ns\":7000000,\"event_type\":\"txn_aborted\",\"block_group\":0,\"txn_aborted\":{\"txn_id\":77,\"reason\":\"ssi_cycle\",\"detail\":\"rw-antidependency cycle\",\"read_set_size\":3,\"write_set_size\":2}}\n",
+            "{\"timestamp_ns\":11000000,\"event_type\":\"refresh_policy_changed\",\"block_group\":4,\"refresh_policy_changed\":{\"block_group\":4,\"old_policy\":\"lazy\",\"new_policy\":\"eager\"}}\n",
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn parse_skips_invalid_lines() {
         let mut data = Vec::new();
         // Valid record

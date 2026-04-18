@@ -477,6 +477,79 @@ mod tests {
     }
 
     #[test]
+    fn representative_error_catalog_exact_golden_contract() {
+        let catalog = [
+            (
+                "IoWouldBlock",
+                FfsError::Io(std::io::Error::new(std::io::ErrorKind::WouldBlock, "busy")),
+            ),
+            (
+                "Corruption",
+                FfsError::Corruption {
+                    block: 42,
+                    detail: "checksum mismatch".into(),
+                },
+            ),
+            ("Format", FfsError::Format("bad magic".into())),
+            ("Parse", FfsError::Parse("need 4 bytes".into())),
+            (
+                "UnsupportedFeature",
+                FfsError::UnsupportedFeature("INLINE_DATA".into()),
+            ),
+            (
+                "IncompatibleFeature",
+                FfsError::IncompatibleFeature("missing FILETYPE".into()),
+            ),
+            (
+                "UnsupportedBlockSize",
+                FfsError::UnsupportedBlockSize("8192".into()),
+            ),
+            (
+                "InvalidGeometry",
+                FfsError::InvalidGeometry("blocks_per_group=0".into()),
+            ),
+            ("MvccConflict", FfsError::MvccConflict { tx: 7, block: 11 }),
+            ("Cancelled", FfsError::Cancelled),
+            ("NoSpace", FfsError::NoSpace),
+            ("NotFound", FfsError::NotFound("/lost+found".into())),
+            ("ReadOnly", FfsError::ReadOnly),
+            ("Exists", FfsError::Exists),
+            (
+                "RepairFailed",
+                FfsError::RepairFailed("symbol decode failed".into()),
+            ),
+            (
+                "ModeViolation",
+                FfsError::ModeViolation("native-only op in compat mode".into()),
+            ),
+        ]
+        .into_iter()
+        .map(|(label, err)| format!("{label}|errno={}|display={err}", err.to_errno()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        assert_eq!(
+            catalog,
+            "IoWouldBlock|errno=11|display=I/O error: busy\n\
+Corruption|errno=5|display=corrupt metadata at block 42: checksum mismatch\n\
+Format|errno=22|display=invalid on-disk format: bad magic\n\
+Parse|errno=22|display=parse error: need 4 bytes\n\
+UnsupportedFeature|errno=95|display=unsupported feature: INLINE_DATA\n\
+IncompatibleFeature|errno=95|display=incompatible feature set: missing FILETYPE\n\
+UnsupportedBlockSize|errno=95|display=unsupported block size: 8192\n\
+InvalidGeometry|errno=22|display=invalid geometry: blocks_per_group=0\n\
+MvccConflict|errno=11|display=MVCC conflict: transaction 7 conflicts on block 11\n\
+Cancelled|errno=4|display=operation cancelled\n\
+NoSpace|errno=28|display=no space left on device\n\
+NotFound|errno=2|display=not found: /lost+found\n\
+ReadOnly|errno=30|display=read-only filesystem\n\
+Exists|errno=17|display=file exists\n\
+RepairFailed|errno=5|display=repair failed: symbol decode failed\n\
+ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mode"
+        );
+    }
+
+    #[test]
     fn display_corruption_with_block_zero() {
         // Block 0 is the superblock — valid corruption target.
         let err = FfsError::Corruption {

@@ -5211,6 +5211,43 @@ impl OpenFs {
         self.with_latest_scope(|scope| self.read_inode_with_scope(cx, scope, ino))
     }
 
+    #[doc(hidden)]
+    pub fn persist_ext4_inode_for_testing(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        inode: &Ext4Inode,
+    ) -> Result<(), FfsError> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let canonical = Self::ext4_canonical_inode(ino);
+                let alloc_mutex = self.require_alloc_state()?;
+                let block_dev = self.block_device_adapter();
+                let sb = self
+                    .ext4_superblock()
+                    .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+                let csum_seed = sb.csum_seed();
+                {
+                    let alloc = alloc_mutex.lock();
+                    ffs_inode::write_inode(
+                        cx,
+                        &block_dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        canonical,
+                        inode,
+                        csum_seed,
+                    )?;
+                }
+                self.flush_mvcc_to_device(cx)?;
+                Ok(())
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "persist_ext4_inode_for_testing is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
     pub fn read_inode_with_scope(
         &self,
         cx: &Cx,
@@ -9534,6 +9571,10 @@ impl OpenFs {
                 let write_len = write_end_in_cluster - write_start_in_cluster;
                 cluster_data[write_start_in_cluster..write_end_in_cluster]
                     .copy_from_slice(&data[data_offset..data_offset + write_len]);
+                let cluster_data_len = usize::try_from(existing_end - cluster_file_offset)
+                    .unwrap_or(cluster_bytes)
+                    .max(write_end_in_cluster)
+                    .min(cluster_bytes);
 
                 // Compress and write the cluster.
                 let mut alloc = alloc_mutex.lock();
@@ -9546,7 +9587,7 @@ impl OpenFs {
                     cluster_start,
                     cluster_nblocks,
                     method_idx,
-                    &cluster_data,
+                    &cluster_data[..cluster_data_len],
                 )?;
                 pending_frees.extend(cluster_write.old_blocks);
                 pending_new_blocks.extend(cluster_write.new_blocks);
@@ -21111,25 +21152,14 @@ mod tests {
     ) {
         let mut inode = fs.read_inode(cx, ino).expect("read inode for e2compr");
         inode.flags |= ffs_types::EXT4_COMPR_FL;
+        inode.flags &= !ffs_types::EXT4_INLINE_DATA_FL;
+        inode.flags &= !ffs_types::EXT4_EXTENTS_FL;
         inode.flags &= !((0x7_u32 << 23) | (0x1F_u32 << 26));
         inode.flags |= (cluster_shift & 0x7) << 23;
         inode.flags |= u32::from(method_idx & 0x1F) << 26;
-
-        let sb = fs.ext4_superblock().expect("ext4 superblock");
-        let csum_seed = sb.csum_seed();
-        let block_dev = fs.block_device_adapter();
-        let alloc_mutex = fs.require_alloc_state().expect("alloc state");
-        let alloc = alloc_mutex.lock();
-        ffs_inode::write_inode(
-            cx,
-            &block_dev,
-            &alloc.geo,
-            &alloc.groups,
-            ino,
-            &inode,
-            csum_seed,
-        )
-        .expect("persist e2compr inode flags");
+        inode.extent_bytes.fill(0);
+        fs.persist_ext4_inode_for_testing(cx, ino, &inode)
+            .expect("persist e2compr inode flags");
     }
 
     fn persist_ext4_test_inode(fs: &OpenFs, cx: &Cx, ino: InodeNumber, inode: &Ext4Inode) {
@@ -22995,6 +23025,14 @@ mod tests {
             .create(&cx, root, OsStr::new("e2compr_rewrite.bin"), 0o644, 0, 0)
             .expect("create");
         enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+        let inode = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after e2compr enable");
+        assert_eq!(
+            inode.flags & ffs_types::EXT4_INLINE_DATA_FL,
+            0,
+            "e2compr helper must clear inline-data before write-side mutation tests",
+        );
 
         let baseline = fs.free_space_summary(&cx).expect("baseline free space");
 
@@ -23039,6 +23077,63 @@ mod tests {
         );
         assert_eq!(inode_after_second.blocks, inode_after_first.blocks);
         assert_eq!(&readback[..second.len()], second.as_slice());
+    }
+
+    #[test]
+    fn write_compressed_uncompressed_fallback_preserves_sparse_tail() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(
+                &cx,
+                root,
+                OsStr::new("e2compr_sparse_tail.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, 2, 20);
+
+        let baseline = fs.free_space_summary(&cx).expect("baseline free space");
+        let mut payload = vec![0_u8; 4096];
+        let mut state = 0x1234_5678_u32;
+        for byte in &mut payload {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state.to_le_bytes()[0];
+        }
+
+        fs.write(&cx, attr.ino, 0, &payload)
+            .expect("fallback compressed write");
+
+        let after_write = fs.free_space_summary(&cx).expect("after fallback write");
+        let inode = fs
+            .read_inode(&cx, attr.ino)
+            .expect("inode after fallback write");
+        let readback = fs.read(&cx, attr.ino, 0, 4096).expect("readback");
+
+        assert_eq!(
+            baseline.free_blocks_total - after_write.free_blocks_total,
+            1,
+            "uncompressed fallback should allocate only the live 4 KiB block and keep the rest of the cluster sparse",
+        );
+        assert_eq!(
+            baseline.gd_free_blocks_total - after_write.gd_free_blocks_total,
+            1,
+            "group descriptor free block accounting should match the sparse-tail allocation",
+        );
+        assert_eq!(
+            inode.blocks,
+            u64::from(4096 / EXT4_SECTOR_SIZE),
+            "i_blocks should reflect a single allocated block for the sparse-tail fallback",
+        );
+        assert_eq!(readback, payload);
     }
 
     #[test]

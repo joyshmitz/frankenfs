@@ -1640,6 +1640,26 @@ mod tests {
         assert!(display.contains("2000"));
     }
 
+    #[test]
+    fn feature_diagnostics_display_exact_golden_contract() {
+        let diag = FeatureDiagnostics {
+            missing_required: vec!["FILETYPE", "EXTENTS"],
+            rejected_present: vec!["ENCRYPT"],
+            unknown_incompat_bits: 0x1000,
+            unknown_ro_compat_bits: 0x2000,
+            incompat_display: "COMPRESSION".to_string(),
+            ro_compat_display: "VERITY".to_string(),
+            compat_display: "HAS_JOURNAL".to_string(),
+        };
+
+        assert_eq!(
+            format!("{diag}"),
+            "compat=HAS_JOURNAL, incompat=COMPRESSION, ro_compat=VERITY; \
+missing required: FILETYPE, EXTENTS; rejected: ENCRYPT; unknown incompat: \
+0x1000; unknown ro_compat: 0x2000"
+        );
+    }
+
     // ── Ext4Inode flags field parsing ──────────────────────────────────
 
     #[test]
@@ -2200,6 +2220,24 @@ mod tests {
         assert!(diag.incompat_display.contains("EXTENTS"));
         assert!(diag.compat_display.contains("HAS_JOURNAL"));
         assert!(diag.ro_compat_display.contains("SPARSE_SUPER"));
+    }
+
+    #[test]
+    fn superblock_feature_diagnostics_v1_exact_golden_contract() {
+        let mut sb = make_superblock();
+        sb.feature_incompat =
+            Ext4IncompatFeatures(Ext4IncompatFeatures::COMPRESSION.0 | 0x4000_0000);
+        sb.feature_ro_compat =
+            Ext4RoCompatFeatures(Ext4RoCompatFeatures::SPARSE_SUPER.0 | 0x8000_0000);
+
+        let diag = sb.feature_diagnostics_v1();
+
+        assert_eq!(
+            format!("{diag}"),
+            "compat=HAS_JOURNAL|EXT_ATTR, incompat=COMPRESSION|0x40000000, \
+ro_compat=SPARSE_SUPER|0x80000000; missing required: FILETYPE; unknown \
+incompat: 0x40000000; unknown ro_compat: 0x80000000"
+        );
     }
 
     // ── group_desc_offset ────────────────────────────────────────────────

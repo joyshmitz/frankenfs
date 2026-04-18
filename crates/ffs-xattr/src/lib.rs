@@ -1406,6 +1406,32 @@ mod tests {
         prop::collection::vec(any::<u8>(), 0..64)
     }
 
+    /// Generate unique external xattr entries across a few namespaces.
+    fn external_xattr_entries_strategy() -> impl Strategy<Value = Vec<Ext4Xattr>> {
+        prop::collection::btree_map(
+            (
+                prop::sample::select(vec![
+                    EXT4_XATTR_INDEX_USER,
+                    EXT4_XATTR_INDEX_TRUSTED,
+                    EXT4_XATTR_INDEX_SECURITY,
+                ]),
+                xattr_suffix_strategy(),
+            ),
+            xattr_value_strategy(),
+            1..6,
+        )
+        .prop_map(|entries| {
+            entries
+                .into_iter()
+                .map(|((name_index, suffix), value)| Ext4Xattr {
+                    name_index,
+                    name: suffix.into_bytes(),
+                    value,
+                })
+                .collect()
+        })
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
 
@@ -1525,6 +1551,34 @@ mod tests {
                 prop_assert_eq!(orig.name_index, parsed_e.name_index);
                 prop_assert_eq!(&orig.name, &parsed_e.name);
                 prop_assert_eq!(&orig.value, &parsed_e.value);
+            }
+        }
+
+        /// Reordering a unique external-xattr set must not change the encoded block bytes.
+        #[test]
+        fn proptest_build_external_block_is_order_invariant(
+            entries in external_xattr_entries_strategy(),
+        ) {
+            let mut reversed = entries.clone();
+            reversed.reverse();
+
+            let forward = build_external_block(4096, &entries).unwrap();
+            let backward = build_external_block(4096, &reversed).unwrap();
+            prop_assert_eq!(
+                &forward,
+                &backward,
+                "external block encoding must be invariant to input order permutations"
+            );
+
+            let parsed = parse_external_entries(&forward, false).unwrap();
+            let mut expected = entries;
+            sort_external_entries(&mut expected);
+
+            prop_assert_eq!(parsed.len(), expected.len());
+            for (expected_entry, parsed_entry) in expected.iter().zip(parsed.iter()) {
+                prop_assert_eq!(expected_entry.name_index, parsed_entry.name_index);
+                prop_assert_eq!(&expected_entry.name, &parsed_entry.name);
+                prop_assert_eq!(&expected_entry.value, &parsed_entry.value);
             }
         }
 
