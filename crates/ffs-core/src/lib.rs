@@ -2768,7 +2768,7 @@ impl OpenFs {
             let ino = InodeNumber(u64::from(next));
             inodes.push(ino);
 
-            match self.read_inode(cx, ino) {
+            match self.read_inode_raw(cx, ino) {
                 Ok(inode) => {
                     next = inode.dtime;
                 }
@@ -5217,6 +5217,19 @@ impl OpenFs {
         scope: &RequestScope,
         ino: InodeNumber,
     ) -> Result<Ext4Inode, FfsError> {
+        let inode = self.read_inode_raw_with_scope(cx, scope, ino)?;
+        if inode.mode == 0 {
+            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
+        }
+        Ok(inode)
+    }
+
+    fn read_inode_raw_with_scope(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        ino: InodeNumber,
+    ) -> Result<Ext4Inode, FfsError> {
         let sb = self
             .ext4_superblock()
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
@@ -5252,10 +5265,11 @@ impl OpenFs {
         let inode =
             Ext4Inode::parse_from_bytes(&block_data[offset_in_block..offset_in_block + inode_size])
                 .map_err(|e| parse_to_ffs_error(&e))?;
-        if inode.mode == 0 {
-            return Err(FfsError::NotFound(format!("inode {}", ino.0)));
-        }
         Ok(inode)
+    }
+
+    fn read_inode_raw(&self, cx: &Cx, ino: InodeNumber) -> Result<Ext4Inode, FfsError> {
+        self.with_latest_scope(|scope| self.read_inode_raw_with_scope(cx, scope, ino))
     }
 
     /// Read an ext4 inode and return its VFS attributes, respecting MVCC isolation.
@@ -5314,7 +5328,7 @@ impl OpenFs {
 
             let ino = InodeNumber(u64::from(next));
             inodes.push(ino);
-            let inode = self.read_inode(cx, ino)?;
+            let inode = self.read_inode_raw(cx, ino)?;
             next = inode.dtime;
         }
 
@@ -7077,7 +7091,7 @@ impl OpenFs {
         data: &[u8],
     ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
 
         let old_blocks =
             self.collect_old_cluster_blocks(cx, scope, inode, cluster_start, cluster_nblocks)?;
@@ -7244,6 +7258,7 @@ impl OpenFs {
             metadata_blocks_allocated +=
                 u64::try_from(new_metadata_blocks.len()).unwrap_or(u64::MAX);
             new_blocks.extend(new_metadata_blocks);
+            block_dev = self.block_device_adapter();
         }
 
         // Set remaining block pointers in the cluster to 0 (holes).
@@ -7298,7 +7313,7 @@ impl OpenFs {
         data: &[u8],
     ) -> Result<Ext4CompressedClusterWrite, FfsError> {
         let bs_usize = self.block_size() as usize;
-        let block_dev = self.block_device_adapter();
+        let mut block_dev = self.block_device_adapter();
 
         let old_blocks =
             self.collect_old_cluster_blocks(cx, scope, inode, cluster_start, cluster_nblocks)?;
@@ -7364,6 +7379,7 @@ impl OpenFs {
                 u64::try_from(new_metadata_blocks.len()).unwrap_or(u64::MAX);
             new_blocks.extend(new_metadata_blocks);
             blocks_written += 1;
+            block_dev = self.block_device_adapter();
         }
         debug_assert_eq!(blocks_written, planned_blocks_written);
         let blocks_after_write = self.ext4_checked_inode_blocks_after_cluster_rewrite(
@@ -8906,6 +8922,11 @@ impl OpenFs {
         if inode.is_symlink() {
             return Err(FfsError::Format("cannot fallocate a symlink".into()));
         }
+        if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
+            return Err(FfsError::UnsupportedFeature(
+                "ext4 inline-data fallocate mutation is not supported".into(),
+            ));
+        }
         if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
             return Err(FfsError::UnsupportedFeature(
                 "fallocate of non-extent (indirect block) files is not supported".into(),
@@ -9224,6 +9245,11 @@ impl OpenFs {
         }
         if inode.is_symlink() {
             return Err(FfsError::Format("cannot write to a symlink".into()));
+        }
+        if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
+            return Err(FfsError::UnsupportedFeature(
+                "ext4 inline-data write-side mutation is not supported".into(),
+            ));
         }
         // e2compr compressed write: route to cluster-based write path.
         if inode.flags & ffs_types::EXT4_COMPR_FL != 0 {
@@ -9569,6 +9595,7 @@ impl OpenFs {
                     )?;
                 }
 
+                let mut free_block_dev = self.block_device_adapter();
                 for block in std::mem::take(&mut pending_frees) {
                     let Ext4AllocState {
                         geo,
@@ -9577,7 +9604,7 @@ impl OpenFs {
                     } = &mut *alloc;
                     if let Err(error) = ffs_alloc::free_blocks_persist(
                         cx,
-                        &block_dev,
+                        &free_block_dev,
                         geo,
                         groups,
                         block,
@@ -9590,6 +9617,7 @@ impl OpenFs {
                             "e2compr: failed to release superseded cluster block after inode update"
                         );
                     }
+                    free_block_dev = self.block_device_adapter();
                 }
                 drop(alloc);
             }
@@ -9599,6 +9627,7 @@ impl OpenFs {
         if write_result.is_err() && !pending_new_blocks.is_empty() {
             {
                 let mut alloc = alloc_mutex.lock();
+                let mut rollback_block_dev = self.block_device_adapter();
                 for block in pending_new_blocks {
                     let Ext4AllocState {
                         geo,
@@ -9607,7 +9636,7 @@ impl OpenFs {
                     } = &mut *alloc;
                     if let Err(error) = ffs_alloc::free_blocks_persist(
                         cx,
-                        &block_dev,
+                        &rollback_block_dev,
                         geo,
                         groups,
                         block,
@@ -9620,6 +9649,7 @@ impl OpenFs {
                             "e2compr: failed to release newly allocated block after write rollback"
                         );
                     }
+                    rollback_block_dev = self.block_device_adapter();
                 }
                 drop(alloc);
             }
