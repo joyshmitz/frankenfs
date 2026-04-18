@@ -4089,11 +4089,19 @@ pub fn parse_dx_root(block: &[u8]) -> Result<Ext4DxRoot, ParseError> {
         });
     }
 
+    let reserved_zero = read_le_u32(block, 0x18)?;
     let hash_version = block[0x1C];
     let info_length = block[0x1D];
     let indirect_levels = block[0x1E];
+    let unused_flags = block[0x1F];
 
     // Validate
+    if reserved_zero != 0 {
+        return Err(ParseError::InvalidField {
+            field: "dx_reserved_zero",
+            reason: "expected 0",
+        });
+    }
     if info_length != 8 {
         return Err(ParseError::InvalidField {
             field: "dx_root_info_length",
@@ -4104,6 +4112,12 @@ pub fn parse_dx_root(block: &[u8]) -> Result<Ext4DxRoot, ParseError> {
         return Err(ParseError::InvalidField {
             field: "dx_indirect_levels",
             reason: "exceeds maximum (2)",
+        });
+    }
+    if unused_flags != 0 {
+        return Err(ParseError::InvalidField {
+            field: "dx_unused_flags",
+            reason: "expected 0",
         });
     }
 
@@ -7336,8 +7350,7 @@ mod tests {
 
     // ── DX root parsing tests ───────────────────────────────────────────
 
-    #[test]
-    fn parse_dx_root_basic() {
+    fn make_dx_root_test_block() -> Vec<u8> {
         let mut block = vec![0_u8; 4096];
 
         // Fake "." dir entry at 0x00 (12 bytes)
@@ -7368,6 +7381,13 @@ mod tests {
         block[0x30..0x34].copy_from_slice(&0x8000_u32.to_le_bytes());
         block[0x34..0x38].copy_from_slice(&3_u32.to_le_bytes());
 
+        block
+    }
+
+    #[test]
+    fn parse_dx_root_basic() {
+        let block = make_dx_root_test_block();
+
         let root = parse_dx_root(&block).unwrap();
         assert_eq!(root.hash_version, 1);
         assert_eq!(root.indirect_levels, 0);
@@ -7376,6 +7396,36 @@ mod tests {
         assert_eq!(root.entries[0].block, 1);
         assert_eq!(root.entries[1].hash, 0x1000);
         assert_eq!(root.entries[2].hash, 0x8000);
+    }
+
+    #[test]
+    fn parse_dx_root_rejects_nonzero_reserved_zero() {
+        let mut block = make_dx_root_test_block();
+        block[0x18..0x1C].copy_from_slice(&1_u32.to_le_bytes());
+
+        let err = parse_dx_root(&block).expect_err("reserved root info field must be zero");
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "dx_reserved_zero",
+                reason: "expected 0"
+            }
+        );
+    }
+
+    #[test]
+    fn parse_dx_root_rejects_nonzero_unused_flags() {
+        let mut block = make_dx_root_test_block();
+        block[0x1F] = 1;
+
+        let err = parse_dx_root(&block).expect_err("unused root info flags must be zero");
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "dx_unused_flags",
+                reason: "expected 0"
+            }
+        );
     }
 
     #[test]

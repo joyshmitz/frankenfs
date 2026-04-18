@@ -888,106 +888,98 @@ pub fn walk_tree(
     nodesize: u32,
     csum_type: u16,
 ) -> Result<Vec<BtrfsLeafEntry>, ParseError> {
-    let mut results = Vec::new();
-    let mut active_path = HashSet::new();
-    let mut visited_nodes = HashSet::new();
-    walk_node(
+    let mut walker = BtrfsTreeWalker {
         read_physical,
         chunks,
-        root_logical,
         nodesize,
         csum_type,
-        &mut results,
-        &mut active_path,
-        &mut visited_nodes,
-    )?;
-    Ok(results)
+        out: Vec::new(),
+        active_path: HashSet::new(),
+        visited_nodes: HashSet::new(),
+    };
+    walker.walk_node(root_logical)?;
+    Ok(walker.out)
 }
 
-fn walk_node(
-    read_physical: &mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
-    chunks: &[BtrfsChunkEntry],
-    logical: u64,
+struct BtrfsTreeWalker<'a> {
+    read_physical: &'a mut dyn FnMut(u64) -> Result<Vec<u8>, ParseError>,
+    chunks: &'a [BtrfsChunkEntry],
     nodesize: u32,
     csum_type: u16,
-    out: &mut Vec<BtrfsLeafEntry>,
-    active_path: &mut HashSet<u64>,
-    visited_nodes: &mut HashSet<u64>,
-) -> Result<(), ParseError> {
-    let nodesize_u64 = u64::from(nodesize);
-    if nodesize_u64 == 0 {
-        return Err(ParseError::InvalidField {
-            field: "nodesize",
-            reason: "zero nodesize",
-        });
-    }
-    if logical % nodesize_u64 != 0 {
-        return Err(ParseError::InvalidField {
-            field: "logical_address",
-            reason: "not aligned to nodesize",
-        });
-    }
-    if !active_path.insert(logical) {
-        return Err(ParseError::InvalidField {
-            field: "logical_address",
-            reason: "cycle detected in btrfs tree pointers",
-        });
-    }
-    if !visited_nodes.insert(logical) {
-        return Err(ParseError::InvalidField {
-            field: "logical_address",
-            reason: "duplicate node reference in btrfs tree pointers",
-        });
-    }
+    out: Vec<BtrfsLeafEntry>,
+    active_path: HashSet<u64>,
+    visited_nodes: HashSet<u64>,
+}
 
-    let mapping = map_logical_to_physical(chunks, logical)?.ok_or(ParseError::InvalidField {
-        field: "logical_address",
-        reason: "not covered by any chunk",
-    })?;
-
-    let block = read_physical(mapping.physical)?;
-    let ns = usize::try_from(nodesize)
-        .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
-    if block.len() != ns {
-        return Err(ParseError::InsufficientData {
-            needed: ns,
-            offset: 0,
-            actual: block.len(),
-        });
-    }
-
-    // Verify checksum before parsing.
-    ffs_ondisk::verify_btrfs_tree_block_checksum(&block, csum_type)?;
-
-    let header = BtrfsHeader::parse_from_block(&block)?;
-    header.validate(block.len(), Some(logical))?;
-
-    if header.level == 0 {
-        collect_leaf_items(&block, out)?;
-    } else {
-        let (_, ptrs) = parse_internal_items(&block)?;
-        for kp in &ptrs {
-            if kp.blockptr % nodesize_u64 != 0 {
-                return Err(ParseError::InvalidField {
-                    field: "blockptr",
-                    reason: "not aligned to nodesize",
-                });
-            }
-            walk_node(
-                read_physical,
-                chunks,
-                kp.blockptr,
-                nodesize,
-                csum_type,
-                out,
-                active_path,
-                visited_nodes,
-            )?;
+impl BtrfsTreeWalker<'_> {
+    fn walk_node(&mut self, logical: u64) -> Result<(), ParseError> {
+        let nodesize_u64 = u64::from(self.nodesize);
+        if nodesize_u64 == 0 {
+            return Err(ParseError::InvalidField {
+                field: "nodesize",
+                reason: "zero nodesize",
+            });
         }
-    }
+        if logical % nodesize_u64 != 0 {
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "not aligned to nodesize",
+            });
+        }
+        if !self.active_path.insert(logical) {
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "cycle detected in btrfs tree pointers",
+            });
+        }
+        if !self.visited_nodes.insert(logical) {
+            return Err(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "duplicate node reference in btrfs tree pointers",
+            });
+        }
 
-    active_path.remove(&logical);
-    Ok(())
+        let mapping =
+            map_logical_to_physical(self.chunks, logical)?.ok_or(ParseError::InvalidField {
+                field: "logical_address",
+                reason: "not covered by any chunk",
+            })?;
+
+        let block = (self.read_physical)(mapping.physical)?;
+        let ns = usize::try_from(self.nodesize)
+            .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
+        if block.len() != ns {
+            return Err(ParseError::InsufficientData {
+                needed: ns,
+                offset: 0,
+                actual: block.len(),
+            });
+        }
+
+        // Verify checksum before parsing.
+        ffs_ondisk::verify_btrfs_tree_block_checksum(&block, self.csum_type)?;
+
+        let header = BtrfsHeader::parse_from_block(&block)?;
+        header.validate(block.len(), Some(logical))?;
+
+        if header.level == 0 {
+            collect_leaf_items(&block, &mut self.out)?;
+        } else {
+            let (_, ptrs) = parse_internal_items(&block)?;
+            for kp in &ptrs {
+                if kp.blockptr % nodesize_u64 != 0 {
+                    return Err(ParseError::InvalidField {
+                        field: "blockptr",
+                        reason: "not aligned to nodesize",
+                    });
+                }
+                self.walk_node(kp.blockptr)?;
+            }
+        }
+
+        self.active_path.remove(&logical);
+        Ok(())
+    }
 }
 
 fn collect_leaf_items(block: &[u8], out: &mut Vec<BtrfsLeafEntry>) -> Result<(), ParseError> {
@@ -3490,7 +3482,13 @@ pub fn replay_tree_log(
         "btrfs tree-log replay start"
     );
 
-    let items = walk_tree(read_physical, chunks, sb.log_root, sb.nodesize, sb.csum_type)?;
+    let items = walk_tree(
+        read_physical,
+        chunks,
+        sb.log_root,
+        sb.nodesize,
+        sb.csum_type,
+    )?;
 
     tracing::info!(
         items_replayed = items.len(),
