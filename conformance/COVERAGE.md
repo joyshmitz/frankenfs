@@ -19,8 +19,12 @@
 | Ext4DxRoot | ✅ | ✅ | 3 | 3 | 100% | htree DX root with 3 entries |
 | Ext4DxEntry | ✅ | ✅ | 2 | 2 | 100% | via dx_root fixture |
 | Ext4MmpBlock | ✅ | ✅ | 2 | 2 | 100% | clean state, status decoding |
+| Ext4InlineData read boundary | ✅ | ✅ | 2 | 2 | 100% | reads crossing, at, and past EOF return exact bytes/empty output for inode-body and xattr continuation storage |
+| Ext4InlineData extreme read boundary | ✅ | ✅ | 2 | 2 | 100% | zero-size reads return empty and oversized/extreme-offset reads clamp safely for inode-body and xattr-continuation storage |
+| Ext4InlineData VFS surface | ✅ | ✅ | 3 | 3 | 100% | mounted root `readdir`, `lookup`/`getattr`, path resolution, and readback through looked-up inode for inline and xattr-continuation storage |
+| Ext4InlineData RW boundary | ✅ | ✅ | 2 | 2 | 100% | read-compatible; write/fallocate mutation rejects with `EOPNOTSUPP` and preserves data |
 
-**ext4 Total: 66 MUST clauses, 66 passing = 100.0%**
+**ext4 Total: 75 MUST clauses, 75 passing = 100.0%**
 
 ## btrfs On-Disk Structures
 
@@ -45,12 +49,31 @@
 
 None. All identified on-disk structures have conformance fixtures.
 
+## Fuzz/Adversarial Parser Coverage
+
+| Surface | Corpus/Test | Passing | Notes |
+|---------|-------------|:-------:|-------|
+| Ext4 inline-data ibody xattrs | ✅ | ✅ | synthetic adversarial seeds cover inline-data flags with huge `i_size`, oversized `i_extra_isize`, ibody xattr magic-only, name overflow, value overflow, and a valid ibody xattr smoke path through the deterministic fuzz regression harness |
+| Ext4 external xattr blocks | ✅ | ✅ | synthetic adversarial seeds cover bad magic, header-only empty block, name overflow, value overflow, and a valid user xattr smoke path through the deterministic fuzz regression harness |
+| Ext4 directory blocks | ✅ | ✅ | synthetic adversarial seeds cover valid multi-entry checksum-tail iteration, short/unaligned/out-of-bounds `rec_len`, name overflow, and nonzero checksum-tail padding |
+| Ext4 extent trees | ✅ | ✅ | synthetic adversarial seeds cover valid leaf and index nodes, bad magic, `eh_entries > eh_max`, truncated entries, overlapping leaf extents, unsorted index entries, and extent-block checksum stamping/corruption |
+| Btrfs tree blocks | ✅ | ✅ | synthetic adversarial seeds cover valid leaf and internal nodes, excessive tree level, leaf payload overlap with the item table, payload out-of-block bounds, overlapping leaf payload ranges, zero child block pointers, and tree-block checksum stamping/corruption |
+| Btrfs sys_chunk_array | ✅ | ✅ | synthetic adversarial seeds cover valid single-device bootstrap mapping, bad chunk key type/objectid, zero chunk length, zero stripe length, zero stripes, multiple RAID profile bits, and truncated stripe data |
+| Btrfs dev items | ✅ | ✅ | synthetic adversarial seeds cover full field-layout parsing, max numeric/classification values, trailing bytes after the fixed 98-byte item, and truncated payload rejection |
+
 ## Next Actions
 
 - [x] Add ext4_mmp_block.json fixture - DONE
 - [ ] Consider additional edge cases (malformed structures, boundary conditions)
-- [ ] Add more adversarial corpus entries for fuzzing
+- [x] Add ext4 inline-data adversarial corpus entries for fuzzing - DONE
+- [x] Add ext4 xattr block adversarial corpus entries for fuzzing - DONE
+- [x] Add ext4 directory block adversarial corpus entries for fuzzing - DONE
+- [x] Add ext4 extent tree adversarial corpus entries for fuzzing - DONE
+- [x] Add btrfs tree block adversarial corpus entries for fuzzing - DONE
+- [x] Add btrfs sys_chunk_array adversarial corpus entries for fuzzing - DONE
+- [x] Add btrfs dev item adversarial corpus entries for fuzzing - DONE
+- [ ] Continue targeted adversarial corpus expansion for remaining mutation surfaces
 
 ---
 
-*Last updated: 2026-04-15*
+*Last updated: 2026-04-18*

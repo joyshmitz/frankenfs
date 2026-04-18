@@ -10,7 +10,7 @@ use ffs_btrfs::{
     BtrfsDeviceSet, SendCommand, parse_send_stream, replay_tree_log, walk_chunk_tree,
     walk_device_tree,
 };
-use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions, RequestScope};
+use ffs_core::{Ext4JournalReplayMode, FileType, OpenFs, OpenOptions, RequestScope};
 use ffs_harness::{
     GoldenReference, ParityReport,
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
@@ -25,8 +25,8 @@ use ffs_ondisk::{
 };
 use ffs_types::{
     BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL, EXT4_COMPR_FL, EXT4_COMPRBLK_FL,
-    EXT4_EXTENTS_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber, InodeNumber,
-    ParseError,
+    EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
+    InodeNumber, ParseError,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -200,6 +200,204 @@ fn ext4_inline_data_xattr_continuation_openfs_read_conforms() {
         .read(&cx, InodeNumber(11), 56, 32)
         .expect("read inline-data continuation tail");
     assert_eq!(tail, b"AAAABBBBBBBBBBBBBBBB");
+}
+
+#[test]
+fn ext4_inline_data_openfs_read_boundaries_conform() {
+    let fs = open_ext4_inline_data_image("ext4_inode_inline_data.json");
+    let cx = Cx::for_testing();
+
+    let eof_tail = fs
+        .read(&cx, InodeNumber(11), 20, 128)
+        .expect("read inline-data range crossing EOF");
+    assert_eq!(&eof_tail, b"ta!");
+
+    let at_eof = fs
+        .read(&cx, InodeNumber(11), 23, 128)
+        .expect("read inline-data exactly at EOF");
+    assert!(at_eof.is_empty(), "read at inline-data EOF should be empty");
+
+    let past_eof = fs
+        .read(&cx, InodeNumber(11), 4096, 128)
+        .expect("read inline-data past EOF");
+    assert!(
+        past_eof.is_empty(),
+        "read past inline-data EOF should be empty"
+    );
+
+    let fs = open_ext4_inline_data_image("ext4_inode_inline_data_with_continuation.json");
+    let continuation_tail = fs
+        .read(&cx, InodeNumber(11), 72, 32)
+        .expect("read inline-data continuation range crossing EOF");
+    assert_eq!(&continuation_tail, b"BBBB");
+}
+
+#[test]
+fn ext4_inline_data_zero_size_and_extreme_read_bounds_conform() {
+    let fs = open_ext4_inline_data_image("ext4_inode_inline_data.json");
+    let cx = Cx::for_testing();
+
+    for offset in [0, 6, 23, 4096, u64::MAX] {
+        let empty = fs
+            .read(&cx, InodeNumber(11), offset, 0)
+            .expect("zero-size inline-data read");
+        assert!(
+            empty.is_empty(),
+            "zero-size inline-data read at offset {offset} should be empty"
+        );
+    }
+
+    let full = fs
+        .read(&cx, InodeNumber(11), 0, u32::MAX)
+        .expect("oversized inline-data read clamps to inode size");
+    assert_eq!(&full, b"Hello from inline data!");
+
+    let extreme = fs
+        .read(&cx, InodeNumber(11), u64::MAX - 4, u32::MAX)
+        .expect("extreme inline-data offset read");
+    assert!(
+        extreme.is_empty(),
+        "extreme inline-data offset should not over-read"
+    );
+
+    let fs = open_ext4_inline_data_image("ext4_inode_inline_data_with_continuation.json");
+    for offset in [0, 60, 76, 4096, u64::MAX] {
+        let empty = fs
+            .read(&cx, InodeNumber(11), offset, 0)
+            .expect("zero-size continued inline-data read");
+        assert!(
+            empty.is_empty(),
+            "zero-size continued inline-data read at offset {offset} should be empty"
+        );
+    }
+
+    let continued_full = fs
+        .read(&cx, InodeNumber(11), 0, u32::MAX)
+        .expect("oversized continued inline-data read clamps to inode size");
+    let mut expected = vec![b'A'; 60];
+    expected.extend(std::iter::repeat_n(b'B', 16));
+    assert_eq!(continued_full, expected);
+
+    let continued_extreme = fs
+        .read(&cx, InodeNumber(11), u64::MAX - 8, u32::MAX)
+        .expect("extreme continued inline-data offset read");
+    assert!(
+        continued_extreme.is_empty(),
+        "extreme continued inline-data offset should not over-read"
+    );
+}
+
+#[test]
+fn ext4_inline_data_vfs_lookup_readdir_conforms() {
+    let fs = open_ext4_inline_data_image("ext4_inode_inline_data.json");
+    let cx = Cx::for_testing();
+    let root = InodeNumber(2);
+
+    let entries = fs
+        .readdir(&cx, root, 0)
+        .expect("readdir inline-data fixture root");
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].name, b".");
+    assert_eq!(entries[1].name, b"..");
+    assert_eq!(entries[2].name, b"inline.bin");
+    assert_eq!(entries[2].ino, InodeNumber(11));
+    assert_eq!(entries[2].kind, FileType::RegularFile);
+
+    let attr = fs
+        .lookup(&cx, root, OsStr::new("inline.bin"))
+        .expect("lookup inline-data file through root directory");
+    assert_eq!(attr.ino, InodeNumber(11));
+    assert_eq!(attr.kind, FileType::RegularFile);
+    assert_eq!(attr.size, 23);
+    assert_eq!(attr.blocks, 0);
+    assert_eq!(attr.perm, 0o644);
+    assert_eq!(attr.nlink, 1);
+    assert_eq!(attr.uid, 1000);
+    assert_eq!(attr.gid, 1000);
+
+    let (resolved_ino, resolved_inode) = fs
+        .resolve_path(&cx, &RequestScope::empty(), "/inline.bin")
+        .expect("resolve inline-data file path");
+    assert_eq!(resolved_ino, InodeNumber(11));
+    assert_ne!(resolved_inode.flags & EXT4_INLINE_DATA_FL, 0);
+
+    let data = fs
+        .read(&cx, attr.ino, 0, 128)
+        .expect("read inline-data file through looked-up inode");
+    assert_eq!(&data, b"Hello from inline data!");
+
+    let fs = open_ext4_inline_data_image("ext4_inode_inline_data_with_continuation.json");
+    let attr = fs
+        .lookup(&cx, root, OsStr::new("inline.bin"))
+        .expect("lookup continued inline-data file through root directory");
+    assert_eq!(attr.ino, InodeNumber(11));
+    assert_eq!(attr.kind, FileType::RegularFile);
+    assert_eq!(attr.size, 76);
+
+    let continuation = fs
+        .read(&cx, attr.ino, 0, 128)
+        .expect("read continued inline-data file through looked-up inode");
+    let mut expected = vec![b'A'; 60];
+    expected.extend(std::iter::repeat_n(b'B', 16));
+    assert_eq!(continuation, expected);
+}
+
+#[test]
+fn ext4_inline_data_write_rejects_without_mutating_contents() {
+    let mut fs = open_ext4_inline_data_image("ext4_inode_inline_data.json");
+    let cx = Cx::for_testing();
+    fs.enable_writes(&cx)
+        .expect("enable writes for inline-data rejection check");
+
+    let before = fs
+        .read(&cx, InodeNumber(11), 0, 128)
+        .expect("read inline data before rejected write");
+    let err = fs
+        .write(&cx, InodeNumber(11), 0, b"mutated")
+        .expect_err("inline-data writes are outside the V1 mutation contract");
+
+    assert!(
+        matches!(err, ffs_error::FfsError::UnsupportedFeature(ref message)
+            if message.contains("inline-data write-side mutation")),
+        "expected explicit inline-data UnsupportedFeature, got {err:?}"
+    );
+    assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
+
+    let after = fs
+        .read(&cx, InodeNumber(11), 0, 128)
+        .expect("read inline data after rejected write");
+    assert_eq!(after, before, "rejected inline write must not mutate data");
+
+    let inode = validate_inode_fixture(&fixture_path("ext4_inode_inline_data.json"))
+        .expect("inline data inode fixture");
+    assert_ne!(inode.flags & EXT4_INLINE_DATA_FL, 0);
+}
+
+#[test]
+fn ext4_inline_data_fallocate_rejects_without_mutating_contents() {
+    let mut fs = open_ext4_inline_data_image("ext4_inode_inline_data.json");
+    let cx = Cx::for_testing();
+    fs.enable_writes(&cx)
+        .expect("enable writes for inline-data fallocate rejection check");
+
+    let before = fs
+        .read(&cx, InodeNumber(11), 0, 128)
+        .expect("read inline data before rejected fallocate");
+    let err = fs
+        .fallocate(&cx, InodeNumber(11), 0, 4096, 0)
+        .expect_err("inline-data fallocate is outside the V1 mutation contract");
+
+    assert!(
+        matches!(err, ffs_error::FfsError::UnsupportedFeature(ref message)
+            if message.contains("inline-data fallocate mutation")),
+        "expected explicit inline-data fallocate UnsupportedFeature, got {err:?}"
+    );
+    assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
+
+    let after = fs
+        .read(&cx, InodeNumber(11), 0, 128)
+        .expect("read inline data after rejected fallocate");
+    assert_eq!(after, before, "rejected fallocate must not mutate data");
 }
 
 #[test]
