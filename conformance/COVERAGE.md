@@ -53,25 +53,63 @@ None. All identified on-disk structures have conformance fixtures.
 
 | Surface | Corpus/Test | Passing | Notes |
 |---------|-------------|:-------:|-------|
+| Ext4 superblocks | ✅ | ✅ | synthetic adversarial seeds cover valid region/image parsing, bad magic, unsupported block-size shifts, invalid cluster-size shifts, metadata checksum stamping/corruption, geometry validation failures, and short region/image rejection |
 | Ext4 inline-data ibody xattrs | ✅ | ✅ | synthetic adversarial seeds cover inline-data flags with huge `i_size`, oversized `i_extra_isize`, ibody xattr magic-only, name overflow, value overflow, and a valid ibody xattr smoke path through the deterministic fuzz regression harness |
+| Ext4 inode checksums | ✅ | ✅ | synthetic adversarial seeds cover 132-byte and 256-byte inode checksum layouts with low/high checksum halves, checksum-field corruption, covered-byte corruption, wrong inode-number checksum seed rejection, short inode buffers, and below-minimum inode-size rejection |
 | Ext4 external xattr blocks | ✅ | ✅ | synthetic adversarial seeds cover bad magic, header-only empty block, name overflow, value overflow, and a valid user xattr smoke path through the deterministic fuzz regression harness |
-| Ext4 directory blocks | ✅ | ✅ | synthetic adversarial seeds cover valid multi-entry checksum-tail iteration, short/unaligned/out-of-bounds `rec_len`, name overflow, and nonzero checksum-tail padding |
+| Ext4 directory blocks | ✅ | ✅ | synthetic adversarial seeds cover valid multi-entry checksum-tail iteration, checksum stamping/verification, checksum-field corruption, covered-entry-byte corruption, wrong inode/generation checksum seed rejection, malformed tails, too-small checksum blocks, short/unaligned/out-of-bounds `rec_len`, name overflow, and nonzero checksum-tail padding |
+| Ext4 HTree dx roots | ✅ | ✅ | synthetic adversarial seeds cover valid root entries, unknown hash-version preservation for hash fallback, zero-count roots, nonzero reserved fields, bad root-info length, excessive indirect levels, nonzero unused flags, entry count greater than limit, and short-root rejection |
 | Ext4 extent trees | ✅ | ✅ | synthetic adversarial seeds cover valid leaf and index nodes, bad magic, `eh_entries > eh_max`, truncated entries, overlapping leaf extents, unsorted index entries, and extent-block checksum stamping/corruption |
+| Ext4 group descriptors | ✅ | ✅ | synthetic adversarial seeds cover 32-byte and 64-byte descriptor field composition, metadata checksum stamping/verification, checksum corruption rejection, invalid descriptor size, and short descriptor rejection |
+| Ext4 MMP blocks | ✅ | ✅ | synthetic adversarial seeds cover clean/fsck/active/unknown sequence statuses, bad magic rejection, checksum corruption rejection, and short-block rejection |
 | Btrfs tree blocks | ✅ | ✅ | synthetic adversarial seeds cover valid leaf and internal nodes, excessive tree level, leaf payload overlap with the item table, payload out-of-block bounds, overlapping leaf payload ranges, zero child block pointers, and tree-block checksum stamping/corruption |
 | Btrfs sys_chunk_array | ✅ | ✅ | synthetic adversarial seeds cover valid single-device bootstrap mapping, bad chunk key type/objectid, zero chunk length, zero stripe length, zero stripes, multiple RAID profile bits, and truncated stripe data |
+| Btrfs chunk-tree items | ✅ | ✅ | deterministic adversarial regression tests cover valid multi-stripe chunk-tree item parsing, fixed header truncation, declared stripe payload truncation, zero chunk length, zero stripe length, zero stripes, and multiple RAID profile bit rejection |
 | Btrfs dev items | ✅ | ✅ | synthetic adversarial seeds cover full field-layout parsing, max numeric/classification values, trailing bytes after the fixed 98-byte item, and truncated payload rejection |
+| Btrfs superblocks | ✅ | ✅ | synthetic adversarial seeds cover valid superblock-region parsing, image-offset parsing, bad magic, zero and non-power-of-two sizing fields, oversized sys_chunk_array declarations, and short region/image rejection |
+| Btrfs item payload parsers | ✅ | ✅ | deterministic adversarial regression tests cover root/root_ref/inode/dir/xattr/extent payload valid boundaries, multi-entry dir/xattr payloads, short headers, length overflows, unsupported extent types, zero root bytenr rejection, and malformed ROOT_REF fallback behavior for subvolumes/snapshots |
+| Btrfs send streams | ✅ | ✅ | deterministic adversarial regression tests cover unknown command fallback, streams without END, zero-length and unknown attributes, multi-attribute commands, trailing partial command headers, and END payload handling |
+| Btrfs delayed refs | ✅ | ✅ | deterministic adversarial regression tests cover zero-limit flush preservation, bounded partial flush accounting, delete-underflow queue preservation, and sequence-ordered drain across extent key order |
+| Btrfs transactions | ✅ | ✅ | deterministic adversarial mutation tests cover same-tree root replacement, delayed-ref commit failure nonvisibility, and tree-root address overflow nonvisibility |
+| Btrfs extent allocator | ✅ | ✅ | deterministic adversarial mutation tests cover overflowing block-group range rejection without accounting side effects and exact block-group tail-fit allocation |
+| Btrfs COW tree mutations | ✅ | ✅ | deterministic COW tests cover positive internal split height growth, parent-rewrite update, and left/right delete-borrow success paths plus allocator-failure atomicity for duplicate/missing-key short-circuits, leaf split child allocation, internal split child allocation, internal-root allocation, root split, insert/update parent rewrite, update leaf, delete left/right borrow, and delete merge/root-shrink paths without publishing deferred frees for still-reachable nodes |
 
 ## Next Actions
 
 - [x] Add ext4_mmp_block.json fixture - DONE
 - [ ] Consider additional edge cases (malformed structures, boundary conditions)
+- [x] Add ext4 superblock adversarial corpus entries for fuzzing - DONE
 - [x] Add ext4 inline-data adversarial corpus entries for fuzzing - DONE
+- [x] Add ext4 inode checksum adversarial corpus entries for fuzzing - DONE
 - [x] Add ext4 xattr block adversarial corpus entries for fuzzing - DONE
 - [x] Add ext4 directory block adversarial corpus entries for fuzzing - DONE
+- [x] Add ext4 directory checksum adversarial corpus entries for fuzzing - DONE
+- [x] Add ext4 HTree dx root adversarial corpus entries for fuzzing - DONE
 - [x] Add ext4 extent tree adversarial corpus entries for fuzzing - DONE
+- [x] Add ext4 group descriptor adversarial corpus entries for fuzzing - DONE
+- [x] Add ext4 MMP block adversarial corpus entries for fuzzing - DONE
 - [x] Add btrfs tree block adversarial corpus entries for fuzzing - DONE
 - [x] Add btrfs sys_chunk_array adversarial corpus entries for fuzzing - DONE
+- [x] Add btrfs chunk-tree item adversarial parser regression coverage - DONE
 - [x] Add btrfs dev item adversarial corpus entries for fuzzing - DONE
+- [x] Add btrfs superblock adversarial corpus entries for fuzzing - DONE
+- [x] Add btrfs send stream adversarial parser regression coverage - DONE
+- [x] Add btrfs item payload parser adversarial regression coverage - DONE
+- [x] Add btrfs ROOT_REF adversarial parser regression coverage - DONE
+- [x] Add btrfs delayed ref adversarial mutation coverage - DONE
+- [x] Add btrfs transaction adversarial mutation coverage - DONE
+- [x] Harden btrfs extent allocator overflow boundaries - DONE
+- [x] Add btrfs COW tree allocator-failure mutation coverage - DONE
+- [x] Add btrfs COW delete allocator-failure mutation coverage - DONE
+- [x] Add btrfs COW update allocator-failure mutation coverage - DONE
+- [x] Add btrfs COW leaf-split allocator-failure mutation coverage - DONE
+- [x] Add btrfs COW key-error mutation short-circuit coverage - DONE
+- [x] Add btrfs COW delete left-borrow allocator-failure mutation coverage - DONE
+- [x] Add btrfs COW internal-split allocator-failure mutation coverage - DONE
+- [x] Add btrfs COW internal-root allocator-failure mutation coverage - DONE
+- [x] Add btrfs COW internal-split success coverage - DONE
+- [x] Add btrfs COW left-borrow delete success coverage - DONE
+- [x] Add btrfs COW parent-rewrite update success coverage - DONE
 - [ ] Continue targeted adversarial corpus expansion for remaining mutation surfaces
 
 ---

@@ -1,14 +1,23 @@
 #![forbid(unsafe_code)]
 
+use ffs_ondisk::ext4::{
+    EXT4_MMP_MAGIC, EXT4_MMP_SEQ_CLEAN, EXT4_MMP_SEQ_FSCK, Ext4RoCompatFeatures,
+    stamp_group_desc_checksum,
+};
 use ffs_ondisk::{
     BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4MmpBlock,
-    Ext4Superblock, ExtentTree, iter_dir_block, map_logical_to_physical, parse_dev_item,
-    parse_dir_block, parse_dx_root, parse_extent_tree, parse_ibody_xattrs, parse_internal_items,
-    parse_leaf_items, parse_sys_chunk_array, parse_xattr_block, stamp_extent_block_checksum,
+    Ext4MmpStatus, Ext4Superblock, ExtentTree, ext4_chksum, iter_dir_block,
+    map_logical_to_physical, parse_dev_item, parse_dir_block, parse_dx_root, parse_extent_tree,
+    parse_ibody_xattrs, parse_internal_items, parse_leaf_items, parse_sys_chunk_array,
+    parse_xattr_block, stamp_dir_block_checksum, stamp_extent_block_checksum,
     verify_btrfs_superblock_checksum, verify_btrfs_tree_block_checksum, verify_dir_block_checksum,
     verify_extent_block_checksum, verify_group_desc_checksum, verify_inode_checksum,
 };
-use ffs_types::{BTRFS_CSUM_TYPE_CRC32C, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_SIZE, ParseError};
+use ffs_types::{
+    BTRFS_CSUM_TYPE_CRC32C, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE,
+    EXT4_SB_CHECKSUM_OFFSET, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE,
+    ParseError,
+};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
@@ -69,12 +78,18 @@ fn load_corpus_samples() -> Vec<(String, Vec<u8>)> {
     entries.sort_by_key(std::fs::DirEntry::file_name);
 
     let mut out = inline_data_adversarial_samples();
+    out.extend(inode_checksum_adversarial_samples());
     out.extend(xattr_block_adversarial_samples());
     out.extend(dir_block_adversarial_samples());
+    out.extend(dx_root_adversarial_samples());
+    out.extend(ext4_superblock_adversarial_samples());
     out.extend(extent_tree_adversarial_samples());
+    out.extend(group_desc_adversarial_samples());
+    out.extend(mmp_block_adversarial_samples());
     out.extend(btrfs_tree_adversarial_samples());
     out.extend(btrfs_sys_chunk_adversarial_samples());
     out.extend(btrfs_dev_item_adversarial_samples());
+    out.extend(btrfs_superblock_adversarial_samples());
     for entry in entries {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("bin") {
@@ -176,6 +191,146 @@ fn inline_data_adversarial_samples() -> Vec<(String, Vec<u8>)> {
     samples
 }
 
+fn base_inode_for_checksum(inode_size: usize, extra_isize: u16) -> Vec<u8> {
+    let mut inode = vec![0_u8; inode_size];
+    inode[0x00..0x02].copy_from_slice(&(ffs_types::S_IFREG | 0o644).to_le_bytes());
+    inode[0x04..0x08].copy_from_slice(&12_345_u32.to_le_bytes());
+    inode[0x1A..0x1C].copy_from_slice(&1_u16.to_le_bytes());
+    inode[0x20..0x24].copy_from_slice(&ffs_types::EXT4_EXTENTS_FL.to_le_bytes());
+    inode[0x64..0x68].copy_from_slice(&42_u32.to_le_bytes());
+    if inode_size >= EXT4_TEST_INODE_CHECKSUM_HI_OFFSET {
+        inode[0x80..0x82].copy_from_slice(&extra_isize.to_le_bytes());
+    }
+    inode
+}
+
+fn ext4_inode_checksum_hi_is_present(raw_inode: &[u8], inode_size: usize) -> bool {
+    if inode_size < EXT4_TEST_INODE_CHECKSUM_HI_OFFSET + 2
+        || raw_inode.len() < EXT4_TEST_INODE_CHECKSUM_HI_OFFSET + 2
+    {
+        return false;
+    }
+    let extra_isize = u16::from_le_bytes([raw_inode[0x80], raw_inode[0x81]]);
+    128 + usize::from(extra_isize) >= EXT4_TEST_INODE_CHECKSUM_HI_OFFSET + 2
+}
+
+fn compute_ext4_inode_checksum(raw_inode: &[u8], csum_seed: u32, ino: u32, inode_size: u16) -> u32 {
+    let inode_size = usize::from(inode_size);
+    let generation = u32::from_le_bytes([
+        raw_inode[0x64],
+        raw_inode[0x65],
+        raw_inode[0x66],
+        raw_inode[0x67],
+    ]);
+    let ino_seed = ext4_chksum(csum_seed, &ino.to_le_bytes());
+    let ino_seed = ext4_chksum(ino_seed, &generation.to_le_bytes());
+
+    let mut csum = ext4_chksum(ino_seed, &raw_inode[..EXT4_TEST_INODE_CHECKSUM_LO_OFFSET]);
+    csum = ext4_chksum(csum, &[0, 0]);
+    csum = ext4_chksum(
+        csum,
+        &raw_inode[EXT4_TEST_INODE_CHECKSUM_LO_OFFSET + 2..128],
+    );
+
+    if inode_size > 128 {
+        let hi_bound = EXT4_TEST_INODE_CHECKSUM_HI_OFFSET.min(inode_size);
+        csum = ext4_chksum(csum, &raw_inode[128..hi_bound]);
+
+        if inode_size >= EXT4_TEST_INODE_CHECKSUM_HI_OFFSET + 2 {
+            if ext4_inode_checksum_hi_is_present(raw_inode, inode_size) {
+                csum = ext4_chksum(csum, &[0, 0]);
+                let after_hi = EXT4_TEST_INODE_CHECKSUM_HI_OFFSET + 2;
+                if after_hi < inode_size {
+                    csum = ext4_chksum(csum, &raw_inode[after_hi..inode_size]);
+                }
+            } else {
+                csum = ext4_chksum(
+                    csum,
+                    &raw_inode[EXT4_TEST_INODE_CHECKSUM_HI_OFFSET..inode_size],
+                );
+            }
+        } else if hi_bound < inode_size {
+            csum = ext4_chksum(csum, &raw_inode[hi_bound..inode_size]);
+        }
+    }
+
+    csum
+}
+
+fn stamp_ext4_inode_checksum(raw_inode: &mut [u8], csum_seed: u32, ino: u32, inode_size: u16) {
+    let inode_size_usize = usize::from(inode_size);
+    raw_inode[EXT4_TEST_INODE_CHECKSUM_LO_OFFSET..EXT4_TEST_INODE_CHECKSUM_LO_OFFSET + 2].fill(0);
+    if ext4_inode_checksum_hi_is_present(raw_inode, inode_size_usize) {
+        raw_inode[EXT4_TEST_INODE_CHECKSUM_HI_OFFSET..EXT4_TEST_INODE_CHECKSUM_HI_OFFSET + 2]
+            .fill(0);
+    }
+
+    let csum = compute_ext4_inode_checksum(raw_inode, csum_seed, ino, inode_size);
+    raw_inode[EXT4_TEST_INODE_CHECKSUM_LO_OFFSET..EXT4_TEST_INODE_CHECKSUM_LO_OFFSET + 2]
+        .copy_from_slice(&(csum & 0xFFFF).to_le_bytes()[..2]);
+
+    if ext4_inode_checksum_hi_is_present(raw_inode, inode_size_usize) {
+        raw_inode[EXT4_TEST_INODE_CHECKSUM_HI_OFFSET..EXT4_TEST_INODE_CHECKSUM_HI_OFFSET + 2]
+            .copy_from_slice(&(csum >> 16).to_le_bytes()[..2]);
+    }
+}
+
+fn inode_checksum_adversarial_samples() -> Vec<(String, Vec<u8>)> {
+    let mut valid132 = base_inode_for_checksum(132, 4);
+    stamp_ext4_inode_checksum(
+        &mut valid132,
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER,
+        132,
+    );
+
+    let mut valid256 = base_inode_for_checksum(256, 32);
+    valid256[0x84..0x88].copy_from_slice(&500_000_000_u32.to_le_bytes());
+    valid256[0x98..0x9C].copy_from_slice(&0x0102_0304_u32.to_le_bytes());
+    stamp_ext4_inode_checksum(
+        &mut valid256,
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER,
+        256,
+    );
+
+    let mut bad_checksum = valid256.clone();
+    bad_checksum[EXT4_TEST_INODE_CHECKSUM_LO_OFFSET] ^= 0x80;
+
+    let mut covered_byte_corrupt = valid256.clone();
+    covered_byte_corrupt[0x10] ^= 0x01;
+
+    let mut short256 = valid256.clone();
+    short256.truncate(255);
+
+    vec![
+        (
+            "synthetic_ext4_inode_checksum_valid_132.bin".to_owned(),
+            valid132,
+        ),
+        (
+            "synthetic_ext4_inode_checksum_valid_256.bin".to_owned(),
+            valid256,
+        ),
+        (
+            "synthetic_ext4_inode_checksum_bad_checksum.bin".to_owned(),
+            bad_checksum,
+        ),
+        (
+            "synthetic_ext4_inode_checksum_covered_byte_corrupt.bin".to_owned(),
+            covered_byte_corrupt,
+        ),
+        (
+            "synthetic_ext4_inode_checksum_short_256.bin".to_owned(),
+            short256,
+        ),
+        (
+            "synthetic_ext4_inode_checksum_inode_size_too_small.bin".to_owned(),
+            base_inode_for_checksum(128, 0),
+        ),
+    ]
+}
+
 fn base_xattr_block(size: usize) -> Vec<u8> {
     let mut block = vec![0_u8; size];
     block[0..4].copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
@@ -246,6 +401,9 @@ fn write_dir_header(
 
 fn dir_block_adversarial_samples() -> Vec<(String, Vec<u8>)> {
     let mut samples = Vec::new();
+    let checksum_seed = EXT4_TEST_DIR_CSUM_SEED;
+    let dir_ino = EXT4_TEST_DIR_INODE;
+    let dir_generation = EXT4_TEST_DIR_GENERATION;
 
     let valid = synth_valid_dir_block(
         &[
@@ -257,6 +415,49 @@ fn dir_block_adversarial_samples() -> Vec<(String, Vec<u8>)> {
         0xA5A5_5A5A,
     );
     samples.push(("synthetic_ext4_dir_block_valid_tail.bin".to_owned(), valid));
+
+    let mut valid_checksum = synth_valid_dir_block(
+        &[
+            (2, 2, b".".to_vec()),
+            (2, 2, b"..".to_vec()),
+            (12, 1, b"file".to_vec()),
+        ],
+        true,
+        0,
+    );
+    stamp_dir_block_checksum(&mut valid_checksum, checksum_seed, dir_ino, dir_generation);
+
+    let mut checksum_corrupt = valid_checksum.clone();
+    checksum_corrupt[EXT4_TEST_DIR_BLOCK_SIZE - 1] ^= 0x80;
+
+    let mut covered_byte_corrupt = valid_checksum.clone();
+    covered_byte_corrupt[8] ^= 0x01;
+
+    let mut malformed_tail = valid_checksum.clone();
+    malformed_tail[EXT4_TEST_DIR_BLOCK_SIZE - 5] = 0xDF;
+
+    let too_small_for_tail = vec![0_u8; 11];
+
+    samples.push((
+        "synthetic_ext4_dir_block_checksum_valid.bin".to_owned(),
+        valid_checksum,
+    ));
+    samples.push((
+        "synthetic_ext4_dir_block_checksum_corrupt.bin".to_owned(),
+        checksum_corrupt,
+    ));
+    samples.push((
+        "synthetic_ext4_dir_block_checksum_covered_byte_corrupt.bin".to_owned(),
+        covered_byte_corrupt,
+    ));
+    samples.push((
+        "synthetic_ext4_dir_block_checksum_malformed_tail.bin".to_owned(),
+        malformed_tail,
+    ));
+    samples.push((
+        "synthetic_ext4_dir_block_checksum_too_small.bin".to_owned(),
+        too_small_for_tail,
+    ));
 
     let mut rec_len_too_small = vec![0_u8; EXT4_TEST_DIR_BLOCK_SIZE];
     write_dir_header(&mut rec_len_too_small, 0, 12, 8, 1, 1);
@@ -300,6 +501,87 @@ fn dir_block_adversarial_samples() -> Vec<(String, Vec<u8>)> {
     ));
 
     samples
+}
+
+fn make_dx_root_block(hash_version: u8, indirect_levels: u8, limit: u16, count: u16) -> Vec<u8> {
+    let mut block = vec![0_u8; EXT4_TEST_DIR_BLOCK_SIZE];
+
+    write_dir_header(&mut block, 0, 2, 12, 1, 2);
+    block[8] = b'.';
+    write_dir_header(&mut block, 12, 2, 12, 2, 2);
+    block[20..22].copy_from_slice(b"..");
+
+    block[0x1C] = hash_version;
+    block[0x1D] = 8;
+    block[0x1E] = indirect_levels;
+    block[0x1F] = 0;
+    block[0x20..0x22].copy_from_slice(&limit.to_le_bytes());
+    block[0x22..0x24].copy_from_slice(&count.to_le_bytes());
+    block[0x24..0x28].copy_from_slice(&1_u32.to_le_bytes());
+    block[0x28..0x2C].copy_from_slice(&0x1000_u32.to_le_bytes());
+    block[0x2C..0x30].copy_from_slice(&2_u32.to_le_bytes());
+    block[0x30..0x34].copy_from_slice(&0x8000_u32.to_le_bytes());
+    block[0x34..0x38].copy_from_slice(&3_u32.to_le_bytes());
+
+    block
+}
+
+fn dx_root_adversarial_samples() -> Vec<(String, Vec<u8>)> {
+    let valid = make_dx_root_block(1, 0, 100, 3);
+    let unknown_hash_version = make_dx_root_block(0xFF, 0, 100, 3);
+    let zero_count = make_dx_root_block(1, 0, 100, 0);
+
+    let mut nonzero_reserved = valid.clone();
+    nonzero_reserved[0x18..0x1C].copy_from_slice(&1_u32.to_le_bytes());
+
+    let mut bad_info_length = valid.clone();
+    bad_info_length[0x1D] = 7;
+
+    let mut excessive_indirect_levels = valid.clone();
+    excessive_indirect_levels[0x1E] = 3;
+
+    let mut nonzero_unused_flags = valid.clone();
+    nonzero_unused_flags[0x1F] = 1;
+
+    let mut count_exceeds_limit = make_dx_root_block(1, 0, 2, 3);
+    count_exceeds_limit[0x20..0x22].copy_from_slice(&2_u16.to_le_bytes());
+    count_exceeds_limit[0x22..0x24].copy_from_slice(&3_u16.to_le_bytes());
+
+    let mut too_short = valid.clone();
+    too_short.truncate(0x27);
+
+    vec![
+        ("synthetic_ext4_dx_root_valid.bin".to_owned(), valid),
+        (
+            "synthetic_ext4_dx_root_unknown_hash_version.bin".to_owned(),
+            unknown_hash_version,
+        ),
+        (
+            "synthetic_ext4_dx_root_zero_count.bin".to_owned(),
+            zero_count,
+        ),
+        (
+            "synthetic_ext4_dx_root_nonzero_reserved.bin".to_owned(),
+            nonzero_reserved,
+        ),
+        (
+            "synthetic_ext4_dx_root_bad_info_length.bin".to_owned(),
+            bad_info_length,
+        ),
+        (
+            "synthetic_ext4_dx_root_excessive_indirect_levels.bin".to_owned(),
+            excessive_indirect_levels,
+        ),
+        (
+            "synthetic_ext4_dx_root_nonzero_unused_flags.bin".to_owned(),
+            nonzero_unused_flags,
+        ),
+        (
+            "synthetic_ext4_dx_root_count_exceeds_limit.bin".to_owned(),
+            count_exceeds_limit,
+        ),
+        ("synthetic_ext4_dx_root_too_short.bin".to_owned(), too_short),
+    ]
 }
 
 fn write_extent_header(
@@ -412,6 +694,139 @@ fn extent_tree_adversarial_samples() -> Vec<(String, Vec<u8>)> {
         "synthetic_ext4_extent_block_valid_checksum.bin".to_owned(),
         valid_checksum_block,
     ));
+
+    samples
+}
+
+fn write_ext4_group_desc_low_fields(desc: &mut [u8]) {
+    desc[0x00..0x04].copy_from_slice(&0x0000_0100_u32.to_le_bytes());
+    desc[0x04..0x08].copy_from_slice(&0x0000_0200_u32.to_le_bytes());
+    desc[0x08..0x0C].copy_from_slice(&0x0000_0300_u32.to_le_bytes());
+    desc[0x0C..0x0E].copy_from_slice(&0x0040_u16.to_le_bytes());
+    desc[0x0E..0x10].copy_from_slice(&0x0020_u16.to_le_bytes());
+    desc[0x10..0x12].copy_from_slice(&0x0003_u16.to_le_bytes());
+    desc[0x12..0x14].copy_from_slice(&0x0005_u16.to_le_bytes());
+    desc[0x18..0x1A].copy_from_slice(&0x1357_u16.to_le_bytes());
+    desc[0x1A..0x1C].copy_from_slice(&0x2468_u16.to_le_bytes());
+    desc[0x1C..0x1E].copy_from_slice(&0x0010_u16.to_le_bytes());
+}
+
+fn make_ext4_group_desc_32() -> Vec<u8> {
+    let mut desc = vec![0_u8; 32];
+    write_ext4_group_desc_low_fields(&mut desc);
+    desc
+}
+
+fn make_ext4_group_desc_64() -> Vec<u8> {
+    let mut desc = vec![0_u8; 64];
+    write_ext4_group_desc_low_fields(&mut desc);
+    desc[0x20..0x24].copy_from_slice(&0x0000_0001_u32.to_le_bytes());
+    desc[0x24..0x28].copy_from_slice(&0x0000_0002_u32.to_le_bytes());
+    desc[0x28..0x2C].copy_from_slice(&0x0000_0003_u32.to_le_bytes());
+    desc[0x2C..0x2E].copy_from_slice(&0x0001_u16.to_le_bytes());
+    desc[0x2E..0x30].copy_from_slice(&0x0002_u16.to_le_bytes());
+    desc[0x30..0x32].copy_from_slice(&0x0003_u16.to_le_bytes());
+    desc[0x32..0x34].copy_from_slice(&0x0004_u16.to_le_bytes());
+    desc[0x38..0x3A].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+    desc[0x3A..0x3C].copy_from_slice(&0xBBBB_u16.to_le_bytes());
+    desc
+}
+
+fn group_desc_adversarial_samples() -> Vec<(String, Vec<u8>)> {
+    let mut valid32 = make_ext4_group_desc_32();
+    stamp_group_desc_checksum(
+        &mut valid32,
+        EXT4_TEST_GROUP_DESC_CSUM_SEED,
+        EXT4_TEST_GROUP_DESC_NUMBER,
+        32,
+    );
+
+    let mut valid64 = make_ext4_group_desc_64();
+    stamp_group_desc_checksum(
+        &mut valid64,
+        EXT4_TEST_GROUP_DESC_CSUM_SEED,
+        EXT4_TEST_GROUP_DESC_NUMBER,
+        64,
+    );
+
+    let mut bad_checksum = valid32.clone();
+    bad_checksum[0x1E] ^= 0xFF;
+
+    let mut short32 = valid32.clone();
+    short32.truncate(31);
+
+    let mut short64 = valid64.clone();
+    short64.truncate(63);
+
+    vec![
+        (
+            "synthetic_ext4_group_desc_valid_32.bin".to_owned(),
+            valid32.clone(),
+        ),
+        ("synthetic_ext4_group_desc_valid_64.bin".to_owned(), valid64),
+        (
+            "synthetic_ext4_group_desc_bad_checksum.bin".to_owned(),
+            bad_checksum,
+        ),
+        ("synthetic_ext4_group_desc_short_32.bin".to_owned(), short32),
+        ("synthetic_ext4_group_desc_short_64.bin".to_owned(), short64),
+        (
+            "synthetic_ext4_group_desc_desc_size_too_small.bin".to_owned(),
+            valid32,
+        ),
+    ]
+}
+
+fn make_ext4_mmp_block(seq: u32, checksum_seed: u32) -> Vec<u8> {
+    let mut block = vec![0_u8; EXT4_SUPERBLOCK_SIZE];
+    block[0x00..0x04].copy_from_slice(&EXT4_MMP_MAGIC.to_le_bytes());
+    block[0x04..0x08].copy_from_slice(&seq.to_le_bytes());
+    block[0x08..0x10].copy_from_slice(&0x0000_0001_0000_007B_u64.to_le_bytes());
+    block[0x10..0x1A].copy_from_slice(b"ffs-node-a");
+    block[0x50..0x58].copy_from_slice(b"/dev/vda");
+    block[0x70..0x72].copy_from_slice(&5_u16.to_le_bytes());
+
+    let checksum = ext4_chksum(checksum_seed, &block[..EXT4_TEST_MMP_CHECKSUM_OFFSET]);
+    block[EXT4_TEST_MMP_CHECKSUM_OFFSET..EXT4_TEST_MMP_CHECKSUM_OFFSET + 4]
+        .copy_from_slice(&checksum.to_le_bytes());
+    block
+}
+
+fn mmp_block_adversarial_samples() -> Vec<(String, Vec<u8>)> {
+    let checksum_seed = 0xAABB_CCDD;
+    let mut samples = vec![
+        (
+            "synthetic_ext4_mmp_clean_valid.bin".to_owned(),
+            make_ext4_mmp_block(EXT4_MMP_SEQ_CLEAN, checksum_seed),
+        ),
+        (
+            "synthetic_ext4_mmp_fsck_valid.bin".to_owned(),
+            make_ext4_mmp_block(EXT4_MMP_SEQ_FSCK, checksum_seed),
+        ),
+        (
+            "synthetic_ext4_mmp_active_valid.bin".to_owned(),
+            make_ext4_mmp_block(42, checksum_seed),
+        ),
+        (
+            "synthetic_ext4_mmp_unknown_seq.bin".to_owned(),
+            make_ext4_mmp_block(u32::MAX, checksum_seed),
+        ),
+    ];
+
+    let mut bad_magic = make_ext4_mmp_block(EXT4_MMP_SEQ_CLEAN, checksum_seed);
+    bad_magic[0x00..0x04].copy_from_slice(&0xCAFE_BABEu32.to_le_bytes());
+    samples.push(("synthetic_ext4_mmp_bad_magic.bin".to_owned(), bad_magic));
+
+    let mut checksum_corrupt = make_ext4_mmp_block(EXT4_MMP_SEQ_CLEAN, checksum_seed);
+    checksum_corrupt[EXT4_TEST_MMP_CHECKSUM_OFFSET] ^= 0xFF;
+    samples.push((
+        "synthetic_ext4_mmp_checksum_corrupt.bin".to_owned(),
+        checksum_corrupt,
+    ));
+
+    let mut short_block = make_ext4_mmp_block(EXT4_MMP_SEQ_CLEAN, checksum_seed);
+    short_block.truncate(EXT4_SUPERBLOCK_SIZE - 1);
+    samples.push(("synthetic_ext4_mmp_short.bin".to_owned(), short_block));
 
     samples
 }
@@ -772,6 +1187,120 @@ fn btrfs_dev_item_adversarial_samples() -> Vec<(String, Vec<u8>)> {
     samples
 }
 
+fn minimal_valid_btrfs_superblock_region(sys_chunk_array: &[u8]) -> Vec<u8> {
+    let mut region = vec![0_u8; BTRFS_SUPER_INFO_SIZE];
+    let sys_chunk_array_size =
+        u32::try_from(sys_chunk_array.len()).expect("sys_chunk_array length fits in u32");
+    let sys_chunk_array_offset = 0x32B;
+    let sys_chunk_array_end = sys_chunk_array_offset + sys_chunk_array.len();
+
+    region[0x20..0x30].copy_from_slice(&[0x33; 16]);
+    let superblock_bytenr =
+        u64::try_from(BTRFS_SUPER_INFO_OFFSET).expect("btrfs superblock offset fits in u64");
+    region[0x30..0x38].copy_from_slice(&superblock_bytenr.to_le_bytes());
+    region[0x38..0x40].copy_from_slice(&0_u64.to_le_bytes());
+    region[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+    region[0x48..0x50].copy_from_slice(&7_u64.to_le_bytes());
+    region[0x50..0x58].copy_from_slice(&0x4000_u64.to_le_bytes());
+    region[0x58..0x60].copy_from_slice(&0x8000_u64.to_le_bytes());
+    region[0x60..0x68].copy_from_slice(&0_u64.to_le_bytes());
+    region[0x70..0x78].copy_from_slice(&BTRFS_TEST_DEV_TOTAL_BYTES.to_le_bytes());
+    region[0x78..0x80].copy_from_slice(&BTRFS_TEST_DEV_BYTES_USED.to_le_bytes());
+    region[0x80..0x88].copy_from_slice(&5_u64.to_le_bytes());
+    region[0x88..0x90].copy_from_slice(&1_u64.to_le_bytes());
+    region[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+    region[0x94..0x98].copy_from_slice(&16_384_u32.to_le_bytes());
+    region[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
+    region[0xA0..0xA4].copy_from_slice(&sys_chunk_array_size.to_le_bytes());
+    region[0xC4..0xC6].copy_from_slice(&BTRFS_CSUM_TYPE_CRC32C.to_le_bytes());
+    region[0xC6] = 0;
+    region[0xC7] = 0;
+    region[0xC8] = 0;
+    region[0x12B..0x13A].copy_from_slice(b"ffs-adversarial");
+    region[sys_chunk_array_offset..sys_chunk_array_end].copy_from_slice(sys_chunk_array);
+
+    region
+}
+
+fn minimal_valid_btrfs_image(superblock_region: &[u8]) -> Vec<u8> {
+    let mut image = vec![0_u8; BTRFS_TEST_MAX_SAMPLE_SIZE];
+    let end = BTRFS_SUPER_INFO_OFFSET + BTRFS_SUPER_INFO_SIZE;
+    image[BTRFS_SUPER_INFO_OFFSET..end].copy_from_slice(superblock_region);
+    image
+}
+
+fn btrfs_superblock_adversarial_samples() -> Vec<(String, Vec<u8>)> {
+    let sys_chunk_array = make_btrfs_sys_chunk(
+        BTRFS_TEST_CHUNK_LENGTH,
+        4096,
+        BTRFS_TEST_BLOCK_GROUP_SYSTEM,
+        1,
+    );
+    let valid_region = minimal_valid_btrfs_superblock_region(&sys_chunk_array);
+    let mut samples = Vec::new();
+
+    samples.push((
+        "synthetic_btrfs_superblock_valid_region.bin".to_owned(),
+        valid_region.clone(),
+    ));
+
+    let mut bad_magic = valid_region.clone();
+    bad_magic[0x40..0x48].copy_from_slice(&0xFEED_FACE_CAFE_BEEFu64.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_superblock_bad_magic.bin".to_owned(),
+        bad_magic,
+    ));
+
+    let mut zero_sectorsize = valid_region.clone();
+    zero_sectorsize[0x90..0x94].copy_from_slice(&0_u32.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_superblock_zero_sectorsize.bin".to_owned(),
+        zero_sectorsize,
+    ));
+
+    let mut non_power_nodesize = valid_region.clone();
+    non_power_nodesize[0x94..0x98].copy_from_slice(&12_288_u32.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_superblock_non_power_nodesize.bin".to_owned(),
+        non_power_nodesize,
+    ));
+
+    let mut bad_stripesize = valid_region.clone();
+    bad_stripesize[0x9C..0xA0].copy_from_slice(&12_288_u32.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_superblock_bad_stripesize.bin".to_owned(),
+        bad_stripesize,
+    ));
+
+    let mut oversized_sys_chunk_array = valid_region.clone();
+    oversized_sys_chunk_array[0xA0..0xA4].copy_from_slice(&2049_u32.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_superblock_oversized_sys_chunk_array.bin".to_owned(),
+        oversized_sys_chunk_array,
+    ));
+
+    let mut short_region = valid_region.clone();
+    short_region.truncate(BTRFS_SUPER_INFO_SIZE - 1);
+    samples.push((
+        "synthetic_btrfs_superblock_short_region.bin".to_owned(),
+        short_region,
+    ));
+
+    samples.push((
+        "synthetic_btrfs_superblock_valid_image.bin".to_owned(),
+        minimal_valid_btrfs_image(&valid_region),
+    ));
+
+    let mut short_image = minimal_valid_btrfs_image(&valid_region);
+    short_image.truncate(BTRFS_TEST_MAX_SAMPLE_SIZE - 1);
+    samples.push((
+        "synthetic_btrfs_superblock_short_image.bin".to_owned(),
+        short_image,
+    ));
+
+    samples
+}
+
 fn run_parser<T, F>(
     sample_name: &str,
     parser_name: &'static str,
@@ -828,7 +1357,124 @@ fn minimal_valid_ext4_superblock_bytes() -> [u8; EXT4_SUPERBLOCK_SIZE] {
     sb
 }
 
+fn stamp_ext4_superblock_checksum(sb: &mut [u8; EXT4_SUPERBLOCK_SIZE]) {
+    let ro_compat = Ext4RoCompatFeatures::METADATA_CSUM.0.to_le_bytes();
+    sb[0x64..0x68].copy_from_slice(&ro_compat);
+    let checksum = ext4_chksum(!0_u32, &sb[..EXT4_SB_CHECKSUM_OFFSET]);
+    sb[EXT4_SB_CHECKSUM_OFFSET..EXT4_SB_CHECKSUM_OFFSET + 4]
+        .copy_from_slice(&checksum.to_le_bytes());
+}
+
+fn ext4_superblock_image(region: &[u8; EXT4_SUPERBLOCK_SIZE]) -> Vec<u8> {
+    let mut image = vec![0_u8; EXT4_SUPERBLOCK_OFFSET];
+    image.extend_from_slice(region);
+    image
+}
+
+fn ext4_superblock_adversarial_samples() -> Vec<(String, Vec<u8>)> {
+    let mut valid_region = minimal_valid_ext4_superblock_bytes();
+    valid_region[0x78..0x83].copy_from_slice(b"ffs-ext4-sb");
+    valid_region[0xEC..0xF0].copy_from_slice(&0x0123_4567_u32.to_le_bytes());
+    valid_region[0xF0..0xF4].copy_from_slice(&0x89AB_CDEF_u32.to_le_bytes());
+    stamp_ext4_superblock_checksum(&mut valid_region);
+
+    let valid_image = ext4_superblock_image(&valid_region);
+
+    let mut bad_magic = valid_region;
+    bad_magic[0x38..0x3A].copy_from_slice(&0x1234_u16.to_le_bytes());
+
+    let mut unsupported_block_size = valid_region;
+    unsupported_block_size[0x18..0x1C].copy_from_slice(&3_u32.to_le_bytes());
+    stamp_ext4_superblock_checksum(&mut unsupported_block_size);
+
+    let mut invalid_cluster_shift = valid_region;
+    invalid_cluster_shift[0x1C..0x20].copy_from_slice(&22_u32.to_le_bytes());
+    stamp_ext4_superblock_checksum(&mut invalid_cluster_shift);
+
+    let mut checksum_corrupt = valid_region;
+    checksum_corrupt[EXT4_SB_CHECKSUM_OFFSET] ^= 0x80;
+
+    let mut zero_blocks_per_group = valid_region;
+    zero_blocks_per_group[0x20..0x24].copy_from_slice(&0_u32.to_le_bytes());
+    stamp_ext4_superblock_checksum(&mut zero_blocks_per_group);
+
+    let mut inode_size_not_power_two = valid_region;
+    inode_size_not_power_two[0x58..0x5A].copy_from_slice(&192_u16.to_le_bytes());
+    stamp_ext4_superblock_checksum(&mut inode_size_not_power_two);
+
+    let mut wrong_first_data_block_1k = valid_region;
+    wrong_first_data_block_1k[0x18..0x1C].copy_from_slice(&0_u32.to_le_bytes());
+    wrong_first_data_block_1k[0x1C..0x20].copy_from_slice(&0_u32.to_le_bytes());
+    wrong_first_data_block_1k[0x04..0x08].copy_from_slice(&16_384_u32.to_le_bytes());
+    wrong_first_data_block_1k[0x20..0x24].copy_from_slice(&8192_u32.to_le_bytes());
+    wrong_first_data_block_1k[0x24..0x28].copy_from_slice(&8192_u32.to_le_bytes());
+    wrong_first_data_block_1k[0x14..0x18].copy_from_slice(&0_u32.to_le_bytes());
+    stamp_ext4_superblock_checksum(&mut wrong_first_data_block_1k);
+
+    let short_region = valid_region[..EXT4_SUPERBLOCK_SIZE - 1].to_vec();
+    let short_image = ext4_superblock_image(&valid_region)
+        [..EXT4_SUPERBLOCK_OFFSET + EXT4_SUPERBLOCK_SIZE - 1]
+        .to_vec();
+
+    vec![
+        (
+            "synthetic_ext4_superblock_valid_region.bin".to_owned(),
+            valid_region.to_vec(),
+        ),
+        (
+            "synthetic_ext4_superblock_valid_image.bin".to_owned(),
+            valid_image,
+        ),
+        (
+            "synthetic_ext4_superblock_bad_magic.bin".to_owned(),
+            bad_magic.to_vec(),
+        ),
+        (
+            "synthetic_ext4_superblock_unsupported_block_size.bin".to_owned(),
+            unsupported_block_size.to_vec(),
+        ),
+        (
+            "synthetic_ext4_superblock_invalid_cluster_shift.bin".to_owned(),
+            invalid_cluster_shift.to_vec(),
+        ),
+        (
+            "synthetic_ext4_superblock_checksum_corrupt.bin".to_owned(),
+            checksum_corrupt.to_vec(),
+        ),
+        (
+            "synthetic_ext4_superblock_zero_blocks_per_group.bin".to_owned(),
+            zero_blocks_per_group.to_vec(),
+        ),
+        (
+            "synthetic_ext4_superblock_inode_size_not_power_two.bin".to_owned(),
+            inode_size_not_power_two.to_vec(),
+        ),
+        (
+            "synthetic_ext4_superblock_wrong_first_data_block_1k.bin".to_owned(),
+            wrong_first_data_block_1k.to_vec(),
+        ),
+        (
+            "synthetic_ext4_superblock_short_region.bin".to_owned(),
+            short_region,
+        ),
+        (
+            "synthetic_ext4_superblock_short_image.bin".to_owned(),
+            short_image,
+        ),
+    ]
+}
+
 const EXT4_TEST_DIR_BLOCK_SIZE: usize = 4096;
+const EXT4_TEST_DIR_CSUM_SEED: u32 = 0xC0DE_CAFE;
+const EXT4_TEST_DIR_GENERATION: u32 = 0x0102_0304;
+const EXT4_TEST_DIR_INODE: u32 = 2;
+const EXT4_TEST_GROUP_DESC_CSUM_SEED: u32 = 0xAABB_CCDD;
+const EXT4_TEST_GROUP_DESC_NUMBER: u32 = 7;
+const EXT4_TEST_INODE_CHECKSUM_LO_OFFSET: usize = 0x7C;
+const EXT4_TEST_INODE_CHECKSUM_HI_OFFSET: usize = 0x82;
+const EXT4_TEST_INODE_CSUM_SEED: u32 = 0x3141_5926;
+const EXT4_TEST_INODE_NUMBER: u32 = 11;
+const EXT4_TEST_MMP_CHECKSUM_OFFSET: usize = 0x3FC;
 const BTRFS_TEST_HEADER_SIZE: usize = 101;
 const BTRFS_TEST_ITEM_SIZE: usize = 25;
 const BTRFS_TEST_KEY_PTR_SIZE: usize = 33;
@@ -844,6 +1490,7 @@ const BTRFS_TEST_BLOCK_GROUP_RAID0: u64 = 1 << 3;
 const BTRFS_TEST_BLOCK_GROUP_RAID1: u64 = 1 << 4;
 const BTRFS_TEST_DEV_TOTAL_BYTES: u64 = 1 << 40;
 const BTRFS_TEST_DEV_BYTES_USED: u64 = 1 << 39;
+const BTRFS_TEST_MAX_SAMPLE_SIZE: usize = BTRFS_SUPER_INFO_OFFSET + BTRFS_SUPER_INFO_SIZE;
 
 fn align4(len: usize) -> usize {
     (len + 3) & !3
@@ -997,8 +1644,8 @@ fn adversarial_corpus_is_panic_free_and_exercises_parse_error_variants() {
 
     for (name, bytes) in &samples {
         assert!(
-            bytes.len() <= 64 * 1024,
-            "sample `{name}` exceeds 64KiB limit"
+            bytes.len() <= BTRFS_TEST_MAX_SAMPLE_SIZE,
+            "sample `{name}` exceeds btrfs superblock image-size limit"
         );
 
         let mut sample_had_error = false;
@@ -1318,6 +1965,127 @@ fn ext4_inline_data_adversarial_samples_exercise_ibody_boundaries() {
 }
 
 #[test]
+fn ext4_inode_checksum_adversarial_samples_exercise_boundaries() {
+    let samples = inode_checksum_adversarial_samples()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+    assert_valid_ext4_inode_checksum_samples(&samples);
+    assert_invalid_ext4_inode_checksum_samples(&samples);
+}
+
+fn assert_valid_ext4_inode_checksum_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let valid132 = &samples["synthetic_ext4_inode_checksum_valid_132.bin"];
+    verify_inode_checksum(
+        valid132,
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER,
+        132,
+    )
+    .expect("132-byte inode checksum with high half verifies");
+
+    let inode132 =
+        Ext4Inode::parse_from_bytes(valid132).expect("valid 132-byte checksum inode parses");
+    assert_eq!(inode132.generation, 42);
+    assert_eq!(inode132.extra_isize, 4);
+
+    let valid256 = &samples["synthetic_ext4_inode_checksum_valid_256.bin"];
+    verify_inode_checksum(
+        valid256,
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER,
+        256,
+    )
+    .expect("256-byte inode checksum with high half verifies");
+
+    let inode256 =
+        Ext4Inode::parse_from_bytes(valid256).expect("valid 256-byte checksum inode parses");
+    assert_eq!(inode256.generation, 42);
+    assert_eq!(inode256.extra_isize, 32);
+    assert_ne!(inode256.checksum, 0);
+    assert_eq!(inode256.version_hi, 0x0102_0304);
+}
+
+fn assert_invalid_ext4_inode_checksum_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let bad_checksum = verify_inode_checksum(
+        &samples["synthetic_ext4_inode_checksum_bad_checksum.bin"],
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER,
+        256,
+    )
+    .expect_err("inode checksum field corruption must be rejected");
+    assert!(matches!(
+        bad_checksum,
+        ParseError::InvalidField {
+            field: "i_checksum",
+            ..
+        }
+    ));
+
+    let covered_byte = verify_inode_checksum(
+        &samples["synthetic_ext4_inode_checksum_covered_byte_corrupt.bin"],
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER,
+        256,
+    )
+    .expect_err("covered inode byte corruption must be rejected");
+    assert!(matches!(
+        covered_byte,
+        ParseError::InvalidField {
+            field: "i_checksum",
+            ..
+        }
+    ));
+
+    let wrong_ino = verify_inode_checksum(
+        &samples["synthetic_ext4_inode_checksum_valid_256.bin"],
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER + 1,
+        256,
+    )
+    .expect_err("wrong inode-number checksum seed must be rejected");
+    assert!(matches!(
+        wrong_ino,
+        ParseError::InvalidField {
+            field: "i_checksum",
+            ..
+        }
+    ));
+
+    let short256 = verify_inode_checksum(
+        &samples["synthetic_ext4_inode_checksum_short_256.bin"],
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER,
+        256,
+    )
+    .expect_err("short inode checksum buffer must be rejected");
+    assert!(matches!(
+        short256,
+        ParseError::InsufficientData {
+            needed: 256,
+            offset: 0,
+            actual: 255,
+        }
+    ));
+
+    let size_too_small = verify_inode_checksum(
+        &samples["synthetic_ext4_inode_checksum_inode_size_too_small.bin"],
+        EXT4_TEST_INODE_CSUM_SEED,
+        EXT4_TEST_INODE_NUMBER,
+        64,
+    )
+    .expect_err("inode sizes below the 128-byte minimum must be rejected");
+    assert!(matches!(
+        size_too_small,
+        ParseError::InsufficientData {
+            needed: 128,
+            offset: 0,
+            actual: 128,
+        }
+    ));
+}
+
+#[test]
 fn ext4_xattr_block_adversarial_samples_exercise_boundaries() {
     let samples = xattr_block_adversarial_samples()
         .into_iter()
@@ -1399,6 +2167,9 @@ fn ext4_dir_block_adversarial_samples_exercise_boundaries() {
         0xA5A5_5A5A
     );
 
+    assert_valid_ext4_dir_checksum_samples(&samples);
+    assert_invalid_ext4_dir_checksum_samples(&samples);
+
     let rec_len_too_small = parse_dir_block(
         &samples["synthetic_ext4_dir_block_rec_len_too_small.bin"],
         4096,
@@ -1460,6 +2231,392 @@ fn ext4_dir_block_adversarial_samples_exercise_boundaries() {
             field: "dir_block_tail",
             ..
         }
+    ));
+}
+
+fn assert_valid_ext4_dir_checksum_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let valid = &samples["synthetic_ext4_dir_block_checksum_valid.bin"];
+    verify_dir_block_checksum(
+        valid,
+        EXT4_TEST_DIR_CSUM_SEED,
+        EXT4_TEST_DIR_INODE,
+        EXT4_TEST_DIR_GENERATION,
+    )
+    .expect("stamped directory block checksum verifies");
+
+    let (entries, tail) = parse_dir_block(
+        valid,
+        u32::try_from(EXT4_TEST_DIR_BLOCK_SIZE).expect("fixed block size fits in u32"),
+    )
+    .expect("checksum-valid synthetic dir block parses");
+    assert_eq!(entries.len(), 3);
+    let tail = tail.expect("checksum-valid synthetic dir block carries a tail");
+    assert_ne!(tail.checksum, 0);
+}
+
+fn assert_invalid_ext4_dir_checksum_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let checksum_corrupt = verify_dir_block_checksum(
+        &samples["synthetic_ext4_dir_block_checksum_corrupt.bin"],
+        EXT4_TEST_DIR_CSUM_SEED,
+        EXT4_TEST_DIR_INODE,
+        EXT4_TEST_DIR_GENERATION,
+    )
+    .expect_err("directory checksum field corruption must be rejected");
+    assert!(matches!(
+        checksum_corrupt,
+        ParseError::InvalidField {
+            field: "dir_checksum",
+            ..
+        }
+    ));
+
+    let covered_byte_corrupt = verify_dir_block_checksum(
+        &samples["synthetic_ext4_dir_block_checksum_covered_byte_corrupt.bin"],
+        EXT4_TEST_DIR_CSUM_SEED,
+        EXT4_TEST_DIR_INODE,
+        EXT4_TEST_DIR_GENERATION,
+    )
+    .expect_err("covered directory-entry byte corruption must be rejected");
+    assert!(matches!(
+        covered_byte_corrupt,
+        ParseError::InvalidField {
+            field: "dir_checksum",
+            ..
+        }
+    ));
+
+    let wrong_ino = verify_dir_block_checksum(
+        &samples["synthetic_ext4_dir_block_checksum_valid.bin"],
+        EXT4_TEST_DIR_CSUM_SEED,
+        EXT4_TEST_DIR_INODE + 1,
+        EXT4_TEST_DIR_GENERATION,
+    )
+    .expect_err("wrong directory inode checksum seed must be rejected");
+    assert!(matches!(
+        wrong_ino,
+        ParseError::InvalidField {
+            field: "dir_checksum",
+            ..
+        }
+    ));
+
+    let wrong_generation = verify_dir_block_checksum(
+        &samples["synthetic_ext4_dir_block_checksum_valid.bin"],
+        EXT4_TEST_DIR_CSUM_SEED,
+        EXT4_TEST_DIR_INODE,
+        EXT4_TEST_DIR_GENERATION + 1,
+    )
+    .expect_err("wrong directory generation checksum seed must be rejected");
+    assert!(matches!(
+        wrong_generation,
+        ParseError::InvalidField {
+            field: "dir_checksum",
+            ..
+        }
+    ));
+
+    let malformed_tail = verify_dir_block_checksum(
+        &samples["synthetic_ext4_dir_block_checksum_malformed_tail.bin"],
+        EXT4_TEST_DIR_CSUM_SEED,
+        EXT4_TEST_DIR_INODE,
+        EXT4_TEST_DIR_GENERATION,
+    )
+    .expect_err("malformed checksum tail must be rejected before CRC comparison");
+    assert!(matches!(
+        malformed_tail,
+        ParseError::InvalidField {
+            field: "dir_block_tail",
+            ..
+        }
+    ));
+
+    let too_small = verify_dir_block_checksum(
+        &samples["synthetic_ext4_dir_block_checksum_too_small.bin"],
+        EXT4_TEST_DIR_CSUM_SEED,
+        EXT4_TEST_DIR_INODE,
+        EXT4_TEST_DIR_GENERATION,
+    )
+    .expect_err("directory checksum blocks shorter than a tail must be rejected");
+    assert!(matches!(
+        too_small,
+        ParseError::InsufficientData {
+            needed: 12,
+            offset: 0,
+            actual: 11,
+        }
+    ));
+}
+
+#[test]
+fn ext4_dx_root_adversarial_samples_exercise_boundaries() {
+    let samples = dx_root_adversarial_samples()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+    assert_valid_ext4_dx_root_samples(&samples);
+    assert_invalid_ext4_dx_root_samples(&samples);
+}
+
+fn assert_valid_ext4_dx_root_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let valid = parse_dx_root(&samples["synthetic_ext4_dx_root_valid.bin"])
+        .expect("valid synthetic dx root parses");
+    assert_eq!(valid.hash_version, 1);
+    assert_eq!(valid.indirect_levels, 0);
+    assert_eq!(valid.entries.len(), 3);
+    assert_eq!(valid.entries[0].hash, 0);
+    assert_eq!(valid.entries[0].block, 1);
+    assert_eq!(valid.entries[1].hash, 0x1000);
+    assert_eq!(valid.entries[1].block, 2);
+    assert_eq!(valid.entries[2].hash, 0x8000);
+    assert_eq!(valid.entries[2].block, 3);
+
+    let unknown_hash = parse_dx_root(&samples["synthetic_ext4_dx_root_unknown_hash_version.bin"])
+        .expect("unknown hash versions are preserved for dx_hash fallback handling");
+    assert_eq!(unknown_hash.hash_version, 0xFF);
+    assert_eq!(unknown_hash.entries.len(), 3);
+
+    let zero_count = parse_dx_root(&samples["synthetic_ext4_dx_root_zero_count.bin"])
+        .expect("zero-count dx root parses as an empty entry set");
+    assert!(zero_count.entries.is_empty());
+}
+
+fn assert_invalid_ext4_dx_root_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let nonzero_reserved = parse_dx_root(&samples["synthetic_ext4_dx_root_nonzero_reserved.bin"])
+        .expect_err("nonzero dx reserved field must be rejected");
+    assert!(matches!(
+        nonzero_reserved,
+        ParseError::InvalidField {
+            field: "dx_reserved_zero",
+            ..
+        }
+    ));
+
+    let bad_info_length = parse_dx_root(&samples["synthetic_ext4_dx_root_bad_info_length.bin"])
+        .expect_err("bad dx root info length must be rejected");
+    assert!(matches!(
+        bad_info_length,
+        ParseError::InvalidField {
+            field: "dx_root_info_length",
+            ..
+        }
+    ));
+
+    let excessive_indirect_levels =
+        parse_dx_root(&samples["synthetic_ext4_dx_root_excessive_indirect_levels.bin"])
+            .expect_err("too many dx indirect levels must be rejected");
+    assert!(matches!(
+        excessive_indirect_levels,
+        ParseError::InvalidField {
+            field: "dx_indirect_levels",
+            ..
+        }
+    ));
+
+    let nonzero_unused_flags =
+        parse_dx_root(&samples["synthetic_ext4_dx_root_nonzero_unused_flags.bin"])
+            .expect_err("nonzero dx unused flags must be rejected");
+    assert!(matches!(
+        nonzero_unused_flags,
+        ParseError::InvalidField {
+            field: "dx_unused_flags",
+            ..
+        }
+    ));
+
+    let count_exceeds_limit =
+        parse_dx_root(&samples["synthetic_ext4_dx_root_count_exceeds_limit.bin"])
+            .expect_err("dx entry count exceeding limit must be rejected");
+    assert!(matches!(
+        count_exceeds_limit,
+        ParseError::InvalidField {
+            field: "dx_count",
+            ..
+        }
+    ));
+
+    let too_short = parse_dx_root(&samples["synthetic_ext4_dx_root_too_short.bin"])
+        .expect_err("short dx root blocks must be rejected");
+    assert!(matches!(
+        too_short,
+        ParseError::InsufficientData {
+            needed: 0x28,
+            offset: 0,
+            actual: 0x27,
+        }
+    ));
+}
+
+#[test]
+fn ext4_superblock_adversarial_samples_exercise_boundaries() {
+    let samples = ext4_superblock_adversarial_samples()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+    assert_valid_ext4_superblock_samples(&samples);
+    assert_invalid_ext4_superblock_samples(&samples);
+}
+
+fn assert_valid_ext4_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) -> Ext4Superblock {
+    let valid = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_valid_region.bin"],
+    )
+    .expect("valid synthetic ext4 superblock region parses");
+    assert_eq!(valid.magic, EXT4_SUPER_MAGIC);
+    assert_eq!(valid.block_size, 4096);
+    assert_eq!(valid.cluster_size, 4096);
+    assert_eq!(valid.inodes_count, 8192);
+    assert_eq!(valid.blocks_count, 32768);
+    assert_eq!(valid.blocks_per_group, 32768);
+    assert_eq!(valid.inodes_per_group, 8192);
+    assert_eq!(valid.inode_size, 256);
+    assert_eq!(valid.volume_name, "ffs-ext4-sb");
+    assert!(valid.has_metadata_csum());
+    valid
+        .validate_geometry()
+        .expect("valid synthetic ext4 superblock geometry is accepted");
+    valid
+        .validate_checksum(&samples["synthetic_ext4_superblock_valid_region.bin"])
+        .expect("stamped synthetic ext4 superblock checksum verifies");
+
+    let from_image =
+        Ext4Superblock::parse_from_image(&samples["synthetic_ext4_superblock_valid_image.bin"])
+            .expect("valid synthetic ext4 image parses at the canonical offset");
+    assert_eq!(from_image, valid);
+
+    valid
+}
+
+fn assert_invalid_ext4_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    assert_invalid_ext4_superblock_parse_samples(samples);
+    assert_invalid_ext4_superblock_checksum_samples(samples);
+    assert_invalid_ext4_superblock_geometry_samples(samples);
+    assert_short_ext4_superblock_samples(samples);
+}
+
+fn assert_invalid_ext4_superblock_parse_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let bad_magic = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_bad_magic.bin"],
+    )
+    .expect_err("bad ext4 superblock magic must be rejected");
+    assert!(matches!(
+        bad_magic,
+        ParseError::InvalidMagic { expected, actual }
+            if expected == u64::from(EXT4_SUPER_MAGIC) && actual == u64::from(0x1234_u16)
+    ));
+
+    let unsupported_block_size = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_unsupported_block_size.bin"],
+    )
+    .expect_err("unsupported ext4 block sizes must be rejected");
+    assert!(matches!(
+        unsupported_block_size,
+        ParseError::InvalidField {
+            field: "s_log_block_size",
+            reason: "unsupported block size",
+        }
+    ));
+
+    let invalid_cluster_shift = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_invalid_cluster_shift.bin"],
+    )
+    .expect_err("overflowing ext4 cluster-size shifts must be rejected");
+    assert!(matches!(
+        invalid_cluster_shift,
+        ParseError::InvalidField {
+            field: "s_log_cluster_size",
+            reason: "invalid shift",
+        }
+    ));
+}
+
+fn assert_invalid_ext4_superblock_checksum_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let checksum_corrupt = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_checksum_corrupt.bin"],
+    )
+    .expect("checksum-corrupt ext4 superblock still parses before checksum validation");
+    let checksum_err = checksum_corrupt
+        .validate_checksum(&samples["synthetic_ext4_superblock_checksum_corrupt.bin"])
+        .expect_err("corrupt ext4 superblock checksum must be rejected");
+    assert!(matches!(
+        checksum_err,
+        ParseError::InvalidField {
+            field: "s_checksum",
+            ..
+        }
+    ));
+}
+
+fn assert_invalid_ext4_superblock_geometry_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let zero_blocks = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_zero_blocks_per_group.bin"],
+    )
+    .expect("zero blocks_per_group parses before geometry validation");
+    let zero_blocks_err = zero_blocks
+        .validate_geometry()
+        .expect_err("zero blocks_per_group must be rejected by geometry validation");
+    assert!(matches!(
+        zero_blocks_err,
+        ParseError::InvalidField {
+            field: "s_blocks_per_group",
+            ..
+        }
+    ));
+
+    let inode_size = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_inode_size_not_power_two.bin"],
+    )
+    .expect("non-power-of-two inode_size parses before geometry validation");
+    let inode_size_err = inode_size
+        .validate_geometry()
+        .expect_err("non-power-of-two inode_size must be rejected by geometry validation");
+    assert!(matches!(
+        inode_size_err,
+        ParseError::InvalidField {
+            field: "s_inode_size",
+            reason: "must be a power of two",
+        }
+    ));
+
+    let wrong_first_data = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_wrong_first_data_block_1k.bin"],
+    )
+    .expect("wrong 1K first_data_block parses before geometry validation");
+    let wrong_first_data_err = wrong_first_data
+        .validate_geometry()
+        .expect_err("1K ext4 superblocks require first_data_block = 1");
+    assert!(matches!(
+        wrong_first_data_err,
+        ParseError::InvalidField {
+            field: "s_first_data_block",
+            reason: "must be 1 for 1K block size",
+        }
+    ));
+}
+
+fn assert_short_ext4_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let short_region = Ext4Superblock::parse_superblock_region(
+        &samples["synthetic_ext4_superblock_short_region.bin"],
+    )
+    .expect_err("short ext4 superblock regions must be rejected");
+    assert!(matches!(
+        short_region,
+        ParseError::InsufficientData {
+            needed: EXT4_SUPERBLOCK_SIZE,
+            offset: 0,
+            actual,
+        } if actual == EXT4_SUPERBLOCK_SIZE - 1
+    ));
+
+    let short_image =
+        Ext4Superblock::parse_from_image(&samples["synthetic_ext4_superblock_short_image.bin"])
+            .expect_err("short ext4 images must be rejected before slicing the superblock region");
+    assert!(matches!(
+        short_image,
+        ParseError::InsufficientData {
+            needed: EXT4_SUPERBLOCK_SIZE,
+            offset: EXT4_SUPERBLOCK_OFFSET,
+            actual,
+        } if actual == EXT4_SUPERBLOCK_SIZE - 1
     ));
 }
 
@@ -1557,6 +2714,197 @@ fn ext4_extent_tree_adversarial_samples_exercise_boundaries() {
             field: "extent_checksum",
             ..
         }
+    ));
+}
+
+#[test]
+fn ext4_group_desc_adversarial_samples_exercise_boundaries() {
+    let samples = group_desc_adversarial_samples()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+    assert_valid_ext4_group_desc_samples(&samples);
+    assert_invalid_ext4_group_desc_samples(&samples);
+}
+
+fn assert_valid_ext4_group_desc_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let valid32 = &samples["synthetic_ext4_group_desc_valid_32.bin"];
+    let desc32 =
+        Ext4GroupDesc::parse_from_bytes(valid32, 32).expect("valid 32-byte group desc parses");
+    assert_eq!(desc32.block_bitmap, 0x0000_0100);
+    assert_eq!(desc32.inode_bitmap, 0x0000_0200);
+    assert_eq!(desc32.inode_table, 0x0000_0300);
+    assert_eq!(desc32.free_blocks_count, 0x0040);
+    assert_eq!(desc32.free_inodes_count, 0x0020);
+    assert_eq!(desc32.used_dirs_count, 0x0003);
+    assert_eq!(desc32.itable_unused, 0x0010);
+    assert_eq!(desc32.flags, 0x0005);
+    assert_eq!(desc32.block_bitmap_csum, 0x1357);
+    assert_eq!(desc32.inode_bitmap_csum, 0x2468);
+    verify_group_desc_checksum(
+        valid32,
+        EXT4_TEST_GROUP_DESC_CSUM_SEED,
+        EXT4_TEST_GROUP_DESC_NUMBER,
+        32,
+    )
+    .expect("stamped 32-byte group desc checksum verifies");
+
+    let valid64 = &samples["synthetic_ext4_group_desc_valid_64.bin"];
+    let desc64 =
+        Ext4GroupDesc::parse_from_bytes(valid64, 64).expect("valid 64-byte group desc parses");
+    assert_eq!(desc64.block_bitmap, 0x0000_0001_0000_0100);
+    assert_eq!(desc64.inode_bitmap, 0x0000_0002_0000_0200);
+    assert_eq!(desc64.inode_table, 0x0000_0003_0000_0300);
+    assert_eq!(desc64.free_blocks_count, 0x0001_0040);
+    assert_eq!(desc64.free_inodes_count, 0x0002_0020);
+    assert_eq!(desc64.used_dirs_count, 0x0003_0003);
+    assert_eq!(desc64.itable_unused, 0x0004_0010);
+    assert_eq!(desc64.block_bitmap_csum, 0xAAAA_1357);
+    assert_eq!(desc64.inode_bitmap_csum, 0xBBBB_2468);
+    verify_group_desc_checksum(
+        valid64,
+        EXT4_TEST_GROUP_DESC_CSUM_SEED,
+        EXT4_TEST_GROUP_DESC_NUMBER,
+        64,
+    )
+    .expect("stamped 64-byte group desc checksum verifies");
+}
+
+fn assert_invalid_ext4_group_desc_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let bad_checksum = verify_group_desc_checksum(
+        &samples["synthetic_ext4_group_desc_bad_checksum.bin"],
+        EXT4_TEST_GROUP_DESC_CSUM_SEED,
+        EXT4_TEST_GROUP_DESC_NUMBER,
+        32,
+    )
+    .expect_err("group desc checksum corruption must be rejected");
+    assert!(matches!(
+        bad_checksum,
+        ParseError::InvalidField {
+            field: "bg_checksum",
+            ..
+        }
+    ));
+
+    let desc_size_too_small = Ext4GroupDesc::parse_from_bytes(
+        &samples["synthetic_ext4_group_desc_desc_size_too_small.bin"],
+        31,
+    )
+    .expect_err("group desc sizes below 32 bytes must be rejected");
+    assert!(matches!(
+        desc_size_too_small,
+        ParseError::InvalidField {
+            field: "s_desc_size",
+            ..
+        }
+    ));
+
+    let short32 =
+        Ext4GroupDesc::parse_from_bytes(&samples["synthetic_ext4_group_desc_short_32.bin"], 32)
+            .expect_err("short 32-byte group desc must be rejected");
+    assert!(matches!(
+        short32,
+        ParseError::InsufficientData {
+            needed: 32,
+            offset: 0,
+            actual: 31,
+        }
+    ));
+
+    let short64 =
+        Ext4GroupDesc::parse_from_bytes(&samples["synthetic_ext4_group_desc_short_64.bin"], 64)
+            .expect_err("short 64-byte group desc must be rejected");
+    assert!(matches!(
+        short64,
+        ParseError::InsufficientData {
+            needed: 64,
+            offset: 0,
+            actual: 63,
+        }
+    ));
+
+    let checksum_short64 = verify_group_desc_checksum(
+        &samples["synthetic_ext4_group_desc_short_64.bin"],
+        EXT4_TEST_GROUP_DESC_CSUM_SEED,
+        EXT4_TEST_GROUP_DESC_NUMBER,
+        64,
+    )
+    .expect_err("short group desc checksum input must be rejected");
+    assert!(matches!(
+        checksum_short64,
+        ParseError::InsufficientData { .. }
+    ));
+}
+
+#[test]
+fn ext4_mmp_block_adversarial_samples_exercise_boundaries() {
+    let samples = mmp_block_adversarial_samples()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let checksum_seed = 0xAABB_CCDD;
+
+    let clean = Ext4MmpBlock::parse_from_bytes(&samples["synthetic_ext4_mmp_clean_valid.bin"])
+        .expect("valid clean MMP block parses");
+    assert_eq!(clean.status(), Ext4MmpStatus::Clean);
+    assert_eq!(clean.time, 0x0000_0001_0000_007B);
+    assert_eq!(clean.nodename, "ffs-node-a");
+    assert_eq!(clean.bdevname, "/dev/vda");
+    assert_eq!(clean.check_interval, 5);
+    clean
+        .validate_checksum(
+            &samples["synthetic_ext4_mmp_clean_valid.bin"],
+            checksum_seed,
+        )
+        .expect("valid MMP checksum verifies");
+
+    let fsck = Ext4MmpBlock::parse_from_bytes(&samples["synthetic_ext4_mmp_fsck_valid.bin"])
+        .expect("valid fsck MMP block parses");
+    assert_eq!(fsck.status(), Ext4MmpStatus::Fsck);
+
+    let active = Ext4MmpBlock::parse_from_bytes(&samples["synthetic_ext4_mmp_active_valid.bin"])
+        .expect("valid active MMP block parses");
+    assert_eq!(active.status(), Ext4MmpStatus::Active(42));
+
+    let unknown = Ext4MmpBlock::parse_from_bytes(&samples["synthetic_ext4_mmp_unknown_seq.bin"])
+        .expect("unknown but well-formed MMP sequence parses");
+    assert_eq!(unknown.status(), Ext4MmpStatus::UnsafeUnknown(u32::MAX));
+
+    let bad_magic = Ext4MmpBlock::parse_from_bytes(&samples["synthetic_ext4_mmp_bad_magic.bin"])
+        .expect_err("bad MMP magic must be rejected");
+    assert!(matches!(
+        bad_magic,
+        ParseError::InvalidField {
+            field: "mmp_magic",
+            ..
+        }
+    ));
+
+    let corrupt =
+        Ext4MmpBlock::parse_from_bytes(&samples["synthetic_ext4_mmp_checksum_corrupt.bin"])
+            .expect("checksum-corrupt MMP block still parses before validation");
+    let checksum_err = corrupt
+        .validate_checksum(
+            &samples["synthetic_ext4_mmp_checksum_corrupt.bin"],
+            checksum_seed,
+        )
+        .expect_err("corrupt MMP checksum must be rejected");
+    assert!(matches!(
+        checksum_err,
+        ParseError::InvalidField {
+            field: "mmp_checksum",
+            ..
+        }
+    ));
+
+    let short = Ext4MmpBlock::parse_from_bytes(&samples["synthetic_ext4_mmp_short.bin"])
+        .expect_err("short MMP blocks must be rejected");
+    assert!(matches!(
+        short,
+        ParseError::InsufficientData {
+            needed: EXT4_SUPERBLOCK_SIZE,
+            offset: 0,
+            actual,
+        } if actual == EXT4_SUPERBLOCK_SIZE - 1
     ));
 }
 
@@ -1753,6 +3101,136 @@ fn btrfs_sys_chunk_adversarial_samples_exercise_boundaries() {
     assert!(matches!(
         truncated_stripe,
         ParseError::InsufficientData { .. }
+    ));
+}
+
+#[test]
+fn btrfs_superblock_adversarial_samples_exercise_boundaries() {
+    let samples = btrfs_superblock_adversarial_samples()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    assert_valid_btrfs_superblock_samples(&samples);
+    assert_invalid_btrfs_superblock_samples(&samples);
+}
+
+fn assert_valid_btrfs_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) -> BtrfsSuperblock {
+    let valid = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_valid_region.bin"],
+    )
+    .expect("valid synthetic btrfs superblock region parses");
+    assert_eq!(valid.magic, BTRFS_MAGIC);
+    assert_eq!(
+        valid.bytenr,
+        u64::try_from(BTRFS_SUPER_INFO_OFFSET).expect("btrfs superblock offset fits in u64")
+    );
+    assert_eq!(valid.generation, 7);
+    assert_eq!(valid.root, 0x4000);
+    assert_eq!(valid.chunk_root, 0x8000);
+    assert_eq!(valid.total_bytes, BTRFS_TEST_DEV_TOTAL_BYTES);
+    assert_eq!(valid.bytes_used, BTRFS_TEST_DEV_BYTES_USED);
+    assert_eq!(valid.root_dir_objectid, 5);
+    assert_eq!(valid.num_devices, 1);
+    assert_eq!(valid.sectorsize, 4096);
+    assert_eq!(valid.nodesize, 16_384);
+    assert_eq!(valid.stripesize, 4096);
+    assert_eq!(valid.csum_type, BTRFS_CSUM_TYPE_CRC32C);
+    assert_eq!(valid.label, "ffs-adversarial");
+
+    let chunks =
+        parse_sys_chunk_array(&valid.sys_chunk_array).expect("superblock sys_chunk_array parses");
+    assert_eq!(chunks.len(), 1);
+    let mapping = map_logical_to_physical(&chunks, 0x1010)
+        .expect("valid sys chunk mapping is checked")
+        .expect("logical address is covered");
+    assert_eq!(mapping.devid, 1);
+    assert_eq!(mapping.physical, 0x2010);
+
+    let from_image =
+        BtrfsSuperblock::parse_from_image(&samples["synthetic_btrfs_superblock_valid_image.bin"])
+            .expect("valid synthetic btrfs image parses at the canonical offset");
+    assert_eq!(from_image, valid);
+
+    valid
+}
+
+fn assert_invalid_btrfs_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    let short_image =
+        BtrfsSuperblock::parse_from_image(&samples["synthetic_btrfs_superblock_short_image.bin"])
+            .expect_err("short images must be rejected before slicing the superblock region");
+    assert!(matches!(
+        short_image,
+        ParseError::InsufficientData {
+            needed: BTRFS_SUPER_INFO_SIZE,
+            offset: BTRFS_SUPER_INFO_OFFSET,
+            actual,
+        } if actual == BTRFS_SUPER_INFO_SIZE - 1
+    ));
+
+    let short_region = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_short_region.bin"],
+    )
+    .expect_err("one-byte-short superblock regions must be rejected");
+    assert!(matches!(
+        short_region,
+        ParseError::InsufficientData {
+            needed: BTRFS_SUPER_INFO_SIZE,
+            offset: 0,
+            actual,
+        } if actual == BTRFS_SUPER_INFO_SIZE - 1
+    ));
+
+    let bad_magic = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_bad_magic.bin"],
+    )
+    .expect_err("bad btrfs magic must be rejected");
+    assert!(matches!(bad_magic, ParseError::InvalidMagic { .. }));
+
+    let zero_sectorsize = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_zero_sectorsize.bin"],
+    )
+    .expect_err("zero sector sizes must be rejected");
+    assert!(matches!(
+        zero_sectorsize,
+        ParseError::InvalidField {
+            field: "sectorsize",
+            ..
+        }
+    ));
+
+    let non_power_nodesize = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_non_power_nodesize.bin"],
+    )
+    .expect_err("non-power-of-two node sizes must be rejected");
+    assert!(matches!(
+        non_power_nodesize,
+        ParseError::InvalidField {
+            field: "nodesize",
+            ..
+        }
+    ));
+
+    let bad_stripesize = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_bad_stripesize.bin"],
+    )
+    .expect_err("non-power-of-two stripe sizes must be rejected");
+    assert!(matches!(
+        bad_stripesize,
+        ParseError::InvalidField {
+            field: "stripesize",
+            ..
+        }
+    ));
+
+    let oversized_sys_chunk_array = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_oversized_sys_chunk_array.bin"],
+    )
+    .expect_err("oversized sys_chunk_array declarations must be rejected");
+    assert!(matches!(
+        oversized_sys_chunk_array,
+        ParseError::InvalidField {
+            field: "sys_chunk_array_size",
+            ..
+        }
     ));
 }
 
