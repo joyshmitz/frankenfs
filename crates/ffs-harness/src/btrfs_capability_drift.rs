@@ -7,8 +7,9 @@
 //!
 //! 1. Parse the capability table from `FEATURE_PARITY.md` section 2.1.
 //! 2. For `unit::*` contract IDs, verify the test function exists in `ffs-core`.
-//! 3. For `e2e::*` contract IDs, verify the capability is backed either by an
-//!    E2E script scenario or by an end-to-end Rust test in `ffs-core`.
+//! 3. For `e2e::*` contract IDs, verify the capability is backed by an E2E
+//!    script scenario, an end-to-end Rust test in `ffs-core`, or the FUSE E2E
+//!    harness scenario markers.
 //!
 //! # Contract version
 //!
@@ -103,10 +104,10 @@ pub fn check_unit_contract(ffs_core_source: &str, bare_name: &str) -> bool {
     ffs_core_source.contains(&pattern)
 }
 
-/// Check an E2E contract row against E2E script content.
+/// Check an E2E contract row against E2E backing source content.
 ///
-/// Returns true if the scenario can be traced in the E2E script.  E2E scripts
-/// assemble scenario IDs at runtime (e.g. `btrfs_rw_` + case name, or
+/// Returns true if the scenario can be traced in the E2E sources. Some E2E
+/// scripts assemble scenario IDs at runtime (e.g. `btrfs_rw_` + case name, or
 /// `btrfs_rw_crash_matrix_` + point_id + label), so this function checks
 /// progressively stripped forms:
 ///
@@ -284,6 +285,10 @@ crash_matrix_label_for_point() {
         let e2e_script =
             std::fs::read_to_string(format!("{root}/scripts/e2e/ffs_btrfs_rw_smoke.sh"))
                 .expect("read e2e script");
+        let fuse_e2e =
+            std::fs::read_to_string(format!("{root}/crates/ffs-harness/tests/fuse_e2e.rs"))
+                .expect("read FUSE e2e tests");
+        let e2e_backing = format!("{e2e_script}\n{fuse_e2e}");
 
         let rows = parse_capability_table(&parity);
         let e2e_rows: Vec<_> = rows
@@ -298,9 +303,10 @@ crash_matrix_label_for_point() {
 
         for row in &e2e_rows {
             assert!(
-                check_e2e_contract_backing(&core_src, &e2e_script, &row.bare_name),
+                check_e2e_contract_backing(&core_src, &e2e_backing, &row.bare_name),
                 "DRIFT: e2e contract '{}' documented in FEATURE_PARITY.md but backing test \
-                 '{}' not found in ffs-core/src/lib.rs or scripts/e2e/ffs_btrfs_rw_smoke.sh",
+                 '{}' not found in ffs-core/src/lib.rs, scripts/e2e/ffs_btrfs_rw_smoke.sh, \
+                 or crates/ffs-harness/tests/fuse_e2e.rs",
                 row.contract_id,
                 row.bare_name
             );
@@ -317,8 +323,12 @@ crash_matrix_label_for_point() {
         let e2e_script =
             std::fs::read_to_string(format!("{root}/scripts/e2e/ffs_btrfs_rw_smoke.sh"))
                 .expect("read e2e script");
+        let fuse_e2e =
+            std::fs::read_to_string(format!("{root}/crates/ffs-harness/tests/fuse_e2e.rs"))
+                .expect("read FUSE e2e tests");
+        let e2e_backing = format!("{e2e_script}\n{fuse_e2e}");
 
-        let results = check_btrfs_drift(&parity, &core_src, &e2e_script);
+        let results = check_btrfs_drift(&parity, &core_src, &e2e_backing);
         assert!(
             !results.is_empty(),
             "should have at least one drift check result"

@@ -289,8 +289,9 @@ fn ext4_external_journal_recovery_replays_committed_transaction() {
     image[sb_off + 0xE4..sb_off + 0xE8].copy_from_slice(&1_u32.to_le_bytes());
     set_test_journal_uuid(&mut image, uuid);
 
-    let journal =
-        build_external_journal_image(BLOCK_SIZE, uuid, TARGET_BLOCK as u32, b"EXT-JBD2-REPLAY!");
+    let target_block =
+        u32::try_from(TARGET_BLOCK).expect("external journal target block should fit u32");
+    let journal = build_external_journal_image(BLOCK_SIZE, uuid, target_block, b"EXT-JBD2-REPLAY!");
     let tmp = tempfile::NamedTempFile::new().expect("create temp journal");
     std::fs::write(tmp.path(), &journal).expect("write external journal");
 
@@ -359,7 +360,7 @@ fn ext4_external_journal_uuid_mismatch_is_rejected() {
     let journal = build_external_journal_image(
         BLOCK_SIZE,
         other_uuid,
-        TARGET_BLOCK as u32,
+        u32::try_from(TARGET_BLOCK).expect("external journal target block should fit u32"),
         b"EXT-JBD2-REPLAY!",
     );
     let tmp = tempfile::NamedTempFile::new().expect("create temp journal");

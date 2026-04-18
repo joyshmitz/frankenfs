@@ -666,28 +666,25 @@ fn append_crc_valid_send_stream_command(
     stream.extend_from_slice(&command);
 }
 
-fn send_stream_attr<'a>(command: &'a ffs_btrfs::SendStreamCommand, attr: SendAttr) -> &'a [u8] {
+fn send_stream_attr(command: &ffs_btrfs::SendStreamCommand, attr: SendAttr) -> &[u8] {
     command
         .attrs
         .iter()
         .find_map(|(attr_id, value)| (*attr_id == attr as u16).then_some(value.as_slice()))
-        .unwrap_or_else(|| panic!("missing send attr {:?}", attr))
+        .unwrap_or_else(|| panic!("missing send attr {attr:?}"))
 }
 
 fn send_stream_attr_u64(command: &ffs_btrfs::SendStreamCommand, attr: SendAttr) -> u64 {
     let raw = send_stream_attr(command, attr);
     let bytes: [u8; 8] = raw
         .try_into()
-        .unwrap_or_else(|_| panic!("send attr {:?} should be 8 bytes, got {}", attr, raw.len()));
+        .unwrap_or_else(|_| panic!("send attr {attr:?} should be 8 bytes, got {}", raw.len()));
     u64::from_le_bytes(bytes)
 }
 
-fn send_stream_attr_string<'a>(
-    command: &'a ffs_btrfs::SendStreamCommand,
-    attr: SendAttr,
-) -> &'a str {
+fn send_stream_attr_string(command: &ffs_btrfs::SendStreamCommand, attr: SendAttr) -> &str {
     std::str::from_utf8(send_stream_attr(command, attr))
-        .unwrap_or_else(|err| panic!("send attr {:?} should be utf-8: {err}", attr))
+        .unwrap_or_else(|err| panic!("send attr {attr:?} should be utf-8: {err}"))
 }
 
 fn format_btrfs_send_uuid(uuid: &[u8]) -> String {
@@ -824,7 +821,7 @@ fn normalize_send_stream_for_btrfs_dump(parsed: &ffs_btrfs::SendStreamParseResul
                 normalized.push(format!("rename {path} dest={dest}"));
             }
             SendCommand::End => break,
-            other => panic!("unexpected send command in reference stream: {:?}", other),
+            other => panic!("unexpected send command in reference stream: {other:?}"),
         }
     }
 

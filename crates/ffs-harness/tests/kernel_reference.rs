@@ -598,7 +598,7 @@ fn capture_xattr_value(image: &Path, path: &str, name: &str) -> String {
 
     let attr = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|line| {
+        .find_map(|line| {
             let line = line.trim();
             if line.is_empty() || line.starts_with("debugfs") {
                 return None;
@@ -610,7 +610,6 @@ fn capture_xattr_value(image: &Path, path: &str, name: &str) -> String {
                 value: rhs.trim().trim_matches('"').to_string(),
             })
         })
-        .next()
         .unwrap_or_else(|| panic!("debugfs ea_get returned no xattr for {path} {name}"));
     assert_eq!(attr.name, name, "debugfs ea_get returned wrong xattr");
     attr.value
@@ -1339,7 +1338,7 @@ fn ext4_debugfs_vs_ffs_xattr_writer_reference() {
         .expect("read reference external xattr block");
     assert_eq!(
         canonicalize_xattr_block_for_writer_reference(&external_block),
-        canonicalize_xattr_block_for_writer_reference(&reference_block),
+        canonicalize_xattr_block_for_writer_reference(reference_block),
         "external xattr block bytes diverged from debugfs reference after checksum normalization"
     );
 }
@@ -1644,7 +1643,7 @@ fn ext4_dir_index_reference_image_materializes_real_htree() {
     let reader = Ext4ImageReader::new(&image).expect("parse ext4 image");
     assert_eq!(
         reader.sb.hash_seed,
-        [0x11111111, 0x33332222, 0x55554444, 0x55555555],
+        [0x1111_1111, 0x3333_2222, 0x5555_4444, 0x5555_5555],
         "dir_index reference image should pin the hash seed for reproducibility"
     );
     assert_eq!(

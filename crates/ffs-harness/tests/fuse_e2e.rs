@@ -29,6 +29,16 @@ use tempfile::TempDir;
 const EOPNOTSUPP_ERRNO: i64 = 95;
 const BTRFS_TEST_WORKSPACE: &str = "testdir";
 
+fn patterned_bytes(len: usize, modulus: usize, offset: usize) -> Vec<u8> {
+    assert!(
+        modulus + offset <= usize::from(u8::MAX) + 1,
+        "pattern byte range should fit u8"
+    );
+    (0..len)
+        .map(|i| u8::try_from((i % modulus) + offset).expect("pattern byte should fit u8"))
+        .collect()
+}
+
 fn command_available(name: &str) -> bool {
     Command::new("which")
         .arg(name)
@@ -39,7 +49,9 @@ fn command_available(name: &str) -> bool {
 fn emit_scenario_result(scenario_id: &str, outcome: &str, detail: Option<&str>) {
     match detail {
         Some(detail) => {
-            eprintln!("SCENARIO_RESULT|scenario_id={scenario_id}|outcome={outcome}|detail={detail}")
+            eprintln!(
+                "SCENARIO_RESULT|scenario_id={scenario_id}|outcome={outcome}|detail={detail}"
+            );
         }
         None => eprintln!("SCENARIO_RESULT|scenario_id={scenario_id}|outcome={outcome}"),
     }
@@ -637,7 +649,7 @@ finally:
 }
 
 fn assert_seek_data_hole_contract(path: &Path, scenario_id: &str) {
-    let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 251) + 1) as u8).collect();
+    let data = patterned_bytes(12_288, 251, 1);
     fs::write(path, &data).expect("seed seek test file");
 
     let out = Command::new("fallocate")
@@ -1233,7 +1245,7 @@ fn ext4_fuse_fallocate_zero_range_zeroes_range() {
     with_rw_mount(|mnt| {
         let scenario_id = "ext4_rw_fallocate_zero_range_zeroes_range";
         let path = mnt.join("ext4_zero_range.bin");
-        let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 253) + 1) as u8).collect();
+        let data = patterned_bytes(12_288, 253, 1);
         fs::write(&path, &data).expect("seed zero-range file on ext4");
 
         let out = Command::new("fallocate")
@@ -1281,7 +1293,7 @@ fn ext4_fuse_fallocate_punch_hole_keep_size_zeroes_range() {
     with_rw_mount(|mnt| {
         let scenario_id = "ext4_rw_fallocate_punch_hole_keep_size_zeroes_range";
         let path = mnt.join("ext4_punch_hole.bin");
-        let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 251) + 1) as u8).collect();
+        let data = patterned_bytes(12_288, 251, 1);
         fs::write(&path, &data).expect("seed punch-hole file on ext4");
 
         let out = Command::new("fallocate")
@@ -1549,9 +1561,12 @@ fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
             );
             return;
         }
-        let original = original_report["flags"]
-            .as_u64()
-            .expect("original flags u64") as u32;
+        let original = u32::try_from(
+            original_report["flags"]
+                .as_u64()
+                .expect("original flags u64"),
+        )
+        .expect("original flags should fit u32");
         assert_ne!(
             original & ffs_types::EXT4_EXTENTS_FL,
             0,
@@ -1577,7 +1592,8 @@ fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
         );
 
         let updated_report = ext4_inode_flags_ioctl(&path, "get", None);
-        let updated = updated_report["flags"].as_u64().expect("updated flags u64") as u32;
+        let updated = u32::try_from(updated_report["flags"].as_u64().expect("updated flags u64"))
+            .expect("updated flags should fit u32");
         assert_eq!(
             updated & (ffs_types::EXT4_NOATIME_FL | ffs_types::EXT4_NODUMP_FL),
             ffs_types::EXT4_NOATIME_FL | ffs_types::EXT4_NODUMP_FL,
@@ -1732,7 +1748,7 @@ fn fuse_write_large_file() {
     with_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
         // Write 64 KiB of patterned data (crosses multiple blocks).
-        let data: Vec<u8> = (0..65536_u32).map(|i| (i % 251) as u8).collect();
+        let data = patterned_bytes(65_536, 251, 0);
         fs::write(&path, &data).expect("write large file via FUSE");
 
         let readback = fs::read(&path).expect("read large file");
@@ -2922,7 +2938,7 @@ fn btrfs_fuse_write_large_file() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
         // Write 64 KiB of patterned data (crosses multiple blocks).
-        let data: Vec<u8> = (0..65536_u32).map(|i| (i % 251) as u8).collect();
+        let data = patterned_bytes(65_536, 251, 0);
         fs::write(&path, &data).expect("write large file on btrfs");
 
         let readback = fs::read(&path).expect("read large file on btrfs");
@@ -3018,7 +3034,7 @@ fn btrfs_fuse_fallocate_punch_hole_keep_size_zeroes_range() {
     with_btrfs_rw_mount(|mnt| {
         let scenario_id = "btrfs_rw_fallocate_punch_hole_keep_size_zeroes_range";
         let path = mnt.join("punch_hole.bin");
-        let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 251) + 1) as u8).collect();
+        let data = patterned_bytes(12_288, 251, 1);
         fs::write(&path, &data).expect("seed punch-hole file on btrfs");
 
         let out = Command::new("fallocate")
@@ -3067,7 +3083,7 @@ fn btrfs_fuse_fallocate_zero_range_zeroes_range() {
     with_btrfs_rw_mount(|mnt| {
         let scenario_id = "btrfs_rw_fallocate_zero_range_zeroes_range";
         let path = mnt.join("zero_range.bin");
-        let data: Vec<u8> = (0..12288_u32).map(|i| ((i % 253) + 1) as u8).collect();
+        let data = patterned_bytes(12_288, 253, 1);
         fs::write(&path, &data).expect("seed zero-range file on btrfs");
 
         let out = Command::new("fallocate")

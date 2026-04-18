@@ -6,11 +6,11 @@
 //! system, security, and trusted attribute namespaces.
 
 use ffs_error::{FfsError, Result};
-use ffs_ondisk::{parse_ibody_xattrs, parse_xattr_block, Ext4Inode, Ext4Xattr};
+use ffs_ondisk::{Ext4Inode, Ext4Xattr, parse_ibody_xattrs, parse_xattr_block};
 use ffs_types::{
-    ParseError, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
+    EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
     EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_SYSTEM, EXT4_XATTR_INDEX_TRUSTED,
-    EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC,
+    EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC, ParseError,
 };
 
 const INLINE_HEADER_LEN: usize = 4;
@@ -232,7 +232,7 @@ fn build_external_block(block_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u
     out[0..4].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
     out[4..8].copy_from_slice(&1_u32.to_le_bytes()); // h_refcount
     out[8..12].copy_from_slice(&1_u32.to_le_bytes()); // h_blocks
-                                                      // e2fsprogs/debugfs leaves h_hash unset when writing fresh EA blocks.
+    // e2fsprogs/debugfs leaves h_hash unset when writing fresh EA blocks.
     out[12..16].copy_from_slice(&0_u32.to_le_bytes());
 
     let encoded = encode_entries_region_with_hashes(

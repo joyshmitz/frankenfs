@@ -574,7 +574,7 @@ fn btrfs_tree_block_checksum_tamper_detection_conforms() {
         .expect("root logical covered");
 
     let mut data = std::fs::read(&image_path).unwrap();
-    let offset = mapping.physical as usize;
+    let offset = usize::try_from(mapping.physical).expect("physical offset should fit usize");
     let corrupt_offset = offset + usize::try_from(ctx.nodesize.min(0x80)).expect("nodesize usize");
     data[corrupt_offset] ^= 0xFF;
     std::fs::write(&image_path, data).unwrap();
@@ -798,7 +798,7 @@ fn build_ext4_featured_dir_image(
     let dir = dir + 12;
     image[dir..dir + 4].copy_from_slice(&11_u32.to_le_bytes());
     image[dir + 4..dir + 6].copy_from_slice(&4072_u16.to_le_bytes());
-    image[dir + 6] = raw_name.len() as u8;
+    image[dir + 6] = u8::try_from(raw_name.len()).expect("casefold test name length fits u8");
     image[dir + 7] = 1;
     image[dir + 8..dir + 8 + raw_name.len()].copy_from_slice(raw_name);
 
@@ -881,7 +881,7 @@ fn build_ext4_inline_data_image(inode_fixture: &str) -> Vec<u8> {
     let dir = dir + 12;
     image[dir..dir + 4].copy_from_slice(&11_u32.to_le_bytes());
     image[dir + 4..dir + 6].copy_from_slice(&4072_u16.to_le_bytes());
-    image[dir + 6] = name.len() as u8;
+    image[dir + 6] = u8::try_from(name.len()).expect("inline fixture name length fits u8");
     image[dir + 7] = 1;
     image[dir + 8..dir + 8 + name.len()].copy_from_slice(name);
 
@@ -1516,7 +1516,12 @@ fn ext4_fallocate_zero_range_zeroes_target_range() {
         .expect("zero-range middle block");
 
     let readback = fs
-        .read(&cx, ino, 0, payload.len() as u32)
+        .read(
+            &cx,
+            ino,
+            0,
+            u32::try_from(payload.len()).expect("payload length should fit u32"),
+        )
         .expect("read zero-range ext4 file");
     assert_eq!(readback.len(), payload.len());
     assert_eq!(&readback[..4096], &payload[..4096]);
@@ -1589,15 +1594,17 @@ fn ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only() {
     assert_eq!(&target[..16], b"JBD2-REPLAY-TEST");
 }
 
-#[allow(clippy::cast_possible_truncation)]
 fn append_send_stream_command(stream: &mut Vec<u8>, cmd: u16, attrs: &[(u16, &[u8])]) {
     let payload_len: usize = attrs.iter().map(|(_, value)| 4 + value.len()).sum();
-    stream.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    let payload_len =
+        u32::try_from(payload_len).expect("send stream command payload length fits u32");
+    stream.extend_from_slice(&payload_len.to_le_bytes());
     stream.extend_from_slice(&cmd.to_le_bytes());
     stream.extend_from_slice(&0_u32.to_le_bytes());
     for (attr, value) in attrs {
         stream.extend_from_slice(&attr.to_le_bytes());
-        stream.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        let value_len = u16::try_from(value.len()).expect("send stream attr length fits u16");
+        stream.extend_from_slice(&value_len.to_le_bytes());
         stream.extend_from_slice(value);
     }
 }
@@ -1712,6 +1719,11 @@ fn write_btrfs_header(
     block[0x64] = level;
 }
 
+fn stamp_btrfs_tree_block_checksum(block: &mut [u8]) {
+    let csum = ffs_types::crc32c(&block[0x20..]);
+    block[0..4].copy_from_slice(&csum.to_le_bytes());
+}
+
 fn write_btrfs_leaf_item(
     block: &mut [u8],
     idx: usize,
@@ -1750,7 +1762,8 @@ fn write_btrfs_key_ptr(
     block[base + 25..base + 33].copy_from_slice(&generation.to_le_bytes());
 }
 
-fn build_chunk_item_payload(
+#[derive(Clone, Copy)]
+struct ChunkItemPayload {
     length: u64,
     owner: u64,
     stripe_len: u64,
@@ -1760,19 +1773,21 @@ fn build_chunk_item_payload(
     sector_size: u32,
     devid: u64,
     physical_offset: u64,
-) -> Vec<u8> {
+}
+
+fn build_chunk_item_payload(params: ChunkItemPayload) -> Vec<u8> {
     let mut data = vec![0_u8; 48 + 32];
-    data[0..8].copy_from_slice(&length.to_le_bytes());
-    data[8..16].copy_from_slice(&owner.to_le_bytes());
-    data[16..24].copy_from_slice(&stripe_len.to_le_bytes());
-    data[24..32].copy_from_slice(&chunk_type.to_le_bytes());
-    data[32..36].copy_from_slice(&io_align.to_le_bytes());
-    data[36..40].copy_from_slice(&io_width.to_le_bytes());
-    data[40..44].copy_from_slice(&sector_size.to_le_bytes());
+    data[0..8].copy_from_slice(&params.length.to_le_bytes());
+    data[8..16].copy_from_slice(&params.owner.to_le_bytes());
+    data[16..24].copy_from_slice(&params.stripe_len.to_le_bytes());
+    data[24..32].copy_from_slice(&params.chunk_type.to_le_bytes());
+    data[32..36].copy_from_slice(&params.io_align.to_le_bytes());
+    data[36..40].copy_from_slice(&params.io_width.to_le_bytes());
+    data[40..44].copy_from_slice(&params.sector_size.to_le_bytes());
     data[44..46].copy_from_slice(&1_u16.to_le_bytes());
     data[46..48].copy_from_slice(&0_u16.to_le_bytes());
-    data[48..56].copy_from_slice(&devid.to_le_bytes());
-    data[56..64].copy_from_slice(&physical_offset.to_le_bytes());
+    data[48..56].copy_from_slice(&params.devid.to_le_bytes());
+    data[56..64].copy_from_slice(&params.physical_offset.to_le_bytes());
     data
 }
 
@@ -1933,6 +1948,7 @@ fn build_btrfs_regular_extent_mount_image(
     root_item[last] = 0;
     let root_item_off = usize::try_from(BTRFS_TEST_ROOT_ITEM_OFF).expect("root item offset");
     root_leaf[root_item_off..root_item_off + root_item.len()].copy_from_slice(&root_item);
+    stamp_btrfs_tree_block_checksum(&mut root_leaf);
     let root_leaf_off =
         usize::try_from(BTRFS_TEST_ROOT_TREE_LOGICAL).expect("root tree logical should fit");
     image[root_leaf_off..root_leaf_off + root_leaf.len()].copy_from_slice(&root_leaf);
@@ -1999,6 +2015,7 @@ fn build_btrfs_regular_extent_mount_image(
     fs_leaf[file_inode_off..file_inode_off + file_inode.len()].copy_from_slice(&file_inode);
     let extent_off = usize::try_from(BTRFS_TEST_EXTENT_OFF).expect("extent offset");
     fs_leaf[extent_off..extent_off + extent.len()].copy_from_slice(&extent);
+    stamp_btrfs_tree_block_checksum(&mut fs_leaf);
     let fs_leaf_off =
         usize::try_from(BTRFS_TEST_FS_TREE_LOGICAL).expect("fs tree logical should fit");
     image[fs_leaf_off..fs_leaf_off + fs_leaf.len()].copy_from_slice(&fs_leaf);
@@ -2015,10 +2032,10 @@ fn build_btrfs_subvolume_mount_image() -> Vec<u8> {
     build_btrfs_regular_extent_mount_image(b"hello.txt", file_bytes, file_bytes, 0)
 }
 
-fn open_btrfs_test_image(image_name: &str, image: Vec<u8>) -> (OpenFs, tempfile::TempDir) {
+fn open_btrfs_test_image(image_name: &str, image: &[u8]) -> (OpenFs, tempfile::TempDir) {
     let tmp = tempfile::TempDir::new().expect("tmpdir for btrfs test image");
     let image_path = tmp.path().join(image_name);
-    std::fs::write(&image_path, &image).expect("write btrfs test image");
+    std::fs::write(&image_path, image).expect("write btrfs test image");
     let cx = Cx::for_testing();
     let fs = OpenFs::open_with_options(&cx, &image_path, &OpenOptions::default())
         .expect("open btrfs test image");
@@ -2080,12 +2097,15 @@ fn open_btrfs_transparent_decompression_image(
     };
     let image =
         build_btrfs_regular_extent_mount_image(file_name.as_bytes(), &logical, &compressed, codec);
-    let (fs, tmp) = open_btrfs_test_image(image_name, image);
+    let (fs, tmp) = open_btrfs_test_image(image_name, &image);
     (fs, tmp, logical)
 }
 
 fn open_btrfs_subvolume_mount_image() -> (OpenFs, tempfile::TempDir) {
-    open_btrfs_test_image("subvolume-mount.btrfs", build_btrfs_subvolume_mount_image())
+    open_btrfs_test_image(
+        "subvolume-mount.btrfs",
+        &build_btrfs_subvolume_mount_image(),
+    )
 }
 
 #[test]
@@ -2258,6 +2278,8 @@ fn btrfs_tree_log_replay_multilevel_conforms() {
     write_btrfs_leaf_item(&mut leaf, 1, 257, BTRFS_ITEM_INODE_ITEM, 0, beta_off, 4);
     leaf[beta_off as usize..(beta_off + 4) as usize].copy_from_slice(b"beta");
 
+    stamp_btrfs_tree_block_checksum(&mut root);
+    stamp_btrfs_tree_block_checksum(&mut leaf);
     let blocks: HashMap<u64, Vec<u8>> = [(root_physical, root), (leaf_physical, leaf)]
         .into_iter()
         .collect();
@@ -2321,17 +2343,17 @@ fn btrfs_chunk_tree_walk_adds_and_sorts_new_chunks() {
         BTRFS_CHUNK_TREE_OBJECTID,
         77,
     );
-    let payload = build_chunk_item_payload(
-        0x20_000,
-        2,
-        0x10_000,
-        1,
-        BTRFS_TEST_NODESIZE,
-        BTRFS_TEST_NODESIZE,
-        BTRFS_TEST_NODESIZE,
-        2,
-        0x90_000,
-    );
+    let payload = build_chunk_item_payload(ChunkItemPayload {
+        length: 0x20_000,
+        owner: 2,
+        stripe_len: 0x10_000,
+        chunk_type: 1,
+        io_align: BTRFS_TEST_NODESIZE,
+        io_width: BTRFS_TEST_NODESIZE,
+        sector_size: BTRFS_TEST_NODESIZE,
+        devid: 2,
+        physical_offset: 0x90_000,
+    });
     let data_off = 3500_u32;
     write_btrfs_leaf_item(
         &mut leaf,
@@ -2344,7 +2366,8 @@ fn btrfs_chunk_tree_walk_adds_and_sorts_new_chunks() {
     );
     let end = data_off as usize + payload.len();
     leaf[data_off as usize..end].copy_from_slice(&payload);
-    let blocks: HashMap<u64, Vec<u8>> = [(0x80_000_u64, leaf)].into_iter().collect();
+    stamp_btrfs_tree_block_checksum(&mut leaf);
+    let blocks: HashMap<u64, Vec<u8>> = std::iter::once((0x80_000_u64, leaf)).collect();
     let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
         blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
             field: "physical",
@@ -2427,6 +2450,8 @@ fn btrfs_device_tree_walk_enumerates_all_devices() {
     let second_end = second_off as usize + second_payload.len();
     leaf[second_off as usize..second_end].copy_from_slice(&second_payload);
 
+    stamp_btrfs_tree_block_checksum(&mut root);
+    stamp_btrfs_tree_block_checksum(&mut leaf);
     let blocks: HashMap<u64, Vec<u8>> = [(root_physical, root), (leaf_physical, leaf)]
         .into_iter()
         .collect();
@@ -2527,7 +2552,6 @@ fn btrfs_multi_device_dup_read_conforms() {
         }),
     );
 
-    let cx = Cx::for_testing();
     // Read from logical (picks first mirror)
     let res1 = devices
         .read_logical(&chunks, logical, 4)
@@ -2606,14 +2630,13 @@ fn btrfs_multi_device_raid6_read_conforms() {
         }),
     );
 
-    // For stripe_nr=1, rot=1. p_pos=(4-1-1)%4=2 (dev3), q_pos=(4-2+4-1)%4=1 (dev2).
-    // Data at dev1, dev4.
+    // Row 0 has P=dev4 and Q=dev3, so the two data stripes are dev1 and dev2.
     let d2 = Arc::clone(&data2);
     devices.add_device(
-        4,
+        2,
         Box::new(move |physical, len| {
             assert_eq!(len, 4);
-            if physical == 0x410_000 {
+            if physical == 0x200_000 {
                 Ok((*d2).clone())
             } else {
                 Err(ParseError::InvalidField {
@@ -2624,14 +2647,13 @@ fn btrfs_multi_device_raid6_read_conforms() {
         }),
     );
 
-    let cx = Cx::for_testing();
     // Read stripe 0 (data1)
     let res1 = devices
         .read_logical(&chunks, logical, 4)
         .expect("read RAID6 data1");
     assert_eq!(res1, vec![0x66_u8; 4]);
 
-    // Read stripe 1 (data2)
+    // Read row 0, data stripe 1.
     let res2 = devices
         .read_logical(&chunks, logical + stripe_len, 4)
         .expect("read RAID6 data2");
@@ -2700,7 +2722,7 @@ fn btrfs_multi_device_raid10_read_conforms() {
     devices.add_device(
         2,
         Box::new(move |physical, len| {
-            assert_eq!(physical, 0x100_000);
+            assert_eq!(physical, 0x200_000);
             assert_eq!(len, 4);
             Ok(b"mir0".to_vec())
         }),
@@ -2708,13 +2730,12 @@ fn btrfs_multi_device_raid10_read_conforms() {
     devices.add_device(
         4,
         Box::new(move |physical, len| {
-            assert_eq!(physical, 0x300_000);
+            assert_eq!(physical, 0x400_000);
             assert_eq!(len, 4);
             Ok(b"mir1".to_vec())
         }),
     );
 
-    let cx = Cx::for_testing();
     // Read from stripe 0 (should fall back to dev2)
     let res1 = devices
         .read_logical(&chunks, logical, 4)
@@ -2775,7 +2796,8 @@ fn btrfs_multi_device_raid5_read_conforms() {
 
     // In RAID5, data is striped.
     // Stripe 0: dev1:0x100_000, dev2:0x200_000, dev3:0x300_000 (P)
-    // Stripe 1: dev1:0x110_000 (P), dev2:0x210_000, dev3:0x310_000
+    // Row 1 starts at the next full RAID5 row: dev1:0x110_000 (P),
+    // dev2:0x210_000, dev3:0x310_000.
 
     let d1 = Arc::clone(&data1);
     devices.add_device(
@@ -2798,7 +2820,7 @@ fn btrfs_multi_device_raid5_read_conforms() {
         2,
         Box::new(move |physical, len| {
             assert_eq!(len, 4);
-            if physical == 0x210_000 {
+            if physical == 0x200_000 {
                 Ok((*d2).clone())
             } else {
                 Err(ParseError::InvalidField {
@@ -2825,8 +2847,7 @@ fn btrfs_multi_device_raid5_read_conforms() {
         .expect("read RAID5 data1");
     assert_eq!(res1, vec![0x11_u8; 4]);
 
-    // Read from logical 0x50_000 + stripe_len (stripe 1, data 2)
-    // Stripe 1 for logical 0x60_000 should map to dev2:0x210_000
+    // Read row 0, data stripe 1. Row 0 has parity on dev3, so this maps to dev2:0x200_000.
     let res2 = devices
         .read_logical(&chunks, logical + stripe_len, 4)
         .expect("read RAID5 data2");
@@ -3144,7 +3165,7 @@ fn ext4_mmp_block_fixture_conforms() {
 
     assert_eq!(mmp.magic, 0x004D_4D50, "should have MMP magic");
     assert_eq!(mmp.seq, 0xFF4D_4D50, "should have clean seq");
-    assert_eq!(mmp.time, 1700000000, "time should be 1700000000");
+    assert_eq!(mmp.time, 1_700_000_000, "time should be 1700000000");
     assert_eq!(mmp.nodename, "ffs-node-01", "nodename should match");
     assert_eq!(mmp.bdevname, "/dev/nvme0n1", "bdevname should match");
     assert_eq!(mmp.check_interval, 5, "check_interval should be 5");
@@ -3603,24 +3624,16 @@ fn validate_legacy_fixture_goldens(workspace: &Path) {
     let actual_json_set = actual_json_files.iter().cloned().collect::<HashSet<_>>();
     let checksum_json_set = checksum_inventory.keys().cloned().collect::<HashSet<_>>();
 
-    let missing_from_checksums = sorted_names(
-        actual_json_set
-            .difference(&checksum_json_set)
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
+    let missing_from_checksums =
+        sorted_names(actual_json_set.difference(&checksum_json_set).cloned());
     assert!(
         missing_from_checksums.is_empty(),
         "tests/fixtures/golden/checksums.txt is missing entries for: {}",
         missing_from_checksums.join(", ")
     );
 
-    let extra_checksum_entries = sorted_names(
-        checksum_json_set
-            .difference(&actual_json_set)
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
+    let extra_checksum_entries =
+        sorted_names(checksum_json_set.difference(&actual_json_set).cloned());
     assert!(
         extra_checksum_entries.is_empty(),
         "tests/fixtures/golden/checksums.txt references missing files: {}",
