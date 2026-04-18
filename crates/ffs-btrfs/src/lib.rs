@@ -1134,6 +1134,8 @@ pub struct InMemoryCowBtrfsTree {
     root: u64,
     allocator: Box<dyn BtrfsAllocator>,
     deferred_frees: Vec<u64>,
+    staged_allocations: Vec<u64>,
+    staged_deferred_frees: Vec<u64>,
     nodes: BTreeMap<u64, BtrfsCowNode>,
 }
 
@@ -1162,6 +1164,8 @@ impl InMemoryCowBtrfsTree {
             root,
             allocator,
             deferred_frees: Vec::new(),
+            staged_allocations: Vec::new(),
+            staged_deferred_frees: Vec::new(),
             nodes,
         })
     }
@@ -1211,14 +1215,42 @@ impl InMemoryCowBtrfsTree {
     fn alloc_node(&mut self, node: BtrfsCowNode) -> Result<u64, BtrfsMutationError> {
         let block = self.allocator.alloc_block()?;
         self.nodes.insert(block, node);
+        self.staged_allocations.push(block);
         trace!(block, "btrfs_cow_alloc_node");
         Ok(block)
     }
 
     fn retire_node(&mut self, block: u64) {
-        self.allocator.defer_free(block);
-        self.deferred_frees.push(block);
+        self.staged_deferred_frees.push(block);
         trace!(block, "btrfs_cow_defer_free");
+    }
+
+    fn commit_retired_nodes(&mut self) {
+        for block in self.staged_deferred_frees.drain(..) {
+            self.allocator.defer_free(block);
+            self.deferred_frees.push(block);
+        }
+    }
+
+    fn commit_allocated_nodes(&mut self) {
+        self.staged_allocations.clear();
+    }
+
+    fn discard_retired_nodes(&mut self) {
+        self.staged_deferred_frees.clear();
+    }
+
+    fn rollback_allocated_nodes(&mut self) {
+        for block in self.staged_allocations.drain(..).rev() {
+            self.nodes.remove(&block);
+            self.allocator.defer_free(block);
+            trace!(block, "btrfs_cow_rollback_alloc");
+        }
+    }
+
+    fn rollback_mutation(&mut self) {
+        self.discard_retired_nodes();
+        self.rollback_allocated_nodes();
     }
 
     fn child_slot(keys: &[BtrfsKey], key: &BtrfsKey) -> usize {
@@ -1232,6 +1264,8 @@ impl InMemoryCowBtrfsTree {
         entry: BtrfsTreeItem,
         allow_replace: bool,
     ) -> Result<u64, BtrfsMutationError> {
+        debug_assert!(self.staged_allocations.is_empty());
+        debug_assert!(self.staged_deferred_frees.is_empty());
         let old_root = self.root;
         trace!(
             root = old_root,
@@ -1241,24 +1275,39 @@ impl InMemoryCowBtrfsTree {
             allow_replace,
             "btrfs_cow_insert_start"
         );
-        let result = self.insert_into(self.root, entry, allow_replace)?;
-        self.root = result.node_id;
-        if let Some((separator, right_id)) = result.split {
+        let result = match self.insert_into(self.root, entry, allow_replace) {
+            Ok(result) => result,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        let new_root = if let Some((separator, right_id)) = result.split {
             debug!(
                 old_root,
-                left_root = self.root,
+                left_root = result.node_id,
                 right_root = right_id,
                 separator_objectid = separator.objectid,
                 separator_type = separator.item_type,
                 separator_offset = separator.offset,
                 "btrfs_cow_root_split"
             );
-            let new_root = self.alloc_node(BtrfsCowNode::Internal {
+            match self.alloc_node(BtrfsCowNode::Internal {
                 keys: vec![separator],
-                children: vec![self.root, right_id],
-            })?;
-            self.root = new_root;
-        }
+                children: vec![result.node_id, right_id],
+            }) {
+                Ok(new_root) => new_root,
+                Err(err) => {
+                    self.rollback_mutation();
+                    return Err(err);
+                }
+            }
+        } else {
+            result.node_id
+        };
+        self.root = new_root;
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
         trace!(old_root, new_root = self.root, "btrfs_cow_insert_complete");
         Ok(self.root)
     }
@@ -1729,9 +1778,9 @@ impl InMemoryCowBtrfsTree {
         }
     }
 
-    fn normalize_root_after_delete(&mut self) -> Result<(), BtrfsMutationError> {
+    fn normalized_root_after_delete(&mut self, mut root: u64) -> Result<u64, BtrfsMutationError> {
         loop {
-            let root_node = self.node_ref(self.root)?.clone();
+            let root_node = self.node_ref(root)?.clone();
             let BtrfsCowNode::Internal { children, .. } = root_node else {
                 break;
             };
@@ -1743,11 +1792,11 @@ impl InMemoryCowBtrfsTree {
                     "internal node must have children",
                 ));
             };
-            let old_root = self.root;
-            self.root = *child;
+            let old_root = root;
+            root = *child;
             self.retire_node(old_root);
         }
-        Ok(())
+        Ok(root)
     }
 
     fn find(&self, key: &BtrfsKey) -> Result<Option<Vec<u8>>, BtrfsMutationError> {
@@ -1933,6 +1982,8 @@ impl BtrfsBTree for InMemoryCowBtrfsTree {
     }
 
     fn delete(&mut self, key: &BtrfsKey) -> Result<u64, BtrfsMutationError> {
+        debug_assert!(self.staged_allocations.is_empty());
+        debug_assert!(self.staged_deferred_frees.is_empty());
         let old_root = self.root;
         trace!(
             root = old_root,
@@ -1941,12 +1992,27 @@ impl BtrfsBTree for InMemoryCowBtrfsTree {
             offset = key.offset,
             "btrfs_cow_delete_start"
         );
-        let deleted = self.delete_from(self.root, key)?;
+        let deleted = match self.delete_from(self.root, key) {
+            Ok(deleted) => deleted,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
         if !deleted.deleted {
+            self.rollback_mutation();
             return Err(BtrfsMutationError::KeyNotFound);
         }
-        self.root = deleted.node_id;
-        self.normalize_root_after_delete()?;
+        let new_root = match self.normalized_root_after_delete(deleted.node_id) {
+            Ok(new_root) => new_root,
+            Err(err) => {
+                self.rollback_mutation();
+                return Err(err);
+            }
+        };
+        self.root = new_root;
+        self.commit_allocated_nodes();
+        self.commit_retired_nodes();
         trace!(old_root, new_root = self.root, "btrfs_cow_delete_complete");
         Ok(self.root)
     }
@@ -2653,7 +2719,10 @@ impl BtrfsExtentAllocator {
         // We must include both EXTENT_ITEM (168) and METADATA_ITEM (169)
         // as both represent physical space allocations.
         let bg = &self.block_groups[&bg_start];
-        let bg_end = bg.start + bg.item.total_bytes;
+        let bg_end = bg
+            .start
+            .checked_add(bg.item.total_bytes)
+            .ok_or(BtrfsMutationError::AddressOverflow)?;
 
         let range_start = BtrfsKey {
             objectid: bg.start,
@@ -2671,7 +2740,9 @@ impl BtrfsExtentAllocator {
 
         // Scan for gaps between existing extents.
         let alloc_offset = self.block_groups[&bg_start].alloc_offset;
-        let mut cursor = bg_start + alloc_offset;
+        let mut cursor = bg_start
+            .checked_add(alloc_offset)
+            .ok_or(BtrfsMutationError::AddressOverflow)?;
 
         let allocated_ranges: Vec<(u64, u64)> = extents
             .iter()
@@ -2681,7 +2752,9 @@ impl BtrfsExtentAllocator {
         let mut found = None;
         // Try from alloc_offset first, then wrap around.
         for &(ext_start, ext_size) in &allocated_ranges {
-            let ext_end = ext_start + ext_size;
+            let ext_end = ext_start
+                .checked_add(ext_size)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
             if cursor < ext_start {
                 let gap = ext_start - cursor;
                 if gap >= num_bytes {
@@ -2694,14 +2767,20 @@ impl BtrfsExtentAllocator {
             }
         }
         // Check gap after last extent.
-        if found.is_none() && cursor + num_bytes <= bg_end {
-            found = Some(cursor);
+        if found.is_none() {
+            if let Some(end) = cursor.checked_add(num_bytes) {
+                if end <= bg_end {
+                    found = Some(cursor);
+                }
+            }
         }
         // Wrap around: try from block group start if we started mid-group.
         if found.is_none() && alloc_offset > 0 {
             cursor = bg_start;
             for &(ext_start, ext_size) in &allocated_ranges {
-                let ext_end = ext_start + ext_size;
+                let ext_end = ext_start
+                    .checked_add(ext_size)
+                    .ok_or(BtrfsMutationError::AddressOverflow)?;
                 if cursor < ext_start {
                     let gap = ext_start - cursor;
                     if gap >= num_bytes {
@@ -2713,8 +2792,12 @@ impl BtrfsExtentAllocator {
                     cursor = ext_end;
                 }
             }
-            if found.is_none() && cursor + num_bytes <= bg_end {
-                found = Some(cursor);
+            if found.is_none() {
+                if let Some(end) = cursor.checked_add(num_bytes) {
+                    if end <= bg_end {
+                        found = Some(cursor);
+                    }
+                }
             }
         }
 
@@ -2764,7 +2847,12 @@ impl BtrfsExtentAllocator {
         if let Some(bg) = self.block_groups.get_mut(&bg_start) {
             let used_before = bg.item.used_bytes;
             bg.item.used_bytes += num_bytes;
-            bg.alloc_offset = (bytenr + num_bytes) - bg_start;
+            let alloc_end = bytenr
+                .checked_add(num_bytes)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            bg.alloc_offset = alloc_end
+                .checked_sub(bg_start)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
             trace!(
                 target: "ffs::btrfs::alloc",
                 block_group = bg_start,
@@ -2840,7 +2928,10 @@ impl BtrfsExtentAllocator {
         // Update block group accounting.
         let mut owning_bg = None;
         for bg in self.block_groups.values_mut() {
-            let bg_end = bg.start + bg.item.total_bytes;
+            let bg_end = bg
+                .start
+                .checked_add(bg.item.total_bytes)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
             if bytenr >= bg.start && bytenr < bg_end {
                 let used_before = bg.item.used_bytes;
                 bg.item.used_bytes = bg.item.used_bytes.saturating_sub(num_bytes);
@@ -2982,6 +3073,13 @@ fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry,
     let num_stripes = read_le_u16(data, 44)?;
     let sub_stripes = read_le_u16(data, 46)?;
 
+    let raid_bits = chunk_type & chunk_type_flags::RAID_MASK;
+    if raid_bits.count_ones() > 1 {
+        return Err(ParseError::InvalidField {
+            field: "chunk_type",
+            reason: "multiple RAID profiles set",
+        });
+    }
     if length == 0 {
         return Err(ParseError::InvalidField {
             field: "chunk_length",
@@ -3507,6 +3605,7 @@ mod tests {
     use super::*;
     use ffs_ondisk::{BtrfsStripe, BtrfsSuperblock};
     use std::collections::{BTreeMap, HashMap};
+    use std::sync::{Arc, Mutex};
 
     const NODESIZE: u32 = 4096;
     const HEADER_SIZE: usize = 101;
@@ -3539,6 +3638,11 @@ mod tests {
         block[0x58..0x60].copy_from_slice(&owner.to_le_bytes());
         block[0x60..0x64].copy_from_slice(&nritems.to_le_bytes());
         block[0x64] = level;
+    }
+
+    fn stamp_tree_block_crc32c(block: &mut [u8]) {
+        let csum = ffs_types::crc32c(&block[0x20..]);
+        block[0..4].copy_from_slice(&csum.to_le_bytes());
     }
 
     /// Write a leaf item entry at the given index.
@@ -3613,6 +3717,7 @@ mod tests {
         write_header(&mut leaf, root_logical, 1, 0, BTRFS_CHUNK_TREE_OBJECTID, 1);
         let data_off = NODESIZE.saturating_sub(16);
         write_leaf_item(&mut leaf, 0, 256, BTRFS_ITEM_CHUNK, data_off, 16);
+        stamp_tree_block_crc32c(&mut leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [(root_logical, leaf)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -3668,6 +3773,7 @@ mod tests {
         // Item 1: key=(257,1,0), data at [3010..3025]
         write_leaf_item(&mut leaf, 1, 257, 1, 3010, 15);
         leaf[3010..3025].copy_from_slice(&[0xBB; 15]);
+        stamp_tree_block_crc32c(&mut leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [(logical, leaf)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -3709,6 +3815,10 @@ mod tests {
         write_header(&mut right_leaf, right_logical, 1, 0, 5, 10);
         write_leaf_item(&mut right_leaf, 0, 512, 1, 2000, 4);
         right_leaf[2000..2004].copy_from_slice(&[5, 6, 7, 8]);
+
+        stamp_tree_block_crc32c(&mut root);
+        stamp_tree_block_crc32c(&mut left_leaf);
+        stamp_tree_block_crc32c(&mut right_leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [
             (root_logical, root),
@@ -3784,6 +3894,7 @@ mod tests {
         let mut root = vec![0_u8; NODESIZE as usize];
         write_header(&mut root, root_logical, 1, 1, 1, 10);
         write_key_ptr(&mut root, 0, 256, 1, unaligned_child, 10);
+        stamp_tree_block_crc32c(&mut root);
 
         let blocks: HashMap<u64, Vec<u8>> = [(root_logical, root)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -3810,6 +3921,7 @@ mod tests {
 
         let mut leaf = vec![0_u8; NODESIZE as usize];
         write_header(&mut leaf, logical, 0, 0, 5, 10);
+        stamp_tree_block_crc32c(&mut leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [(logical, leaf)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -3831,6 +3943,7 @@ mod tests {
         let mut root = vec![0_u8; NODESIZE as usize];
         write_header(&mut root, root_logical, 1, 1, 1, 10);
         write_key_ptr(&mut root, 0, 256, 1, root_logical, 10);
+        stamp_tree_block_crc32c(&mut root);
 
         let blocks: HashMap<u64, Vec<u8>> = [(root_logical, root)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -3864,6 +3977,9 @@ mod tests {
         write_header(&mut b, b_logical, 1, 1, 1, 10);
         write_key_ptr(&mut b, 0, 256, 1, a_logical, 10);
 
+        stamp_tree_block_crc32c(&mut a);
+        stamp_tree_block_crc32c(&mut b);
+
         let blocks: HashMap<u64, Vec<u8>> = [(a_logical, a), (b_logical, b)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
             blocks.get(&phys).cloned().ok_or(ParseError::InvalidField {
@@ -3895,6 +4011,9 @@ mod tests {
 
         let mut leaf = vec![0_u8; NODESIZE as usize];
         write_header(&mut leaf, leaf_logical, 0, 0, 5, 10);
+
+        stamp_tree_block_crc32c(&mut root);
+        stamp_tree_block_crc32c(&mut leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [(root_logical, root), (leaf_logical, leaf)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -4021,6 +4140,32 @@ mod tests {
     }
 
     #[test]
+    fn delete_underflow_borrows_from_left_sibling() {
+        let mut tree = InMemoryCowBtrfsTree::new(4).expect("tree");
+        for objectid in [10_u64, 20, 30, 40, 50, 5] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("insert");
+        }
+        tree.delete(&test_key(50)).expect("seed delete");
+
+        tree.delete(&test_key(40)).expect("left borrow delete");
+        let keys = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range query")
+            .iter()
+            .map(|(key, _)| key.objectid)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec![5, 10, 20, 30]);
+        assert_eq!(tree.height().expect("height"), 2);
+        assert!(matches!(
+            tree.node_snapshot(tree.root_block())
+                .expect("root snapshot"),
+            BtrfsCowNode::Internal { .. }
+        ));
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
     fn delete_underflow_merges_and_shrinks_root() {
         let mut tree = InMemoryCowBtrfsTree::new(4).expect("tree");
         for objectid in 1_u64..=5 {
@@ -4063,6 +4208,46 @@ mod tests {
         let entries = tree.range(&key, &key).expect("point range");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1, b"new");
+    }
+
+    #[test]
+    fn update_internal_child_rewrites_parent_and_preserves_order() {
+        let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
+        for objectid in [10_u64, 20, 30, 40] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("insert");
+        }
+        assert_eq!(tree.height().expect("height before"), 2);
+        let root_before = tree.root_block();
+        let root_snapshot = tree.node_snapshot(root_before).expect("root snapshot");
+
+        tree.update(&test_key(20), b"updated")
+            .expect("update internal child");
+
+        assert_ne!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.node_snapshot(root_before).expect("old root snapshot"),
+            root_snapshot
+        );
+        assert!(matches!(
+            tree.node_snapshot(tree.root_block())
+                .expect("new root snapshot"),
+            BtrfsCowNode::Internal { .. }
+        ));
+        let entries = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range query");
+        let keys = entries
+            .iter()
+            .map(|(key, _)| key.objectid)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec![10, 20, 30, 40]);
+        assert_eq!(entries[0].1, test_payload(10));
+        assert_eq!(entries[1].1, b"updated");
+        assert_eq!(entries[2].1, test_payload(30));
+        assert_eq!(entries[3].1, test_payload(40));
+        assert_eq!(tree.height().expect("height after"), 2);
+        tree.validate_invariants().expect("invariants");
     }
 
     #[test]
@@ -4128,6 +4313,564 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cow_adversarial_duplicate_insert_short_circuits_without_mutation() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        tree.insert(test_key(10), b"old").expect("seed insert");
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(0));
+        let err = tree
+            .insert(test_key(10), b"duplicate")
+            .expect_err("duplicate insert should short-circuit before allocation");
+        assert_eq!(err, BtrfsMutationError::KeyAlreadyExists);
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after duplicate insert"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 0);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_missing_update_short_circuits_without_mutation() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        for objectid in [10_u64, 20, 30] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(0));
+        let err = tree
+            .update(&test_key(40), b"missing")
+            .expect_err("missing update should short-circuit before allocation");
+        assert_eq!(err, BtrfsMutationError::KeyNotFound);
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after missing update"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 0);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_missing_delete_short_circuits_without_mutation() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        for objectid in [10_u64, 20, 30, 40] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+        assert_eq!(tree.height().expect("height"), 2);
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(0));
+        let err = tree
+            .delete(&test_key(25))
+            .expect_err("missing delete should short-circuit before allocation");
+        assert_eq!(err, BtrfsMutationError::KeyNotFound);
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after missing delete"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 0);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_leaf_split_left_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        for objectid in [10_u64, 20, 30] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(0));
+        let err = tree
+            .insert(test_key(40), b"d")
+            .expect_err("left split allocation should fail before publishing a root");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after failed left split allocation"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 0);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_leaf_split_right_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        for objectid in [10_u64, 20, 30] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(1));
+        let err = tree
+            .insert(test_key(40), b"d")
+            .expect_err("right split allocation should fail before publishing a root");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after failed right split allocation"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 1);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_root_split_allocator_failure_is_not_visible() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        for objectid in [10_u64, 20, 30] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(2));
+        let err = tree
+            .insert(test_key(40), b"d")
+            .expect_err("new root allocation should fail after split children allocate");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after failed split"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 2);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    fn seed_cow_tree_for_internal_split(tree: &mut InMemoryCowBtrfsTree) {
+        for objectid in [10_u64, 20, 30, 40, 50, 60, 70, 80, 90] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+        assert_eq!(tree.height().expect("height"), 2);
+        assert!(matches!(
+            tree.node_snapshot(tree.root_block())
+                .expect("root snapshot"),
+            BtrfsCowNode::Internal { keys, .. } if keys.len() == 3
+        ));
+    }
+
+    #[test]
+    fn cow_insert_internal_split_creates_higher_root_and_preserves_order() {
+        let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
+        seed_cow_tree_for_internal_split(&mut tree);
+
+        tree.insert(test_key(100), &test_payload(100))
+            .expect("insert triggering internal split");
+
+        assert_eq!(tree.height().expect("height"), 3);
+        assert!(matches!(
+            tree.node_snapshot(tree.root_block())
+                .expect("root snapshot"),
+            BtrfsCowNode::Internal { keys, children } if keys.len() == 1 && children.len() == 2
+        ));
+        let keys = tree
+            .range(&test_key(0), &test_key(200))
+            .expect("range query")
+            .iter()
+            .map(|(key, _)| key.objectid)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_internal_split_left_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        seed_cow_tree_for_internal_split(&mut tree);
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(200))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(2));
+        let err = tree
+            .insert(test_key(100), &test_payload(100))
+            .expect_err("left internal split allocation should fail after leaf split allocates");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(200))
+                .expect("range after failed internal split left allocation"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 2);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_internal_split_right_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        seed_cow_tree_for_internal_split(&mut tree);
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(200))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(3));
+        let err = tree.insert(test_key(100), &test_payload(100)).expect_err(
+            "right internal split allocation should fail after left internal allocates",
+        );
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(200))
+                .expect("range after failed internal split right allocation"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 3);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_internal_root_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        seed_cow_tree_for_internal_split(&mut tree);
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(200))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(4));
+        let err = tree
+            .insert(test_key(100), &test_payload(100))
+            .expect_err("new root allocation should fail after internal split allocates");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(200))
+                .expect("range after failed internal root allocation"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 4);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_parent_rewrite_allocator_failure_does_not_retire_live_child() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        for objectid in [10_u64, 20, 30, 40] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+        assert_eq!(tree.height().expect("height"), 2);
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(1));
+        let err = tree
+            .insert(test_key(25), b"new")
+            .expect_err("parent rewrite allocation should fail after child rewrite allocates");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after failed parent rewrite"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 1);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_delete_borrow_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator_max(4);
+        for objectid in 1_u64..=5 {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(10))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(1));
+        let err = tree
+            .delete(&test_key(1))
+            .expect_err("right-borrow allocation should fail after child rewrite allocates");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(10))
+                .expect("range after failed delete borrow"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 1);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_delete_left_borrow_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator_max(4);
+        for objectid in [10_u64, 20, 30, 40, 50, 5] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+        tree.delete(&test_key(50)).expect("seed delete");
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(1));
+        let err = tree
+            .delete(&test_key(40))
+            .expect_err("left-borrow allocation should fail after child rewrite allocates");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after failed delete left borrow"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 1);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_delete_merge_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator_max(4);
+        for objectid in 1_u64..=5 {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+        tree.delete(&test_key(5)).expect("seed delete");
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(10))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(2));
+        let err = tree
+            .delete(&test_key(4))
+            .expect_err("parent allocation should fail after merge allocation");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(10))
+                .expect("range after failed delete merge"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 2);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_update_leaf_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        tree.insert(test_key(10), b"old").expect("seed insert");
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(0));
+        let err = tree
+            .update(&test_key(10), b"new")
+            .expect_err("leaf update allocation should fail");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after failed leaf update"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 0);
+        tree.validate_invariants().expect("invariants");
+    }
+
+    #[test]
+    fn cow_adversarial_update_parent_rewrite_allocator_failure_preserves_visible_tree() {
+        let (mut tree, allocator_state) = cow_tree_with_shared_allocator();
+        for objectid in [10_u64, 20, 30, 40] {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("seed insert");
+        }
+        assert_eq!(tree.height().expect("height"), 2);
+
+        let root_before = tree.root_block();
+        let entries_before = tree
+            .range(&test_key(0), &test_key(100))
+            .expect("range before");
+        let deferred_before = tree.deferred_free_blocks().len();
+        let allocator_deferred_before = allocator_deferred_len(&allocator_state);
+
+        set_allocator_remaining_successes(&allocator_state, Some(1));
+        let err = tree
+            .update(&test_key(20), b"updated")
+            .expect_err("parent rewrite allocation should fail after update child allocates");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("injected allocation failure")
+        );
+        set_allocator_remaining_successes(&allocator_state, None);
+
+        assert_eq!(tree.root_block(), root_before);
+        assert_eq!(
+            tree.range(&test_key(0), &test_key(100))
+                .expect("range after failed parent update"),
+            entries_before
+        );
+        assert_eq!(tree.deferred_free_blocks().len(), deferred_before);
+        assert_allocator_deferred_delta(&allocator_state, allocator_deferred_before, 1);
+        tree.validate_invariants().expect("invariants");
+    }
+
     fn lcg_next(state: &mut u64) -> u64 {
         *state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -4138,6 +4881,97 @@ mod tests {
     fn payload_from_rng(rand: u64, case: usize) -> Vec<u8> {
         let case_u64 = u64::try_from(case).expect("case should fit u64");
         (rand ^ case_u64).to_le_bytes().to_vec()
+    }
+
+    #[derive(Debug)]
+    struct FailAllocatorState {
+        next_block: u64,
+        remaining_successful_allocs: Option<usize>,
+        deferred: Vec<u64>,
+    }
+
+    #[derive(Debug)]
+    struct SharedFailAllocator {
+        state: Arc<Mutex<FailAllocatorState>>,
+    }
+
+    impl SharedFailAllocator {
+        fn new(state: Arc<Mutex<FailAllocatorState>>) -> Self {
+            Self { state }
+        }
+    }
+
+    impl BtrfsAllocator for SharedFailAllocator {
+        fn alloc_block(&mut self) -> Result<u64, BtrfsMutationError> {
+            let mut state = lock_fail_allocator_state(&self.state);
+            if let Some(remaining) = &mut state.remaining_successful_allocs {
+                if *remaining == 0 {
+                    return Err(BtrfsMutationError::BrokenInvariant(
+                        "injected allocation failure",
+                    ));
+                }
+                *remaining -= 1;
+            }
+            let block = state.next_block;
+            state.next_block = state
+                .next_block
+                .checked_add(1)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            drop(state);
+            Ok(block)
+        }
+
+        fn defer_free(&mut self, block: u64) {
+            lock_fail_allocator_state(&self.state).deferred.push(block);
+        }
+    }
+
+    fn cow_tree_with_shared_allocator() -> (InMemoryCowBtrfsTree, Arc<Mutex<FailAllocatorState>>) {
+        cow_tree_with_shared_allocator_max(3)
+    }
+
+    fn cow_tree_with_shared_allocator_max(
+        max_items: usize,
+    ) -> (InMemoryCowBtrfsTree, Arc<Mutex<FailAllocatorState>>) {
+        let state = Arc::new(Mutex::new(FailAllocatorState {
+            next_block: 2,
+            remaining_successful_allocs: None,
+            deferred: Vec::new(),
+        }));
+        let tree = InMemoryCowBtrfsTree::with_allocator(
+            max_items,
+            Box::new(SharedFailAllocator::new(Arc::clone(&state))),
+        )
+        .expect("tree");
+        (tree, state)
+    }
+
+    fn set_allocator_remaining_successes(
+        state: &Arc<Mutex<FailAllocatorState>>,
+        remaining: Option<usize>,
+    ) {
+        lock_fail_allocator_state(state).remaining_successful_allocs = remaining;
+    }
+
+    fn allocator_deferred_len(state: &Arc<Mutex<FailAllocatorState>>) -> usize {
+        lock_fail_allocator_state(state).deferred.len()
+    }
+
+    fn assert_allocator_deferred_delta(
+        state: &Arc<Mutex<FailAllocatorState>>,
+        before: usize,
+        expected_delta: usize,
+    ) {
+        assert_eq!(allocator_deferred_len(state), before + expected_delta);
+    }
+
+    fn lock_fail_allocator_state(
+        state: &Arc<Mutex<FailAllocatorState>>,
+    ) -> std::sync::MutexGuard<'_, FailAllocatorState> {
+        match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     fn assert_extent_non_overlap(
@@ -4958,6 +5792,255 @@ mod tests {
         }
     }
 
+    fn make_root_item_payload(len: usize, bytenr: u64) -> Vec<u8> {
+        assert!(
+            len >= 224,
+            "root item test payload must include fixed fields"
+        );
+
+        let mut payload = vec![0_u8; len];
+        payload[160..168].copy_from_slice(&7_u64.to_le_bytes());
+        payload[168..176].copy_from_slice(&256_u64.to_le_bytes());
+        payload[176..184].copy_from_slice(&bytenr.to_le_bytes());
+        payload[208..216].copy_from_slice(&1_u64.to_le_bytes());
+        payload[216..224].copy_from_slice(&3_u64.to_le_bytes());
+        if len >= 240 {
+            payload[224..240].copy_from_slice(&[0x11; 16]);
+        }
+        if len >= 256 {
+            payload[240..256].copy_from_slice(&[0x22; 16]);
+        }
+        payload[len - 1] = 2;
+        payload
+    }
+
+    fn make_xattr_payload(name: &[u8], value: &[u8]) -> Vec<u8> {
+        let name_len = u16::try_from(name.len()).expect("test xattr name length fits u16");
+        let value_len = u16::try_from(value.len()).expect("test xattr value length fits u16");
+
+        let mut payload = Vec::with_capacity(30 + name.len() + value.len());
+        payload.extend_from_slice(&[0_u8; 17]);
+        payload.extend_from_slice(&[0_u8; 8]);
+        payload.extend_from_slice(&value_len.to_le_bytes());
+        payload.extend_from_slice(&name_len.to_le_bytes());
+        payload.push(0);
+        payload.extend_from_slice(name);
+        payload.extend_from_slice(value);
+        payload
+    }
+
+    fn assert_insufficient_data<T: std::fmt::Debug>(
+        result: Result<T, ParseError>,
+        needed: usize,
+        offset: usize,
+        actual: usize,
+    ) {
+        let err = result.expect_err("expected insufficient data error");
+        if let ParseError::InsufficientData {
+            needed: got_needed,
+            offset: got_offset,
+            actual: got_actual,
+        } = err
+        {
+            assert_eq!(got_needed, needed);
+            assert_eq!(got_offset, offset);
+            assert_eq!(got_actual, actual);
+        } else {
+            assert!(
+                matches!(err, ParseError::InsufficientData { .. }),
+                "expected insufficient data error, got {err:?}"
+            );
+        }
+    }
+
+    fn assert_invalid_field<T: std::fmt::Debug>(
+        result: Result<T, ParseError>,
+        field: &'static str,
+        reason: &'static str,
+    ) {
+        let err = result.expect_err("expected invalid field error");
+        if let ParseError::InvalidField {
+            field: got_field,
+            reason: got_reason,
+        } = err
+        {
+            assert_eq!(got_field, field);
+            assert_eq!(got_reason, reason);
+        } else {
+            assert!(
+                matches!(err, ParseError::InvalidField { .. }),
+                "expected invalid field error, got {err:?}"
+            );
+        }
+    }
+
+    fn assert_root_item_adversarial_boundaries() {
+        let valid_min = make_root_item_payload(224, 0x1234_0000);
+        let parsed = parse_root_item(&valid_min).expect("parse minimal root item");
+        assert_eq!(parsed.bytenr, 0x1234_0000);
+        assert_eq!(parsed.generation, 7);
+        assert_eq!(parsed.root_dirid, 256);
+        assert_eq!(parsed.level, 2);
+
+        let valid_uuid = make_root_item_payload(256, 0x5678_0000);
+        let parsed = parse_root_item(&valid_uuid).expect("parse root item with uuids");
+        assert_eq!(parsed.bytenr, 0x5678_0000);
+        assert_eq!(parsed.uuid[0], 0x11);
+        assert_eq!(parsed.parent_uuid[0], 0x22);
+        assert_eq!(parsed.level, 2);
+
+        assert_insufficient_data(parse_root_item(&[0_u8; 223]), 224, 0, 223);
+
+        let zero_bytenr = make_root_item_payload(224, 0);
+        assert_invalid_field(
+            parse_root_item(&zero_bytenr),
+            "root_item.bytenr",
+            "must be non-zero",
+        );
+    }
+
+    fn assert_inode_item_adversarial_boundaries() {
+        let original = BtrfsInodeItem {
+            generation: u64::MAX,
+            size: u64::MAX,
+            nbytes: u64::MAX,
+            nlink: u32::MAX,
+            uid: u32::MAX,
+            gid: u32::MAX,
+            mode: u32::MAX,
+            rdev: u64::MAX,
+            atime_sec: u64::MAX,
+            atime_nsec: u32::MAX,
+            ctime_sec: u64::MAX,
+            ctime_nsec: u32::MAX,
+            mtime_sec: u64::MAX,
+            mtime_nsec: u32::MAX,
+            otime_sec: u64::MAX,
+            otime_nsec: u32::MAX,
+        };
+        let bytes = original.to_bytes();
+        assert_eq!(
+            parse_inode_item(&bytes).expect("parse max inode item"),
+            original
+        );
+        assert_insufficient_data(parse_inode_item(&bytes[..159]), 160, 0, 159);
+    }
+
+    fn assert_dir_item_adversarial_boundaries() {
+        let first = BtrfsDirItem {
+            child_objectid: 258,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: BTRFS_FT_REG_FILE,
+            name: b"file-a".to_vec(),
+        };
+        let mut second = BtrfsDirItem {
+            child_objectid: 259,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: 0xff,
+            name: b"unknown-type".to_vec(),
+        };
+        let mut payload = first.to_bytes();
+        payload.extend_from_slice(&second.to_bytes());
+
+        let parsed = parse_dir_items(&payload).expect("parse multi-entry dir payload");
+        assert_eq!(parsed, [first, second.clone()]);
+        assert!(
+            parse_dir_items(&[])
+                .expect("parse empty dir payload")
+                .is_empty()
+        );
+
+        assert_insufficient_data(parse_dir_items(&[0_u8; 29]), 30, 0, 29);
+
+        let mut name_overflow = vec![0_u8; 30];
+        name_overflow[27..29].copy_from_slice(&5_u16.to_le_bytes());
+        assert_insufficient_data(parse_dir_items(&name_overflow), 35, 0, 30);
+
+        second.name = b"n".to_vec();
+        let mut data_overflow = second.to_bytes();
+        data_overflow[25..27].copy_from_slice(&4_u16.to_le_bytes());
+        assert_insufficient_data(parse_dir_items(&data_overflow), 35, 0, 31);
+    }
+
+    fn assert_xattr_item_adversarial_boundaries() {
+        let mut payload = make_xattr_payload(b"user.a", b"alpha");
+        payload.extend_from_slice(&make_xattr_payload(b"user.b", b""));
+        let parsed = parse_xattr_items(&payload).expect("parse multi-entry xattr payload");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, b"user.a");
+        assert_eq!(parsed[0].value, b"alpha");
+        assert_eq!(parsed[1].name, b"user.b");
+        assert!(parsed[1].value.is_empty());
+        assert!(
+            parse_xattr_items(&[])
+                .expect("parse empty xattr payload")
+                .is_empty()
+        );
+
+        assert_insufficient_data(parse_xattr_items(&[0_u8; 29]), 30, 0, 29);
+
+        let mut name_overflow = vec![0_u8; 30];
+        name_overflow[27..29].copy_from_slice(&5_u16.to_le_bytes());
+        assert_insufficient_data(parse_xattr_items(&name_overflow), 35, 0, 30);
+
+        let mut value_overflow = make_xattr_payload(b"n", b"");
+        value_overflow[25..27].copy_from_slice(&4_u16.to_le_bytes());
+        assert_insufficient_data(parse_xattr_items(&value_overflow), 35, 0, 31);
+    }
+
+    fn assert_extent_data_adversarial_boundaries() {
+        let inline = BtrfsExtentData::Inline {
+            generation: 9,
+            ram_bytes: 3,
+            compression: 0,
+            data: b"abc".to_vec(),
+        };
+        assert_eq!(
+            parse_extent_data(&inline.to_bytes()).expect("parse inline extent"),
+            inline
+        );
+
+        let prealloc = BtrfsExtentData::Regular {
+            generation: 10,
+            ram_bytes: 8192,
+            extent_type: BTRFS_FILE_EXTENT_PREALLOC,
+            compression: 0,
+            disk_bytenr: 0x80_000,
+            disk_num_bytes: 8192,
+            extent_offset: 0,
+            num_bytes: 4096,
+        };
+        assert_eq!(
+            parse_extent_data(&prealloc.to_bytes()).expect("parse prealloc extent"),
+            prealloc
+        );
+
+        assert_insufficient_data(parse_extent_data(&[0_u8; 20]), 21, 0, 20);
+
+        let mut truncated_regular = vec![0_u8; 52];
+        truncated_regular[20] = BTRFS_FILE_EXTENT_REG;
+        assert_insufficient_data(parse_extent_data(&truncated_regular), 53, 0, 52);
+
+        let mut unknown_type = vec![0_u8; 21];
+        unknown_type[20] = 0xff;
+        assert_invalid_field(
+            parse_extent_data(&unknown_type),
+            "extent_data.type",
+            "unsupported extent type",
+        );
+    }
+
+    #[test]
+    fn btrfs_item_payload_adversarial_samples_exercise_boundaries() {
+        assert_root_item_adversarial_boundaries();
+        assert_inode_item_adversarial_boundaries();
+        assert_dir_item_adversarial_boundaries();
+        assert_xattr_item_adversarial_boundaries();
+        assert_extent_data_adversarial_boundaries();
+    }
+
     // ── Serialization round-trip tests ────────────────────────────────────
 
     #[test]
@@ -5749,6 +6832,7 @@ mod tests {
             239,
         );
         leaf[data_region + 478..data_region + 717].copy_from_slice(&root_payload_a);
+        stamp_tree_block_crc32c(&mut leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [(logical, leaf)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -5828,6 +6912,7 @@ mod tests {
         // Inode 257 INODE_ITEM (unrelated)
         let ext2_off = 3400_u32;
         write_leaf_item(&mut leaf, 3, 257, BTRFS_ITEM_INODE_ITEM, ext2_off, 160);
+        stamp_tree_block_crc32c(&mut leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [(logical, leaf)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -5952,6 +7037,7 @@ mod tests {
 
         leaf[off_a as usize..(off_a + file_entry_len) as usize].copy_from_slice(&dir_entry_a);
         leaf[off_b as usize..(off_b + subdir_entry_len) as usize].copy_from_slice(&dir_entry_b);
+        stamp_tree_block_crc32c(&mut leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [(logical, leaf)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -6024,6 +7110,7 @@ mod tests {
 
         let mut leaf = vec![0_u8; NODESIZE as usize];
         write_header(&mut leaf, logical, 0, 0, BTRFS_FS_TREE_OBJECTID, 1);
+        stamp_tree_block_crc32c(&mut leaf);
 
         let blocks: HashMap<u64, Vec<u8>> = [(logical, leaf)].into();
         let mut read = |phys: u64| -> Result<Vec<u8>, ParseError> {
@@ -6375,6 +7462,105 @@ mod tests {
         // Verify unmapped address outside the sys_chunk range
         let miss = map_logical_to_physical(&chunks, 0x200_0000).expect("no error");
         assert!(miss.is_none(), "address outside sys_chunk should not map");
+    }
+
+    fn make_chunk_item_payload(
+        length: u64,
+        stripe_len: u64,
+        chunk_type: u64,
+        num_stripes: u16,
+    ) -> Vec<u8> {
+        const CHUNK_FIXED: usize = 48;
+        const STRIPE_SIZE: usize = 32;
+
+        let stripe_count = usize::from(num_stripes);
+        let mut data = vec![0_u8; CHUNK_FIXED + stripe_count * STRIPE_SIZE];
+        data[0..8].copy_from_slice(&length.to_le_bytes());
+        data[8..16].copy_from_slice(&2_u64.to_le_bytes());
+        data[16..24].copy_from_slice(&stripe_len.to_le_bytes());
+        data[24..32].copy_from_slice(&chunk_type.to_le_bytes());
+        data[32..36].copy_from_slice(&4096_u32.to_le_bytes());
+        data[36..40].copy_from_slice(&4096_u32.to_le_bytes());
+        data[40..44].copy_from_slice(&4096_u32.to_le_bytes());
+        data[44..46].copy_from_slice(&num_stripes.to_le_bytes());
+        data[46..48].copy_from_slice(&0_u16.to_le_bytes());
+
+        for stripe_idx in 0..stripe_count {
+            let stripe_off = CHUNK_FIXED + stripe_idx * STRIPE_SIZE;
+            let devid = u64::try_from(stripe_idx + 1).expect("test stripe index fits u64");
+            let physical = 0x80_0000_u64
+                + u64::try_from(stripe_idx).expect("test stripe index fits u64") * 0x10_0000;
+            let uuid_byte = 0xa0_u8
+                .checked_add(u8::try_from(stripe_idx).expect("test stripe index fits u8"))
+                .expect("test stripe uuid byte fits u8");
+            data[stripe_off..stripe_off + 8].copy_from_slice(&devid.to_le_bytes());
+            data[stripe_off + 8..stripe_off + 16].copy_from_slice(&physical.to_le_bytes());
+            data[stripe_off + 16..stripe_off + 32].fill(uuid_byte);
+        }
+
+        data
+    }
+
+    #[test]
+    fn parse_chunk_item_adversarial_samples_exercise_boundaries() {
+        let chunk_type =
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0;
+        let data = make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, chunk_type, 2);
+        let parsed = parse_chunk_item(&data, 0x100_0000).expect("parse multi-stripe chunk");
+        assert_eq!(parsed.key.objectid, BTRFS_CHUNK_TREE_OBJECTID);
+        assert_eq!(parsed.key.item_type, BTRFS_ITEM_CHUNK);
+        assert_eq!(parsed.key.offset, 0x100_0000);
+        assert_eq!(parsed.length, 8 * 1024 * 1024);
+        assert_eq!(parsed.stripe_len, 64 * 1024);
+        assert_eq!(parsed.chunk_type, chunk_type);
+        assert_eq!(parsed.io_align, 4096);
+        assert_eq!(parsed.io_width, 4096);
+        assert_eq!(parsed.sector_size, 4096);
+        assert_eq!(parsed.num_stripes, 2);
+        assert_eq!(parsed.stripes.len(), 2);
+        assert_eq!(parsed.stripes[0].devid, 1);
+        assert_eq!(parsed.stripes[0].offset, 0x80_0000);
+        assert_eq!(parsed.stripes[0].dev_uuid, [0xa0; 16]);
+        assert_eq!(parsed.stripes[1].devid, 2);
+        assert_eq!(parsed.stripes[1].offset, 0x90_0000);
+        assert_eq!(parsed.stripes[1].dev_uuid, [0xa1; 16]);
+
+        assert_insufficient_data(parse_chunk_item(&data[..47], 0x100_0000), 48, 0, 47);
+
+        let mut truncated_stripe = data;
+        truncated_stripe.truncate(48 + 31);
+        assert_insufficient_data(parse_chunk_item(&truncated_stripe, 0x100_0000), 112, 48, 79);
+
+        let zero_stripes = make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, chunk_type, 0);
+        assert_invalid_field(
+            parse_chunk_item(&zero_stripes, 0x100_0000),
+            "stripes",
+            "chunk has no stripes",
+        );
+
+        let zero_length = make_chunk_item_payload(0, 64 * 1024, chunk_type, 1);
+        assert_invalid_field(
+            parse_chunk_item(&zero_length, 0x100_0000),
+            "chunk_length",
+            "chunk has zero length",
+        );
+
+        let zero_stripe_len = make_chunk_item_payload(8 * 1024 * 1024, 0, chunk_type, 1);
+        assert_invalid_field(
+            parse_chunk_item(&zero_stripe_len, 0x100_0000),
+            "stripe_len",
+            "chunk has zero stripe length",
+        );
+
+        let multi_raid_type = chunk_type_flags::BTRFS_BLOCK_GROUP_DATA
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID0
+            | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1;
+        let multi_raid = make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, multi_raid_type, 1);
+        assert_invalid_field(
+            parse_chunk_item(&multi_raid, 0x100_0000),
+            "chunk_type",
+            "multiple RAID profiles set",
+        );
     }
 
     #[test]
@@ -6811,6 +7997,141 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_tx_adversarial_same_tree_root_replacement_persists_last_root() {
+        let cx = Cx::for_request();
+        let mut store = MvccStore::new();
+        let mut txn = BtrfsTransaction::begin(&mut store, 55, &cx).expect("begin");
+        let txn_id = txn.txn_id();
+        let meta_block = BtrfsTransaction::metadata_block_for_txn(txn_id).expect("metadata block");
+
+        txn.stage_tree_root(
+            BTRFS_FS_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x10_0000,
+                level: 0,
+            },
+        );
+        txn.stage_tree_root(
+            BTRFS_FS_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x20_0000,
+                level: 2,
+            },
+        );
+        assert_eq!(txn.pending_trees().len(), 1);
+
+        let commit_seq = txn.commit(&mut store, &cx).expect("commit");
+        assert_eq!(commit_seq, CommitSeq(1));
+
+        let snap = store.current_snapshot();
+        let metadata = store
+            .read_visible(meta_block, snap)
+            .expect("transaction metadata should be visible");
+        assert_eq!(
+            u64::from_le_bytes(metadata[24..32].try_into().unwrap()),
+            1_u64,
+            "same-tree replacement should count as one root update"
+        );
+
+        let tree_block =
+            BtrfsTransaction::tree_root_block(BTRFS_FS_TREE_OBJECTID).expect("tree block");
+        let tree_record = store
+            .read_visible(tree_block, snap)
+            .expect("tree root record should be visible");
+        assert_eq!(
+            u64::from_le_bytes(tree_record[16..24].try_into().unwrap()),
+            0x20_0000_u64
+        );
+        assert_eq!(tree_record[24], 2_u8);
+    }
+
+    #[test]
+    fn btrfs_tx_adversarial_delayed_ref_failure_leaves_no_visible_records() {
+        let cx = Cx::for_request();
+        let mut store = MvccStore::new();
+        let mut txn = BtrfsTransaction::begin(&mut store, 56, &cx).expect("begin");
+        let txn_id = txn.txn_id();
+        let meta_block = BtrfsTransaction::metadata_block_for_txn(txn_id).expect("metadata block");
+        let tree_block =
+            BtrfsTransaction::tree_root_block(BTRFS_FS_TREE_OBJECTID).expect("tree block");
+        let payload_block = BlockNumber(0xCAFE);
+
+        txn.stage_tree_root(
+            BTRFS_FS_TREE_OBJECTID,
+            TreeRoot {
+                bytenr: 0x30_0000,
+                level: 1,
+            },
+        );
+        txn.stage_block_write(payload_block, b"must-not-commit".to_vec())
+            .expect("stage payload");
+        txn.queue_delayed_ref(
+            ExtentKey {
+                bytenr: 0x40_0000,
+                num_bytes: 4096,
+            },
+            delayed_data_ref(700),
+            RefAction::Delete,
+        );
+
+        let err = txn
+            .commit(&mut store, &cx)
+            .expect_err("delete without materialized refcount should fail");
+        assert!(
+            matches!(
+                err,
+                BtrfsTransactionError::DelayedRefs(BtrfsMutationError::BrokenInvariant(
+                    "delayed ref delete without prior refcount"
+                ))
+            ),
+            "unexpected error: {err:?}"
+        );
+
+        let snap = store.current_snapshot();
+        assert!(store.read_visible(meta_block, snap).is_none());
+        assert!(store.read_visible(tree_block, snap).is_none());
+        assert!(store.read_visible(payload_block, snap).is_none());
+    }
+
+    #[test]
+    fn btrfs_tx_adversarial_tree_root_overflow_leaves_no_visible_records() {
+        let cx = Cx::for_request();
+        let mut store = MvccStore::new();
+        let mut txn = BtrfsTransaction::begin(&mut store, 57, &cx).expect("begin");
+        let txn_id = txn.txn_id();
+        let meta_block = BtrfsTransaction::metadata_block_for_txn(txn_id).expect("metadata block");
+        let payload_block = BlockNumber(0xD00D);
+
+        txn.stage_tree_root(
+            u64::MAX,
+            TreeRoot {
+                bytenr: 0x50_0000,
+                level: 0,
+            },
+        );
+        txn.stage_block_write(payload_block, b"must-not-commit".to_vec())
+            .expect("stage payload");
+
+        let err = txn
+            .commit(&mut store, &cx)
+            .expect_err("overflowing tree id should fail");
+        assert!(
+            matches!(
+                err,
+                BtrfsTransactionError::TreeRootAddressOverflow { tree_id } if tree_id == u64::MAX
+            ),
+            "unexpected error: {err:?}"
+        );
+
+        let snap = store.current_snapshot();
+        assert!(
+            store.read_visible(meta_block, snap).is_none(),
+            "metadata staged before the overflow must not become visible"
+        );
+        assert!(store.read_visible(payload_block, snap).is_none());
+    }
+
+    #[test]
     fn btrfs_tx_track_allocation_and_defer_free() {
         let cx = Cx::for_request();
         let mut store = MvccStore::new();
@@ -6849,6 +8170,49 @@ mod tests {
         assert!(
             result.is_err(),
             "metadata alloc without metadata bg should fail"
+        );
+    }
+
+    #[test]
+    fn extent_allocator_adversarial_rejects_overflowing_block_group_range() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_start = u64::MAX - 1024;
+        alloc.add_block_group(bg_start, make_data_bg(bg_start, 4096));
+
+        let err = alloc
+            .alloc_data(512)
+            .expect_err("overflowing block group end should be rejected");
+        assert_eq!(err, BtrfsMutationError::AddressOverflow);
+
+        let bg = alloc.block_group(bg_start).expect("bg");
+        assert_eq!(
+            bg.used_bytes, 0,
+            "failed allocation should not change accounting"
+        );
+        assert_eq!(alloc.delayed_ref_count(), 0);
+    }
+
+    #[test]
+    fn extent_allocator_adversarial_allows_exact_tail_fit() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_start = 0x10_0000;
+        alloc.add_block_group(bg_start, make_data_bg(bg_start, 8192));
+
+        let first = alloc.alloc_data(4096).expect("first half");
+        let second = alloc.alloc_data(4096).expect("exact tail fit");
+        assert_eq!(first.bytenr, bg_start);
+        assert_eq!(second.bytenr, bg_start + 4096);
+
+        let bg = alloc.block_group(bg_start).expect("bg");
+        assert_eq!(bg.used_bytes, 8192);
+        assert_eq!(bg.free_bytes(), 0);
+
+        let err = alloc
+            .alloc_data(1)
+            .expect_err("full block group should reject one more byte");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("no block group with enough free space")
         );
     }
 
@@ -7064,6 +8428,101 @@ mod tests {
         assert_eq!(queue.pending_for(&key_b).len(), 1);
     }
 
+    fn delayed_data_ref(objectid: u64) -> BtrfsRef {
+        BtrfsRef::DataExtent {
+            root: BTRFS_FS_TREE_OBJECTID,
+            objectid,
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn delayed_ref_queue_adversarial_flush_boundaries() {
+        let key_a = ExtentKey {
+            bytenr: 0x1000,
+            num_bytes: 4096,
+        };
+        let key_b = ExtentKey {
+            bytenr: 0x2000,
+            num_bytes: 8192,
+        };
+        let mut queue = DelayedRefQueue::new();
+        let mut refcounts = BTreeMap::new();
+
+        queue.queue(key_a, delayed_data_ref(1), RefAction::Insert);
+        assert_eq!(queue.flush(0, &mut refcounts).expect("zero-limit flush"), 0);
+        assert_eq!(queue.pending_count(), 1);
+        assert!(refcounts.is_empty());
+        assert_eq!(queue.pending_for(&key_a).len(), 1);
+
+        queue.queue(key_a, delayed_data_ref(2), RefAction::Insert);
+        queue.queue(key_b, delayed_data_ref(3), RefAction::Insert);
+        assert_eq!(queue.pending_count(), 3);
+
+        let flushed = queue.flush(2, &mut refcounts).expect("bounded flush");
+        assert_eq!(flushed, 2);
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(refcounts.get(&key_a), Some(&2));
+        assert_eq!(queue.pending_for(&key_a).len(), 0);
+        assert_eq!(queue.pending_for(&key_b).len(), 1);
+    }
+
+    #[test]
+    fn delayed_ref_queue_adversarial_delete_underflow_preserves_queue() {
+        let key = ExtentKey {
+            bytenr: 0x3000,
+            num_bytes: 4096,
+        };
+        let mut queue = DelayedRefQueue::new();
+        let mut refcounts = BTreeMap::new();
+
+        queue.queue(key, delayed_data_ref(4), RefAction::Delete);
+        let err = queue
+            .flush(1, &mut refcounts)
+            .expect_err("delete without refcount");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("delayed ref delete without prior refcount")
+        );
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_for(&key).len(), 1);
+        assert!(refcounts.is_empty());
+    }
+
+    #[test]
+    fn delayed_ref_queue_drain_all_preserves_sequence_across_key_order() {
+        let key_low = ExtentKey {
+            bytenr: 0x1000,
+            num_bytes: 4096,
+        };
+        let key_high = ExtentKey {
+            bytenr: 0x9000,
+            num_bytes: 4096,
+        };
+        let mut queue = DelayedRefQueue::new();
+
+        queue.queue(key_high, delayed_data_ref(10), RefAction::Insert);
+        queue.queue(key_low, delayed_data_ref(11), RefAction::Insert);
+        queue.queue(key_high, delayed_data_ref(12), RefAction::Delete);
+
+        let drained = queue.drain_all();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(
+            drained
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(drained[0].extent, key_high);
+        assert_eq!(drained[1].extent, key_low);
+        assert_eq!(drained[2].extent, key_high);
+        assert_eq!(drained[2].action, RefAction::Delete);
+        assert_eq!(queue.pending_count(), 0);
+        assert!(queue.pending_for(&key_low).is_empty());
+        assert!(queue.pending_for(&key_high).is_empty());
+    }
+
     // ── Subvolume enumeration tests ────────────────────────────────
 
     fn make_root_item_data(bytenr: u64, generation: u64, flags: u64) -> Vec<u8> {
@@ -7176,6 +8635,34 @@ mod tests {
         assert_eq!(subvols[0].name, "subvol-500");
     }
 
+    #[test]
+    fn enumerate_subvolumes_malformed_root_ref_uses_fallback_name() {
+        let mut malformed_ref = make_root_ref_data(256, b"broken");
+        malformed_ref.truncate(20);
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 600,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_data(0x6000, 22, 0),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 5,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 600,
+                },
+                data: malformed_ref,
+            },
+        ];
+
+        let subvols = enumerate_subvolumes(&entries);
+        assert_eq!(subvols.len(), 1);
+        assert_eq!(subvols[0].name, "subvol-600");
+    }
+
     // ── Snapshot enumeration tests ─────────────────────────────────
 
     #[test]
@@ -7233,6 +8720,44 @@ mod tests {
             snapshots.is_empty(),
             "regular subvolume should not be listed as snapshot"
         );
+    }
+
+    #[test]
+    fn enumerate_snapshots_malformed_root_ref_uses_fallback_name() {
+        let src_uuid = [1_u8; 16];
+        let snap_uuid = [2_u8; 16];
+        let mut malformed_ref = make_root_ref_data(256, b"broken_snapshot");
+        malformed_ref.truncate(21);
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x1000, 10, 0, src_uuid, [0; 16]),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 257,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x2000, 15, 1, snap_uuid, src_uuid),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 257,
+                },
+                data: malformed_ref,
+            },
+        ];
+
+        let snapshots = enumerate_snapshots(&entries);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].name, "snap-257");
     }
 
     // ── Snapshot diff tests ────────────────────────────────────────
@@ -7332,6 +8857,33 @@ mod tests {
         assert!(matches!(err, ParseError::InsufficientData { .. }));
     }
 
+    #[test]
+    fn parse_root_ref_adversarial_samples_exercise_boundaries() {
+        let empty_name = make_root_ref_data(256, b"");
+        let parsed = parse_root_ref(&empty_name).expect("parse empty root ref name");
+        assert_eq!(parsed.dirid, 256);
+        assert!(parsed.name.is_empty());
+
+        let long_name = vec![b'a'; 255];
+        let parsed = parse_root_ref(&make_root_ref_data(4096, &long_name))
+            .expect("parse long root ref name");
+        assert_eq!(parsed.dirid, 4096);
+        assert_eq!(parsed.name, long_name);
+
+        let mut trailing = make_root_ref_data(512, b"subvol");
+        trailing[8..16].copy_from_slice(&42_u64.to_le_bytes());
+        trailing.extend_from_slice(b"ignored-trailing");
+        let parsed = parse_root_ref(&trailing).expect("parse root ref with trailing bytes");
+        assert_eq!(parsed.sequence, 42);
+        assert_eq!(parsed.name, b"subvol");
+
+        assert_insufficient_data(parse_root_ref(&[0_u8; 17]), 18, 0, 17);
+
+        let mut truncated_name = vec![0_u8; 20];
+        truncated_name[16..18].copy_from_slice(&5_u16.to_le_bytes());
+        assert_insufficient_data(parse_root_ref(&truncated_name), 23, 18, 2);
+    }
+
     // ── RAID6 parity wraparound regression test ────────────────────
 
     #[test]
@@ -7407,6 +8959,30 @@ mod tests {
 
     // ── Send stream tests ───────────────────────────────────────────────
 
+    fn make_send_stream_data() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&BTRFS_SEND_STREAM_VERSION.to_le_bytes());
+        data
+    }
+
+    fn append_send_command(data: &mut Vec<u8>, cmd: u16, payload: &[u8]) {
+        let payload_len =
+            u32::try_from(payload.len()).expect("test send command payload length fits u32");
+        data.extend_from_slice(&payload_len.to_le_bytes());
+        data.extend_from_slice(&cmd.to_le_bytes());
+        data.extend_from_slice(&0_u32.to_le_bytes());
+        data.extend_from_slice(payload);
+    }
+
+    fn append_send_attr(payload: &mut Vec<u8>, attr_type: u16, attr_data: &[u8]) {
+        let attr_len =
+            u16::try_from(attr_data.len()).expect("test send attr payload length fits u16");
+        payload.extend_from_slice(&attr_type.to_le_bytes());
+        payload.extend_from_slice(&attr_len.to_le_bytes());
+        payload.extend_from_slice(attr_data);
+    }
+
     #[test]
     fn parse_send_stream_minimal() {
         let mut data = Vec::new();
@@ -7421,6 +8997,43 @@ mod tests {
         assert_eq!(result.version, 1);
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].cmd, SendCommand::End);
+    }
+
+    #[test]
+    fn parse_send_stream_adversarial_samples_exercise_boundaries() {
+        let mut no_end = make_send_stream_data();
+        append_send_command(&mut no_end, 0xffff, &[]);
+        let parsed = parse_send_stream(&no_end).expect("parse unknown command at EOF");
+        assert_eq!(parsed.version, BTRFS_SEND_STREAM_VERSION);
+        assert_eq!(parsed.commands.len(), 1);
+        assert_eq!(parsed.commands[0].cmd, SendCommand::Unspec);
+        assert!(parsed.commands[0].attrs.is_empty());
+
+        let mut attrs = Vec::new();
+        append_send_attr(&mut attrs, 15, b"");
+        append_send_attr(&mut attrs, 0xfffe, b"payload");
+        let mut multi_attr = make_send_stream_data();
+        append_send_command(&mut multi_attr, 4, &attrs);
+        append_send_command(&mut multi_attr, 21, &[]);
+        let parsed = parse_send_stream(&multi_attr).expect("parse multi-attribute command");
+        assert_eq!(parsed.commands.len(), 2);
+        assert_eq!(parsed.commands[0].cmd, SendCommand::Mkdir);
+        assert_eq!(parsed.commands[0].attrs.len(), 2);
+        assert_eq!(parsed.commands[0].attrs[0], (15, Vec::new()));
+        assert_eq!(parsed.commands[0].attrs[1], (0xfffe, b"payload".to_vec()));
+        assert_eq!(parsed.commands[1].cmd, SendCommand::End);
+
+        let mut partial_header = make_send_stream_data();
+        append_send_command(&mut partial_header, 4, &[]);
+        partial_header.extend_from_slice(&[0xaa; 9]);
+        assert_insufficient_data(parse_send_stream(&partial_header), 10, 27, 9);
+
+        let mut end_with_payload = make_send_stream_data();
+        append_send_command(&mut end_with_payload, 21, b"ignored");
+        let parsed = parse_send_stream(&end_with_payload).expect("parse end command payload");
+        assert_eq!(parsed.commands.len(), 1);
+        assert_eq!(parsed.commands[0].cmd, SendCommand::End);
+        assert!(parsed.commands[0].attrs.is_empty());
     }
 
     #[test]
