@@ -3745,6 +3745,7 @@ fn mount_with_fuse(
         read_only: !read_write,
         allow_other,
         auto_unmount,
+        ioctl_trace_path: None,
         worker_threads: 0,
     };
 
@@ -3770,6 +3771,7 @@ fn mount_with_managed_fuse(open_fs: OpenFs, params: &ManagedMountParams<'_>) -> 
             read_only: !params.read_write,
             allow_other: params.allow_other,
             auto_unmount: params.auto_unmount,
+            ioctl_trace_path: None,
             worker_threads: 0,
         },
         unmount_timeout: std::time::Duration::from_secs(params.unmount_timeout_secs),
@@ -3832,6 +3834,7 @@ fn mount_with_per_core_fuse(open_fs: OpenFs, params: &ManagedMountParams<'_>) ->
             read_only: !params.read_write,
             allow_other: params.allow_other,
             auto_unmount: params.auto_unmount,
+            ioctl_trace_path: None,
             worker_threads: dispatcher.num_cores() as usize,
         },
         unmount_timeout: std::time::Duration::from_secs(params.unmount_timeout_secs),

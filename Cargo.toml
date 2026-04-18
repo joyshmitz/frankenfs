@@ -105,6 +105,11 @@ ffs-tui = { path = "crates/ffs-tui" }
 ffs-types = { path = "crates/ffs-types" }
 ffs-xattr = { path = "crates/ffs-xattr" }
 
+[patch.crates-io]
+# The vendored fuser forwards unrestricted ioctls so ext4/btrfs FIEMAP and
+# EXT4_IOC_* parity tests exercise the real FrankenFS userspace handlers.
+fuser = { path = "vendor/fuser" }
+
 [profile.release]
 opt-level = "z"
 lto = true

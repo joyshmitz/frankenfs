@@ -24,6 +24,8 @@ use fuser::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::os::raw::c_int;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -160,6 +162,11 @@ pub struct MountOptions {
     pub read_only: bool,
     pub allow_other: bool,
     pub auto_unmount: bool,
+    /// Optional append-only trace file for recording every FUSE ioctl callback.
+    ///
+    /// Used by end-to-end harness tests to distinguish kernel/VFS rejections
+    /// from requests that actually reached FrankenFS userspace handling.
+    pub ioctl_trace_path: Option<PathBuf>,
     /// Number of worker threads for FUSE dispatch.
     ///
     /// For explicit non-zero values, FrankenFS maps this to kernel FUSE queue
@@ -174,6 +181,7 @@ impl Default for MountOptions {
             read_only: true,
             allow_other: false,
             auto_unmount: true,
+            ioctl_trace_path: None,
             worker_threads: 0,
         }
     }
@@ -596,6 +604,7 @@ struct FuseInner {
     metrics: Arc<AtomicMetrics>,
     thread_count: usize,
     read_only: bool,
+    ioctl_trace: Option<Mutex<IoctlTraceProbe>>,
     backpressure: Option<BackpressureGate>,
     access_predictor: AccessPredictor,
     readahead: ReadaheadManager,
@@ -608,6 +617,55 @@ impl std::fmt::Debug for FuseInner {
             .field("thread_count", &self.thread_count)
             .field("read_only", &self.read_only)
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+struct IoctlTraceProbe {
+    path: PathBuf,
+    writer: Option<BufWriter<File>>,
+}
+
+impl IoctlTraceProbe {
+    fn new(path: PathBuf) -> Self {
+        Self { path, writer: None }
+    }
+
+    fn record(&mut self, ino: u64, cmd: u32, in_len: usize, out_size: u32) -> std::io::Result<()> {
+        let writer = self.ensure_writer()?;
+        writeln!(
+            writer,
+            "ino={ino} cmd=0x{cmd:08x} in_len={in_len} out_size={out_size}"
+        )
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        writer.flush()
+    }
+
+    fn ensure_writer(&mut self) -> std::io::Result<&mut BufWriter<File>> {
+        if self.writer.is_none() {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            self.writer = Some(BufWriter::with_capacity(64 * 1024, file));
+        }
+        Ok(self
+            .writer
+            .as_mut()
+            .expect("ioctl trace writer initialized above"))
+    }
+}
+
+impl Drop for IoctlTraceProbe {
+    fn drop(&mut self) {
+        if let Err(error) = self.flush() {
+            warn!(path = %self.path.display(), %error, "ioctl trace flush failed");
+        }
     }
 }
 
@@ -667,6 +725,11 @@ impl FrankenFuse {
                 metrics: Arc::new(AtomicMetrics::new()),
                 thread_count,
                 read_only: options.read_only,
+                ioctl_trace: options
+                    .ioctl_trace_path
+                    .clone()
+                    .map(IoctlTraceProbe::new)
+                    .map(Mutex::new),
                 backpressure: None,
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
@@ -689,6 +752,11 @@ impl FrankenFuse {
                 metrics: Arc::new(AtomicMetrics::new()),
                 thread_count,
                 read_only: options.read_only,
+                ioctl_trace: options
+                    .ioctl_trace_path
+                    .clone()
+                    .map(IoctlTraceProbe::new)
+                    .map(Mutex::new),
                 backpressure: Some(gate),
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
@@ -1011,6 +1079,28 @@ impl FrankenFuse {
                 }
             }
             _ => IoctlResult::Error(libc::ENOTTY),
+        }
+    }
+
+    fn record_ioctl_probe(&self, ino: u64, cmd: u32, in_len: usize, out_size: u32) {
+        let Some(trace) = self.inner.ioctl_trace.as_ref() else {
+            return;
+        };
+
+        let mut trace = match trace.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("ioctl trace lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+
+        if let Err(error) = trace.record(ino, cmd, in_len, out_size) {
+            warn!(
+                path = %trace.path.display(),
+                %error,
+                "ioctl trace write failed"
+            );
         }
     }
 
@@ -1991,6 +2081,7 @@ impl Filesystem for FrankenFuse {
         out_size: u32,
         reply: ReplyIoctl,
     ) {
+        self.record_ioctl_probe(ino, cmd, in_data.len(), out_size);
         match self.dispatch_ioctl(ino, fh, cmd, in_data, out_size) {
             IoctlResult::Data(data) => reply.ioctl(0, &data),
             IoctlResult::Error(errno) => {
@@ -2612,6 +2703,7 @@ mod tests {
         assert!(opts.read_only);
         assert!(!opts.allow_other);
         assert!(opts.auto_unmount);
+        assert!(opts.ioctl_trace_path.is_none());
     }
 
     #[test]
@@ -2956,6 +3048,18 @@ mod tests {
         }
     }
 
+    fn flush_ioctl_trace_for_testing(fuse: &FrankenFuse) {
+        let mut trace = fuse
+            .inner
+            .ioctl_trace
+            .as_ref()
+            .expect("ioctl trace configured")
+            .lock()
+            .expect("lock ioctl trace");
+        trace.flush().expect("flush buffered ioctl trace");
+        drop(trace);
+    }
+
     impl FsOps for IoctlRecordingFs {
         fn getattr(
             &self,
@@ -3275,6 +3379,47 @@ mod tests {
 
         let response = fuse.dispatch_ioctl(1, 0, 0xDEAD_BEEF, &[], 0);
         assert_eq!(response, IoctlResult::Error(libc::ENOTTY));
+    }
+
+    #[test]
+    fn record_ioctl_probe_appends_lines_via_buffered_sink() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time after unix epoch")
+            .as_nanos();
+        let trace_path = std::env::temp_dir().join(format!(
+            "ffs_fuse_ioctl_trace_{}_{}.log",
+            std::process::id(),
+            unique
+        ));
+        std::fs::write(&trace_path, "seed\n").expect("seed ioctl trace");
+        let options = MountOptions {
+            ioctl_trace_path: Some(trace_path.clone()),
+            ..MountOptions::default()
+        };
+
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(
+                0x1234_5678,
+                Arc::new(Mutex::new(Vec::new())),
+            )),
+            &options,
+        );
+
+        fuse.record_ioctl_probe(11, EXT4_IOC_GETFLAGS, 0, 4);
+        fuse.record_ioctl_probe(12, 0xDEAD_BEEF, 0, 0);
+        flush_ioctl_trace_for_testing(&fuse);
+
+        let trace = std::fs::read_to_string(&trace_path).expect("read ioctl trace");
+        let lines = trace.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            vec![
+                "seed",
+                "ino=11 cmd=0x80086601 in_len=0 out_size=4",
+                "ino=12 cmd=0xdeadbeef in_len=0 out_size=0",
+            ]
+        );
     }
 
     #[test]
@@ -4370,6 +4515,7 @@ mod tests {
             metrics: Arc::new(AtomicMetrics::new()),
             thread_count: 4,
             read_only: true,
+            ioctl_trace: None,
             backpressure: None,
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
@@ -4692,6 +4838,7 @@ mod tests {
             read_only: false,
             allow_other: false,
             auto_unmount: true,
+            ioctl_trace_path: None,
             worker_threads: 0,
         };
         let mount_opts = build_mount_options(&opts);
@@ -4706,6 +4853,7 @@ mod tests {
             read_only: true,
             allow_other: true,
             auto_unmount: false,
+            ioctl_trace_path: None,
             worker_threads: 0,
         };
         let mount_opts = build_mount_options(&opts);
@@ -4721,6 +4869,7 @@ mod tests {
             read_only: true,
             allow_other: false,
             auto_unmount: true,
+            ioctl_trace_path: None,
             worker_threads: 8,
         };
         let mount_opts = build_mount_options(&opts);
@@ -4742,6 +4891,7 @@ mod tests {
             read_only: true,
             allow_other: false,
             auto_unmount: true,
+            ioctl_trace_path: None,
             worker_threads: 0,
         };
         let mount_opts = build_mount_options(&opts);
@@ -5131,6 +5281,7 @@ mod tests {
             read_only: false,
             allow_other: true,
             auto_unmount: false,
+            ioctl_trace_path: None,
             worker_threads: 4,
         };
         let mount_opts = build_mount_options(&opts);
@@ -5330,6 +5481,7 @@ mod tests {
             metrics: Arc::new(AtomicMetrics::new()),
             thread_count: 2,
             read_only: false,
+            ioctl_trace: None,
             backpressure: None,
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(8),

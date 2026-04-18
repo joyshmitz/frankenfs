@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -28,6 +28,9 @@ use tempfile::TempDir;
 
 const EOPNOTSUPP_ERRNO: i64 = 95;
 const BTRFS_TEST_WORKSPACE: &str = "testdir";
+const FS_IOC_FIEMAP_CMD: u32 = 0xC020_660B;
+const EXT4_IOC_GETFLAGS_CMD: u32 = 0x8008_6601;
+const EXT4_IOC_SETFLAGS_CMD: u32 = 0x4008_6602;
 
 fn patterned_bytes(len: usize, modulus: usize, offset: usize) -> Vec<u8> {
     assert!(
@@ -55,6 +58,14 @@ fn emit_scenario_result(scenario_id: &str, outcome: &str, detail: Option<&str>) 
         }
         None => eprintln!("SCENARIO_RESULT|scenario_id={scenario_id}|outcome={outcome}"),
     }
+}
+
+fn read_ioctl_trace(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_default()
+}
+
+fn trace_contains_cmd(trace: &str, cmd: u32) -> bool {
+    trace.contains(&format!("cmd=0x{cmd:08x}"))
 }
 
 /// Check if FUSE E2E prerequisites are met.
@@ -245,10 +256,14 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
     image
 }
 
-/// Try to mount an ext4 image via FrankenFS FUSE (read-only).
+/// Try to mount an ext4 image via FrankenFS FUSE with explicit mount options.
 ///
 /// Returns `None` if FUSE mounting fails (e.g. permission denied in containers).
-fn try_mount_ffs(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
+fn try_mount_ffs_with_options(
+    image: &Path,
+    mountpoint: &Path,
+    mount_opts: &MountOptions,
+) -> Option<fuser::BackgroundSession> {
     let cx = Cx::for_testing();
     let opts = OpenOptions {
         skip_validation: false,
@@ -256,12 +271,7 @@ fn try_mount_ffs(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSes
         ..OpenOptions::default()
     };
     let fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
-    let mount_opts = MountOptions {
-        read_only: true,
-        auto_unmount: false,
-        ..MountOptions::default()
-    };
-    match mount_background(Box::new(fs), mountpoint, &mount_opts) {
+    match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
             // Give FUSE a moment to initialize.
             thread::sleep(Duration::from_millis(300));
@@ -272,6 +282,18 @@ fn try_mount_ffs(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSes
             None
         }
     }
+}
+
+/// Try to mount an ext4 image via FrankenFS FUSE (read-only).
+///
+/// Returns `None` if FUSE mounting fails (e.g. permission denied in containers).
+fn try_mount_ffs(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    try_mount_ffs_with_options(image, mountpoint, &mount_opts)
 }
 
 #[test]
@@ -432,10 +454,15 @@ fn fuse_readlink_and_symlink_detection() {
 
 // ── Write-path E2E tests ────────────────────────────────────────────────────
 
-/// Try to mount an ext4 image via FrankenFS FUSE in **read-write** mode.
+/// Try to mount an ext4 image via FrankenFS FUSE in **read-write** mode with
+/// explicit mount options.
 ///
 /// Returns `None` if FUSE mounting fails (e.g. permission denied in containers).
-fn try_mount_ffs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
+fn try_mount_ffs_rw_with_options(
+    image: &Path,
+    mountpoint: &Path,
+    mount_opts: &MountOptions,
+) -> Option<fuser::BackgroundSession> {
     let cx = Cx::for_testing();
     let opts = OpenOptions {
         skip_validation: false,
@@ -445,12 +472,7 @@ fn try_mount_ffs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Background
     };
     let mut fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
     fs.enable_writes(&cx).expect("enable ext4 write support");
-    let mount_opts = MountOptions {
-        read_only: false,
-        auto_unmount: false,
-        ..MountOptions::default()
-    };
-    match mount_background(Box::new(fs), mountpoint, &mount_opts) {
+    match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
             thread::sleep(Duration::from_millis(300));
             Some(session)
@@ -460,6 +482,18 @@ fn try_mount_ffs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Background
             None
         }
     }
+}
+
+/// Try to mount an ext4 image via FrankenFS FUSE in **read-write** mode.
+///
+/// Returns `None` if FUSE mounting fails (e.g. permission denied in containers).
+fn try_mount_ffs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    try_mount_ffs_rw_with_options(image, mountpoint, &mount_opts)
 }
 
 /// Helper: create image, mount rw, run a closure, then drop the session.
@@ -1424,20 +1458,36 @@ fn fuse_ioctl_fiemap_reports_valid_extents() {
 
     let mnt = tmp.path().join("mnt");
     fs::create_dir_all(&mnt).expect("create mountpoint");
-    let Some(_session) = try_mount_ffs(&image, &mnt) else {
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-fiemap.log");
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_with_options(&image, &mnt, &mount_opts) else {
         return;
     };
 
     let path = mnt.join("fiemap_seed.bin");
     let meta = fs::metadata(&path).expect("stat fiemap seed file");
     let report = query_fiemap(&path, 16);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
     if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+            "FIEMAP returned EOPNOTSUPP after reaching ffs-fuse::ioctl: {ioctl_trace}"
+        );
         eprintln!(
-            "FIEMAP ioctl skipped: current FUSE transport reports EOPNOTSUPP before FrankenFS \
-             receives unrestricted ioctl requests"
+            "FIEMAP ioctl skipped: kernel/VFS returned EOPNOTSUPP before ffs-fuse::ioctl \
+             (trace empty)"
         );
         return;
     }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+        "successful FIEMAP should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
     let extents = report["extents"].as_array().expect("fiemap extents array");
 
     assert!(
@@ -1484,137 +1534,207 @@ fn fuse_ioctl_fiemap_reports_valid_extents() {
 
 #[test]
 fn btrfs_fuse_ioctl_fiemap_reports_valid_extents() {
-    with_btrfs_rw_mount(|mnt| {
-        let path = mnt.join("fiemap_seed.bin");
-        let payload = vec![0xA5_u8; 24 * 1024];
-        fs::write(&path, &payload).expect("write btrfs fiemap seed file");
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
 
-        let meta = fs::metadata(&path).expect("stat btrfs fiemap seed file");
-        let report = query_fiemap(&path, 16);
-        if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
-            eprintln!(
-                "btrfs FIEMAP ioctl skipped: current FUSE transport reports EOPNOTSUPP before FrankenFS \
-                 receives unrestricted ioctl requests"
-            );
-            return;
-        }
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-btrfs-fiemap.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_btrfs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
 
-        let extents = report["extents"]
-            .as_array()
-            .expect("btrfs fiemap extents array");
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    assert!(
+        workspace.is_dir(),
+        "seeded btrfs workspace missing at {}",
+        workspace.display()
+    );
 
+    let path = workspace.join("fiemap_seed.bin");
+    let payload = vec![0xA5_u8; 24 * 1024];
+    fs::write(&path, &payload).expect("write btrfs fiemap seed file");
+
+    let meta = fs::metadata(&path).expect("stat btrfs fiemap seed file");
+    let report = query_fiemap(&path, 16);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
         assert!(
-            report["mapped_extents"].as_u64().unwrap_or(0) >= 1,
-            "expected at least one mapped btrfs extent: {report}"
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+            "btrfs FIEMAP returned EOPNOTSUPP after reaching ffs-fuse::ioctl: {ioctl_trace}"
         );
+        eprintln!(
+            "btrfs FIEMAP ioctl skipped: kernel/VFS returned EOPNOTSUPP before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+        "successful btrfs FIEMAP should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+
+    let extents = report["extents"]
+        .as_array()
+        .expect("btrfs fiemap extents array");
+
+    assert!(
+        report["mapped_extents"].as_u64().unwrap_or(0) >= 1,
+        "expected at least one mapped btrfs extent: {report}"
+    );
+    assert_eq!(
+        report["requested_extents"].as_u64().unwrap_or(0),
+        16,
+        "kernel should preserve requested btrfs extent count in response header"
+    );
+
+    let mut covered = 0_u64;
+    let mut expected_logical = 0_u64;
+    let mut saw_last = false;
+    for extent in extents {
+        let logical = extent["logical"].as_u64().expect("logical");
+        let physical = extent["physical"].as_u64().expect("physical");
+        let length = extent["length"].as_u64().expect("length");
+        let last = extent["last"].as_bool().expect("last flag");
+
         assert_eq!(
-            report["requested_extents"].as_u64().unwrap_or(0),
-            16,
-            "kernel should preserve requested btrfs extent count in response header"
+            logical, expected_logical,
+            "expected btrfs extents to begin at logical offset 0 and remain contiguous: {report}"
         );
+        assert!(physical > 0, "physical offset should be non-zero: {report}");
+        assert!(length > 0, "extent length should be non-zero: {report}");
 
-        let mut covered = 0_u64;
-        let mut expected_logical = 0_u64;
-        let mut saw_last = false;
-        for extent in extents {
-            let logical = extent["logical"].as_u64().expect("logical");
-            let physical = extent["physical"].as_u64().expect("physical");
-            let length = extent["length"].as_u64().expect("length");
-            let last = extent["last"].as_bool().expect("last flag");
+        covered = covered.saturating_add(length);
+        expected_logical = expected_logical.saturating_add(length);
+        saw_last |= last;
+    }
 
-            assert_eq!(
-                logical, expected_logical,
-                "expected btrfs extents to begin at logical offset 0 and remain contiguous: {report}"
-            );
-            assert!(physical > 0, "physical offset should be non-zero: {report}");
-            assert!(length > 0, "extent length should be non-zero: {report}");
-
-            covered = covered.saturating_add(length);
-            expected_logical = expected_logical.saturating_add(length);
-            saw_last |= last;
-        }
-
-        assert!(
-            covered >= meta.len(),
-            "btrfs fiemap extents should cover file length (covered={covered}, len={}): {report}",
-            meta.len()
-        );
-        assert!(
-            saw_last,
-            "expected FIEMAP_EXTENT_LAST in returned btrfs extents: {report}"
-        );
-    });
+    assert!(
+        covered >= meta.len(),
+        "btrfs fiemap extents should cover file length (covered={covered}, len={}): {report}",
+        meta.len()
+    );
+    assert!(
+        saw_last,
+        "expected FIEMAP_EXTENT_LAST in returned btrfs extents: {report}"
+    );
 }
 
 #[test]
 fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
-    with_rw_mount(|mnt| {
-        let scenario_id = "ext4_ioctl_getflags_setflags_roundtrip";
-        let path = mnt.join("inode_flags.bin");
-        fs::write(&path, b"ext4 ioctl flags payload\n").expect("write ext4 ioctl seed file");
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
 
-        let original_report = ext4_inode_flags_ioctl(&path, "get", None);
-        if original_report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
-            eprintln!(
-                "EXT4 GETFLAGS ioctl skipped: current FUSE transport reports EOPNOTSUPP before FrankenFS \
-                 receives unrestricted ioctl requests"
-            );
-            return;
-        }
-        let original = u32::try_from(
-            original_report["flags"]
-                .as_u64()
-                .expect("original flags u64"),
-        )
-        .expect("original flags should fit u32");
-        assert_ne!(
-            original & ffs_types::EXT4_EXTENTS_FL,
-            0,
-            "default rw ext4 file should start extent-based: {original_report}"
-        );
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-flags.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
 
-        let requested = (original
-            | ffs_types::EXT4_NOATIME_FL
-            | ffs_types::EXT4_NODUMP_FL
-            | ffs_types::EXT4_HUGE_FILE_FL)
-            & !ffs_types::EXT4_EXTENTS_FL;
-        let set_report = ext4_inode_flags_ioctl(&path, "set", Some(requested));
-        if set_report["errno"].as_i64() == Some(i64::from(libc::ENOTTY)) {
-            eprintln!(
-                "EXT4 SETFLAGS ioctl skipped: current FUSE transport reports ENOTTY before FrankenFS \
-                 receives unrestricted write ioctl requests"
-            );
-            return;
-        }
+    let scenario_id = "ext4_ioctl_getflags_setflags_roundtrip";
+    let path = mnt.join("inode_flags.bin");
+    fs::write(&path, b"ext4 ioctl flags payload\n").expect("write ext4 ioctl seed file");
+
+    let original_report = ext4_inode_flags_ioctl(&path, "get", None);
+    let get_trace = read_ioctl_trace(&ioctl_trace_path);
+    if original_report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
         assert!(
-            set_report["errno"].is_null(),
-            "EXT4 SETFLAGS ioctl should succeed on rw mount: {set_report}"
+            !trace_contains_cmd(&get_trace, EXT4_IOC_GETFLAGS_CMD),
+            "GETFLAGS returned EOPNOTSUPP after reaching ffs-fuse::ioctl: {get_trace}"
         );
+        eprintln!(
+            "EXT4 GETFLAGS ioctl skipped: kernel/VFS returned EOPNOTSUPP before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&get_trace, EXT4_IOC_GETFLAGS_CMD),
+        "successful GETFLAGS should hit ffs-fuse::ioctl: {get_trace}"
+    );
+    let original = u32::try_from(
+        original_report["flags"]
+            .as_u64()
+            .expect("original flags u64"),
+    )
+    .expect("original flags should fit u32");
+    assert_ne!(
+        original & ffs_types::EXT4_EXTENTS_FL,
+        0,
+        "default rw ext4 file should start extent-based: {original_report}"
+    );
 
-        let updated_report = ext4_inode_flags_ioctl(&path, "get", None);
-        let updated = u32::try_from(updated_report["flags"].as_u64().expect("updated flags u64"))
-            .expect("updated flags should fit u32");
-        assert_eq!(
-            updated & (ffs_types::EXT4_NOATIME_FL | ffs_types::EXT4_NODUMP_FL),
-            ffs_types::EXT4_NOATIME_FL | ffs_types::EXT4_NODUMP_FL,
-            "SETFLAGS should apply user-settable NOATIME/NODUMP bits: {updated_report}"
+    let requested = (original
+        | ffs_types::EXT4_NOATIME_FL
+        | ffs_types::EXT4_NODUMP_FL
+        | ffs_types::EXT4_HUGE_FILE_FL)
+        & !ffs_types::EXT4_EXTENTS_FL;
+    let set_report = ext4_inode_flags_ioctl(&path, "set", Some(requested));
+    let set_trace = read_ioctl_trace(&ioctl_trace_path);
+    if set_report["errno"].as_i64() == Some(i64::from(libc::ENOTTY)) {
+        assert!(
+            !trace_contains_cmd(&set_trace, EXT4_IOC_SETFLAGS_CMD),
+            "SETFLAGS returned ENOTTY after reaching ffs-fuse::ioctl: {set_trace}"
         );
-        assert_eq!(
-            updated & ffs_types::EXT4_EXTENTS_FL,
-            original & ffs_types::EXT4_EXTENTS_FL,
-            "SETFLAGS must not clear system-managed EXTENTS bit: {updated_report}"
+        eprintln!(
+            "EXT4 SETFLAGS ioctl skipped: kernel/VFS returned ENOTTY before \
+             ffs-fuse::ioctl (trace empty)"
         );
-        assert_eq!(
-            updated & ffs_types::EXT4_HUGE_FILE_FL,
-            original & ffs_types::EXT4_HUGE_FILE_FL,
-            "SETFLAGS must not introduce system-managed HUGE_FILE bit: {updated_report}"
-        );
-        emit_scenario_result(
-            scenario_id,
-            "PASS",
-            Some("user_bits_applied_system_bits_preserved"),
-        );
-    });
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&set_trace, EXT4_IOC_SETFLAGS_CMD),
+        "successful SETFLAGS should hit ffs-fuse::ioctl: {set_trace}"
+    );
+    assert!(
+        set_report["errno"].is_null(),
+        "EXT4 SETFLAGS ioctl should succeed on rw mount: {set_report}"
+    );
+
+    let updated_report = ext4_inode_flags_ioctl(&path, "get", None);
+    let updated = u32::try_from(updated_report["flags"].as_u64().expect("updated flags u64"))
+        .expect("updated flags should fit u32");
+    assert_eq!(
+        updated & (ffs_types::EXT4_NOATIME_FL | ffs_types::EXT4_NODUMP_FL),
+        ffs_types::EXT4_NOATIME_FL | ffs_types::EXT4_NODUMP_FL,
+        "SETFLAGS should apply user-settable NOATIME/NODUMP bits: {updated_report}"
+    );
+    assert_eq!(
+        updated & ffs_types::EXT4_EXTENTS_FL,
+        original & ffs_types::EXT4_EXTENTS_FL,
+        "SETFLAGS must not clear system-managed EXTENTS bit: {updated_report}"
+    );
+    assert_eq!(
+        updated & ffs_types::EXT4_HUGE_FILE_FL,
+        original & ffs_types::EXT4_HUGE_FILE_FL,
+        "SETFLAGS must not introduce system-managed HUGE_FILE bit: {updated_report}"
+    );
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("user_bits_applied_system_bits_preserved"),
+    );
 }
 
 #[test]
@@ -2503,8 +2623,13 @@ fn create_btrfs_test_image(dir: &Path) -> std::path::PathBuf {
     image
 }
 
-/// Try to mount a btrfs image via FrankenFS FUSE (read-write).
-fn try_mount_btrfs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
+/// Try to mount a btrfs image via FrankenFS FUSE (read-write) with explicit
+/// mount options.
+fn try_mount_btrfs_rw_with_options(
+    image: &Path,
+    mountpoint: &Path,
+    mount_opts: &MountOptions,
+) -> Option<fuser::BackgroundSession> {
     let cx = Cx::for_testing();
     let opts = OpenOptions {
         skip_validation: false,
@@ -2516,12 +2641,7 @@ fn try_mount_btrfs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Backgrou
         eprintln!("btrfs enable_writes failed (skipping test): {e}");
         return None;
     }
-    let mount_opts = MountOptions {
-        read_only: false,
-        auto_unmount: false,
-        ..MountOptions::default()
-    };
-    match mount_background(Box::new(fs), mountpoint, &mount_opts) {
+    match mount_background(Box::new(fs), mountpoint, mount_opts) {
         Ok(session) => {
             thread::sleep(Duration::from_millis(300));
             Some(session)
@@ -2531,6 +2651,16 @@ fn try_mount_btrfs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Backgrou
             None
         }
     }
+}
+
+/// Try to mount a btrfs image via FrankenFS FUSE (read-write).
+fn try_mount_btrfs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    try_mount_btrfs_rw_with_options(image, mountpoint, &mount_opts)
 }
 
 /// Helper: create btrfs image, mount rw, run a closure against the mount root.
