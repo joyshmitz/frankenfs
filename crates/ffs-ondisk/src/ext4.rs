@@ -4504,6 +4504,24 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Build a representative dir block of `block_size` bytes with the
+    /// 12-byte fake-record checksum tail in place but the checksum slot
+    /// left zeroed.  Body bytes are filled with a deterministic ramp so
+    /// that any single-bit flip in the covered region is reliably visible
+    /// to the CRC.
+    fn build_dir_block_for_checksum_test(block_size: usize) -> Vec<u8> {
+        let mut block = vec![0u8; block_size];
+        for (i, b) in block.iter_mut().enumerate() {
+            *b = u8::try_from(i & 0xFF).unwrap();
+        }
+        let tail_off = block_size - 12;
+        block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
+        block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
+        block[tail_off + 6] = 0;
+        block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+        block
+    }
+
     #[test]
     fn parse_ext4_superblock_region_smoke() {
         let mut sb = [0_u8; EXT4_SUPERBLOCK_SIZE];
@@ -10286,19 +10304,134 @@ mod tests {
             generation in any::<u32>(),
             block_size in prop_oneof![Just(1024_usize), Just(2048_usize), Just(4096_usize)],
         ) {
-            let mut block = vec![0u8; block_size];
-            for (i, b) in block.iter_mut().enumerate() {
-                *b = u8::try_from(i & 0xFF).unwrap();
-            }
+            let mut block = build_dir_block_for_checksum_test(block_size);
+            stamp_dir_block_checksum(&mut block, csum_seed, ino, generation);
+            prop_assert!(verify_dir_block_checksum(&block, csum_seed, ino, generation).is_ok());
+        }
 
-            let tail_off = block_size - 12;
-            block[tail_off..tail_off + 4].copy_from_slice(&0_u32.to_le_bytes());
-            block[tail_off + 4..tail_off + 6].copy_from_slice(&12_u16.to_le_bytes());
-            block[tail_off + 6] = 0;
-            block[tail_off + 7] = EXT4_FT_DIR_CSUM;
+        /// MR-INO: identical dir-block bodies stamped at two different inode
+        /// numbers must produce different stored checksums, and a stamp from
+        /// one ino must NOT verify when presented as another (defends against
+        /// cross-slot replay).
+        #[test]
+        fn ext4_proptest_dir_block_checksum_is_sensitive_to_inode_number(
+            csum_seed in any::<u32>(),
+            ino_a in any::<u32>(),
+            ino_b_delta in 1_u32..,
+            generation in any::<u32>(),
+            block_size in prop_oneof![Just(1024_usize), Just(2048_usize), Just(4096_usize)],
+        ) {
+            let ino_b = ino_a.wrapping_add(ino_b_delta);
+            let mut block_a = build_dir_block_for_checksum_test(block_size);
+            let mut block_b = block_a.clone();
+            stamp_dir_block_checksum(&mut block_a, csum_seed, ino_a, generation);
+            stamp_dir_block_checksum(&mut block_b, csum_seed, ino_b, generation);
+
+            prop_assert_ne!(
+                &block_a[block_size - 4..],
+                &block_b[block_size - 4..],
+                "dir-block stamps for inode {:#010x} and inode {:#010x} must differ",
+                ino_a,
+                ino_b
+            );
+            prop_assert!(
+                verify_dir_block_checksum(&block_b, csum_seed, ino_a, generation).is_err(),
+                "stamp from inode {:#010x} must NOT verify when presented as inode {:#010x}",
+                ino_b,
+                ino_a
+            );
+        }
+
+        /// MR-GEN: changing only the generation field must shift the stamped
+        /// checksum.  Generation participates in the per-inode seed, so two
+        /// stampings at the same (csum_seed, ino) but different generations
+        /// must yield distinct stored checksums.
+        #[test]
+        fn ext4_proptest_dir_block_checksum_is_sensitive_to_generation(
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            gen_a in any::<u32>(),
+            gen_delta in 1_u32..,
+            block_size in prop_oneof![Just(1024_usize), Just(2048_usize), Just(4096_usize)],
+        ) {
+            let gen_b = gen_a.wrapping_add(gen_delta);
+            let mut block_a = build_dir_block_for_checksum_test(block_size);
+            let mut block_b = block_a.clone();
+            stamp_dir_block_checksum(&mut block_a, csum_seed, ino, gen_a);
+            stamp_dir_block_checksum(&mut block_b, csum_seed, ino, gen_b);
+
+            prop_assert_ne!(
+                &block_a[block_size - 4..],
+                &block_b[block_size - 4..],
+                "generation flip from {:#010x} to {:#010x} must change the stored checksum",
+                gen_a,
+                gen_b
+            );
+        }
+
+        /// MR-SEED: identical body+ino+generation stamped under two
+        /// different filesystem checksum seeds must yield different stored
+        /// checksums, and a cross-seed verification must fail.  This is what
+        /// makes a valid stamp from filesystem instance X non-replayable on
+        /// instance Y.
+        #[test]
+        fn ext4_proptest_dir_block_checksum_is_sensitive_to_csum_seed(
+            seed_a in any::<u32>(),
+            seed_delta in 1_u32..,
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            block_size in prop_oneof![Just(1024_usize), Just(2048_usize), Just(4096_usize)],
+        ) {
+            let seed_b = seed_a.wrapping_add(seed_delta);
+            let mut block_a = build_dir_block_for_checksum_test(block_size);
+            let mut block_b = block_a.clone();
+            stamp_dir_block_checksum(&mut block_a, seed_a, ino, generation);
+            stamp_dir_block_checksum(&mut block_b, seed_b, ino, generation);
+
+            prop_assert_ne!(
+                &block_a[block_size - 4..],
+                &block_b[block_size - 4..],
+                "dir-block stamp under seed {:#010x} must differ from stamp under seed {:#010x}",
+                seed_a,
+                seed_b
+            );
+            prop_assert!(
+                verify_dir_block_checksum(&block_a, seed_b, ino, generation).is_err(),
+                "stamp under seed A must NOT verify under seed B"
+            );
+        }
+
+        /// MR-DETECT: flipping any single bit anywhere in the covered region
+        /// `[0..block_size - 12]` must invalidate verification.  The 12-byte
+        /// tail is excluded from coverage by construction (stamp/verify both
+        /// only CRC the prefix), so flips inside the tail are unsound and
+        /// must be skipped.
+        #[test]
+        fn ext4_proptest_dir_block_checksum_detects_single_bit_flip_in_body(
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            block_size in prop_oneof![Just(1024_usize), Just(2048_usize), Just(4096_usize)],
+            flip_pos in 0_usize..4096,
+            flip_bit in 0_u8..8,
+        ) {
+            prop_assume!(flip_pos < block_size - 12);
+
+            let mut block = build_dir_block_for_checksum_test(block_size);
             stamp_dir_block_checksum(&mut block, csum_seed, ino, generation);
 
-            prop_assert!(verify_dir_block_checksum(&block, csum_seed, ino, generation).is_ok());
+            // Sanity: the unflipped stamp verifies.
+            prop_assert!(
+                verify_dir_block_checksum(&block, csum_seed, ino, generation).is_ok()
+            );
+
+            block[flip_pos] ^= 1_u8 << flip_bit;
+            prop_assert!(
+                verify_dir_block_checksum(&block, csum_seed, ino, generation).is_err(),
+                "single-bit flip at byte {:#06x} bit {} must invalidate the stored checksum",
+                flip_pos,
+                flip_bit
+            );
         }
 
         /// Extent block with stamped checksum passes verification.
