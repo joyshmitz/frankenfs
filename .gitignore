@@ -126,6 +126,7 @@ gemini.mcp.json
 .beads/*.reindex_test_*
 .beads/*.vacuum_test_*
 .beads/recovery*/
+.beads_snapshot_*/
 
 # Fuzz artifacts (campaign outputs, crash artifacts, build products)
 fuzz-*.log
