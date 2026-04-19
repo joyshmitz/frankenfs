@@ -32489,6 +32489,38 @@ mod tests {
         assert_eq!(gate.check(RequestOp::Mkdir), BackpressureDecision::Proceed);
     }
 
+    const REPRESENTATIVE_BACKPRESSURE_DIAGNOSTICS_GOLDEN: &str = concat!(
+        "transition=DegradationTransition { from: Normal, to: Critical, headroom: 60 }\n",
+        "fsm=DegradationFsm { level: Critical, recovery_count: 0, transitions: 1, recovery_samples: 3, .. }\n",
+        "gate=BackpressureGate { level: Critical }\n",
+        "decision.write=Throttle\n",
+        "decision.create=Shed\n",
+        "decision.read=Proceed\n",
+        "decision.lookup=Proceed",
+    );
+
+    fn representative_backpressure_diagnostics_text() -> String {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
+        pressure.set_headroom(0.06);
+        let transition = fsm.tick().expect("critical transition");
+        let gate = BackpressureGate::new(Arc::clone(&fsm));
+
+        format!(
+            "transition={transition:?}\n\
+             fsm={fsm:?}\n\
+             gate={gate:?}\n\
+             decision.write={:?}\n\
+             decision.create={:?}\n\
+             decision.read={:?}\n\
+             decision.lookup={:?}",
+            gate.check(RequestOp::Write),
+            gate.check(RequestOp::Create),
+            gate.check(RequestOp::Read),
+            gate.check(RequestOp::Lookup),
+        )
+    }
+
     #[test]
     fn backpressure_gate_debug_shows_level() {
         let pressure = Arc::new(SystemPressure::new());
@@ -32508,6 +32540,12 @@ mod tests {
         let d2 = d;
         assert_eq!(d, d2);
         assert!(format!("{d:?}").contains("Throttle"));
+    }
+
+    #[test]
+    fn representative_backpressure_diagnostics_exact_golden_contract() {
+        let debug = representative_backpressure_diagnostics_text();
+        assert_eq!(debug, REPRESENTATIVE_BACKPRESSURE_DIAGNOSTICS_GOLDEN);
     }
 
     #[test]

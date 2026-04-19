@@ -1570,6 +1570,66 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    const REPRESENTATIVE_SCALAR_JSON_GOLDEN: &str = r#"{
+  "mount_mode": "Native",
+  "block_number": 42,
+  "inode_number": 2,
+  "txn_id": 7,
+  "commit_seq": 17,
+  "snapshot": {
+    "high": 17
+  },
+  "block_size": 4096,
+  "group_number": 3,
+  "byte_offset": 8192,
+  "generation": 21,
+  "ext4_inode": 2,
+  "btrfs_object_id": 256
+}"#;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct RepresentativeScalarJsonContract {
+        mount_mode: MountMode,
+        block_number: BlockNumber,
+        inode_number: InodeNumber,
+        txn_id: TxnId,
+        commit_seq: CommitSeq,
+        snapshot: Snapshot,
+        block_size: BlockSize,
+        group_number: GroupNumber,
+        byte_offset: ByteOffset,
+        generation: Generation,
+        ext4_inode: Ext4InodeNumber,
+        btrfs_object_id: BtrfsObjectId,
+    }
+
+    #[test]
+    fn representative_scalar_json_exact_golden_contract() {
+        let actual = RepresentativeScalarJsonContract {
+            mount_mode: MountMode::Native,
+            block_number: BlockNumber(42),
+            inode_number: InodeNumber::ROOT,
+            txn_id: TxnId(7),
+            commit_seq: CommitSeq(17),
+            snapshot: Snapshot {
+                high: CommitSeq(17),
+            },
+            block_size: BlockSize::new(4096).unwrap(),
+            group_number: GroupNumber(3),
+            byte_offset: ByteOffset(8192),
+            generation: Generation(21),
+            ext4_inode: Ext4InodeNumber::ROOT,
+            btrfs_object_id: BtrfsObjectId(256),
+        };
+
+        let json = serde_json::to_string_pretty(&actual).expect("serialize representative JSON");
+        assert_eq!(json, REPRESENTATIVE_SCALAR_JSON_GOLDEN);
+
+        let parsed: RepresentativeScalarJsonContract =
+            serde_json::from_str(&json).expect("deserialize representative JSON");
+        assert_eq!(parsed, actual);
+    }
+
     #[test]
     fn newtype_ordering() {
         assert!(BlockNumber(1) < BlockNumber(2));

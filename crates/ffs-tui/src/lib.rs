@@ -574,6 +574,42 @@ fn render_pressure_gauge(value: f64, width: usize) -> String {
 mod tests {
     use super::*;
 
+    const REPRESENTATIVE_SYSTEM_HEALTH_TEXT_GOLDEN: &str = concat!(
+        "Degradation: WRITES THROTTLED (L3)\n",
+        "\n",
+        "CPU:    [########..]  78%\n",
+        "Memory: [######....]  62%\n",
+        "I/O:    [###.......]  34% depth=22\n",
+        "\n",
+        "Recent events:\n",
+        "  12:35:22 L1 -> L0\n",
+        "  12:34:05 L0 -> L1 (cpu)",
+    );
+
+    fn representative_system_health_snapshot() -> DashboardSnapshot {
+        DashboardSnapshot {
+            degradation_level: DegradationLevel::Critical,
+            cpu_pressure: 0.78,
+            memory_pressure: 0.62,
+            io_queue_depth: 22,
+            degradation_events: vec![
+                DegradationEvent {
+                    timestamp: "12:34:05".to_owned(),
+                    from: DegradationLevel::Normal,
+                    to: DegradationLevel::Warning,
+                    reason: "cpu".to_owned(),
+                },
+                DegradationEvent {
+                    timestamp: "12:35:22".to_owned(),
+                    from: DegradationLevel::Warning,
+                    to: DegradationLevel::Normal,
+                    reason: String::new(),
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn dashboard_snapshot_default_is_zeroed() {
         let snap = DashboardSnapshot::default();
@@ -630,27 +666,7 @@ mod tests {
 
     #[test]
     fn system_health_text_includes_recent_events() {
-        let snap = DashboardSnapshot {
-            degradation_level: DegradationLevel::Critical,
-            cpu_pressure: 0.78,
-            memory_pressure: 0.62,
-            io_queue_depth: 22,
-            degradation_events: vec![
-                DegradationEvent {
-                    timestamp: "12:34:05".to_owned(),
-                    from: DegradationLevel::Normal,
-                    to: DegradationLevel::Warning,
-                    reason: "cpu".to_owned(),
-                },
-                DegradationEvent {
-                    timestamp: "12:35:22".to_owned(),
-                    from: DegradationLevel::Warning,
-                    to: DegradationLevel::Normal,
-                    reason: String::new(),
-                },
-            ],
-            ..Default::default()
-        };
+        let snap = representative_system_health_snapshot();
 
         let text = build_system_health_text(&snap).to_plain_text();
         assert!(text.contains("Degradation: WRITES THROTTLED (L3)"));
@@ -659,6 +675,13 @@ mod tests {
         assert!(text.contains("Recent events:"));
         assert!(text.contains("12:35:22 L1 -> L0"));
         assert!(text.contains("12:34:05 L0 -> L1 (cpu)"));
+    }
+
+    #[test]
+    fn representative_system_health_text_exact_golden_contract() {
+        let text =
+            build_system_health_text(&representative_system_health_snapshot()).to_plain_text();
+        assert_eq!(text, REPRESENTATIVE_SYSTEM_HEALTH_TEXT_GOLDEN);
     }
 
     #[test]

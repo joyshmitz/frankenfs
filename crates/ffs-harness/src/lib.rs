@@ -645,11 +645,42 @@ mod tests {
         assert_eq!(fixture.writes[0].hex, "ff".repeat(16));
     }
 
+    const REPRESENTATIVE_SPARSE_FIXTURE_JSON_GOLDEN: &str = r#"{
+  "size": 12,
+  "writes": [
+    {
+      "offset": 1,
+      "hex": "ab"
+    },
+    {
+      "offset": 4,
+      "hex": "010203"
+    },
+    {
+      "offset": 10,
+      "hex": "ff"
+    }
+  ]
+}"#;
+
     #[test]
     fn sparse_fixture_json_round_trip() {
         let original = vec![0, 0x42, 0, 0, 0xDE, 0xAD, 0, 0];
         let fixture = SparseFixture::from_bytes(&original);
         let json = serde_json::to_string_pretty(&fixture).expect("serialize");
+        let parsed: SparseFixture = serde_json::from_str(&json).expect("deserialize");
+        let materialized = parsed.materialize().expect("materialize");
+        assert_eq!(materialized, original);
+    }
+
+    #[test]
+    fn representative_sparse_fixture_json_exact_golden_contract() {
+        let original = vec![0, 0xAB, 0, 0, 1, 2, 3, 0, 0, 0, 0xFF, 0];
+        let fixture = SparseFixture::from_bytes(&original);
+        let json = serde_json::to_string_pretty(&fixture).expect("serialize");
+
+        assert_eq!(json, REPRESENTATIVE_SPARSE_FIXTURE_JSON_GOLDEN);
+
         let parsed: SparseFixture = serde_json::from_str(&json).expect("deserialize");
         let materialized = parsed.materialize().expect("materialize");
         assert_eq!(materialized, original);

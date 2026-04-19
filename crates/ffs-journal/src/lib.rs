@@ -2546,6 +2546,102 @@ mod tests {
             .copy_from_slice(&checksum.to_be_bytes());
     }
 
+    const REPRESENTATIVE_JBD2_CHECKSUM_BLOCK_GOLDEN: &str = concat!(
+        "descriptor\n",
+        "  seq=0x10203040\n",
+        "  target=7\n",
+        "  flags=0x0000000a\n",
+        "  checksum=0xe29aad06\n",
+        "  verify=true\n",
+        "  bytes=[c0, 3b, 39, 98, 00, 00, 00, 01, 10, 20, 30, 40, 00, 00, 00, 07, 00, 00, 00, 0a, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, e2, 9a, ad, 06]\n",
+        "revoke\n",
+        "  seq=0x11223344\n",
+        "  count=28\n",
+        "  targets=[7, 9, 15]\n",
+        "  checksum=0xef1b9c26\n",
+        "  verify=true\n",
+        "  bytes=[c0, 3b, 39, 98, 00, 00, 00, 05, 11, 22, 33, 44, 00, 00, 00, 1c, 00, 00, 00, 07, 00, 00, 00, 09, 00, 00, 00, 0f, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, ef, 1b, 9c, 26]\n",
+        "commit\n",
+        "  seq=0x55667788\n",
+        "  checksum=0x1c8f2bdd\n",
+        "  good_seed=0x2c78fa30\n",
+        "  bad_seed=0xbf86a461\n",
+        "  verify_good=true\n",
+        "  verify_bad=false\n",
+        "  bytes=[c0, 3b, 39, 98, 00, 00, 00, 02, 55, 66, 77, 88, 00, 00, 00, 00, 1c, 8f, 2b, dd, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]"
+    );
+
+    fn representative_jbd2_checksum_block_golden_contract_actual() -> String {
+        let descriptor_sb = checksum_v2_superblock();
+        let mut descriptor = descriptor_block(64, 0x1020_3040, &[(7, JBD2_TAG_FLAG_LAST)]);
+        stamp_descriptor_or_revoke_checksum(&mut descriptor, &descriptor_sb);
+
+        let mut revoke = revoke_block(64, 0x1122_3344, &[7, 9, 15]);
+        stamp_descriptor_or_revoke_checksum(&mut revoke, &descriptor_sb);
+
+        let good_uuid = *b"ffs-jbd2-v3-seed";
+        let bad_uuid = *b"ffs-jbd2-v3-alt!";
+        let good_commit_sb = checksum_v3_superblock(good_uuid);
+        let bad_commit_sb = checksum_v3_superblock(bad_uuid);
+        let mut commit = commit_block(64, 0x5566_7788);
+        stamp_commit_checksum(&mut commit, &good_commit_sb);
+
+        let descriptor_checksum =
+            u32::from_be_bytes(descriptor[descriptor.len() - 4..].try_into().expect("tail"));
+        let revoke_checksum =
+            u32::from_be_bytes(revoke[revoke.len() - 4..].try_into().expect("tail"));
+        let commit_checksum = u32::from_be_bytes(
+            commit[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + 4]
+                .try_into()
+                .expect("commit checksum field"),
+        );
+        let revoke_count = u32::from_be_bytes(revoke[12..16].try_into().expect("revoke count"));
+
+        format!(
+            concat!(
+                "descriptor\n",
+                "  seq=0x{:08x}\n",
+                "  target=7\n",
+                "  flags=0x{:08x}\n",
+                "  checksum=0x{:08x}\n",
+                "  verify={}\n",
+                "  bytes={:02x?}\n",
+                "revoke\n",
+                "  seq=0x{:08x}\n",
+                "  count={}\n",
+                "  targets=[7, 9, 15]\n",
+                "  checksum=0x{:08x}\n",
+                "  verify={}\n",
+                "  bytes={:02x?}\n",
+                "commit\n",
+                "  seq=0x{:08x}\n",
+                "  checksum=0x{:08x}\n",
+                "  good_seed=0x{:08x}\n",
+                "  bad_seed=0x{:08x}\n",
+                "  verify_good={}\n",
+                "  verify_bad={}\n",
+                "  bytes={:02x?}"
+            ),
+            0x1020_3040_u32,
+            JBD2_TAG_FLAG_LAST | JBD2_TAG_FLAG_SAME_UUID,
+            descriptor_checksum,
+            verify_jbd2_block_checksum(&descriptor, &descriptor_sb),
+            descriptor,
+            0x1122_3344_u32,
+            revoke_count,
+            revoke_checksum,
+            verify_jbd2_block_checksum(&revoke, &descriptor_sb),
+            revoke,
+            0x5566_7788_u32,
+            commit_checksum,
+            good_commit_sb.csum_seed(),
+            bad_commit_sb.csum_seed(),
+            verify_jbd2_block_checksum(&commit, &good_commit_sb),
+            verify_jbd2_block_checksum(&commit, &bad_commit_sb),
+            commit,
+        )
+    }
+
     #[test]
     fn replay_jbd2_committed_descriptor_replays_payload() {
         let cx = test_cx();
@@ -2628,6 +2724,14 @@ mod tests {
 
         commit[8] ^= 0x01;
         assert!(!verify_jbd2_block_checksum(&commit, &good_sb));
+    }
+
+    #[test]
+    fn representative_jbd2_checksum_block_layout_exact_golden_contract() {
+        assert_eq!(
+            representative_jbd2_checksum_block_golden_contract_actual(),
+            REPRESENTATIVE_JBD2_CHECKSUM_BLOCK_GOLDEN
+        );
     }
 
     #[test]

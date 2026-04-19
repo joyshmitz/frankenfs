@@ -9256,6 +9256,101 @@ mod tests {
         assert_eq!(m.select_policy(&config), ConflictPolicy::SafeMerge);
     }
 
+    const REPRESENTATIVE_MVCC_RUNTIME_METRICS_JSON_GOLDEN: &str = r#"{
+  "active_snapshots": 2,
+  "commit_rate": 12.5,
+  "conflict_rate": 0.125,
+  "abort_rate": 0.25,
+  "version_chain_max_length": 7,
+  "prune_throughput": 3.5,
+  "commit_attempts_total": 16,
+  "commit_successes_total": 14,
+  "conflicts_total": 2,
+  "aborts_total": 4,
+  "pruned_versions_total": 28,
+  "commit_latency_us": {
+    "buckets": [
+      {
+        "le": 5,
+        "count": 1
+      },
+      {
+        "le": 50,
+        "count": 3
+      },
+      {
+        "le": 500,
+        "count": 10
+      }
+    ],
+    "inf_count": 2,
+    "sum": 912,
+    "count": 14
+  },
+  "conflict_resolution_latency_us": {
+    "buckets": [
+      {
+        "le": 10,
+        "count": 1
+      },
+      {
+        "le": 100,
+        "count": 1
+      }
+    ],
+    "inf_count": 0,
+    "sum": 67,
+    "count": 2
+  }
+}"#;
+
+    fn representative_mvcc_runtime_metrics_snapshot() -> MvccRuntimeMetricsSnapshot {
+        MvccRuntimeMetricsSnapshot {
+            active_snapshots: 2,
+            commit_rate: 12.5,
+            conflict_rate: 0.125,
+            abort_rate: 0.25,
+            version_chain_max_length: 7,
+            prune_throughput: 3.5,
+            commit_attempts_total: 16,
+            commit_successes_total: 14,
+            conflicts_total: 2,
+            aborts_total: 4,
+            pruned_versions_total: 28,
+            commit_latency_us: RuntimeHistogramSnapshot {
+                buckets: vec![
+                    RuntimeHistogramBucket { le: 5, count: 1 },
+                    RuntimeHistogramBucket { le: 50, count: 3 },
+                    RuntimeHistogramBucket { le: 500, count: 10 },
+                ],
+                inf_count: 2,
+                sum: 912,
+                count: 14,
+            },
+            conflict_resolution_latency_us: RuntimeHistogramSnapshot {
+                buckets: vec![
+                    RuntimeHistogramBucket { le: 10, count: 1 },
+                    RuntimeHistogramBucket { le: 100, count: 1 },
+                ],
+                inf_count: 0,
+                sum: 67,
+                count: 2,
+            },
+        }
+    }
+
+    #[test]
+    fn representative_mvcc_runtime_metrics_json_exact_golden_contract() {
+        let metrics = representative_mvcc_runtime_metrics_snapshot();
+        let json = serde_json::to_string_pretty(&metrics).expect("serialize representative JSON");
+
+        assert_eq!(json, REPRESENTATIVE_MVCC_RUNTIME_METRICS_JSON_GOLDEN);
+
+        let parsed: MvccRuntimeMetricsSnapshot =
+            serde_json::from_str(&json).expect("deserialize representative JSON");
+        assert_eq!(parsed, metrics);
+    }
+
     #[test]
     fn mvcc_runtime_metrics_export_serializes_expected_fields() {
         let mut store = MvccStore::new();

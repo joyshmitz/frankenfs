@@ -8778,6 +8778,132 @@ mod tests {
         }
     }
 
+    const REPRESENTATIVE_SUBVOLUME_SNAPSHOT_ENUMERATION_GOLDEN: &str = concat!(
+        "subvolumes\n",
+        "  id=256 parent=5 name=src gen=10 ro=false bytenr=0x1000 level=0\n",
+        "  id=300 parent=0 name=subvol-300 gen=22 ro=true bytenr=0x3000 level=0\n",
+        "  id=400 parent=5 name=snap-a gen=15 ro=true bytenr=0x2000 level=0\n",
+        "snapshots\n",
+        "  id=400 source=256 name=snap-a gen=15 uuid=02020202020202020202020202020202 parent_uuid=01010101010101010101010101010101 bytenr=0x2000 level=0\n",
+        "diff\n",
+        "  inode=100 change=deleted\n",
+        "  inode=200 change=modified\n",
+        "  inode=300 change=deleted\n",
+        "  inode=400 change=added"
+    );
+
+    fn format_uuid_hex(uuid: [u8; 16]) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::with_capacity(32);
+        for byte in uuid {
+            write!(&mut out, "{byte:02x}").expect("write to String");
+        }
+        out
+    }
+
+    fn representative_subvolume_snapshot_enumeration_actual() -> String {
+        use std::fmt::Write as _;
+
+        let src_uuid = [1_u8; 16];
+        let snap_uuid = [2_u8; 16];
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 256,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x1000, 10, 0, src_uuid, [0; 16]),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 300,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_data(0x3000, 22, 1),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 400,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x2000, 15, 1, snap_uuid, src_uuid),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 5,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 256,
+                },
+                data: make_root_ref_data(256, b"src"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 5,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 400,
+                },
+                data: make_root_ref_data(256, b"snap-a"),
+            },
+        ];
+        let older = vec![
+            make_inode_entry(100, 5),
+            make_inode_entry(200, 5),
+            make_inode_entry(300, 5),
+        ];
+        let newer = vec![make_inode_entry(200, 10), make_inode_entry(400, 8)];
+        let subvols = enumerate_subvolumes(&entries);
+        let snapshots = enumerate_snapshots(&entries);
+        let diffs = snapshot_diff_by_generation(&older, &newer);
+
+        let mut out = String::new();
+        out.push_str("subvolumes\n");
+        for subvol in &subvols {
+            writeln!(
+                &mut out,
+                "  id={} parent={} name={} gen={} ro={} bytenr=0x{:x} level={}",
+                subvol.id,
+                subvol.parent_id,
+                subvol.name,
+                subvol.generation,
+                subvol.read_only,
+                subvol.bytenr,
+                subvol.level
+            )
+            .expect("write subvolume");
+        }
+        out.push_str("snapshots\n");
+        for snapshot in &snapshots {
+            writeln!(
+                &mut out,
+                "  id={} source={} name={} gen={} uuid={} parent_uuid={} bytenr=0x{:x} level={}",
+                snapshot.id,
+                snapshot.source_id,
+                snapshot.name,
+                snapshot.generation,
+                format_uuid_hex(snapshot.uuid),
+                format_uuid_hex(snapshot.parent_uuid),
+                snapshot.bytenr,
+                snapshot.level
+            )
+            .expect("write snapshot");
+        }
+        out.push_str("diff\n");
+        for diff in &diffs {
+            let change = match diff.change_type {
+                SnapshotChangeType::Added => "added",
+                SnapshotChangeType::Modified => "modified",
+                SnapshotChangeType::Deleted => "deleted",
+            };
+            writeln!(&mut out, "  inode={} change={change}", diff.inode).expect("write diff");
+        }
+        out.pop();
+        out
+    }
+
     #[test]
     fn snapshot_diff_detects_added() {
         let older = vec![make_inode_entry(256, 10)];
@@ -8838,6 +8964,14 @@ mod tests {
         assert_eq!(diffs[2].change_type, SnapshotChangeType::Deleted);
         assert_eq!(diffs[3].inode, 400);
         assert_eq!(diffs[3].change_type, SnapshotChangeType::Added);
+    }
+
+    #[test]
+    fn representative_subvolume_snapshot_enumeration_exact_golden_contract() {
+        assert_eq!(
+            representative_subvolume_snapshot_enumeration_actual(),
+            REPRESENTATIVE_SUBVOLUME_SNAPSHOT_ENUMERATION_GOLDEN
+        );
     }
 
     // ── ROOT_REF parsing tests ─────────────────────────────────────

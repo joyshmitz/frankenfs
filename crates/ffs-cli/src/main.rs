@@ -9507,14 +9507,19 @@ mod tests {
         assert_eq!(spec.physical_block_count, 16);
     }
 
+    const BTRFS_REPAIR_GROUP_SPEC_UNMAPPED_RANGE_GOLDEN: &str =
+        "btrfs block group 0 logical start 16384 is not covered by any chunk";
+
     #[test]
     fn btrfs_repair_group_spec_rejects_unmapped_range() {
         let chunks = vec![test_btrfs_chunk_entry(0x1000, 0x1000, 0x8000)];
         let err = build_btrfs_repair_group_spec(0, 0x4000, 0x1000, 4096, &chunks)
             .expect_err("unmapped logical range should fail");
         let detail = format!("{err:#}");
-        assert!(detail.contains("not covered by any chunk"));
+        assert_eq!(detail, BTRFS_REPAIR_GROUP_SPEC_UNMAPPED_RANGE_GOLDEN);
     }
+
+    const BTRFS_REPAIR_GROUP_SPEC_NON_CONTIGUOUS_GOLDEN: &str = "btrfs block group 1 spans non-contiguous chunk mapping (start_physical=65536, end_physical=200703, expected_end=73727)";
 
     #[test]
     fn btrfs_repair_group_spec_rejects_non_contiguous_chunk_mapping() {
@@ -9525,7 +9530,7 @@ mod tests {
         let err = build_btrfs_repair_group_spec(1, 0x0, 0x2000, 4096, &chunks)
             .expect_err("discontiguous mapping should fail");
         let detail = format!("{err:#}");
-        assert!(detail.contains("non-contiguous chunk mapping"));
+        assert_eq!(detail, BTRFS_REPAIR_GROUP_SPEC_NON_CONTIGUOUS_GOLDEN);
     }
 
     // ── summarize_repair_staleness: additional edge cases ─────────────────
@@ -9707,6 +9712,28 @@ mod tests {
 
     // ── WAL replay telemetry tests ──────────────────────────────────────
 
+    const REPRESENTATIVE_MVCC_INFO_OUTPUT_GOLDEN: &str = r#"{
+  "current_commit_seq": 10,
+  "active_snapshot_count": 1,
+  "oldest_active_snapshot": 5,
+  "total_versioned_blocks": 20,
+  "max_chain_depth": 3,
+  "average_chain_depth": "1.500",
+  "blocks_pending_gc": 4,
+  "ssi_conflict_count": 0,
+  "abort_count": 0,
+  "wal_replay": {
+    "outcome": "EmptyLog",
+    "is_clean": true,
+    "commits_replayed": 0,
+    "versions_replayed": 0,
+    "records_discarded": 0,
+    "wal_valid_bytes": 16,
+    "wal_total_bytes": 16,
+    "used_checkpoint": false
+  }
+}"#;
+
     #[test]
     fn wal_replay_info_output_serializes_to_stable_json_schema() {
         use super::WalReplayInfoOutput;
@@ -9872,5 +9899,36 @@ mod tests {
         assert_eq!(wal["outcome"], "EmptyLog");
         assert_eq!(wal["is_clean"], true);
         assert_eq!(wal["wal_valid_bytes"], 16);
+    }
+
+    #[test]
+    fn representative_mvcc_info_json_exact_golden_contract() {
+        use super::{MvccInfoOutput, WalReplayInfoOutput};
+
+        let output = MvccInfoOutput {
+            current_commit_seq: 10,
+            active_snapshot_count: 1,
+            oldest_active_snapshot: Some(5),
+            total_versioned_blocks: 20,
+            max_chain_depth: 3,
+            average_chain_depth: "1.500".to_owned(),
+            blocks_pending_gc: 4,
+            ssi_conflict_count: Some(0),
+            abort_count: Some(0),
+            wal_replay: Some(WalReplayInfoOutput {
+                outcome: "EmptyLog".to_owned(),
+                is_clean: true,
+                commits_replayed: 0,
+                versions_replayed: 0,
+                records_discarded: 0,
+                wal_valid_bytes: 16,
+                wal_total_bytes: 16,
+                used_checkpoint: false,
+                checkpoint_commit_seq: None,
+            }),
+        };
+
+        let json = serde_json::to_string_pretty(&output).expect("MvccInfoOutput should serialize");
+        assert_eq!(json, REPRESENTATIVE_MVCC_INFO_OUTPUT_GOLDEN);
     }
 }

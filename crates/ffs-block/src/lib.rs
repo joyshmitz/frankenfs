@@ -5637,6 +5637,50 @@ mod tests {
         assert!((export.hit_rate - 0.7).abs() < 1e-12);
     }
 
+    const REPRESENTATIVE_CACHE_RUNTIME_METRICS_JSON_GOLDEN: &str = r#"{
+  "cache_hits": 6,
+  "cache_misses": 2,
+  "cache_evictions": 1,
+  "cache_dirty_count": 3,
+  "writeback_queue_depth": 2,
+  "hit_rate": 0.75
+}"#;
+
+    fn representative_cache_runtime_metrics_snapshot() -> CacheRuntimeMetricsSnapshot {
+        CacheMetrics {
+            hits: 6,
+            misses: 2,
+            evictions: 1,
+            dirty_flushes: 0,
+            t1_len: 1,
+            t2_len: 2,
+            b1_len: 0,
+            b2_len: 1,
+            resident: 4,
+            dirty_blocks: 3,
+            dirty_bytes: 4096 * 3,
+            writeback_queue_depth: 2,
+            oldest_dirty_age_ticks: Some(4),
+            capacity: 8,
+            p: 1,
+            b1_ghost_hits: 2,
+            b2_ghost_hits: 1,
+        }
+        .runtime_metrics_snapshot()
+    }
+
+    #[test]
+    fn representative_cache_runtime_metrics_json_exact_golden_contract() {
+        let metrics = representative_cache_runtime_metrics_snapshot();
+        let json = serde_json::to_string_pretty(&metrics).expect("serialize representative JSON");
+
+        assert_eq!(json, REPRESENTATIVE_CACHE_RUNTIME_METRICS_JSON_GOLDEN);
+
+        let parsed: CacheRuntimeMetricsSnapshot =
+            serde_json::from_str(&json).expect("deserialize representative JSON");
+        assert_eq!(parsed, metrics);
+    }
+
     #[test]
     fn arc_cache_runtime_metrics_export_serializes_to_json() {
         let cx = Cx::for_testing();

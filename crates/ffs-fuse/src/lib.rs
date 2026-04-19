@@ -5275,6 +5275,22 @@ mod tests {
 
     // ── Edge-case hardening tests ──────────────────────────────────────
 
+    const REPRESENTATIVE_RW_ALLOW_OTHER_THREADS_MOUNT_OPTIONS_GOLDEN: &str = r#"FSName("frankenfs")
+Subtype("ffs")
+DefaultPermissions
+NoAtime
+AllowOther
+CUSTOM("max_background=4")
+CUSTOM("congestion_threshold=3")"#;
+
+    fn mount_option_debug_lines(options: &[MountOption]) -> String {
+        options
+            .iter()
+            .map(|option| format!("{option:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn build_mount_options_rw_allow_other_with_threads() {
         let opts = MountOptions {
@@ -5285,19 +5301,11 @@ mod tests {
             worker_threads: 4,
         };
         let mount_opts = build_mount_options(&opts);
-        // Should contain FSName, Subtype, DefaultPermissions, NoAtime, AllowOther,
-        // max_background, congestion_threshold — but NOT RO or AutoUnmount.
-        let dbg = format!("{mount_opts:?}");
-        assert!(dbg.contains("AllowOther"), "missing AllowOther: {dbg}");
-        assert!(
-            dbg.contains("max_background"),
-            "missing max_background: {dbg}"
+        let actual = mount_option_debug_lines(&mount_opts);
+        assert_eq!(
+            actual,
+            REPRESENTATIVE_RW_ALLOW_OTHER_THREADS_MOUNT_OPTIONS_GOLDEN
         );
-        assert!(
-            dbg.contains("congestion_threshold"),
-            "missing congestion_threshold: {dbg}"
-        );
-        assert!(!dbg.contains("\"RO\""), "should not contain RO: {dbg}");
     }
 
     #[test]
