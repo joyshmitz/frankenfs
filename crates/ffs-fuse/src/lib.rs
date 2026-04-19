@@ -24,14 +24,15 @@ use fuser::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::os::raw::c_int;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
@@ -604,7 +605,7 @@ struct FuseInner {
     metrics: Arc<AtomicMetrics>,
     thread_count: usize,
     read_only: bool,
-    ioctl_trace: Option<Mutex<IoctlTraceProbe>>,
+    ioctl_trace: Option<IoctlTraceProbe>,
     backpressure: Option<BackpressureGate>,
     access_predictor: AccessPredictor,
     readahead: ReadaheadManager,
@@ -620,51 +621,176 @@ impl std::fmt::Debug for FuseInner {
     }
 }
 
+/// Bounded queue capacity for the ioctl trace writer.  Sized so a busy
+/// dispatcher can buffer ~4k callbacks before backpressure forces drops; in
+/// practice the trace is only enabled by harness tests with low ioctl volume.
+const IOCTL_TRACE_CHANNEL_CAPACITY: usize = 4096;
+
+#[derive(Debug)]
+enum IoctlTraceMsg {
+    Record {
+        ino: u64,
+        cmd: u32,
+        in_len: usize,
+        out_size: u32,
+    },
+    /// Synchronisation barrier: the writer drains all preceding `Record`
+    /// messages, then signals on the supplied reply channel.  Used by tests
+    /// (and any caller that needs a happens-before guarantee for an external
+    /// reader of the trace file).
+    Flush(SyncSender<()>),
+}
+
+/// Off-thread ioctl trace sink.
+///
+/// `record` enqueues onto a bounded channel and returns immediately, so the
+/// FUSE dispatcher thread is never blocked on file I/O.  A dedicated writer
+/// thread drains the channel and appends each event to the configured trace
+/// file as a single `write(2)` syscall (no in-process buffering — the kernel
+/// page cache is buffer enough for a low-volume diagnostic, and skipping a
+/// user-space buffer means external readers see events as soon as the writer
+/// thread is scheduled).
+///
+/// On backpressure (channel full) the record is dropped and `dropped_events`
+/// is incremented; the count is surfaced as a `warn!` on shutdown so the
+/// trace's lossiness under load is auditable.
 #[derive(Debug)]
 struct IoctlTraceProbe {
     path: PathBuf,
-    writer: Option<BufWriter<File>>,
+    sender: Option<SyncSender<IoctlTraceMsg>>,
+    worker: Option<JoinHandle<()>>,
+    dropped_events: Arc<AtomicU64>,
 }
 
 impl IoctlTraceProbe {
     fn new(path: PathBuf) -> Self {
-        Self { path, writer: None }
-    }
-
-    fn record(&mut self, ino: u64, cmd: u32, in_len: usize, out_size: u32) -> std::io::Result<()> {
-        let writer = self.ensure_writer()?;
-        writeln!(
-            writer,
-            "ino={ino} cmd=0x{cmd:08x} in_len={in_len} out_size={out_size}"
-        )
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let Some(writer) = self.writer.as_mut() else {
-            return Ok(());
-        };
-        writer.flush()
-    }
-
-    fn ensure_writer(&mut self) -> std::io::Result<&mut BufWriter<File>> {
-        if self.writer.is_none() {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.path)?;
-            self.writer = Some(BufWriter::with_capacity(64 * 1024, file));
+        let (sender, receiver) = sync_channel::<IoctlTraceMsg>(IOCTL_TRACE_CHANNEL_CAPACITY);
+        let worker_path = path.clone();
+        let worker = thread::Builder::new()
+            .name("ffs-ioctl-trace".into())
+            .spawn(move || ioctl_trace_writer_loop(&worker_path, &receiver))
+            .expect("spawn ioctl trace writer thread");
+        Self {
+            path,
+            sender: Some(sender),
+            worker: Some(worker),
+            dropped_events: Arc::new(AtomicU64::new(0)),
         }
-        Ok(self
-            .writer
-            .as_mut()
-            .expect("ioctl trace writer initialized above"))
     }
+
+    /// Non-blocking enqueue.  Increments `dropped_events` if the channel is
+    /// full (writer thread is behind) so the loss is observable.
+    fn record(&self, ino: u64, cmd: u32, in_len: usize, out_size: u32) {
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        if sender
+            .try_send(IoctlTraceMsg::Record {
+                ino,
+                cmd,
+                in_len,
+                out_size,
+            })
+            .is_err()
+        {
+            self.dropped_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Round-trip a `Flush` barrier through the writer thread.  When this
+    /// returns, all previously enqueued `Record` messages have been written
+    /// to the trace file (visible to any same-process reader).
+    fn flush_sync(&self) -> std::io::Result<()> {
+        let sender = self.sender.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "ioctl trace writer terminated",
+            )
+        })?;
+        let (reply_tx, reply_rx) = sync_channel::<()>(1);
+        sender.send(IoctlTraceMsg::Flush(reply_tx)).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "ioctl trace writer terminated",
+            )
+        })?;
+        reply_rx.recv().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "ioctl trace writer dropped flush reply",
+            )
+        })
+    }
+
 }
 
 impl Drop for IoctlTraceProbe {
     fn drop(&mut self) {
-        if let Err(error) = self.flush() {
-            warn!(path = %self.path.display(), %error, "ioctl trace flush failed");
+        // Drop the sender first so the writer thread observes channel close
+        // and exits its `recv()` loop.
+        drop(self.sender.take());
+        if let Some(worker) = self.worker.take()
+            && let Err(panic) = worker.join()
+        {
+            warn!(
+                path = %self.path.display(),
+                ?panic,
+                "ioctl trace writer thread panicked"
+            );
+        }
+        let dropped = self.dropped_events.load(Ordering::Relaxed);
+        if dropped > 0 {
+            warn!(
+                path = %self.path.display(),
+                dropped,
+                "ioctl trace lost events to writer-thread backpressure"
+            );
+        }
+    }
+}
+
+fn ioctl_trace_writer_loop(path: &Path, receiver: &Receiver<IoctlTraceMsg>) {
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            warn!(
+                path = %path.display(),
+                %error,
+                "ioctl trace writer failed to open log; dropping all events"
+            );
+            // Drain the channel to unblock senders that may be holding
+            // `try_send` slots; flush replies still complete so callers do
+            // not deadlock on a missing trace file.
+            for msg in receiver {
+                if let IoctlTraceMsg::Flush(reply) = msg {
+                    let _ = reply.send(());
+                }
+            }
+            return;
+        }
+    };
+    while let Ok(msg) = receiver.recv() {
+        match msg {
+            IoctlTraceMsg::Record {
+                ino,
+                cmd,
+                in_len,
+                out_size,
+            } => {
+                let line = format!(
+                    "ino={ino} cmd=0x{cmd:08x} in_len={in_len} out_size={out_size}\n"
+                );
+                if let Err(error) = file.write_all(line.as_bytes()) {
+                    warn!(path = %path.display(), %error, "ioctl trace write failed");
+                }
+            }
+            IoctlTraceMsg::Flush(reply) => {
+                let _ = reply.send(());
+            }
         }
     }
 }
@@ -728,8 +854,7 @@ impl FrankenFuse {
                 ioctl_trace: options
                     .ioctl_trace_path
                     .clone()
-                    .map(IoctlTraceProbe::new)
-                    .map(Mutex::new),
+                    .map(IoctlTraceProbe::new),
                 backpressure: None,
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
@@ -755,8 +880,7 @@ impl FrankenFuse {
                 ioctl_trace: options
                     .ioctl_trace_path
                     .clone()
-                    .map(IoctlTraceProbe::new)
-                    .map(Mutex::new),
+                    .map(IoctlTraceProbe::new),
                 backpressure: Some(gate),
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
@@ -1086,22 +1210,9 @@ impl FrankenFuse {
         let Some(trace) = self.inner.ioctl_trace.as_ref() else {
             return;
         };
-
-        let mut trace = match trace.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("ioctl trace lock poisoned, recovering");
-                poisoned.into_inner()
-            }
-        };
-
-        if let Err(error) = trace.record(ino, cmd, in_len, out_size) {
-            warn!(
-                path = %trace.path.display(),
-                %error,
-                "ioctl trace write failed"
-            );
-        }
+        // Non-blocking enqueue onto the writer thread's bounded channel.
+        // Backpressure is recorded inside the probe and surfaced on shutdown.
+        trace.record(ino, cmd, in_len, out_size);
     }
 
     fn with_request_scope<T, F>(&self, cx: &Cx, op: RequestOp, f: F) -> ffs_error::Result<T>
@@ -3049,15 +3160,12 @@ mod tests {
     }
 
     fn flush_ioctl_trace_for_testing(fuse: &FrankenFuse) {
-        let mut trace = fuse
-            .inner
+        fuse.inner
             .ioctl_trace
             .as_ref()
             .expect("ioctl trace configured")
-            .lock()
-            .expect("lock ioctl trace");
-        trace.flush().expect("flush buffered ioctl trace");
-        drop(trace);
+            .flush_sync()
+            .expect("ioctl trace flush_sync");
     }
 
     impl FsOps for IoctlRecordingFs {
@@ -3419,6 +3527,70 @@ mod tests {
                 "ino=11 cmd=0x80086601 in_len=0 out_size=4",
                 "ino=12 cmd=0xdeadbeef in_len=0 out_size=0",
             ]
+        );
+    }
+
+    #[test]
+    fn ioctl_trace_flush_sync_is_happens_before_barrier_for_concurrent_recorders() {
+        // Spawning many threads that all enqueue records concurrently, then
+        // a single `flush_sync` from the main thread, must guarantee that
+        // every previously enqueued record is visible in the on-disk file by
+        // the time `flush_sync` returns.  This is the core contract of the
+        // off-thread writer: the dispatcher never blocks on file I/O, but
+        // tests get a deterministic synchronisation point.
+        const RECORDER_THREADS: usize = 8;
+        const RECORDS_PER_THREAD: usize = 32;
+
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time after unix epoch")
+            .as_nanos();
+        let trace_path = std::env::temp_dir().join(format!(
+            "ffs_fuse_ioctl_trace_concurrent_{}_{}.log",
+            std::process::id(),
+            unique
+        ));
+        let options = MountOptions {
+            ioctl_trace_path: Some(trace_path.clone()),
+            ..MountOptions::default()
+        };
+        let fuse = Arc::new(FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(
+                0,
+                Arc::new(Mutex::new(Vec::new())),
+            )),
+            &options,
+        ));
+
+        let barrier = Arc::new(std::sync::Barrier::new(RECORDER_THREADS));
+        let mut handles = Vec::with_capacity(RECORDER_THREADS);
+        for thread_idx in 0..RECORDER_THREADS {
+            let fuse = Arc::clone(&fuse);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for record_idx in 0..RECORDS_PER_THREAD {
+                    fuse.record_ioctl_probe(
+                        (thread_idx * RECORDS_PER_THREAD + record_idx) as u64,
+                        EXT4_IOC_GETFLAGS,
+                        0,
+                        4,
+                    );
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("recorder thread");
+        }
+        flush_ioctl_trace_for_testing(&fuse);
+
+        let trace = std::fs::read_to_string(&trace_path).expect("read ioctl trace");
+        let line_count = trace.lines().count();
+        assert_eq!(
+            line_count,
+            RECORDER_THREADS * RECORDS_PER_THREAD,
+            "every recorded ioctl event must be visible after flush_sync; \
+             channel capacity ({IOCTL_TRACE_CHANNEL_CAPACITY}) is far above this test's load"
         );
     }
 
