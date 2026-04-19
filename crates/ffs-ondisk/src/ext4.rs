@@ -10471,6 +10471,35 @@ mod tests {
             prop_assert!(verify_extent_block_checksum(&block, csum_seed, ino, generation).is_ok());
         }
 
+        /// Restamping must ignore any previous extent-tail checksum bytes because
+        /// the checksum coverage ends immediately before the 4-byte tail slot.
+        #[test]
+        fn ext4_proptest_extent_block_checksum_stamping_ignores_previous_tail_contents(
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            eh_max in 1_u16..=10,
+            tail_garbage in any::<u32>(),
+        ) {
+            let tail_off = 12 + usize::from(eh_max) * 12;
+            let mut stamped_from_clean = build_extent_block_for_checksum_test(eh_max);
+            let mut stamped_from_dirty = stamped_from_clean.clone();
+            stamped_from_dirty[tail_off..tail_off + 4].copy_from_slice(&tail_garbage.to_le_bytes());
+
+            stamp_extent_block_checksum(&mut stamped_from_clean, csum_seed, ino, generation);
+            stamp_extent_block_checksum(&mut stamped_from_dirty, csum_seed, ino, generation);
+
+            prop_assert_eq!(
+                &stamped_from_dirty,
+                &stamped_from_clean,
+                "restamping must ignore prior extent tail checksum bytes"
+            );
+            prop_assert!(
+                verify_extent_block_checksum(&stamped_from_dirty, csum_seed, ino, generation).is_ok(),
+                "restamped extent block checksum must verify"
+            );
+        }
+
         /// MR-INO: identical extent-block bodies stamped at two different
         /// inode numbers must produce different stored checksums, and a
         /// stamp from one ino must NOT verify when presented as another.
