@@ -4522,6 +4522,24 @@ mod tests {
         block
     }
 
+    /// Build a representative extent tree block sized for `eh_max` slots,
+    /// with a valid extent header magic + eh_max, the body filled with a
+    /// deterministic ramp (so single-bit flips in the covered prefix are
+    /// observable to the CRC), and the 4-byte tail checksum slot left
+    /// zeroed.  `tail_off = 12 + 12 * eh_max`; the returned buffer is
+    /// `tail_off + 4` bytes long.
+    fn build_extent_block_for_checksum_test(eh_max: u16) -> Vec<u8> {
+        let tail_off = 12 + usize::from(eh_max) * 12;
+        let mut block = vec![0u8; tail_off + 4];
+        for (i, b) in block.iter_mut().enumerate().take(tail_off) {
+            *b = u8::try_from(i & 0xFF).unwrap();
+        }
+        // Restore the magic + eh_max fields after the ramp clobbered them.
+        block[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+        block[4..6].copy_from_slice(&eh_max.to_le_bytes());
+        block
+    }
+
     #[test]
     fn parse_ext4_superblock_region_smoke() {
         let mut sb = [0_u8; EXT4_SUPERBLOCK_SIZE];
@@ -10451,6 +10469,134 @@ mod tests {
             let csum = ext4_chksum(seed, &block[..tail_off]);
             block[tail_off..tail_off + 4].copy_from_slice(&csum.to_le_bytes());
             prop_assert!(verify_extent_block_checksum(&block, csum_seed, ino, generation).is_ok());
+        }
+
+        /// MR-INO: identical extent-block bodies stamped at two different
+        /// inode numbers must produce different stored checksums, and a
+        /// stamp from one ino must NOT verify when presented as another.
+        /// Defends against cross-slot replay of a valid extent tree block.
+        #[test]
+        fn ext4_proptest_extent_block_checksum_is_sensitive_to_inode_number(
+            csum_seed in any::<u32>(),
+            ino_a in any::<u32>(),
+            ino_b_delta in 1_u32..,
+            generation in any::<u32>(),
+            eh_max in 1_u16..=10,
+        ) {
+            let ino_b = ino_a.wrapping_add(ino_b_delta);
+            let mut block_a = build_extent_block_for_checksum_test(eh_max);
+            let mut block_b = block_a.clone();
+            stamp_extent_block_checksum(&mut block_a, csum_seed, ino_a, generation);
+            stamp_extent_block_checksum(&mut block_b, csum_seed, ino_b, generation);
+
+            let tail_off = 12 + usize::from(eh_max) * 12;
+            prop_assert_ne!(
+                &block_a[tail_off..tail_off + 4],
+                &block_b[tail_off..tail_off + 4],
+                "extent-block stamps for inode {:#010x} and inode {:#010x} must differ",
+                ino_a,
+                ino_b
+            );
+            prop_assert!(
+                verify_extent_block_checksum(&block_b, csum_seed, ino_a, generation).is_err(),
+                "stamp from inode {:#010x} must NOT verify when presented as inode {:#010x}",
+                ino_b,
+                ino_a
+            );
+        }
+
+        /// MR-GEN: changing only the generation field must shift the stamped
+        /// checksum.  Extent blocks reuse the same per-inode seed as inode
+        /// and dir blocks, so generation participation is required.
+        #[test]
+        fn ext4_proptest_extent_block_checksum_is_sensitive_to_generation(
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            gen_a in any::<u32>(),
+            gen_delta in 1_u32..,
+            eh_max in 1_u16..=10,
+        ) {
+            let gen_b = gen_a.wrapping_add(gen_delta);
+            let mut block_a = build_extent_block_for_checksum_test(eh_max);
+            let mut block_b = block_a.clone();
+            stamp_extent_block_checksum(&mut block_a, csum_seed, ino, gen_a);
+            stamp_extent_block_checksum(&mut block_b, csum_seed, ino, gen_b);
+
+            let tail_off = 12 + usize::from(eh_max) * 12;
+            prop_assert_ne!(
+                &block_a[tail_off..tail_off + 4],
+                &block_b[tail_off..tail_off + 4],
+                "generation flip from {:#010x} to {:#010x} must change the stored checksum",
+                gen_a,
+                gen_b
+            );
+        }
+
+        /// MR-SEED: identical body+ino+generation stamped under two
+        /// different filesystem checksum seeds must yield different stored
+        /// checksums, and a cross-seed verification must fail.
+        #[test]
+        fn ext4_proptest_extent_block_checksum_is_sensitive_to_csum_seed(
+            seed_a in any::<u32>(),
+            seed_delta in 1_u32..,
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            eh_max in 1_u16..=10,
+        ) {
+            let seed_b = seed_a.wrapping_add(seed_delta);
+            let mut block_a = build_extent_block_for_checksum_test(eh_max);
+            let mut block_b = block_a.clone();
+            stamp_extent_block_checksum(&mut block_a, seed_a, ino, generation);
+            stamp_extent_block_checksum(&mut block_b, seed_b, ino, generation);
+
+            let tail_off = 12 + usize::from(eh_max) * 12;
+            prop_assert_ne!(
+                &block_a[tail_off..tail_off + 4],
+                &block_b[tail_off..tail_off + 4],
+                "extent-block stamp under seed {:#010x} must differ from stamp under seed {:#010x}",
+                seed_a,
+                seed_b
+            );
+            prop_assert!(
+                verify_extent_block_checksum(&block_a, seed_b, ino, generation).is_err(),
+                "stamp under seed A must NOT verify under seed B"
+            );
+        }
+
+        /// MR-DETECT: flipping any single bit in the covered prefix
+        /// `[0..tail_off]` must invalidate verification.  Flips inside the
+        /// 4-byte stored-checksum slot (`[tail_off..tail_off + 4]`) are
+        /// excluded — the verifier reads the stored checksum from there
+        /// rather than CRC-ing it, so a flip there changes which stored
+        /// value the comparator reads but doesn't break the digest contract
+        /// in a way MR-DETECT is meant to catch.
+        #[test]
+        fn ext4_proptest_extent_block_checksum_detects_single_bit_flip_in_body(
+            csum_seed in any::<u32>(),
+            ino in any::<u32>(),
+            generation in any::<u32>(),
+            eh_max in 1_u16..=10,
+            flip_pos_raw in 0_usize..132,
+            flip_bit in 0_u8..8,
+        ) {
+            let tail_off = 12 + usize::from(eh_max) * 12;
+            prop_assume!(flip_pos_raw < tail_off);
+
+            let mut block = build_extent_block_for_checksum_test(eh_max);
+            stamp_extent_block_checksum(&mut block, csum_seed, ino, generation);
+
+            // Sanity: the unflipped stamp verifies.
+            prop_assert!(
+                verify_extent_block_checksum(&block, csum_seed, ino, generation).is_ok()
+            );
+
+            block[flip_pos_raw] ^= 1_u8 << flip_bit;
+            prop_assert!(
+                verify_extent_block_checksum(&block, csum_seed, ino, generation).is_err(),
+                "single-bit flip at byte {:#06x} bit {} must invalidate the stored checksum",
+                flip_pos_raw,
+                flip_bit
+            );
         }
 
         // ── Block bitmap ─────────────────────────────────────────────
