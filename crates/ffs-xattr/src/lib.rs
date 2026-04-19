@@ -1679,28 +1679,44 @@ mod tests {
             }
         }
 
-        /// Reordering a unique external-xattr set must not change the encoded block bytes.
+        /// Reordering a unique external-xattr set must not change the logical external block,
+        /// and extra trailing block capacity must not change the parsed entries.
         #[test]
-        fn proptest_build_external_block_is_order_invariant(
+        fn proptest_build_external_block_is_order_and_capacity_invariant(
             entries in external_xattr_entries_strategy(),
+            rotation in 0_usize..8,
         ) {
-            let mut reversed = entries.clone();
-            reversed.reverse();
+            let mut rotated = entries.clone();
+            let rotation = rotation % rotated.len();
+            rotated.rotate_left(rotation);
 
             let forward = build_external_block(4096, &entries).unwrap();
-            let backward = build_external_block(4096, &reversed).unwrap();
+            let rotated_block = build_external_block(4096, &rotated).unwrap();
             prop_assert_eq!(
                 &forward,
-                &backward,
+                &rotated_block,
                 "external block encoding must be invariant to input order permutations"
             );
 
             let parsed = parse_external_entries(&forward, false).unwrap();
+            let larger_capacity = build_external_block(8192, &rotated).unwrap();
+            let parsed_larger_capacity = parse_external_entries(&larger_capacity, false).unwrap();
             let mut expected = entries;
             sort_external_entries(&mut expected);
 
             prop_assert_eq!(parsed.len(), expected.len());
             for (expected_entry, parsed_entry) in expected.iter().zip(parsed.iter()) {
+                prop_assert_eq!(expected_entry.name_index, parsed_entry.name_index);
+                prop_assert_eq!(&expected_entry.name, &parsed_entry.name);
+                prop_assert_eq!(&expected_entry.value, &parsed_entry.value);
+            }
+
+            prop_assert_eq!(
+                parsed_larger_capacity.len(),
+                expected.len(),
+                "larger external block capacity must preserve parsed entry count"
+            );
+            for (expected_entry, parsed_entry) in expected.iter().zip(parsed_larger_capacity.iter()) {
                 prop_assert_eq!(expected_entry.name_index, parsed_entry.name_index);
                 prop_assert_eq!(&expected_entry.name, &parsed_entry.name);
                 prop_assert_eq!(&expected_entry.value, &parsed_entry.value);
