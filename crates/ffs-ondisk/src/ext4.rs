@@ -7356,6 +7356,58 @@ mod tests {
         assert!(xattrs.is_empty());
     }
 
+    fn build_sorted_external_xattr_block_with_entry_hashes(
+        first_entry_hash: u32,
+        second_entry_hash: u32,
+    ) -> Vec<u8> {
+        let mut block = vec![0_u8; 4096];
+        block[0..4].copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+
+        let first_entry_offset = 32;
+        let first_name = b"b";
+        let first_value = b"one";
+        let first_value_off = 4088_u16;
+        block[first_entry_offset] = u8::try_from(first_name.len()).expect("fixed name length");
+        block[first_entry_offset + 1] = ffs_types::EXT4_XATTR_INDEX_USER;
+        block[first_entry_offset + 2..first_entry_offset + 4]
+            .copy_from_slice(&first_value_off.to_le_bytes());
+        block[first_entry_offset + 8..first_entry_offset + 12].copy_from_slice(
+            &u32::try_from(first_value.len())
+                .expect("fixed value length")
+                .to_le_bytes(),
+        );
+        block[first_entry_offset + 12..first_entry_offset + 16]
+            .copy_from_slice(&first_entry_hash.to_le_bytes());
+        block[first_entry_offset + 16..first_entry_offset + 16 + first_name.len()]
+            .copy_from_slice(first_name);
+        block[usize::from(first_value_off)..usize::from(first_value_off) + first_value.len()]
+            .copy_from_slice(first_value);
+
+        let second_entry_offset = 52;
+        let second_name = b"alpha";
+        let second_value = b"two";
+        let second_value_off = 4092_u16;
+        block[second_entry_offset] = u8::try_from(second_name.len()).expect("fixed name length");
+        block[second_entry_offset + 1] = ffs_types::EXT4_XATTR_INDEX_USER;
+        block[second_entry_offset + 2..second_entry_offset + 4]
+            .copy_from_slice(&second_value_off.to_le_bytes());
+        block[second_entry_offset + 8..second_entry_offset + 12].copy_from_slice(
+            &u32::try_from(second_value.len())
+                .expect("fixed value length")
+                .to_le_bytes(),
+        );
+        block[second_entry_offset + 12..second_entry_offset + 16]
+            .copy_from_slice(&second_entry_hash.to_le_bytes());
+        block[second_entry_offset + 16..second_entry_offset + 16 + second_name.len()]
+            .copy_from_slice(second_name);
+        block[usize::from(second_value_off)..usize::from(second_value_off) + second_value.len()]
+            .copy_from_slice(second_value);
+
+        block[76] = 0;
+        block[77] = 0;
+        block
+    }
+
     #[test]
     fn parse_xattr_block_smoke() {
         let mut block = vec![0_u8; 4096];
@@ -7381,6 +7433,32 @@ mod tests {
         assert_eq!(xattrs.len(), 1);
         assert_eq!(xattrs[0].full_name(), "security.cap");
         assert_eq!(xattrs[0].value, b"data");
+    }
+
+    proptest! {
+        #[test]
+        fn ext4_proptest_parse_xattr_block_entry_hash_words_do_not_affect_sorted_parse(
+            first_entry_hash in any::<u32>(),
+            second_entry_hash in any::<u32>(),
+        ) {
+            let canonical = build_sorted_external_xattr_block_with_entry_hashes(0, 0);
+            let mutated =
+                build_sorted_external_xattr_block_with_entry_hashes(first_entry_hash, second_entry_hash);
+
+            let parsed_canonical =
+                super::parse_xattr_block(&canonical).expect("canonical xattr block should parse");
+            let parsed_mutated =
+                super::parse_xattr_block(&mutated).expect("mutated xattr block should parse");
+
+            prop_assert_eq!(
+                &parsed_mutated,
+                &parsed_canonical,
+                "unused external-xattr entry hash words must not change the logical parse result"
+            );
+
+            let names: Vec<String> = parsed_mutated.iter().map(Ext4Xattr::full_name).collect();
+            prop_assert_eq!(names, vec!["user.b", "user.alpha"]);
+        }
     }
 
     #[test]
