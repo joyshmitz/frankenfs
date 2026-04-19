@@ -1335,21 +1335,27 @@ mod tests {
             actual: 2,
         };
         let msg = format!("{e}");
-        assert!(msg.contains('8'), "should mention needed bytes");
-        assert!(msg.contains('4'), "should mention offset");
+        assert_eq!(msg, "insufficient data: need 8 bytes at offset 4, got 2");
 
         let e = ParseError::InvalidMagic {
             expected: 0xEF53,
             actual: 0xBEEF,
         };
         let msg = format!("{e}");
-        assert!(msg.contains("0xef53"), "should contain expected magic");
+        assert_eq!(msg, "invalid magic: expected 0xef53, got 0xbeef");
+
+        let e = ParseError::InvalidField {
+            field: "test_field",
+            reason: "bad value",
+        };
+        let msg = format!("{e}");
+        assert_eq!(msg, "invalid field: test_field (bad value)");
 
         let e = ParseError::IntegerConversion {
             field: "test_field",
         };
         let msg = format!("{e}");
-        assert!(msg.contains("test_field"));
+        assert_eq!(msg, "integer conversion failed: test_field");
     }
 
     #[test]
@@ -1452,9 +1458,7 @@ mod tests {
     #[test]
     fn device_id_display_zero_padded() {
         let id = DeviceId(0x1);
-        let display = id.to_string();
-        assert_eq!(display.len(), 32, "should be zero-padded to 32 hex chars");
-        assert!(display.ends_with('1'));
+        assert_eq!(id.to_string(), "00000000000000000000000000000001");
     }
 
     // ── Edge-case hardening tests ──────────────────────────────────────

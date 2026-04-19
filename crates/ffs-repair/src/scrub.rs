@@ -1175,11 +1175,10 @@ mod tests {
             severity: Severity::Error,
             detail: "CRC32C expected 0xDEAD, got 0xBEEF".into(),
         };
-        let s = finding.to_string();
-        assert!(s.contains("42"));
-        assert!(s.contains("error"));
-        assert!(s.contains("checksum_mismatch"));
-        assert!(s.contains("CRC32C expected"));
+        assert_eq!(
+            finding.to_string(),
+            "block 42 [error] checksum_mismatch: CRC32C expected 0xDEAD, got 0xBEEF"
+        );
 
         let report = ScrubReport {
             findings: vec![finding],
@@ -1187,9 +1186,10 @@ mod tests {
             blocks_corrupt: 1,
             blocks_io_error: 0,
         };
-        let s = report.to_string();
-        assert!(s.contains("100 blocks"));
-        assert!(s.contains("1 corrupt"));
+        assert_eq!(
+            report.to_string(),
+            "scanned 100 blocks: 1 corrupt, 0 io_errors, 1 findings"
+        );
     }
 
     // ── Edge-case hardening tests ──────────────────────────────────────
@@ -1262,11 +1262,10 @@ mod tests {
             severity: Severity::Critical,
             detail: "expected 0xEF53".into(),
         };
-        let s = finding.to_string();
-        assert!(s.contains("999"));
-        assert!(s.contains("critical"));
-        assert!(s.contains("bad_magic"));
-        assert!(s.contains("expected 0xEF53"));
+        assert_eq!(
+            finding.to_string(),
+            "block 999 [critical] bad_magic: expected 0xEF53"
+        );
     }
 
     #[test]
@@ -1277,9 +1276,10 @@ mod tests {
             blocks_corrupt: 0,
             blocks_io_error: 3,
         };
-        let s = report.to_string();
-        assert!(s.contains("50 blocks"));
-        assert!(s.contains("3 io_error"));
+        assert_eq!(
+            report.to_string(),
+            "scanned 50 blocks: 0 corrupt, 3 io_errors, 0 findings"
+        );
     }
 
     #[test]

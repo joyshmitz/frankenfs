@@ -359,7 +359,10 @@ mod tests {
         );
 
         let parse = FfsError::Parse("insufficient data: need 4 bytes at offset 0, got 2".into());
-        assert!(parse.to_string().contains("parse error:"));
+        assert_eq!(
+            parse.to_string(),
+            "parse error: insufficient data: need 4 bytes at offset 0, got 2"
+        );
 
         let ro = FfsError::ReadOnly;
         assert_eq!(ro.to_string(), "read-only filesystem");
@@ -569,9 +572,9 @@ ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mod
             detail: "out of range".into(),
         };
         let s = err.to_string();
-        assert!(
-            s.contains(&u64::MAX.to_string()),
-            "max block number should appear in Display: {s}"
+        assert_eq!(
+            s,
+            "corrupt metadata at block 18446744073709551615: out of range"
         );
     }
 
@@ -582,8 +585,10 @@ ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mod
             block: u64::MAX - 1,
         };
         let s = err.to_string();
-        assert!(s.contains(&u64::MAX.to_string()));
-        assert!(s.contains(&(u64::MAX - 1).to_string()));
+        assert_eq!(
+            s,
+            "MVCC conflict: transaction 18446744073709551615 conflicts on block 18446744073709551614"
+        );
     }
 
     // ── From<std::io::Error> conversion tests ───────────────────────────
@@ -595,7 +600,7 @@ ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mod
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file gone");
         let ffs_err: FfsError = io_err.into();
         assert_eq!(ffs_err.to_errno(), libc::ENOENT);
-        assert!(ffs_err.to_string().contains("file gone"));
+        assert_eq!(ffs_err.to_string(), "I/O error: file gone");
 
         // With from_raw_os_error, the errno passes through.
         let io_err2 = std::io::Error::from_raw_os_error(libc::ENOENT);
@@ -833,7 +838,7 @@ ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mod
     #[test]
     fn unicode_in_string_payloads() {
         let err = FfsError::NotFound("日本語ファイル.txt".into());
-        assert!(err.to_string().contains("日本語ファイル.txt"));
+        assert_eq!(err.to_string(), "not found: 日本語ファイル.txt");
         assert_eq!(err.to_errno(), libc::ENOENT);
     }
 
@@ -852,9 +857,10 @@ ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mod
     #[test]
     fn debug_includes_payload_for_string_variants() {
         let err = FfsError::RepairFailed("reed-solomon decode fail".into());
-        let dbg = format!("{err:?}");
-        assert!(dbg.contains("RepairFailed"));
-        assert!(dbg.contains("reed-solomon decode fail"));
+        assert_eq!(
+            format!("{err:?}"),
+            "RepairFailed(\"reed-solomon decode fail\")"
+        );
     }
 
     // ── Chained ? operator across error types ────────────────────────
@@ -940,15 +946,16 @@ ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mod
     #[test]
     fn display_mode_violation_includes_detail() {
         let err = FfsError::ModeViolation("native-only op in compat mode".to_owned());
-        let msg = format!("{err}");
-        assert!(msg.contains("native-only op in compat mode"));
+        assert_eq!(
+            format!("{err}"),
+            "mount-mode violation: native-only op in compat mode"
+        );
     }
 
     #[test]
     fn display_repair_failed_includes_detail() {
         let err = FfsError::RepairFailed("codec exhausted".to_owned());
-        let msg = format!("{err}");
-        assert!(msg.contains("codec exhausted"));
+        assert_eq!(format!("{err}"), "repair failed: codec exhausted");
     }
 
     #[test]
@@ -967,7 +974,7 @@ ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mod
         let err = FfsError::Io(io_err);
         let source = std::error::Error::source(&err);
         assert!(source.is_some());
-        assert!(format!("{}", source.unwrap()).contains("inner cause"));
+        assert_eq!(format!("{}", source.unwrap()), "inner cause");
     }
 
     #[test]

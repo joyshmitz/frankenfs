@@ -51,8 +51,10 @@ mod tests {
     #[test]
     fn detection_error_display_formats() {
         let e = DetectionError::UnsupportedImage;
-        let msg = format!("{e}");
-        assert!(msg.contains("ext4/btrfs"));
+        assert_eq!(
+            format!("{e}"),
+            "image does not decode as supported ext4/btrfs superblock"
+        );
     }
 
     #[test]
