@@ -32626,11 +32626,17 @@ mod tests {
 
     #[test]
     fn pressure_monitor_debug_format() {
+        const PRESSURE_MONITOR_DEBUG_GOLDEN: &str = concat!(
+            "PressureMonitor { ",
+            "budget: ComputeBudget { headroom: 1.0, cpu_count: [CPU_COUNT], level: \"normal\" }, ",
+            "fsm: DegradationFsm { level: Normal, recovery_count: 0, transitions: 0, recovery_samples: 3, .. }, ",
+            "samples: 0, .. }"
+        );
+
         let pressure = Arc::new(SystemPressure::new());
         let monitor = PressureMonitor::new(pressure, 3);
         let dbg = format!("{monitor:?}");
-        assert!(dbg.contains("PressureMonitor"));
-        assert!(dbg.contains("samples"));
+        assert_eq!(scrub_cpu_count(&dbg), PRESSURE_MONITOR_DEBUG_GOLDEN);
     }
 
     #[test]
@@ -32647,14 +32653,26 @@ mod tests {
 
     #[test]
     fn compute_budget_debug_format() {
+        const COMPUTE_BUDGET_DEBUG_GOLDEN: &str =
+            "ComputeBudget { headroom: 1.0, cpu_count: [CPU_COUNT], level: \"normal\" }";
+
         let pressure = Arc::new(SystemPressure::new());
         let budget = ComputeBudget::new(pressure);
         let dbg = format!("{budget:?}");
-        assert!(dbg.contains("ComputeBudget"));
-        assert!(dbg.contains("headroom"));
+        assert_eq!(scrub_cpu_count(&dbg), COMPUTE_BUDGET_DEBUG_GOLDEN);
     }
 
     // ── Proptest property-based tests ────────────────────────────────────
+
+    fn scrub_cpu_count(dbg: &str) -> String {
+        let Some((prefix, rest)) = dbg.split_once("cpu_count: ") else {
+            return dbg.to_owned();
+        };
+        let Some((_, suffix)) = rest.split_once(", level: ") else {
+            return dbg.to_owned();
+        };
+        format!("{prefix}cpu_count: [CPU_COUNT], level: {suffix}")
+    }
 
     mod proptest_tests {
         use super::*;

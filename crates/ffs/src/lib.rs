@@ -326,6 +326,8 @@ mod tests {
 
     #[test]
     fn ext4_geometry_is_constructable() {
+        const EXT4_GEOMETRY_DEBUG_GOLDEN: &str = "Ext4Geometry { block_size: 4096, inodes_count: 8192, inodes_per_group: 1024, first_ino: 11, inode_size: 256, groups_count: 8, group_desc_size: 64, csum_seed: 3735928559, is_64bit: true, has_metadata_csum: true }";
+
         let geo = Ext4Geometry {
             block_size: 4096,
             inodes_count: 8192,
@@ -339,7 +341,7 @@ mod tests {
             has_metadata_csum: true,
         };
         let debug = format!("{geo:?}");
-        assert!(debug.contains("4096"));
+        assert_eq!(debug, EXT4_GEOMETRY_DEBUG_GOLDEN);
     }
 
     #[test]

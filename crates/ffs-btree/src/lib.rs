@@ -3219,6 +3219,9 @@ Hole { hole_len: 90 }
 
     #[test]
     fn search_result_debug_and_clone() {
+        const SEARCH_RESULT_FOUND_DEBUG_GOLDEN: &str = "Found { extent: Ext4Extent { logical_block: 0, raw_len: 1, physical_start: 100 }, offset_in_extent: 0 }";
+        const SEARCH_RESULT_HOLE_DEBUG_GOLDEN: &str = "Hole { hole_len: 42 }";
+
         let sr = SearchResult::Found {
             extent: Ext4Extent {
                 logical_block: 0,
@@ -3230,17 +3233,19 @@ Hole { hole_len: 90 }
         let sr2 = sr.clone();
         assert_eq!(sr, sr2);
         let dbg = format!("{sr:?}");
-        assert!(dbg.contains("Found"));
+        assert_eq!(dbg, SEARCH_RESULT_FOUND_DEBUG_GOLDEN);
 
         let hole = SearchResult::Hole { hole_len: 42 };
         let hole2 = hole.clone();
         assert_eq!(hole, hole2);
         let dbg2 = format!("{hole:?}");
-        assert!(dbg2.contains("Hole"));
+        assert_eq!(dbg2, SEARCH_RESULT_HOLE_DEBUG_GOLDEN);
     }
 
     #[test]
     fn freed_range_debug_and_copy() {
+        const FREED_RANGE_DEBUG_GOLDEN: &str = "FreedRange { physical_start: 1000, count: 5 }";
+
         let fr = FreedRange {
             physical_start: 1000,
             count: 5,
@@ -3248,7 +3253,7 @@ Hole { hole_len: 90 }
         let fr2 = fr; // Copy
         assert_eq!(fr, fr2);
         let dbg = format!("{fr:?}");
-        assert!(dbg.contains("FreedRange"));
+        assert_eq!(dbg, FREED_RANGE_DEBUG_GOLDEN);
     }
 
     #[test]

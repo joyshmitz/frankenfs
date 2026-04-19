@@ -1958,13 +1958,15 @@ mod tests {
 
     #[test]
     fn txn_id_hash_and_debug() {
+        const TXN_ID_DEBUG_GOLDEN: &str = "TxnId(42)";
+
         use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(TxnId(1));
         set.insert(TxnId(2));
         set.insert(TxnId(1));
         assert_eq!(set.len(), 2);
-        assert!(format!("{:?}", TxnId(42)).contains("42"));
+        assert_eq!(format!("{:?}", TxnId(42)), TXN_ID_DEBUG_GOLDEN);
     }
 
     #[test]
@@ -1983,12 +1985,14 @@ mod tests {
 
     #[test]
     fn commit_seq_hash_and_debug() {
+        const COMMIT_SEQ_DEBUG_GOLDEN: &str = "CommitSeq(99)";
+
         use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(CommitSeq(10));
         set.insert(CommitSeq(20));
         assert_eq!(set.len(), 2);
-        assert!(format!("{:?}", CommitSeq(99)).contains("99"));
+        assert_eq!(format!("{:?}", CommitSeq(99)), COMMIT_SEQ_DEBUG_GOLDEN);
     }
 
     #[test]

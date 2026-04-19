@@ -149,6 +149,14 @@ fn log_txn_commit(txn_id: u64, commit_seq: CommitSeq, blocks_written: usize) {
 mod tests {
     use super::*;
 
+    const SNAPSHOT_ISOLATION_DEMO_OUTPUT_GOLDEN: &str = concat!(
+        "reader A sees version 1\n",
+        "writer commits version 2\n",
+        "reader A still sees version 1\n",
+        "reader B sees version 2\n",
+        "snapshot isolation: PASS"
+    );
+
     #[test]
     fn snapshot_isolation_demo_is_deterministic() {
         let result = run_snapshot_isolation_demo().expect("demo should succeed");
@@ -165,10 +173,6 @@ mod tests {
         let lines = result.output_lines();
         let output = lines.as_slice().join("\n");
 
-        assert!(output.contains("reader A sees version 1"));
-        assert!(output.contains("writer commits version 2"));
-        assert!(output.contains("reader A still sees version 1"));
-        assert!(output.contains("reader B sees version 2"));
-        assert!(output.contains("snapshot isolation: PASS"));
+        assert_eq!(output, SNAPSHOT_ISOLATION_DEMO_OUTPUT_GOLDEN);
     }
 }

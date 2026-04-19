@@ -4630,6 +4630,16 @@ mod tests {
 
     #[test]
     fn mount_handle_debug_format() {
+        const MOUNT_HANDLE_DEBUG_GOLDEN: &str = concat!(
+            "MountHandle { ",
+            "mountpoint: \"/mnt/dbg\", ",
+            "active: false, ",
+            "shutdown: false, ",
+            "metrics: MetricsSnapshot { requests_total: 0, requests_ok: 0, requests_err: 0, ",
+            "bytes_read: 0, requests_throttled: 0, requests_shed: 0 }, ",
+            "unmount_timeout: 30s }"
+        );
+
         let handle = MountHandle {
             session: None,
             mountpoint: PathBuf::from("/mnt/dbg"),
@@ -4638,10 +4648,7 @@ mod tests {
             config: MountConfig::default(),
         };
         let dbg = format!("{handle:?}");
-        assert!(dbg.contains("MountHandle"), "missing struct name: {dbg}");
-        assert!(dbg.contains("/mnt/dbg"), "missing mountpoint: {dbg}");
-        assert!(dbg.contains("active: false"), "missing active: {dbg}");
-        assert!(dbg.contains("shutdown: false"), "missing shutdown: {dbg}");
+        assert_eq!(dbg, MOUNT_HANDLE_DEBUG_GOLDEN);
     }
 
     #[test]
@@ -5359,27 +5366,32 @@ CUSTOM("congestion_threshold=3")"#;
 
     #[test]
     fn atomic_metrics_debug_shows_fields() {
+        const ATOMIC_METRICS_DEBUG_GOLDEN: &str = concat!(
+            "AtomicMetrics { ",
+            "requests_total: 1, ",
+            "requests_ok: 1, ",
+            "requests_err: 0, ",
+            "bytes_read: 512, ",
+            "requests_throttled: 1, ",
+            "requests_shed: 0",
+            " }"
+        );
+
         let m = AtomicMetrics::new();
         m.record_ok();
         m.record_bytes_read(512);
         m.record_throttled();
         let dbg = format!("{m:?}");
-        assert!(dbg.contains("AtomicMetrics"), "missing struct name: {dbg}");
-        assert!(dbg.contains("requests_total"), "missing field: {dbg}");
-        assert!(
-            dbg.contains("requests_throttled"),
-            "missing pressure field: {dbg}"
-        );
+        assert_eq!(dbg, ATOMIC_METRICS_DEBUG_GOLDEN);
     }
 
     #[test]
     fn cache_line_padded_debug_delegates_to_inner() {
+        const CACHE_LINE_PADDED_DEBUG_GOLDEN: &str = "42";
+
         let padded = CacheLinePadded(42_u32);
         let dbg = format!("{padded:?}");
-        assert!(
-            dbg.contains("42"),
-            "CacheLinePadded Debug should show inner: {dbg}"
-        );
+        assert_eq!(dbg, CACHE_LINE_PADDED_DEBUG_GOLDEN);
     }
 
     #[test]
@@ -5469,21 +5481,27 @@ CUSTOM("congestion_threshold=3")"#;
 
     #[test]
     fn fuse_error_display_variants() {
+        const INVALID_MOUNTPOINT_DISPLAY_GOLDEN: &str = "invalid mountpoint: bad path";
+        const IO_ERROR_DISPLAY_GOLDEN: &str = "mount I/O error: disk gone";
+
         let invalid_mp = FuseError::InvalidMountpoint("bad path".into());
-        assert!(
-            invalid_mp.to_string().contains("bad path"),
-            "InvalidMountpoint should contain path: {invalid_mp}",
-        );
+        assert_eq!(invalid_mp.to_string(), INVALID_MOUNTPOINT_DISPLAY_GOLDEN);
 
         let io_err = FuseError::Io(std::io::Error::other("disk gone"));
-        assert!(
-            io_err.to_string().contains("disk gone"),
-            "Io variant should contain inner error: {io_err}",
-        );
+        assert_eq!(io_err.to_string(), IO_ERROR_DISPLAY_GOLDEN);
     }
 
     #[test]
     fn fuse_inner_debug_shows_non_exhaustive() {
+        const FUSE_INNER_DEBUG_GOLDEN: &str = concat!(
+            "FuseInner { ",
+            "metrics: AtomicMetrics { requests_total: 0, requests_ok: 0, requests_err: 0, ",
+            "bytes_read: 0, requests_throttled: 0, requests_shed: 0 }, ",
+            "thread_count: 2, ",
+            "read_only: false, ",
+            ".. }"
+        );
+
         let inner = FuseInner {
             ops: Arc::new(StubFs),
             metrics: Arc::new(AtomicMetrics::new()),
@@ -5495,12 +5513,7 @@ CUSTOM("congestion_threshold=3")"#;
             readahead: ReadaheadManager::new(8),
         };
         let dbg = format!("{inner:?}");
-        assert!(dbg.contains("FuseInner"), "missing struct name: {dbg}");
-        assert!(
-            dbg.contains("thread_count: 2"),
-            "missing thread_count: {dbg}"
-        );
-        assert!(dbg.contains("read_only: false"), "missing read_only: {dbg}");
+        assert_eq!(dbg, FUSE_INNER_DEBUG_GOLDEN);
     }
 
     #[test]

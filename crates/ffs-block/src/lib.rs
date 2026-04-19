@@ -6649,15 +6649,18 @@ mod tests {
 
     #[test]
     fn throttle_debug_format() {
+        const THROTTLE_INJECTOR_DEBUG_GOLDEN: &str = "ThrottleInjector { config: ThrottleConfig { read_latency: 10ms, \
+write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
+0ns, respect_deadline: true }, seed: 99, events: 0, log_len: 0, rng_state: 99, \
+.. }";
+
         let dev = MemBlockDevice::new(4096, 4);
         let config = ThrottleConfig {
             read_latency: Duration::from_millis(10),
             ..Default::default()
         };
         let ti = ThrottleInjector::new(dev, config, 99);
-        let dbg = format!("{ti:?}");
-        assert!(dbg.contains("ThrottleInjector"), "missing struct: {dbg}");
-        assert!(dbg.contains("seed"), "missing seed: {dbg}");
+        assert_eq!(format!("{ti:?}"), THROTTLE_INJECTOR_DEBUG_GOLDEN);
     }
 
     #[test]
@@ -7527,14 +7530,16 @@ mod tests {
 
     #[test]
     fn flush_pin_token_debug_format() {
+        const FLUSH_PIN_TOKEN_NOOP_DEBUG_GOLDEN: &str = "FlushPinToken(false)";
+        const FLUSH_PIN_TOKEN_REAL_DEBUG_GOLDEN: &str = "FlushPinToken(true)";
+
         let noop = FlushPinToken::noop();
         let dbg = format!("{noop:?}");
-        assert!(dbg.contains("FlushPinToken"));
-        assert!(dbg.contains("false")); // is_some() = false for noop
+        assert_eq!(dbg, FLUSH_PIN_TOKEN_NOOP_DEBUG_GOLDEN);
 
         let real = FlushPinToken::new(42_u32);
         let dbg = format!("{real:?}");
-        assert!(dbg.contains("true")); // is_some() = true
+        assert_eq!(dbg, FLUSH_PIN_TOKEN_REAL_DEBUG_GOLDEN);
     }
 
     #[test]

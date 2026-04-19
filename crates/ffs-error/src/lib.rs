@@ -697,21 +697,19 @@ ModeViolation|errno=1|display=mount-mode violation: native-only op in compat mod
 
     #[test]
     fn debug_formatting_includes_variant_name() {
+        const NO_SPACE_DEBUG_GOLDEN: &str = "NoSpace";
+        const CORRUPTION_DEBUG_GOLDEN: &str = "Corruption { block: 7, detail: \"bad\" }";
+
         let err = FfsError::NoSpace;
         let debug = format!("{err:?}");
-        assert!(
-            debug.contains("NoSpace"),
-            "Debug should include variant name: {debug}"
-        );
+        assert_eq!(debug, NO_SPACE_DEBUG_GOLDEN);
 
         let err2 = FfsError::Corruption {
             block: 7,
             detail: "bad".into(),
         };
         let debug2 = format!("{err2:?}");
-        assert!(debug2.contains("Corruption"));
-        assert!(debug2.contains('7'));
-        assert!(debug2.contains("bad"));
+        assert_eq!(debug2, CORRUPTION_DEBUG_GOLDEN);
     }
 
     // ── Errno value correctness (verify against libc constants) ─────────

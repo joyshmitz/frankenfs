@@ -2598,18 +2598,32 @@ mod tests {
         assert!(items.is_empty());
     }
 
-    #[test]
-    fn superblock_debug_and_clone() {
+    const REPRESENTATIVE_BTRFS_SUPERBLOCK_DEBUG_GOLDEN: &str = concat!(
+        "BtrfsSuperblock { csum: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ",
+        "fsid: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ",
+        "bytenr: 0, flags: 0, magic: 5575266562640200287, generation: 0, root: 0, chunk_root: 0, ",
+        "log_root: 0, total_bytes: 0, bytes_used: 0, root_dir_objectid: 0, num_devices: 0, ",
+        "sectorsize: 4096, nodesize: 16384, stripesize: 4096, compat_flags: 0, compat_ro_flags: 0, ",
+        "incompat_flags: 0, csum_type: 0, root_level: 0, chunk_root_level: 0, log_root_level: 0, ",
+        "label: \"\", sys_chunk_array_size: 0, sys_chunk_array: [] }",
+    );
+
+    fn representative_btrfs_superblock() -> BtrfsSuperblock {
         let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
         sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
-        let parsed = BtrfsSuperblock::parse_superblock_region(&sb).expect("parse");
+        BtrfsSuperblock::parse_superblock_region(&sb).expect("parse")
+    }
+
+    #[test]
+    fn superblock_debug_and_clone() {
+        let parsed = representative_btrfs_superblock();
         let cloned = parsed.clone();
         assert_eq!(parsed, cloned);
         let dbg = format!("{parsed:?}");
-        assert!(dbg.contains("BtrfsSuperblock"));
+        assert_eq!(dbg, REPRESENTATIVE_BTRFS_SUPERBLOCK_DEBUG_GOLDEN);
     }
 
     #[test]
@@ -2634,7 +2648,10 @@ mod tests {
         let kp2 = kp; // Copy
         assert_eq!(kp, kp2);
         let dbg = format!("{kp:?}");
-        assert!(dbg.contains("BtrfsKeyPtr"));
+        assert_eq!(
+            dbg,
+            "BtrfsKeyPtr { key: BtrfsKey { objectid: 1, item_type: 2, offset: 3 }, blockptr: 16384, generation: 10 }"
+        );
     }
 
     fn make_proptest_valid_btrfs_superblock(

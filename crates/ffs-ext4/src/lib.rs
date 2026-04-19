@@ -120,9 +120,10 @@ mod tests {
             compat_display: String::new(),
         };
         assert!(!diag.is_ok());
-        let display = format!("{diag}");
-        assert!(display.contains("missing required"));
-        assert!(display.contains("FILETYPE"));
+        assert_eq!(
+            format!("{diag}"),
+            "compat=, incompat=, ro_compat=; missing required: FILETYPE"
+        );
     }
 
     #[test]
@@ -137,8 +138,10 @@ mod tests {
             compat_display: String::new(),
         };
         assert!(!diag.is_ok());
-        let display = format!("{diag}");
-        assert!(display.contains("rejected"));
+        assert_eq!(
+            format!("{diag}"),
+            "compat=, incompat=, ro_compat=; rejected: ENCRYPT"
+        );
     }
 
     #[test]
@@ -153,9 +156,10 @@ mod tests {
             compat_display: String::new(),
         };
         assert!(!diag.is_ok());
-        let display = format!("{diag}");
-        assert!(display.contains("unknown incompat"));
-        assert!(display.contains("FF00"));
+        assert_eq!(
+            format!("{diag}"),
+            "compat=, incompat=, ro_compat=; unknown incompat: 0xFF00"
+        );
     }
 
     #[test]
@@ -169,9 +173,11 @@ mod tests {
             ro_compat_display: "SPARSE_SUPER".to_string(),
             compat_display: "HAS_JOURNAL".to_string(),
         };
-        let display = format!("{diag}");
-        assert!(display.contains("unknown ro_compat"));
-        assert!(display.contains("AB"));
+        assert_eq!(
+            format!("{diag}"),
+            "compat=HAS_JOURNAL, incompat=FILETYPE, ro_compat=SPARSE_SUPER; \
+unknown ro_compat: 0xAB"
+        );
     }
 
     // ── Ext4FileType tests ──────────────────────────────────────────────

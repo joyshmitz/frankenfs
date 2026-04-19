@@ -2868,13 +2868,15 @@ mod tests {
 
     #[test]
     fn inode_location_debug_format() {
+        const INODE_LOCATION_DEBUG_GOLDEN: &str =
+            "InodeLocation { block: BlockNumber(42), byte_offset: 256 }";
+
         let loc = InodeLocation {
             block: BlockNumber(42),
             byte_offset: 256,
         };
         let dbg = format!("{loc:?}");
-        assert!(dbg.contains("42"));
-        assert!(dbg.contains("256"));
+        assert_eq!(dbg, INODE_LOCATION_DEBUG_GOLDEN);
     }
 
     #[test]

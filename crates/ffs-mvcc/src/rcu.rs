@@ -709,19 +709,22 @@ mod tests {
 
     #[test]
     fn rcu_cell_debug_format() {
+        const RCU_CELL_DEBUG_GOLDEN: &str = "RcuCell { value: 42, update_count: 0 }";
+
         let cell = RcuCell::new(42_u64);
         let debug_str = format!("{cell:?}");
-        assert!(debug_str.contains("RcuCell"));
-        assert!(debug_str.contains("42"));
+        assert_eq!(debug_str, RCU_CELL_DEBUG_GOLDEN);
     }
 
     #[test]
     fn rcu_map_debug_format() {
+        const RCU_MAP_DEBUG_GOLDEN: &str =
+            "RcuMap { entry_count: 1, update_count: 1, churn_threshold: 10000, .. }";
+
         let map: RcuMap<u64, u64> = RcuMap::new();
         map.insert(1, 10);
         let debug_str = format!("{map:?}");
-        assert!(debug_str.contains("RcuMap"));
-        assert!(debug_str.contains("entry_count"));
+        assert_eq!(debug_str, RCU_MAP_DEBUG_GOLDEN);
     }
 
     // ── Property-based tests (proptest) ────────────────────────────────────

@@ -51,6 +51,34 @@ fn parse_metric(line: &str, key: &str) -> usize {
         .unwrap_or_else(|err| panic!("invalid metric {key} in line '{line}': {err}"))
 }
 
+const REPRESENTATIVE_SELF_HEALING_DEMO_OUTPUT_GOLDEN: &str = concat!(
+    "demo start: image_size=8388608B file_count=10 corruption_pct=2 seed=0x00c0ffeef00dbaad\n",
+    "image created: wrote 10 payload files across 40 source blocks\n",
+    "corruption injected: blocks_corrupted=1 pct=2\n",
+    "repair complete: blocks_repaired=1 duration_ms=<duration_ms>\n",
+    "verification: files_verified=10 all_ok=true\n",
+    "demo result: PASS"
+);
+
+fn scrub_demo_output_line(line: &str) -> String {
+    if let Some((prefix, rest)) = line.split_once("duration_ms=") {
+        let digit_prefix_len = rest.chars().take_while(char::is_ascii_digit).count();
+        return format!(
+            "{prefix}duration_ms=<duration_ms>{}",
+            &rest[digit_prefix_len..]
+        );
+    }
+    line.to_owned()
+}
+
+fn scrub_demo_output<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
+    lines
+        .into_iter()
+        .map(scrub_demo_output_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ── Test 0: binary command path ─────────────────────────────────────────────
 
 #[test]
@@ -73,12 +101,10 @@ fn demo_binary_runs_via_self_healing_command() {
     let stdout = String::from_utf8(output.stdout).expect("stdout must be utf8");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 6, "expected six output lines, got:\n{stdout}");
-    assert!(lines[0].starts_with("demo start:"));
-    assert!(lines[1].starts_with("image created:"));
-    assert!(lines[2].starts_with("corruption injected:"));
-    assert!(lines[3].starts_with("repair complete:"));
-    assert!(lines[4].starts_with("verification:"));
-    assert_eq!(lines[5], "demo result: PASS");
+    assert_eq!(
+        scrub_demo_output(lines.iter().copied()),
+        REPRESENTATIVE_SELF_HEALING_DEMO_OUTPUT_GOLDEN
+    );
 
     let corrupted = parse_metric(lines[2], "blocks_corrupted=");
     let repaired = parse_metric(lines[3], "blocks_repaired=");
@@ -86,7 +112,6 @@ fn demo_binary_runs_via_self_healing_command() {
         corrupted, repaired,
         "binary run must repair every corrupted block"
     );
-    assert!(lines[4].contains("all_ok=true"));
     assert!(
         elapsed.as_secs() < 30,
         "binary command must finish in <30s, took {:.2}s",
@@ -105,34 +130,9 @@ fn demo_output_has_six_structured_lines() {
         6,
         "expected exactly 6 output lines"
     );
-    assert!(
-        result.output_lines[0].starts_with("demo start:"),
-        "line 0 should start with 'demo start:', got: {}",
-        result.output_lines[0]
-    );
-    assert!(
-        result.output_lines[1].starts_with("image created:"),
-        "line 1 should start with 'image created:', got: {}",
-        result.output_lines[1]
-    );
-    assert!(
-        result.output_lines[2].starts_with("corruption injected:"),
-        "line 2 should start with 'corruption injected:', got: {}",
-        result.output_lines[2]
-    );
-    assert!(
-        result.output_lines[3].starts_with("repair complete:"),
-        "line 3 should start with 'repair complete:', got: {}",
-        result.output_lines[3]
-    );
-    assert!(
-        result.output_lines[4].starts_with("verification:"),
-        "line 4 should start with 'verification:', got: {}",
-        result.output_lines[4]
-    );
     assert_eq!(
-        result.output_lines[5], "demo result: PASS",
-        "line 5 should be 'demo result: PASS'"
+        scrub_demo_output(result.output_lines.iter().map(String::as_str)),
+        REPRESENTATIVE_SELF_HEALING_DEMO_OUTPUT_GOLDEN
     );
 }
 
