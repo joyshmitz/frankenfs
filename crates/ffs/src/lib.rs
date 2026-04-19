@@ -406,6 +406,83 @@ mod tests {
     }
 
     #[test]
+    fn representative_public_diagnostics_exact_golden_contract() {
+        let verdict = CheckVerdict {
+            component: "superblock".to_string(),
+            passed: true,
+            detail: String::new(),
+        };
+        let report = IntegrityReport {
+            verdicts: vec![verdict.clone()],
+            passed: 100,
+            failed: 0,
+            posterior_alpha: 1.0,
+            posterior_beta: 101.0,
+            expected_corruption_rate: 0.0098,
+            upper_bound_corruption_rate: 0.005,
+            healthy: true,
+        };
+        let stat = FsStat {
+            blocks: 100_000,
+            blocks_free: 50_000,
+            blocks_available: 48_000,
+            files: 10_000,
+            files_free: 5_000,
+            block_size: 4096,
+            name_max: 255,
+            fragment_size: 4096,
+        };
+        let geo = Ext4Geometry {
+            block_size: 4096,
+            inodes_count: 8192,
+            inodes_per_group: 1024,
+            first_ino: 11,
+            inode_size: 256,
+            groups_count: 8,
+            group_desc_size: 64,
+            csum_seed: 0xDEAD_BEEF,
+            is_64bit: true,
+            has_metadata_csum: true,
+        };
+        let summary = Ext4FreeSpaceSummary {
+            free_blocks_total: 5000,
+            free_inodes_total: 2000,
+            gd_free_blocks_total: 5000,
+            gd_free_inodes_total: 2000,
+            blocks_mismatch: false,
+            inodes_mismatch: false,
+        };
+        let orphans = Ext4OrphanList {
+            head: 42,
+            inodes: Vec::new(),
+        };
+
+        let actual = format!(
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+            DetectionError::UnsupportedImage,
+            DegradationLevel::Critical,
+            verdict,
+            report,
+            stat,
+            geo,
+            summary,
+            orphans,
+        );
+
+        let expected = "\
+image does not decode as supported ext4/btrfs superblock
+critical
+CheckVerdict { component: \"superblock\", passed: true, detail: \"\" }
+IntegrityReport { verdicts: [CheckVerdict { component: \"superblock\", passed: true, detail: \"\" }], passed: 100, failed: 0, posterior_alpha: 1.0, posterior_beta: 101.0, expected_corruption_rate: 0.0098, upper_bound_corruption_rate: 0.005, healthy: true }
+FsStat { blocks: 100000, blocks_free: 50000, blocks_available: 48000, files: 10000, files_free: 5000, block_size: 4096, name_max: 255, fragment_size: 4096 }
+Ext4Geometry { block_size: 4096, inodes_count: 8192, inodes_per_group: 1024, first_ino: 11, inode_size: 256, groups_count: 8, group_desc_size: 64, csum_seed: 3735928559, is_64bit: true, has_metadata_csum: true }
+Ext4FreeSpaceSummary { free_blocks_total: 5000, free_inodes_total: 2000, gd_free_blocks_total: 5000, gd_free_inodes_total: 2000, blocks_mismatch: false, inodes_mismatch: false }
+Ext4OrphanList { head: 42, inodes: [] }";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn xattr_set_mode_variants_exist() {
         // Verify all three variants are accessible through the facade
         assert_ne!(

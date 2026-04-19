@@ -1069,6 +1069,55 @@ mod tests {
     }
 
     #[test]
+    fn representative_extent_mapping_exact_golden_contract() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let written = allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            0,
+            3,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+        let unwritten = allocate_unwritten_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            5,
+            2,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+        let mappings = map_logical_to_physical(&cx, &dev, &root, 0, 9).unwrap();
+
+        let actual = format!(
+            "{written:?}\n{unwritten:?}\n{mappings:?}\n{}",
+            groups[0].free_blocks
+        );
+
+        let expected = "\
+ExtentMapping { logical_start: 0, physical_start: 131, count: 3, unwritten: false }
+ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true }
+[ExtentMapping { logical_start: 0, physical_start: 131, count: 3, unwritten: false }, ExtentMapping { logical_start: 3, physical_start: 0, count: 2, unwritten: false }, ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true }, ExtentMapping { logical_start: 7, physical_start: 0, count: 2, unwritten: false }]
+8187";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn map_rejects_root_depth_above_ext4_limit() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);

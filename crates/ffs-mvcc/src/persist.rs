@@ -29,6 +29,7 @@ use asupersync::Cx;
 use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, CommitSeq};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -91,7 +92,7 @@ pub struct WalStats {
 /// This captures enough detail for the evidence ledger integration:
 /// how many commits were replayed, how many records were discarded
 /// (corrupt or truncated), and whether a checkpoint was used.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalRecoveryReport {
     /// Classified replay outcome (clean, truncated, corrupt, etc.).
     pub outcome: ReplayOutcome,
@@ -1693,6 +1694,39 @@ mod tests {
         assert_eq!(report.records_discarded, 0);
         assert!(!report.used_checkpoint);
         assert!(report.checkpoint_commit_seq.is_none());
+    }
+
+    #[test]
+    fn representative_recovery_report_json_exact_golden_contract() {
+        let report = WalRecoveryReport {
+            outcome: ReplayOutcome::CorruptTail {
+                records_discarded: 2,
+                first_corrupt_offset: 4096,
+            },
+            commits_replayed: 7,
+            versions_replayed: 11,
+            records_discarded: 2,
+            wal_valid_bytes: 8192,
+            wal_total_bytes: 12288,
+            used_checkpoint: true,
+            checkpoint_commit_seq: Some(5),
+        };
+
+        let actual = serde_json::to_string(&report).expect("serialize");
+        let expected = concat!(
+            "{\"outcome\":{\"corrupt_tail\":{\"records_discarded\":2,\"first_corrupt_offset\":4096}}",
+            ",\"commits_replayed\":7",
+            ",\"versions_replayed\":11",
+            ",\"records_discarded\":2",
+            ",\"wal_valid_bytes\":8192",
+            ",\"wal_total_bytes\":12288",
+            ",\"used_checkpoint\":true",
+            ",\"checkpoint_commit_seq\":5}"
+        );
+        assert_eq!(actual, expected);
+
+        let parsed: WalRecoveryReport = serde_json::from_str(expected).expect("deserialize");
+        assert_eq!(parsed, report);
     }
 
     #[test]

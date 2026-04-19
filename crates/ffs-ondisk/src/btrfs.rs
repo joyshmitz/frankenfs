@@ -1437,51 +1437,154 @@ mod tests {
         assert_eq!(parsed.label, "ffs");
     }
 
-    #[test]
-    fn superblock_sys_chunk_array_parsed() {
-        // Build a superblock with a single sys_chunk_array entry
+    fn representative_sys_chunk_superblock() -> [u8; BTRFS_SUPER_INFO_SIZE] {
         let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
         sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0x9C..0xA0].copy_from_slice(&65536_u32.to_le_bytes());
+        sb[BTRFS_SUPER_LABEL_OFFSET..BTRFS_SUPER_LABEL_OFFSET + 4].copy_from_slice(b"gold");
 
-        // Build a sys_chunk_array entry: disk_key (17) + chunk_fixed (48) + 1 stripe (32) = 97
+        // Build a sys_chunk_array entry: disk_key (17) + chunk_fixed (48) + 1 stripe (32) = 97.
         let entry_size: u32 = 97;
         sb[0xA0..0xA4].copy_from_slice(&entry_size.to_le_bytes());
 
         let base = BTRFS_SYS_CHUNK_ARRAY_OFFSET;
-        // disk_key: objectid=256, type=228 (CHUNK_ITEM_KEY), offset=0
+        // disk_key: objectid=256, type=228 (CHUNK_ITEM_KEY), offset=16 MiB.
         sb[base..base + 8].copy_from_slice(&256_u64.to_le_bytes());
         sb[base + 8] = 228;
-        sb[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
-        // chunk: length=8MiB, owner=2, stripe_len=64K, type=2 (SYSTEM)
+        sb[base + 9..base + 17].copy_from_slice(&0x100_0000_u64.to_le_bytes());
+
+        // chunk: length=8 MiB, owner=2, stripe_len=64 KiB, type=2 (SYSTEM).
         let c = base + 17;
         sb[c..c + 8].copy_from_slice(&(8 * 1024 * 1024_u64).to_le_bytes());
         sb[c + 8..c + 16].copy_from_slice(&2_u64.to_le_bytes());
         sb[c + 16..c + 24].copy_from_slice(&(64 * 1024_u64).to_le_bytes());
-        sb[c + 24..c + 32].copy_from_slice(&2_u64.to_le_bytes()); // type=SYSTEM
+        sb[c + 24..c + 32].copy_from_slice(&2_u64.to_le_bytes());
         sb[c + 32..c + 36].copy_from_slice(&4096_u32.to_le_bytes());
         sb[c + 36..c + 40].copy_from_slice(&4096_u32.to_le_bytes());
         sb[c + 40..c + 44].copy_from_slice(&4096_u32.to_le_bytes());
-        sb[c + 44..c + 46].copy_from_slice(&1_u16.to_le_bytes()); // num_stripes=1
-        sb[c + 46..c + 48].copy_from_slice(&0_u16.to_le_bytes()); // sub_stripes=0
-        // stripe: devid=1, offset=0, uuid=zeros
+        sb[c + 44..c + 46].copy_from_slice(&1_u16.to_le_bytes());
+        sb[c + 46..c + 48].copy_from_slice(&0_u16.to_le_bytes());
+
+        // stripe: devid=1, physical offset=2 MiB, uuid=zeros.
         let s = c + 48;
         sb[s..s + 8].copy_from_slice(&1_u64.to_le_bytes());
-        sb[s + 8..s + 16].copy_from_slice(&0_u64.to_le_bytes());
+        sb[s + 8..s + 16].copy_from_slice(&0x20_0000_u64.to_le_bytes());
+        sb
+    }
 
-        let parsed = BtrfsSuperblock::parse_superblock_region(&sb).expect("sb parse");
-        assert_eq!(parsed.sys_chunk_array_size, entry_size);
+    #[test]
+    fn superblock_sys_chunk_array_parsed() {
+        let parsed =
+            BtrfsSuperblock::parse_superblock_region(&representative_sys_chunk_superblock())
+                .expect("sb parse");
+        assert_eq!(parsed.sys_chunk_array_size, 97);
         assert_eq!(parsed.sys_chunk_array.len(), 97);
 
         let entries = parse_sys_chunk_array(&parsed.sys_chunk_array).expect("chunk parse");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key.objectid, 256);
         assert_eq!(entries[0].key.item_type, 228);
+        assert_eq!(entries[0].key.offset, 0x100_0000);
         assert_eq!(entries[0].length, 8 * 1024 * 1024);
         assert_eq!(entries[0].num_stripes, 1);
         assert_eq!(entries[0].stripes[0].devid, 1);
+        assert_eq!(entries[0].stripes[0].offset, 0x20_0000);
+    }
+
+    #[test]
+    fn representative_sys_chunk_mapping_exact_golden_contract() {
+        let parsed =
+            BtrfsSuperblock::parse_superblock_region(&representative_sys_chunk_superblock())
+                .expect("sb parse");
+        let entries = parse_sys_chunk_array(&parsed.sys_chunk_array).expect("chunk parse");
+        let entry = &entries[0];
+        let mapping = map_logical_to_physical(&entries, 0x108_0000)
+            .expect("mapping should succeed")
+            .expect("should find a mapping");
+
+        let actual = format!(
+            concat!(
+                "superblock\n",
+                "  label={}\n",
+                "  sectorsize={}\n",
+                "  nodesize={}\n",
+                "  stripesize={}\n",
+                "  sys_chunk_array_size={}\n",
+                "entry\n",
+                "  key.objectid={}\n",
+                "  key.item_type={}\n",
+                "  key.offset_hex=0x{:x}\n",
+                "  length_hex=0x{:x}\n",
+                "  owner={}\n",
+                "  stripe_len_hex=0x{:x}\n",
+                "  chunk_type={}\n",
+                "  io_align={}\n",
+                "  io_width={}\n",
+                "  sector_size={}\n",
+                "  num_stripes={}\n",
+                "  sub_stripes={}\n",
+                "  first_stripe.devid={}\n",
+                "  first_stripe.offset_hex=0x{:x}\n",
+                "lookup\n",
+                "  logical_hex=0x1080000\n",
+                "  mapping.devid={}\n",
+                "  mapping.physical_hex=0x{:x}"
+            ),
+            parsed.label,
+            parsed.sectorsize,
+            parsed.nodesize,
+            parsed.stripesize,
+            parsed.sys_chunk_array_size,
+            entry.key.objectid,
+            entry.key.item_type,
+            entry.key.offset,
+            entry.length,
+            entry.owner,
+            entry.stripe_len,
+            entry.chunk_type,
+            entry.io_align,
+            entry.io_width,
+            entry.sector_size,
+            entry.num_stripes,
+            entry.sub_stripes,
+            entry.stripes[0].devid,
+            entry.stripes[0].offset,
+            mapping.devid,
+            mapping.physical,
+        );
+
+        assert_eq!(
+            actual,
+            concat!(
+                "superblock\n",
+                "  label=gold\n",
+                "  sectorsize=4096\n",
+                "  nodesize=16384\n",
+                "  stripesize=65536\n",
+                "  sys_chunk_array_size=97\n",
+                "entry\n",
+                "  key.objectid=256\n",
+                "  key.item_type=228\n",
+                "  key.offset_hex=0x1000000\n",
+                "  length_hex=0x800000\n",
+                "  owner=2\n",
+                "  stripe_len_hex=0x10000\n",
+                "  chunk_type=2\n",
+                "  io_align=4096\n",
+                "  io_width=4096\n",
+                "  sector_size=4096\n",
+                "  num_stripes=1\n",
+                "  sub_stripes=0\n",
+                "  first_stripe.devid=1\n",
+                "  first_stripe.offset_hex=0x200000\n",
+                "lookup\n",
+                "  logical_hex=0x1080000\n",
+                "  mapping.devid=1\n",
+                "  mapping.physical_hex=0x280000"
+            )
+        );
     }
 
     #[test]

@@ -614,6 +614,150 @@ mod tests {
             .collect()
     }
 
+    fn representative_inode() -> Ext4Inode {
+        Ext4Inode {
+            mode: 0o100_755,
+            uid: 0x0001_03E8,
+            gid: 0x0002_03E9,
+            size: 0x0001_0000_0000_1234,
+            links_count: 2,
+            blocks: 0x0002_0000_0000_0008,
+            flags: EXT4_EXTENTS_FL,
+            version: 7,
+            generation: 0x1122_3344,
+            file_acl: 0x0001_0000_0000_0064,
+            atime: 1_700_000_000,
+            ctime: 1_700_000_001,
+            mtime: 1_700_000_002,
+            dtime: 0,
+            atime_extra: encode_extra_timestamp(u64::from(u32::MAX) + 2, 123_456_789),
+            ctime_extra: encode_extra_timestamp(u64::from(u32::MAX) + 1, 222_222_222),
+            mtime_extra: encode_extra_timestamp(u64::from(u32::MAX), 333_333_333),
+            crtime: 1_650_000_000,
+            crtime_extra: encode_extra_timestamp(u64::from(u32::MAX) + 3, 444_444_444),
+            extra_isize: 32,
+            checksum: 0,
+            version_hi: 9,
+            projid: 0x5566_7788,
+            extent_bytes: (0_u8..60).collect(),
+            xattr_ibody: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        }
+    }
+
+    const REPRESENTATIVE_INODE_GOLDEN: &str = concat!(
+        "geometry\n",
+        "  block_size=4096\n",
+        "  inode_size=256\n",
+        "  inodes_per_group=2048\n",
+        "location\n",
+        "  debug=InodeLocation { block: BlockNumber(203), byte_offset: 0 }\n",
+        "  block=203\n",
+        "  byte_offset=0\n",
+        "encoded_timestamps\n",
+        "  atime_extra=0x1d6f3455\n",
+        "  ctime_extra=0x34fb5e39\n",
+        "  mtime_extra=0x4f790d54\n",
+        "  crtime_extra=0x69f6bc71\n",
+        "serialized_fields\n",
+        "  mode=0x81ed\n",
+        "  uid_lo=0x03e8\n",
+        "  uid_hi=0x0001\n",
+        "  gid_lo=0x03e9\n",
+        "  gid_hi=0x0002\n",
+        "  size_lo=0x00001234\n",
+        "  size_hi=0x00010000\n",
+        "  generation=0x11223344\n",
+        "  file_acl_lo=0x00000064\n",
+        "  file_acl_hi=0x0000\n",
+        "  version_hi=0x00000009\n",
+        "  projid=0x55667788\n",
+        "  extent_prefix=[00, 01, 02, 03, 04, 05, 06, 07]\n",
+        "checksum\n",
+        "  lo=0x39ca\n",
+        "  hi=0xd38c"
+    );
+
+    fn representative_inode_golden_contract_actual() -> String {
+        let geo = make_geometry();
+        let groups = make_groups(&geo);
+        let ino = InodeNumber(4097);
+        let loc = locate_inode(ino, &geo, &groups).expect("representative inode location");
+        let inode = representative_inode();
+        let mut raw = serialize_inode(&inode, usize::from(geo.inode_size));
+        compute_and_set_checksum(&mut raw, 0xA1B2_C3D4, ino.0 as u32);
+        ffs_ondisk::verify_inode_checksum(&raw, 0xA1B2_C3D4, ino.0 as u32, geo.inode_size)
+            .expect("representative checksum should verify");
+
+        let checksum_lo = u16::from_le_bytes([
+            raw[INODE_CHECKSUM_LO_OFFSET],
+            raw[INODE_CHECKSUM_LO_OFFSET + 1],
+        ]);
+        let checksum_hi = u16::from_le_bytes([
+            raw[INODE_CHECKSUM_HI_OFFSET],
+            raw[INODE_CHECKSUM_HI_OFFSET + 1],
+        ]);
+
+        format!(
+            concat!(
+                "geometry\n",
+                "  block_size={}\n",
+                "  inode_size={}\n",
+                "  inodes_per_group={}\n",
+                "location\n",
+                "  debug={:?}\n",
+                "  block={}\n",
+                "  byte_offset={}\n",
+                "encoded_timestamps\n",
+                "  atime_extra=0x{:08x}\n",
+                "  ctime_extra=0x{:08x}\n",
+                "  mtime_extra=0x{:08x}\n",
+                "  crtime_extra=0x{:08x}\n",
+                "serialized_fields\n",
+                "  mode=0x{:04x}\n",
+                "  uid_lo=0x{:04x}\n",
+                "  uid_hi=0x{:04x}\n",
+                "  gid_lo=0x{:04x}\n",
+                "  gid_hi=0x{:04x}\n",
+                "  size_lo=0x{:08x}\n",
+                "  size_hi=0x{:08x}\n",
+                "  generation=0x{:08x}\n",
+                "  file_acl_lo=0x{:08x}\n",
+                "  file_acl_hi=0x{:04x}\n",
+                "  version_hi=0x{:08x}\n",
+                "  projid=0x{:08x}\n",
+                "  extent_prefix={:02x?}\n",
+                "checksum\n",
+                "  lo=0x{:04x}\n",
+                "  hi=0x{:04x}"
+            ),
+            geo.block_size,
+            geo.inode_size,
+            geo.inodes_per_group,
+            loc,
+            loc.block.0,
+            loc.byte_offset,
+            inode.atime_extra,
+            inode.ctime_extra,
+            inode.mtime_extra,
+            inode.crtime_extra,
+            u16::from_le_bytes([raw[0x00], raw[0x01]]),
+            u16::from_le_bytes([raw[0x02], raw[0x03]]),
+            u16::from_le_bytes([raw[0x78], raw[0x79]]),
+            u16::from_le_bytes([raw[0x18], raw[0x19]]),
+            u16::from_le_bytes([raw[0x7A], raw[0x7B]]),
+            u32::from_le_bytes([raw[0x04], raw[0x05], raw[0x06], raw[0x07]]),
+            u32::from_le_bytes([raw[0x6C], raw[0x6D], raw[0x6E], raw[0x6F]]),
+            u32::from_le_bytes([raw[0x64], raw[0x65], raw[0x66], raw[0x67]]),
+            u32::from_le_bytes([raw[0x68], raw[0x69], raw[0x6A], raw[0x6B]]),
+            u16::from_le_bytes([raw[0x76], raw[0x77]]),
+            u32::from_le_bytes([raw[0x98], raw[0x99], raw[0x9A], raw[0x9B]]),
+            u32::from_le_bytes([raw[0x9C], raw[0x9D], raw[0x9E], raw[0x9F]]),
+            &raw[0x28..0x30],
+            checksum_lo,
+            checksum_hi,
+        )
+    }
+
     #[test]
     fn locate_inode_basic() {
         let geo = make_geometry();
@@ -682,6 +826,14 @@ mod tests {
         assert_eq!(parsed.atime, inode.atime);
         assert_eq!(parsed.mtime, inode.mtime);
         assert_eq!(parsed.ctime, inode.ctime);
+    }
+
+    #[test]
+    fn representative_inode_location_and_serialization_exact_golden_contract() {
+        assert_eq!(
+            representative_inode_golden_contract_actual(),
+            REPRESENTATIVE_INODE_GOLDEN
+        );
     }
 
     #[test]

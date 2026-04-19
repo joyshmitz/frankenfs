@@ -24,6 +24,7 @@
 
 use crate::wal::{self, DecodeResult, WalCommit};
 use ffs_error::{FfsError, Result};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 // ── Tail policy ──────────────────────────────────────────────────────────────
@@ -44,7 +45,8 @@ pub enum TailPolicy {
 // ── Replay outcome classification ────────────────────────────────────────────
 
 /// Classification of how a WAL replay completed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReplayOutcome {
     /// All records decoded cleanly with no issues.
     Clean,

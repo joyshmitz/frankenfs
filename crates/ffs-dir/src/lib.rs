@@ -432,6 +432,85 @@ mod tests {
             .boxed()
     }
 
+    const REPRESENTATIVE_DIR_BLOCK_GOLDEN: &str = concat!(
+        "slot_headers\n",
+        "  [0] inode=17 rec_len=12 name_len=1 file_type=Dir\n",
+        "  [12] inode=2 rec_len=28 name_len=2 file_type=Dir\n",
+        "  [24] inode=0 rec_len=16 name_len=0 file_type_raw=0\n",
+        "  [40] inode=99 rec_len=12 name_len=3 file_type=Dir\n",
+        "tail\n",
+        "  checksum=0 raw=[00, 00, 00, 00, 0c, 00, 00, de, 00, 00, 00, 00]\n",
+        "parsed\n",
+        "  inode=17 rec_len=12 file_type=Dir name=\".\"\n",
+        "  inode=2 rec_len=28 file_type=Dir name=\"..\"\n",
+        "  inode=99 rec_len=12 file_type=Dir name=\"sub\"\n",
+        "block=[11, 00, 00, 00, 0c, 00, 01, 02, 2e, 00, 00, 00, 02, 00, 00, 00, 1c, 00, 02, 02, 2e, 2e, 00, 00, 00, 00, 00, 00, 10, 00, 00, 00, 68, 69, 2e, 74, 78, 74, 00, 00, 63, 00, 00, 00, 0c, 00, 03, 02, 73, 75, 62, 00, 00, 00, 00, 00, 0c, 00, 00, de, 00, 00, 00, 00]"
+    );
+
+    fn representative_dir_block_golden_contract_actual() -> String {
+        let mut block = vec![0_u8; 64];
+        init_dir_block(&mut block, 17, 2, 12).expect("init representative dir block");
+        add_entry(&mut block, 41, b"hi.txt", Ext4FileType::RegFile, 12)
+            .expect("insert representative file");
+        add_entry(&mut block, 99, b"sub", Ext4FileType::Dir, 12)
+            .expect("insert representative subdir");
+        assert!(
+            remove_entry(&mut block, b"hi.txt", 12).expect("remove representative file"),
+            "representative file entry should be removed"
+        );
+
+        let (entries, tail) = parse_dir_block(&block, 64).expect("parse representative dir block");
+        let tail = tail.expect("representative dir block should preserve checksum tail");
+        let parsed_lines = entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "  inode={} rec_len={} file_type={:?} name={:?}",
+                    entry.inode,
+                    entry.rec_len,
+                    entry.file_type,
+                    entry.name_str()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            concat!(
+                "slot_headers\n",
+                "  [0] inode={} rec_len={} name_len={} file_type={:?}\n",
+                "  [12] inode={} rec_len={} name_len={} file_type={:?}\n",
+                "  [24] inode={} rec_len={} name_len={} file_type_raw={}\n",
+                "  [40] inode={} rec_len={} name_len={} file_type={:?}\n",
+                "tail\n",
+                "  checksum={} raw={:02x?}\n",
+                "parsed\n",
+                "{}\n",
+                "block={:02x?}"
+            ),
+            read_u32_le(&block, 0).expect("read dot inode"),
+            read_u16_le(&block, 4).expect("read dot rec_len"),
+            block[6],
+            Ext4FileType::from_raw(block[7]),
+            read_u32_le(&block, 12).expect("read dotdot inode"),
+            read_u16_le(&block, 16).expect("read dotdot rec_len"),
+            block[18],
+            Ext4FileType::from_raw(block[19]),
+            read_u32_le(&block, 24).expect("read deleted inode"),
+            read_u16_le(&block, 28).expect("read deleted rec_len"),
+            block[30],
+            block[31],
+            read_u32_le(&block, 40).expect("read sub inode"),
+            read_u16_le(&block, 44).expect("read sub rec_len"),
+            block[46],
+            Ext4FileType::from_raw(block[47]),
+            tail.checksum,
+            &block[52..64],
+            parsed_lines,
+            block,
+        )
+    }
+
     fn live_name_set(block: &[u8]) -> BTreeSet<Vec<u8>> {
         parse_dir_block(block, u32::try_from(block.len()).unwrap())
             .unwrap()
@@ -653,6 +732,14 @@ mod tests {
         let (entries, tail) = parse_dir_block(&block, 1024).unwrap();
         assert_eq!(entries[1].rec_len, 1024 - 12 - 12);
         assert!(tail.is_some());
+    }
+
+    #[test]
+    fn representative_dir_block_mutation_exact_golden_contract() {
+        assert_eq!(
+            representative_dir_block_golden_contract_actual(),
+            REPRESENTATIVE_DIR_BLOCK_GOLDEN
+        );
     }
 
     #[test]

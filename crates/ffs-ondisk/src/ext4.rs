@@ -4573,6 +4573,29 @@ mod tests {
         sb
     }
 
+    fn representative_ext4_geometry_sb() -> [u8; EXT4_SUPERBLOCK_SIZE] {
+        let mut sb = make_valid_sb();
+        sb[0x00..0x04].copy_from_slice(&(32_u32 * 8192).to_le_bytes()); // inodes_count
+        sb[0x04..0x08].copy_from_slice(&(32_u32 * 32768).to_le_bytes()); // blocks_count_lo
+        sb[0x5C..0x60].copy_from_slice(&Ext4CompatFeatures::SPARSE_SUPER2.0.to_le_bytes());
+        sb[0x60..0x64].copy_from_slice(
+            &(Ext4IncompatFeatures::FILETYPE.0
+                | Ext4IncompatFeatures::EXTENTS.0
+                | Ext4IncompatFeatures::FLEX_BG.0
+                | Ext4IncompatFeatures::MMP.0
+                | Ext4IncompatFeatures::BIT64.0)
+                .to_le_bytes(),
+        );
+        sb[0x64..0x68].copy_from_slice(&Ext4RoCompatFeatures::METADATA_CSUM.0.to_le_bytes());
+        sb[0xFE..0x100].copy_from_slice(&64_u16.to_le_bytes()); // desc_size
+        sb[0x166..0x168].copy_from_slice(&5_u16.to_le_bytes()); // mmp_update_interval
+        sb[0x168..0x170].copy_from_slice(&1234_u64.to_le_bytes()); // mmp_block
+        sb[0x174] = 3; // log_groups_per_flex = 8 groups/flex
+        sb[0x24C..0x250].copy_from_slice(&7_u32.to_le_bytes()); // backup_bgs[0]
+        sb[0x250..0x254].copy_from_slice(&19_u32.to_le_bytes()); // backup_bgs[1]
+        sb
+    }
+
     #[test]
     fn validate_superblock_features_v1() {
         let mut sb = make_valid_sb();
@@ -5214,6 +5237,103 @@ mod tests {
         assert!(parsed.has_backup_superblock(GroupNumber(19)));
         assert!(!parsed.has_backup_superblock(GroupNumber(1)));
         assert!(!parsed.has_backup_superblock(GroupNumber(9)));
+    }
+
+    #[test]
+    fn representative_ext4_geometry_and_backup_layout_exact_golden_contract() {
+        let parsed = Ext4Superblock::parse_superblock_region(&representative_ext4_geometry_sb())
+            .expect("parse representative ext4 superblock");
+        let root_loc = parsed
+            .locate_inode(InodeNumber::ROOT)
+            .expect("locate root inode");
+        let first_second_group = parsed
+            .locate_inode(InodeNumber(8193))
+            .expect("locate first inode in second group");
+        let root_dev = parsed
+            .inode_device_offset(&root_loc, 100)
+            .expect("root inode device offset");
+        let second_group_dev = parsed
+            .inode_device_offset(&first_second_group, 200)
+            .expect("second group inode device offset");
+
+        let actual = format!(
+            concat!(
+                "superblock\n",
+                "  block_size={}\n",
+                "  cluster_size={}\n",
+                "  inode_size={}\n",
+                "  groups_count={}\n",
+                "  group_desc_size={}\n",
+                "  group_desc_blocks_count={}\n",
+                "  groups_per_flex={}\n",
+                "  flex_group_index(15)={}\n",
+                "  has_metadata_csum={}\n",
+                "  mmp_block_number={:?}\n",
+                "  backup_superblock_groups={:?}\n",
+                "  has_backup_superblock(1)={}\n",
+                "  has_backup_superblock(7)={}\n",
+                "  has_backup_superblock(19)={}\n",
+                "group_desc_offsets\n",
+                "  group0={:?}\n",
+                "  group31={:?}\n",
+                "inode_locations\n",
+                "  ino2=group:{},index:{},offset:{}\n",
+                "  ino2_device_offset@100={}\n",
+                "  ino8193=group:{},index:{},offset:{}\n",
+                "  ino8193_device_offset@200={}"
+            ),
+            parsed.block_size,
+            parsed.cluster_size,
+            parsed.inode_size,
+            parsed.groups_count(),
+            parsed.group_desc_size(),
+            parsed.group_desc_blocks_count(),
+            parsed.groups_per_flex(),
+            parsed.flex_group_index(GroupNumber(15)),
+            parsed.has_metadata_csum(),
+            parsed.mmp_block_number(),
+            parsed.backup_superblock_groups(parsed.groups_count()),
+            parsed.has_backup_superblock(GroupNumber(1)),
+            parsed.has_backup_superblock(GroupNumber(7)),
+            parsed.has_backup_superblock(GroupNumber(19)),
+            parsed.group_desc_offset(GroupNumber(0)),
+            parsed.group_desc_offset(GroupNumber(31)),
+            root_loc.group.0,
+            root_loc.index,
+            root_loc.offset_in_table,
+            root_dev,
+            first_second_group.group.0,
+            first_second_group.index,
+            first_second_group.offset_in_table,
+            second_group_dev,
+        );
+
+        let expected = concat!(
+            "superblock\n",
+            "  block_size=4096\n",
+            "  cluster_size=4096\n",
+            "  inode_size=256\n",
+            "  groups_count=32\n",
+            "  group_desc_size=64\n",
+            "  group_desc_blocks_count=1\n",
+            "  groups_per_flex=8\n",
+            "  flex_group_index(15)=1\n",
+            "  has_metadata_csum=true\n",
+            "  mmp_block_number=Some(1234)\n",
+            "  backup_superblock_groups=[0, 7, 19]\n",
+            "  has_backup_superblock(1)=false\n",
+            "  has_backup_superblock(7)=true\n",
+            "  has_backup_superblock(19)=true\n",
+            "group_desc_offsets\n",
+            "  group0=Some(4096)\n",
+            "  group31=Some(6080)\n",
+            "inode_locations\n",
+            "  ino2=group:0,index:1,offset:256\n",
+            "  ino2_device_offset@100=409856\n",
+            "  ino8193=group:1,index:0,offset:0\n",
+            "  ino8193_device_offset@200=819200"
+        );
+        assert_eq!(actual, expected);
     }
 
     #[test]

@@ -592,6 +592,131 @@ mod tests {
         }
     }
 
+    fn representative_external_block_entries() -> Vec<Ext4Xattr> {
+        vec![
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_SECURITY,
+                name: b"selinux".to_vec(),
+                value: b"u:obj".to_vec(),
+            },
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"alpha".to_vec(),
+                value: b"A".to_vec(),
+            },
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_TRUSTED,
+                name: b"zeta".to_vec(),
+                value: b"trust".to_vec(),
+            },
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"b".to_vec(),
+                value: b"bee!".to_vec(),
+            },
+        ]
+    }
+
+    const REPRESENTATIVE_EXTERNAL_BLOCK_GOLDEN: &str = concat!(
+        "header\n",
+        "  magic=0xea020000\n",
+        "  refcount=1\n",
+        "  blocks=1\n",
+        "  block_hash=0x00000000\n",
+        "  terminator_offset=120\n",
+        "entries\n",
+        "  [0] offset=32 name_index=1 name=user.b value_off=252 value_size=4 hash=0x21076562\n",
+        "  [1] offset=52 name_index=1 name=user.alpha value_off=248 value_size=1 hash=0xcd610666\n",
+        "  [2] offset=76 name_index=4 name=trusted.zeta value_off=240 value_size=5 hash=0x7248e9e0\n",
+        "  [3] offset=96 name_index=6 name=security.selinux value_off=232 value_size=5 hash=0x368054c1\n",
+        "parsed\n",
+        "  user.b=[62, 65, 65, 21]\n",
+        "  user.alpha=[41]\n",
+        "  trusted.zeta=[74, 72, 75, 73, 74]\n",
+        "  security.selinux=[75, 3a, 6f, 62, 6a]\n",
+        "entry_region_prefix=[01, 01, fc, 00, 00, 00, 00, 00, 04, 00, 00, 00, 62, 65, 07, 21, 62, 00, 00, 00, 05, 01, f8, 00, 00, 00, 00, 00, 01, 00, 00, 00, 66, 06, 61, cd, 61, 6c, 70, 68, 61, 00, 00, 00, 04, 04, f0, 00, 00, 00, 00, 00, 05, 00, 00, 00, e0, e9, 48, 72, 7a, 65, 74, 61, 07, 06, e8, 00, 00, 00, 00, 00, 05, 00, 00, 00, c1, 54, 80, 36, 73, 65, 6c, 69, 6e, 75, 78, 00, 00, 00, 00, 00, 00, 00, 00, 00]\n",
+        "value_region_tail=[00, 00, 00, 00, 00, 00, 00, 00, 75, 3a, 6f, 62, 6a, 00, 00, 00, 74, 72, 75, 73, 74, 00, 00, 00, 41, 00, 00, 00, 62, 65, 65, 21]"
+    );
+
+    fn representative_external_block_golden_contract_actual() -> String {
+        let block = build_external_block(256, &representative_external_block_entries())
+            .expect("build representative external xattr block");
+        let parsed =
+            parse_external_entries(&block, false).expect("parse representative external block");
+
+        let mut offset = EXTERNAL_HEADER_LEN;
+        let mut entry_lines = Vec::new();
+        let mut entry_idx = 0_usize;
+        while offset + 4 <= block.len() {
+            let name_len = usize::from(block[offset]);
+            let name_index = block[offset + 1];
+            if name_len == 0 && name_index == 0 {
+                break;
+            }
+
+            let value_off = u16::from_le_bytes([block[offset + 2], block[offset + 3]]);
+            let value_size = u32::from_le_bytes([
+                block[offset + 8],
+                block[offset + 9],
+                block[offset + 10],
+                block[offset + 11],
+            ]);
+            let hash = u32::from_le_bytes([
+                block[offset + 12],
+                block[offset + 13],
+                block[offset + 14],
+                block[offset + 15],
+            ]);
+            let name = block
+                [offset + XATTR_ENTRY_HEADER_LEN..offset + XATTR_ENTRY_HEADER_LEN + name_len]
+                .to_vec();
+            let full_name = Ext4Xattr {
+                name_index,
+                name,
+                value: Vec::new(),
+            }
+            .full_name();
+            entry_lines.push(format!(
+                "  [{entry_idx}] offset={offset} name_index={name_index} name={full_name} value_off={value_off} value_size={value_size} hash=0x{hash:08x}"
+            ));
+
+            offset += align4(XATTR_ENTRY_HEADER_LEN + name_len);
+            entry_idx += 1;
+        }
+
+        let parsed_lines = parsed
+            .iter()
+            .map(|entry| format!("  {}={:02x?}", entry.full_name(), entry.value))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            concat!(
+                "header\n",
+                "  magic=0x{:08x}\n",
+                "  refcount={}\n",
+                "  blocks={}\n",
+                "  block_hash=0x{:08x}\n",
+                "  terminator_offset={}\n",
+                "entries\n",
+                "{}\n",
+                "parsed\n",
+                "{}\n",
+                "entry_region_prefix={:02x?}\n",
+                "value_region_tail={:02x?}"
+            ),
+            u32::from_le_bytes([block[0], block[1], block[2], block[3]]),
+            u32::from_le_bytes([block[4], block[5], block[6], block[7]]),
+            u32::from_le_bytes([block[8], block[9], block[10], block[11]]),
+            u32::from_le_bytes([block[12], block[13], block[14], block[15]]),
+            offset,
+            entry_lines.join("\n"),
+            parsed_lines,
+            &block[EXTERNAL_HEADER_LEN..EXTERNAL_HEADER_LEN + 96],
+            &block[224..],
+        )
+    }
+
     #[test]
     fn parse_xattr_name_maps_namespaces() {
         let (idx_user, name_user) = parse_xattr_name("user.mime").unwrap();
@@ -1672,6 +1797,14 @@ mod tests {
         let parsed = parse_xattr_block(&block).expect("parse sorted external block");
         let names: Vec<String> = parsed.into_iter().map(|entry| entry.full_name()).collect();
         assert_eq!(names, vec!["user.b", "user.alpha", "trusted.zeta"]);
+    }
+
+    #[test]
+    fn representative_external_block_encoding_exact_golden_contract() {
+        assert_eq!(
+            representative_external_block_golden_contract_actual(),
+            REPRESENTATIVE_EXTERNAL_BLOCK_GOLDEN
+        );
     }
 
     #[test]

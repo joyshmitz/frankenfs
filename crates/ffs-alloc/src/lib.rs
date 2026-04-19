@@ -2965,6 +2965,45 @@ mod tests {
         assert!(gs.inode_bitmap_uninit());
     }
 
+    #[test]
+    fn representative_allocator_diagnostics_exact_golden_contract() {
+        let geo = make_geometry();
+        let groups = make_groups(&geo);
+        let first_data_block = geo.group_block_to_absolute(GroupNumber(1), 131);
+        let hint = AllocHint {
+            goal_group: Some(GroupNumber(1)),
+            goal_block: Some(first_data_block),
+        };
+        let block_alloc = BlockAlloc {
+            start: first_data_block,
+            count: 4,
+        };
+        let inode_alloc = InodeAlloc {
+            ino: InodeNumber(17),
+            group: GroupNumber(1),
+        };
+
+        let actual = format!(
+            "{:?}\n{:?}\n{:?}\n{:?}\n{}\n{:?}",
+            groups[1],
+            hint,
+            block_alloc,
+            inode_alloc,
+            first_non_reserved_block(&geo, &groups, GroupNumber(1)),
+            reserved_inodes_in_group(&geo, GroupNumber(0)),
+        );
+
+        let expected = "\
+GroupStats { group: GroupNumber(1), free_blocks: 8192, free_inodes: 2048, used_dirs: 0, block_bitmap_block: BlockNumber(8193), inode_bitmap_block: BlockNumber(8194), inode_table_block: BlockNumber(8195), flags: 0, block_bitmap_csum: 0, inode_bitmap_csum: 0 }
+AllocHint { goal_group: Some(GroupNumber(1)), goal_block: Some(BlockNumber(8323)) }
+BlockAlloc { start: BlockNumber(8323), count: 4 }
+InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
+131
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]";
+
+        assert_eq!(actual, expected);
+    }
+
     // ── Property-based tests (proptest) ────────────────────────────────
 
     use proptest::prelude::*;

@@ -1683,6 +1683,69 @@ mod tests {
     }
 
     #[test]
+    fn representative_root_split_exact_golden_contract() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        for i in 0..4 {
+            insert(
+                &cx,
+                &dev,
+                &mut root,
+                Ext4Extent {
+                    logical_block: i * 100,
+                    raw_len: 10,
+                    physical_start: (i as u64) * 1000 + 500,
+                },
+                &mut alloc,
+            )
+            .unwrap();
+        }
+
+        insert(
+            &cx,
+            &dev,
+            &mut root,
+            Ext4Extent {
+                logical_block: 400,
+                raw_len: 10,
+                physical_start: 4500,
+            },
+            &mut alloc,
+        )
+        .unwrap();
+
+        let (header, _) = parse_header(&root).unwrap();
+        let indexes = parse_index_entries(&root, &header).unwrap();
+        let mut walked = Vec::new();
+        let count = walk(&cx, &dev, &root, &mut |ext| {
+            walked.push(*ext);
+            Ok(())
+        })
+        .unwrap();
+        let found = search(&cx, &dev, &root, 305).unwrap();
+        let hole = search(&cx, &dev, &root, 210).unwrap();
+
+        let actual = format!(
+            "{header:?}\n{indexes:?}\n{walked:?}\n{count}\n{found:?}\n{hole:?}\n{:?}",
+            alloc.freed_blocks()
+        );
+
+        let expected = "\
+Ext4ExtentHeader { magic: 62218, entries: 2, max_entries: 4, depth: 1, generation: 0 }
+[Ext4ExtentIndex { logical_block: 0, leaf_block: 100 }, Ext4ExtentIndex { logical_block: 200, leaf_block: 101 }]
+[Ext4Extent { logical_block: 0, raw_len: 10, physical_start: 500 }, Ext4Extent { logical_block: 100, raw_len: 10, physical_start: 1500 }, Ext4Extent { logical_block: 200, raw_len: 10, physical_start: 2500 }, Ext4Extent { logical_block: 300, raw_len: 10, physical_start: 3500 }, Ext4Extent { logical_block: 400, raw_len: 10, physical_start: 4500 }]
+5
+Found { extent: Ext4Extent { logical_block: 300, raw_len: 10, physical_start: 3500 }, offset_in_extent: 5 }
+Hole { hole_len: 90 }
+[]";
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn walk_visits_all_extents_in_order() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);

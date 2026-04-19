@@ -557,6 +557,49 @@ mod tests {
         assert_eq!(mem.name(), "memory");
     }
 
+    #[test]
+    fn representative_io_engine_debug_exact_golden_contract() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("engine.img");
+        std::fs::write(&path, vec![0_u8; 64]).expect("seed file");
+
+        let pread = PreadPwriteEngine::open(&path).expect("open");
+        let mem = MemIoEngine::new(128);
+        let actual = [
+            format!(
+                "{:?}",
+                IoOp::Read {
+                    offset: 7,
+                    buf: vec![1, 2, 3],
+                }
+            ),
+            format!("{:?}", IoCompletion::Read(vec![4, 5])),
+            format!(
+                "{:?}",
+                IoEngineStats {
+                    reads: 1,
+                    writes: 2,
+                    syncs: 3,
+                    bytes_read: 4,
+                    bytes_written: 5,
+                    batches: 6,
+                }
+            ),
+            format!("{mem:?}"),
+            format!("{pread:?}"),
+        ]
+        .join("\n");
+
+        let expected = concat!(
+            "Read { offset: 7, buf: [1, 2, 3] }\n",
+            "Read([4, 5])\n",
+            "IoEngineStats { reads: 1, writes: 2, syncs: 3, bytes_read: 4, bytes_written: 5, batches: 6 }\n",
+            "MemIoEngine { size: 128, .. }\n",
+            "PreadPwriteEngine { stats: IoEngineStats { reads: 0, writes: 0, syncs: 0, bytes_read: 0, bytes_written: 0, batches: 0 }, .. }"
+        );
+        assert_eq!(actual, expected);
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(96))]
 
