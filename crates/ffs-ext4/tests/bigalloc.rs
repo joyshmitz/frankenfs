@@ -1,0 +1,226 @@
+use asupersync::Cx;
+use ffs_alloc::{FsGeometry, GroupStats, PersistCtx, free_blocks_persist};
+use ffs_block::{BlockBuf, BlockDevice};
+use ffs_error::Result;
+use ffs_ext4::{Ext4CompatFeatures, Ext4GroupDesc, Ext4IncompatFeatures, Ext4RoCompatFeatures};
+use ffs_types::{BlockNumber, GroupNumber};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+#[derive(Debug)]
+struct MemBlockDevice {
+    blocks: Mutex<HashMap<u64, Vec<u8>>>,
+    block_size: u32,
+}
+
+impl MemBlockDevice {
+    fn new(block_size: u32) -> Self {
+        Self {
+            blocks: Mutex::new(HashMap::new()),
+            block_size,
+        }
+    }
+}
+
+impl BlockDevice for MemBlockDevice {
+    fn read_block(&self, _cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+        let data = {
+            let blocks = self.blocks.lock().expect("mem device mutex poisoned");
+            blocks
+                .get(&block.0)
+                .cloned()
+                .unwrap_or_else(|| vec![0; self.block_size as usize])
+        };
+        Ok(BlockBuf::new(data))
+    }
+
+    fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+        self.blocks
+            .lock()
+            .expect("mem device mutex poisoned")
+            .insert(block.0, data.to_vec());
+        Ok(())
+    }
+
+    fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    fn block_count(&self) -> u64 {
+        1_000_000
+    }
+
+    fn sync(&self, _cx: &Cx) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn make_bigalloc_geometry() -> FsGeometry {
+    FsGeometry {
+        blocks_per_group: 8192,
+        inodes_per_group: 2048,
+        block_size: 4096,
+        total_blocks: 32768,
+        total_inodes: 8192,
+        first_data_block: 0,
+        group_count: 4,
+        inode_size: 256,
+        desc_size: 32,
+        reserved_gdt_blocks: 0,
+        feature_compat: Ext4CompatFeatures(0),
+        feature_incompat: Ext4IncompatFeatures(0),
+        feature_ro_compat: Ext4RoCompatFeatures(
+            Ext4RoCompatFeatures::SPARSE_SUPER.0 | Ext4RoCompatFeatures::BIGALLOC.0,
+        ),
+        log_groups_per_flex: 0,
+        backup_bgs: [0, 0],
+        first_inode: 11,
+        cluster_ratio: 4,
+    }
+}
+
+fn make_groups(geo: &FsGeometry) -> Vec<GroupStats> {
+    let bpg = u64::from(geo.blocks_per_group);
+    (0..geo.group_count)
+        .map(|g| {
+            let group_start = u64::from(g) * bpg;
+            GroupStats {
+                group: GroupNumber(g),
+                free_blocks: geo.blocks_per_group,
+                free_inodes: geo.inodes_per_group,
+                used_dirs: 0,
+                block_bitmap_block: BlockNumber(group_start + 1),
+                inode_bitmap_block: BlockNumber(group_start + 2),
+                inode_table_block: BlockNumber(group_start + 3),
+                flags: 0,
+                block_bitmap_csum: 0,
+                inode_bitmap_csum: 0,
+            }
+        })
+        .collect()
+}
+
+fn make_persist_ctx(geo: &FsGeometry) -> PersistCtx {
+    PersistCtx {
+        gdt_block: BlockNumber(50),
+        desc_size: 32,
+        has_metadata_csum: false,
+        csum_seed: 0,
+        blocks_per_group: geo.blocks_per_group,
+        inodes_per_group: geo.inodes_per_group,
+    }
+}
+
+fn bitmap_set(bitmap: &mut [u8], idx: u32) {
+    let byte_idx = (idx / 8) as usize;
+    let bit_idx = idx % 8;
+    if byte_idx < bitmap.len() {
+        bitmap[byte_idx] |= 1 << bit_idx;
+    }
+}
+
+fn seed_gdt_block(dev: &MemBlockDevice, pctx: &PersistCtx, groups: &[GroupStats]) {
+    let block_size = dev.block_size() as usize;
+    let ds = usize::from(pctx.desc_size);
+    let mut buf = vec![0_u8; block_size];
+    for (i, gs) in groups.iter().enumerate() {
+        let offset = i * ds;
+        if offset + ds > block_size {
+            break;
+        }
+        let gd = Ext4GroupDesc {
+            block_bitmap: gs.block_bitmap_block.0,
+            inode_bitmap: gs.inode_bitmap_block.0,
+            inode_table: gs.inode_table_block.0,
+            free_blocks_count: gs.free_blocks,
+            free_inodes_count: gs.free_inodes,
+            used_dirs_count: gs.used_dirs,
+            itable_unused: 0,
+            flags: gs.flags,
+            checksum: 0,
+            block_bitmap_csum: 0,
+            inode_bitmap_csum: 0,
+        };
+        gd.write_to_bytes(&mut buf[offset..], pctx.desc_size)
+            .expect("group descriptor write");
+    }
+    let cx = Cx::for_testing();
+    dev.write_block(&cx, pctx.gdt_block, &buf)
+        .expect("seed gdt block");
+}
+
+#[test]
+fn bigalloc_cross_group_deallocation_splits_into_segments() {
+    let cx = Cx::for_testing();
+    let dev = MemBlockDevice::new(4096);
+    let geo = make_bigalloc_geometry();
+    let mut groups = make_groups(&geo);
+    let pctx = make_persist_ctx(&geo);
+
+    let group2_start = u64::from(geo.blocks_per_group) * 2;
+    groups[2].block_bitmap_block = BlockNumber(group2_start + 64);
+    groups[2].inode_bitmap_block = BlockNumber(group2_start + 65);
+    groups[2].inode_table_block = BlockNumber(group2_start + 96);
+
+    let tail_start = geo.blocks_in_group(GroupNumber(1)) - 2;
+    let mut group1_bitmap = dev
+        .read_block(&cx, groups[1].block_bitmap_block)
+        .expect("group1 bitmap")
+        .as_slice()
+        .to_vec();
+    for idx in tail_start..tail_start + 2 {
+        bitmap_set(&mut group1_bitmap, idx);
+    }
+    dev.write_block(&cx, groups[1].block_bitmap_block, &group1_bitmap)
+        .expect("seed group1 bitmap");
+    groups[1].free_blocks -= 2;
+
+    let mut group2_bitmap = dev
+        .read_block(&cx, groups[2].block_bitmap_block)
+        .expect("group2 bitmap")
+        .as_slice()
+        .to_vec();
+    for idx in 0_u32..3 {
+        bitmap_set(&mut group2_bitmap, idx);
+    }
+    dev.write_block(&cx, groups[2].block_bitmap_block, &group2_bitmap)
+        .expect("seed group2 bitmap");
+    groups[2].free_blocks -= 3;
+
+    seed_gdt_block(&dev, &pctx, &groups);
+
+    let start = geo.group_block_to_absolute(GroupNumber(1), tail_start);
+    free_blocks_persist(&cx, &dev, &geo, &mut groups, start, 5, &pctx)
+        .expect("cross-group free should split into group-local segments");
+
+    assert_eq!(groups[1].free_blocks, geo.blocks_in_group(GroupNumber(1)));
+    assert_eq!(groups[2].free_blocks, geo.blocks_in_group(GroupNumber(2)));
+
+    let group1_bitmap = dev
+        .read_block(&cx, groups[1].block_bitmap_block)
+        .expect("group1 bitmap after free");
+    for idx in tail_start..tail_start + 2 {
+        let byte_idx = (idx / 8) as usize;
+        let bit_idx = idx % 8;
+        assert_eq!((group1_bitmap.as_slice()[byte_idx] >> bit_idx) & 1, 0);
+    }
+
+    let group2_bitmap = dev
+        .read_block(&cx, groups[2].block_bitmap_block)
+        .expect("group2 bitmap after free");
+    for idx in 0_u32..3 {
+        let byte_idx = (idx / 8) as usize;
+        let bit_idx = idx % 8;
+        assert_eq!((group2_bitmap.as_slice()[byte_idx] >> bit_idx) & 1, 0);
+    }
+
+    let gdt_raw = dev.read_block(&cx, pctx.gdt_block).expect("gdt after free");
+    let gdt_raw = gdt_raw.as_slice();
+    let ds = usize::from(pctx.desc_size);
+    let gd1 = Ext4GroupDesc::parse_from_bytes(&gdt_raw[ds..ds * 2], pctx.desc_size)
+        .expect("group1 gdt parse");
+    let gd2 = Ext4GroupDesc::parse_from_bytes(&gdt_raw[ds * 2..ds * 3], pctx.desc_size)
+        .expect("group2 gdt parse");
+    assert_eq!(gd1.free_blocks_count, geo.blocks_in_group(GroupNumber(1)));
+    assert_eq!(gd2.free_blocks_count, geo.blocks_in_group(GroupNumber(2)));
+}

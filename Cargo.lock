@@ -723,6 +723,10 @@ dependencies = [
 name = "ffs-ext4"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
+ "ffs-alloc",
+ "ffs-block",
+ "ffs-error",
  "ffs-ondisk",
  "ffs-types",
 ]

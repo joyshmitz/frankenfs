@@ -759,6 +759,61 @@ fn try_alloc_in_group(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FreeBlockSegment {
+    group: GroupNumber,
+    rel_start: u32,
+    count: u32,
+}
+
+fn split_free_block_segments(
+    geo: &FsGeometry,
+    groups_len: usize,
+    start: BlockNumber,
+    count: u32,
+    detail_prefix: &str,
+) -> Result<Vec<FreeBlockSegment>> {
+    let mut segments = Vec::new();
+    if count == 0 {
+        return Ok(segments);
+    }
+
+    let mut next_abs = start.0;
+    let mut remaining = count;
+
+    while remaining > 0 {
+        let block = BlockNumber(next_abs);
+        let (group, rel_start) = geo.absolute_to_group_block(block);
+        let gidx = group.0 as usize;
+        if gidx >= groups_len {
+            return Err(FfsError::Corruption {
+                block: block.0,
+                detail: format!("{detail_prefix}: group out of range"),
+            });
+        }
+
+        let blocks_in_group = geo.blocks_in_group(group);
+        if rel_start >= blocks_in_group {
+            return Err(FfsError::Corruption {
+                block: block.0,
+                detail: format!("{detail_prefix}: relative block out of range"),
+            });
+        }
+
+        let segment_count = remaining.min(blocks_in_group - rel_start);
+        segments.push(FreeBlockSegment {
+            group,
+            rel_start,
+            count: segment_count,
+        });
+
+        next_abs = next_abs.saturating_add(u64::from(segment_count));
+        remaining -= segment_count;
+    }
+
+    Ok(segments)
+}
+
 /// Free `count` contiguous blocks starting at `start`.
 pub fn free_blocks(
     cx: &Cx,
@@ -770,32 +825,21 @@ pub fn free_blocks(
 ) -> Result<()> {
     cx_checkpoint(cx)?;
 
-    let (group, rel_start) = geo.absolute_to_group_block(start);
-    let gidx = group.0 as usize;
-    if gidx >= groups.len() {
-        return Err(FfsError::Corruption {
-            block: start.0,
-            detail: "free_blocks: group out of range".into(),
-        });
+    let segments = split_free_block_segments(geo, groups.len(), start, count, "free_blocks")?;
+
+    for segment in segments {
+        let gidx = segment.group.0 as usize;
+        let gs = &groups[gidx];
+        let bitmap_buf = dev.read_block(cx, gs.block_bitmap_block)?;
+        let mut bitmap = bitmap_buf.as_slice().to_vec();
+
+        for i in segment.rel_start..segment.rel_start + segment.count {
+            bitmap_clear(&mut bitmap, i);
+        }
+
+        dev.write_block(cx, gs.block_bitmap_block, &bitmap)?;
+        groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
     }
-
-    if rel_start.saturating_add(count) > geo.blocks_in_group(group) {
-        return Err(FfsError::Corruption {
-            block: start.0,
-            detail: "free_blocks: extent crosses block group boundary".into(),
-        });
-    }
-
-    let gs = &groups[gidx];
-    let bitmap_buf = dev.read_block(cx, gs.block_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
-
-    for i in rel_start..rel_start + count {
-        bitmap_clear(&mut bitmap, i);
-    }
-
-    dev.write_block(cx, gs.block_bitmap_block, &bitmap)?;
-    groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(count);
     Ok(())
 }
 
@@ -957,56 +1001,52 @@ pub fn free_blocks_persist(
 ) -> Result<()> {
     cx_checkpoint(cx)?;
 
-    let (group, rel_start) = geo.absolute_to_group_block(start);
-    let gidx = group.0 as usize;
-    if gidx >= groups.len() {
-        return Err(FfsError::Corruption {
-            block: start.0,
-            detail: "free_blocks_persist: group out of range".into(),
-        });
-    }
+    let segments =
+        split_free_block_segments(geo, groups.len(), start, count, "free_blocks_persist")?;
+    let mut prepared = Vec::with_capacity(segments.len());
 
-    if rel_start.saturating_add(count) > geo.blocks_in_group(group) {
-        return Err(FfsError::Corruption {
-            block: start.0,
-            detail: "free_blocks_persist: extent crosses block group boundary".into(),
-        });
-    }
+    for segment in segments {
+        let gidx = segment.group.0 as usize;
+        let reserved = reserved_blocks_in_group(geo, groups, segment.group);
 
-    let reserved = reserved_blocks_in_group(geo, groups, group);
-
-    // Validate none of the blocks being freed are reserved.
-    for i in rel_start..rel_start + count {
-        if is_reserved(&reserved, i) {
-            return Err(FfsError::Corruption {
-                block: geo.group_block_to_absolute(group, i).0,
-                detail: "attempt to free reserved metadata block".into(),
-            });
+        // Validate none of the blocks being freed are reserved.
+        for i in segment.rel_start..segment.rel_start + segment.count {
+            if is_reserved(&reserved, i) {
+                return Err(FfsError::Corruption {
+                    block: geo.group_block_to_absolute(segment.group, i).0,
+                    detail: "attempt to free reserved metadata block".into(),
+                });
+            }
         }
-    }
 
-    let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
-    let mut bitmap = bitmap_buf.as_slice().to_vec();
+        let bitmap_buf = dev.read_block(cx, groups[gidx].block_bitmap_block)?;
+        let mut bitmap = bitmap_buf.as_slice().to_vec();
 
-    // Validate all blocks are currently allocated (double-free detection).
-    for i in rel_start..rel_start + count {
-        if !bitmap_get(&bitmap, i) {
-            return Err(FfsError::Corruption {
-                block: geo.group_block_to_absolute(group, i).0,
-                detail: "double-free: block already free in bitmap".into(),
-            });
+        // Validate all blocks are currently allocated (double-free detection).
+        for i in segment.rel_start..segment.rel_start + segment.count {
+            if !bitmap_get(&bitmap, i) {
+                return Err(FfsError::Corruption {
+                    block: geo.group_block_to_absolute(segment.group, i).0,
+                    detail: "double-free: block already free in bitmap".into(),
+                });
+            }
         }
+
+        for i in segment.rel_start..segment.rel_start + segment.count {
+            bitmap_clear(&mut bitmap, i);
+        }
+
+        prepared.push((segment, bitmap));
     }
 
-    for i in rel_start..rel_start + count {
-        bitmap_clear(&mut bitmap, i);
+    for (segment, bitmap) in prepared {
+        let gidx = segment.group.0 as usize;
+        dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
+        groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(segment.count);
+
+        // Persist group descriptor.
+        persist_group_desc(cx, dev, pctx, segment.group, &groups[gidx])?;
     }
-
-    dev.write_block(cx, groups[gidx].block_bitmap_block, &bitmap)?;
-    groups[gidx].free_blocks = groups[gidx].free_blocks.saturating_add(count);
-
-    // Persist group descriptor.
-    persist_group_desc(cx, dev, pctx, group, &groups[gidx])?;
 
     Ok(())
 }
@@ -2291,17 +2331,128 @@ mod tests {
     }
 
     #[test]
-    fn free_blocks_persist_cross_boundary_returns_error() {
+    fn free_blocks_cross_boundary_updates_each_group_segment() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        geo.feature_ro_compat.0 |= ffs_ondisk::Ext4RoCompatFeatures::SPARSE_SUPER.0;
+        geo.feature_ro_compat.0 |= ffs_ondisk::Ext4RoCompatFeatures::BIGALLOC.0;
+        geo.cluster_ratio = 4;
+
+        let group2_start = u64::from(geo.blocks_per_group) * 2;
+        groups[2].block_bitmap_block = BlockNumber(group2_start + 64);
+        groups[2].inode_bitmap_block = BlockNumber(group2_start + 65);
+        groups[2].inode_table_block = BlockNumber(group2_start + 96);
+
+        let tail_start = geo.blocks_in_group(GroupNumber(1)) - 2;
+        let mut group1_bitmap = dev
+            .read_block(&cx, groups[1].block_bitmap_block)
+            .unwrap()
+            .as_slice()
+            .to_vec();
+        for idx in tail_start..tail_start + 2 {
+            bitmap_set(&mut group1_bitmap, idx);
+        }
+        dev.write_block(&cx, groups[1].block_bitmap_block, &group1_bitmap)
+            .unwrap();
+        groups[1].free_blocks -= 2;
+
+        let mut group2_bitmap = dev
+            .read_block(&cx, groups[2].block_bitmap_block)
+            .unwrap()
+            .as_slice()
+            .to_vec();
+        for idx in 0..3 {
+            bitmap_set(&mut group2_bitmap, idx);
+        }
+        dev.write_block(&cx, groups[2].block_bitmap_block, &group2_bitmap)
+            .unwrap();
+        groups[2].free_blocks -= 3;
+
+        let start = geo.group_block_to_absolute(GroupNumber(1), tail_start);
+        free_blocks(&cx, &dev, &geo, &mut groups, start, 5).unwrap();
+
+        assert_eq!(groups[1].free_blocks, geo.blocks_in_group(GroupNumber(1)));
+        assert_eq!(groups[2].free_blocks, geo.blocks_in_group(GroupNumber(2)));
+    }
+
+    #[test]
+    fn free_blocks_persist_cross_boundary_splits_bigalloc_segments() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        geo.feature_ro_compat.0 |= ffs_ondisk::Ext4RoCompatFeatures::SPARSE_SUPER.0;
+        geo.feature_ro_compat.0 |= ffs_ondisk::Ext4RoCompatFeatures::BIGALLOC.0;
+        geo.cluster_ratio = 4;
+
+        let group2_start = u64::from(geo.blocks_per_group) * 2;
+        groups[2].block_bitmap_block = BlockNumber(group2_start + 64);
+        groups[2].inode_bitmap_block = BlockNumber(group2_start + 65);
+        groups[2].inode_table_block = BlockNumber(group2_start + 96);
+
+        let pctx = make_persist_ctx();
+        let tail_start = geo.blocks_in_group(GroupNumber(1)) - 2;
+
+        let mut group1_bitmap = dev
+            .read_block(&cx, groups[1].block_bitmap_block)
+            .unwrap()
+            .as_slice()
+            .to_vec();
+        for idx in tail_start..tail_start + 2 {
+            bitmap_set(&mut group1_bitmap, idx);
+        }
+        dev.write_block(&cx, groups[1].block_bitmap_block, &group1_bitmap)
+            .unwrap();
+        groups[1].free_blocks -= 2;
+
+        let mut group2_bitmap = dev
+            .read_block(&cx, groups[2].block_bitmap_block)
+            .unwrap()
+            .as_slice()
+            .to_vec();
+        for idx in 0..3 {
+            bitmap_set(&mut group2_bitmap, idx);
+        }
+        dev.write_block(&cx, groups[2].block_bitmap_block, &group2_bitmap)
+            .unwrap();
+        groups[2].free_blocks -= 3;
+
+        seed_gdt_block(&dev, &pctx, &groups);
+
+        let start = geo.group_block_to_absolute(GroupNumber(1), tail_start);
+        free_blocks_persist(&cx, &dev, &geo, &mut groups, start, 5, &pctx).unwrap();
+
+        assert_eq!(groups[1].free_blocks, geo.blocks_in_group(GroupNumber(1)));
+        assert_eq!(groups[2].free_blocks, geo.blocks_in_group(GroupNumber(2)));
+
+        let gdt_raw = dev.read_block(&cx, pctx.gdt_block).unwrap();
+        let gdt_raw = gdt_raw.as_slice();
+        let ds = usize::from(pctx.desc_size);
+        let gd1 = Ext4GroupDesc::parse_from_bytes(&gdt_raw[ds..ds * 2], pctx.desc_size).unwrap();
+        let gd2 =
+            Ext4GroupDesc::parse_from_bytes(&gdt_raw[ds * 2..ds * 3], pctx.desc_size).unwrap();
+        assert_eq!(gd1.free_blocks_count, geo.blocks_in_group(GroupNumber(1)));
+        assert_eq!(gd2.free_blocks_count, geo.blocks_in_group(GroupNumber(2)));
+    }
+
+    #[test]
+    fn free_blocks_persist_cross_boundary_rejects_reserved_segment() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
         let geo = make_geometry();
         let mut groups = make_groups(&geo);
         let pctx = make_persist_ctx();
 
-        // Try to free blocks that span across a group boundary.
-        // Group 0 has 8192 blocks (0..8191). Block 8190 + count=5 crosses into group 1.
-        let result = free_blocks_persist(&cx, &dev, &geo, &mut groups, BlockNumber(8190), 5, &pctx);
-        assert!(result.is_err(), "cross-boundary free should fail");
+        // Crossing from group 0 into group 1 reaches group-1 backup metadata immediately.
+        let start =
+            geo.group_block_to_absolute(GroupNumber(0), geo.blocks_in_group(GroupNumber(0)) - 2);
+        let result = free_blocks_persist(&cx, &dev, &geo, &mut groups, start, 5, &pctx);
+        assert!(
+            result.is_err(),
+            "reserved cross-group segment should still fail"
+        );
     }
 
     #[test]
@@ -3684,25 +3835,29 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
             prop_assert!(result.is_err(), "free_blocks should reject out-of-range group");
         }
 
-        /// Freeing blocks that cross group boundary returns error.
+        /// Freeing blocks can span groups when the target groups expose data at
+        /// the segment boundary.
         #[test]
-        fn proptest_free_blocks_cross_boundary_errors(
-            group_idx in 0_u32..3,
+        fn proptest_free_blocks_cross_boundary_splits_segments(
+            count in 2_u32..33,
         ) {
             let cx = test_cx();
             let dev = MemBlockDevice::new(4096);
-            let geo = make_geometry();
+            let mut geo = make_geometry();
             let mut groups = make_groups(&geo);
+            geo.feature_ro_compat.0 |= ffs_ondisk::Ext4RoCompatFeatures::SPARSE_SUPER.0;
 
-            let blocks_in = geo.blocks_in_group(GroupNumber(group_idx));
-            // Start near end of group, count crosses boundary.
-            let rel_start = blocks_in.saturating_sub(1);
-            let abs = geo.group_block_to_absolute(GroupNumber(group_idx), rel_start);
-            let result = free_blocks(&cx, &dev, &geo, &mut groups, abs, 2);
-            prop_assert!(
-                result.is_err(),
-                "free_blocks should reject extent crossing group boundary"
-            );
+            let group2_start = u64::from(geo.blocks_per_group) * 2;
+            groups[2].block_bitmap_block = BlockNumber(group2_start + 64);
+            groups[2].inode_bitmap_block = BlockNumber(group2_start + 65);
+            groups[2].inode_table_block = BlockNumber(group2_start + 96);
+
+            let rel_start = geo.blocks_in_group(GroupNumber(1)) - 1;
+            let start = geo.group_block_to_absolute(GroupNumber(1), rel_start);
+            let cross_count = count.min(32);
+
+            let result = free_blocks(&cx, &dev, &geo, &mut groups, start, cross_count);
+            prop_assert!(result.is_ok(), "free_blocks should segment cross-group frees");
         }
 
         /// `bitmap_find_free` with start >= count is clamped and doesn't panic.
