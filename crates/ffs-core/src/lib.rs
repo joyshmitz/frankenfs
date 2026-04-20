@@ -51,7 +51,7 @@ use ffs_types::{
     BlockNumber, ByteOffset, CommitSeq, EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET,
     EXT4_SECTOR_SIZE, GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
 };
-use ffs_xattr::XattrWriteAccess;
+use ffs_xattr::{XattrReadAccess, XattrWriteAccess};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -10222,15 +10222,6 @@ impl OpenFs {
             external_block = Some(buf);
         }
 
-        let existing = ffs_xattr::get_xattr(&inode, external_block.as_deref(), name)?;
-        match mode {
-            XattrSetMode::Create if existing.is_some() => return Err(FfsError::Exists),
-            XattrSetMode::Replace if existing.is_none() => {
-                return Err(FfsError::NotFound(name.to_owned()));
-            }
-            XattrSetMode::Set | XattrSetMode::Create | XattrSetMode::Replace => {}
-        }
-
         let access = XattrWriteAccess {
             // The FUSE mount uses `default_permissions`, so ownership checks are
             // expected to have already happened in-kernel.
@@ -10238,6 +10229,21 @@ impl OpenFs {
             has_cap_fowner: false,
             has_cap_sys_admin: false,
         };
+        let existing = ffs_xattr::get_xattr_for_access(
+            &inode,
+            external_block.as_deref(),
+            name,
+            XattrReadAccess {
+                has_cap_sys_admin: access.has_cap_sys_admin,
+            },
+        )?;
+        match mode {
+            XattrSetMode::Create if existing.is_some() => return Err(FfsError::Exists),
+            XattrSetMode::Replace if existing.is_none() => {
+                return Err(FfsError::NotFound(name.to_owned()));
+            }
+            XattrSetMode::Set | XattrSetMode::Create | XattrSetMode::Replace => {}
+        }
 
         let storage = match ffs_xattr::set_xattr(
             &mut inode,

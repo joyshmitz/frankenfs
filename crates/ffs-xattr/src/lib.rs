@@ -305,6 +305,12 @@ pub struct XattrWriteAccess {
     pub has_cap_sys_admin: bool,
 }
 
+/// Permission context used for namespace read/list checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct XattrReadAccess {
+    pub has_cap_sys_admin: bool,
+}
+
 fn check_write_permissions(name_index: u8, access: XattrWriteAccess) -> Result<()> {
     let user_allowed = access.is_owner || access.has_cap_fowner || access.has_cap_sys_admin;
     match name_index {
@@ -331,6 +337,10 @@ fn check_write_permissions(name_index: u8, access: XattrWriteAccess) -> Result<(
             "unsupported xattr name index: {name_index}"
         ))),
     }
+}
+
+fn can_read_name_index(name_index: u8, access: XattrReadAccess) -> bool {
+    name_index != EXT4_XATTR_INDEX_TRUSTED || access.has_cap_sys_admin
 }
 
 /// Where a successful xattr mutation was stored.
@@ -506,10 +516,24 @@ pub fn remove_xattr(
 
 /// List all xattr names (`user.foo`, `security.selinux`, ...).
 pub fn list_xattrs(inode: &Ext4Inode, external_block: Option<&[u8]>) -> Result<Vec<String>> {
+    list_xattrs_for_access(inode, external_block, XattrReadAccess::default())
+}
+
+/// List xattr names for a specific caller view.
+pub fn list_xattrs_for_access(
+    inode: &Ext4Inode,
+    external_block: Option<&[u8]>,
+    access: XattrReadAccess,
+) -> Result<Vec<String>> {
     let mut names = Vec::new();
 
     let inline_entries = parse_inline_entries(inode)?;
-    names.extend(inline_entries.into_iter().map(|e| e.full_name()));
+    names.extend(
+        inline_entries
+            .into_iter()
+            .filter(|e| can_read_name_index(e.name_index, access))
+            .map(|e| e.full_name()),
+    );
 
     if inode.file_acl != 0 && external_block.is_none() {
         return Err(FfsError::Format(
@@ -519,7 +543,12 @@ pub fn list_xattrs(inode: &Ext4Inode, external_block: Option<&[u8]>) -> Result<V
 
     if let Some(block) = external_block {
         let ext_entries = parse_external_entries(block, true)?;
-        names.extend(ext_entries.into_iter().map(|e| e.full_name()));
+        names.extend(
+            ext_entries
+                .into_iter()
+                .filter(|e| can_read_name_index(e.name_index, access))
+                .map(|e| e.full_name()),
+        );
     }
 
     Ok(names)
@@ -531,7 +560,20 @@ pub fn get_xattr(
     external_block: Option<&[u8]>,
     full_name: &str,
 ) -> Result<Option<Vec<u8>>> {
+    get_xattr_for_access(inode, external_block, full_name, XattrReadAccess::default())
+}
+
+/// Get one xattr value by full name for a specific caller view.
+pub fn get_xattr_for_access(
+    inode: &Ext4Inode,
+    external_block: Option<&[u8]>,
+    full_name: &str,
+    access: XattrReadAccess,
+) -> Result<Option<Vec<u8>>> {
     let (name_index, name) = parse_xattr_name(full_name)?;
+    if !can_read_name_index(name_index, access) {
+        return Ok(None);
+    }
 
     let inline_entries = parse_inline_entries(inode)?;
     if let Some(entry) = inline_entries
@@ -2089,6 +2131,9 @@ mod tests {
             has_cap_fowner: true,
             has_cap_sys_admin: true,
         };
+        let admin_read = XattrReadAccess {
+            has_cap_sys_admin: true,
+        };
 
         set_xattr(&mut inode, Some(&mut external), "user.tag", b"u", admin).unwrap();
         set_xattr(
@@ -2101,21 +2146,59 @@ mod tests {
         .unwrap();
         set_xattr(&mut inode, Some(&mut external), "trusted.meta", b"t", admin).unwrap();
 
-        let mut names = list_xattrs(&inode, Some(&external)).unwrap();
+        let mut names = list_xattrs_for_access(&inode, Some(&external), admin_read).unwrap();
         names.sort();
         assert_eq!(names, vec!["security.selinux", "trusted.meta", "user.tag"]);
 
         assert_eq!(
-            get_xattr(&inode, Some(&external), "user.tag").unwrap(),
+            get_xattr_for_access(&inode, Some(&external), "user.tag", admin_read).unwrap(),
             Some(b"u".to_vec())
         );
         assert_eq!(
-            get_xattr(&inode, Some(&external), "security.selinux").unwrap(),
+            get_xattr_for_access(&inode, Some(&external), "security.selinux", admin_read).unwrap(),
             Some(b"context".to_vec())
         );
         assert_eq!(
-            get_xattr(&inode, Some(&external), "trusted.meta").unwrap(),
+            get_xattr_for_access(&inode, Some(&external), "trusted.meta", admin_read).unwrap(),
             Some(b"t".to_vec())
+        );
+    }
+
+    #[test]
+    fn trusted_namespace_hidden_from_unprivileged_default_view() {
+        let mut inode = make_inode(0);
+        let mut external = vec![0_u8; 4096];
+        let admin = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: true,
+            has_cap_sys_admin: true,
+        };
+        let admin_read = XattrReadAccess {
+            has_cap_sys_admin: true,
+        };
+
+        set_xattr(&mut inode, Some(&mut external), "user.public", b"u", admin).unwrap();
+        set_xattr(&mut inode, Some(&mut external), "trusted.meta", b"t", admin).unwrap();
+
+        let mut names = list_xattrs(&inode, Some(&external)).unwrap();
+        names.sort();
+        assert_eq!(names, vec!["user.public"]);
+
+        let mut admin_names = list_xattrs_for_access(&inode, Some(&external), admin_read).unwrap();
+        admin_names.sort();
+        assert_eq!(admin_names, vec!["trusted.meta", "user.public"]);
+
+        assert_eq!(
+            get_xattr(&inode, Some(&external), "trusted.meta").unwrap(),
+            None
+        );
+        assert_eq!(
+            get_xattr_for_access(&inode, Some(&external), "trusted.meta", admin_read).unwrap(),
+            Some(b"t".to_vec())
+        );
+        assert_eq!(
+            get_xattr(&inode, Some(&external), "user.public").unwrap(),
+            Some(b"u".to_vec())
         );
     }
 
@@ -2351,10 +2434,9 @@ mod tests {
 
         let names = list_xattrs(&inode, Some(&ext_block)).unwrap();
         assert!(names.contains(&"user.u".to_owned()));
-        assert!(names.contains(&"trusted.t".to_owned()));
         assert!(names.contains(&"security.s".to_owned()));
         assert!(names.contains(&"system.posix_acl_access".to_owned()));
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 3);
     }
 
     // ── Remove all then verify clean state ──────────────────────────────
