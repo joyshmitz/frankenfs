@@ -1400,16 +1400,37 @@ unknown ro_compat: 0xAB"
         image[offset + 8..offset + 8 + name.len()].copy_from_slice(name);
     }
 
-    fn encode_dx_node_block(first_block: u32) -> Vec<u8> {
+    fn encode_dx_node_block(entries: &[Ext4DxEntry]) -> Vec<u8> {
+        assert!(
+            !entries.is_empty(),
+            "DX node fixture needs at least the sentinel entry",
+        );
+        assert_eq!(
+            entries[0].hash, 0,
+            "DX node fixture sentinel hash must be zero",
+        );
+
         let mut block = vec![0_u8; 4096];
-        block[0x08..0x0A].copy_from_slice(&1_u16.to_le_bytes());
-        block[0x0A..0x0C].copy_from_slice(&1_u16.to_le_bytes());
-        block[0x0C..0x10].copy_from_slice(&first_block.to_le_bytes());
+        let count = u16::try_from(entries.len()).expect("DX node fixture count must fit in u16");
+        block[0x08..0x0A].copy_from_slice(&count.to_le_bytes());
+        block[0x0A..0x0C].copy_from_slice(&count.to_le_bytes());
+        block[0x0C..0x10].copy_from_slice(&entries[0].block.to_le_bytes());
+
+        let mut off = 0x10;
+        for entry in entries.iter().skip(1) {
+            block[off..off + 4].copy_from_slice(&entry.hash.to_le_bytes());
+            block[off + 4..off + 8].copy_from_slice(&entry.block.to_le_bytes());
+            off += 8;
+        }
         block
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn build_large_dir_three_level_htree_image(target_name: &[u8]) -> Vec<u8> {
+    fn build_large_dir_three_level_htree_image(
+        deepest_entries: &[Ext4DxEntry],
+        first_leaf_entries: &[(u32, &[u8])],
+        second_leaf_entries: &[(u32, &[u8])],
+    ) -> Vec<u8> {
         let block_size = 4096_usize;
         let image_blocks = 48_usize;
         let mut image = vec![0_u8; block_size * image_blocks];
@@ -1436,7 +1457,7 @@ unknown ro_compat: 0xAB"
         let inode_table_off = 2 * block_size;
         let inode_off = inode_table_off + 256; // inode 2
         image[inode_off..inode_off + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
-        image[inode_off + 0x04..inode_off + 0x08].copy_from_slice(&(5_u32 * 4096).to_le_bytes());
+        image[inode_off + 0x04..inode_off + 0x08].copy_from_slice(&(6_u32 * 4096).to_le_bytes());
         image[inode_off + 0x1A..inode_off + 0x1C].copy_from_slice(&2_u16.to_le_bytes());
         image[inode_off + 0x20..inode_off + 0x24].copy_from_slice(
             &(ffs_types::EXT4_EXTENTS_FL | ffs_types::EXT4_INDEX_FL).to_le_bytes(),
@@ -1451,7 +1472,7 @@ unknown ro_compat: 0xAB"
         image[i_block + 8..i_block + 12].copy_from_slice(&1_u32.to_le_bytes());
         let extent = i_block + 12;
         image[extent..extent + 4].copy_from_slice(&0_u32.to_le_bytes());
-        image[extent + 4..extent + 6].copy_from_slice(&5_u16.to_le_bytes());
+        image[extent + 4..extent + 6].copy_from_slice(&6_u16.to_le_bytes());
         image[extent + 6..extent + 8].copy_from_slice(&0_u16.to_le_bytes());
         image[extent + 8..extent + 12].copy_from_slice(&10_u32.to_le_bytes());
 
@@ -1465,21 +1486,40 @@ unknown ro_compat: 0xAB"
         image[root_off + 0x22..root_off + 0x24].copy_from_slice(&1_u16.to_le_bytes());
         image[root_off + 0x24..root_off + 0x28].copy_from_slice(&1_u32.to_le_bytes());
 
-        let node1 = encode_dx_node_block(2);
+        let node1 = encode_dx_node_block(&[Ext4DxEntry { hash: 0, block: 2 }]);
         image[11 * block_size..12 * block_size].copy_from_slice(&node1);
-        let node2 = encode_dx_node_block(3);
+        let node2 = encode_dx_node_block(&[Ext4DxEntry { hash: 0, block: 3 }]);
         image[12 * block_size..13 * block_size].copy_from_slice(&node2);
-        let node3 = encode_dx_node_block(4);
+        let node3 = encode_dx_node_block(deepest_entries);
         image[13 * block_size..14 * block_size].copy_from_slice(&node3);
 
-        write_dir_entry_test(&mut image, 14 * block_size, 42, 1, target_name, 4096_u16);
+        let write_leaf = |image: &mut [u8], block_index: usize, entries: &[(u32, &[u8])]| {
+            let leaf_off = block_index * block_size;
+            let mut cursor = 0_usize;
+            for (idx, (inode, name)) in entries.iter().enumerate() {
+                let rec_len = if idx + 1 == entries.len() {
+                    u16::try_from(block_size - cursor).expect("leaf rec_len fits u16")
+                } else {
+                    12_u16
+                };
+                write_dir_entry_test(image, leaf_off + cursor, *inode, 1, name, rec_len);
+                cursor += usize::from(rec_len);
+            }
+        };
+
+        write_leaf(&mut image, 14, first_leaf_entries);
+        write_leaf(&mut image, 15, second_leaf_entries);
         image
     }
 
     #[test]
     fn htree_lookup_supports_large_dir_three_indirect_levels() {
         let target_name = b"triple-indirect-target";
-        let image = build_large_dir_three_level_htree_image(target_name);
+        let image = build_large_dir_three_level_htree_image(
+            &[Ext4DxEntry { hash: 0, block: 4 }],
+            &[(42, target_name)],
+            &[],
+        );
 
         let reader = Ext4ImageReader::new(&image).expect("open indexed large_dir test image");
         let dir_inode = reader
@@ -1491,6 +1531,35 @@ unknown ro_compat: 0xAB"
             .expect("htree lookup should succeed");
         let found = found.expect("lookup should reach the level-three successor leaf");
         assert_eq!(found.inode, 42);
+        assert_eq!(found.name, target_name);
+    }
+
+    #[test]
+    fn htree_lookup_follows_large_dir_three_level_collision_successor_leaf() {
+        let target_name = b"triple-collision-target";
+        let target_hash = dx_hash(1, target_name, &[0; 4]).0;
+        let image = build_large_dir_three_level_htree_image(
+            &[
+                Ext4DxEntry { hash: 0, block: 4 },
+                Ext4DxEntry {
+                    hash: target_hash | 1,
+                    block: 5,
+                },
+            ],
+            &[(11, b"alpha")],
+            &[(77, target_name)],
+        );
+
+        let reader = Ext4ImageReader::new(&image).expect("open indexed large_dir test image");
+        let dir_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(2))
+            .expect("read indexed directory inode");
+
+        let found = reader
+            .htree_lookup(&image, &dir_inode, target_name)
+            .expect("htree lookup should succeed");
+        let found = found.expect("lookup should follow the level-three collision successor leaf");
+        assert_eq!(found.inode, 77);
         assert_eq!(found.name, target_name);
     }
 
