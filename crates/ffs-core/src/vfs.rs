@@ -719,6 +719,22 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get the legacy fscrypt v1 encryption policy (`FS_IOC_GET_ENCRYPTION_POLICY`).
+    ///
+    /// Returns the raw 12-byte `struct fscrypt_policy_v1` payload for the given
+    /// inode. Backends should return `ENODATA` if the inode is not encrypted,
+    /// and `EINVAL` if the inode uses a newer policy version.
+    fn get_encryption_policy_v1(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<[u8; 12]> {
+        Err(FfsError::UnsupportedFeature(
+            "get_encryption_policy_v1 is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate
