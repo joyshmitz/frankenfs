@@ -55,7 +55,7 @@ impl BlockDevice for MemBlockDevice {
     }
 }
 
-fn make_bigalloc_geometry() -> FsGeometry {
+fn make_bigalloc_geometry_with_cluster_ratio(cluster_ratio: u32) -> FsGeometry {
     FsGeometry {
         blocks_per_group: 8192,
         inodes_per_group: 2048,
@@ -76,8 +76,16 @@ fn make_bigalloc_geometry() -> FsGeometry {
         log_groups_per_flex: 0,
         backup_bgs: [0, 0],
         first_inode: 11,
-        cluster_ratio: 4,
+        cluster_ratio,
     }
+}
+
+fn make_bigalloc_geometry() -> FsGeometry {
+    make_bigalloc_geometry_with_cluster_ratio(4)
+}
+
+fn bigalloc_bitmap_units_per_group(geo: &FsGeometry) -> u32 {
+    geo.blocks_per_group / geo.cluster_ratio.max(1)
 }
 
 fn make_groups(geo: &FsGeometry) -> Vec<GroupStats> {
@@ -109,7 +117,20 @@ fn make_persist_ctx(geo: &FsGeometry) -> PersistCtx {
         csum_seed: 0,
         uuid: [0; 16],
         group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None,
-        blocks_per_group: geo.blocks_per_group,
+        blocks_per_group: bigalloc_bitmap_units_per_group(geo),
+        inodes_per_group: geo.inodes_per_group,
+    }
+}
+
+fn make_metadata_csum_persist_ctx(geo: &FsGeometry) -> PersistCtx {
+    PersistCtx {
+        gdt_block: BlockNumber(50),
+        desc_size: 64,
+        has_metadata_csum: true,
+        csum_seed: 0x1234_5678,
+        uuid: *b"frankenfs-bigalc",
+        group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::MetadataCsum,
+        blocks_per_group: bigalloc_bitmap_units_per_group(geo),
         inodes_per_group: geo.inodes_per_group,
     }
 }
@@ -226,4 +247,63 @@ fn bigalloc_cross_group_deallocation_splits_into_segments() {
         .expect("group2 gdt parse");
     assert_eq!(gd1.free_blocks_count, geo.blocks_in_group(GroupNumber(1)));
     assert_eq!(gd2.free_blocks_count, geo.blocks_in_group(GroupNumber(2)));
+}
+
+#[test]
+fn bigalloc_64k_persisted_bitmap_checksum_uses_cluster_units() {
+    let cx = Cx::for_testing();
+    let dev = MemBlockDevice::new(4096);
+    let geo = make_bigalloc_geometry_with_cluster_ratio(16);
+    let mut groups = make_groups(&geo);
+    let pctx = make_metadata_csum_persist_ctx(&geo);
+
+    let rel_start = 256;
+    let mut group1_bitmap = dev
+        .read_block(&cx, groups[1].block_bitmap_block)
+        .expect("group1 bitmap")
+        .as_slice()
+        .to_vec();
+    bitmap_set(&mut group1_bitmap, rel_start);
+    dev.write_block(&cx, groups[1].block_bitmap_block, &group1_bitmap)
+        .expect("seed group1 bitmap");
+    groups[1].free_blocks -= 1;
+
+    seed_gdt_block(&dev, &pctx, &groups);
+
+    let start = geo.group_block_to_absolute(GroupNumber(1), rel_start);
+    free_blocks_persist(&cx, &dev, &geo, &mut groups, start, 1, &pctx)
+        .expect("64KiB bigalloc free should restamp metadata_csum bitmap checksums");
+
+    let group1_bitmap = dev
+        .read_block(&cx, groups[1].block_bitmap_block)
+        .expect("group1 bitmap after free");
+    let gdt_raw = dev.read_block(&cx, pctx.gdt_block).expect("gdt after free");
+    let gdt_raw = gdt_raw.as_slice();
+    let ds = usize::from(pctx.desc_size);
+    let gd1 = Ext4GroupDesc::parse_from_bytes(&gdt_raw[ds..ds * 2], pctx.desc_size)
+        .expect("group1 gdt parse");
+
+    let clusters_per_group = bigalloc_bitmap_units_per_group(&geo);
+    assert!(
+        ffs_ondisk::ext4::verify_block_bitmap_checksum(
+            group1_bitmap.as_slice(),
+            pctx.csum_seed,
+            clusters_per_group,
+            &gd1,
+            pctx.desc_size,
+        )
+        .is_ok(),
+        "64KiB bigalloc block bitmap checksum must be stamped with clusters_per_group",
+    );
+    assert!(
+        ffs_ondisk::ext4::verify_block_bitmap_checksum(
+            group1_bitmap.as_slice(),
+            pctx.csum_seed,
+            geo.blocks_per_group,
+            &gd1,
+            pctx.desc_size,
+        )
+        .is_err(),
+        "verifying the same checksum with raw blocks_per_group should fail for bigalloc",
+    );
 }

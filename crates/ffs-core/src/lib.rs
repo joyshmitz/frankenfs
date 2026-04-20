@@ -3833,7 +3833,7 @@ impl OpenFs {
             csum_seed: geom.csum_seed,
             uuid: geom.uuid,
             group_desc_checksum_kind: geom.group_desc_checksum_kind,
-            blocks_per_group: sb.blocks_per_group,
+            blocks_per_group: Self::block_bitmap_units_per_group(&geo),
             inodes_per_group: sb.inodes_per_group,
         };
 
@@ -3849,6 +3849,17 @@ impl OpenFs {
             groups,
             persist_ctx,
         })
+    }
+
+    fn block_bitmap_units_per_group(geo: &FsGeometry) -> u32 {
+        if geo
+            .feature_ro_compat
+            .contains(ffs_ondisk::Ext4RoCompatFeatures::BIGALLOC)
+        {
+            geo.blocks_per_group / geo.cluster_ratio.max(1)
+        } else {
+            geo.blocks_per_group
+        }
     }
 
     /// Load btrfs allocation state by walking the FS tree and populating
@@ -17706,6 +17717,36 @@ mod tests {
         assert_eq!(deser.block_size, 4096);
         assert_eq!(deser.inodes_count, 8192);
         assert_eq!(deser.groups_count, 1);
+    }
+
+    #[test]
+    fn bigalloc_block_bitmap_units_per_group_uses_clusters() {
+        let geo = FsGeometry {
+            blocks_per_group: 8192,
+            inodes_per_group: 2048,
+            block_size: 4096,
+            total_blocks: 32768,
+            total_inodes: 8192,
+            first_data_block: 0,
+            group_count: 4,
+            inode_size: 256,
+            desc_size: 64,
+            reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(
+                ffs_ondisk::Ext4RoCompatFeatures::SPARSE_SUPER.0
+                    | ffs_ondisk::Ext4RoCompatFeatures::BIGALLOC.0
+                    | ffs_ondisk::Ext4RoCompatFeatures::METADATA_CSUM.0,
+            ),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
+            first_inode: 11,
+            cluster_ratio: 16,
+        };
+
+        assert_eq!(OpenFs::block_bitmap_units_per_group(&geo), 512);
     }
 
     // ── Device-based inode read tests ──────────────────────────────────
