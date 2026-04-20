@@ -4504,6 +4504,7 @@ fn tea_transform(a: &mut u32, b: &mut u32, buf: &[u32]) {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::collections::BTreeSet;
 
     /// Build a representative dir block of `block_size` bytes with the
     /// 12-byte fake-record checksum tail in place but the checksum slot
@@ -7595,7 +7596,16 @@ mod tests {
 
     // ── DX root parsing tests ───────────────────────────────────────────
 
-    fn make_dx_root_test_block() -> Vec<u8> {
+    fn encode_dx_root_test_block(hash_version: u8, entries: &[Ext4DxEntry]) -> Vec<u8> {
+        assert!(
+            !entries.is_empty(),
+            "DX root fixture needs at least the sentinel entry"
+        );
+        assert_eq!(
+            entries[0].hash, 0,
+            "DX root fixture sentinel hash must be zero"
+        );
+
         let mut block = vec![0_u8; 4096];
 
         // Fake "." dir entry at 0x00 (12 bytes)
@@ -7605,28 +7615,74 @@ mod tests {
 
         // DX root info at 0x18 (after ".." dir entry header)
         // Actually, the root info is at fixed offset 0x1C
-        block[0x1C] = 1; // hash_version = half_md4
+        block[0x1C] = hash_version;
         block[0x1D] = 8; // info_length = 8
         block[0x1E] = 0; // indirect_levels = 0
         block[0x1F] = 0; // unused_flags
 
         // dx_countlimit at 0x20: overlaps with entry[0] (hash is implicit 0).
         // Layout: [limit(u16), count(u16), entry0_block(u32), entry1_hash, entry1_block, ...]
-        block[0x20..0x22].copy_from_slice(&100_u16.to_le_bytes()); // limit=100
-        block[0x22..0x24].copy_from_slice(&3_u16.to_le_bytes()); // count=3
+        let count = u16::try_from(entries.len()).expect("DX root fixture count must fit in u16");
+        block[0x20..0x22].copy_from_slice(&count.to_le_bytes());
+        block[0x22..0x24].copy_from_slice(&count.to_le_bytes());
 
-        // Entry 0 (sentinel): hash is implicitly 0 (from countlimit bytes), block=1
-        block[0x24..0x28].copy_from_slice(&1_u32.to_le_bytes());
+        // Entry 0 (sentinel): hash is implicitly 0 (from countlimit bytes).
+        block[0x24..0x28].copy_from_slice(&entries[0].block.to_le_bytes());
 
-        // Entry 1: hash=0x1000, block=2
-        block[0x28..0x2C].copy_from_slice(&0x1000_u32.to_le_bytes());
-        block[0x2C..0x30].copy_from_slice(&2_u32.to_le_bytes());
-
-        // Entry 2: hash=0x8000, block=3
-        block[0x30..0x34].copy_from_slice(&0x8000_u32.to_le_bytes());
-        block[0x34..0x38].copy_from_slice(&3_u32.to_le_bytes());
+        let mut off = 0x28;
+        for entry in entries.iter().skip(1) {
+            block[off..off + 4].copy_from_slice(&entry.hash.to_le_bytes());
+            block[off + 4..off + 8].copy_from_slice(&entry.block.to_le_bytes());
+            off += 8;
+        }
 
         block
+    }
+
+    fn make_dx_root_test_block() -> Vec<u8> {
+        encode_dx_root_test_block(
+            DX_HASH_HALF_MD4,
+            &[
+                Ext4DxEntry { hash: 0, block: 1 },
+                Ext4DxEntry {
+                    hash: 0x1000,
+                    block: 2,
+                },
+                Ext4DxEntry {
+                    hash: 0x8000,
+                    block: 3,
+                },
+            ],
+        )
+    }
+
+    fn build_single_name_dx_entries(
+        hash_version: u8,
+        names: &[Vec<u8>],
+        seed: &[u32; 4],
+    ) -> Option<Vec<Ext4DxEntry>> {
+        let mut hashed_blocks = Vec::with_capacity(names.len());
+        for (idx, name) in names.iter().enumerate() {
+            let (hash, _) = dx_hash(hash_version, name, seed);
+            let block = u32::try_from(idx + 1).expect("fixture block index must fit in u32");
+            hashed_blocks.push((hash, block));
+        }
+
+        hashed_blocks.sort_unstable_by_key(|(hash, block)| (*hash, *block));
+        if hashed_blocks.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return None;
+        }
+
+        let mut entries = Vec::with_capacity(hashed_blocks.len());
+        entries.push(Ext4DxEntry {
+            hash: 0,
+            block: hashed_blocks[0].1,
+        });
+        for (hash, block) in hashed_blocks.into_iter().skip(1) {
+            entries.push(Ext4DxEntry { hash, block });
+        }
+
+        Some(entries)
     }
 
     #[test]
@@ -7671,6 +7727,67 @@ mod tests {
                 reason: "expected 0"
             }
         );
+    }
+
+    proptest! {
+        /// Metamorphic relation: if the same directory names are re-indexed
+        /// under hash_version=1 (half_md4) and hash_version=2 (TEA), and the
+        /// DX entries are regenerated consistently for that version, each
+        /// name still routes to its stable leaf block.
+        #[test]
+        fn ext4_proptest_dx_root_hash_version_transform_preserves_name_to_leaf_mapping(
+            raw_names in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..=24), 2..=8),
+            seed in proptest::array::uniform4(any::<u32>()),
+        ) {
+            let mut seen = BTreeSet::new();
+            let names: Vec<Vec<u8>> = raw_names
+                .into_iter()
+                .filter(|name| seen.insert(name.clone()))
+                .collect();
+            prop_assume!(names.len() >= 2);
+            prop_assume!(names.iter().any(|name| {
+                dx_hash(DX_HASH_HALF_MD4, name, &seed) != dx_hash(DX_HASH_TEA, name, &seed)
+            }));
+
+            let Some(half_md4_entries) = build_single_name_dx_entries(DX_HASH_HALF_MD4, &names, &seed) else {
+                prop_assume!(false);
+                unreachable!("rejected duplicate half_md4 major hashes");
+            };
+            let Some(tea_entries) = build_single_name_dx_entries(DX_HASH_TEA, &names, &seed) else {
+                prop_assume!(false);
+                unreachable!("rejected duplicate TEA major hashes");
+            };
+
+            let half_md4_root = parse_dx_root(
+                &encode_dx_root_test_block(DX_HASH_HALF_MD4, &half_md4_entries),
+            )
+            .expect("half_md4 DX root fixture should parse");
+            let tea_root = parse_dx_root(&encode_dx_root_test_block(DX_HASH_TEA, &tea_entries))
+                .expect("TEA DX root fixture should parse");
+
+            prop_assert_eq!(half_md4_root.hash_version, DX_HASH_HALF_MD4);
+            prop_assert_eq!(tea_root.hash_version, DX_HASH_TEA);
+
+            for (idx, name) in names.iter().enumerate() {
+                let expected_block =
+                    u32::try_from(idx + 1).expect("fixture block index must fit in u32");
+                let (half_md4_hash, _) = dx_hash(half_md4_root.hash_version, name, &seed);
+                let (tea_hash, _) = dx_hash(tea_root.hash_version, name, &seed);
+
+                prop_assert_eq!(
+                    dx_find_leaf(&half_md4_root.entries, half_md4_hash),
+                    expected_block,
+                    "half_md4 root must route {:?} to its stable leaf block",
+                    name,
+                );
+                prop_assert_eq!(
+                    dx_find_leaf(&tea_root.entries, tea_hash),
+                    expected_block,
+                    "TEA root must route {:?} to its stable leaf block after the hash_version transform",
+                    name,
+                );
+            }
+        }
     }
 
     #[test]
