@@ -1385,6 +1385,115 @@ unknown ro_compat: 0xAB"
         assert_eq!(root.entries[0].block, 5);
     }
 
+    fn write_dir_entry_test(
+        image: &mut [u8],
+        offset: usize,
+        inode: u32,
+        file_type: u8,
+        name: &[u8],
+        rec_len: u16,
+    ) {
+        image[offset..offset + 4].copy_from_slice(&inode.to_le_bytes());
+        image[offset + 4..offset + 6].copy_from_slice(&rec_len.to_le_bytes());
+        image[offset + 6] = u8::try_from(name.len()).expect("dir entry name length fits in u8");
+        image[offset + 7] = file_type;
+        image[offset + 8..offset + 8 + name.len()].copy_from_slice(name);
+    }
+
+    fn encode_dx_node_block(first_block: u32) -> Vec<u8> {
+        let mut block = vec![0_u8; 4096];
+        block[0x08..0x0A].copy_from_slice(&1_u16.to_le_bytes());
+        block[0x0A..0x0C].copy_from_slice(&1_u16.to_le_bytes());
+        block[0x0C..0x10].copy_from_slice(&first_block.to_le_bytes());
+        block
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_large_dir_three_level_htree_image(target_name: &[u8]) -> Vec<u8> {
+        let block_size = 4096_usize;
+        let image_blocks = 48_usize;
+        let mut image = vec![0_u8; block_size * image_blocks];
+
+        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+        let mut sb = [0_u8; ffs_types::EXT4_SUPERBLOCK_SIZE];
+        sb[0x38..0x3A].copy_from_slice(&ffs_types::EXT4_SUPER_MAGIC.to_le_bytes());
+        sb[0x18..0x1C].copy_from_slice(&2_u32.to_le_bytes()); // 4K blocks
+        sb[0x00..0x04].copy_from_slice(&8192_u32.to_le_bytes());
+        sb[0x04..0x08].copy_from_slice(&(image_blocks as u32).to_le_bytes());
+        sb[0x14..0x18].copy_from_slice(&0_u32.to_le_bytes());
+        sb[0x20..0x24].copy_from_slice(&(image_blocks as u32).to_le_bytes());
+        sb[0x28..0x2C].copy_from_slice(&8192_u32.to_le_bytes());
+        sb[0x54..0x58].copy_from_slice(&11_u32.to_le_bytes());
+        sb[0x58..0x5A].copy_from_slice(&256_u16.to_le_bytes());
+        sb[0x60..0x64].copy_from_slice(&Ext4IncompatFeatures::LARGEDIR.0.to_le_bytes());
+        image[sb_off..sb_off + ffs_types::EXT4_SUPERBLOCK_SIZE].copy_from_slice(&sb);
+
+        let gdt_off = block_size;
+        let mut gd = [0_u8; 32];
+        gd[0x08..0x0C].copy_from_slice(&2_u32.to_le_bytes()); // inode table at block 2
+        image[gdt_off..gdt_off + 32].copy_from_slice(&gd);
+
+        let inode_table_off = 2 * block_size;
+        let inode_off = inode_table_off + 256; // inode 2
+        image[inode_off..inode_off + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+        image[inode_off + 0x04..inode_off + 0x08].copy_from_slice(&(5_u32 * 4096).to_le_bytes());
+        image[inode_off + 0x1A..inode_off + 0x1C].copy_from_slice(&2_u16.to_le_bytes());
+        image[inode_off + 0x20..inode_off + 0x24].copy_from_slice(
+            &(ffs_types::EXT4_EXTENTS_FL | ffs_types::EXT4_INDEX_FL).to_le_bytes(),
+        );
+        image[inode_off + 0x64..inode_off + 0x68].copy_from_slice(&1_u32.to_le_bytes());
+
+        let i_block = inode_off + 0x28;
+        image[i_block..i_block + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[i_block + 2..i_block + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[i_block + 4..i_block + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[i_block + 6..i_block + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[i_block + 8..i_block + 12].copy_from_slice(&1_u32.to_le_bytes());
+        let extent = i_block + 12;
+        image[extent..extent + 4].copy_from_slice(&0_u32.to_le_bytes());
+        image[extent + 4..extent + 6].copy_from_slice(&5_u16.to_le_bytes());
+        image[extent + 6..extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[extent + 8..extent + 12].copy_from_slice(&10_u32.to_le_bytes());
+
+        let root_off = 10 * block_size;
+        write_dir_entry_test(&mut image, root_off, 2, 2, b".", 12);
+        write_dir_entry_test(&mut image, root_off + 12, 2, 2, b"..", 12);
+        image[root_off + 0x1C] = 1; // DX_HASH_HALF_MD4
+        image[root_off + 0x1D] = 8;
+        image[root_off + 0x1E] = 3; // three indirect levels with LARGEDIR
+        image[root_off + 0x20..root_off + 0x22].copy_from_slice(&1_u16.to_le_bytes());
+        image[root_off + 0x22..root_off + 0x24].copy_from_slice(&1_u16.to_le_bytes());
+        image[root_off + 0x24..root_off + 0x28].copy_from_slice(&1_u32.to_le_bytes());
+
+        let node1 = encode_dx_node_block(2);
+        image[11 * block_size..12 * block_size].copy_from_slice(&node1);
+        let node2 = encode_dx_node_block(3);
+        image[12 * block_size..13 * block_size].copy_from_slice(&node2);
+        let node3 = encode_dx_node_block(4);
+        image[13 * block_size..14 * block_size].copy_from_slice(&node3);
+
+        write_dir_entry_test(&mut image, 14 * block_size, 42, 1, target_name, 4096_u16);
+        image
+    }
+
+    #[test]
+    fn htree_lookup_supports_large_dir_three_indirect_levels() {
+        let target_name = b"triple-indirect-target";
+        let image = build_large_dir_three_level_htree_image(target_name);
+
+        let reader = Ext4ImageReader::new(&image).expect("open indexed large_dir test image");
+        let dir_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(2))
+            .expect("read indexed directory inode");
+
+        let found = reader
+            .htree_lookup(&image, &dir_inode, target_name)
+            .expect("htree lookup should succeed");
+        let found = found.expect("lookup should reach the level-three successor leaf");
+        assert_eq!(found.inode, 42);
+        assert_eq!(found.name, target_name);
+    }
+
     #[test]
     fn parse_dx_root_with_empty_entries() {
         let mut block = vec![0_u8; 256];
