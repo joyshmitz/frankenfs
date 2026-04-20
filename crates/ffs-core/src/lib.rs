@@ -452,6 +452,8 @@ pub struct Ext4FastCommitReplayEvidence {
     pub reserved_fc_blocks: u32,
     /// Number of bytes gathered from the fast-commit tail region.
     pub bytes_collected: u64,
+    /// Number of replay operations whose on-disk targets were verified.
+    pub verified_operations: u64,
     /// Parsed replay result for the collected region.
     pub replay: FcReplayResult,
 }
@@ -2291,14 +2293,19 @@ impl OpenFs {
 
             // Apply fast-commit operations if we have committed FC transactions
             // that don't require fallback to full JBD2 replay.
-            if let Some(ref evidence) = fs.ext4_fast_commit_replay {
-                if !evidence.replay.fallback_required && !evidence.replay.operations.is_empty() {
-                    let applied = fs.apply_fast_commit_operations(cx, &evidence.replay.operations);
-                    match applied {
+            let maybe_fc_ops = fs.ext4_fast_commit_replay.as_ref().and_then(|evidence| {
+                (!evidence.replay.fallback_required && !evidence.replay.operations.is_empty())
+                    .then(|| evidence.replay.operations.clone())
+            });
+            if let Some(operations) = maybe_fc_ops {
+                let verified = fs.apply_fast_commit_operations(cx, &operations);
+                if let Some(evidence) = fs.ext4_fast_commit_replay.as_mut() {
+                    match verified {
                         Ok(count) => {
+                            evidence.verified_operations = u64::try_from(count).unwrap_or(u64::MAX);
                             info!(
-                                applied_ops = count,
-                                "ext4 fast-commit operations applied to metadata"
+                                verified_ops = count,
+                                "ext4 fast-commit operations verified against metadata"
                             );
                         }
                         Err(e) => {
@@ -3230,6 +3237,7 @@ impl OpenFs {
         let evidence = Ext4FastCommitReplayEvidence {
             reserved_fc_blocks: journal_sb.num_fc_blocks,
             bytes_collected: u64::try_from(fc_bytes.len()).unwrap_or(u64::MAX),
+            verified_operations: 0,
             replay,
         };
 
@@ -3255,7 +3263,7 @@ impl OpenFs {
     /// - DelRange: log extent unmapping
     /// - InodeUpdate: re-read the inode from disk (JBD2 replay already wrote it)
     ///
-    /// Returns the number of operations processed.
+    /// Returns the number of operations whose on-disk targets were verified.
     ///
     /// NOTE: Currently, FC operations are applied at the observability level —
     /// the actual inode/dir mutations from FC are assumed to have been partially
@@ -3273,66 +3281,163 @@ impl OpenFs {
         for op in operations {
             match op {
                 ffs_journal::FcOperation::Create(dentry) => {
-                    debug!(
-                        parent_ino = dentry.parent_ino,
-                        ino = dentry.ino,
-                        name = ?String::from_utf8_lossy(&dentry.name),
-                        "fc_apply: create (observational — inode state from JBD2 replay)"
-                    );
-                    applied += 1;
+                    if self.verify_fast_commit_dentry_target(cx, dentry, "create") {
+                        applied += 1;
+                    }
                 }
                 ffs_journal::FcOperation::Link(dentry) => {
-                    debug!(
-                        parent_ino = dentry.parent_ino,
-                        ino = dentry.ino,
-                        name = ?String::from_utf8_lossy(&dentry.name),
-                        "fc_apply: link (observational)"
-                    );
-                    applied += 1;
+                    if self.verify_fast_commit_dentry_target(cx, dentry, "link") {
+                        applied += 1;
+                    }
                 }
                 ffs_journal::FcOperation::Unlink(dentry) => {
-                    debug!(
-                        parent_ino = dentry.parent_ino,
-                        ino = dentry.ino,
-                        name = ?String::from_utf8_lossy(&dentry.name),
-                        "fc_apply: unlink (observational)"
-                    );
-                    applied += 1;
+                    if self.verify_fast_commit_parent_directory(cx, dentry, "unlink") {
+                        applied += 1;
+                    }
                 }
                 ffs_journal::FcOperation::AddRange(range) => {
-                    debug!(
-                        ino = range.ino,
-                        logical_block = range.logical_block,
-                        len = range.len,
-                        physical_block = range.physical_block,
-                        "fc_apply: add_range (observational)"
-                    );
-                    applied += 1;
+                    if self.verify_fast_commit_range_inode(
+                        cx,
+                        range.ino,
+                        range.logical_block,
+                        range.len,
+                        Some(range.physical_block),
+                        "add_range",
+                    ) {
+                        applied += 1;
+                    }
                 }
                 ffs_journal::FcOperation::DelRange(range) => {
-                    debug!(
-                        ino = range.ino,
-                        logical_block = range.logical_block,
-                        len = range.len,
-                        "fc_apply: del_range (observational)"
-                    );
-                    applied += 1;
+                    if self.verify_fast_commit_range_inode(
+                        cx,
+                        range.ino,
+                        range.logical_block,
+                        range.len,
+                        None,
+                        "del_range",
+                    ) {
+                        applied += 1;
+                    }
                 }
                 ffs_journal::FcOperation::InodeUpdate(ino) => {
-                    // The inode was updated by JBD2 replay. Verify it's readable.
-                    match self.read_inode(cx, InodeNumber(u64::from(*ino))) {
-                        Ok(_) => {
-                            debug!(ino, "fc_apply: inode_update verified readable");
-                        }
-                        Err(e) => {
-                            warn!(ino, error = %e, "fc_apply: inode_update target not readable");
-                        }
+                    if self.verify_fast_commit_inode(cx, *ino) {
+                        applied += 1;
                     }
-                    applied += 1;
                 }
             }
         }
         Ok(applied)
+    }
+
+    fn verify_fast_commit_dentry_target(
+        &self,
+        cx: &Cx,
+        dentry: &ffs_journal::FcDentry,
+        op: &'static str,
+    ) -> bool {
+        let parent = self.read_inode(cx, InodeNumber(u64::from(dentry.parent_ino)));
+        let target = self.read_inode(cx, InodeNumber(u64::from(dentry.ino)));
+        match (parent, target) {
+            (Ok(parent), Ok(_)) if parent.is_dir() => {
+                debug!(
+                    op,
+                    parent_ino = dentry.parent_ino,
+                    ino = dentry.ino,
+                    name = ?String::from_utf8_lossy(&dentry.name),
+                    "fc_apply: dentry targets verified readable"
+                );
+                true
+            }
+            (parent_result, target_result) => {
+                warn!(
+                    op,
+                    parent_ino = dentry.parent_ino,
+                    ino = dentry.ino,
+                    parent_ok = parent_result.as_ref().is_ok_and(Ext4Inode::is_dir),
+                    target_ok = target_result.is_ok(),
+                    "fc_apply: dentry targets not fully readable"
+                );
+                false
+            }
+        }
+    }
+
+    fn verify_fast_commit_parent_directory(
+        &self,
+        cx: &Cx,
+        dentry: &ffs_journal::FcDentry,
+        op: &'static str,
+    ) -> bool {
+        match self.read_inode(cx, InodeNumber(u64::from(dentry.parent_ino))) {
+            Ok(parent) if parent.is_dir() => {
+                debug!(
+                    op,
+                    parent_ino = dentry.parent_ino,
+                    ino = dentry.ino,
+                    name = ?String::from_utf8_lossy(&dentry.name),
+                    "fc_apply: parent directory verified readable"
+                );
+                true
+            }
+            Ok(_) | Err(_) => {
+                warn!(
+                    op,
+                    parent_ino = dentry.parent_ino,
+                    ino = dentry.ino,
+                    "fc_apply: parent directory not readable"
+                );
+                false
+            }
+        }
+    }
+
+    fn verify_fast_commit_range_inode(
+        &self,
+        cx: &Cx,
+        ino: u32,
+        logical_block: u32,
+        len: u32,
+        physical_block: Option<u32>,
+        op: &'static str,
+    ) -> bool {
+        match self.read_inode(cx, InodeNumber(u64::from(ino))) {
+            Ok(_) => {
+                debug!(
+                    op,
+                    ino,
+                    logical_block,
+                    len,
+                    physical_block,
+                    "fc_apply: range target inode verified readable"
+                );
+                true
+            }
+            Err(error) => {
+                warn!(
+                    op,
+                    ino,
+                    logical_block,
+                    len,
+                    physical_block,
+                    error = %error,
+                    "fc_apply: range target inode not readable"
+                );
+                false
+            }
+        }
+    }
+
+    fn verify_fast_commit_inode(&self, cx: &Cx, ino: u32) -> bool {
+        match self.read_inode(cx, InodeNumber(u64::from(ino))) {
+            Ok(_) => {
+                debug!(ino, "fc_apply: inode_update verified readable");
+                true
+            }
+            Err(error) => {
+                warn!(ino, error = %error, "fc_apply: inode_update target not readable");
+                false
+            }
+        }
     }
 
     fn collect_ext4_journal_segments(
@@ -16988,6 +17093,7 @@ mod tests {
         assert_eq!(replay.stats.replayed_blocks, 1);
         assert_eq!(fc.reserved_fc_blocks, 2);
         assert!(fc.bytes_collected >= 32);
+        assert_eq!(fc.verified_operations, 0);
         assert_eq!(fc.replay.transactions_found, 1);
         assert_eq!(fc.replay.last_tid, 1);
         assert_eq!(fc.replay.operations.len(), 1);
@@ -17015,6 +17121,7 @@ mod tests {
             .expect("fast-commit evidence should be present");
 
         assert_eq!(fc.reserved_fc_blocks, 2);
+        assert_eq!(fc.verified_operations, 0);
         assert_eq!(fc.replay.transactions_found, 0);
         assert_eq!(fc.replay.last_tid, 0);
         assert_eq!(fc.replay.operations.len(), 0);
@@ -17036,6 +17143,7 @@ mod tests {
 
         assert_eq!(fc.reserved_fc_blocks, 2);
         assert_eq!(fc.bytes_collected, 8192);
+        assert_eq!(fc.verified_operations, 0);
         assert_eq!(fc.replay.transactions_found, 2);
         assert_eq!(fc.replay.last_tid, 2);
         assert_eq!(fc.replay.operations.len(), 2);
@@ -17048,6 +17156,34 @@ mod tests {
                 ffs_journal::FcOperation::InodeUpdate(42),
                 ffs_journal::FcOperation::InodeUpdate(43),
             ]
+        );
+    }
+
+    #[test]
+    fn open_fs_verifies_fast_commit_create_targets() {
+        let image = build_ext4_image_with_fast_commit_create_evidence();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let fc = fs
+            .ext4_fast_commit_replay()
+            .expect("fast-commit evidence should be present");
+
+        assert_eq!(fc.reserved_fc_blocks, 2);
+        assert_eq!(fc.verified_operations, 1);
+        assert_eq!(fc.replay.transactions_found, 1);
+        assert_eq!(fc.replay.last_tid, 1);
+        assert_eq!(fc.replay.operations.len(), 1);
+        assert_eq!(fc.replay.incomplete_transactions, 0);
+        assert!(!fc.replay.fallback_required);
+        assert_eq!(
+            fc.replay.operations,
+            vec![ffs_journal::FcOperation::Create(ffs_journal::FcDentry {
+                parent_ino: 2,
+                ino: 11,
+                name: b"hello.txt".to_vec(),
+            })]
         );
     }
 
@@ -18029,6 +18165,20 @@ mod tests {
         bytes
     }
 
+    fn build_fc_create_transaction(parent_ino: u32, ino: u32, name: &[u8], tid: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(build_fc_tag(0x0A, &[0; 16]));
+        let mut payload = Vec::with_capacity(8 + name.len());
+        payload.extend_from_slice(&parent_ino.to_le_bytes());
+        payload.extend_from_slice(&ino.to_le_bytes());
+        payload.extend_from_slice(name);
+        bytes.extend(build_fc_tag(0x05, &payload));
+        let mut tail = [0_u8; 8];
+        tail[..4].copy_from_slice(&tid.to_le_bytes());
+        bytes.extend(build_fc_tag(0x09, &tail));
+        bytes
+    }
+
     fn pad_fc_stream_to_block_boundary(bytes: &mut Vec<u8>, block_len: usize) {
         let used = bytes.len() % block_len;
         if used == 0 {
@@ -18358,6 +18508,56 @@ mod tests {
         let second_fc_block = 25 * 4096;
         image[second_fc_block..second_fc_block + second_fc_payload.len()]
             .copy_from_slice(&second_fc_payload);
+        image
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_ext4_image_with_fast_commit_create_evidence() -> Vec<u8> {
+        let mut image = build_ext4_image_with_fast_commit_evidence();
+
+        let root_ino = 4 * 4096 + 256;
+        image[root_ino..root_ino + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+        image[root_ino + 4..root_ino + 8].copy_from_slice(&4096_u32.to_le_bytes());
+        image[root_ino + 0x1A..root_ino + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+        image[root_ino + 0x20..root_ino + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+        image[root_ino + 0x80..root_ino + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        let root_extent = root_ino + 0x28;
+        image[root_extent..root_extent + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[root_extent + 2..root_extent + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[root_extent + 4..root_extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[root_extent + 6..root_extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[root_extent + 12..root_extent + 16].copy_from_slice(&0_u32.to_le_bytes());
+        image[root_extent + 16..root_extent + 18].copy_from_slice(&1_u16.to_le_bytes());
+        image[root_extent + 18..root_extent + 20].copy_from_slice(&0_u16.to_le_bytes());
+        image[root_extent + 20..root_extent + 24].copy_from_slice(&10_u32.to_le_bytes());
+
+        let dir_block = 10 * 4096;
+        image[dir_block..dir_block + 4].copy_from_slice(&2_u32.to_le_bytes());
+        image[dir_block + 4..dir_block + 6].copy_from_slice(&12_u16.to_le_bytes());
+        image[dir_block + 6] = 1;
+        image[dir_block + 7] = 2;
+        image[dir_block + 8] = b'.';
+
+        let dotdot = dir_block + 12;
+        image[dotdot..dotdot + 4].copy_from_slice(&2_u32.to_le_bytes());
+        image[dotdot + 4..dotdot + 6].copy_from_slice(&12_u16.to_le_bytes());
+        image[dotdot + 6] = 2;
+        image[dotdot + 7] = 2;
+        image[dotdot + 8] = b'.';
+        image[dotdot + 9] = b'.';
+
+        let hello = dotdot + 12;
+        image[hello..hello + 4].copy_from_slice(&11_u32.to_le_bytes());
+        image[hello + 4..hello + 6].copy_from_slice(&(4096_u16 - 24).to_le_bytes());
+        image[hello + 6] = 9;
+        image[hello + 7] = 1;
+        image[hello + 8..hello + 17].copy_from_slice(b"hello.txt");
+
+        let fc_block = 24 * 4096;
+        let fc_payload = build_fc_create_transaction(2, 11, b"hello.txt", 1);
+        image[fc_block..fc_block + 4096].fill(0);
+        image[fc_block..fc_block + fc_payload.len()].copy_from_slice(&fc_payload);
         image
     }
 
