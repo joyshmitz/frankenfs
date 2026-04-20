@@ -16953,6 +16953,34 @@ mod tests {
     }
 
     #[test]
+    fn open_fs_collects_fast_commit_replay_evidence_across_multiple_blocks() {
+        let image = build_ext4_image_with_multi_block_fast_commit_evidence();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let fc = fs
+            .ext4_fast_commit_replay()
+            .expect("fast-commit evidence should be present");
+
+        assert_eq!(fc.reserved_fc_blocks, 2);
+        assert_eq!(fc.bytes_collected, 8192);
+        assert_eq!(fc.replay.transactions_found, 2);
+        assert_eq!(fc.replay.last_tid, 2);
+        assert_eq!(fc.replay.operations.len(), 2);
+        assert_eq!(fc.replay.incomplete_transactions, 0);
+        assert!(!fc.replay.fallback_required);
+        assert_eq!(fc.replay.blocks_scanned, 2);
+        assert_eq!(
+            fc.replay.operations,
+            vec![
+                ffs_journal::FcOperation::InodeUpdate(42),
+                ffs_journal::FcOperation::InodeUpdate(43),
+            ]
+        );
+    }
+
+    #[test]
     fn read_ext4_orphan_list_traverses_chain() {
         let image = build_ext4_image_with_orphan_chain(&[11, 12, 13]);
         let dev = TestDevice::from_vec(image);
@@ -17876,6 +17904,30 @@ mod tests {
         bytes
     }
 
+    fn build_fc_inode_update_transaction(ino: u32, tid: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(build_fc_tag(0x0A, &[0; 16]));
+        bytes.extend(build_fc_tag(0x07, &ino.to_le_bytes()));
+        let mut tail = [0_u8; 8];
+        tail[..4].copy_from_slice(&tid.to_le_bytes());
+        bytes.extend(build_fc_tag(0x09, &tail));
+        bytes
+    }
+
+    fn pad_fc_stream_to_block_boundary(bytes: &mut Vec<u8>, block_len: usize) {
+        let used = bytes.len() % block_len;
+        if used == 0 {
+            return;
+        }
+
+        let remaining = block_len - used;
+        let pad_tag = build_fc_tag(0x08, &[]);
+        debug_assert_eq!(pad_tag.len(), 4);
+        for _ in 0..(remaining / pad_tag.len()) {
+            bytes.extend_from_slice(&pad_tag);
+        }
+    }
+
     fn set_test_journal_uuid(image: &mut [u8], uuid: [u8; 16]) {
         let sb_off = EXT4_SUPERBLOCK_OFFSET;
         image[sb_off + 0xD0..sb_off + 0xE0].copy_from_slice(&uuid);
@@ -18158,10 +18210,7 @@ mod tests {
         let j_commit = 23 * 4096;
         write_jbd2_header(&mut image[j_commit..j_commit + 4096], 2, 1);
 
-        let mut fc_payload = Vec::new();
-        fc_payload.extend(build_fc_tag(0x0A, &[0; 16]));
-        fc_payload.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
-        fc_payload.extend(build_fc_tag(0x09, &[1, 0, 0, 0, 0, 0, 0, 0]));
+        let fc_payload = build_fc_inode_update_transaction(42, 1);
         let fc_block = 24 * 4096;
         image[fc_block..fc_block + fc_payload.len()].copy_from_slice(&fc_payload);
 
@@ -18177,6 +18226,23 @@ mod tests {
         truncated.extend(build_fc_tag(0x07, &42_u32.to_le_bytes()));
         image[fc_block..fc_block + 4096].fill(0);
         image[fc_block..fc_block + truncated.len()].copy_from_slice(&truncated);
+        image
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_ext4_image_with_multi_block_fast_commit_evidence() -> Vec<u8> {
+        let mut image = build_ext4_image_with_fast_commit_evidence();
+        let fc_block = 24 * 4096;
+        let mut first_fc_payload = build_fc_inode_update_transaction(42, 1);
+        pad_fc_stream_to_block_boundary(&mut first_fc_payload, 4096);
+        image[fc_block..fc_block + 4096].fill(0);
+        image[fc_block..fc_block + 4096].copy_from_slice(&first_fc_payload);
+
+        let second_fc_payload = build_fc_inode_update_transaction(43, 2);
+
+        let second_fc_block = 25 * 4096;
+        image[second_fc_block..second_fc_block + second_fc_payload.len()]
+            .copy_from_slice(&second_fc_payload);
         image
     }
 
