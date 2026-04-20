@@ -8,9 +8,10 @@
 use ffs_error::{FfsError, Result};
 use ffs_ondisk::{Ext4Inode, Ext4Xattr, parse_ibody_xattrs, parse_xattr_block};
 use ffs_types::{
-    EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
-    EXT4_XATTR_INDEX_RICHACL, EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_SYSTEM,
-    EXT4_XATTR_INDEX_TRUSTED, EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC, ParseError,
+    EXT4_XATTR_INDEX_ENCRYPTION, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
+    EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT, EXT4_XATTR_INDEX_RICHACL, EXT4_XATTR_INDEX_SECURITY,
+    EXT4_XATTR_INDEX_SYSTEM, EXT4_XATTR_INDEX_TRUSTED, EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC,
+    ParseError,
 };
 
 const INLINE_HEADER_LEN: usize = 4;
@@ -340,7 +341,13 @@ fn check_write_permissions(name_index: u8, access: XattrWriteAccess) -> Result<(
 }
 
 fn can_read_name_index(name_index: u8, access: XattrReadAccess) -> bool {
-    name_index != EXT4_XATTR_INDEX_TRUSTED || access.has_cap_sys_admin
+    match name_index {
+        EXT4_XATTR_INDEX_TRUSTED => access.has_cap_sys_admin,
+        // fscrypt contexts are stored as hidden xattrs and should not surface
+        // through getxattr/listxattr-style APIs.
+        EXT4_XATTR_INDEX_ENCRYPTION => false,
+        _ => true,
+    }
 }
 
 /// Where a successful xattr mutation was stored.
@@ -2200,6 +2207,40 @@ mod tests {
             get_xattr(&inode, Some(&external), "user.public").unwrap(),
             Some(b"u".to_vec())
         );
+    }
+
+    #[test]
+    fn encryption_namespace_hidden_from_all_xattr_views() {
+        let inode = Ext4Inode {
+            xattr_ibody: build_inline_ibody(
+                256,
+                &[
+                    Ext4Xattr {
+                        name_index: EXT4_XATTR_INDEX_ENCRYPTION,
+                        name: b"c".to_vec(),
+                        value: b"context".to_vec(),
+                    },
+                    Ext4Xattr {
+                        name_index: EXT4_XATTR_INDEX_USER,
+                        name: b"public".to_vec(),
+                        value: b"u".to_vec(),
+                    },
+                ],
+            )
+            .unwrap(),
+            ..make_inode(256)
+        };
+        let admin_read = XattrReadAccess {
+            has_cap_sys_admin: true,
+        };
+
+        let mut names = list_xattrs(&inode, None).unwrap();
+        names.sort();
+        assert_eq!(names, vec!["user.public"]);
+
+        let mut admin_names = list_xattrs_for_access(&inode, None, admin_read).unwrap();
+        admin_names.sort();
+        assert_eq!(admin_names, vec!["user.public"]);
     }
 
     #[test]
