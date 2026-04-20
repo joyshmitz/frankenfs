@@ -23,6 +23,7 @@ const JBD2_BLOCKTYPE_REVOKE: u32 = 5;
 
 const JBD2_FEATURE_COMPAT_CHECKSUM: u32 = 0x0000_0001;
 const JBD2_FEATURE_INCOMPAT_64BIT: u32 = 0x0000_0002;
+const JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT: u32 = 0x0000_0004;
 const JBD2_FEATURE_INCOMPAT_CSUM_V2: u32 = 0x0000_0008;
 const JBD2_FEATURE_INCOMPAT_CSUM_V3: u32 = 0x0000_0010;
 const JBD2_FEATURE_INCOMPAT_FAST_COMMIT: u32 = 0x0000_0020;
@@ -99,8 +100,14 @@ impl Jbd2Superblock {
     }
 
     #[must_use]
+    pub fn has_async_commit(&self) -> bool {
+        (self.feature_incompat & JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT) != 0
+    }
+
+    #[must_use]
     pub fn has_checksum(&self) -> bool {
-        (self.feature_compat & JBD2_FEATURE_COMPAT_CHECKSUM) != 0
+        self.has_async_commit()
+            || (self.feature_compat & JBD2_FEATURE_COMPAT_CHECKSUM) != 0
             || (self.feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V2) != 0
             || (self.feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V3) != 0
     }
@@ -2566,6 +2573,21 @@ mod tests {
         }
     }
 
+    fn async_commit_superblock() -> Jbd2Superblock {
+        Jbd2Superblock {
+            block_size: 512,
+            max_len: 0,
+            first_log_block: 0,
+            start_sequence: 0,
+            start_block: 0,
+            num_fc_blocks: 0,
+            feature_compat: 0,
+            feature_incompat: JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT,
+            feature_ro_compat: 0,
+            uuid: [0; 16],
+        }
+    }
+
     fn stamp_descriptor_or_revoke_checksum(block: &mut [u8], sb: &Jbd2Superblock) {
         let checksum =
             checksum_jbd2_tail_zeroed_block(block, sb.csum_seed()).expect("descriptor has tail");
@@ -2763,6 +2785,40 @@ mod tests {
 
         commit[8] ^= 0x01;
         assert!(!verify_jbd2_block_checksum(&commit, &good_sb));
+    }
+
+    #[test]
+    fn async_commit_superblock_implies_checksum_semantics() {
+        let sb = async_commit_superblock();
+        assert!(sb.has_async_commit());
+        assert!(sb.has_checksum());
+        assert_eq!(
+            sb.csum_seed(),
+            0,
+            "async commit without v3 uses legacy seed"
+        );
+    }
+
+    #[test]
+    fn verify_jbd2_async_commit_descriptor_checksum_roundtrip_and_tamper_detection() {
+        let sb = async_commit_superblock();
+        let mut descriptor = descriptor_block(512, 3, &[(7, JBD2_TAG_FLAG_LAST)]);
+        stamp_descriptor_or_revoke_checksum(&mut descriptor, &sb);
+        assert!(verify_jbd2_block_checksum(&descriptor, &sb));
+
+        descriptor[24] ^= 0x5A;
+        assert!(!verify_jbd2_block_checksum(&descriptor, &sb));
+    }
+
+    #[test]
+    fn verify_jbd2_async_commit_commit_checksum_roundtrip_and_tamper_detection() {
+        let sb = async_commit_superblock();
+        let mut commit = commit_block(512, 8);
+        stamp_commit_checksum(&mut commit, &sb);
+        assert!(verify_jbd2_block_checksum(&commit, &sb));
+
+        commit[8] ^= 0x01;
+        assert!(!verify_jbd2_block_checksum(&commit, &sb));
     }
 
     #[test]
