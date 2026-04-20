@@ -21,6 +21,7 @@ ffs-mvcc = { workspace = true }
 ffs-ondisk = { workspace = true }
 ffs-types = { workspace = true }
 ffs-xattr = { workspace = true }
+libc = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

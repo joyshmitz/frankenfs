@@ -18399,6 +18399,59 @@ mod tests {
         image[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&state.to_le_bytes());
     }
 
+    fn build_test_inline_ibody(ibody_len: usize, entries: &[ffs_ondisk::Ext4Xattr]) -> Vec<u8> {
+        let mut out = vec![0_u8; ibody_len];
+        if entries.is_empty() {
+            return out;
+        }
+
+        out[0..4].copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+        let region_capacity = ibody_len
+            .checked_sub(4)
+            .expect("inline xattr region must include 4-byte header");
+        let mut region = vec![0_u8; region_capacity];
+        let mut next_entry = 0_usize;
+        let mut value_tail = region_capacity;
+
+        for entry in entries {
+            let entry_len = (16 + entry.name.len() + 3) & !3;
+            let value_start = value_tail
+                .checked_sub(entry.value.len())
+                .expect("inline xattr value should fit")
+                & !3;
+            let entry_end_with_term = next_entry
+                .checked_add(entry_len + 4)
+                .expect("inline xattr entry offset should not overflow");
+            assert!(
+                entry_end_with_term <= value_start,
+                "inline xattr entry table should not overlap values"
+            );
+
+            region[value_start..value_start + entry.value.len()].copy_from_slice(&entry.value);
+            value_tail = value_start;
+
+            region[next_entry] =
+                u8::try_from(entry.name.len()).expect("inline xattr name should fit in u8");
+            region[next_entry + 1] = entry.name_index;
+            region[next_entry + 2..next_entry + 4].copy_from_slice(
+                &u16::try_from(value_start + 4)
+                    .expect("inline xattr value offset should fit in u16")
+                    .to_le_bytes(),
+            );
+            region[next_entry + 8..next_entry + 12].copy_from_slice(
+                &u32::try_from(entry.value.len())
+                    .expect("inline xattr value length should fit in u32")
+                    .to_le_bytes(),
+            );
+            region[next_entry + 16..next_entry + 16 + entry.name.len()]
+                .copy_from_slice(&entry.name);
+            next_entry += entry_len;
+        }
+
+        out[4..].copy_from_slice(&region);
+        out
+    }
+
     fn build_ext4_image_with_encryption_context(context: &[u8], encrypted_flag: bool) -> Vec<u8> {
         let mut image = build_ext4_image_with_inode();
         let sb_off = EXT4_SUPERBLOCK_OFFSET;
@@ -18420,15 +18473,14 @@ mod tests {
             image[ino_off + 0x20..ino_off + 0x24].copy_from_slice(&0x0000_0800_u32.to_le_bytes());
         }
 
-        let ibody = ffs_xattr::build_inline_ibody(
+        let ibody = build_test_inline_ibody(
             256 - (128 + 32),
             &[ffs_ondisk::Ext4Xattr {
                 name_index: ffs_types::EXT4_XATTR_INDEX_ENCRYPTION,
                 name: EXT4_ENCRYPTION_XATTR_NAME.to_vec(),
                 value: context.to_vec(),
             }],
-        )
-        .expect("fscrypt context should fit inline");
+        );
         let xattr_off = ino_off + 128 + 32;
         image[xattr_off..xattr_off + ibody.len()].copy_from_slice(&ibody);
 
