@@ -82,6 +82,8 @@ const MOVE_EXT_ORIG_START_OFFSET: usize = 8;
 const MOVE_EXT_DONOR_START_OFFSET: usize = 16;
 const MOVE_EXT_LEN_OFFSET: usize = 24;
 const MOVE_EXT_MOVED_LEN_OFFSET: usize = 32;
+const MOVE_EXT_PAGE_SIZE_BYTES: u64 = 4096;
+const EXT4_MOVE_EXT_MAX_BLOCKS: u64 = 0xFFFF_FFFF;
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
@@ -1185,6 +1187,31 @@ impl FrankenFuse {
         response
     }
 
+    fn validate_move_ext_range(
+        blksize: u32,
+        orig_start: u64,
+        donor_start: u64,
+        len: u64,
+    ) -> Result<(), c_int> {
+        let blocks_per_page = (MOVE_EXT_PAGE_SIZE_BYTES / u64::from(blksize.max(1))).max(1);
+        if orig_start % blocks_per_page != donor_start % blocks_per_page {
+            return Err(libc::EINVAL);
+        }
+
+        let orig_end = orig_start.checked_add(len).ok_or(libc::EINVAL)?;
+        let donor_end = donor_start.checked_add(len).ok_or(libc::EINVAL)?;
+        if orig_start >= EXT4_MOVE_EXT_MAX_BLOCKS
+            || donor_start >= EXT4_MOVE_EXT_MAX_BLOCKS
+            || len > EXT4_MOVE_EXT_MAX_BLOCKS
+            || orig_end >= EXT4_MOVE_EXT_MAX_BLOCKS
+            || donor_end >= EXT4_MOVE_EXT_MAX_BLOCKS
+        {
+            return Err(libc::EINVAL);
+        }
+
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn dispatch_ioctl(
         &self,
@@ -1302,6 +1329,9 @@ impl FrankenFuse {
 
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    let attr = self.inner.ops.getattr(cx, scope, InodeNumber(ino))?;
+                    Self::validate_move_ext_range(attr.blksize, orig_start, donor_start, len)
+                        .map_err(|_| FfsError::InvalidGeometry("invalid move_ext range".into()))?;
                     let moved_len = self.inner.ops.move_ext(
                         cx,
                         scope,
@@ -3265,6 +3295,7 @@ mod tests {
         Fiemap(InodeNumber, u64, u64),
         Fsync(InodeNumber, u64, bool),
         GetFlags(InodeNumber),
+        Getattr(InodeNumber),
         GetVersion(InodeNumber),
         MoveExt(InodeNumber, u32, u64, u64, u64),
         SetFlags(InodeNumber, u32),
@@ -3275,6 +3306,7 @@ mod tests {
     struct IoctlRecordingFs {
         flags: u32,
         generation: u32,
+        blksize: u32,
         move_ext_result: Option<u64>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
     }
@@ -3284,6 +3316,7 @@ mod tests {
             Self {
                 flags,
                 generation: 0,
+                blksize: 4096,
                 move_ext_result: None,
                 calls,
             }
@@ -3293,6 +3326,7 @@ mod tests {
             Self {
                 flags,
                 generation,
+                blksize: 4096,
                 move_ext_result: None,
                 calls,
             }
@@ -3302,7 +3336,18 @@ mod tests {
             Self {
                 flags: 0,
                 generation: 0,
+                blksize: 4096,
                 move_ext_result: Some(moved_len),
+                calls,
+            }
+        }
+
+        fn with_move_ext_blksize(blksize: u32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            Self {
+                flags: 0,
+                generation: 0,
+                blksize,
+                move_ext_result: Some(1),
                 calls,
             }
         }
@@ -3322,9 +3367,29 @@ mod tests {
             &self,
             _cx: &Cx,
             _scope: &mut RequestScope,
-            _ino: InodeNumber,
+            ino: InodeNumber,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::Getattr(ino));
+            Ok(InodeAttr {
+                ino,
+                size: 64 * 1024,
+                blocks: 0,
+                atime: SystemTime::UNIX_EPOCH,
+                mtime: SystemTime::UNIX_EPOCH,
+                ctime: SystemTime::UNIX_EPOCH,
+                crtime: SystemTime::UNIX_EPOCH,
+                kind: FfsFileType::RegularFile,
+                perm: 0o644,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                rdev: 0,
+                blksize: self.blksize,
+                generation: 0,
+            })
         }
 
         fn lookup(
@@ -3731,6 +3796,65 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ioctl_move_ext_rejects_misaligned_page_offsets() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_blksize(
+                1024,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let request = FrankenFuse::encode_move_ext_response(7, 1, 2, 1, 0);
+
+        let response = fuse.dispatch_ioctl(
+            5,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_ext_max_blocks_boundaries() {
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
+            &options,
+        );
+
+        let request = FrankenFuse::encode_move_ext_response(7, EXT4_MOVE_EXT_MAX_BLOCKS, 0, 1, 0);
+        let response = fuse.dispatch_ioctl(
+            5,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+
+        let request =
+            FrankenFuse::encode_move_ext_response(7, EXT4_MOVE_EXT_MAX_BLOCKS - 1, 0, 1, 0);
+        let response = fuse.dispatch_ioctl(
+            5,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
     fn dispatch_ioctl_move_ext_rejects_too_small_output_buffer() {
         let options = MountOptions {
             read_only: false,
@@ -3783,6 +3907,7 @@ mod tests {
             calls.lock().expect("lock ioctl calls").as_slice(),
             &[
                 IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::Getattr(InodeNumber(9)),
                 IoctlCall::MoveExt(InodeNumber(9), 7, 11, 22, 33),
                 IoctlCall::Commit,
                 IoctlCall::End(RequestOp::IoctlWrite),
