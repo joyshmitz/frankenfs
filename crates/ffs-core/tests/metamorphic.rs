@@ -173,8 +173,14 @@ fn read_raw_inode(
 }
 
 fn extract_stamped_checksum(raw: &[u8]) -> u32 {
-    let lo = u16::from_le_bytes([raw[INODE_CHECKSUM_LO_OFFSET], raw[INODE_CHECKSUM_LO_OFFSET + 1]]);
-    let hi = u16::from_le_bytes([raw[INODE_CHECKSUM_HI_OFFSET], raw[INODE_CHECKSUM_HI_OFFSET + 1]]);
+    let lo = u16::from_le_bytes([
+        raw[INODE_CHECKSUM_LO_OFFSET],
+        raw[INODE_CHECKSUM_LO_OFFSET + 1],
+    ]);
+    let hi = u16::from_le_bytes([
+        raw[INODE_CHECKSUM_HI_OFFSET],
+        raw[INODE_CHECKSUM_HI_OFFSET + 1],
+    ]);
     (u32::from(hi) << 16) | u32::from(lo)
 }
 
