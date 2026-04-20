@@ -1840,6 +1840,7 @@ missing required: FILETYPE, EXTENTS; rejected: ENCRYPT; unknown incompat: \
                 Ext4IncompatFeatures::FILETYPE.0 | Ext4IncompatFeatures::EXTENTS.0,
             ),
             feature_ro_compat: Ext4RoCompatFeatures(Ext4RoCompatFeatures::SPARSE_SUPER.0),
+            super_flags: Ext4SuperFlags(0),
             default_mount_opts: 0,
             state: EXT4_VALID_FS,
             errors: 1,

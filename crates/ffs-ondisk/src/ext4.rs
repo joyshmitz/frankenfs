@@ -299,6 +299,49 @@ pub enum Ext4GroupDescChecksumKind {
     MetadataCsum,
 }
 
+/// ext4 miscellaneous superblock flags (`s_flags`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ext4SuperFlags(pub u32);
+
+impl Ext4SuperFlags {
+    pub const SIGNED_HASH: Self = Self(0x0001);
+    pub const UNSIGNED_HASH: Self = Self(0x0002);
+    pub const TEST_FILESYS: Self = Self(0x0004);
+
+    const KNOWN: &[(u32, &'static str)] = &[
+        (0x0001, "SIGNED_HASH"),
+        (0x0002, "UNSIGNED_HASH"),
+        (0x0004, "TEST_FILESYS"),
+    ];
+
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn contains(self, flag: Self) -> bool {
+        (self.0 & flag.0) != 0
+    }
+
+    #[must_use]
+    pub fn describe(self) -> Vec<&'static str> {
+        describe_flags(self.0, Self::KNOWN)
+    }
+
+    #[must_use]
+    pub fn unknown_bits(self) -> u32 {
+        let known_mask: u32 = Self::KNOWN.iter().map(|(bit, _)| bit).fold(0, |a, b| a | b);
+        self.0 & !known_mask
+    }
+}
+
+impl std::fmt::Display for Ext4SuperFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        format_flags(f, self.0, Self::KNOWN)
+    }
+}
+
 impl std::fmt::Display for Ext4RoCompatFeatures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         format_flags(f, self.0, Self::KNOWN)
@@ -454,6 +497,7 @@ pub struct Ext4Superblock {
     pub feature_compat: Ext4CompatFeatures,
     pub feature_incompat: Ext4IncompatFeatures,
     pub feature_ro_compat: Ext4RoCompatFeatures,
+    pub super_flags: Ext4SuperFlags,
     pub default_mount_opts: u32,
 
     // ── State & error tracking ───────────────────────────────────────────
@@ -584,6 +628,7 @@ impl Ext4Superblock {
             feature_compat: Ext4CompatFeatures(read_le_u32(region, 0x5C)?),
             feature_incompat: Ext4IncompatFeatures(read_le_u32(region, 0x60)?),
             feature_ro_compat: Ext4RoCompatFeatures(read_le_u32(region, 0x64)?),
+            super_flags: Ext4SuperFlags(read_le_u32(region, 0x160)?),
             default_mount_opts: read_le_u32(region, 0x100)?,
 
             // State & error tracking
@@ -663,6 +708,27 @@ impl Ext4Superblock {
     #[must_use]
     pub fn has_ro_compat(&self, mask: Ext4RoCompatFeatures) -> bool {
         (self.feature_ro_compat.0 & mask.0) != 0
+    }
+
+    #[must_use]
+    pub fn has_super_flag(&self, mask: Ext4SuperFlags) -> bool {
+        (self.super_flags.0 & mask.0) != 0
+    }
+
+    #[must_use]
+    pub fn effective_dirhash_version(&self, hash_version: u8) -> u8 {
+        match hash_version {
+            DX_HASH_LEGACY if self.has_super_flag(Ext4SuperFlags::UNSIGNED_HASH) => {
+                DX_HASH_LEGACY_UNSIGNED
+            }
+            DX_HASH_HALF_MD4 if self.has_super_flag(Ext4SuperFlags::UNSIGNED_HASH) => {
+                DX_HASH_HALF_MD4_UNSIGNED
+            }
+            DX_HASH_TEA if self.has_super_flag(Ext4SuperFlags::UNSIGNED_HASH) => {
+                DX_HASH_TEA_UNSIGNED
+            }
+            _ => hash_version,
+        }
     }
 
     #[must_use]
@@ -3919,8 +3985,10 @@ impl Ext4ImageReader {
             return self.lookup(image, dir_inode, name);
         }
 
-        // Hash the name using the hash version from the DX root
-        let (hash, _minor) = dx_hash(dx_root.hash_version, name, &self.sb.hash_seed);
+        // ext4 stores the base DX hash version in the root block and applies
+        // the superblock's signed/unsigned hash flag when hashing names.
+        let hash_version = self.sb.effective_dirhash_version(dx_root.hash_version);
+        let (hash, _minor) = dx_hash(hash_version, name, &self.sb.hash_seed);
 
         let indirect_levels = usize::from(dx_root.indirect_levels);
         let root_entries = dx_root.entries;
@@ -4352,7 +4420,7 @@ const DX_HASH_LEGACY: u8 = 0;
 const DX_HASH_HALF_MD4: u8 = 1;
 const DX_HASH_TEA: u8 = 2;
 const DX_HASH_LEGACY_UNSIGNED: u8 = 3;
-const _DX_HASH_HALF_MD4_UNSIGNED: u8 = 4;
+const DX_HASH_HALF_MD4_UNSIGNED: u8 = 4;
 const DX_HASH_TEA_UNSIGNED: u8 = 5;
 const _DX_HASH_SIPHASH: u8 = 6;
 const EXT4_HTREE_EOF_32BIT: u32 = (1_u32 << 31) - 1;
@@ -5163,6 +5231,7 @@ mod tests {
         sb[0xE8..0xEC].copy_from_slice(&12_u32.to_le_bytes()); // last_orphan
         sb[0xEC..0xF0].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes()); // hash_seed[0]
         sb[0xFC] = 1; // def_hash_version=HalfMD4
+        sb[0x160..0x164].copy_from_slice(&Ext4SuperFlags::UNSIGNED_HASH.0.to_le_bytes());
         sb[0x174] = 4; // log_groups_per_flex
         sb[0x166..0x168].copy_from_slice(&5_u16.to_le_bytes()); // mmp_update_interval
         sb[0x168..0x170].copy_from_slice(&1234_u64.to_le_bytes()); // mmp_block
@@ -5181,6 +5250,7 @@ mod tests {
         assert_eq!(parsed.last_orphan, 12);
         assert_eq!(parsed.hash_seed[0], 0xDEAD_BEEF);
         assert_eq!(parsed.def_hash_version, 1);
+        assert!(parsed.has_super_flag(Ext4SuperFlags::UNSIGNED_HASH));
         assert_eq!(parsed.log_groups_per_flex, 4);
         assert_eq!(parsed.mmp_update_interval, 5);
         assert_eq!(parsed.mmp_block, 1234);
@@ -8015,9 +8085,36 @@ mod tests {
         assert!(!super::dx_hash_extends_collision_chain(0x2468, 0x3469));
     }
 
+    #[test]
+    fn effective_dirhash_version_applies_unsigned_super_flag() {
+        let mut sb = make_valid_sb();
+        sb[0xFC] = DX_HASH_HALF_MD4;
+        sb[0x160..0x164].copy_from_slice(&Ext4SuperFlags::UNSIGNED_HASH.0.to_le_bytes());
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse valid sb");
+
+        assert_eq!(
+            parsed.effective_dirhash_version(DX_HASH_LEGACY),
+            DX_HASH_LEGACY_UNSIGNED
+        );
+        assert_eq!(
+            parsed.effective_dirhash_version(DX_HASH_HALF_MD4),
+            DX_HASH_HALF_MD4_UNSIGNED
+        );
+        assert_eq!(
+            parsed.effective_dirhash_version(DX_HASH_TEA),
+            DX_HASH_TEA_UNSIGNED
+        );
+        assert_eq!(
+            parsed.effective_dirhash_version(DX_HASH_TEA_UNSIGNED),
+            DX_HASH_TEA_UNSIGNED
+        );
+    }
+
     #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
     fn build_indexed_htree_lookup_test_image(
         target_name: &[u8],
+        super_flags: u32,
+        root_hash_version: u8,
         root_entries: &[Ext4DxEntry],
         leaf1_entries: &[(u32, &[u8])],
         leaf2_entries: &[(u32, &[u8])],
@@ -8039,6 +8136,7 @@ mod tests {
         sb[0x28..0x2C].copy_from_slice(&8192_u32.to_le_bytes());
         sb[0x58..0x5A].copy_from_slice(&256_u16.to_le_bytes());
         sb[0x54..0x58].copy_from_slice(&11_u32.to_le_bytes());
+        sb[0x160..0x164].copy_from_slice(&super_flags.to_le_bytes());
         image[sb_off..sb_off + EXT4_SUPERBLOCK_SIZE].copy_from_slice(&sb);
 
         // Group descriptor table at block 1.
@@ -8072,7 +8170,7 @@ mod tests {
 
         // DX root at logical block 0 / physical block 10.
         let root_off = 10 * block_size;
-        let root_block = encode_dx_root_test_block(DX_HASH_HALF_MD4, root_entries);
+        let root_block = encode_dx_root_test_block(root_hash_version, root_entries);
         image[root_off..root_off + block_size].copy_from_slice(&root_block[..block_size]);
 
         let write_leaf = |image: &mut [u8], block_index: usize, entries: &[(u32, &[u8])]| {
@@ -8095,7 +8193,8 @@ mod tests {
 
         // Ensure the target name is actually hashed under the default seed path.
         let reader = Ext4ImageReader::new(&image).expect("open indexed test image");
-        let (target_hash, _) = dx_hash(DX_HASH_HALF_MD4, target_name, &reader.sb.hash_seed);
+        let effective_hash_version = reader.sb.effective_dirhash_version(root_hash_version);
+        let (target_hash, _) = dx_hash(effective_hash_version, target_name, &reader.sb.hash_seed);
         assert_eq!(
             root_entries[1].hash & !1,
             target_hash,
@@ -8111,6 +8210,8 @@ mod tests {
         let target_hash = dx_hash(DX_HASH_HALF_MD4, target_name, &[0; 4]).0;
         let image = build_indexed_htree_lookup_test_image(
             target_name,
+            0,
+            DX_HASH_HALF_MD4,
             &[
                 Ext4DxEntry { hash: 0, block: 1 },
                 Ext4DxEntry {
@@ -8142,6 +8243,8 @@ mod tests {
         let target_hash = dx_hash(DX_HASH_HALF_MD4, target_name, &[0; 4]).0;
         let image = build_indexed_htree_lookup_test_image(
             target_name,
+            0,
+            DX_HASH_HALF_MD4,
             &[
                 Ext4DxEntry { hash: 0, block: 1 },
                 Ext4DxEntry {
@@ -8170,6 +8273,39 @@ mod tests {
             found.is_none(),
             "lookup must not cross into a successor leaf whose major hash range differs",
         );
+    }
+
+    #[test]
+    fn htree_lookup_applies_superblock_unsigned_hash_flag() {
+        let target_name = b"\xC3unsigned-target";
+        let target_hash = dx_hash(DX_HASH_HALF_MD4_UNSIGNED, target_name, &[0; 4]).0;
+        let image = build_indexed_htree_lookup_test_image(
+            target_name,
+            Ext4SuperFlags::UNSIGNED_HASH.0,
+            DX_HASH_HALF_MD4,
+            &[
+                Ext4DxEntry { hash: 0, block: 1 },
+                Ext4DxEntry {
+                    hash: target_hash | 1,
+                    block: 2,
+                },
+            ],
+            &[(11, b"alpha")],
+            &[(42, target_name)],
+            &[],
+        );
+
+        let reader = Ext4ImageReader::new(&image).expect("open indexed unsigned-hash test image");
+        let dir_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(2))
+            .expect("read indexed directory inode");
+
+        let found = reader
+            .htree_lookup(&image, &dir_inode, target_name)
+            .expect("htree lookup should succeed");
+        let found = found.expect("lookup should respect the unsigned hash superblock flag");
+        assert_eq!(found.inode, 42);
+        assert_eq!(found.name, target_name);
     }
 
     #[test]
