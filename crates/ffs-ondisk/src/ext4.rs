@@ -41,6 +41,7 @@ pub const EXT4_MMP_MAGIC: u32 = 0x004D_4D50;
 pub const EXT4_MMP_SEQ_CLEAN: u32 = 0xFF4D_4D50;
 pub const EXT4_MMP_SEQ_FSCK: u32 = 0xE24D_4D50;
 pub const EXT4_MMP_SEQ_MAX: u32 = 0xE24D_4D4F;
+pub const EXT4_DFL_MAX_MNT_COUNT: u16 = 20;
 const EXT4_MMP_CHECKSUM_OFFSET: usize = 0x3FC;
 
 // ── ext4 feature flags ─────────────────────────────────────────────────────
@@ -729,6 +730,37 @@ impl Ext4Superblock {
             }
             _ => hash_version,
         }
+    }
+
+    /// ext4 interprets `s_max_mnt_count` as a signed 16-bit value.
+    ///
+    /// Negative values disable mount-count based fsck warnings. A raw value of
+    /// zero is normalized to [`EXT4_DFL_MAX_MNT_COUNT`] on the first write mount.
+    #[must_use]
+    pub fn signed_max_mount_count(&self) -> i16 {
+        i16::from_le_bytes(self.max_mnt_count.to_le_bytes())
+    }
+
+    /// Whether ext4 would emit the "maximal mount count reached" warning for
+    /// the current on-disk counters before applying write-mount fixups.
+    #[must_use]
+    pub fn should_warn_max_mount_count(&self) -> bool {
+        let signed_max = self.signed_max_mount_count();
+        u16::try_from(signed_max).is_ok_and(|max| self.mnt_count >= max)
+    }
+
+    /// Apply the mount-count updates ext4 performs on a write mount.
+    ///
+    /// This mirrors the kernel's mount-time fixups:
+    /// - `s_max_mnt_count == 0` becomes [`EXT4_DFL_MAX_MNT_COUNT`]
+    /// - `s_mnt_count` increments with 16-bit wraparound
+    /// - `s_mtime` records the mount timestamp
+    pub fn record_write_mount(&mut self, mount_time: u32) {
+        if self.max_mnt_count == 0 {
+            self.max_mnt_count = EXT4_DFL_MAX_MNT_COUNT;
+        }
+        self.mnt_count = self.mnt_count.wrapping_add(1);
+        self.mtime = mount_time;
     }
 
     #[must_use]
@@ -5257,6 +5289,47 @@ mod tests {
         assert_eq!(parsed.backup_bgs, [7, 11]);
         assert_eq!(parsed.checksum_type, 1);
         assert_eq!(parsed.groups_count(), 1);
+    }
+
+    #[test]
+    fn max_mount_count_warning_honors_signed_disable_semantics() {
+        let mut sb = Ext4Superblock::parse_superblock_region(&make_valid_sb()).unwrap();
+        sb.mnt_count = 7;
+        sb.max_mnt_count = 7;
+        assert!(sb.should_warn_max_mount_count());
+
+        sb.max_mnt_count = u16::MAX; // ((__s16)-1) disables the warning
+        assert_eq!(sb.signed_max_mount_count(), -1);
+        assert!(!sb.should_warn_max_mount_count());
+    }
+
+    #[test]
+    fn write_mount_normalizes_zero_max_mount_count_and_increments_counter() {
+        let mut sb = Ext4Superblock::parse_superblock_region(&make_valid_sb()).unwrap();
+        sb.max_mnt_count = 0;
+        sb.mnt_count = 0;
+        sb.mtime = 11;
+
+        // The kernel warns before normalizing the zero field.
+        assert!(sb.should_warn_max_mount_count());
+
+        sb.record_write_mount(1_700_000_123);
+        assert_eq!(sb.max_mnt_count, EXT4_DFL_MAX_MNT_COUNT);
+        assert_eq!(sb.mnt_count, 1);
+        assert_eq!(sb.mtime, 1_700_000_123);
+        assert!(!sb.should_warn_max_mount_count());
+    }
+
+    #[test]
+    fn write_mount_wraps_mount_count_like_le16_add_cpu() {
+        let mut sb = Ext4Superblock::parse_superblock_region(&make_valid_sb()).unwrap();
+        sb.max_mnt_count = u16::MAX; // signed -1: disabled
+        sb.mnt_count = u16::MAX;
+
+        sb.record_write_mount(99);
+        assert_eq!(sb.mnt_count, 0);
+        assert_eq!(sb.mtime, 99);
+        assert_eq!(sb.max_mnt_count, u16::MAX);
     }
 
     #[test]
