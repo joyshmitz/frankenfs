@@ -154,6 +154,7 @@ struct MountCmdOptions {
     read_write: bool,
     mount_mode: MountMode,
     ext4_data_err_policy: Ext4DataErrPolicy,
+    ext4_verify_journal_checksums: bool,
     runtime: MountRuntimeConfig,
 }
 
@@ -359,6 +360,9 @@ enum Command {
         /// Abort the ext4 journal on ordered-mode file-data I/O errors.
         #[arg(long = "ext4-data-err-abort")]
         ext4_data_err_abort: bool,
+        /// Disable JBD2 checksum verification during ext4 journal replay.
+        #[arg(long = "ext4-nojournal-checksum")]
+        ext4_nojournal_checksum: bool,
         /// Mount a specific btrfs subvolume by name.
         ///
         /// Not yet supported — passing this flag will return an error.
@@ -1336,6 +1340,7 @@ fn run() -> Result<()> {
             rw,
             native,
             ext4_data_err_abort,
+            ext4_nojournal_checksum,
             subvol,
             snapshot,
         } => {
@@ -1356,6 +1361,7 @@ fn run() -> Result<()> {
                     } else {
                         Ext4DataErrPolicy::Ignore
                     },
+                    ext4_verify_journal_checksums: !ext4_nojournal_checksum,
                     runtime: MountRuntimeConfig {
                         mode: runtime_mode,
                         managed_unmount_timeout_secs,
@@ -4005,6 +4011,7 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: MountCmdOptions) -> 
     let open_opts = OpenOptions {
         ext4_journal_replay_mode: ext4_mount_replay_mode(options.read_write),
         ext4_data_err_policy: options.ext4_data_err_policy,
+        ext4_verify_journal_checksums: options.ext4_verify_journal_checksums,
         mount_mode: options.mount_mode,
         ..OpenOptions::default()
     };
@@ -6984,6 +6991,7 @@ mod tests {
                 read_write: false,
                 mount_mode: MountMode::Compat,
                 ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                ext4_verify_journal_checksums: true,
                 runtime: MountRuntimeConfig {
                     mode: MountRuntimeMode::Managed,
                     managed_unmount_timeout_secs: Some(30),
@@ -7011,6 +7019,7 @@ mod tests {
                 read_write: false,
                 mount_mode: MountMode::Compat,
                 ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                ext4_verify_journal_checksums: true,
                 runtime: MountRuntimeConfig {
                     mode: MountRuntimeMode::PerCore,
                     managed_unmount_timeout_secs: None,
@@ -7159,6 +7168,49 @@ mod tests {
                 assert!(
                     ext4_data_err_abort,
                     "--ext4-data-err-abort should opt into abort policy"
+                );
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn mount_ext4_nojournal_checksum_defaults_to_false() {
+        let cli = Cli::try_parse_from(["ffs", "mount", "/img", "/mnt"])
+            .expect("mount should parse with defaults");
+        match cli.command {
+            Command::Mount {
+                ext4_nojournal_checksum,
+                ..
+            } => {
+                assert!(
+                    !ext4_nojournal_checksum,
+                    "default ext4 nojournal_checksum flag must be false"
+                );
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn mount_ext4_nojournal_checksum_opt_in() {
+        let cli =
+            Cli::try_parse_from(["ffs", "mount", "--ext4-nojournal-checksum", "/img", "/mnt"])
+                .expect("mount with --ext4-nojournal-checksum should parse");
+        match cli.command {
+            Command::Mount {
+                ext4_nojournal_checksum,
+                ..
+            } => {
+                assert!(
+                    ext4_nojournal_checksum,
+                    "--ext4-nojournal-checksum should disable checksum verification"
                 );
             }
             other => assert!(

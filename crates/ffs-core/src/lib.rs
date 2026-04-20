@@ -35,8 +35,8 @@ use ffs_btrfs::{
 };
 use ffs_error::FfsError;
 use ffs_journal::{
-    FcReplayResult, Jbd2Superblock, Jbd2WriteStats, Jbd2Writer, JournalSegment, ReplayOutcome,
-    replay_fast_commit, replay_jbd2_segments,
+    FcReplayResult, Jbd2Superblock, Jbd2WriteStats, Jbd2Writer, JournalSegment, ReplayOptions,
+    ReplayOutcome, replay_fast_commit, replay_jbd2_segments_with_options, replay_jbd2_with_options,
 };
 use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal_replay::{ReplayOutcome as MvccReplayOutcome, TailPolicy, WalReplayEngine};
@@ -266,6 +266,8 @@ pub struct OpenOptions {
     pub external_journal_path: Option<std::path::PathBuf>,
     /// ext4 `data_err=` policy for ordered-mode file data writeback errors.
     pub ext4_data_err_policy: Ext4DataErrPolicy,
+    /// Whether JBD2 descriptor/commit/revoke checksums are enforced during replay.
+    pub ext4_verify_journal_checksums: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -279,6 +281,7 @@ impl Default for OpenOptions {
             mvcc_replay_policy: TailPolicy::default(),
             external_journal_path: None,
             ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+            ext4_verify_journal_checksums: true,
         }
     }
 }
@@ -2278,6 +2281,7 @@ impl OpenFs {
                 cx,
                 options.ext4_journal_replay_mode,
                 options.external_journal_path.as_deref(),
+                options.ext4_verify_journal_checksums,
             )?;
             fs.ext4_fast_commit_replay = fs.maybe_collect_ext4_fast_commit_evidence(cx)?;
 
@@ -2985,6 +2989,7 @@ impl OpenFs {
         cx: &Cx,
         mode: Ext4JournalReplayMode,
         external_path: Option<&Path>,
+        verify_checksums: bool,
     ) -> Result<Option<ReplayOutcome>, FfsError> {
         let (block_size, journal_inum, journal_dev) = match self.ext4_superblock() {
             Some(sb) => (sb.block_size, sb.journal_inum, sb.journal_dev),
@@ -2998,6 +3003,7 @@ impl OpenFs {
                 journal_dev,
                 mode,
                 external_path,
+                verify_checksums,
             );
         }
 
@@ -3049,9 +3055,15 @@ impl OpenFs {
             journal_blocks = total_blocks,
             journal_segments = journal_segment_count,
             replay_mode = ?mode,
+            verify_checksums,
             "ext4 journal replay start"
         );
-        let outcome = replay_jbd2_segments(cx, &block_dev, &segments)?;
+        let outcome = replay_jbd2_segments_with_options(
+            cx,
+            &block_dev,
+            &segments,
+            ReplayOptions { verify_checksums },
+        )?;
 
         // After successful replay, the superblock on disk might have been updated
         // (e.g. s_state cleared). Re-read it into our flavor cache.
@@ -3072,6 +3084,7 @@ impl OpenFs {
             incomplete_transactions = outcome.stats.incomplete_transactions,
             committed_sequences = outcome.committed_sequences.len(),
             replay_mode = ?mode,
+            verify_checksums,
             "ext4 journal replay completed"
         );
         Ok(Some(outcome))
@@ -3084,6 +3097,7 @@ impl OpenFs {
         journal_dev: u32,
         mode: Ext4JournalReplayMode,
         external_path: Option<&Path>,
+        verify_checksums: bool,
     ) -> Result<Option<ReplayOutcome>, FfsError> {
         let sb = self
             .ext4_superblock()
@@ -3149,9 +3163,15 @@ impl OpenFs {
             journal_dev,
             journal_blocks = journal_region.blocks,
             replay_mode = ?mode,
+            verify_checksums,
             "ext4 external journal replay start"
         );
-        let outcome = ffs_journal::replay_jbd2(cx, &adapter, journal_region)?;
+        let outcome = replay_jbd2_with_options(
+            cx,
+            &adapter,
+            journal_region,
+            ReplayOptions { verify_checksums },
+        )?;
 
         let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
         if let FsFlavor::Ext4(cache) = &mut self.flavor {
@@ -3164,6 +3184,7 @@ impl OpenFs {
             scanned_blocks = outcome.stats.scanned_blocks,
             replayed_blocks = outcome.stats.replayed_blocks,
             committed_sequences = outcome.committed_sequences.len(),
+            verify_checksums,
             "ext4 external journal replay completed"
         );
         Ok(Some(outcome))
@@ -16824,6 +16845,50 @@ mod tests {
     }
 
     #[test]
+    fn open_fs_bad_internal_journal_checksum_skips_replay_by_default() {
+        let image = build_ext4_image_with_internal_journal_checksums(true);
+        let baseline = image[15 * 4096..15 * 4096 + 16].to_vec();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let replay = fs
+            .ext4_journal_replay()
+            .expect("journal replay outcome should be present");
+
+        assert!(
+            replay.committed_sequences.is_empty(),
+            "checksum mismatch should prevent replay by default"
+        );
+        assert_eq!(replay.stats.replayed_blocks, 0);
+
+        let target = fs.read_block_vec(&cx, BlockNumber(15)).unwrap();
+        assert_eq!(&target[..16], baseline.as_slice());
+    }
+
+    #[test]
+    fn open_fs_nojournal_checksum_replays_internal_journal_with_bad_checksum() {
+        let image = build_ext4_image_with_internal_journal_checksums(true);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            ext4_verify_journal_checksums: false,
+            ..OpenOptions::default()
+        };
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).unwrap();
+        let replay = fs
+            .ext4_journal_replay()
+            .expect("journal replay outcome should be present");
+
+        assert_eq!(replay.committed_sequences, vec![1]);
+        assert_eq!(replay.stats.replayed_blocks, 1);
+
+        let target = fs.read_block_vec(&cx, BlockNumber(15)).unwrap();
+        assert_eq!(&target[..16], b"JBD2-CSUM-REPLAY");
+    }
+
+    #[test]
     fn open_fs_collects_fast_commit_replay_evidence() {
         let image = build_ext4_image_with_fast_commit_evidence();
         let dev = TestDevice::from_vec(image);
@@ -17731,6 +17796,33 @@ mod tests {
         block[84..88].copy_from_slice(&num_fc_blocks.to_be_bytes());
     }
 
+    fn checksum_jbd2_tail_zeroed_block_for_test(block: &[u8], seed: u32) -> u32 {
+        let tail = block.len() - 4;
+        let checksum = ffs_types::crc32c_append(!seed, &block[..tail]);
+        let checksum = ffs_types::crc32c_append(checksum, &[0_u8; 4]);
+        !checksum
+    }
+
+    fn stamp_test_jbd2_descriptor_checksum(block: &mut [u8], seed: u32) {
+        let checksum = checksum_jbd2_tail_zeroed_block_for_test(block, seed);
+        let tail = block.len() - 4;
+        block[tail..tail + 4].copy_from_slice(&checksum.to_be_bytes());
+    }
+
+    fn stamp_test_jbd2_commit_checksum(block: &mut [u8], seed: u32) {
+        const JBD2_COMMIT_CHKSUM_OFFSET: usize = 16;
+
+        let mut temp = block.to_vec();
+        temp[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + 4].fill(0);
+        let checksum = !ffs_types::crc32c_append(!seed, &temp);
+        block[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + 4]
+            .copy_from_slice(&checksum.to_be_bytes());
+    }
+
+    fn jbd2_v3_seed(uuid: [u8; 16]) -> u32 {
+        !ffs_types::crc32c_append(!0u32, &uuid)
+    }
+
     fn build_fc_tag(tag_type: u16, payload: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(4 + payload.len());
         bytes.extend_from_slice(&tag_type.to_le_bytes());
@@ -17830,6 +17922,75 @@ mod tests {
         // Journal block 22: commit.
         let j_commit = 22 * 4096;
         write_jbd2_header(&mut image[j_commit..j_commit + 4096], 2, 1);
+
+        image
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_ext4_image_with_internal_journal_checksums(
+        corrupt_descriptor_checksum: bool,
+    ) -> Vec<u8> {
+        const JBD2_FEATURE_INCOMPAT_CSUM_V3: u32 = 0x0000_0010;
+
+        let mut image = build_ext4_image_with_extents();
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        let journal_uuid = *b"ffs-jbd2-csum-v3";
+        let seed = jbd2_v3_seed(journal_uuid);
+
+        let compat = u32::from_le_bytes([
+            image[sb_off + 0x5C],
+            image[sb_off + 0x5D],
+            image[sb_off + 0x5E],
+            image[sb_off + 0x5F],
+        ]);
+        image[sb_off + 0x5C..sb_off + 0x60].copy_from_slice(&(compat | 0x0004).to_le_bytes());
+        image[sb_off + 0xE0..sb_off + 0xE4].copy_from_slice(&8_u32.to_le_bytes());
+
+        let ino8_off: usize = 4 * 4096 + 7 * 256;
+        image[ino8_off..ino8_off + 2].copy_from_slice(&0o100_600_u16.to_le_bytes());
+        image[ino8_off + 4..ino8_off + 8].copy_from_slice(&(4_u32 * 4096).to_le_bytes());
+        image[ino8_off + 0x1A..ino8_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        image[ino8_off + 0x20..ino8_off + 0x24].copy_from_slice(&0x0008_0000_u32.to_le_bytes());
+        image[ino8_off + 0x80..ino8_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        let e = ino8_off + 0x28;
+        image[e..e + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+        image[e + 2..e + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[e + 4..e + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[e + 6..e + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[e + 12..e + 16].copy_from_slice(&0_u32.to_le_bytes());
+        image[e + 16..e + 18].copy_from_slice(&4_u16.to_le_bytes());
+        image[e + 18..e + 20].copy_from_slice(&0_u16.to_le_bytes());
+        image[e + 20..e + 24].copy_from_slice(&20_u32.to_le_bytes());
+
+        let j_sb = 20 * 4096;
+        write_jbd2_superblock_v2(
+            &mut image[j_sb..j_sb + 4096],
+            4096,
+            4,
+            1,
+            1,
+            1,
+            0,
+            JBD2_FEATURE_INCOMPAT_CSUM_V3,
+        );
+        image[j_sb + 48..j_sb + 64].copy_from_slice(&journal_uuid);
+
+        let j_desc = 21 * 4096;
+        write_jbd2_header(&mut image[j_desc..j_desc + 4096], 1, 1);
+        image[j_desc + 12..j_desc + 16].copy_from_slice(&15_u32.to_be_bytes());
+        image[j_desc + 16..j_desc + 20].copy_from_slice(&0x0000_0008_u32.to_be_bytes());
+        stamp_test_jbd2_descriptor_checksum(&mut image[j_desc..j_desc + 4096], seed);
+        if corrupt_descriptor_checksum {
+            image[j_desc + 4096 - 1] ^= 0x5A;
+        }
+
+        let j_data = 22 * 4096;
+        image[j_data..j_data + 16].copy_from_slice(b"JBD2-CSUM-REPLAY");
+
+        let j_commit = 23 * 4096;
+        write_jbd2_header(&mut image[j_commit..j_commit + 4096], 2, 1);
+        stamp_test_jbd2_commit_checksum(&mut image[j_commit..j_commit + 4096], seed);
 
         image
     }
@@ -33646,6 +33807,12 @@ mod tests {
     fn ext4_data_err_policy_default_is_ignore() {
         let opts = OpenOptions::default();
         assert_eq!(opts.ext4_data_err_policy, Ext4DataErrPolicy::Ignore);
+    }
+
+    #[test]
+    fn ext4_verify_journal_checksums_defaults_to_true() {
+        let opts = OpenOptions::default();
+        assert!(opts.ext4_verify_journal_checksums);
     }
 
     #[test]

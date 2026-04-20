@@ -348,6 +348,21 @@ const fn journal_seq_is_newer_or_equal(candidate: u32, current: u32) -> bool {
     candidate == current || journal_seq_is_newer(candidate, current)
 }
 
+/// Options controlling JBD2 replay behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayOptions {
+    /// Whether to verify descriptor/commit/revoke checksums during replay.
+    pub verify_checksums: bool,
+}
+
+impl Default for ReplayOptions {
+    fn default() -> Self {
+        Self {
+            verify_checksums: true,
+        }
+    }
+}
+
 /// Replay JBD2 descriptor/commit/revoke blocks from a journal region.
 ///
 /// Behavior:
@@ -360,7 +375,18 @@ pub fn replay_jbd2(
     dev: &dyn BlockDevice,
     journal_region: JournalRegion,
 ) -> Result<ReplayOutcome> {
-    replay_jbd2_inner(cx, dev, journal_region.blocks, |index| {
+    replay_jbd2_with_options(cx, dev, journal_region, ReplayOptions::default())
+}
+
+/// Replay JBD2 descriptor/commit/revoke blocks from a journal region with
+/// explicit replay options.
+pub fn replay_jbd2_with_options(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    journal_region: JournalRegion,
+    options: ReplayOptions,
+) -> Result<ReplayOutcome> {
+    replay_jbd2_inner(cx, dev, journal_region.blocks, options, |index| {
         resolve_region_block(journal_region, index)
     })
 }
@@ -373,6 +399,17 @@ pub fn replay_jbd2_segments(
     cx: &Cx,
     dev: &dyn BlockDevice,
     journal_segments: &[JournalSegment],
+) -> Result<ReplayOutcome> {
+    replay_jbd2_segments_with_options(cx, dev, journal_segments, ReplayOptions::default())
+}
+
+/// Replay JBD2 descriptor/commit/revoke blocks from non-contiguous segments
+/// with explicit replay options.
+pub fn replay_jbd2_segments_with_options(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    journal_segments: &[JournalSegment],
+    options: ReplayOptions,
 ) -> Result<ReplayOutcome> {
     if journal_segments.is_empty() {
         return Err(FfsError::Format(
@@ -390,7 +427,7 @@ pub fn replay_jbd2_segments(
             .ok_or_else(|| FfsError::Format("journal segment length overflow".to_owned()))
     })?;
 
-    replay_jbd2_inner(cx, dev, total_blocks, |index| {
+    replay_jbd2_inner(cx, dev, total_blocks, options, |index| {
         resolve_segment_block(journal_segments, index, total_blocks)
     })
 }
@@ -400,6 +437,7 @@ fn replay_jbd2_inner(
     cx: &Cx,
     dev: &dyn BlockDevice,
     total_blocks: u64,
+    options: ReplayOptions,
     mut resolve_block: impl FnMut(u64) -> Result<BlockNumber>,
 ) -> Result<ReplayOutcome> {
     if total_blocks == 0 {
@@ -464,17 +502,18 @@ fn replay_jbd2_inner(
         }
 
         // Verify checksum if enabled.
-        if let Some(sb) = &journal_sb {
-            if !verify_jbd2_block_checksum(raw.as_slice(), sb) {
-                tracing::warn!(
-                    target: "ffs::journal",
-                    block_idx = current_idx,
-                    sequence = header.sequence,
-                    block_type = header.block_type,
-                    "jbd2_block_checksum_mismatch"
-                );
-                break;
-            }
+        if options.verify_checksums
+            && let Some(sb) = &journal_sb
+            && !verify_jbd2_block_checksum(raw.as_slice(), sb)
+        {
+            tracing::warn!(
+                target: "ffs::journal",
+                block_idx = current_idx,
+                sequence = header.sequence,
+                block_type = header.block_type,
+                "jbd2_block_checksum_mismatch"
+            );
+            break;
         }
 
         // Check sequence if following guided scan.
