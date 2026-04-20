@@ -426,6 +426,10 @@ pub struct PersistCtx {
     pub has_metadata_csum: bool,
     /// CRC32C seed for metadata_csum (from superblock).
     pub csum_seed: u32,
+    /// Filesystem UUID used by legacy `gdt_csum`.
+    pub uuid: [u8; 16],
+    /// Group-descriptor checksum mode derived from the superblock feature bits.
+    pub group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind,
     /// Blocks (clusters) per group — needed for bitmap checksum length.
     pub blocks_per_group: u32,
     /// Inodes per group — needed for inode bitmap checksum length.
@@ -619,12 +623,14 @@ fn persist_group_desc(
         .write_to_bytes(&mut buf[offset_in_block..], pctx.desc_size)
         .map_err(|e| FfsError::Format(format!("GDT write: {e}")))?;
 
-    if pctx.has_metadata_csum {
+    if pctx.group_desc_checksum_kind != ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None {
         ffs_ondisk::ext4::stamp_group_desc_checksum(
             &mut buf[offset_in_block..offset_in_block + ds],
+            &pctx.uuid,
             pctx.csum_seed,
             group.0,
             pctx.desc_size,
+            pctx.group_desc_checksum_kind,
         );
     }
 
@@ -1949,6 +1955,8 @@ mod tests {
             desc_size: 32,
             has_metadata_csum: false,
             csum_seed: 0,
+            uuid: [0; 16],
+            group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None,
             blocks_per_group: 32768,
             inodes_per_group: 2048,
         }
@@ -2874,6 +2882,8 @@ mod tests {
             desc_size: 32,
             has_metadata_csum: false,
             csum_seed: 0,
+            uuid: [0; 16],
+            group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None,
             blocks_per_group: 32768,
             inodes_per_group: 2048,
         };

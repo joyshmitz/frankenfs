@@ -1025,7 +1025,9 @@ mod tests {
             gdt_block: BlockNumber(50),
             desc_size: 32,
             has_metadata_csum: false,
+            uuid: [0; 16],
             csum_seed: 0,
+            group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None,
             blocks_per_group: 32768,
             inodes_per_group: 2048,
         }

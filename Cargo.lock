@@ -585,6 +585,7 @@ version = "0.1.0"
 dependencies = [
  "asupersync",
  "ffs-core",
+ "ffs-ondisk",
 ]
 
 [[package]]

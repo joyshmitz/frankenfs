@@ -11,6 +11,7 @@ ffs-core = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true }
+ffs-ondisk = { workspace = true }
 
 [lints]
 workspace = true

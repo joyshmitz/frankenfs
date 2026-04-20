@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use ffs_ondisk::ext4::{
-    EXT4_MMP_MAGIC, EXT4_MMP_SEQ_CLEAN, EXT4_MMP_SEQ_FSCK, Ext4RoCompatFeatures,
-    stamp_group_desc_checksum,
+    EXT4_MMP_MAGIC, EXT4_MMP_SEQ_CLEAN, EXT4_MMP_SEQ_FSCK, Ext4GroupDescChecksumKind,
+    Ext4RoCompatFeatures, stamp_group_desc_checksum,
 };
 use ffs_ondisk::{
     BtrfsHeader, BtrfsSuperblock, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4MmpBlock,
@@ -736,17 +736,21 @@ fn group_desc_adversarial_samples() -> Vec<(String, Vec<u8>)> {
     let mut valid32 = make_ext4_group_desc_32();
     stamp_group_desc_checksum(
         &mut valid32,
+        &EXT4_TEST_GROUP_DESC_UUID,
         EXT4_TEST_GROUP_DESC_CSUM_SEED,
         EXT4_TEST_GROUP_DESC_NUMBER,
         32,
+        Ext4GroupDescChecksumKind::MetadataCsum,
     );
 
     let mut valid64 = make_ext4_group_desc_64();
     stamp_group_desc_checksum(
         &mut valid64,
+        &EXT4_TEST_GROUP_DESC_UUID,
         EXT4_TEST_GROUP_DESC_CSUM_SEED,
         EXT4_TEST_GROUP_DESC_NUMBER,
         64,
+        Ext4GroupDescChecksumKind::MetadataCsum,
     );
 
     let mut bad_checksum = valid32.clone();
@@ -1470,6 +1474,7 @@ const EXT4_TEST_DIR_GENERATION: u32 = 0x0102_0304;
 const EXT4_TEST_DIR_INODE: u32 = 2;
 const EXT4_TEST_GROUP_DESC_CSUM_SEED: u32 = 0xAABB_CCDD;
 const EXT4_TEST_GROUP_DESC_NUMBER: u32 = 7;
+const EXT4_TEST_GROUP_DESC_UUID: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 const EXT4_TEST_INODE_CHECKSUM_LO_OFFSET: usize = 0x7C;
 const EXT4_TEST_INODE_CHECKSUM_HI_OFFSET: usize = 0x82;
 const EXT4_TEST_INODE_CSUM_SEED: u32 = 0x3141_5926;
@@ -1735,7 +1740,16 @@ fn adversarial_corpus_is_panic_free_and_exercises_parse_error_variants() {
             "ext4_verify_group_desc_checksum",
             &mut parser_hits,
             &mut coverage,
-            || verify_group_desc_checksum(bytes, 0, 0, 32),
+            || {
+                verify_group_desc_checksum(
+                    bytes,
+                    &EXT4_TEST_GROUP_DESC_UUID,
+                    0,
+                    0,
+                    32,
+                    Ext4GroupDescChecksumKind::MetadataCsum,
+                )
+            },
         );
         sample_had_error |= run_parser(
             name,
@@ -2743,9 +2757,11 @@ fn assert_valid_ext4_group_desc_samples(samples: &BTreeMap<String, Vec<u8>>) {
     assert_eq!(desc32.inode_bitmap_csum, 0x2468);
     verify_group_desc_checksum(
         valid32,
+        &EXT4_TEST_GROUP_DESC_UUID,
         EXT4_TEST_GROUP_DESC_CSUM_SEED,
         EXT4_TEST_GROUP_DESC_NUMBER,
         32,
+        Ext4GroupDescChecksumKind::MetadataCsum,
     )
     .expect("stamped 32-byte group desc checksum verifies");
 
@@ -2763,9 +2779,11 @@ fn assert_valid_ext4_group_desc_samples(samples: &BTreeMap<String, Vec<u8>>) {
     assert_eq!(desc64.inode_bitmap_csum, 0xBBBB_2468);
     verify_group_desc_checksum(
         valid64,
+        &EXT4_TEST_GROUP_DESC_UUID,
         EXT4_TEST_GROUP_DESC_CSUM_SEED,
         EXT4_TEST_GROUP_DESC_NUMBER,
         64,
+        Ext4GroupDescChecksumKind::MetadataCsum,
     )
     .expect("stamped 64-byte group desc checksum verifies");
 }
@@ -2773,9 +2791,11 @@ fn assert_valid_ext4_group_desc_samples(samples: &BTreeMap<String, Vec<u8>>) {
 fn assert_invalid_ext4_group_desc_samples(samples: &BTreeMap<String, Vec<u8>>) {
     let bad_checksum = verify_group_desc_checksum(
         &samples["synthetic_ext4_group_desc_bad_checksum.bin"],
+        &EXT4_TEST_GROUP_DESC_UUID,
         EXT4_TEST_GROUP_DESC_CSUM_SEED,
         EXT4_TEST_GROUP_DESC_NUMBER,
         32,
+        Ext4GroupDescChecksumKind::MetadataCsum,
     )
     .expect_err("group desc checksum corruption must be rejected");
     assert!(matches!(
@@ -2825,9 +2845,11 @@ fn assert_invalid_ext4_group_desc_samples(samples: &BTreeMap<String, Vec<u8>>) {
 
     let checksum_short64 = verify_group_desc_checksum(
         &samples["synthetic_ext4_group_desc_short_64.bin"],
+        &EXT4_TEST_GROUP_DESC_UUID,
         EXT4_TEST_GROUP_DESC_CSUM_SEED,
         EXT4_TEST_GROUP_DESC_NUMBER,
         64,
+        Ext4GroupDescChecksumKind::MetadataCsum,
     )
     .expect_err("short group desc checksum input must be rejected");
     assert!(matches!(

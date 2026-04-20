@@ -288,6 +288,17 @@ impl Ext4RoCompatFeatures {
     }
 }
 
+/// ext4 block-group descriptor checksum mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Ext4GroupDescChecksumKind {
+    /// No on-disk checksum is expected.
+    None,
+    /// Legacy `gdt_csum` mode using CRC16 over UUID, group number, and descriptor bytes.
+    GdtCsum,
+    /// Modern `metadata_csum` mode using CRC32C over UUID/seed, group number, and descriptor bytes.
+    MetadataCsum,
+}
+
 impl std::fmt::Display for Ext4RoCompatFeatures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         format_flags(f, self.0, Self::KNOWN)
@@ -689,6 +700,22 @@ impl Ext4Superblock {
     #[must_use]
     pub fn has_metadata_csum(&self) -> bool {
         self.has_ro_compat(Ext4RoCompatFeatures::METADATA_CSUM)
+    }
+
+    #[must_use]
+    pub fn has_gdt_csum(&self) -> bool {
+        self.has_ro_compat(Ext4RoCompatFeatures::GDT_CSUM) && !self.has_metadata_csum()
+    }
+
+    #[must_use]
+    pub fn group_desc_checksum_kind(&self) -> Ext4GroupDescChecksumKind {
+        if self.has_metadata_csum() {
+            Ext4GroupDescChecksumKind::MetadataCsum
+        } else if self.has_gdt_csum() {
+            Ext4GroupDescChecksumKind::GdtCsum
+        } else {
+            Ext4GroupDescChecksumKind::None
+        }
     }
 
     #[must_use]
@@ -1405,18 +1432,49 @@ impl Ext4GroupDesc {
 /// Offset of `bg_checksum` within a group descriptor (2 bytes).
 const GD_CHECKSUM_OFFSET: usize = 0x1E;
 
-/// Verify a group descriptor's CRC32C checksum (metadata_csum mode).
+/// CRC-16 lookup table used by legacy ext4 `gdt_csum`.
 ///
-/// `raw_gd` is the raw on-disk group descriptor bytes (32 or 64 bytes).
-/// `csum_seed` comes from `Ext4Superblock::csum_seed()`.
-/// `group_number` is the block group index.
-/// `desc_size` is from `Ext4Superblock::group_desc_size()`.
-pub fn verify_group_desc_checksum(
+/// Matches e2fsprogs `ext2fs_crc16` with polynomial `0x8005`.
+const EXT4_GDT_CRC16_TABLE: [u16; 256] = [
+    0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241, 0xC601, 0x06C0, 0x0780, 0xC741,
+    0x0500, 0xC5C1, 0xC481, 0x0440, 0xCC01, 0x0CC0, 0x0D80, 0xCD41, 0x0F00, 0xCFC1, 0xCE81, 0x0E40,
+    0x0A00, 0xCAC1, 0xCB81, 0x0B40, 0xC901, 0x09C0, 0x0880, 0xC841, 0xD801, 0x18C0, 0x1980, 0xD941,
+    0x1B00, 0xDBC1, 0xDA81, 0x1A40, 0x1E00, 0xDEC1, 0xDF81, 0x1F40, 0xDD01, 0x1DC0, 0x1C80, 0xDC41,
+    0x1400, 0xD4C1, 0xD581, 0x1540, 0xD701, 0x17C0, 0x1680, 0xD641, 0xD201, 0x12C0, 0x1380, 0xD341,
+    0x1100, 0xD1C1, 0xD081, 0x1040, 0xF001, 0x30C0, 0x3180, 0xF141, 0x3300, 0xF3C1, 0xF281, 0x3240,
+    0x3600, 0xF6C1, 0xF781, 0x3740, 0xF501, 0x35C0, 0x3480, 0xF441, 0x3C00, 0xFCC1, 0xFD81, 0x3D40,
+    0xFF01, 0x3FC0, 0x3E80, 0xFE41, 0xFA01, 0x3AC0, 0x3B80, 0xFB41, 0x3900, 0xF9C1, 0xF881, 0x3840,
+    0x2800, 0xE8C1, 0xE981, 0x2940, 0xEB01, 0x2BC0, 0x2A80, 0xEA41, 0xEE01, 0x2EC0, 0x2F80, 0xEF41,
+    0x2D00, 0xEDC1, 0xEC81, 0x2C40, 0xE401, 0x24C0, 0x2580, 0xE541, 0x2700, 0xE7C1, 0xE681, 0x2640,
+    0x2200, 0xE2C1, 0xE381, 0x2340, 0xE101, 0x21C0, 0x2080, 0xE041, 0xA001, 0x60C0, 0x6180, 0xA141,
+    0x6300, 0xA3C1, 0xA281, 0x6240, 0x6600, 0xA6C1, 0xA781, 0x6740, 0xA501, 0x65C0, 0x6480, 0xA441,
+    0x6C00, 0xACC1, 0xAD81, 0x6D40, 0xAF01, 0x6FC0, 0x6E80, 0xAE41, 0xAA01, 0x6AC0, 0x6B80, 0xAB41,
+    0x6900, 0xA9C1, 0xA881, 0x6840, 0x7800, 0xB8C1, 0xB981, 0x7940, 0xBB01, 0x7BC0, 0x7A80, 0xBA41,
+    0xBE01, 0x7EC0, 0x7F80, 0xBF41, 0x7D00, 0xBDC1, 0xBC81, 0x7C40, 0xB401, 0x74C0, 0x7580, 0xB541,
+    0x7700, 0xB7C1, 0xB681, 0x7640, 0x7200, 0xB2C1, 0xB381, 0x7340, 0xB101, 0x71C0, 0x7080, 0xB041,
+    0x5000, 0x90C1, 0x9181, 0x5140, 0x9301, 0x53C0, 0x5280, 0x9241, 0x9601, 0x56C0, 0x5780, 0x9741,
+    0x5500, 0x95C1, 0x9481, 0x5440, 0x9C01, 0x5CC0, 0x5D80, 0x9D41, 0x5F00, 0x9FC1, 0x9E81, 0x5E40,
+    0x5A00, 0x9AC1, 0x9B81, 0x5B40, 0x9901, 0x59C0, 0x5880, 0x9841, 0x8801, 0x48C0, 0x4980, 0x8941,
+    0x4B00, 0x8BC1, 0x8A81, 0x4A40, 0x4E00, 0x8EC1, 0x8F81, 0x4F40, 0x8D01, 0x4DC0, 0x4C80, 0x8C41,
+    0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641, 0x8201, 0x42C0, 0x4380, 0x8341,
+    0x4100, 0x81C1, 0x8081, 0x4040,
+];
+
+fn ext4_gdt_crc16(mut crc: u16, buffer: &[u8]) -> u16 {
+    for &byte in buffer {
+        crc = (crc >> 8) ^ EXT4_GDT_CRC16_TABLE[usize::from((crc ^ u16::from(byte)) & 0x00FF)];
+    }
+    crc
+}
+
+fn group_desc_checksum_value(
     raw_gd: &[u8],
+    uuid: &[u8; 16],
     csum_seed: u32,
     group_number: u32,
     desc_size: u16,
-) -> Result<(), ParseError> {
+    checksum_kind: Ext4GroupDescChecksumKind,
+) -> Result<u16, ParseError> {
     let ds = usize::from(desc_size);
     if raw_gd.len() < ds {
         return Err(ParseError::InsufficientData {
@@ -1426,56 +1484,103 @@ pub fn verify_group_desc_checksum(
         });
     }
 
+    let after_csum = GD_CHECKSUM_OFFSET + 2;
     let le_group = group_number.to_le_bytes();
 
-    // kernel: csum = ext4_chksum(csum_seed, &le_group, 4)
-    let mut csum = ext4_chksum(csum_seed, &le_group);
-    // kernel: csum = ext4_chksum(csum, gd[0..bg_checksum_offset], offset)
-    csum = ext4_chksum(csum, &raw_gd[..GD_CHECKSUM_OFFSET]);
-    // kernel: csum = ext4_chksum(csum, &dummy_csum, 2)  (zero out checksum field)
-    csum = ext4_chksum(csum, &[0, 0]);
-    // kernel: if offset+2 < desc_size, csum rest
-    let after_csum = GD_CHECKSUM_OFFSET + 2;
-    if after_csum < ds {
-        csum = ext4_chksum(csum, &raw_gd[after_csum..ds]);
+    match checksum_kind {
+        Ext4GroupDescChecksumKind::None => Ok(0),
+        Ext4GroupDescChecksumKind::MetadataCsum => {
+            let mut csum = ext4_chksum(csum_seed, &le_group);
+            csum = ext4_chksum(csum, &raw_gd[..GD_CHECKSUM_OFFSET]);
+            csum = ext4_chksum(csum, &[0, 0]);
+            if after_csum < ds {
+                csum = ext4_chksum(csum, &raw_gd[after_csum..ds]);
+            }
+            Ok((csum & 0xFFFF) as u16)
+        }
+        Ext4GroupDescChecksumKind::GdtCsum => {
+            let mut crc = ext4_gdt_crc16(!0u16, uuid);
+            crc = ext4_gdt_crc16(crc, &le_group);
+            crc = ext4_gdt_crc16(crc, &raw_gd[..GD_CHECKSUM_OFFSET]);
+            if after_csum < ds {
+                crc = ext4_gdt_crc16(crc, &raw_gd[after_csum..ds]);
+            }
+            Ok(crc)
+        }
+    }
+}
+
+/// Verify a group descriptor checksum according to the ext4 feature mode.
+///
+/// `raw_gd` is the raw on-disk group descriptor bytes (32 or 64 bytes).
+/// `uuid` comes from `Ext4Superblock::uuid`.
+/// `csum_seed` comes from `Ext4Superblock::csum_seed()` for `metadata_csum`.
+/// `group_number` is the block group index.
+/// `desc_size` is from `Ext4Superblock::group_desc_size()`.
+pub fn verify_group_desc_checksum(
+    raw_gd: &[u8],
+    uuid: &[u8; 16],
+    csum_seed: u32,
+    group_number: u32,
+    desc_size: u16,
+    checksum_kind: Ext4GroupDescChecksumKind,
+) -> Result<(), ParseError> {
+    if checksum_kind == Ext4GroupDescChecksumKind::None {
+        return Ok(());
     }
 
-    let expected = (csum & 0xFFFF) as u16;
+    let expected = group_desc_checksum_value(
+        raw_gd,
+        uuid,
+        csum_seed,
+        group_number,
+        desc_size,
+        checksum_kind,
+    )?;
     let stored = read_le_u16(raw_gd, GD_CHECKSUM_OFFSET)?;
 
     if expected != stored {
         return Err(ParseError::InvalidField {
             field: "bg_checksum",
-            reason: "group descriptor CRC32C mismatch",
+            reason: "group descriptor checksum mismatch",
         });
     }
     Ok(())
 }
 
-/// Compute and write the CRC32C checksum for a group descriptor buffer.
+/// Compute and write the checksum for a group descriptor buffer.
 ///
 /// Overwrites the 2-byte checksum at offset 0x1E in `raw_gd`.
 #[allow(clippy::cast_possible_truncation)]
 pub fn stamp_group_desc_checksum(
     raw_gd: &mut [u8],
+    uuid: &[u8; 16],
     csum_seed: u32,
     group_number: u32,
     desc_size: u16,
+    checksum_kind: Ext4GroupDescChecksumKind,
 ) {
     use ffs_types::write_le_u16;
+    if checksum_kind == Ext4GroupDescChecksumKind::None {
+        return;
+    }
+
     let ds = usize::from(desc_size);
     if raw_gd.len() < ds || ds < GD_CHECKSUM_OFFSET + 2 {
         return;
     }
-    let le_group = group_number.to_le_bytes();
-    let mut csum = ext4_chksum(csum_seed, &le_group);
-    csum = ext4_chksum(csum, &raw_gd[..GD_CHECKSUM_OFFSET]);
-    csum = ext4_chksum(csum, &[0, 0]);
-    let after_csum = GD_CHECKSUM_OFFSET + 2;
-    if after_csum < ds {
-        csum = ext4_chksum(csum, &raw_gd[after_csum..ds]);
-    }
-    write_le_u16(raw_gd, GD_CHECKSUM_OFFSET, (csum & 0xFFFF) as u16);
+
+    let Ok(csum) = group_desc_checksum_value(
+        raw_gd,
+        uuid,
+        csum_seed,
+        group_number,
+        desc_size,
+        checksum_kind,
+    ) else {
+        return;
+    };
+    write_le_u16(raw_gd, GD_CHECKSUM_OFFSET, csum);
 }
 
 /// Offset of `i_checksum_lo` within an ext4 inode (osd2 area, 2 bytes).
@@ -5425,10 +5530,26 @@ mod tests {
         gd.write_to_bytes(&mut buf, 32).unwrap();
 
         let csum_seed = 0x1234_5678_u32;
-        stamp_group_desc_checksum(&mut buf, csum_seed, 0, 32);
+        let uuid = [1_u8; 16];
+        stamp_group_desc_checksum(
+            &mut buf,
+            &uuid,
+            csum_seed,
+            0,
+            32,
+            Ext4GroupDescChecksumKind::MetadataCsum,
+        );
 
         // Verify should now pass.
-        verify_group_desc_checksum(&buf, csum_seed, 0, 32).expect("checksum should verify");
+        verify_group_desc_checksum(
+            &buf,
+            &uuid,
+            csum_seed,
+            0,
+            32,
+            Ext4GroupDescChecksumKind::MetadataCsum,
+        )
+        .expect("checksum should verify");
     }
 
     #[test]
@@ -6250,12 +6371,29 @@ mod tests {
         gd[GD_CHECKSUM_OFFSET..GD_CHECKSUM_OFFSET + 2].copy_from_slice(&checksum.to_le_bytes());
 
         // Verify it passes
-        verify_group_desc_checksum(&gd, csum_seed, group_number, desc_size)
-            .expect("checksum should match");
+        verify_group_desc_checksum(
+            &gd,
+            &uuid,
+            csum_seed,
+            group_number,
+            desc_size,
+            Ext4GroupDescChecksumKind::MetadataCsum,
+        )
+        .expect("checksum should match");
 
         // Corrupt one byte and verify it fails
         gd[0] ^= 0xFF;
-        assert!(verify_group_desc_checksum(&gd, csum_seed, group_number, desc_size).is_err());
+        assert!(
+            verify_group_desc_checksum(
+                &gd,
+                &uuid,
+                csum_seed,
+                group_number,
+                desc_size,
+                Ext4GroupDescChecksumKind::MetadataCsum,
+            )
+            .is_err()
+        );
     }
 
     /// Helper: compute inode checksum the same way the kernel does,
@@ -9643,14 +9781,29 @@ mod tests {
             group_number in any::<u32>(),
             desc_size in prop_oneof![Just(32_u16), Just(64_u16)],
         ) {
+            let uuid = [0xA5_u8; 16];
             let ds = usize::from(desc_size);
             let mut buf = vec![0u8; ds];
             // Fill with arbitrary data except checksum field.
             for (i, b) in buf.iter_mut().enumerate() {
                 *b = u8::try_from(i & 0xFF).unwrap();
             }
-            stamp_group_desc_checksum(&mut buf, csum_seed, group_number, desc_size);
-            let result = verify_group_desc_checksum(&buf, csum_seed, group_number, desc_size);
+            stamp_group_desc_checksum(
+                &mut buf,
+                &uuid,
+                csum_seed,
+                group_number,
+                desc_size,
+                Ext4GroupDescChecksumKind::MetadataCsum,
+            );
+            let result = verify_group_desc_checksum(
+                &buf,
+                &uuid,
+                csum_seed,
+                group_number,
+                desc_size,
+                Ext4GroupDescChecksumKind::MetadataCsum,
+            );
             prop_assert!(result.is_ok(), "stamp then verify should succeed");
         }
 
@@ -9661,19 +9814,34 @@ mod tests {
             group_number in any::<u32>(),
             tamper_byte in 0_usize..30,
         ) {
+            let uuid = [0xA5_u8; 16];
             let desc_size = 32_u16;
             let ds = usize::from(desc_size);
             let mut buf = vec![0u8; ds];
             for (i, b) in buf.iter_mut().enumerate() {
                 *b = u8::try_from(i & 0xFF).unwrap();
             }
-            stamp_group_desc_checksum(&mut buf, csum_seed, group_number, desc_size);
+            stamp_group_desc_checksum(
+                &mut buf,
+                &uuid,
+                csum_seed,
+                group_number,
+                desc_size,
+                Ext4GroupDescChecksumKind::MetadataCsum,
+            );
 
             // Tamper with a non-checksum byte.
             let tamper_idx = if tamper_byte >= GD_CHECKSUM_OFFSET { tamper_byte + 2 } else { tamper_byte };
             if tamper_idx < ds {
                 buf[tamper_idx] ^= 0xFF;
-                let result = verify_group_desc_checksum(&buf, csum_seed, group_number, desc_size);
+                let result = verify_group_desc_checksum(
+                    &buf,
+                    &uuid,
+                    csum_seed,
+                    group_number,
+                    desc_size,
+                    Ext4GroupDescChecksumKind::MetadataCsum,
+                );
                 prop_assert!(result.is_err(), "tampered descriptor should fail verification");
             }
         }

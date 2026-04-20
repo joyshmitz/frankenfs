@@ -313,10 +313,14 @@ pub struct Ext4Geometry {
     pub group_desc_size: u16,
     /// Checksum seed for metadata_csum verification.
     pub csum_seed: u32,
+    /// Filesystem UUID used by legacy `gdt_csum` verification.
+    pub uuid: [u8; 16],
     /// Whether the filesystem uses 64-bit block addressing.
     pub is_64bit: bool,
     /// Whether metadata_csum is enabled.
     pub has_metadata_csum: bool,
+    /// Group-descriptor checksum mode derived from the superblock feature bits.
+    pub group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind,
 }
 
 /// Pre-computed btrfs context derived from the superblock.
@@ -2069,8 +2073,10 @@ impl OpenFs {
                     groups_count: sb.groups_count(),
                     group_desc_size: sb.group_desc_size(),
                     csum_seed: sb.csum_seed(),
+                    uuid: sb.uuid,
                     is_64bit: sb.is_64bit(),
                     has_metadata_csum: sb.has_metadata_csum(),
+                    group_desc_checksum_kind: sb.group_desc_checksum_kind(),
                 };
                 (Some(geom), None)
             }
@@ -3730,6 +3736,8 @@ impl OpenFs {
             desc_size: geom.group_desc_size,
             has_metadata_csum: geom.has_metadata_csum,
             csum_seed: geom.csum_seed,
+            uuid: geom.uuid,
+            group_desc_checksum_kind: geom.group_desc_checksum_kind,
             blocks_per_group: sb.blocks_per_group,
             inodes_per_group: sb.inodes_per_group,
         };
@@ -5192,12 +5200,14 @@ impl OpenFs {
 
         // Verify checksum if metadata_csum is enabled.
         if let Some(geom) = &self.ext4_geometry {
-            if geom.has_metadata_csum {
+            if geom.group_desc_checksum_kind != ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None {
                 ffs_ondisk::ext4::verify_group_desc_checksum(
                     buf,
+                    &geom.uuid,
                     geom.csum_seed,
                     group.0,
                     desc_size,
+                    geom.group_desc_checksum_kind,
                 )
                 .map_err(|e| parse_to_ffs_error(&e))?;
             }
@@ -15223,17 +15233,28 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
             continue;
         }
 
-        match ffs_ondisk::verify_group_desc_checksum(raw_gd, csum_seed, g, desc_size) {
-            Ok(()) => {
-                passed += 1;
-            }
-            Err(e) => {
-                verdicts.push(CheckVerdict {
-                    component: format!("group_desc[{g}]"),
-                    passed: false,
-                    detail: e.to_string(),
-                });
-                failed += 1;
+        if sb.group_desc_checksum_kind() == ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None {
+            passed += 1;
+        } else {
+            match ffs_ondisk::verify_group_desc_checksum(
+                raw_gd,
+                &sb.uuid,
+                csum_seed,
+                g,
+                desc_size,
+                sb.group_desc_checksum_kind(),
+            ) {
+                Ok(()) => {
+                    passed += 1;
+                }
+                Err(e) => {
+                    verdicts.push(CheckVerdict {
+                        component: format!("group_desc[{g}]"),
+                        passed: false,
+                        detail: e.to_string(),
+                    });
+                    failed += 1;
+                }
             }
         }
     }
@@ -17413,8 +17434,10 @@ mod tests {
             groups_count: 1,
             group_desc_size: 32,
             csum_seed: 0,
+            uuid: [0; 16],
             is_64bit: false,
             has_metadata_csum: false,
+            group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None,
         };
         let json = serde_json::to_string(&geom).unwrap();
         let deser: Ext4Geometry = serde_json::from_str(&json).unwrap();

@@ -1252,26 +1252,59 @@ unknown ro_compat: 0xAB"
         let mut buf = vec![0_u8; 32];
         gd.write_to_bytes(&mut buf, 32).unwrap();
 
-        let csum_seed = ext4_chksum(
-            0xFFFF_FFFF,
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        let uuid = [1_u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let csum_seed = ext4_chksum(0xFFFF_FFFF, &uuid);
+        stamp_group_desc_checksum(
+            &mut buf,
+            &uuid,
+            csum_seed,
+            0,
+            32,
+            Ext4GroupDescChecksumKind::MetadataCsum,
         );
-        stamp_group_desc_checksum(&mut buf, csum_seed, 0, 32);
 
         // verify should pass
-        assert!(verify_group_desc_checksum(&buf, csum_seed, 0, 32).is_ok());
+        assert!(
+            verify_group_desc_checksum(
+                &buf,
+                &uuid,
+                csum_seed,
+                0,
+                32,
+                Ext4GroupDescChecksumKind::MetadataCsum,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn verify_group_desc_checksum_fails_on_corruption() {
         let mut buf = vec![0_u8; 32];
+        let uuid = [0_u8; 16];
         let csum_seed = 0x1234_5678;
-        stamp_group_desc_checksum(&mut buf, csum_seed, 0, 32);
+        stamp_group_desc_checksum(
+            &mut buf,
+            &uuid,
+            csum_seed,
+            0,
+            32,
+            Ext4GroupDescChecksumKind::MetadataCsum,
+        );
 
         // Corrupt a byte
         buf[0] ^= 0xFF;
 
-        assert!(verify_group_desc_checksum(&buf, csum_seed, 0, 32).is_err());
+        assert!(
+            verify_group_desc_checksum(
+                &buf,
+                &uuid,
+                csum_seed,
+                0,
+                32,
+                Ext4GroupDescChecksumKind::MetadataCsum,
+            )
+            .is_err()
+        );
     }
 
     // ── Bitmap verification tests ──────────────────────────────────────

@@ -106,6 +106,8 @@ fn make_persist_ctx(geo: &FsGeometry) -> PersistCtx {
         desc_size: 32,
         has_metadata_csum: false,
         csum_seed: 0,
+        uuid: [0; 16],
+        group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None,
         blocks_per_group: geo.blocks_per_group,
         inodes_per_group: geo.inodes_per_group,
     }

@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn ext4_geometry_is_constructable() {
-        const EXT4_GEOMETRY_DEBUG_GOLDEN: &str = "Ext4Geometry { block_size: 4096, inodes_count: 8192, inodes_per_group: 1024, first_ino: 11, inode_size: 256, groups_count: 8, group_desc_size: 64, csum_seed: 3735928559, is_64bit: true, has_metadata_csum: true }";
+        const EXT4_GEOMETRY_DEBUG_GOLDEN: &str = "Ext4Geometry { block_size: 4096, inodes_count: 8192, inodes_per_group: 1024, first_ino: 11, inode_size: 256, groups_count: 8, group_desc_size: 64, csum_seed: 3735928559, uuid: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], is_64bit: true, has_metadata_csum: true, group_desc_checksum_kind: MetadataCsum }";
 
         let geo = Ext4Geometry {
             block_size: 4096,
@@ -339,8 +339,10 @@ mod tests {
             groups_count: 8,
             group_desc_size: 64,
             csum_seed: 0xDEAD_BEEF,
+            uuid: [0; 16],
             is_64bit: true,
             has_metadata_csum: true,
+            group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::MetadataCsum,
         };
         let debug = format!("{geo:?}");
         assert_eq!(debug, EXT4_GEOMETRY_DEBUG_GOLDEN);
@@ -445,8 +447,10 @@ mod tests {
             groups_count: 8,
             group_desc_size: 64,
             csum_seed: 0xDEAD_BEEF,
+            uuid: [0; 16],
             is_64bit: true,
             has_metadata_csum: true,
+            group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::MetadataCsum,
         };
         let summary = Ext4FreeSpaceSummary {
             free_blocks_total: 5000,
@@ -479,7 +483,7 @@ critical
 CheckVerdict { component: \"superblock\", passed: true, detail: \"\" }
 IntegrityReport { verdicts: [CheckVerdict { component: \"superblock\", passed: true, detail: \"\" }], passed: 100, failed: 0, posterior_alpha: 1.0, posterior_beta: 101.0, expected_corruption_rate: 0.0098, upper_bound_corruption_rate: 0.005, healthy: true }
 FsStat { blocks: 100000, blocks_free: 50000, blocks_available: 48000, files: 10000, files_free: 5000, block_size: 4096, name_max: 255, fragment_size: 4096 }
-Ext4Geometry { block_size: 4096, inodes_count: 8192, inodes_per_group: 1024, first_ino: 11, inode_size: 256, groups_count: 8, group_desc_size: 64, csum_seed: 3735928559, is_64bit: true, has_metadata_csum: true }
+Ext4Geometry { block_size: 4096, inodes_count: 8192, inodes_per_group: 1024, first_ino: 11, inode_size: 256, groups_count: 8, group_desc_size: 64, csum_seed: 3735928559, uuid: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], is_64bit: true, has_metadata_csum: true, group_desc_checksum_kind: MetadataCsum }
 Ext4FreeSpaceSummary { free_blocks_total: 5000, free_inodes_total: 2000, gd_free_blocks_total: 5000, gd_free_inodes_total: 2000, blocks_mismatch: false, inodes_mismatch: false }
 Ext4OrphanList { head: 42, inodes: [] }";
 
