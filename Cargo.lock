@@ -727,9 +727,11 @@ dependencies = [
  "asupersync",
  "ffs-alloc",
  "ffs-block",
+ "ffs-core",
  "ffs-error",
  "ffs-ondisk",
  "ffs-types",
+ "tempfile",
 ]
 
 [[package]]

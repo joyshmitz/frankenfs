@@ -23,8 +23,8 @@ use ffs_btrfs::{
     parse_inode_item, parse_root_item,
 };
 use ffs_core::{
-    CrashRecoveryOutcome, Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions,
-    detect_filesystem_at_path,
+    CrashRecoveryOutcome, Ext4DataErrPolicy, Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs,
+    OpenOptions, detect_filesystem_at_path,
 };
 use ffs_fuse::{MountConfig, MountOptions, mount_managed};
 use ffs_harness::ParityReport;
@@ -146,6 +146,15 @@ impl MountRuntimeConfig {
         self.managed_unmount_timeout_secs
             .unwrap_or(DEFAULT_MANAGED_UNMOUNT_TIMEOUT_SECS)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MountCmdOptions {
+    allow_other: bool,
+    read_write: bool,
+    mount_mode: MountMode,
+    ext4_data_err_policy: Ext4DataErrPolicy,
+    runtime: MountRuntimeConfig,
 }
 
 fn default_env_filter() -> EnvFilter {
@@ -347,6 +356,9 @@ enum Command {
         /// symbols, and BLAKE3 checksums.
         #[arg(long)]
         native: bool,
+        /// Abort the ext4 journal on ordered-mode file-data I/O errors.
+        #[arg(long = "ext4-data-err-abort")]
+        ext4_data_err_abort: bool,
         /// Mount a specific btrfs subvolume by name.
         ///
         /// Not yet supported — passing this flag will return an error.
@@ -1323,6 +1335,7 @@ fn run() -> Result<()> {
             allow_other,
             rw,
             native,
+            ext4_data_err_abort,
             subvol,
             snapshot,
         } => {
@@ -1330,11 +1343,24 @@ fn run() -> Result<()> {
             mount_cmd(
                 &image,
                 &mountpoint,
-                allow_other,
-                rw,
-                native,
-                runtime_mode,
-                managed_unmount_timeout_secs,
+                MountCmdOptions {
+                    allow_other,
+                    read_write: rw,
+                    mount_mode: if native {
+                        MountMode::Native
+                    } else {
+                        MountMode::Compat
+                    },
+                    ext4_data_err_policy: if ext4_data_err_abort {
+                        Ext4DataErrPolicy::Abort
+                    } else {
+                        Ext4DataErrPolicy::Ignore
+                    },
+                    runtime: MountRuntimeConfig {
+                        mode: runtime_mode,
+                        managed_unmount_timeout_secs,
+                    },
+                },
             )
         }
         Command::Scrub { image, json } => scrub_cmd(&image, json),
@@ -3918,22 +3944,16 @@ fn log_mount_shutdown_metrics(
 }
 
 #[allow(clippy::too_many_lines)]
-fn mount_cmd(
-    image_path: &Path,
-    mountpoint: &Path,
-    allow_other: bool,
-    rw: bool,
-    native: bool,
-    runtime_mode: MountRuntimeMode,
-    managed_unmount_timeout_secs: Option<u64>,
-) -> Result<()> {
+fn mount_cmd(image_path: &Path, mountpoint: &Path, options: MountCmdOptions) -> Result<()> {
     let auto_unmount = env_bool("FFS_AUTO_UNMOUNT", true)?;
-    let requested_runtime = MountRuntimeConfig {
-        mode: runtime_mode,
-        managed_unmount_timeout_secs,
-    };
-    let operation_id = mount_operation_id(image_path, mountpoint, requested_runtime.mode, rw);
-    let scenario_id = requested_runtime.mode.scenario_id(rw);
+    let requested_runtime = options.runtime;
+    let operation_id = mount_operation_id(
+        image_path,
+        mountpoint,
+        requested_runtime.mode,
+        options.read_write,
+    );
+    let scenario_id = requested_runtime.mode.scenario_id(options.read_write);
     let command_span = info_span!(
         target: "ffs::cli::mount",
         "mount",
@@ -3943,9 +3963,9 @@ fn mount_cmd(
         mountpoint = %mountpoint.display(),
         runtime_mode = requested_runtime.mode.as_str(),
         managed_unmount_timeout_secs = requested_runtime.managed_unmount_timeout_secs,
-        allow_other,
+        allow_other = options.allow_other,
         auto_unmount,
-        read_write = rw
+        read_write = options.read_write
     );
     let _command_guard = command_span.enter();
     let started = Instant::now();
@@ -3964,7 +3984,7 @@ fn mount_cmd(
                 &operation_id,
                 scenario_id,
                 requested_runtime,
-                rw,
+                options.read_write,
                 "invalid_runtime_mode_flags",
                 &reason,
             );
@@ -3976,28 +3996,24 @@ fn mount_cmd(
         &operation_id,
         scenario_id,
         runtime,
-        allow_other,
+        options.allow_other,
         auto_unmount,
-        rw,
+        options.read_write,
     );
 
     let cx = cli_cx();
-    let mount_mode = if native {
-        MountMode::Native
-    } else {
-        MountMode::Compat
-    };
     let open_opts = OpenOptions {
-        ext4_journal_replay_mode: ext4_mount_replay_mode(rw),
-        mount_mode,
+        ext4_journal_replay_mode: ext4_mount_replay_mode(options.read_write),
+        ext4_data_err_policy: options.ext4_data_err_policy,
+        mount_mode: options.mount_mode,
         ..OpenOptions::default()
     };
     let mut open_fs = OpenFs::open_with_options(&cx, image_path, &open_opts)
         .with_context(|| format!("failed to open filesystem image: {}", image_path.display()))?;
-    emit_mount_banner(&open_fs, mountpoint, rw, runtime.mode);
+    emit_mount_banner(&open_fs, mountpoint, options.read_write, runtime.mode);
     emit_optional_recovery_banner(&open_fs);
 
-    if rw {
+    if options.read_write {
         open_fs
             .enable_writes(&cx)
             .context("failed to enable write support")?;
@@ -4005,13 +4021,19 @@ fn mount_cmd(
 
     match runtime.mode {
         MountRuntimeMode::Standard => {
-            mount_with_fuse(open_fs, mountpoint, rw, allow_other, auto_unmount)?;
+            mount_with_fuse(
+                open_fs,
+                mountpoint,
+                options.read_write,
+                options.allow_other,
+                auto_unmount,
+            )?;
         }
         MountRuntimeMode::Managed | MountRuntimeMode::PerCore => {
             let params = ManagedMountParams {
                 mountpoint,
-                read_write: rw,
-                allow_other,
+                read_write: options.read_write,
+                allow_other: options.allow_other,
                 auto_unmount,
                 unmount_timeout_secs: runtime.managed_unmount_timeout_secs(),
                 operation_id: &operation_id,
@@ -5240,14 +5262,15 @@ fn mkfs_cmd_with_program(
 mod tests {
     use super::{
         BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem, Cli,
-        Command, DumpCommand, Ext4JournalReplayMode, FsckCommandOptions, FsckFlags,
-        InfoCommandOptions, InfoSections, LogFormat, MountRuntimeConfig, MountRuntimeMode,
-        RepairCommandOptions, RepairFlags, btrfs_chunk_type_flag_names, build_ext4_group_info,
-        build_fsck_output, build_info_output, choose_btrfs_scrub_block_size,
-        ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
-        log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
-        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
-        summarize_repair_staleness, unavailable_repair_info, validate_btrfs_mount_selection,
+        Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode, FsckCommandOptions,
+        FsckFlags, InfoCommandOptions, InfoSections, LogFormat, MountCmdOptions, MountMode,
+        MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions, RepairFlags,
+        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
+        choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
+        format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
+        mount_cmd, mount_operation_id, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
+        read_file_region, summarize_repair_staleness, unavailable_repair_info,
+        validate_btrfs_mount_selection,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -6956,11 +6979,16 @@ mod tests {
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
             &PathBuf::from("/definitely/missing-mountpoint"),
-            false,
-            false,
-            false,
-            MountRuntimeMode::Managed,
-            Some(30),
+            MountCmdOptions {
+                allow_other: false,
+                read_write: false,
+                mount_mode: MountMode::Compat,
+                ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                runtime: MountRuntimeConfig {
+                    mode: MountRuntimeMode::Managed,
+                    managed_unmount_timeout_secs: Some(30),
+                },
+            },
         )
         .expect_err("managed mode with missing image should fail at open");
         let message = format!("{err:#}");
@@ -6978,11 +7006,16 @@ mod tests {
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
             &PathBuf::from("/definitely/missing-mountpoint"),
-            false,
-            false,
-            false,
-            MountRuntimeMode::PerCore,
-            None,
+            MountCmdOptions {
+                allow_other: false,
+                read_write: false,
+                mount_mode: MountMode::Compat,
+                ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                runtime: MountRuntimeConfig {
+                    mode: MountRuntimeMode::PerCore,
+                    managed_unmount_timeout_secs: None,
+                },
+            },
         )
         .expect_err("per-core mode with missing image should fail at open");
         let message = format!("{err:#}");
@@ -7085,6 +7118,48 @@ mod tests {
         match cli.command {
             Command::Mount { native, .. } => {
                 assert!(native, "--native flag should set native to true");
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn mount_ext4_data_err_abort_defaults_to_false() {
+        let cli = Cli::try_parse_from(["ffs", "mount", "/img", "/mnt"])
+            .expect("mount should parse with defaults");
+        match cli.command {
+            Command::Mount {
+                ext4_data_err_abort,
+                ..
+            } => {
+                assert!(
+                    !ext4_data_err_abort,
+                    "default ext4 data_err=abort flag must be false"
+                );
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn mount_ext4_data_err_abort_opt_in() {
+        let cli = Cli::try_parse_from(["ffs", "mount", "--ext4-data-err-abort", "/img", "/mnt"])
+            .expect("mount with --ext4-data-err-abort should parse");
+        match cli.command {
+            Command::Mount {
+                ext4_data_err_abort,
+                ..
+            } => {
+                assert!(
+                    ext4_data_err_abort,
+                    "--ext4-data-err-abort should opt into abort policy"
+                );
             }
             other => assert!(
                 matches!(other, Command::Mount { .. }),

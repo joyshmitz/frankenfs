@@ -58,6 +58,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::{debug, error, info, trace, warn};
@@ -263,6 +264,8 @@ pub struct OpenOptions {
     /// blocks live on a separate device. Provide the external journal image path
     /// here so FrankenFS can validate UUID pairing and replay the journal.
     pub external_journal_path: Option<std::path::PathBuf>,
+    /// ext4 `data_err=` policy for ordered-mode file data writeback errors.
+    pub ext4_data_err_policy: Ext4DataErrPolicy,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -275,8 +278,20 @@ impl Default for OpenOptions {
             mvcc_wal_path: None,
             mvcc_replay_policy: TailPolicy::default(),
             external_journal_path: None,
+            ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
         }
     }
+}
+
+/// ext4 `data_err=` mount policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Ext4DataErrPolicy {
+    /// `data_err=ignore`: log/report the file-data error but do not abort.
+    Ignore,
+    /// `data_err=continue`: surface the I/O error but keep the filesystem writable.
+    Continue,
+    /// `data_err=abort`: abort the journal on ordered-mode file-data errors.
+    Abort,
 }
 
 /// ext4 internal journal replay policy at open/mount time.
@@ -485,6 +500,10 @@ pub struct OpenFs {
     pub external_journal_info: Option<ExternalJournalInfo>,
     /// Active mount mode (compat or native).
     pub mount_mode: MountMode,
+    /// Active ext4 `data_err=` policy selected at open time.
+    pub ext4_data_err_policy: Ext4DataErrPolicy,
+    /// Latched when an ext4 write I/O error forces a read-only remount.
+    ext4_forced_read_only: AtomicBool,
     /// Block device for I/O operations.
     dev: Box<dyn ByteDevice>,
     /// MVCC version store for snapshot-isolated block access.
@@ -538,6 +557,12 @@ impl std::fmt::Debug for OpenFs {
             .field("crash_recovery", &self.crash_recovery)
             .field("mvcc_wal_recovery", &self.mvcc_wal_recovery)
             .field("external_journal_info", &self.external_journal_info)
+            .field("mount_mode", &self.mount_mode)
+            .field("ext4_data_err_policy", &self.ext4_data_err_policy)
+            .field(
+                "ext4_forced_read_only",
+                &self.ext4_forced_read_only.load(Ordering::SeqCst),
+            )
             .field("dev_len", &self.dev.len_bytes())
             .field("mvcc_version_count", &mvcc_guard.version_count())
             .field("mvcc_active_snapshots", &mvcc_guard.active_snapshot_count())
@@ -2222,6 +2247,7 @@ impl OpenFs {
 
         info!(
             mount_mode = %options.mount_mode,
+            ext4_data_err_policy = ?options.ext4_data_err_policy,
             operation_id = "open_fs",
             "mount_mode_selected"
         );
@@ -2236,6 +2262,8 @@ impl OpenFs {
             mvcc_wal_recovery,
             external_journal_info: None,
             mount_mode: options.mount_mode,
+            ext4_data_err_policy: options.ext4_data_err_policy,
+            ext4_forced_read_only: AtomicBool::new(false),
             dev,
             mvcc_store,
             jbd2_writer: None,
@@ -2504,6 +2532,45 @@ impl OpenFs {
     #[must_use]
     pub fn mvcc_wal_recovery(&self) -> Option<&WalRecoveryReport> {
         self.mvcc_wal_recovery.as_ref()
+    }
+
+    /// Return the active ext4 `data_err=` policy.
+    #[must_use]
+    pub const fn ext4_data_err_policy(&self) -> Ext4DataErrPolicy {
+        self.ext4_data_err_policy
+    }
+
+    /// Whether ordered-mode file-data I/O errors should abort the journal.
+    #[must_use]
+    pub const fn ext4_data_err_aborts_journal(&self) -> bool {
+        matches!(self.ext4_data_err_policy, Ext4DataErrPolicy::Abort)
+    }
+
+    fn handle_ext4_write_result<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, FfsError>,
+    ) -> Result<T, FfsError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if self.is_ext4() && matches!(err, FfsError::Io(_)) {
+                    let remount_read_only = self.ext4_data_err_aborts_journal();
+                    warn!(
+                        target: "ffs::ext4::rw",
+                        operation,
+                        policy = ?self.ext4_data_err_policy,
+                        remount_read_only,
+                        error = %err,
+                        "ext4_data_err_policy_triggered"
+                    );
+                    if remount_read_only {
+                        self.ext4_forced_read_only.store(true, Ordering::SeqCst);
+                    }
+                }
+                Err(err)
+            }
+        }
     }
 
     // ── Mount-mode boundary enforcement ─────────────────────────────────
@@ -3668,7 +3735,8 @@ impl OpenFs {
     /// Whether write operations are enabled.
     #[must_use]
     pub fn is_writable(&self) -> bool {
-        self.ext4_alloc_state.is_some() || self.btrfs_alloc_state.is_some()
+        (self.ext4_alloc_state.is_some() && !self.ext4_forced_read_only.load(Ordering::SeqCst))
+            || self.btrfs_alloc_state.is_some()
     }
 
     /// Flush all committed MVCC block versions to the underlying image.
@@ -3677,13 +3745,18 @@ impl OpenFs {
     /// before unmounting to ensure data written through the FUSE interface
     /// survives across remounts.  Returns the number of blocks flushed.
     pub fn flush_mvcc_to_device(&self, cx: &Cx) -> ffs_error::Result<usize> {
-        let base_dev = self.direct_block_device_adapter();
-        let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
-        if flushed > 0 {
-            self.dev.sync(cx)?;
-            info!(flushed_blocks = flushed, "flush_mvcc_to_device");
-        }
-        Ok(flushed)
+        self.handle_ext4_write_result(
+            "flush_mvcc_to_device",
+            (|| {
+                let base_dev = self.direct_block_device_adapter();
+                let flushed = self.mvcc_store.read().flush_to_device(cx, &base_dev)?;
+                if flushed > 0 {
+                    self.dev.sync(cx)?;
+                    info!(flushed_blocks = flushed, "flush_mvcc_to_device");
+                }
+                Ok(flushed)
+            })(),
+        )
     }
 
     /// Enable write operations by loading allocation state for the detected
@@ -3698,6 +3771,7 @@ impl OpenFs {
             FsFlavor::Ext4(_) => {
                 let alloc_state = self.load_ext4_alloc_state(cx)?;
                 self.ext4_alloc_state = Some(Mutex::new(alloc_state));
+                self.ext4_forced_read_only.store(false, Ordering::SeqCst);
             }
             FsFlavor::Btrfs(_) => {
                 let alloc_state = self.load_btrfs_alloc_state(cx)?;
@@ -7863,6 +7937,9 @@ impl OpenFs {
 
     /// Require the ext4 alloc state to be present (i.e., writes enabled).
     fn require_alloc_state(&self) -> Result<&Mutex<Ext4AllocState>, FfsError> {
+        if self.ext4_forced_read_only.load(Ordering::SeqCst) {
+            return Err(FfsError::ReadOnly);
+        }
         self.ext4_alloc_state.as_ref().ok_or(FfsError::ReadOnly)
     }
 
@@ -13521,9 +13598,12 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_latest_scope(|scope| {
-            <Self as FsOps>::create(self, cx, scope, parent, name, mode, uid, gid)
-        })
+        self.handle_ext4_write_result(
+            "create",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::create(self, cx, scope, parent, name, mode, uid, gid)
+            }),
+        )
     }
 
     pub fn mkdir(
@@ -13535,17 +13615,26 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_latest_scope(|scope| {
-            <Self as FsOps>::mkdir(self, cx, scope, parent, name, mode, uid, gid)
-        })
+        self.handle_ext4_write_result(
+            "mkdir",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::mkdir(self, cx, scope, parent, name, mode, uid, gid)
+            }),
+        )
     }
 
     pub fn unlink(&self, cx: &Cx, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| <Self as FsOps>::unlink(self, cx, scope, parent, name))
+        self.handle_ext4_write_result(
+            "unlink",
+            self.with_latest_scope(|scope| <Self as FsOps>::unlink(self, cx, scope, parent, name)),
+        )
     }
 
     pub fn rmdir(&self, cx: &Cx, parent: InodeNumber, name: &OsStr) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| <Self as FsOps>::rmdir(self, cx, scope, parent, name))
+        self.handle_ext4_write_result(
+            "rmdir",
+            self.with_latest_scope(|scope| <Self as FsOps>::rmdir(self, cx, scope, parent, name)),
+        )
     }
 
     pub fn rename(
@@ -13556,9 +13645,12 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &OsStr,
     ) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| {
-            <Self as FsOps>::rename(self, cx, scope, parent, name, new_parent, new_name)
-        })
+        self.handle_ext4_write_result(
+            "rename",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::rename(self, cx, scope, parent, name, new_parent, new_name)
+            }),
+        )
     }
 
     pub fn write(
@@ -13568,7 +13660,12 @@ impl OpenFs {
         offset: u64,
         data: &[u8],
     ) -> ffs_error::Result<u32> {
-        self.with_latest_scope(|scope| <Self as FsOps>::write(self, cx, scope, ino, offset, data))
+        self.handle_ext4_write_result(
+            "write",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::write(self, cx, scope, ino, offset, data)
+            }),
+        )
     }
 
     pub fn setxattr(
@@ -13579,13 +13676,21 @@ impl OpenFs {
         value: &[u8],
         mode: XattrSetMode,
     ) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| {
-            <Self as FsOps>::setxattr(self, cx, scope, ino, name, value, mode)
-        })
+        self.handle_ext4_write_result(
+            "setxattr",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::setxattr(self, cx, scope, ino, name, value, mode)
+            }),
+        )
     }
 
     pub fn removexattr(&self, cx: &Cx, ino: InodeNumber, name: &str) -> ffs_error::Result<bool> {
-        self.with_latest_scope(|scope| <Self as FsOps>::removexattr(self, cx, scope, ino, name))
+        self.handle_ext4_write_result(
+            "removexattr",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::removexattr(self, cx, scope, ino, name)
+            }),
+        )
     }
 
     pub fn fallocate(
@@ -13596,9 +13701,12 @@ impl OpenFs {
         length: u64,
         mode: i32,
     ) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| {
-            <Self as FsOps>::fallocate(self, cx, scope, ino, offset, length, mode)
-        })
+        self.handle_ext4_write_result(
+            "fallocate",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::fallocate(self, cx, scope, ino, offset, length, mode)
+            }),
+        )
     }
 
     pub fn flush(
@@ -13608,7 +13716,12 @@ impl OpenFs {
         fh: u64,
         lock_owner: u64,
     ) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| <Self as FsOps>::flush(self, cx, scope, ino, fh, lock_owner))
+        self.handle_ext4_write_result(
+            "flush",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::flush(self, cx, scope, ino, fh, lock_owner)
+            }),
+        )
     }
 
     pub fn fsync(
@@ -13618,7 +13731,12 @@ impl OpenFs {
         fh: u64,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| <Self as FsOps>::fsync(self, cx, scope, ino, fh, datasync))
+        self.handle_ext4_write_result(
+            "fsync",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::fsync(self, cx, scope, ino, fh, datasync)
+            }),
+        )
     }
 
     pub fn fsyncdir(
@@ -13628,9 +13746,12 @@ impl OpenFs {
         fh: u64,
         datasync: bool,
     ) -> ffs_error::Result<()> {
-        self.with_latest_scope(|scope| {
-            <Self as FsOps>::fsyncdir(self, cx, scope, ino, fh, datasync)
-        })
+        self.handle_ext4_write_result(
+            "fsyncdir",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::fsyncdir(self, cx, scope, ino, fh, datasync)
+            }),
+        )
     }
 
     pub fn getattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<InodeAttr> {
@@ -13701,9 +13822,12 @@ impl OpenFs {
         new_parent: InodeNumber,
         new_name: &OsStr,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_latest_scope(|scope| {
-            <Self as FsOps>::link(self, cx, scope, ino, new_parent, new_name)
-        })
+        self.handle_ext4_write_result(
+            "link",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::link(self, cx, scope, ino, new_parent, new_name)
+            }),
+        )
     }
 
     pub fn symlink(
@@ -13715,9 +13839,12 @@ impl OpenFs {
         uid: u32,
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_latest_scope(|scope| {
-            <Self as FsOps>::symlink(self, cx, scope, parent, name, target, uid, gid)
-        })
+        self.handle_ext4_write_result(
+            "symlink",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::symlink(self, cx, scope, parent, name, target, uid, gid)
+            }),
+        )
     }
 
     pub fn readlink(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<u8>> {
@@ -13730,7 +13857,10 @@ impl OpenFs {
         ino: InodeNumber,
         attrs: &SetAttrRequest,
     ) -> ffs_error::Result<InodeAttr> {
-        self.with_latest_scope(|scope| <Self as FsOps>::setattr(self, cx, scope, ino, attrs))
+        self.handle_ext4_write_result(
+            "setattr",
+            self.with_latest_scope(|scope| <Self as FsOps>::setattr(self, cx, scope, ino, attrs)),
+        )
     }
 
     pub fn statfs(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<FsStat> {
@@ -33277,6 +33407,12 @@ mod tests {
     }
 
     #[test]
+    fn ext4_data_err_policy_default_is_ignore() {
+        let opts = OpenOptions::default();
+        assert_eq!(opts.ext4_data_err_policy, Ext4DataErrPolicy::Ignore);
+    }
+
+    #[test]
     fn mount_mode_native_opt_in() {
         let opts = OpenOptions {
             mount_mode: MountMode::Native,
@@ -33401,6 +33537,21 @@ mod tests {
         let fs_native =
             OpenFs::from_device(&cx, Box::new(dev2), &opts_native).expect("open native");
         assert_eq!(fs_native.mount_mode, MountMode::Native);
+    }
+
+    #[test]
+    fn open_fs_stores_ext4_data_err_policy_from_options() {
+        let image = build_ext4_image(1);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            skip_validation: true,
+            ext4_data_err_policy: Ext4DataErrPolicy::Abort,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
+        assert_eq!(fs.ext4_data_err_policy(), Ext4DataErrPolicy::Abort);
+        assert!(fs.ext4_data_err_aborts_journal());
     }
 
     #[test]

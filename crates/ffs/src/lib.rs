@@ -19,6 +19,7 @@ mod tests {
             options.ext4_journal_replay_mode,
             Ext4JournalReplayMode::Apply
         ));
+        assert_eq!(options.ext4_data_err_policy, Ext4DataErrPolicy::Ignore);
     }
 
     #[test]
