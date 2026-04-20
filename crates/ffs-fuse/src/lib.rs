@@ -68,11 +68,20 @@ const EXT4_IOC_GETFLAGS: u32 = 0x8008_6601;
 const EXT4_IOC_GETVERSION: u32 = 0x8008_6603;
 /// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
+/// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
+const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 const FIEMAP_START_OFFSET: usize = 0;
 const FIEMAP_LENGTH_OFFSET: usize = 8;
 const FIEMAP_FLAGS_OFFSET: usize = 16;
 const FIEMAP_MAPPED_EXTENTS_OFFSET: usize = 20;
 const FIEMAP_EXTENT_COUNT_OFFSET: usize = 24;
+const MOVE_EXT_SIZE: usize = 40;
+const MOVE_EXT_RESERVED_OFFSET: usize = 0;
+const MOVE_EXT_DONOR_FD_OFFSET: usize = 4;
+const MOVE_EXT_ORIG_START_OFFSET: usize = 8;
+const MOVE_EXT_DONOR_START_OFFSET: usize = 16;
+const MOVE_EXT_LEN_OFFSET: usize = 24;
+const MOVE_EXT_MOVED_LEN_OFFSET: usize = 32;
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
@@ -1056,6 +1065,48 @@ impl FrankenFuse {
         Ok((fm_start, fm_length, fm_flags, fm_extent_count))
     }
 
+    fn parse_move_ext_request(in_data: &[u8]) -> Result<(u32, u64, u64, u64), c_int> {
+        if in_data.len() < MOVE_EXT_SIZE {
+            return Err(libc::EINVAL);
+        }
+
+        let reserved = u32::from_ne_bytes(
+            in_data[MOVE_EXT_RESERVED_OFFSET..MOVE_EXT_RESERVED_OFFSET + 4]
+                .try_into()
+                .map_err(|_| libc::EINVAL)?,
+        );
+        if reserved != 0 {
+            return Err(libc::EINVAL);
+        }
+
+        let donor_fd = u32::from_ne_bytes(
+            in_data[MOVE_EXT_DONOR_FD_OFFSET..MOVE_EXT_DONOR_FD_OFFSET + 4]
+                .try_into()
+                .map_err(|_| libc::EINVAL)?,
+        );
+        let orig_start = u64::from_ne_bytes(
+            in_data[MOVE_EXT_ORIG_START_OFFSET..MOVE_EXT_ORIG_START_OFFSET + 8]
+                .try_into()
+                .map_err(|_| libc::EINVAL)?,
+        );
+        let donor_start = u64::from_ne_bytes(
+            in_data[MOVE_EXT_DONOR_START_OFFSET..MOVE_EXT_DONOR_START_OFFSET + 8]
+                .try_into()
+                .map_err(|_| libc::EINVAL)?,
+        );
+        let len = u64::from_ne_bytes(
+            in_data[MOVE_EXT_LEN_OFFSET..MOVE_EXT_LEN_OFFSET + 8]
+                .try_into()
+                .map_err(|_| libc::EINVAL)?,
+        );
+
+        if orig_start.checked_add(len).is_none() || donor_start.checked_add(len).is_none() {
+            return Err(libc::EINVAL);
+        }
+
+        Ok((donor_fd, orig_start, donor_start, len))
+    }
+
     fn parse_inode_flags(in_data: &[u8]) -> Result<u32, c_int> {
         if in_data.len() < std::mem::size_of::<u32>() {
             return Err(libc::EINVAL);
@@ -1114,6 +1165,27 @@ impl FrankenFuse {
         response
     }
 
+    fn encode_move_ext_response(
+        donor_fd: u32,
+        orig_start: u64,
+        donor_start: u64,
+        len: u64,
+        moved_len: u64,
+    ) -> Vec<u8> {
+        let mut response = vec![0_u8; MOVE_EXT_SIZE];
+        response[MOVE_EXT_DONOR_FD_OFFSET..MOVE_EXT_DONOR_FD_OFFSET + 4]
+            .copy_from_slice(&donor_fd.to_ne_bytes());
+        response[MOVE_EXT_ORIG_START_OFFSET..MOVE_EXT_ORIG_START_OFFSET + 8]
+            .copy_from_slice(&orig_start.to_ne_bytes());
+        response[MOVE_EXT_DONOR_START_OFFSET..MOVE_EXT_DONOR_START_OFFSET + 8]
+            .copy_from_slice(&donor_start.to_ne_bytes());
+        response[MOVE_EXT_LEN_OFFSET..MOVE_EXT_LEN_OFFSET + 8].copy_from_slice(&len.to_ne_bytes());
+        response[MOVE_EXT_MOVED_LEN_OFFSET..MOVE_EXT_MOVED_LEN_OFFSET + 8]
+            .copy_from_slice(&moved_len.to_ne_bytes());
+        response
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn dispatch_ioctl(
         &self,
         ino: u64,
@@ -1212,6 +1284,43 @@ impl FrankenFuse {
                     Ok(())
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_MOVE_EXT => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if out_size < u32::try_from(MOVE_EXT_SIZE).unwrap_or(u32::MAX) {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let (donor_fd, orig_start, donor_start, len) =
+                    match Self::parse_move_ext_request(in_data) {
+                        Ok(request) => request,
+                        Err(errno) => return IoctlResult::Error(errno),
+                    };
+
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    let moved_len = self.inner.ops.move_ext(
+                        cx,
+                        scope,
+                        InodeNumber(ino),
+                        donor_fd,
+                        orig_start,
+                        donor_start,
+                        len,
+                    )?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(moved_len)
+                }) {
+                    Ok(moved_len) => IoctlResult::Data(Self::encode_move_ext_response(
+                        donor_fd,
+                        orig_start,
+                        donor_start,
+                        len,
+                        moved_len,
+                    )),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -3157,6 +3266,7 @@ mod tests {
         Fsync(InodeNumber, u64, bool),
         GetFlags(InodeNumber),
         GetVersion(InodeNumber),
+        MoveExt(InodeNumber, u32, u64, u64, u64),
         SetFlags(InodeNumber, u32),
         Commit,
         End(RequestOp),
@@ -3165,6 +3275,7 @@ mod tests {
     struct IoctlRecordingFs {
         flags: u32,
         generation: u32,
+        move_ext_result: Option<u64>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
     }
 
@@ -3173,6 +3284,7 @@ mod tests {
             Self {
                 flags,
                 generation: 0,
+                move_ext_result: None,
                 calls,
             }
         }
@@ -3181,6 +3293,16 @@ mod tests {
             Self {
                 flags,
                 generation,
+                move_ext_result: None,
+                calls,
+            }
+        }
+
+        fn with_move_ext_result(moved_len: u64, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            Self {
+                flags: 0,
+                generation: 0,
+                move_ext_result: Some(moved_len),
                 calls,
             }
         }
@@ -3313,6 +3435,29 @@ mod tests {
                 .expect("lock ioctl calls")
                 .push(IoctlCall::SetFlags(ino, flags));
             Ok(())
+        }
+
+        fn move_ext(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            donor_fd: u32,
+            orig_start: u64,
+            donor_start: u64,
+            len: u64,
+        ) -> ffs_error::Result<u64> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::MoveExt(
+                    ino,
+                    donor_fd,
+                    orig_start,
+                    donor_start,
+                    len,
+                ));
+            Ok(self.move_ext_result.unwrap_or(len))
         }
 
         fn begin_request_scope(&self, _cx: &Cx, op: RequestOp) -> ffs_error::Result<RequestScope> {
@@ -3491,6 +3636,154 @@ mod tests {
             &[
                 IoctlCall::Begin(RequestOp::IoctlWrite),
                 IoctlCall::SetFlags(InodeNumber(9), 0x42),
+                IoctlCall::Commit,
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_read_only_mount() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+        let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+
+        let response = fuse.dispatch_ioctl(
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EROFS));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_too_short_payload() {
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
+            &options,
+        );
+
+        let response = fuse.dispatch_ioctl(5, 0, EXT4_IOC_MOVE_EXT, &[0_u8; 16], 40);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_nonzero_reserved_field() {
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
+            &options,
+        );
+        let mut request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+        request[MOVE_EXT_RESERVED_OFFSET..MOVE_EXT_RESERVED_OFFSET + 4]
+            .copy_from_slice(&1_u32.to_ne_bytes());
+
+        let response = fuse.dispatch_ioctl(
+            5,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_overflowing_ranges() {
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
+            &options,
+        );
+
+        let request = FrankenFuse::encode_move_ext_response(7, u64::MAX, 22, 1, 0);
+        let response = fuse.dispatch_ioctl(
+            5,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+
+        let request = FrankenFuse::encode_move_ext_response(7, 11, u64::MAX, 1, 0);
+        let response = fuse.dispatch_ioctl(
+            5,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_too_small_output_buffer() {
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
+            &options,
+        );
+        let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+
+        let response = fuse.dispatch_ioctl(
+            5,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE - 1).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_routes_to_fsops_and_commits() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_result(
+                21,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+
+        let response = fuse.dispatch_ioctl(
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(
+            response,
+            IoctlResult::Data(FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 21))
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::MoveExt(InodeNumber(9), 7, 11, 22, 33),
                 IoctlCall::Commit,
                 IoctlCall::End(RequestOp::IoctlWrite),
             ]

@@ -733,6 +733,28 @@ pub trait FsOps: Send + Sync {
         Err(FfsError::ReadOnly)
     }
 
+    /// Move extents between files (ext4 `EXT4_IOC_MOVE_EXT`).
+    ///
+    /// `donor_fd` is the userspace donor file descriptor carried by the ioctl
+    /// request. `orig_start`, `donor_start`, and `len` are block-based ranges
+    /// matching Linux's `struct move_extent`. Implementations that do not
+    /// support online defragmentation may return `UnsupportedFeature`.
+    #[allow(clippy::too_many_arguments)]
+    fn move_ext(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _donor_fd: u32,
+        _orig_start: u64,
+        _donor_start: u64,
+        _len: u64,
+    ) -> ffs_error::Result<u64> {
+        Err(FfsError::UnsupportedFeature(
+            "move_ext is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set inode attributes. Returns updated attributes.
     fn setattr(
         &self,
