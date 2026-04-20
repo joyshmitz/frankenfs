@@ -2016,6 +2016,45 @@ mod tests {
         dev.write_block(&cx, pctx.gdt_block, &buf).unwrap();
     }
 
+    fn assert_group_bitmap_checksums_valid(
+        cx: &Cx,
+        dev: &MemBlockDevice,
+        groups: &[GroupStats],
+        pctx: &PersistCtx,
+        group: GroupNumber,
+    ) {
+        let ds = usize::from(pctx.desc_size);
+        let descs_per_block = dev.block_size() as usize / ds;
+        let gdt_block_idx = group.0 as usize / descs_per_block;
+        let offset_in_block = (group.0 as usize % descs_per_block) * ds;
+        let gdt_raw = dev
+            .read_block(cx, BlockNumber(pctx.gdt_block.0 + gdt_block_idx as u64))
+            .unwrap();
+        let gd =
+            Ext4GroupDesc::parse_from_bytes(&gdt_raw.as_slice()[offset_in_block..], pctx.desc_size)
+                .unwrap();
+        let stats = &groups[group.0 as usize];
+        let block_bitmap = dev.read_block(cx, stats.block_bitmap_block).unwrap();
+        let inode_bitmap = dev.read_block(cx, stats.inode_bitmap_block).unwrap();
+
+        ffs_ondisk::ext4::verify_block_bitmap_checksum(
+            block_bitmap.as_slice(),
+            pctx.csum_seed,
+            pctx.blocks_per_group,
+            &gd,
+            pctx.desc_size,
+        )
+        .unwrap();
+        ffs_ondisk::ext4::verify_inode_bitmap_checksum(
+            inode_bitmap.as_slice(),
+            pctx.csum_seed,
+            pctx.inodes_per_group,
+            &gd,
+            pctx.desc_size,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn alloc_persist_skips_reserved_and_updates_gdt() {
         let cx = test_cx();
@@ -2184,6 +2223,63 @@ mod tests {
         let gdt_raw = dev.read_block(&cx, pctx.gdt_block).unwrap();
         let gd = Ext4GroupDesc::parse_from_bytes(gdt_raw.as_slice(), pctx.desc_size).unwrap();
         assert_eq!(gd.free_blocks_count, original_free);
+    }
+
+    #[test]
+    fn alloc_and_free_persist_keep_bitmap_checksums_in_sync() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut geo = make_geometry();
+        geo.desc_size = 64;
+        let mut groups = make_groups(&geo);
+        let pctx = PersistCtx {
+            gdt_block: BlockNumber(50),
+            desc_size: 64,
+            has_metadata_csum: true,
+            csum_seed: 0x1357_2468,
+            uuid: [0x5A; 16],
+            group_desc_checksum_kind: ffs_ondisk::ext4::Ext4GroupDescChecksumKind::MetadataCsum,
+            blocks_per_group: geo.blocks_per_group,
+            inodes_per_group: geo.inodes_per_group,
+        };
+        seed_gdt_block(&dev, &pctx, &groups);
+
+        let first = alloc_blocks_persist(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            2,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+        assert_group_bitmap_checksums_valid(&cx, &dev, &groups, &pctx, GroupNumber(0));
+
+        free_blocks_persist(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            first.start,
+            first.count,
+            &pctx,
+        )
+        .unwrap();
+        assert_group_bitmap_checksums_valid(&cx, &dev, &groups, &pctx, GroupNumber(0));
+
+        let second = alloc_blocks_persist(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            3,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+        assert_eq!(second.count, 3);
+        assert_group_bitmap_checksums_valid(&cx, &dev, &groups, &pctx, GroupNumber(0));
     }
 
     // ── bd-1xe.5: ext4 read path allocator bitmap tests ─────────────────
