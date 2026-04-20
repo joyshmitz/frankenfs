@@ -14255,6 +14255,11 @@ impl FsOps for OpenFs {
                 if !inode.is_symlink() {
                     return Err(FfsError::Format("not a symlink".into()));
                 }
+                if inode.is_encrypted() {
+                    return Err(FfsError::UnsupportedFeature(
+                        "encrypted symlink target requires fscrypt context".into(),
+                    ));
+                }
 
                 if inode.size <= 60 {
                     // Fast symlink: data is stored directly in the inode's block field.
@@ -24167,6 +24172,52 @@ mod tests {
                 .map(DirEntry::name_str)
                 .any(|n| n == "fast_sym")
         );
+    }
+
+    #[test]
+    fn write_symlink_readlink_rejects_encrypted_targets() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let slow_target = "/var/lib/frankenfs/some/really/long/path/that/exceeds/sixty/bytes/for/slow/symlink-target.txt";
+
+        let fast = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("enc_fast"),
+                Path::new("hello.txt"),
+                0,
+                0,
+            )
+            .expect("create fast symlink");
+        let slow = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::new("enc_slow"),
+                Path::new(slow_target),
+                0,
+                0,
+            )
+            .expect("create slow symlink");
+
+        for (label, ino) in [("fast", fast.ino), ("slow", slow.ino)] {
+            let mut inode = fs.read_inode(&cx, ino).expect("read test symlink inode");
+            inode.flags |= 0x0000_0800;
+            persist_ext4_test_inode(&fs, &cx, ino, &inode);
+
+            let err = fs
+                .readlink(&cx, ino)
+                .expect_err("encrypted symlink should require fscrypt context");
+            assert!(
+                matches!(err, FfsError::UnsupportedFeature(_)),
+                "expected UnsupportedFeature for {label} symlink, got {err:?}"
+            );
+            assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
+        }
     }
 
     #[test]

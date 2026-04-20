@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 
 const EXT4_EXTENT_MAGIC: u16 = 0xF30A;
 pub const EXT_INIT_MAX_LEN: u16 = 1_u16 << 15;
+// This i_flags bit is historically aliased with the old compression namespace.
+// Modern ext4 uses it as FS_ENCRYPT_FL / EXT4_ENCRYPT_FL on encrypted inodes.
+const EXT4_ENCRYPT_INODE_FL: u32 = 0x0000_0800;
 
 /// Match the Linux kernel's `ext4_chksum()` / `crc32c_le()` convention.
 ///
@@ -2443,6 +2446,12 @@ impl Ext4Inode {
         (self.flags & EXT4_INDEX_FL) != 0
     }
 
+    /// Whether this inode is marked encrypted via ext4's `i_flags` bit.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        (self.flags & EXT4_ENCRYPT_INODE_FL) != 0
+    }
+
     // ── File type detection ─────────────────────────────────────────────
 
     /// Extract the file type bits from the mode field.
@@ -3851,6 +3860,12 @@ impl Ext4ImageReader {
             return Err(ParseError::InvalidField {
                 field: "i_mode",
                 reason: "inode is not a symlink",
+            });
+        }
+        if inode.is_encrypted() {
+            return Err(ParseError::InvalidField {
+                field: "i_flags",
+                reason: "encrypted symlink target requires fscrypt context",
             });
         }
 
@@ -7518,6 +7533,16 @@ mod tests {
         image
     }
 
+    fn set_test_inode_flag(image: &mut [u8], ino: u32, flag: u32) {
+        let inode_size = 256_usize;
+        let itable_off = 2 * 4096_usize;
+        let flags_off = itable_off + (ino as usize - 1) * inode_size + 0x20;
+        let mut raw = [0_u8; 4];
+        raw.copy_from_slice(&image[flags_off..flags_off + 4]);
+        let flags = u32::from_le_bytes(raw) | flag;
+        image[flags_off..flags_off + 4].copy_from_slice(&flags.to_le_bytes());
+    }
+
     #[test]
     fn fast_symlink_detection_and_reading() {
         let image = build_symlink_test_image();
@@ -7564,6 +7589,44 @@ mod tests {
             .read_inode(&image, ffs_types::InodeNumber(11))
             .unwrap();
         assert!(reader.read_symlink(&image, &hello).is_err());
+    }
+
+    #[test]
+    fn read_symlink_rejects_encrypted_fast_symlink() {
+        let mut image = build_symlink_test_image();
+        set_test_inode_flag(&mut image, 14, EXT4_ENCRYPT_INODE_FL);
+        let reader = Ext4ImageReader::new(&image).unwrap();
+
+        let link_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(14))
+            .unwrap();
+        let err = reader.read_symlink(&image, &link_inode).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "i_flags",
+                reason
+            } if reason.contains("fscrypt context")
+        ));
+    }
+
+    #[test]
+    fn read_symlink_rejects_encrypted_extent_symlink() {
+        let mut image = build_symlink_test_image();
+        set_test_inode_flag(&mut image, 15, EXT4_ENCRYPT_INODE_FL);
+        let reader = Ext4ImageReader::new(&image).unwrap();
+
+        let link_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(15))
+            .unwrap();
+        let err = reader.read_symlink(&image, &link_inode).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "i_flags",
+                reason
+            } if reason.contains("fscrypt context")
+        ));
     }
 
     #[test]
