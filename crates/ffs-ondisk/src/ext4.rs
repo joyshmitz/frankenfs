@@ -2817,7 +2817,8 @@ pub fn lookup_in_dir_block(
 /// Case-insensitive directory entry lookup for casefold directories.
 ///
 /// Compares entry names against `target` using Unicode case-insensitive
-/// matching (lowercase comparison of UTF-8 strings). Falls back to
+/// matching (a small clean-room casefold approximation for UTF-8 strings).
+/// Falls back to
 /// byte-level comparison for non-UTF-8 filenames.
 ///
 /// Returns `Err` if the block data is corrupt and cannot be parsed.
@@ -2835,8 +2836,10 @@ pub fn lookup_in_dir_block_casefold(
 
 /// Apply Unicode casefold to a filename for case-insensitive comparison.
 ///
-/// Converts UTF-8 filenames to lowercase. Non-UTF-8 filenames are compared
-/// byte-by-byte with ASCII case folding only.
+/// Converts UTF-8 filenames to a canonical comparison form. This intentionally
+/// covers the multi-code-point sharp-s fold (`ß`/`ẞ` -> `ss`) that ext4
+/// casefold directories rely on for stable case-insensitive lookup. Non-UTF-8
+/// filenames are compared byte-by-byte with ASCII case folding only.
 fn casefold_name(name: &[u8]) -> Vec<u8> {
     std::str::from_utf8(name).map_or_else(
         |_| {
@@ -2851,7 +2854,16 @@ fn casefold_name(name: &[u8]) -> Vec<u8> {
                 })
                 .collect()
         },
-        |s| s.to_lowercase().into_bytes(),
+        |s| {
+            let mut folded = String::with_capacity(s.len());
+            for ch in s.chars() {
+                match ch {
+                    'ß' | 'ẞ' => folded.push_str("ss"),
+                    _ => folded.extend(ch.to_lowercase()),
+                }
+            }
+            folded.into_bytes()
+        },
     )
 }
 
@@ -5783,6 +5795,29 @@ mod tests {
         // Completely different name doesn't match
         let not_found = lookup_in_dir_block_casefold(&block, block_size, b"other.txt").unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn lookup_in_dir_block_casefold_matches_sharp_s_expansion() {
+        let block_size = 4096_u32;
+        let mut block = vec![0_u8; block_size as usize];
+
+        write_dir_entry(&mut block, 0, 2, 2, b".", 12);
+        write_dir_entry(&mut block, 12, 2, 2, b"..", 12);
+        let remaining = u16::try_from(block_size).unwrap() - 24;
+        write_dir_entry(&mut block, 24, 77, 1, "Straße.TXT".as_bytes(), remaining);
+
+        let found = lookup_in_dir_block_casefold(&block, block_size, b"STRASSE.txt").unwrap();
+        assert!(
+            found.is_some(),
+            "ext4 casefold lookup should match sharp-s expansion"
+        );
+        assert_eq!(found.unwrap().inode, 77);
+
+        let found_upper_sharp_s =
+            lookup_in_dir_block_casefold(&block, block_size, "STRAẞE.txt".as_bytes()).unwrap();
+        assert!(found_upper_sharp_s.is_some());
+        assert_eq!(found_upper_sharp_s.unwrap().inode, 77);
     }
 
     #[test]
