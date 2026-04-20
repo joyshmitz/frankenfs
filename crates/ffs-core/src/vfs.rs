@@ -705,6 +705,20 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get ext4 inode generation (`EXT4_IOC_GETVERSION`).
+    ///
+    /// Returns the raw `i_generation` field for the given inode.
+    fn get_inode_generation(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        Err(FfsError::UnsupportedFeature(
+            "get_inode_generation is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate

@@ -61,6 +61,11 @@ const FIEMAP_SUPPORTED_FLAGS: u32 = FIEMAP_FLAG_SYNC;
 /// Linux FUSE fileattr plumbing still transfers these flags as `u32`
 /// buffers, so the FUSE handler must not assume an 8-byte payload.
 const EXT4_IOC_GETFLAGS: u32 = 0x8008_6601;
+/// `EXT4_IOC_GETVERSION` = `_IOR('f', 3, long)` on x86_64.
+///
+/// The ext4 generation value is likewise surfaced through a `u32` payload in
+/// the FUSE fileattr path.
+const EXT4_IOC_GETVERSION: u32 = 0x8008_6603;
 /// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 const FIEMAP_START_OFFSET: usize = 0;
@@ -638,6 +643,7 @@ enum IoctlTraceMsg {
     /// messages, then signals on the supplied reply channel.  Used by tests
     /// (and any caller that needs a happens-before guarantee for an external
     /// reader of the trace file).
+    #[cfg_attr(not(test), allow(dead_code))]
     Flush(SyncSender<()>),
 }
 
@@ -700,6 +706,7 @@ impl IoctlTraceProbe {
     /// Round-trip a `Flush` barrier through the writer thread.  When this
     /// returns, all previously enqueued `Record` messages have been written
     /// to the trace file (visible to any same-process reader).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn flush_sync(&self) -> std::io::Result<()> {
         let sender = self.sender.as_ref().ok_or_else(|| {
             std::io::Error::new(
@@ -721,7 +728,6 @@ impl IoctlTraceProbe {
             )
         })
     }
-
 }
 
 impl Drop for IoctlTraceProbe {
@@ -781,9 +787,8 @@ fn ioctl_trace_writer_loop(path: &Path, receiver: &Receiver<IoctlTraceMsg>) {
                 in_len,
                 out_size,
             } => {
-                let line = format!(
-                    "ino={ino} cmd=0x{cmd:08x} in_len={in_len} out_size={out_size}\n"
-                );
+                let line =
+                    format!("ino={ino} cmd=0x{cmd:08x} in_len={in_len} out_size={out_size}\n");
                 if let Err(error) = file.write_all(line.as_bytes()) {
                     warn!(path = %path.display(), %error, "ioctl trace write failed");
                 }
@@ -851,10 +856,7 @@ impl FrankenFuse {
                 metrics: Arc::new(AtomicMetrics::new()),
                 thread_count,
                 read_only: options.read_only,
-                ioctl_trace: options
-                    .ioctl_trace_path
-                    .clone()
-                    .map(IoctlTraceProbe::new),
+                ioctl_trace: options.ioctl_trace_path.clone().map(IoctlTraceProbe::new),
                 backpressure: None,
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
@@ -877,10 +879,7 @@ impl FrankenFuse {
                 metrics: Arc::new(AtomicMetrics::new()),
                 thread_count,
                 read_only: options.read_only,
-                ioctl_trace: options
-                    .ioctl_trace_path
-                    .clone()
-                    .map(IoctlTraceProbe::new),
+                ioctl_trace: options.ioctl_trace_path.clone().map(IoctlTraceProbe::new),
                 backpressure: Some(gate),
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
@@ -1178,6 +1177,20 @@ impl FrankenFuse {
                     self.inner.ops.get_inode_flags(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(flags) => IoctlResult::Data(flags.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_GETVERSION => {
+                if out_size < u32::try_from(std::mem::size_of::<u32>()).unwrap_or(u32::MAX) {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner
+                        .ops
+                        .get_inode_generation(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok(generation) => IoctlResult::Data(generation.to_ne_bytes().to_vec()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -3143,6 +3156,7 @@ mod tests {
         Fiemap(InodeNumber, u64, u64),
         Fsync(InodeNumber, u64, bool),
         GetFlags(InodeNumber),
+        GetVersion(InodeNumber),
         SetFlags(InodeNumber, u32),
         Commit,
         End(RequestOp),
@@ -3150,12 +3164,25 @@ mod tests {
 
     struct IoctlRecordingFs {
         flags: u32,
+        generation: u32,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
     }
 
     impl IoctlRecordingFs {
         fn new(flags: u32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
-            Self { flags, calls }
+            Self {
+                flags,
+                generation: 0,
+                calls,
+            }
+        }
+
+        fn with_generation(flags: u32, generation: u32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            Self {
+                flags,
+                generation,
+                calls,
+            }
         }
     }
 
@@ -3229,6 +3256,19 @@ mod tests {
                 .expect("lock ioctl calls")
                 .push(IoctlCall::GetFlags(ino));
             Ok(self.flags)
+        }
+
+        fn get_inode_generation(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<u32> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetVersion(ino));
+            Ok(self.generation)
         }
 
         fn fiemap(
@@ -3344,6 +3384,50 @@ mod tests {
         )));
 
         let response = fuse.dispatch_ioctl(11, 0, EXT4_IOC_GETFLAGS, &[], 3);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_getversion_encodes_u32_response_for_inode_generation() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_generation(
+            0,
+            0xDEAD_BEEF,
+            Arc::clone(&calls),
+        )));
+
+        let response = fuse.dispatch_ioctl(11, 0, EXT4_IOC_GETVERSION, &[], 4);
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected ioctl data response"
+        );
+        let IoctlResult::Data(bytes) = response else {
+            unreachable!("asserted IoctlResult::Data above");
+        };
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(
+            u32::from_ne_bytes(bytes.try_into().expect("4-byte ioctl payload")),
+            0xDEAD_BEEF_u32
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetVersion(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getversion_rejects_too_small_output_buffer() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_generation(
+            0,
+            7,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+
+        let response = fuse.dispatch_ioctl(11, 0, EXT4_IOC_GETVERSION, &[], 3);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
     }
 
@@ -3555,10 +3639,7 @@ mod tests {
             ..MountOptions::default()
         };
         let fuse = Arc::new(FrankenFuse::with_options(
-            Box::new(IoctlRecordingFs::new(
-                0,
-                Arc::new(Mutex::new(Vec::new())),
-            )),
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
             &options,
         ));
 

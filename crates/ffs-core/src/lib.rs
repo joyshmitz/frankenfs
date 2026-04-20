@@ -14693,6 +14693,24 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_inode_generation(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let inode =
+                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                Ok(inode.generation)
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "get_inode_generation is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
     fn set_inode_flags(
         &self,
         cx: &Cx,
@@ -18335,6 +18353,22 @@ mod tests {
             .get_inode_flags(&cx, &mut scope, InodeNumber(11))
             .unwrap();
         assert_ne!(flags & ffs_types::EXT4_EXTENTS_FL, 0);
+    }
+
+    #[test]
+    fn get_inode_generation_returns_ext4_generation() {
+        let mut image = build_ext4_image_with_extents();
+        let ino11_off: usize = 4 * 4096 + 10 * 256;
+        image[ino11_off + 0x64..ino11_off + 0x68].copy_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let mut scope = RequestScope::empty();
+        let generation = fs
+            .get_inode_generation(&cx, &mut scope, InodeNumber(11))
+            .unwrap();
+        assert_eq!(generation, 0xDEAD_BEEF);
     }
 
     #[test]
