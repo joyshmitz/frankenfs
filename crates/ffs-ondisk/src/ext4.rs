@@ -3919,6 +3919,7 @@ impl Ext4Xattr {
             ffs_types::EXT4_XATTR_INDEX_TRUSTED => "trusted.",
             ffs_types::EXT4_XATTR_INDEX_SECURITY => "security.",
             ffs_types::EXT4_XATTR_INDEX_SYSTEM => "system.",
+            ffs_types::EXT4_XATTR_INDEX_RICHACL => "system.richacl",
             _ => "unknown.",
         };
         format!("{prefix}{}", String::from_utf8_lossy(&self.name))
@@ -7468,6 +7469,16 @@ mod tests {
         assert!(matches!(err, ParseError::InvalidMagic { .. }));
     }
 
+    #[test]
+    fn xattr_full_name_maps_richacl_namespace() {
+        let xattr = Ext4Xattr {
+            name_index: ffs_types::EXT4_XATTR_INDEX_RICHACL,
+            name: Vec::new(),
+            value: Vec::new(),
+        };
+        assert_eq!(xattr.full_name(), "system.richacl");
+    }
+
     // ── DX hash function tests ──────────────────────────────────────────
 
     #[test]
@@ -10008,7 +10019,7 @@ mod tests {
             let full = xattr.full_name();
             let valid_prefixes = [
                 "user.", "system.posix_acl_access", "system.posix_acl_default",
-                "trusted.", "security.", "system.", "unknown.",
+                "trusted.", "security.", "system.", "system.richacl", "unknown.",
             ];
             prop_assert!(
                 valid_prefixes.iter().any(|p| full.starts_with(p)),

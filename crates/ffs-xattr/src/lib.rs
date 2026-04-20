@@ -9,8 +9,8 @@ use ffs_error::{FfsError, Result};
 use ffs_ondisk::{Ext4Inode, Ext4Xattr, parse_ibody_xattrs, parse_xattr_block};
 use ffs_types::{
     EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
-    EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_SYSTEM, EXT4_XATTR_INDEX_TRUSTED,
-    EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC, ParseError,
+    EXT4_XATTR_INDEX_RICHACL, EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_SYSTEM,
+    EXT4_XATTR_INDEX_TRUSTED, EXT4_XATTR_INDEX_USER, EXT4_XATTR_MAGIC, ParseError,
 };
 
 const INLINE_HEADER_LEN: usize = 4;
@@ -279,6 +279,9 @@ fn ext4_name_index_from_full_name(full_name: &str) -> Result<(u8, Vec<u8>)> {
     if full_name == "system.posix_acl_default" {
         return Ok((EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT, Vec::new()));
     }
+    if full_name == "system.richacl" {
+        return Ok((EXT4_XATTR_INDEX_RICHACL, Vec::new()));
+    }
 
     if let Some(name) = full_name.strip_prefix("system.") {
         if name.is_empty() {
@@ -315,6 +318,7 @@ fn check_write_permissions(name_index: u8, access: XattrWriteAccess) -> Result<(
         EXT4_XATTR_INDEX_TRUSTED
         | EXT4_XATTR_INDEX_SECURITY
         | EXT4_XATTR_INDEX_SYSTEM
+        | EXT4_XATTR_INDEX_RICHACL
         | EXT4_XATTR_INDEX_POSIX_ACL_ACCESS
         | EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT => {
             if access.has_cap_sys_admin {
@@ -739,6 +743,10 @@ mod tests {
             parse_xattr_name("system.posix_acl_default").unwrap();
         assert_eq!(idx_acl_default, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT);
         assert!(name_acl_default.is_empty());
+
+        let (idx_richacl, name_richacl) = parse_xattr_name("system.richacl").unwrap();
+        assert_eq!(idx_richacl, EXT4_XATTR_INDEX_RICHACL);
+        assert!(name_richacl.is_empty());
     }
 
     #[test]
@@ -2125,6 +2133,22 @@ mod tests {
 
         let val = get_xattr(&inode, None, "system.custom_attr").unwrap();
         assert_eq!(val, Some(b"val".to_vec()));
+    }
+
+    #[test]
+    fn richacl_xattr_allowed_for_sys_admin() {
+        let mut inode = make_inode(128);
+        let admin = XattrWriteAccess {
+            is_owner: false,
+            has_cap_fowner: false,
+            has_cap_sys_admin: true,
+        };
+
+        let stored = set_xattr(&mut inode, None, "system.richacl", b"acl", admin).unwrap();
+        assert_eq!(stored, XattrStorage::Inline);
+
+        let val = get_xattr(&inode, None, "system.richacl").unwrap();
+        assert_eq!(val, Some(b"acl".to_vec()));
     }
 
     #[test]
