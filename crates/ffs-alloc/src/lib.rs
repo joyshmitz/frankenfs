@@ -250,6 +250,7 @@ pub struct FsGeometry {
     pub inode_size: u16,
     pub desc_size: u16,
     pub reserved_gdt_blocks: u16,
+    pub first_meta_bg: u32,
     pub feature_compat: ffs_ondisk::Ext4CompatFeatures,
     pub feature_incompat: ffs_ondisk::Ext4IncompatFeatures,
     pub feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures,
@@ -290,6 +291,7 @@ impl FsGeometry {
             inode_size: sb.inode_size,
             desc_size: sb.group_desc_size(),
             reserved_gdt_blocks: sb.reserved_gdt_blocks,
+            first_meta_bg: sb.first_meta_bg,
             feature_compat: sb.feature_compat,
             feature_incompat: sb.feature_incompat,
             feature_ro_compat: sb.feature_ro_compat,
@@ -349,13 +351,34 @@ impl FsGeometry {
     }
 
     #[must_use]
+    pub fn reserved_gdt_blocks_in_group(&self, group: GroupNumber) -> u32 {
+        if self.feature_compat.0 & ffs_ondisk::Ext4CompatFeatures::RESIZE_INODE.0 == 0
+            || !self.has_backup_superblock(group)
+        {
+            return 0;
+        }
+        if self.feature_incompat.0 & ffs_ondisk::Ext4IncompatFeatures::META_BG.0 != 0
+            && group.0 >= self.first_meta_bg
+        {
+            return 0;
+        }
+        u32::from(self.reserved_gdt_blocks)
+    }
+
+    #[must_use]
     pub fn base_meta_blocks_in_group(&self, group: GroupNumber) -> u32 {
         if !self.has_backup_superblock(group) {
             return 0;
         }
-        1_u32
-            .saturating_add(self.gdt_blocks_count())
-            .saturating_add(u32::from(self.reserved_gdt_blocks))
+        let mut blocks = 1_u32; // superblock copy
+        if self.feature_incompat.0 & ffs_ondisk::Ext4IncompatFeatures::META_BG.0 == 0
+            || group.0 < self.first_meta_bg
+        {
+            blocks = blocks
+                .saturating_add(self.gdt_blocks_count())
+                .saturating_add(self.reserved_gdt_blocks_in_group(group));
+        }
+        blocks
     }
 
     /// Number of blocks in a specific group (last group may be shorter).
@@ -1617,6 +1640,7 @@ mod tests {
             inode_size: 256,
             desc_size: 32,
             reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
             feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
@@ -2621,6 +2645,7 @@ mod tests {
             inode_size: 256,
             desc_size: 32,
             reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
             feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
@@ -2650,6 +2675,7 @@ mod tests {
             inode_size: 256,
             desc_size: 32,
             reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
             feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
@@ -2683,6 +2709,7 @@ mod tests {
             group_count: u32::MAX,
             desc_size: 32,
             reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
             feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
@@ -2762,6 +2789,7 @@ mod tests {
             inode_size: 256,
             desc_size: 32,
             reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
             feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
@@ -2799,6 +2827,7 @@ mod tests {
             inode_size: 256,
             desc_size: 32,
             reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
             feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
@@ -2906,6 +2935,7 @@ mod tests {
             inode_size: 256,
             desc_size: 32,
             reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
             feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
@@ -2981,8 +3011,10 @@ mod tests {
     #[test]
     fn reserved_blocks_include_backup_super_and_gdt_for_sparse_super2() {
         let mut geo = make_geometry();
-        geo.feature_compat =
-            ffs_ondisk::Ext4CompatFeatures(ffs_ondisk::Ext4CompatFeatures::SPARSE_SUPER2.0);
+        geo.feature_compat = ffs_ondisk::Ext4CompatFeatures(
+            ffs_ondisk::Ext4CompatFeatures::SPARSE_SUPER2.0
+                | ffs_ondisk::Ext4CompatFeatures::RESIZE_INODE.0,
+        );
         geo.backup_bgs = [2, 0];
         geo.reserved_gdt_blocks = 2;
         let groups = make_groups(&geo);
@@ -2998,6 +3030,62 @@ mod tests {
         assert!(
             reserved.contains(&2),
             "reserved GDT block should reserve rel block 2"
+        );
+    }
+
+    #[test]
+    fn reserved_blocks_skip_reserved_gdt_after_first_meta_bg() {
+        let mut geo = make_geometry();
+        geo.feature_compat =
+            ffs_ondisk::Ext4CompatFeatures(ffs_ondisk::Ext4CompatFeatures::RESIZE_INODE.0);
+        geo.feature_incompat =
+            ffs_ondisk::Ext4IncompatFeatures(ffs_ondisk::Ext4IncompatFeatures::META_BG.0);
+        geo.first_meta_bg = 2;
+        geo.reserved_gdt_blocks = 2;
+        geo.group_count = 4;
+        geo.total_blocks = u64::from(geo.blocks_per_group) * u64::from(geo.group_count);
+        let mut groups = make_groups(&geo);
+        for group in [GroupNumber(1), GroupNumber(3)] {
+            let gidx = group.0 as usize;
+            groups[gidx].block_bitmap_block = geo.group_block_to_absolute(group, 100);
+            groups[gidx].inode_bitmap_block = geo.group_block_to_absolute(group, 101);
+            groups[gidx].inode_table_block = geo.group_block_to_absolute(group, 102);
+        }
+
+        let early_reserved = reserved_blocks_in_group(&geo, &groups, GroupNumber(1));
+        assert!(
+            early_reserved.contains(&0),
+            "backup superblock copy should remain reserved"
+        );
+        assert!(
+            early_reserved.contains(&1),
+            "early META_BG groups still carry backup GDT blocks"
+        );
+        assert!(
+            early_reserved.contains(&2),
+            "early META_BG groups still reserve resize GDT slots"
+        );
+        assert!(
+            early_reserved.contains(&3),
+            "early META_BG groups still reserve all backup-GDT prefix blocks"
+        );
+
+        let late_reserved = reserved_blocks_in_group(&geo, &groups, GroupNumber(3));
+        assert!(
+            late_reserved.contains(&0),
+            "backup superblock copy should remain reserved"
+        );
+        assert!(
+            !late_reserved.contains(&1),
+            "groups at or after first_meta_bg must not reserve contiguous backup GDT blocks",
+        );
+        assert!(
+            !late_reserved.contains(&2),
+            "groups at or after first_meta_bg must not reserve resize GDT slots",
+        );
+        assert!(
+            !late_reserved.contains(&3),
+            "groups at or after first_meta_bg must not reserve backup-GDT prefix blocks",
         );
     }
 
@@ -3069,6 +3157,7 @@ mod tests {
             inode_size: 256,
             desc_size: 32,
             reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
             feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
             feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
@@ -3614,6 +3703,7 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
                 inode_size: 256,
                 desc_size: 32,
                 reserved_gdt_blocks: 0,
+                first_meta_bg: 0,
                 feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
                 feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
                 feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),

@@ -37,6 +37,8 @@ pub const EXT4_VALID_FS: u16 = 0x0001;
 pub const EXT4_ERROR_FS: u16 = 0x0002;
 /// Filesystem is being recovered from an orphan list.
 pub const EXT4_ORPHAN_FS: u16 = 0x0004;
+/// Reserved inode used by ext4 online resize to track non-contiguous GDT growth.
+pub const EXT4_RESIZE_INO: u32 = 7;
 pub const EXT4_MMP_MAGIC: u32 = 0x004D_4D50;
 pub const EXT4_MMP_SEQ_CLEAN: u32 = 0xFF4D_4D50;
 pub const EXT4_MMP_SEQ_FSCK: u32 = 0xE24D_4D50;
@@ -538,6 +540,21 @@ pub struct Ext4Superblock {
     pub checksum: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ext4OnlineResizeGroupAddPlan {
+    pub resize_inode: u32,
+    pub old_groups: u32,
+    pub added_groups: u32,
+    pub new_groups: u32,
+    pub old_group_desc_blocks: u32,
+    pub new_group_desc_blocks: u32,
+    pub added_group_desc_blocks_per_copy: u32,
+    pub reserved_gdt_blocks_per_copy: u32,
+    pub reserved_gdt_blocks_consumed_per_copy: u32,
+    pub reserved_gdt_blocks_remaining_per_copy: u32,
+    pub descriptor_blocks_outside_reserved_window_per_copy: u32,
+}
+
 impl Ext4Superblock {
     /// Parse an ext4 superblock from a 1024-byte superblock region.
     #[expect(clippy::too_many_lines)]
@@ -699,6 +716,16 @@ impl Ext4Superblock {
     #[must_use]
     pub fn has_compat(&self, mask: Ext4CompatFeatures) -> bool {
         (self.feature_compat.0 & mask.0) != 0
+    }
+
+    #[must_use]
+    pub fn has_resize_inode(&self) -> bool {
+        self.has_compat(Ext4CompatFeatures::RESIZE_INODE)
+    }
+
+    #[must_use]
+    pub fn resize_inode_number(&self) -> Option<u32> {
+        self.has_resize_inode().then_some(EXT4_RESIZE_INO)
     }
 
     #[must_use]
@@ -864,12 +891,59 @@ impl Ext4Superblock {
     }
 
     #[must_use]
-    pub fn group_desc_blocks_count(&self) -> u32 {
+    fn group_desc_blocks_for_groups(&self, groups: u32) -> u32 {
         let desc_per_block = self.block_size / u32::from(self.group_desc_size());
         if desc_per_block == 0 {
             return 0;
         }
-        self.groups_count().div_ceil(desc_per_block)
+        groups.div_ceil(desc_per_block)
+    }
+
+    #[must_use]
+    pub fn group_desc_blocks_count(&self) -> u32 {
+        self.group_desc_blocks_for_groups(self.groups_count())
+    }
+
+    #[must_use]
+    pub fn reserved_gdt_blocks_in_group(&self, group: GroupNumber) -> u32 {
+        if !self.has_resize_inode() || !self.has_backup_superblock(group) {
+            return 0;
+        }
+        if self.has_incompat(Ext4IncompatFeatures::META_BG) && group.0 >= self.first_meta_bg {
+            return 0;
+        }
+        u32::from(self.reserved_gdt_blocks)
+    }
+
+    #[must_use]
+    pub fn plan_group_add(&self, added_groups: u32) -> Option<Ext4OnlineResizeGroupAddPlan> {
+        let resize_inode = self.resize_inode_number()?;
+        let old_groups = self.groups_count();
+        let new_groups = old_groups.saturating_add(added_groups);
+        let old_group_desc_blocks = self.group_desc_blocks_for_groups(old_groups);
+        let new_group_desc_blocks = self.group_desc_blocks_for_groups(new_groups);
+        let added_group_desc_blocks_per_copy =
+            new_group_desc_blocks.saturating_sub(old_group_desc_blocks);
+        let reserved_gdt_blocks_per_copy = u32::from(self.reserved_gdt_blocks);
+        let reserved_gdt_blocks_consumed_per_copy =
+            added_group_desc_blocks_per_copy.min(reserved_gdt_blocks_per_copy);
+        let reserved_gdt_blocks_remaining_per_copy =
+            reserved_gdt_blocks_per_copy.saturating_sub(reserved_gdt_blocks_consumed_per_copy);
+
+        Some(Ext4OnlineResizeGroupAddPlan {
+            resize_inode,
+            old_groups,
+            added_groups,
+            new_groups,
+            old_group_desc_blocks,
+            new_group_desc_blocks,
+            added_group_desc_blocks_per_copy,
+            reserved_gdt_blocks_per_copy,
+            reserved_gdt_blocks_consumed_per_copy,
+            reserved_gdt_blocks_remaining_per_copy,
+            descriptor_blocks_outside_reserved_window_per_copy: added_group_desc_blocks_per_copy
+                .saturating_sub(reserved_gdt_blocks_consumed_per_copy),
+        })
     }
 
     #[must_use]
@@ -877,9 +951,13 @@ impl Ext4Superblock {
         if !self.has_backup_superblock(group) {
             return 0;
         }
-        1_u32
-            .saturating_add(self.group_desc_blocks_count())
-            .saturating_add(u32::from(self.reserved_gdt_blocks))
+        let mut blocks = 1_u32; // superblock copy
+        if !self.has_incompat(Ext4IncompatFeatures::META_BG) || group.0 < self.first_meta_bg {
+            blocks = blocks
+                .saturating_add(self.group_desc_blocks_count())
+                .saturating_add(self.reserved_gdt_blocks_in_group(group));
+        }
+        blocks
     }
 
     /// Compute the crc32c checksum seed used for metadata checksums.
@@ -5289,6 +5367,40 @@ mod tests {
         assert_eq!(parsed.backup_bgs, [7, 11]);
         assert_eq!(parsed.checksum_type, 1);
         assert_eq!(parsed.groups_count(), 1);
+    }
+
+    #[test]
+    fn base_meta_blocks_in_group_skips_reserved_gdt_after_first_meta_bg() {
+        let mut sb = make_valid_sb();
+        sb[0x5C..0x60].copy_from_slice(&Ext4CompatFeatures::RESIZE_INODE.0.to_le_bytes());
+        sb[0x60..0x64].copy_from_slice(&Ext4IncompatFeatures::META_BG.0.to_le_bytes());
+        sb[0xCE..0xD0].copy_from_slice(&4_u16.to_le_bytes());
+        sb[0x104..0x108].copy_from_slice(&2_u32.to_le_bytes());
+        sb[0x04..0x08].copy_from_slice(&131_072_u32.to_le_bytes()); // 4 groups at 32k blocks/group
+
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse meta_bg sb");
+        let full_copy_blocks =
+            1 + parsed.group_desc_blocks_count() + u32::from(parsed.reserved_gdt_blocks);
+        assert_eq!(
+            parsed.base_meta_blocks_in_group(GroupNumber(1)),
+            full_copy_blocks
+        );
+        assert_eq!(parsed.base_meta_blocks_in_group(GroupNumber(3)), 1);
+    }
+
+    #[test]
+    fn reserved_gdt_blocks_require_resize_inode_feature() {
+        let mut sb = make_valid_sb();
+        sb[0xCE..0xD0].copy_from_slice(&3_u16.to_le_bytes());
+        sb[0x04..0x08].copy_from_slice(&131_072_u32.to_le_bytes());
+
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse sb");
+        assert_eq!(parsed.reserved_gdt_blocks_in_group(GroupNumber(1)), 0);
+
+        sb[0x5C..0x60].copy_from_slice(&Ext4CompatFeatures::RESIZE_INODE.0.to_le_bytes());
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse resize sb");
+        assert_eq!(parsed.resize_inode_number(), Some(EXT4_RESIZE_INO));
+        assert_eq!(parsed.reserved_gdt_blocks_in_group(GroupNumber(1)), 3);
     }
 
     #[test]

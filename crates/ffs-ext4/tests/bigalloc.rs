@@ -67,6 +67,7 @@ fn make_bigalloc_geometry() -> FsGeometry {
         inode_size: 256,
         desc_size: 32,
         reserved_gdt_blocks: 0,
+        first_meta_bg: 0,
         feature_compat: Ext4CompatFeatures(0),
         feature_incompat: Ext4IncompatFeatures(0),
         feature_ro_compat: Ext4RoCompatFeatures(
