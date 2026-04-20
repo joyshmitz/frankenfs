@@ -3998,7 +3998,7 @@ impl Ext4ImageReader {
             return Ok(Vec::new());
         }
         let entries = &inode.xattr_ibody[4..];
-        parse_xattr_entries(entries, &inode.xattr_ibody)
+        parse_xattr_entries(entries, &inode.xattr_ibody, 4)
     }
 
     /// Read xattrs from an external xattr block (pointed to by `i_file_acl`).
@@ -4030,7 +4030,7 @@ impl Ext4ImageReader {
         // Entries start at byte 32 (after the xattr header). Value offsets are
         // relative to the start of the block, per ext4 spec.
         let entries_region = &block_data[32..];
-        parse_xattr_entries(entries_region, block_data)
+        parse_xattr_entries(entries_region, block_data, 32)
     }
 
     /// Read all xattrs for an inode (inline + external block).
@@ -4233,33 +4233,38 @@ impl Ext4Xattr {
 ///   - padding to 4-byte boundary
 ///
 /// Entry list is terminated by a zero name_len + zero name_index.
-fn parse_xattr_entries(data: &[u8], value_base: &[u8]) -> Result<Vec<Ext4Xattr>, ParseError> {
-    let mut entries = Vec::new();
-    let mut offset = 0_usize;
+fn parse_xattr_entries(
+    data: &[u8],
+    value_base: &[u8],
+    value_offset_base: usize,
+) -> Result<Vec<Ext4Xattr>, ParseError> {
+    struct PendingXattr {
+        name_index: u8,
+        name: Vec<u8>,
+        value_offs: u16,
+        value_size: u32,
+    }
 
-    loop {
-        // Need at least 4 bytes to check terminator and read entry header
+    let mut pending = Vec::new();
+    let mut offset = 0_usize;
+    let entries_region_end = loop {
         if offset + 4 > data.len() {
-            break;
+            break offset;
         }
 
         let name_len = data[offset];
         let name_index = data[offset + 1];
 
-        // Terminator: name_len=0, name_index=0
         if name_len == 0 && name_index == 0 {
-            break;
+            break offset + 4;
         }
 
-        // Full entry header is 16 bytes
         if offset + 16 > data.len() {
-            break;
+            break offset;
         }
 
         let value_offs = read_le_u16(data, offset + 2)?;
-        // e_value_block is at offset + 4
         let value_size = read_le_u32(data, offset + 8)?;
-        // skip hash at offset + 12..16
 
         let name_start = offset + 16;
         let name_end = name_start + usize::from(name_len);
@@ -4269,15 +4274,40 @@ fn parse_xattr_entries(data: &[u8], value_base: &[u8]) -> Result<Vec<Ext4Xattr>,
                 reason: "name extends past data boundary",
             });
         }
-        let name = data[name_start..name_end].to_vec();
 
-        // Read value from value area (offsets are from end of data working backwards)
-        let value = if value_size > 0 {
-            let v_off = usize::from(value_offs);
-            let v_size =
-                usize::try_from(value_size).map_err(|_| ParseError::IntegerConversion {
+        pending.push(PendingXattr {
+            name_index,
+            name: data[name_start..name_end].to_vec(),
+            value_offs,
+            value_size,
+        });
+
+        offset = (name_end + 3) & !3;
+    };
+
+    let min_value_offset =
+        value_offset_base
+            .checked_add(entries_region_end)
+            .ok_or(ParseError::InvalidField {
+                field: "xattr_value",
+                reason: "value offset floor overflow",
+            })?;
+
+    let mut entries = Vec::with_capacity(pending.len());
+    for pending_entry in pending {
+        let value = if pending_entry.value_size > 0 {
+            let v_off = usize::from(pending_entry.value_offs);
+            if v_off < min_value_offset {
+                return Err(ParseError::InvalidField {
+                    field: "xattr_value",
+                    reason: "value overlaps xattr header or entry table",
+                });
+            }
+            let v_size = usize::try_from(pending_entry.value_size).map_err(|_| {
+                ParseError::IntegerConversion {
                     field: "xattr_value_size",
-                })?;
+                }
+            })?;
             let v_end = v_off.checked_add(v_size).ok_or(ParseError::InvalidField {
                 field: "xattr_value",
                 reason: "value extends past data boundary",
@@ -4294,13 +4324,10 @@ fn parse_xattr_entries(data: &[u8], value_base: &[u8]) -> Result<Vec<Ext4Xattr>,
         };
 
         entries.push(Ext4Xattr {
-            name_index,
-            name,
+            name_index: pending_entry.name_index,
+            name: pending_entry.name,
             value,
         });
-
-        // Advance past the entry: header (16) + name_len, padded to 4 bytes
-        offset = (name_end + 3) & !3;
     }
 
     Ok(entries)
@@ -4319,7 +4346,7 @@ pub fn parse_ibody_xattrs(inode: &Ext4Inode) -> Result<Vec<Ext4Xattr>, ParseErro
         return Ok(Vec::new());
     }
     let entries = &inode.xattr_ibody[4..];
-    parse_xattr_entries(entries, &inode.xattr_ibody)
+    parse_xattr_entries(entries, &inode.xattr_ibody, 4)
 }
 
 /// Parse xattrs from an external xattr block (raw block data).
@@ -4341,7 +4368,7 @@ pub fn parse_xattr_block(block_data: &[u8]) -> Result<Vec<Ext4Xattr>, ParseError
         });
     }
     let entries_region = &block_data[32..];
-    parse_xattr_entries(entries_region, block_data)
+    parse_xattr_entries(entries_region, block_data, 32)
 }
 
 // ── Hash-tree (htree/DX) structures and algorithms ──────────────────────────
@@ -7682,7 +7709,7 @@ mod tests {
         data[20] = 0; // name_len=0
         data[21] = 0; // name_index=0
 
-        let entries = super::parse_xattr_entries(&data, &data).unwrap();
+        let entries = super::parse_xattr_entries(&data, &data, 0).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name_index, 1);
         assert_eq!(entries[0].name, b"test");
@@ -7718,7 +7745,7 @@ mod tests {
         data[44] = 0;
         data[45] = 0;
 
-        let entries = super::parse_xattr_entries(&data, &data).unwrap();
+        let entries = super::parse_xattr_entries(&data, &data, 0).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].full_name(), "security.selinux");
         assert_eq!(entries[0].value, b"context");
@@ -7730,7 +7757,7 @@ mod tests {
     fn parse_xattr_entries_empty() {
         // Just a terminator
         let data = [0_u8; 4];
-        let entries = super::parse_xattr_entries(&data, &data).unwrap();
+        let entries = super::parse_xattr_entries(&data, &data, 0).unwrap();
         assert!(entries.is_empty());
     }
 
@@ -7787,6 +7814,68 @@ mod tests {
         assert_eq!(xattrs.len(), 1);
         assert_eq!(xattrs[0].full_name(), "user.mime");
         assert_eq!(xattrs[0].value, b"image");
+    }
+
+    #[test]
+    fn parse_ibody_xattrs_accepts_value_at_exact_layout_boundary() {
+        let mut buf = vec![0_u8; 256];
+        buf[0x00..0x02].copy_from_slice(&(S_IFREG | 0o644).to_le_bytes());
+        buf[0x80..0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        let ibody_start = 128 + 32;
+        buf[ibody_start..ibody_start + 4]
+            .copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+
+        let entry_start = ibody_start + 4;
+        buf[entry_start] = 4;
+        buf[entry_start + 1] = ffs_types::EXT4_XATTR_INDEX_USER;
+        let value_offs = 28_u16; // 4-byte header + 20-byte entry + 4-byte terminator
+        buf[entry_start + 2..entry_start + 4].copy_from_slice(&value_offs.to_le_bytes());
+        buf[entry_start + 8..entry_start + 12].copy_from_slice(&3_u32.to_le_bytes());
+        buf[entry_start + 16..entry_start + 20].copy_from_slice(b"mime");
+        buf[ibody_start + usize::from(value_offs)..ibody_start + usize::from(value_offs) + 3]
+            .copy_from_slice(b"ok!");
+        buf[entry_start + 20] = 0;
+        buf[entry_start + 21] = 0;
+
+        let inode = Ext4Inode::parse_from_bytes(&buf).expect("parse inode");
+        let xattrs = super::parse_ibody_xattrs(&inode).expect("parse ibody xattrs");
+        assert_eq!(xattrs.len(), 1);
+        assert_eq!(xattrs[0].full_name(), "user.mime");
+        assert_eq!(xattrs[0].value, b"ok!");
+    }
+
+    #[test]
+    fn parse_ibody_xattrs_rejects_value_before_layout_boundary() {
+        let mut buf = vec![0_u8; 256];
+        buf[0x00..0x02].copy_from_slice(&(S_IFREG | 0o644).to_le_bytes());
+        buf[0x80..0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        let ibody_start = 128 + 32;
+        buf[ibody_start..ibody_start + 4]
+            .copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+
+        let entry_start = ibody_start + 4;
+        buf[entry_start] = 4;
+        buf[entry_start + 1] = ffs_types::EXT4_XATTR_INDEX_USER;
+        let value_offs = 27_u16; // one byte before the first legal value position
+        buf[entry_start + 2..entry_start + 4].copy_from_slice(&value_offs.to_le_bytes());
+        buf[entry_start + 8..entry_start + 12].copy_from_slice(&3_u32.to_le_bytes());
+        buf[entry_start + 16..entry_start + 20].copy_from_slice(b"mime");
+        buf[ibody_start + usize::from(value_offs)..ibody_start + usize::from(value_offs) + 3]
+            .copy_from_slice(b"bad");
+        buf[entry_start + 20] = 0;
+        buf[entry_start + 21] = 0;
+
+        let inode = Ext4Inode::parse_from_bytes(&buf).expect("parse inode");
+        let err = super::parse_ibody_xattrs(&inode).expect_err("value should overlap entry table");
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "xattr_value",
+                reason: "value overlaps xattr header or entry table"
+            }
+        ));
     }
 
     #[test]
@@ -10525,7 +10614,7 @@ mod tests {
                 data[value_off..value_off + value.len()].copy_from_slice(&value);
             }
 
-            let parsed = parse_xattr_entries(&data, &data).expect("valid entry should parse");
+            let parsed = parse_xattr_entries(&data, &data, 0).expect("valid entry should parse");
             prop_assert_eq!(parsed.len(), 1);
             prop_assert_eq!(parsed[0].name_index, name_index);
             prop_assert_eq!(&parsed[0].name, &name);
@@ -10543,7 +10632,8 @@ mod tests {
             data[1] = name_index;
 
             prop_assume!(16 + usize::from(name_len) > data.len());
-            let err = parse_xattr_entries(&data, &data).expect_err("name overflow should reject");
+            let err =
+                parse_xattr_entries(&data, &data, 0).expect_err("name overflow should reject");
             prop_assert_eq!(
                 err,
                 ParseError::InvalidField {
@@ -10585,7 +10675,8 @@ mod tests {
             data[entry_len] = 0;
             data[entry_len + 1] = 0;
 
-            let err = parse_xattr_entries(&data, &data).expect_err("value overflow should reject");
+            let err =
+                parse_xattr_entries(&data, &data, 0).expect_err("value overflow should reject");
             prop_assert_eq!(
                 err,
                 ParseError::InvalidField {
