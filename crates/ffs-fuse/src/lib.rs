@@ -66,10 +66,13 @@ const EXT4_IOC_GETFLAGS: u32 = 0x8008_6601;
 /// The ext4 generation value is likewise surfaced through a `u32` payload in
 /// the FUSE fileattr path.
 const EXT4_IOC_GETVERSION: u32 = 0x8008_6603;
+/// `FS_IOC_GET_ENCRYPTION_POLICY` = `_IOW('f', 21, struct fscrypt_policy_v1)` on x86_64.
+const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
 /// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
+const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FIEMAP_START_OFFSET: usize = 0;
 const FIEMAP_LENGTH_OFFSET: usize = 8;
 const FIEMAP_FLAGS_OFFSET: usize = 16;
@@ -1290,6 +1293,20 @@ impl FrankenFuse {
                         .get_inode_generation(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(generation) => IoctlResult::Data(generation.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FS_IOC_GET_ENCRYPTION_POLICY => {
+                if out_size < u32::try_from(FSCRYPT_POLICY_V1_SIZE).unwrap_or(u32::MAX) {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner
+                        .ops
+                        .get_encryption_policy_v1(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok(policy) => IoctlResult::Data(policy.to_vec()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -3294,6 +3311,7 @@ mod tests {
         Begin(RequestOp),
         Fiemap(InodeNumber, u64, u64),
         Fsync(InodeNumber, u64, bool),
+        GetEncryptionPolicy(InodeNumber),
         GetFlags(InodeNumber),
         Getattr(InodeNumber),
         GetVersion(InodeNumber),
@@ -3304,6 +3322,8 @@ mod tests {
     }
 
     struct IoctlRecordingFs {
+        encryption_policy: Option<[u8; FSCRYPT_POLICY_V1_SIZE]>,
+        encryption_policy_errno: Option<i32>,
         flags: u32,
         generation: u32,
         blksize: u32,
@@ -3314,6 +3334,8 @@ mod tests {
     impl IoctlRecordingFs {
         fn new(flags: u32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
             Self {
+                encryption_policy: None,
+                encryption_policy_errno: None,
                 flags,
                 generation: 0,
                 blksize: 4096,
@@ -3324,6 +3346,8 @@ mod tests {
 
         fn with_generation(flags: u32, generation: u32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
             Self {
+                encryption_policy: None,
+                encryption_policy_errno: None,
                 flags,
                 generation,
                 blksize: 4096,
@@ -3332,8 +3356,37 @@ mod tests {
             }
         }
 
+        fn with_encryption_policy(
+            policy: [u8; FSCRYPT_POLICY_V1_SIZE],
+            calls: Arc<Mutex<Vec<IoctlCall>>>,
+        ) -> Self {
+            Self {
+                encryption_policy: Some(policy),
+                encryption_policy_errno: None,
+                flags: 0,
+                generation: 0,
+                blksize: 4096,
+                move_ext_result: None,
+                calls,
+            }
+        }
+
+        fn with_encryption_policy_errno(errno: i32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            Self {
+                encryption_policy: None,
+                encryption_policy_errno: Some(errno),
+                flags: 0,
+                generation: 0,
+                blksize: 4096,
+                move_ext_result: None,
+                calls,
+            }
+        }
+
         fn with_move_ext_result(moved_len: u64, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
             Self {
+                encryption_policy: None,
+                encryption_policy_errno: None,
                 flags: 0,
                 generation: 0,
                 blksize: 4096,
@@ -3344,6 +3397,8 @@ mod tests {
 
         fn with_move_ext_blksize(blksize: u32, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
             Self {
+                encryption_policy: None,
+                encryption_policy_errno: None,
                 flags: 0,
                 generation: 0,
                 blksize,
@@ -3456,6 +3511,24 @@ mod tests {
                 .expect("lock ioctl calls")
                 .push(IoctlCall::GetVersion(ino));
             Ok(self.generation)
+        }
+
+        fn get_encryption_policy_v1(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<[u8; FSCRYPT_POLICY_V1_SIZE]> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetEncryptionPolicy(ino));
+            if let Some(errno) = self.encryption_policy_errno {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(errno)));
+            }
+            self.encryption_policy.ok_or_else(|| {
+                FfsError::UnsupportedFeature("get_encryption_policy_v1 not configured".into())
+            })
         }
 
         fn fiemap(
@@ -3639,6 +3712,58 @@ mod tests {
 
         let response = fuse.dispatch_ioctl(11, 0, EXT4_IOC_GETVERSION, &[], 3);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_encodes_v1_payload() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let policy = [0, 1, 4, 0, b'm', b'k', b'd', b'e', b's', b'c', b'4', b'2'];
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy(
+            policy,
+            Arc::clone(&calls),
+        )));
+
+        let response = fuse.dispatch_ioctl(11, 0, FS_IOC_GET_ENCRYPTION_POLICY, &[], 12);
+        assert_eq!(response, IoctlResult::Data(policy.to_vec()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetEncryptionPolicy(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_rejects_too_small_output_buffer() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy(
+            [0; FSCRYPT_POLICY_V1_SIZE],
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+
+        let response = fuse.dispatch_ioctl(11, 0, FS_IOC_GET_ENCRYPTION_POLICY, &[], 11);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_propagates_enodata() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy_errno(
+            libc::ENODATA,
+            Arc::clone(&calls),
+        )));
+
+        let response = fuse.dispatch_ioctl(11, 0, FS_IOC_GET_ENCRYPTION_POLICY, &[], 12);
+        assert_eq!(response, IoctlResult::Error(libc::ENODATA));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetEncryptionPolicy(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
     }
 
     #[test]

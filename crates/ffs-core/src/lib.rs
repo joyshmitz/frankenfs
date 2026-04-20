@@ -66,6 +66,10 @@ use tracing::{debug, error, info, trace, warn};
 // Degradation/pressure types are in degradation.rs, re-exported above.
 // VFS types and FsOps trait are in vfs.rs, re-exported above.
 const LINUX_PATH_MAX: u64 = 4096;
+const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
+const FSCRYPT_POLICY_V1_SIZE: usize = 12;
+const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
+const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
 
 /// Adler-32 checksum with a 32-bit seed, matching the e2compr convention.
 ///
@@ -14894,6 +14898,73 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_encryption_policy_v1(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<[u8; FSCRYPT_POLICY_V1_SIZE]> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let sb = self
+                    .ext4_superblock()
+                    .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+                if !sb.has_incompat(ffs_ondisk::Ext4IncompatFeatures::ENCRYPT) {
+                    return Err(FfsError::UnsupportedFeature(
+                        "ext4 ENCRYPT incompat feature is not enabled".into(),
+                    ));
+                }
+
+                let inode =
+                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                if !inode.is_encrypted() {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::ENODATA,
+                    )));
+                }
+
+                let mut xattrs =
+                    ffs_ondisk::parse_ibody_xattrs(&inode).map_err(|e| parse_to_ffs_error(&e))?;
+                if inode.file_acl != 0 {
+                    let block_data = self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
+                    let block_xattrs = ffs_ondisk::parse_xattr_block(&block_data)
+                        .map_err(|e| parse_to_ffs_error(&e))?;
+                    xattrs.extend(block_xattrs);
+                }
+
+                let context = xattrs
+                    .into_iter()
+                    .find(|xattr| {
+                        xattr.name_index == ffs_types::EXT4_XATTR_INDEX_ENCRYPTION
+                            && xattr.name == EXT4_ENCRYPTION_XATTR_NAME
+                    })
+                    .map(|xattr| xattr.value)
+                    .ok_or_else(|| {
+                        FfsError::Format("encrypted inode is missing fscrypt context".into())
+                    })?;
+
+                let Some(version) = context.first().copied() else {
+                    return Err(FfsError::Format("fscrypt context is empty".into()));
+                };
+                if version != FSCRYPT_POLICY_V1_VERSION {
+                    return Err(FfsError::Format(format!(
+                        "FS_IOC_GET_ENCRYPTION_POLICY only supports fscrypt v1, found version {version}"
+                    )));
+                }
+                if context.len() < FSCRYPT_CONTEXT_V1_SIZE {
+                    return Err(FfsError::Format("fscrypt v1 context is truncated".into()));
+                }
+
+                let mut policy = [0_u8; FSCRYPT_POLICY_V1_SIZE];
+                policy.copy_from_slice(&context[..FSCRYPT_POLICY_V1_SIZE]);
+                Ok(policy)
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "get_encryption_policy_v1 is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
     fn set_inode_flags(
         &self,
         cx: &Cx,
@@ -16981,6 +17052,50 @@ mod tests {
     }
 
     #[test]
+    fn get_encryption_policy_v1_reads_hidden_ext4_fscrypt_context() {
+        let context = build_fscrypt_context_v1(1, 4, 0, *b"mkdesc42", *b"0123456789abcdef");
+        let image = build_ext4_image_with_encryption_context(&context, true);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let policy = fs
+            .get_encryption_policy_v1(&cx, &mut RequestScope::empty(), InodeNumber(11))
+            .expect("v1 fscrypt policy should be readable");
+        assert_eq!(policy.as_slice(), &context[..FSCRYPT_POLICY_V1_SIZE]);
+    }
+
+    #[test]
+    fn get_encryption_policy_v1_returns_enodata_for_unencrypted_inode() {
+        let context = build_fscrypt_context_v1(1, 4, 0, *b"mkdesc42", *b"0123456789abcdef");
+        let image = build_ext4_image_with_encryption_context(&context, false);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let err = fs
+            .get_encryption_policy_v1(&cx, &mut RequestScope::empty(), InodeNumber(11))
+            .expect_err("unencrypted inode should not have a readable policy");
+        assert_eq!(err.to_errno(), libc::ENODATA);
+    }
+
+    #[test]
+    fn get_encryption_policy_v1_rejects_newer_fscrypt_context_versions() {
+        let mut context = build_fscrypt_context_v1(1, 4, 0, *b"mkdesc42", *b"0123456789abcdef");
+        context[0] = 2;
+        context.extend_from_slice(&[0_u8; 12]);
+        let image = build_ext4_image_with_encryption_context(&context, true);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let err = fs
+            .get_encryption_policy_v1(&cx, &mut RequestScope::empty(), InodeNumber(11))
+            .expect_err("old ioctl must reject newer fscrypt policy versions");
+        assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
     fn read_ext4_orphan_list_traverses_chain() {
         let image = build_ext4_image_with_orphan_chain(&[11, 12, 13]);
         let dev = TestDevice::from_vec(image);
@@ -18246,6 +18361,23 @@ mod tests {
         image
     }
 
+    fn build_fscrypt_context_v1(
+        contents_mode: u8,
+        filenames_mode: u8,
+        flags: u8,
+        descriptor: [u8; 8],
+        nonce: [u8; 16],
+    ) -> Vec<u8> {
+        let mut context = Vec::with_capacity(FSCRYPT_CONTEXT_V1_SIZE);
+        context.push(FSCRYPT_POLICY_V1_VERSION);
+        context.push(contents_mode);
+        context.push(filenames_mode);
+        context.push(flags);
+        context.extend_from_slice(&descriptor);
+        context.extend_from_slice(&nonce);
+        context
+    }
+
     fn test_inode_offset(ino: u32) -> usize {
         assert!(ino > 0, "inode numbers are 1-based");
         let inode_index = usize::try_from(ino.saturating_sub(1)).expect("inode index should fit");
@@ -18265,6 +18397,45 @@ mod tests {
     fn set_test_ext4_state(image: &mut [u8], state: u16) {
         let sb_off = EXT4_SUPERBLOCK_OFFSET;
         image[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&state.to_le_bytes());
+    }
+
+    fn build_ext4_image_with_encryption_context(context: &[u8], encrypted_flag: bool) -> Vec<u8> {
+        let mut image = build_ext4_image_with_inode();
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        let incompat = u32::from_le_bytes([
+            image[sb_off + 0x60],
+            image[sb_off + 0x61],
+            image[sb_off + 0x62],
+            image[sb_off + 0x63],
+        ]);
+        image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(
+            &(incompat | ffs_ondisk::Ext4IncompatFeatures::ENCRYPT.0).to_le_bytes(),
+        );
+
+        let ino_off = test_inode_offset(11);
+        image[ino_off..ino_off + 2].copy_from_slice(&(ffs_types::S_IFREG | 0o600).to_le_bytes());
+        image[ino_off + 0x1A..ino_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        image[ino_off + 0x80..ino_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+        if encrypted_flag {
+            image[ino_off + 0x20..ino_off + 0x24].copy_from_slice(&0x0000_0800_u32.to_le_bytes());
+        }
+
+        let ibody = ffs_xattr::build_inline_ibody(
+            256 - (128 + 32),
+            &[ffs_ondisk::Ext4Xattr {
+                name_index: ffs_types::EXT4_XATTR_INDEX_ENCRYPTION,
+                name: EXT4_ENCRYPTION_XATTR_NAME.to_vec(),
+                value: context.to_vec(),
+            }],
+        )
+        .expect("fscrypt context should fit inline");
+        let xattr_off = ino_off + 128 + 32;
+        image[xattr_off..xattr_off + ibody.len()].copy_from_slice(&ibody);
+
+        let ibm = 3 * 4096;
+        let bit = 10_usize;
+        image[ibm + bit / 8] |= 1 << (bit % 8);
+        image
     }
 
     fn build_ext4_image_with_orphan_chain(chain: &[u32]) -> Vec<u8> {
