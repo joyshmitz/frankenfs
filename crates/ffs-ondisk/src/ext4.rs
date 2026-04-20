@@ -737,6 +737,11 @@ impl Ext4Superblock {
     }
 
     #[must_use]
+    pub fn has_large_dir(&self) -> bool {
+        self.has_incompat(Ext4IncompatFeatures::LARGEDIR)
+    }
+
+    #[must_use]
     pub fn has_ro_compat(&self, mask: Ext4RoCompatFeatures) -> bool {
         (self.feature_ro_compat.0 & mask.0) != 0
     }
@@ -4103,7 +4108,7 @@ impl Ext4ImageReader {
         let block0 = self.read_block(image, ffs_types::BlockNumber(phys0))?;
 
         // Parse the DX root from block 0
-        let Ok(dx_root) = parse_dx_root(block0) else {
+        let Ok(dx_root) = parse_dx_root_with_large_dir(block0, self.sb.has_large_dir()) else {
             return self.lookup(image, dir_inode, name);
         };
         if dx_root.entries.is_empty() {
@@ -4417,6 +4422,17 @@ pub struct Ext4DxEntry {
 ///   Byte 0x20: count/limit (u16, u16)
 ///   Byte 0x24+: DX entries (8 bytes each: hash(4) + block(4))
 pub fn parse_dx_root(block: &[u8]) -> Result<Ext4DxRoot, ParseError> {
+    parse_dx_root_with_large_dir(block, false)
+}
+
+/// Parse a DX root, applying the `INCOMPAT_LARGEDIR` depth rule when requested.
+///
+/// ext4 permits up to 2 indirect levels for normal indexed directories, and up
+/// to 3 indirect levels when the filesystem advertises `INCOMPAT_LARGEDIR`.
+pub fn parse_dx_root_with_large_dir(
+    block: &[u8],
+    large_dir: bool,
+) -> Result<Ext4DxRoot, ParseError> {
     // The DX root info starts at byte 0x1C in the directory block
     // (after the fake "." entry at 0x00 and ".." entry at 0x0C)
     if block.len() < 0x28 {
@@ -4446,10 +4462,15 @@ pub fn parse_dx_root(block: &[u8]) -> Result<Ext4DxRoot, ParseError> {
             reason: "expected 8",
         });
     }
-    if indirect_levels > 2 {
+    let max_indirect_levels = if large_dir { 3 } else { 2 };
+    if indirect_levels > max_indirect_levels {
         return Err(ParseError::InvalidField {
             field: "dx_indirect_levels",
-            reason: "exceeds maximum (2)",
+            reason: if large_dir {
+                "exceeds maximum (3) with LARGEDIR"
+            } else {
+                "exceeds maximum (2) without LARGEDIR"
+            },
         });
     }
     if unused_flags != 0 {
@@ -8319,6 +8340,33 @@ mod tests {
                 reason: "expected 0"
             }
         );
+    }
+
+    #[test]
+    fn parse_dx_root_rejects_level_three_without_large_dir() {
+        let mut block = make_dx_root_test_block();
+        block[0x1E] = 3;
+
+        let err = parse_dx_root_with_large_dir(&block, false)
+            .expect_err("level-three htree requires LARGEDIR");
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "dx_indirect_levels",
+                reason: "exceeds maximum (2) without LARGEDIR"
+            }
+        );
+    }
+
+    #[test]
+    fn parse_dx_root_accepts_level_three_with_large_dir() {
+        let mut block = make_dx_root_test_block();
+        block[0x1E] = 3;
+
+        let root = parse_dx_root_with_large_dir(&block, true)
+            .expect("LARGEDIR should allow three indirect levels");
+        assert_eq!(root.indirect_levels, 3);
+        assert_eq!(root.entries.len(), 3);
     }
 
     proptest! {

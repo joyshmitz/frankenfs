@@ -332,14 +332,14 @@ unknown ro_compat: 0xAB"
 
         let (header, tree) = parse_extent_tree(&buf).expect("valid leaf with 1 extent");
         assert_eq!(header.entries, 1);
-        if let ExtentTree::Leaf(extents) = tree {
-            assert_eq!(extents.len(), 1);
-            assert_eq!(extents[0].logical_block, 0);
-            assert_eq!(extents[0].actual_len(), 10);
-            assert_eq!(extents[0].physical_start, 42);
-        } else {
-            panic!("expected leaf tree");
-        }
+        assert!(matches!(tree, ExtentTree::Leaf(_)), "expected leaf tree");
+        let ExtentTree::Leaf(extents) = tree else {
+            return;
+        };
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].logical_block, 0);
+        assert_eq!(extents[0].actual_len(), 10);
+        assert_eq!(extents[0].physical_start, 42);
     }
 
     #[test]
@@ -1370,6 +1370,22 @@ unknown ro_compat: 0xAB"
     }
 
     #[test]
+    fn parse_dx_root_accepts_level_three_with_large_dir() {
+        let mut block = vec![0_u8; 256];
+        block[0x1C] = 1; // hash_version
+        block[0x1D] = 8; // info_length = 8
+        block[0x1E] = 3; // level 3 allowed with LARGEDIR
+        block[0x20..0x22].copy_from_slice(&10_u16.to_le_bytes());
+        block[0x22..0x24].copy_from_slice(&1_u16.to_le_bytes());
+        block[0x24..0x28].copy_from_slice(&5_u32.to_le_bytes());
+
+        let root = parse_dx_root_with_large_dir(&block, true).expect("valid dx root");
+        assert_eq!(root.indirect_levels, 3);
+        assert_eq!(root.entries.len(), 1);
+        assert_eq!(root.entries[0].block, 5);
+    }
+
+    #[test]
     fn parse_dx_root_with_empty_entries() {
         let mut block = vec![0_u8; 256];
         block[0x1C] = 1; // hash_version = HALF_MD4
@@ -1446,14 +1462,14 @@ unknown ro_compat: 0xAB"
         inode.extent_bytes[20..24].copy_from_slice(&100_u32.to_le_bytes()); // phys_lo
 
         let (_header, tree) = parse_inode_extent_tree(&inode).expect("valid");
-        if let ExtentTree::Leaf(extents) = tree {
-            assert_eq!(extents.len(), 1);
-            assert_eq!(extents[0].logical_block, 0);
-            assert_eq!(extents[0].actual_len(), 5);
-            assert_eq!(extents[0].physical_start, 100);
-        } else {
-            panic!("expected leaf");
-        }
+        assert!(matches!(tree, ExtentTree::Leaf(_)), "expected leaf");
+        let ExtentTree::Leaf(extents) = tree else {
+            return;
+        };
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].logical_block, 0);
+        assert_eq!(extents[0].actual_len(), 5);
+        assert_eq!(extents[0].physical_start, 100);
     }
 
     // ── ExtentTree::Index variant tests ────────────────────────────────
@@ -1476,13 +1492,13 @@ unknown ro_compat: 0xAB"
 
         let (header, tree) = parse_extent_tree(&buf).expect("valid index node");
         assert_eq!(header.depth, 1);
-        if let ExtentTree::Index(indices) = tree {
-            assert_eq!(indices.len(), 1);
-            assert_eq!(indices[0].logical_block, 0);
-            assert_eq!(indices[0].leaf_block, 500);
-        } else {
-            panic!("expected index tree");
-        }
+        assert!(matches!(tree, ExtentTree::Index(_)), "expected index tree");
+        let ExtentTree::Index(indices) = tree else {
+            return;
+        };
+        assert_eq!(indices.len(), 1);
+        assert_eq!(indices[0].logical_block, 0);
+        assert_eq!(indices[0].leaf_block, 500);
     }
 
     // ── DirBlockIter / Ext4DirEntryRef tests ───────────────────────────
