@@ -1427,6 +1427,7 @@ unknown ro_compat: 0xAB"
 
     #[allow(clippy::cast_possible_truncation)]
     fn build_large_dir_three_level_htree_image(
+        root_hash_version: u8,
         deepest_entries: &[Ext4DxEntry],
         first_leaf_entries: &[(u32, &[u8])],
         second_leaf_entries: &[(u32, &[u8])],
@@ -1479,7 +1480,7 @@ unknown ro_compat: 0xAB"
         let root_off = 10 * block_size;
         write_dir_entry_test(&mut image, root_off, 2, 2, b".", 12);
         write_dir_entry_test(&mut image, root_off + 12, 2, 2, b"..", 12);
-        image[root_off + 0x1C] = 1; // DX_HASH_HALF_MD4
+        image[root_off + 0x1C] = root_hash_version;
         image[root_off + 0x1D] = 8;
         image[root_off + 0x1E] = 3; // three indirect levels with LARGEDIR
         image[root_off + 0x20..root_off + 0x22].copy_from_slice(&1_u16.to_le_bytes());
@@ -1516,6 +1517,7 @@ unknown ro_compat: 0xAB"
     fn htree_lookup_supports_large_dir_three_indirect_levels() {
         let target_name = b"triple-indirect-target";
         let image = build_large_dir_three_level_htree_image(
+            1,
             &[Ext4DxEntry { hash: 0, block: 4 }],
             &[(42, target_name)],
             &[],
@@ -1539,6 +1541,7 @@ unknown ro_compat: 0xAB"
         let target_name = b"triple-collision-target";
         let target_hash = dx_hash(1, target_name, &[0; 4]).0;
         let image = build_large_dir_three_level_htree_image(
+            1,
             &[
                 Ext4DxEntry { hash: 0, block: 4 },
                 Ext4DxEntry {
@@ -1560,6 +1563,36 @@ unknown ro_compat: 0xAB"
             .expect("htree lookup should succeed");
         let found = found.expect("lookup should follow the level-three collision successor leaf");
         assert_eq!(found.inode, 77);
+        assert_eq!(found.name, target_name);
+    }
+
+    #[test]
+    fn htree_lookup_follows_large_dir_three_level_unsigned_hash_split_successor() {
+        let target_name = b"\xC3unsigned-split-target";
+        let target_hash = dx_hash(4, target_name, &[0; 4]).0;
+        let image = build_large_dir_three_level_htree_image(
+            4,
+            &[
+                Ext4DxEntry { hash: 0, block: 4 },
+                Ext4DxEntry {
+                    hash: target_hash | 1,
+                    block: 5,
+                },
+            ],
+            &[(11, b"alpha")],
+            &[(88, target_name)],
+        );
+
+        let reader = Ext4ImageReader::new(&image).expect("open indexed unsigned-hash test image");
+        let dir_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(2))
+            .expect("read indexed directory inode");
+
+        let found = reader
+            .htree_lookup(&image, &dir_inode, target_name)
+            .expect("htree lookup should succeed");
+        let found = found.expect("lookup should follow the unsigned-hash split successor leaf");
+        assert_eq!(found.inode, 88);
         assert_eq!(found.name, target_name);
     }
 
