@@ -1427,6 +1427,7 @@ unknown ro_compat: 0xAB"
 
     #[allow(clippy::cast_possible_truncation)]
     fn build_large_dir_three_level_htree_image(
+        has_large_dir: bool,
         root_hash_version: u8,
         deepest_entries: &[Ext4DxEntry],
         first_leaf_entries: &[(u32, &[u8])],
@@ -1447,7 +1448,12 @@ unknown ro_compat: 0xAB"
         sb[0x28..0x2C].copy_from_slice(&8192_u32.to_le_bytes());
         sb[0x54..0x58].copy_from_slice(&11_u32.to_le_bytes());
         sb[0x58..0x5A].copy_from_slice(&256_u16.to_le_bytes());
-        sb[0x60..0x64].copy_from_slice(&Ext4IncompatFeatures::LARGEDIR.0.to_le_bytes());
+        let incompat = if has_large_dir {
+            Ext4IncompatFeatures::LARGEDIR.0
+        } else {
+            0
+        };
+        sb[0x60..0x64].copy_from_slice(&incompat.to_le_bytes());
         image[sb_off..sb_off + ffs_types::EXT4_SUPERBLOCK_SIZE].copy_from_slice(&sb);
 
         let gdt_off = block_size;
@@ -1517,6 +1523,7 @@ unknown ro_compat: 0xAB"
     fn htree_lookup_supports_large_dir_three_indirect_levels() {
         let target_name = b"triple-indirect-target";
         let image = build_large_dir_three_level_htree_image(
+            true,
             1,
             &[Ext4DxEntry { hash: 0, block: 4 }],
             &[(42, target_name)],
@@ -1541,6 +1548,7 @@ unknown ro_compat: 0xAB"
         let target_name = b"triple-collision-target";
         let target_hash = dx_hash(1, target_name, &[0; 4]).0;
         let image = build_large_dir_three_level_htree_image(
+            true,
             1,
             &[
                 Ext4DxEntry { hash: 0, block: 4 },
@@ -1571,6 +1579,7 @@ unknown ro_compat: 0xAB"
         let target_name = b"\xC3unsigned-split-target";
         let target_hash = dx_hash(4, target_name, &[0; 4]).0;
         let image = build_large_dir_three_level_htree_image(
+            true,
             4,
             &[
                 Ext4DxEntry { hash: 0, block: 4 },
@@ -1594,6 +1603,34 @@ unknown ro_compat: 0xAB"
         let found = found.expect("lookup should follow the unsigned-hash split successor leaf");
         assert_eq!(found.inode, 88);
         assert_eq!(found.name, target_name);
+    }
+
+    #[test]
+    fn htree_lookup_rejects_three_indirect_levels_without_large_dir() {
+        let target_name = b"triple-indirect-without-large-dir";
+        let image = build_large_dir_three_level_htree_image(
+            false,
+            1,
+            &[Ext4DxEntry { hash: 0, block: 4 }],
+            &[(77, target_name)],
+            &[],
+        );
+
+        let reader = Ext4ImageReader::new(&image).expect("open non-large-dir test image");
+        let dir_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(2))
+            .expect("read indexed directory inode");
+
+        let err = reader
+            .htree_lookup(&image, &dir_inode, target_name)
+            .expect_err("three indirect levels without LARGEDIR must be rejected");
+        assert!(matches!(
+            err,
+            ffs_types::ParseError::InvalidField {
+                field: "de_rec_len",
+                ..
+            }
+        ));
     }
 
     #[test]
