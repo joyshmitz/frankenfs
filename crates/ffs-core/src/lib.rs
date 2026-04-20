@@ -24026,6 +24026,51 @@ mod tests {
     }
 
     #[test]
+    fn write_rename_bumps_inode_version_but_preserves_generation() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("version_src.txt"), 0o644, 0, 0)
+            .expect("create source");
+        fs.write(&cx, attr.ino, 0, b"versioned")
+            .expect("write source");
+
+        let before = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode before rename");
+        let before_version = u64::from(before.version) | (u64::from(before.version_hi) << 32);
+        let before_generation = before.generation;
+
+        fs.rename(
+            &cx,
+            root,
+            OsStr::new("version_src.txt"),
+            root,
+            OsStr::new("version_dst.txt"),
+        )
+        .expect("rename");
+
+        let after = fs
+            .read_inode(&cx, attr.ino)
+            .expect("read inode after rename");
+        let after_version = u64::from(after.version) | (u64::from(after.version_hi) << 32);
+
+        assert_eq!(
+            after_version,
+            before_version.wrapping_add(1),
+            "rename should bump ext4 i_version / change cookie exactly once"
+        );
+        assert_eq!(
+            after.generation, before_generation,
+            "rename must preserve ext4 i_generation"
+        );
+    }
+
+    #[test]
     fn write_link_to_nonexistent_inode_fails() {
         let Some(fs) = open_writable_ext4() else {
             return;
