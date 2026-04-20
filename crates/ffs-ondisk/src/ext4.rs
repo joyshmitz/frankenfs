@@ -3978,7 +3978,7 @@ impl Ext4ImageReader {
             }
 
             let next_hash = frames[level].entries[frames[level].idx].hash;
-            if (hash & 1) == 0 && (next_hash & !1) != hash {
+            if !dx_hash_extends_collision_chain(hash, next_hash) {
                 break;
             }
 
@@ -3998,7 +3998,7 @@ impl Ext4ImageReader {
             }
         }
 
-        self.lookup(image, dir_inode, name)
+        Ok(None)
     }
 
     /// Read a directory block and parse its entries.
@@ -4325,6 +4325,18 @@ fn dx_find_leaf_idx(entries: &[Ext4DxEntry], hash: u32) -> usize {
 fn dx_find_leaf(entries: &[Ext4DxEntry], hash: u32) -> u32 {
     let idx = dx_find_leaf_idx(entries, hash);
     entries[idx].block
+}
+
+/// Whether a successor DX entry stays in the same collision chain as the
+/// queried hash.
+///
+/// ext4 stores directory major hashes with the low bit cleared. If a leaf is
+/// split because colliding names do not fit, the successor DX entry sets the
+/// low bit to 1 while keeping the same major hash prefix. Lookups must follow
+/// those successors but stop before the next distinct major-hash range.
+#[must_use]
+fn dx_hash_extends_collision_chain(target_hash: u32, next_hash: u32) -> bool {
+    (target_hash & !1) == (next_hash & !1)
 }
 
 #[derive(Debug, Clone)]
@@ -7994,6 +8006,170 @@ mod tests {
 
         // Hash 0: match sentinel → block 1
         assert_eq!(super::dx_find_leaf(&entries, 0), 1);
+    }
+
+    #[test]
+    fn dx_hash_extends_collision_chain_matches_split_lsb() {
+        assert!(super::dx_hash_extends_collision_chain(0x2468, 0x2468));
+        assert!(super::dx_hash_extends_collision_chain(0x2468, 0x2469));
+        assert!(!super::dx_hash_extends_collision_chain(0x2468, 0x3469));
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    fn build_indexed_htree_lookup_test_image(
+        target_name: &[u8],
+        root_entries: &[Ext4DxEntry],
+        leaf1_entries: &[(u32, &[u8])],
+        leaf2_entries: &[(u32, &[u8])],
+        leaf3_entries: &[(u32, &[u8])],
+    ) -> Vec<u8> {
+        let block_size = 4096_usize;
+        let image_blocks = 48_usize;
+        let mut image = vec![0_u8; block_size * image_blocks];
+
+        // Superblock
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        let mut sb = [0_u8; EXT4_SUPERBLOCK_SIZE];
+        sb[0x38..0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+        sb[0x18..0x1C].copy_from_slice(&2_u32.to_le_bytes()); // 4K blocks
+        sb[0x00..0x04].copy_from_slice(&8192_u32.to_le_bytes());
+        sb[0x04..0x08].copy_from_slice(&(image_blocks as u32).to_le_bytes());
+        sb[0x14..0x18].copy_from_slice(&0_u32.to_le_bytes());
+        sb[0x20..0x24].copy_from_slice(&(image_blocks as u32).to_le_bytes());
+        sb[0x28..0x2C].copy_from_slice(&8192_u32.to_le_bytes());
+        sb[0x58..0x5A].copy_from_slice(&256_u16.to_le_bytes());
+        sb[0x54..0x58].copy_from_slice(&11_u32.to_le_bytes());
+        image[sb_off..sb_off + EXT4_SUPERBLOCK_SIZE].copy_from_slice(&sb);
+
+        // Group descriptor table at block 1.
+        let gdt_off = block_size;
+        let mut gd = [0_u8; 32];
+        gd[0x08..0x0C].copy_from_slice(&2_u32.to_le_bytes()); // inode table at block 2
+        image[gdt_off..gdt_off + 32].copy_from_slice(&gd);
+
+        // Root directory inode (inode 2): indexed + extents, mapping logical
+        // blocks 0..3 onto physical blocks 10..13.
+        let inode_table_off = 2 * block_size;
+        let inode_off = inode_table_off + 256; // inode 2
+        image[inode_off..inode_off + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+        image[inode_off + 0x04..inode_off + 0x08].copy_from_slice(&(4_u32 * 4096).to_le_bytes());
+        image[inode_off + 0x1A..inode_off + 0x1C].copy_from_slice(&2_u16.to_le_bytes());
+        image[inode_off + 0x20..inode_off + 0x24]
+            .copy_from_slice(&(EXT4_EXTENTS_FL | EXT4_INDEX_FL).to_le_bytes());
+        image[inode_off + 0x64..inode_off + 0x68].copy_from_slice(&1_u32.to_le_bytes());
+
+        let i_block = inode_off + 0x28;
+        image[i_block..i_block + 2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+        image[i_block + 2..i_block + 4].copy_from_slice(&1_u16.to_le_bytes());
+        image[i_block + 4..i_block + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[i_block + 6..i_block + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[i_block + 8..i_block + 12].copy_from_slice(&1_u32.to_le_bytes());
+        let extent = i_block + 12;
+        image[extent..extent + 4].copy_from_slice(&0_u32.to_le_bytes());
+        image[extent + 4..extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+        image[extent + 6..extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+        image[extent + 8..extent + 12].copy_from_slice(&10_u32.to_le_bytes());
+
+        // DX root at logical block 0 / physical block 10.
+        let root_off = 10 * block_size;
+        let root_block = encode_dx_root_test_block(DX_HASH_HALF_MD4, root_entries);
+        image[root_off..root_off + block_size].copy_from_slice(&root_block[..block_size]);
+
+        let write_leaf = |image: &mut [u8], block_index: usize, entries: &[(u32, &[u8])]| {
+            let leaf_off = block_index * block_size;
+            let mut cursor = 0_usize;
+            for (idx, (inode, name)) in entries.iter().enumerate() {
+                let rec_len = if idx + 1 == entries.len() {
+                    u16::try_from(block_size - cursor).expect("leaf rec_len fits u16")
+                } else {
+                    12_u16
+                };
+                write_dir_entry(image, leaf_off + cursor, *inode, 1, name, rec_len);
+                cursor += usize::from(rec_len);
+            }
+        };
+
+        write_leaf(&mut image, 11, leaf1_entries);
+        write_leaf(&mut image, 12, leaf2_entries);
+        write_leaf(&mut image, 13, leaf3_entries);
+
+        // Ensure the target name is actually hashed under the default seed path.
+        let reader = Ext4ImageReader::new(&image).expect("open indexed test image");
+        let (target_hash, _) = dx_hash(DX_HASH_HALF_MD4, target_name, &reader.sb.hash_seed);
+        assert_eq!(
+            root_entries[1].hash & !1,
+            target_hash,
+            "fixture successor entry must carry target's collision hash",
+        );
+
+        image
+    }
+
+    #[test]
+    fn htree_lookup_follows_collision_split_successor_leaf() {
+        let target_name = b"collision-target";
+        let target_hash = dx_hash(DX_HASH_HALF_MD4, target_name, &[0; 4]).0;
+        let image = build_indexed_htree_lookup_test_image(
+            target_name,
+            &[
+                Ext4DxEntry { hash: 0, block: 1 },
+                Ext4DxEntry {
+                    hash: target_hash | 1,
+                    block: 2,
+                },
+            ],
+            &[(11, b"alpha")],
+            &[(42, target_name)],
+            &[],
+        );
+
+        let reader = Ext4ImageReader::new(&image).expect("open indexed test image");
+        let dir_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(2))
+            .expect("read indexed directory inode");
+
+        let found = reader
+            .htree_lookup(&image, &dir_inode, target_name)
+            .expect("htree lookup should succeed");
+        let found = found.expect("lookup should scan successor collision leaf");
+        assert_eq!(found.inode, 42);
+        assert_eq!(found.name, target_name);
+    }
+
+    #[test]
+    fn htree_lookup_stops_before_noncollision_successor_leaf() {
+        let target_name = b"collision-target";
+        let target_hash = dx_hash(DX_HASH_HALF_MD4, target_name, &[0; 4]).0;
+        let image = build_indexed_htree_lookup_test_image(
+            target_name,
+            &[
+                Ext4DxEntry { hash: 0, block: 1 },
+                Ext4DxEntry {
+                    hash: target_hash | 1,
+                    block: 2,
+                },
+                Ext4DxEntry {
+                    hash: target_hash.wrapping_add(0x2000),
+                    block: 3,
+                },
+            ],
+            &[(11, b"alpha")],
+            &[(12, b"beta")],
+            &[(77, target_name)],
+        );
+
+        let reader = Ext4ImageReader::new(&image).expect("open indexed test image");
+        let dir_inode = reader
+            .read_inode(&image, ffs_types::InodeNumber(2))
+            .expect("read indexed directory inode");
+
+        let found = reader
+            .htree_lookup(&image, &dir_inode, target_name)
+            .expect("htree lookup should succeed");
+        assert!(
+            found.is_none(),
+            "lookup must not cross into a successor leaf whose major hash range differs",
+        );
     }
 
     #[test]
