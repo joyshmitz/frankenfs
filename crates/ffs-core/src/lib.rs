@@ -9370,12 +9370,12 @@ impl OpenFs {
         if inode.is_symlink() {
             return Err(FfsError::Format("cannot write to a symlink".into()));
         }
-        if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
-            return Err(FfsError::UnsupportedFeature(
-                "ext4 inline-data write-side mutation is not supported".into(),
-            ));
-        }
         // e2compr compressed write: route to cluster-based write path.
+        //
+        // The historic e2compr method field aliases the old compression flag
+        // namespace, including the bit later reused by INLINE_DATA. Treat
+        // COMPR_FL as authoritative for the write path so valid compressed
+        // inodes do not get rejected by the inline-data guard.
         if inode.flags & ffs_types::EXT4_COMPR_FL != 0 {
             return self.ext4_write_compressed(
                 cx,
@@ -9390,6 +9390,11 @@ impl OpenFs {
                 tstamp_secs,
                 tstamp_nanos,
             );
+        }
+        if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
+            return Err(FfsError::UnsupportedFeature(
+                "ext4 inline-data write-side mutation is not supported".into(),
+            ));
         }
 
         if (inode.flags & ffs_types::EXT4_EXTENTS_FL) == 0 {
@@ -10731,6 +10736,8 @@ impl OpenFs {
         | ffs_types::EXT4_DIRSYNC_FL
         | ffs_types::EXT4_TOPDIR_FL
         | ffs_types::EXT4_PROJINHERIT_FL;
+    const EXT4_E2COMPR_DEFAULT_CLUSTER_SHIFT: u32 = 2;
+    const EXT4_E2COMPR_DEFAULT_METHOD_IDX: u8 = 20;
 
     const EXT4_RW_SCENARIO_FLUSH: &str = "ext4_rw_flush";
     const EXT4_RW_SCENARIO_FSYNC: &str = "ext4_rw_fsync";
@@ -10757,6 +10764,15 @@ impl OpenFs {
                 | Self::BTRFS_FALLOC_FL_PUNCH_HOLE
                 | Self::BTRFS_FALLOC_FL_ZERO_RANGE);
         (keep_size, punch_hole, zero_range, unsupported_bits)
+    }
+
+    fn seed_e2compr_defaults_for_inode(inode: &mut Ext4Inode) {
+        inode.flags &= !ffs_types::EXT4_INLINE_DATA_FL;
+        inode.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        inode.flags &= !((0x7_u32 << 23) | (0x1F_u32 << 26));
+        inode.flags |= (Self::EXT4_E2COMPR_DEFAULT_CLUSTER_SHIFT & 0x7) << 23;
+        inode.flags |= u32::from(Self::EXT4_E2COMPR_DEFAULT_METHOD_IDX & 0x1F) << 26;
+        inode.extent_bytes.fill(0);
     }
 
     fn btrfs_validate_fallocate_mode(
@@ -14864,9 +14880,37 @@ impl FsOps for OpenFs {
                 let csum_seed = sb.csum_seed();
 
                 let mut inode = self.read_inode_with_scope(cx, scope, canonical)?;
+                let requested_user_flags = flags & Self::EXT4_USER_SETTABLE_FLAGS;
+                let wants_compression = requested_user_flags & ffs_types::EXT4_COMPR_FL != 0;
+                if wants_compression
+                    && !sb.has_incompat(ffs_ondisk::Ext4IncompatFeatures::COMPRESSION)
+                {
+                    return Err(FfsError::UnsupportedFeature(
+                        "EXT4_COMPR_FL requires the ext4 COMPRESSION incompat feature".into(),
+                    ));
+                }
+                let enabling_compression =
+                    wants_compression && inode.flags & ffs_types::EXT4_COMPR_FL == 0;
+                if enabling_compression {
+                    if !inode.is_regular() {
+                        return Err(FfsError::ModeViolation(
+                            "EXT4_COMPR_FL can only be enabled on regular files".into(),
+                        ));
+                    }
+                    if inode.size != 0 {
+                        return Err(FfsError::UnsupportedFeature(
+                            "EXT4_COMPR_FL can only be enabled on empty files".into(),
+                        ));
+                    }
+                }
 
-                let new_flags = (inode.flags & !Self::EXT4_USER_SETTABLE_FLAGS)
-                    | (flags & Self::EXT4_USER_SETTABLE_FLAGS);
+                let mut new_flags =
+                    (inode.flags & !Self::EXT4_USER_SETTABLE_FLAGS) | requested_user_flags;
+                if enabling_compression {
+                    inode.flags = new_flags;
+                    Self::seed_e2compr_defaults_for_inode(&mut inode);
+                    new_flags = inode.flags;
+                }
                 inode.flags = new_flags;
 
                 if let Some(tx) = &mut scope.tx {
@@ -18588,6 +18632,143 @@ mod tests {
     }
 
     #[test]
+    fn set_inode_flags_enabling_compr_requires_compression_feature() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("compr-flags.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compr-flags.txt");
+
+        let mut write_scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        let err = fs
+            .set_inode_flags(&cx, &mut write_scope, created.ino, ffs_types::EXT4_COMPR_FL)
+            .expect_err("COMPR should be rejected when the feature bit is absent");
+        fs.end_request_scope(&cx, RequestOp::IoctlWrite, write_scope)
+            .expect("end ioctl write scope");
+        assert!(matches!(err, FfsError::UnsupportedFeature(_)));
+    }
+
+    #[test]
+    fn set_inode_flags_enabling_compr_with_feature_seeds_e2compr_defaults_and_write_path() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
+            64,
+            ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
+        ) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("compr-flags.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compr-flags.txt");
+
+        let mut write_scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        fs.set_inode_flags(&cx, &mut write_scope, created.ino, ffs_types::EXT4_COMPR_FL)
+            .expect("enable COMPR flag");
+        fs.commit_request_scope(&mut write_scope)
+            .expect("commit ioctl write scope");
+        fs.end_request_scope(&cx, RequestOp::IoctlWrite, write_scope)
+            .expect("end ioctl write scope");
+
+        let inode_after_setflags = fs
+            .read_inode(&cx, created.ino)
+            .expect("read inode after setflags");
+        assert_ne!(
+            inode_after_setflags.flags & ffs_types::EXT4_COMPR_FL,
+            0,
+            "COMPR flag must be set after ioctl-style mutation"
+        );
+        assert_eq!(
+            inode_after_setflags.flags & ffs_types::EXT4_EXTENTS_FL,
+            0,
+            "e2compr setup must clear EXTENTS when COMPR is enabled"
+        );
+        assert_eq!(
+            (inode_after_setflags.flags >> 23) & 0x7,
+            OpenFs::EXT4_E2COMPR_DEFAULT_CLUSTER_SHIFT,
+            "COMPR enable must seed the default cluster shift"
+        );
+        assert_eq!(
+            ((inode_after_setflags.flags >> 26) & 0x1F) as u8,
+            OpenFs::EXT4_E2COMPR_DEFAULT_METHOD_IDX,
+            "COMPR enable must seed the default compression method"
+        );
+
+        let payload = vec![b'C'; 4096];
+        fs.write(&cx, created.ino, 0, &payload)
+            .expect("compressed write after COMPR flag enable");
+        let readback = fs.read(&cx, created.ino, 0, 4096).expect("readback");
+        assert_eq!(&readback[..payload.len()], payload.as_slice());
+
+        let inode_after_write = fs
+            .read_inode(&cx, created.ino)
+            .expect("read inode after compressed write");
+        assert_ne!(
+            inode_after_write.flags & ffs_types::EXT4_COMPRBLK_FL,
+            0,
+            "compressed write should mark COMPRBLK after COMPR enable via setflags"
+        );
+    }
+
+    #[test]
+    fn set_inode_flags_enabling_compr_rejects_nonempty_file() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs_with_incompat_features(
+            64,
+            ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
+        ) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let created = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("compr-nonempty.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compr-nonempty.txt");
+        fs.write(&cx, created.ino, 0, b"seed")
+            .expect("seed file contents");
+
+        let mut write_scope = fs
+            .begin_request_scope(&cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        let err = fs
+            .set_inode_flags(&cx, &mut write_scope, created.ino, ffs_types::EXT4_COMPR_FL)
+            .expect_err("non-empty file should reject COMPR enable");
+        fs.end_request_scope(&cx, RequestOp::IoctlWrite, write_scope)
+            .expect("end ioctl write scope");
+        assert!(matches!(err, FfsError::UnsupportedFeature(_)));
+    }
+
+    #[test]
     fn read_file_data_leaf() {
         let image = build_ext4_image_with_extents();
         let dev = TestDevice::from_vec(image);
@@ -21241,6 +21422,61 @@ mod tests {
 
         let cx = Cx::for_testing();
         let data = std::fs::read(&image).expect("read image");
+        let dev = TestDevice::from_vec(data);
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+            ..OpenOptions::default()
+        };
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &opts).expect("open ext4");
+        fs.enable_writes(&cx).expect("enable writes");
+        assert!(fs.is_writable());
+        Some((fs, tmp))
+    }
+
+    fn open_writable_ext4_mkfs_with_incompat_features(
+        size_mb: u64,
+        incompat_bits: u32,
+    ) -> Option<(OpenFs, tempfile::TempDir)> {
+        let tmp = tempfile::TempDir::new().expect("tmpdir");
+        let image = tmp.path().join("test.ext4");
+        let f = std::fs::File::create(&image).expect("create image");
+        f.set_len(size_mb * 1024 * 1024).expect("set image size");
+        drop(f);
+
+        let out = std::process::Command::new("mkfs.ext4")
+            .args(["-F", "-b", "4096", image.to_str().unwrap()])
+            .output();
+        let out = match out {
+            Ok(o) if o.status.success() => o,
+            _ => return None,
+        };
+        let _ = out;
+
+        let _ = std::process::Command::new("debugfs")
+            .args([
+                "-w",
+                "-R",
+                "set_inode_field / mode 040777",
+                image.to_str().unwrap(),
+            ])
+            .output();
+
+        let mut data = std::fs::read(&image).expect("read image");
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        let incompat_off = sb_off + 0x60;
+        let checksum_off = sb_off + EXT4_SB_CHECKSUM_OFFSET;
+        let mut feature_incompat = u32::from_le_bytes(
+            data[incompat_off..incompat_off + 4]
+                .try_into()
+                .expect("feature_incompat bytes"),
+        );
+        feature_incompat |= incompat_bits;
+        data[incompat_off..incompat_off + 4].copy_from_slice(&feature_incompat.to_le_bytes());
+        let checksum =
+            ffs_ondisk::ext4::ext4_chksum(!0u32, &data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET]);
+        data[checksum_off..checksum_off + 4].copy_from_slice(&checksum.to_le_bytes());
+
+        let cx = Cx::for_testing();
         let dev = TestDevice::from_vec(data);
         let opts = OpenOptions {
             ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
