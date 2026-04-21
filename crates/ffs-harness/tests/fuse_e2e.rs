@@ -4559,6 +4559,70 @@ fn assert_read_only_setattr_contract(path: &Path, scenario_id: &str) {
     );
 }
 
+fn assert_read_only_xattr_mutation_contract(path: &Path, scenario_id: &str) {
+    let before = snapshot_file_state(path);
+
+    let set_report = py_setxattr_report(path, "user.created", b"blocked", 0);
+    assert_eq!(
+        set_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only setxattr should surface exact EROFS: {set_report}"
+    );
+    assert_file_state_unchanged(path, &before, "rejected setxattr");
+    assert!(
+        py_getxattr(path, "user.created").is_none(),
+        "read-only setxattr must not create a new xattr"
+    );
+    assert_eq!(
+        py_getxattr(path, "user.locked").expect("locked xattr should remain readable"),
+        b"original",
+        "read-only setxattr must not disturb the targeted existing xattr state"
+    );
+    assert_eq!(
+        py_getxattr(path, "user.keep").expect("keep xattr should remain readable"),
+        b"preserve",
+        "read-only setxattr must not disturb unrelated xattrs"
+    );
+
+    let remove_report = py_removexattr_report(path, "user.locked");
+    assert_eq!(
+        remove_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only removexattr should surface exact EROFS: {remove_report}"
+    );
+    assert_file_state_unchanged(path, &before, "rejected removexattr");
+    assert_eq!(
+        py_getxattr(path, "user.locked").expect("locked xattr should remain readable"),
+        b"original",
+        "read-only removexattr must not delete the targeted xattr"
+    );
+    assert_eq!(
+        py_getxattr(path, "user.keep").expect("keep xattr should remain readable"),
+        b"preserve",
+        "read-only removexattr must not disturb unrelated xattrs"
+    );
+
+    let names = py_listxattr(path);
+    assert!(
+        !names.iter().any(|name| name == "user.created"),
+        "read-only setxattr must not leave a newly created xattr behind: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "user.locked"),
+        "read-only removexattr must leave the targeted xattr intact: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "user.keep"),
+        "read-only xattr mutations must leave unrelated xattrs intact: {names:?}"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("setxattr+removexattr=EROFS_no_side_effects"),
+    );
+}
+
 #[test]
 fn fuse_xattr_set_get_list_remove() {
     with_rw_mount(|mnt| {
@@ -5602,6 +5666,59 @@ fn btrfs_fuse_xattr_replace_missing_reports_enodata_without_side_effects() {
             Some("errno=ENODATA_with_no_side_effects"),
         );
     });
+}
+
+#[test]
+fn btrfs_fuse_xattr_read_only_set_and_remove_report_erofs_without_side_effects() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let setup_mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: true,
+        ..MountOptions::default()
+    };
+
+    {
+        let Some(setup_session) = try_mount_btrfs_rw_with_options(&image, &mnt, &setup_mount_opts)
+        else {
+            return;
+        };
+
+        let path = mnt
+            .join(BTRFS_TEST_WORKSPACE)
+            .join("readonly_xattr_seed.txt");
+        fs::write(&path, b"readonly btrfs xattr seed\n").expect("write ro btrfs xattr seed file");
+        py_setxattr(&path, "user.locked", b"original");
+        py_setxattr(&path, "user.keep", b"preserve");
+        drop(setup_session);
+    }
+
+    thread::sleep(Duration::from_millis(500));
+
+    let Some(_session) = try_mount_btrfs_ro(&image, &mnt) else {
+        return;
+    };
+
+    let path = mnt
+        .join(BTRFS_TEST_WORKSPACE)
+        .join("readonly_xattr_seed.txt");
+    assert_eq!(
+        fs::read(&path).expect("read seeded ro btrfs xattr file"),
+        b"readonly btrfs xattr seed\n",
+        "ro remount must preserve the seeded file bytes"
+    );
+
+    assert_read_only_xattr_mutation_contract(
+        &path,
+        "btrfs_ro_xattr_mutation_rejects_erofs_no_side_effects",
+    );
 }
 
 #[test]
