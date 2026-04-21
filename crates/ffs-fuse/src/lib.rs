@@ -80,6 +80,17 @@ const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
+/// `BTRFS_IOC_FS_INFO` = `_IOR(0x94, 0x1F, struct btrfs_ioctl_fs_info_args)`
+/// on x86_64.  The args struct is 1024 bytes of read-only fs metadata
+/// (`max_id`, `num_devices`, `fsid`, `nodesize`, `sectorsize`,
+/// `clone_alignment`, `csum_type/size`, `flags`, `generation`,
+/// `metadata_uuid`, plus pad-to-1K).
+const BTRFS_IOC_FS_INFO: u32 = 0x8400_941F;
+/// Size of the `btrfs_ioctl_fs_info_args` reply payload, mirrored from
+/// `ffs_core::BTRFS_FS_INFO_ARGS_SIZE` so the FUSE ioctl handler can
+/// reject undersized out buffers with `EINVAL` before dispatching to
+/// the backend.
+const BTRFS_IOC_FS_INFO_SIZE: u32 = 1024;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FSCRYPT_POLICY_V2_SIZE: usize = 24;
 const FSCRYPT_POLICY_EX_HEADER_SIZE: usize = 8;
@@ -1728,6 +1739,29 @@ impl FrankenFuse {
                         if copy_len < FSLABEL_MAX {
                             buf[copy_len] = 0;
                         }
+                        IoctlResult::Data(buf)
+                    }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_FS_INFO => {
+                // Reject if the caller's out buffer can't hold the full 1024-byte
+                // `btrfs_ioctl_fs_info_args` struct — the kernel would truncate
+                // it and hand back garbage padding, so fail deterministically.
+                if out_size < BTRFS_IOC_FS_INFO_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_btrfs_fs_info(cx, scope)
+                }) {
+                    Ok(payload) => {
+                        // Backend contract: exactly 1024 bytes.  Be defensive
+                        // — pad/truncate to that width so a single backend
+                        // bug can't corrupt the kernel reply buffer.
+                        let mut buf = vec![0_u8; BTRFS_IOC_FS_INFO_SIZE as usize];
+                        let copy_len = payload.len().min(buf.len());
+                        buf[..copy_len].copy_from_slice(&payload[..copy_len]);
                         IoctlResult::Data(buf)
                     }
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -3690,6 +3724,7 @@ mod tests {
         GetEncryptionPolicyEx(InodeNumber),
         GetFlags(InodeNumber),
         GetFsLabel,
+        GetBtrfsFsInfo,
         Getattr(InodeNumber),
         GetVersion(InodeNumber),
         MoveExt(InodeNumber, u32, u64, u64, u64),
@@ -3710,6 +3745,7 @@ mod tests {
         blksize: u32,
         move_ext_result: Option<u64>,
         fs_label: Vec<u8>,
+        btrfs_fs_info: Option<Vec<u8>>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
     }
 
@@ -3725,6 +3761,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: None,
                 calls,
             }
         }
@@ -3740,6 +3777,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: None,
                 calls,
             }
         }
@@ -3758,6 +3796,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: None,
                 calls,
             }
         }
@@ -3773,6 +3812,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: None,
                 calls,
             }
         }
@@ -3788,6 +3828,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: Some(moved_len),
                 fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: None,
                 calls,
             }
         }
@@ -3803,6 +3844,7 @@ mod tests {
                 blksize,
                 move_ext_result: Some(1),
                 fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: None,
                 calls,
             }
         }
@@ -3823,6 +3865,7 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: Some(1),
                 fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: None,
                 calls,
             }
         }
@@ -3838,6 +3881,23 @@ mod tests {
                 blksize: 4096,
                 move_ext_result: None,
                 fs_label: label.to_vec(),
+                btrfs_fs_info: None,
+                calls,
+            }
+        }
+
+        fn with_btrfs_fs_info(payload: Vec<u8>, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            Self {
+                encryption_policy: None,
+                encryption_policy_errno: None,
+                flags: 0,
+                generation: 0,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
+                blksize: 4096,
+                move_ext_result: None,
+                fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: Some(payload),
                 calls,
             }
         }
@@ -4040,6 +4100,22 @@ mod tests {
                 .expect("lock ioctl calls")
                 .push(IoctlCall::GetFsLabel);
             Ok(self.fs_label.clone())
+        }
+
+        fn get_btrfs_fs_info(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+        ) -> ffs_error::Result<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetBtrfsFsInfo);
+            self.btrfs_fs_info.clone().ok_or_else(|| {
+                FfsError::UnsupportedFeature(
+                    "get_btrfs_fs_info: recorder not configured with a payload".into(),
+                )
+            })
         }
 
         fn fiemap(
@@ -4368,6 +4444,108 @@ mod tests {
         let response = dispatch_ioctl_for_testing(&fuse, 2, 0, FS_IOC_GETFSLABEL, &[], 255);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_fs_info_returns_backend_payload_verbatim() {
+        // Canned 1024-byte payload with distinctive marker bytes at each
+        // named field offset so the dispatcher can't silently corrupt them.
+        let mut payload = vec![0_u8; BTRFS_IOC_FS_INFO_SIZE as usize];
+        payload[0x00..0x08].copy_from_slice(&7_u64.to_le_bytes()); // max_id
+        payload[0x08..0x10].copy_from_slice(&3_u64.to_le_bytes()); // num_devices
+        payload[0x10..0x20].copy_from_slice(&[0x22_u8; 16]);       // fsid
+        payload[0x20..0x24].copy_from_slice(&16_u32.pow(2).to_le_bytes()); // nodesize = 256
+        payload[0x24..0x28].copy_from_slice(&4096_u32.to_le_bytes());       // sectorsize
+        payload[0x28..0x2C].copy_from_slice(&4096_u32.to_le_bytes());       // clone_alignment
+        payload[0x2C..0x2E].copy_from_slice(&0_u16.to_le_bytes()); // csum_type (CRC32C)
+        payload[0x2E..0x30].copy_from_slice(&4_u16.to_le_bytes()); // csum_size
+        payload[0x38..0x40].copy_from_slice(&0xDEAD_BEEF_1234_5678_u64.to_le_bytes()); // generation
+        payload[0x40..0x50].copy_from_slice(&[0x22_u8; 16]);       // metadata_uuid == fsid
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_fs_info(
+            payload.clone(),
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_FS_INFO,
+            &[],
+            BTRFS_IOC_FS_INFO_SIZE,
+        );
+        let IoctlResult::Data(bytes) = response else {
+            panic!("expected IoctlResult::Data, got {response:?}");
+        };
+        assert_eq!(
+            bytes.len(),
+            BTRFS_IOC_FS_INFO_SIZE as usize,
+            "reply must be exactly 1024 bytes"
+        );
+        assert_eq!(&bytes[..], &payload[..], "dispatcher must forward backend payload verbatim");
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetBtrfsFsInfo,
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_fs_info_rejects_too_small_output_buffer() {
+        // Anything below the full 1024-byte width must short-circuit with
+        // EINVAL *before* touching the backend — a partial struct handed
+        // back to userspace would look like valid but scrambled metadata.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_fs_info(
+            vec![0_u8; BTRFS_IOC_FS_INFO_SIZE as usize],
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_FS_INFO,
+            &[],
+            BTRFS_IOC_FS_INFO_SIZE - 1,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(
+            calls.lock().expect("lock ioctl calls").is_empty(),
+            "backend must not be called when the out buffer is undersized"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_fs_info_surfaces_backend_unsupported_as_eopnotsupp() {
+        // Non-btrfs backends return UnsupportedFeature, which must land on
+        // the caller as EOPNOTSUPP — that's the contract ext4 images rely
+        // on to surface a deterministic "not a btrfs filesystem" errno.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_FS_INFO,
+            &[],
+            BTRFS_IOC_FS_INFO_SIZE,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetBtrfsFsInfo,
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
     }
 
     #[test]

@@ -7910,6 +7910,64 @@ fn extent_root_namespace(inode: &Ext4Inode) -> u64 {
     h
 }
 
+/// Encoded size of `struct btrfs_ioctl_fs_info_args` on x86_64.  The kernel's
+/// stable UAPI layout is 1024 bytes: 80 bytes of named fields followed by
+/// 944 bytes of reserved padding (newer kernels reuse the first 16 bytes of
+/// reserved for `fs_tree_generation` + `block_group_tree_generation`, which
+/// is forward-compatible with our zero-initialised output).
+pub const BTRFS_FS_INFO_ARGS_SIZE: usize = 1024;
+
+/// Map a btrfs csum_type code to the digest width in bytes advertised by
+/// `btrfs_ioctl_fs_info_args::csum_size`.  Unknown csum types are reported
+/// as zero (same behaviour as the kernel when facing an image with a csum
+/// algorithm this build does not recognise).
+fn btrfs_csum_size_for_type(csum_type: u16) -> u16 {
+    match csum_type {
+        ffs_types::BTRFS_CSUM_TYPE_CRC32C => 4,
+        ffs_types::BTRFS_CSUM_TYPE_XXHASH64 => 8,
+        ffs_types::BTRFS_CSUM_TYPE_SHA256 | ffs_types::BTRFS_CSUM_TYPE_BLAKE2B => 32,
+        _ => 0,
+    }
+}
+
+/// Encode a `struct btrfs_ioctl_fs_info_args` reply payload from the live
+/// btrfs superblock.  The layout matches the kernel UAPI exactly:
+///
+/// ```text
+///   0x00  __u64  max_id              (= num_devices — largest observed devid)
+///   0x08  __u64  num_devices
+///   0x10  __u8[16] fsid
+///   0x20  __u32  nodesize
+///   0x24  __u32  sectorsize
+///   0x28  __u32  clone_alignment     (= sectorsize per kernel contract)
+///   0x2C  __u16  csum_type
+///   0x2E  __u16  csum_size
+///   0x30  __u64  flags               (zero; we set no BTRFS_FS_INFO_FLAG_* bits)
+///   0x38  __u8[8] generation         (u64 le, as kernel stores it)
+///   0x40  __u8[16] metadata_uuid     (= fsid when METADATA_UUID feature absent)
+///   0x50  __u8[944] reserved         (zero)
+/// ```
+///
+/// We do not track per-fs `max_id` separately, so mirror `num_devices`
+/// (a valid upper bound on observed device IDs).  We also lack a separate
+/// `metadata_uuid` path — absent the METADATA_UUID incompat feature the
+/// kernel itself returns `fsid` here, so we mirror that behaviour.
+fn encode_btrfs_fs_info_args(sb: &ffs_ondisk::BtrfsSuperblock) -> Vec<u8> {
+    let mut buf = vec![0_u8; BTRFS_FS_INFO_ARGS_SIZE];
+    buf[0x00..0x08].copy_from_slice(&sb.num_devices.to_le_bytes());
+    buf[0x08..0x10].copy_from_slice(&sb.num_devices.to_le_bytes());
+    buf[0x10..0x20].copy_from_slice(&sb.fsid);
+    buf[0x20..0x24].copy_from_slice(&sb.nodesize.to_le_bytes());
+    buf[0x24..0x28].copy_from_slice(&sb.sectorsize.to_le_bytes());
+    buf[0x28..0x2C].copy_from_slice(&sb.sectorsize.to_le_bytes());
+    buf[0x2C..0x2E].copy_from_slice(&sb.csum_type.to_le_bytes());
+    buf[0x2E..0x30].copy_from_slice(&btrfs_csum_size_for_type(sb.csum_type).to_le_bytes());
+    // flags (0x30..0x38) already zero from vec![0; ...]
+    buf[0x38..0x40].copy_from_slice(&sb.generation.to_le_bytes());
+    buf[0x40..0x50].copy_from_slice(&sb.fsid);
+    buf
+}
+
 fn parse_to_ffs_error(e: &ParseError) -> FfsError {
     match e {
         ParseError::InvalidField { field, reason } => {
@@ -15656,6 +15714,19 @@ impl FsOps for OpenFs {
                 label.push(0);
                 Ok(label)
             }
+        }
+    }
+
+    fn get_btrfs_fs_info(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_FS_INFO is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(sb) => Ok(encode_btrfs_fs_info_args(sb)),
         }
     }
 

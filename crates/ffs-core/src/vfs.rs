@@ -762,6 +762,30 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Return the btrfs filesystem-info payload for `BTRFS_IOC_FS_INFO`.
+    ///
+    /// Implementations should encode a `struct btrfs_ioctl_fs_info_args`
+    /// (1024 bytes on x86_64) populated with the live `fs_info` fields:
+    /// `max_id`, `num_devices`, `fsid`, `nodesize`, `sectorsize`,
+    /// `clone_alignment`, `csum_type`, `csum_size`, `flags`, `generation`,
+    /// and `metadata_uuid`.  The returned `Vec<u8>` must be exactly
+    /// 1024 bytes so `ffs-fuse` can forward it verbatim to the kernel ioctl
+    /// reply buffer.
+    ///
+    /// Non-btrfs backends must return
+    /// `FfsError::UnsupportedFeature`, which `ffs-fuse` maps to
+    /// `EOPNOTSUPP` so callers on ext4 see a deterministic rejection
+    /// rather than a bogus success.
+    fn get_btrfs_fs_info(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_btrfs_fs_info is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate
