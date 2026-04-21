@@ -29,9 +29,15 @@ use tempfile::TempDir;
 const EOPNOTSUPP_ERRNO: i64 = 95;
 const BTRFS_TEST_WORKSPACE: &str = "testdir";
 const FS_IOC_FIEMAP_CMD: u32 = 0xC020_660B;
+const FS_IOC_GET_ENCRYPTION_POLICY_CMD: u32 = 0x400C_6615;
 const EXT4_IOC_GETFLAGS_CMD: u32 = 0x8008_6601;
 const EXT4_IOC_SETFLAGS_CMD: u32 = 0x4008_6602;
 const EXT4_IOC_MOVE_EXT_CMD: u32 = 0xC028_660F;
+const FSCRYPT_POLICY_V1_SIZE: usize = 12;
+const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
+const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
+const EXT4_ENCRYPT_INODE_FL: u32 = 0x0000_0800;
+const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
 
 fn patterned_bytes(len: usize, modulus: usize, offset: usize) -> Vec<u8> {
     assert!(
@@ -253,6 +259,175 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
         .output()
         .unwrap();
     assert!(out.status.success());
+
+    image
+}
+
+fn build_fscrypt_context_v1(
+    contents_mode: u8,
+    filenames_mode: u8,
+    flags: u8,
+    descriptor: [u8; 8],
+    nonce: [u8; 16],
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(FSCRYPT_CONTEXT_V1_SIZE);
+    context.push(FSCRYPT_POLICY_V1_VERSION);
+    context.push(contents_mode);
+    context.push(filenames_mode);
+    context.push(flags);
+    context.extend_from_slice(&descriptor);
+    context.extend_from_slice(&nonce);
+    context
+}
+
+fn build_test_inline_ibody(ibody_len: usize, entries: &[ffs_ondisk::Ext4Xattr]) -> Vec<u8> {
+    let mut out = vec![0_u8; ibody_len];
+    if entries.is_empty() {
+        return out;
+    }
+
+    out[0..4].copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+    let region_capacity = ibody_len
+        .checked_sub(4)
+        .expect("inline xattr region must include 4-byte header");
+    let mut region = vec![0_u8; region_capacity];
+    let mut next_entry = 0_usize;
+    let mut value_tail = region_capacity;
+
+    for entry in entries {
+        let entry_len = (16 + entry.name.len() + 3) & !3;
+        let value_start = value_tail
+            .checked_sub(entry.value.len())
+            .expect("inline xattr value should fit")
+            & !3;
+        let entry_end_with_term = next_entry
+            .checked_add(entry_len + 4)
+            .expect("inline xattr entry offset should not overflow");
+        assert!(
+            entry_end_with_term <= value_start,
+            "inline xattr entry table should not overlap values"
+        );
+
+        region[value_start..value_start + entry.value.len()].copy_from_slice(&entry.value);
+        value_tail = value_start;
+
+        region[next_entry] =
+            u8::try_from(entry.name.len()).expect("inline xattr name should fit in u8");
+        region[next_entry + 1] = entry.name_index;
+        region[next_entry + 2..next_entry + 4].copy_from_slice(
+            &u16::try_from(value_start + 4)
+                .expect("inline xattr value offset should fit in u16")
+                .to_le_bytes(),
+        );
+        region[next_entry + 8..next_entry + 12].copy_from_slice(
+            &u32::try_from(entry.value.len())
+                .expect("inline xattr value length should fit in u32")
+                .to_le_bytes(),
+        );
+        region[next_entry + 16..next_entry + 16 + entry.name.len()].copy_from_slice(&entry.name);
+        next_entry += entry_len;
+    }
+
+    out[4..].copy_from_slice(&region);
+    out
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn build_ext4_fscrypt_policy_image(encrypted_flag: bool) -> Vec<u8> {
+    let block_size: u32 = 4096;
+    let image_size: u32 = 256 * 1024;
+    let mut image = vec![0_u8; image_size as usize];
+    let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+
+    image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&ffs_types::EXT4_SUPER_MAGIC.to_le_bytes());
+    image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+    let blocks_count = image_size / block_size;
+    image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+    image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+    image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+    let incompat = (ffs_ondisk::Ext4IncompatFeatures::FILETYPE.0
+        | ffs_ondisk::Ext4IncompatFeatures::EXTENTS.0
+        | ffs_ondisk::Ext4IncompatFeatures::ENCRYPT.0)
+        .to_le_bytes();
+    image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat);
+    image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+    let gd_off: usize = 4096;
+    image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+    image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+    let root_ino = 4 * 4096 + 256;
+    image[root_ino..root_ino + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+    image[root_ino + 4..root_ino + 8].copy_from_slice(&4096_u32.to_le_bytes());
+    image[root_ino + 0x1A..root_ino + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+    image[root_ino + 0x20..root_ino + 0x24]
+        .copy_from_slice(&ffs_types::EXT4_EXTENTS_FL.to_le_bytes());
+    image[root_ino + 0x80..root_ino + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let root_extent = root_ino + 0x28;
+    image[root_extent..root_extent + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[root_extent + 2..root_extent + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 4..root_extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[root_extent + 6..root_extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 12..root_extent + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[root_extent + 16..root_extent + 18].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 18..root_extent + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 20..root_extent + 24].copy_from_slice(&10_u32.to_le_bytes());
+
+    let file_ino = 4 * 4096 + 10 * 256;
+    image[file_ino..file_ino + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+    image[file_ino + 4..file_ino + 8].copy_from_slice(&0_u32.to_le_bytes());
+    image[file_ino + 0x1A..file_ino + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+    image[file_ino + 0x80..file_ino + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+    if encrypted_flag {
+        image[file_ino + 0x20..file_ino + 0x24]
+            .copy_from_slice(&EXT4_ENCRYPT_INODE_FL.to_le_bytes());
+    }
+
+    let context = build_fscrypt_context_v1(1, 4, 0, *b"mkdesc42", *b"0123456789abcdef");
+    let ibody = build_test_inline_ibody(
+        256 - (128 + 32),
+        &[ffs_ondisk::Ext4Xattr {
+            name_index: ffs_types::EXT4_XATTR_INDEX_ENCRYPTION,
+            name: EXT4_ENCRYPTION_XATTR_NAME.to_vec(),
+            value: context,
+        }],
+    );
+    let xattr_off = file_ino + 128 + 32;
+    image[xattr_off..xattr_off + ibody.len()].copy_from_slice(&ibody);
+
+    let dir_block = 10 * 4096;
+    image[dir_block..dir_block + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir_block + 4..dir_block + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir_block + 6] = 1;
+    image[dir_block + 7] = 2;
+    image[dir_block + 8] = b'.';
+
+    let dotdot = dir_block + 12;
+    image[dotdot..dotdot + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dotdot + 4..dotdot + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dotdot + 6] = 2;
+    image[dotdot + 7] = 2;
+    image[dotdot + 8] = b'.';
+    image[dotdot + 9] = b'.';
+
+    let file_entry = dotdot + 12;
+    let file_name = b"policy.txt";
+    image[file_entry..file_entry + 4].copy_from_slice(&11_u32.to_le_bytes());
+    image[file_entry + 4..file_entry + 6].copy_from_slice(&(4096_u16 - 24).to_le_bytes());
+    image[file_entry + 6] = u8::try_from(file_name.len()).expect("policy name should fit u8");
+    image[file_entry + 7] = 1;
+    image[file_entry + 8..file_entry + 8 + file_name.len()].copy_from_slice(file_name);
+
+    let inode_bitmap = 3 * 4096;
+    for bit in [1_usize, 10_usize] {
+        image[inode_bitmap + bit / 8] |= 1 << (bit % 8);
+    }
 
     image
 }
@@ -644,6 +819,45 @@ with open(path, 'r+b', buffering=0) as fh:
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("decode ext4 ioctl JSON")
+}
+
+fn ext4_get_encryption_policy_ioctl(path: &Path) -> Value {
+    let script = r"
+import fcntl, json, sys
+
+FS_IOC_GET_ENCRYPTION_POLICY = 0x400C6615
+POLICY_SIZE = 12
+
+with open(sys.argv[1], 'rb', buffering=0) as fh:
+    buffer = bytearray(POLICY_SIZE)
+    try:
+        fcntl.ioctl(fh.fileno(), FS_IOC_GET_ENCRYPTION_POLICY, buffer, True)
+        print(json.dumps({
+            'policy_version': buffer[0],
+            'contents_mode': buffer[1],
+            'filenames_mode': buffer[2],
+            'flags': buffer[3],
+            'master_key_descriptor_hex': buffer[4:12].hex(),
+            'policy_hex': buffer.hex(),
+        }))
+    except OSError as exc:
+        print(json.dumps({
+            'errno': exc.errno,
+            'message': str(exc),
+        }))
+        sys.exit(0)
+    ";
+
+    let output = Command::new("python3")
+        .args(["-c", script, path.to_str().expect("path utf8")])
+        .output()
+        .expect("python3 get encryption policy ioctl");
+    assert!(
+        output.status.success(),
+        "python3 get encryption policy ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode encryption policy ioctl JSON")
 }
 
 fn ext4_move_ext_ioctl(
@@ -1846,6 +2060,177 @@ fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
         "PASS",
         Some("user_bits_applied_system_bits_preserved"),
     );
+}
+
+#[test]
+fn fuse_ioctl_ext4_get_encryption_policy_v1_reports_legacy_policy_on_mounted_path() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = build_ext4_fscrypt_policy_image(true);
+    let image_path = tmp.path().join("fscrypt-policy-v1.ext4");
+    fs::write(&image_path, image).expect("write fscrypt policy image");
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-encryption-policy.log");
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_with_options(&image_path, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_get_encryption_policy_v1";
+    let path = mnt.join("policy.txt");
+    let report = ext4_get_encryption_policy_ioctl(&path);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if matches!(
+        report["errno"].as_i64(),
+        Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO
+    ) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_CMD),
+            "GET_ENCRYPTION_POLICY returned unsupported errno after reaching ffs-fuse::ioctl: \
+             {ioctl_trace}"
+        );
+        eprintln!(
+            "EXT4 GET_ENCRYPTION_POLICY ioctl skipped: kernel/VFS returned unsupported errno \
+             before ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_CMD),
+        "successful GET_ENCRYPTION_POLICY should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    // The legacy getter is encoded as `_IOW`, so restricted FUSE sends the
+    // caller buffer as `in_data` with `out_size == 0`. Real kernels then reject
+    // any successful data reply with `EIO` even though the request reached
+    // FrankenFS; treat that as an auditable surfaced transport gap rather than
+    // as a backend regression.
+    if report["errno"].as_i64() == Some(i64::from(libc::EIO)) {
+        assert!(
+            ioctl_trace.contains("in_len=12 out_size=0"),
+            "legacy fscrypt v1 ioctl should surface the restricted-FUSE `_IOW` \
+             request shape before returning EIO: {ioctl_trace}"
+        );
+        assert_eq!(
+            report["message"].as_str(),
+            Some("[Errno 5] Input/output error"),
+            "legacy fscrypt v1 mounted-path failure should remain the expected \
+             kernel/FUSE transport EIO: {report}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("restricted_fuse_iow_transport_surfaces_eio"),
+        );
+        return;
+    }
+
+    assert!(
+        report["errno"].is_null(),
+        "GET_ENCRYPTION_POLICY should either succeed or surface the known \
+         restricted-FUSE `_IOW` EIO: {report}"
+    );
+    assert_eq!(
+        report["policy_version"].as_u64(),
+        Some(u64::from(FSCRYPT_POLICY_V1_VERSION)),
+        "expected legacy fscrypt policy v1 payload: {report}"
+    );
+    assert_eq!(
+        report["contents_mode"].as_u64(),
+        Some(1),
+        "unexpected fscrypt contents mode: {report}"
+    );
+    assert_eq!(
+        report["filenames_mode"].as_u64(),
+        Some(4),
+        "unexpected fscrypt filenames mode: {report}"
+    );
+    assert_eq!(
+        report["flags"].as_u64(),
+        Some(0),
+        "unexpected fscrypt policy flags: {report}"
+    );
+    assert_eq!(
+        report["master_key_descriptor_hex"].as_str(),
+        Some("6d6b646573633432"),
+        "unexpected fscrypt v1 master key descriptor: {report}"
+    );
+    assert_eq!(
+        report["policy_hex"].as_str(),
+        Some("000104006d6b646573633432"),
+        "expected raw fscrypt policy v1 bytes to remain stable: {report}"
+    );
+    assert_eq!(
+        report["policy_hex"].as_str().map(str::len),
+        Some(FSCRYPT_POLICY_V1_SIZE * 2),
+        "expected the legacy policy ioctl to return exactly 12 bytes: {report}"
+    );
+    emit_scenario_result(scenario_id, "PASS", Some("policy_version=0_v1"));
+}
+
+#[test]
+fn fuse_ioctl_ext4_get_encryption_policy_returns_enodata_for_unencrypted_inode() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = build_ext4_fscrypt_policy_image(false);
+    let image_path = tmp.path().join("fscrypt-policy-enodata.ext4");
+    fs::write(&image_path, image).expect("write fscrypt ENODATA image");
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-encryption-policy-enodata.log");
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_with_options(&image_path, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_get_encryption_policy_enodata";
+    let path = mnt.join("policy.txt");
+    let report = ext4_get_encryption_policy_ioctl(&path);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if matches!(
+        report["errno"].as_i64(),
+        Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO
+    ) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_CMD),
+            "GET_ENCRYPTION_POLICY ENODATA path returned unsupported errno after reaching \
+             ffs-fuse::ioctl: {ioctl_trace}"
+        );
+        eprintln!(
+            "EXT4 GET_ENCRYPTION_POLICY ENODATA path skipped: kernel/VFS returned unsupported \
+             errno before ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_CMD),
+        "ENODATA GET_ENCRYPTION_POLICY should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    assert_eq!(
+        report["errno"].as_i64(),
+        Some(i64::from(libc::ENODATA)),
+        "unencrypted inode should surface ENODATA: {report}"
+    );
+    let detail = format!("errno={}", libc::ENODATA);
+    emit_scenario_result(scenario_id, "PASS", Some(detail.as_str()));
 }
 
 #[test]

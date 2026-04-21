@@ -1547,7 +1547,17 @@ impl FrankenFuse {
                 }
             }
             FS_IOC_GET_ENCRYPTION_POLICY => {
-                if out_size < u32::try_from(FSCRYPT_POLICY_V1_SIZE).unwrap_or(u32::MAX) {
+                // Linux exposes the legacy v1 fscrypt getter as an `_IOW` ioctl,
+                // so real mounted-path requests often arrive with a caller buffer
+                // in `in_data` and `out_size == 0`. Unit tests that bypass the
+                // kernel still use the simpler `out_size` form, so accept either
+                // request shape as long as one side advertises a full v1 policy
+                // buffer. Note that restricted FUSE still cannot return success
+                // data for this ioctl shape: the kernel advertises zero output
+                // bytes and converts any non-empty reply into `EIO`.
+                let advertised_len =
+                    usize::max(in_data.len(), usize::try_from(out_size).unwrap_or(0));
+                if advertised_len < FSCRYPT_POLICY_V1_SIZE {
                     return IoctlResult::Error(libc::EINVAL);
                 }
                 let cx = Self::cx_for_request();
@@ -4133,6 +4143,35 @@ mod tests {
 
         let response =
             dispatch_ioctl_for_testing(&fuse, 11, 0, FS_IOC_GET_ENCRYPTION_POLICY, &[], 12);
+        assert_eq!(response, IoctlResult::Data(policy.to_vec()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetEncryptionPolicy(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_accepts_legacy_iow_request_shape() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let policy = [0, 1, 4, 0, b'm', b'k', b'd', b'e', b's', b'c', b'4', b'2'];
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy(
+            policy,
+            Arc::clone(&calls),
+        )));
+
+        let request_buffer = [0_u8; FSCRYPT_POLICY_V1_SIZE];
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            11,
+            0,
+            FS_IOC_GET_ENCRYPTION_POLICY,
+            &request_buffer,
+            0,
+        );
         assert_eq!(response, IoctlResult::Data(policy.to_vec()));
         assert_eq!(
             calls.lock().expect("lock ioctl calls").as_slice(),
