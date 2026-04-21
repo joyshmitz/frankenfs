@@ -76,6 +76,8 @@ const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
+/// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
+const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FIEMAP_START_OFFSET: usize = 0;
 const FIEMAP_LENGTH_OFFSET: usize = 8;
@@ -1672,6 +1674,27 @@ impl FrankenFuse {
                         );
                         IoctlResult::Error(error.to_errno())
                     }
+                }
+            }
+            FS_IOC_GETFSLABEL => {
+                const FSLABEL_MAX: usize = 256;
+                if out_size < FSLABEL_MAX as u32 {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_fs_label(cx, scope)
+                }) {
+                    Ok(label) => {
+                        let mut buf = vec![0_u8; FSLABEL_MAX];
+                        let copy_len = label.len().min(FSLABEL_MAX);
+                        buf[..copy_len].copy_from_slice(&label[..copy_len]);
+                        if copy_len < FSLABEL_MAX {
+                            buf[copy_len] = 0;
+                        }
+                        IoctlResult::Data(buf)
+                    }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
             _ => IoctlResult::Error(libc::ENOTTY),
@@ -3629,6 +3652,7 @@ mod tests {
         Fsync(InodeNumber, u64, bool),
         GetEncryptionPolicy(InodeNumber),
         GetFlags(InodeNumber),
+        GetFsLabel,
         Getattr(InodeNumber),
         GetVersion(InodeNumber),
         MoveExt(InodeNumber, u32, u64, u64, u64),
@@ -3648,6 +3672,7 @@ mod tests {
         attr_size: u64,
         blksize: u32,
         move_ext_result: Option<u64>,
+        fs_label: Vec<u8>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
     }
 
@@ -3662,6 +3687,7 @@ mod tests {
                 attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: None,
+                fs_label: b"test_label\0".to_vec(),
                 calls,
             }
         }
@@ -3676,6 +3702,7 @@ mod tests {
                 attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: None,
+                fs_label: b"test_label\0".to_vec(),
                 calls,
             }
         }
@@ -3693,6 +3720,7 @@ mod tests {
                 attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: None,
+                fs_label: b"test_label\0".to_vec(),
                 calls,
             }
         }
@@ -3707,6 +3735,7 @@ mod tests {
                 attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: None,
+                fs_label: b"test_label\0".to_vec(),
                 calls,
             }
         }
@@ -3721,6 +3750,7 @@ mod tests {
                 attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: Some(moved_len),
+                fs_label: b"test_label\0".to_vec(),
                 calls,
             }
         }
@@ -3735,6 +3765,7 @@ mod tests {
                 attr_size: 64 * 1024,
                 blksize,
                 move_ext_result: Some(1),
+                fs_label: b"test_label\0".to_vec(),
                 calls,
             }
         }
@@ -3754,6 +3785,22 @@ mod tests {
                 attr_size: size,
                 blksize: 4096,
                 move_ext_result: Some(1),
+                fs_label: b"test_label\0".to_vec(),
+                calls,
+            }
+        }
+
+        fn with_fs_label(label: &[u8], calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            Self {
+                encryption_policy: None,
+                encryption_policy_errno: None,
+                flags: 0,
+                generation: 0,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
+                blksize: 4096,
+                move_ext_result: None,
+                fs_label: label.to_vec(),
                 calls,
             }
         }
@@ -3928,6 +3975,14 @@ mod tests {
             self.encryption_policy.ok_or_else(|| {
                 FfsError::UnsupportedFeature("get_encryption_policy_v1 not configured".into())
             })
+        }
+
+        fn get_fs_label(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetFsLabel);
+            Ok(self.fs_label.clone())
         }
 
         fn fiemap(
@@ -4214,6 +4269,48 @@ mod tests {
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getfslabel_returns_label_in_256_byte_buffer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_fs_label(
+            b"frankenfs_test\0",
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 2, 0, FS_IOC_GETFSLABEL, &[], 256);
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected ioctl data response"
+        );
+        let IoctlResult::Data(bytes) = response else {
+            unreachable!("asserted IoctlResult::Data above");
+        };
+        assert_eq!(bytes.len(), 256);
+        let label_end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        assert_eq!(&bytes[..label_end], b"frankenfs_test");
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetFsLabel,
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getfslabel_rejects_too_small_output_buffer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_fs_label(
+            b"test\0",
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 2, 0, FS_IOC_GETFSLABEL, &[], 255);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
     }
 
     #[test]

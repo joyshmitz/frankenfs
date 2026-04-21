@@ -15641,6 +15641,21 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_fs_label(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(sb) => {
+                let mut label = sb.volume_name.as_bytes().to_vec();
+                label.push(0);
+                Ok(label)
+            }
+            FsFlavor::Btrfs(sb) => {
+                let mut label = sb.label.as_bytes().to_vec();
+                label.push(0);
+                Ok(label)
+            }
+        }
+    }
+
     fn set_inode_flags(
         &self,
         cx: &Cx,

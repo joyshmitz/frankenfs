@@ -735,6 +735,17 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get the filesystem label (`FS_IOC_GETFSLABEL`).
+    ///
+    /// Returns the filesystem label as a null-terminated byte vector.
+    /// ext4: up to 16 bytes from `s_volume_name`.
+    /// btrfs: up to 256 bytes from superblock `label`.
+    fn get_fs_label(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_fs_label is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate
