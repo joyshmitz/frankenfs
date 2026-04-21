@@ -6376,6 +6376,59 @@ fn validate_btrfs_superblock(sb: &BtrfsSuperblock) -> Result<(), FfsError> {
     Ok(())
 }
 
+const EXT4_MMP_VALIDATION_OPERATION_ID: &str = "open_fs_ext4_mmp";
+const EXT4_MMP_VALIDATION_SCENARIO_ID: &str = "ext4_mount_mmp_validation";
+
+fn ext4_mmp_status_class(status: ffs_ondisk::ext4::Ext4MmpStatus) -> &'static str {
+    match status {
+        ffs_ondisk::ext4::Ext4MmpStatus::Clean => "clean",
+        ffs_ondisk::ext4::Ext4MmpStatus::Fsck => "fsck",
+        ffs_ondisk::ext4::Ext4MmpStatus::Active(_) => "active",
+        ffs_ondisk::ext4::Ext4MmpStatus::UnsafeUnknown(_) => "unsafe_unknown",
+    }
+}
+
+fn log_ext4_mmp_validated(mmp_block: u64, mmp: &ffs_ondisk::ext4::Ext4MmpBlock) {
+    info!(
+        target: "ffs::ext4::mmp",
+        operation_id = EXT4_MMP_VALIDATION_OPERATION_ID,
+        scenario_id = EXT4_MMP_VALIDATION_SCENARIO_ID,
+        outcome = "validated_clean",
+        error_class = "none",
+        status_class = ext4_mmp_status_class(mmp.status()),
+        mmp_block,
+        sequence = mmp.seq,
+        check_interval = mmp.check_interval,
+        node_name = %mmp.nodename,
+        device_name = %mmp.bdevname,
+        "ext4_mmp_validated"
+    );
+}
+
+fn log_ext4_mmp_rejected(
+    mmp_block: u64,
+    mmp: &ffs_ondisk::ext4::Ext4MmpBlock,
+    error_class: &'static str,
+    reason: &str,
+) {
+    warn!(
+        target: "ffs::ext4::mmp",
+        operation_id = EXT4_MMP_VALIDATION_OPERATION_ID,
+        scenario_id = EXT4_MMP_VALIDATION_SCENARIO_ID,
+        outcome = "rejected",
+        error_class,
+        status_class = ext4_mmp_status_class(mmp.status()),
+        mmp_block,
+        sequence = mmp.seq,
+        check_interval = mmp.check_interval,
+        node_name = %mmp.nodename,
+        device_name = %mmp.bdevname,
+        errno = libc::EOPNOTSUPP,
+        reason,
+        "ext4_mmp_rejected"
+    );
+}
+
 fn validate_ext4_mmp(cx: &Cx, dev: &dyn ByteDevice, sb: &Ext4Superblock) -> Result<(), FfsError> {
     let Some(mmp_block) = sb.mmp_block_number() else {
         return Ok(());
@@ -6401,16 +6454,27 @@ fn validate_ext4_mmp(cx: &Cx, dev: &dyn ByteDevice, sb: &Ext4Superblock) -> Resu
             .map_err(|e| parse_error_to_ffs(&e))?;
     }
     match mmp.status() {
-        ffs_ondisk::ext4::Ext4MmpStatus::Clean => Ok(()),
-        ffs_ondisk::ext4::Ext4MmpStatus::Fsck => Err(FfsError::UnsupportedFeature(
-            "ext4 MMP block reports fsck in progress; refusing mount".into(),
-        )),
-        ffs_ondisk::ext4::Ext4MmpStatus::Active(seq) => Err(FfsError::UnsupportedFeature(format!(
-            "ext4 MMP sequence 0x{seq:08X} indicates another writer may be active; write-participating MMP is not implemented"
-        ))),
-        ffs_ondisk::ext4::Ext4MmpStatus::UnsafeUnknown(seq) => Err(FfsError::UnsupportedFeature(
-            format!("ext4 MMP sequence 0x{seq:08X} is unsafe/unknown; refusing mount"),
-        )),
+        ffs_ondisk::ext4::Ext4MmpStatus::Clean => {
+            log_ext4_mmp_validated(mmp_block, &mmp);
+            Ok(())
+        }
+        ffs_ondisk::ext4::Ext4MmpStatus::Fsck => {
+            let reason = "ext4 MMP block reports fsck in progress; refusing mount";
+            log_ext4_mmp_rejected(mmp_block, &mmp, "fsck_in_progress", reason);
+            Err(FfsError::UnsupportedFeature(reason.into()))
+        }
+        ffs_ondisk::ext4::Ext4MmpStatus::Active(seq) => {
+            let reason = format!(
+                "ext4 MMP sequence 0x{seq:08X} indicates another writer may be active; write-participating MMP is not implemented"
+            );
+            log_ext4_mmp_rejected(mmp_block, &mmp, "active_writer_maybe", &reason);
+            Err(FfsError::UnsupportedFeature(reason))
+        }
+        ffs_ondisk::ext4::Ext4MmpStatus::UnsafeUnknown(seq) => {
+            let reason = format!("ext4 MMP sequence 0x{seq:08X} is unsafe/unknown; refusing mount");
+            log_ext4_mmp_rejected(mmp_block, &mmp, "unsafe_unknown_status", &reason);
+            Err(FfsError::UnsupportedFeature(reason))
+        }
     }
 }
 
@@ -17360,6 +17424,43 @@ mod tests {
         image
     }
 
+    fn build_ext4_image_with_mmp(seq: u32) -> Vec<u8> {
+        let mut image = build_ext4_image(2);
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        image[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&EXT4_VALID_FS.to_le_bytes());
+
+        let mut incompat_bytes = [0_u8; 4];
+        incompat_bytes.copy_from_slice(&image[sb_off + 0x60..sb_off + 0x64]);
+        let incompat = u32::from_le_bytes(incompat_bytes) | ffs_ondisk::Ext4IncompatFeatures::MMP.0;
+        image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
+
+        let mmp_block = 8_u64;
+        image[sb_off + 0x166..sb_off + 0x168].copy_from_slice(&5_u16.to_le_bytes());
+        image[sb_off + 0x168..sb_off + 0x170].copy_from_slice(&mmp_block.to_le_bytes());
+
+        let mmp_offset = usize::try_from(mmp_block * 4096).expect("mmp offset should fit");
+        image[mmp_offset..mmp_offset + 4]
+            .copy_from_slice(&ffs_ondisk::ext4::EXT4_MMP_MAGIC.to_le_bytes());
+        image[mmp_offset + 4..mmp_offset + 8].copy_from_slice(&seq.to_le_bytes());
+        image[mmp_offset + 8..mmp_offset + 16].copy_from_slice(&1_700_000_123_u64.to_le_bytes());
+        image[mmp_offset + 0x10..mmp_offset + 0x18].copy_from_slice(b"ffs-node");
+        image[mmp_offset + 0x50..mmp_offset + 0x5B].copy_from_slice(b"/dev/testfs");
+        image[mmp_offset + 0x70..mmp_offset + 0x72].copy_from_slice(&5_u16.to_le_bytes());
+
+        image
+    }
+
+    fn find_log_entry<'a>(logs: &'a [Value], message: &str) -> &'a Value {
+        let entry = logs
+            .iter()
+            .find(|entry| entry.get("message").and_then(Value::as_str) == Some(message));
+        assert!(
+            entry.is_some(),
+            "missing log message `{message}` in logs: {logs:?}"
+        );
+        entry.expect("log entry should exist after assert")
+    }
+
     #[test]
     fn open_options_default_enables_validation() {
         let opts = OpenOptions::default();
@@ -17383,6 +17484,120 @@ mod tests {
         let geom = fs.ext4_geometry.as_ref().unwrap();
         assert!(geom.groups_count > 0);
         assert!(geom.group_desc_size == 32 || geom.group_desc_size == 64);
+    }
+
+    #[test]
+    fn open_fs_ext4_mmp_clean_logs_validated_state() {
+        let _guard = log_contract_guard();
+        let buffer = SharedLogBuffer::default();
+        let _sub = install_json_subscriber(&buffer);
+        let image = build_ext4_image_with_mmp(ffs_ondisk::ext4::EXT4_MMP_SEQ_CLEAN);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("clean MMP state should open");
+        assert!(fs.is_ext4());
+
+        let logs = parse_json_logs(&buffer);
+        let validated = find_log_entry(&logs, "ext4_mmp_validated");
+        assert_eq!(
+            validated.get("outcome").and_then(Value::as_str),
+            Some("validated_clean")
+        );
+        assert_eq!(
+            validated.get("error_class").and_then(Value::as_str),
+            Some("none")
+        );
+        assert_eq!(
+            validated.get("status_class").and_then(Value::as_str),
+            Some("clean")
+        );
+        assert_eq!(
+            validated.get("sequence").and_then(Value::as_u64),
+            Some(u64::from(ffs_ondisk::ext4::EXT4_MMP_SEQ_CLEAN))
+        );
+        assert_eq!(validated.get("mmp_block").and_then(Value::as_u64), Some(8));
+    }
+
+    #[test]
+    fn open_fs_ext4_mmp_refusal_logs_remain_stable_for_write_participating_states() {
+        let cases = [
+            (
+                "fsck",
+                ffs_ondisk::ext4::EXT4_MMP_SEQ_FSCK,
+                "fsck_in_progress",
+                "fsck",
+                "ext4 MMP block reports fsck in progress; refusing mount",
+            ),
+            (
+                "active",
+                42_u32,
+                "active_writer_maybe",
+                "active",
+                "another writer may be active",
+            ),
+            (
+                "unsafe_unknown",
+                0_u32,
+                "unsafe_unknown_status",
+                "unsafe_unknown",
+                "unsafe/unknown; refusing mount",
+            ),
+        ];
+
+        for (label, seq, error_class, status_class, needle) in cases {
+            let _guard = log_contract_guard();
+            let buffer = SharedLogBuffer::default();
+            let _sub = install_json_subscriber(&buffer);
+            let image = build_ext4_image_with_mmp(seq);
+            let dev = TestDevice::from_vec(image);
+            let cx = Cx::for_testing();
+            let opts = OpenOptions {
+                ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+                ..OpenOptions::default()
+            };
+
+            let err = OpenFs::from_device(&cx, Box::new(dev), &opts)
+                .expect_err("non-clean MMP state should refuse write-participating open");
+            assert_eq!(
+                err.to_errno(),
+                libc::EOPNOTSUPP,
+                "unexpected errno for {label}"
+            );
+            assert!(
+                matches!(err, FfsError::UnsupportedFeature(ref message) if message.contains(needle)),
+                "unexpected error for {label}: {err:?}"
+            );
+
+            let logs = parse_json_logs(&buffer);
+            let rejected = find_log_entry(&logs, "ext4_mmp_rejected");
+            assert_eq!(
+                rejected.get("outcome").and_then(Value::as_str),
+                Some("rejected"),
+                "unexpected outcome for {label}"
+            );
+            assert_eq!(
+                rejected.get("error_class").and_then(Value::as_str),
+                Some(error_class),
+                "unexpected error_class for {label}"
+            );
+            assert_eq!(
+                rejected.get("status_class").and_then(Value::as_str),
+                Some(status_class),
+                "unexpected status_class for {label}"
+            );
+            assert_eq!(
+                rejected.get("sequence").and_then(Value::as_u64),
+                Some(u64::from(seq)),
+                "unexpected sequence for {label}"
+            );
+            assert_eq!(
+                rejected.get("errno").and_then(Value::as_i64),
+                Some(i64::from(libc::EOPNOTSUPP)),
+                "unexpected errno field for {label}"
+            );
+        }
     }
 
     #[test]

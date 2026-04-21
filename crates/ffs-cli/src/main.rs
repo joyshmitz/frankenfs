@@ -3688,6 +3688,100 @@ fn mount_operation_id(
     format!("mount-{digest:08x}")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Ext4MmpRefusalLogContext {
+    status_class: &'static str,
+    error_class: &'static str,
+    sequence: Option<u32>,
+}
+
+fn parse_ext4_mmp_sequence(message: &str) -> Option<u32> {
+    let rest = message.strip_prefix("ext4 MMP sequence 0x")?;
+    let hex = rest.get(..8)?;
+    u32::from_str_radix(hex, 16).ok()
+}
+
+fn ext4_mmp_refusal_log_context(error: &ffs_error::FfsError) -> Option<Ext4MmpRefusalLogContext> {
+    let ffs_error::FfsError::UnsupportedFeature(message) = error else {
+        return None;
+    };
+
+    if message == "ext4 MMP block reports fsck in progress; refusing mount" {
+        Some(Ext4MmpRefusalLogContext {
+            status_class: "fsck",
+            error_class: "fsck_in_progress",
+            sequence: None,
+        })
+    } else if message.contains("another writer may be active")
+        && message.contains("write-participating MMP is not implemented")
+    {
+        Some(Ext4MmpRefusalLogContext {
+            status_class: "active",
+            error_class: "active_writer_maybe",
+            sequence: parse_ext4_mmp_sequence(message),
+        })
+    } else if message.contains("unsafe/unknown; refusing mount") {
+        Some(Ext4MmpRefusalLogContext {
+            status_class: "unsafe_unknown",
+            error_class: "unsafe_unknown_status",
+            sequence: parse_ext4_mmp_sequence(message),
+        })
+    } else {
+        None
+    }
+}
+
+fn log_mount_open_rejected(
+    operation_id: &str,
+    scenario_id: &str,
+    read_write: bool,
+    error: &ffs_error::FfsError,
+) {
+    if let Some(context) = ext4_mmp_refusal_log_context(error) {
+        if let Some(sequence) = context.sequence {
+            error!(
+                target: "ffs::cli::mount",
+                operation_id,
+                scenario_id,
+                outcome = "mount_open_rejected",
+                error_class = context.error_class,
+                mmp_status_class = context.status_class,
+                mmp_sequence = sequence,
+                read_write,
+                errno = error.to_errno(),
+                reason = %error,
+                "mount_open_rejected"
+            );
+        } else {
+            error!(
+                target: "ffs::cli::mount",
+                operation_id,
+                scenario_id,
+                outcome = "mount_open_rejected",
+                error_class = context.error_class,
+                mmp_status_class = context.status_class,
+                read_write,
+                errno = error.to_errno(),
+                reason = %error,
+                "mount_open_rejected"
+            );
+        }
+        return;
+    }
+
+    error!(
+        target: "ffs::cli::mount",
+        operation_id,
+        scenario_id,
+        outcome = "mount_open_rejected",
+        error_class = "filesystem_open_failed",
+        read_write,
+        errno = error.to_errno(),
+        reason = %error,
+        "mount_open_rejected"
+    );
+}
+
 fn log_mount_runtime_selected(
     operation_id: &str,
     scenario_id: &str,
@@ -4037,8 +4131,16 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
         btrfs_mount_selection: options.btrfs_mount_selection.clone(),
         ..OpenOptions::default()
     };
-    let mut open_fs = OpenFs::open_with_options(&cx, image_path, &open_opts)
-        .with_context(|| format!("failed to open filesystem image: {}", image_path.display()))?;
+    let mut open_fs = match OpenFs::open_with_options(&cx, image_path, &open_opts) {
+        Ok(open_fs) => open_fs,
+        Err(error) => {
+            log_mount_open_rejected(&operation_id, scenario_id, options.read_write, &error);
+            return Err(anyhow::Error::new(error).context(format!(
+                "failed to open filesystem image: {}",
+                image_path.display()
+            )));
+        }
+    };
     if !matches!(
         options.btrfs_mount_selection,
         BtrfsMountSelection::DefaultRoot
@@ -5401,6 +5503,14 @@ mod tests {
         serde_json::from_str(line).expect("line should parse as JSON")
     }
 
+    fn parse_json_logs(buffer: &SharedLogBuffer) -> Vec<Value> {
+        buffer
+            .as_string()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect()
+    }
+
     #[allow(clippy::cast_possible_truncation)]
     fn build_test_ext4_image_with_state(state: u16) -> Vec<u8> {
         const BLOCK_SIZE_LOG: u32 = 2; // 4K blocks
@@ -5443,6 +5553,31 @@ mod tests {
         image[sb_off + 0x240..sb_off + 0x244].copy_from_slice(&3_u32.to_le_bytes());
         image[sb_off + 0x244..sb_off + 0x248].copy_from_slice(&4_u32.to_le_bytes());
         image[sb_off + 0x26C..sb_off + 0x270].copy_from_slice(&11_u32.to_le_bytes());
+        image
+    }
+
+    fn build_test_ext4_image_with_mmp(state: u16, seq: u32) -> Vec<u8> {
+        let mut image = build_test_ext4_image_with_state(state);
+        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+
+        let mut incompat_bytes = [0_u8; 4];
+        incompat_bytes.copy_from_slice(&image[sb_off + 0x60..sb_off + 0x64]);
+        let incompat = u32::from_le_bytes(incompat_bytes) | ffs_ondisk::Ext4IncompatFeatures::MMP.0;
+        image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat.to_le_bytes());
+
+        let mmp_block = 8_u64;
+        image[sb_off + 0x166..sb_off + 0x168].copy_from_slice(&5_u16.to_le_bytes());
+        image[sb_off + 0x168..sb_off + 0x170].copy_from_slice(&mmp_block.to_le_bytes());
+
+        let mmp_offset = usize::try_from(mmp_block * 4096).expect("mmp offset should fit");
+        image[mmp_offset..mmp_offset + 4]
+            .copy_from_slice(&ffs_ondisk::ext4::EXT4_MMP_MAGIC.to_le_bytes());
+        image[mmp_offset + 4..mmp_offset + 8].copy_from_slice(&seq.to_le_bytes());
+        image[mmp_offset + 8..mmp_offset + 16].copy_from_slice(&1_700_000_123_u64.to_le_bytes());
+        image[mmp_offset + 0x10..mmp_offset + 0x18].copy_from_slice(b"ffs-node");
+        image[mmp_offset + 0x50..mmp_offset + 0x5B].copy_from_slice(b"/dev/testfs");
+        image[mmp_offset + 0x70..mmp_offset + 0x72].copy_from_slice(&5_u16.to_le_bytes());
+
         image
     }
 
@@ -7030,6 +7165,138 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| !value.is_empty())
         );
+    }
+
+    #[test]
+    fn info_cmd_accepts_clean_ext4_mmp_state() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image =
+            build_test_ext4_image_with_mmp(EXT4_VALID_FS, ffs_ondisk::ext4::EXT4_MMP_SEQ_CLEAN);
+
+        with_temp_image_path(&image, |path| {
+            super::info_cmd(
+                &path,
+                InfoCommandOptions {
+                    sections: InfoSections::empty(),
+                    json: true,
+                },
+            )
+            .expect("clean MMP state should remain readable through info");
+        });
+    }
+
+    #[test]
+    fn mount_cmd_logs_ext4_mmp_refusal_states() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let cases = [
+            (
+                "fsck",
+                ffs_ondisk::ext4::EXT4_MMP_SEQ_FSCK,
+                "fsck_in_progress",
+                "fsck",
+                None,
+                "ext4 MMP block reports fsck in progress; refusing mount",
+            ),
+            (
+                "active",
+                42_u32,
+                "active_writer_maybe",
+                "active",
+                Some(42_u32),
+                "another writer may be active",
+            ),
+            (
+                "unsafe_unknown",
+                0_u32,
+                "unsafe_unknown_status",
+                "unsafe_unknown",
+                Some(0_u32),
+                "unsafe/unknown; refusing mount",
+            ),
+        ];
+
+        for (label, seq, error_class, status_class, expected_sequence, needle) in cases {
+            let _guard = log_contract_guard();
+            let buffer = SharedLogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .flatten_event(true)
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_max_level(tracing::Level::ERROR)
+                .with_writer(buffer.clone())
+                .finish();
+
+            let dispatch = tracing::Dispatch::new(subscriber);
+            let _default = tracing::dispatcher::set_default(&dispatch);
+            tracing::callsite::rebuild_interest_cache();
+
+            let image = build_test_ext4_image_with_mmp(EXT4_VALID_FS, seq);
+            with_temp_image_path(&image, |path| {
+                let err = mount_cmd(
+                    &path,
+                    &PathBuf::from("/definitely/not-used"),
+                    &MountCmdOptions {
+                        allow_other: false,
+                        read_write: true,
+                        mount_mode: MountMode::Compat,
+                        btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
+                        ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                        ext4_verify_journal_checksums: true,
+                        runtime: MountRuntimeConfig {
+                            mode: MountRuntimeMode::Standard,
+                            managed_unmount_timeout_secs: None,
+                        },
+                    },
+                )
+                .expect_err("non-clean MMP state should reject mount before FUSE starts");
+
+                let message = format!("{err:#}");
+                assert!(
+                    message.contains("failed to open filesystem image"),
+                    "expected mount open context for {label}, got: {message}"
+                );
+                assert!(
+                    message.contains(needle),
+                    "expected stable refusal detail for {label}, got: {message}"
+                );
+            });
+
+            let logs = parse_json_logs(&buffer);
+            let rejected = logs.iter().find(|entry| {
+                entry.get("message").and_then(Value::as_str) == Some("mount_open_rejected")
+            });
+            assert!(
+                rejected.is_some(),
+                "missing mount_open_rejected log for {label}: {logs:?}"
+            );
+            let rejected = rejected.expect("mount_open_rejected log should exist after assert");
+            assert_eq!(
+                rejected.get("outcome").and_then(Value::as_str),
+                Some("mount_open_rejected"),
+                "unexpected outcome for {label}"
+            );
+            assert_eq!(
+                rejected.get("error_class").and_then(Value::as_str),
+                Some(error_class),
+                "unexpected error_class for {label}"
+            );
+            assert_eq!(
+                rejected.get("mmp_status_class").and_then(Value::as_str),
+                Some(status_class),
+                "unexpected mmp_status_class for {label}"
+            );
+            assert_eq!(
+                rejected.get("errno").and_then(Value::as_i64),
+                Some(i64::from(libc::EOPNOTSUPP)),
+                "unexpected errno for {label}"
+            );
+            assert_eq!(
+                rejected.get("mmp_sequence").and_then(Value::as_u64),
+                expected_sequence.map(u64::from),
+                "unexpected mmp_sequence for {label}"
+            );
+        }
     }
 
     #[test]
@@ -8854,18 +9121,19 @@ mod tests {
             )
             .expect("build info output with ext4 quota metadata");
 
-            match output.superblock {
-                super::SuperblockInfoOutput::Ext4 { quota_inodes, .. } => {
-                    assert_eq!(
-                        quota_inodes,
-                        Some(ffs_ondisk::ext4::Ext4QuotaInodes {
-                            user: Some(3),
-                            group: Some(4),
-                            project: Some(11),
-                        })
-                    );
-                }
-                other => panic!("expected ext4 superblock output, got {other:?}"),
+            assert!(
+                matches!(output.superblock, super::SuperblockInfoOutput::Ext4 { .. }),
+                "expected ext4 superblock output"
+            );
+            if let super::SuperblockInfoOutput::Ext4 { quota_inodes, .. } = output.superblock {
+                assert_eq!(
+                    quota_inodes,
+                    Some(ffs_ondisk::ext4::Ext4QuotaInodes {
+                        user: Some(3),
+                        group: Some(4),
+                        project: Some(11),
+                    })
+                );
             }
 
             let json = serde_json::to_value(&output).expect("serialize info output to json");
@@ -8900,11 +9168,12 @@ mod tests {
             )
             .expect("build info output without ext4 quota metadata");
 
-            match output.superblock {
-                super::SuperblockInfoOutput::Ext4 { quota_inodes, .. } => {
-                    assert!(quota_inodes.is_none());
-                }
-                other => panic!("expected ext4 superblock output, got {other:?}"),
+            assert!(
+                matches!(output.superblock, super::SuperblockInfoOutput::Ext4 { .. }),
+                "expected ext4 superblock output"
+            );
+            if let super::SuperblockInfoOutput::Ext4 { quota_inodes, .. } = output.superblock {
+                assert!(quota_inodes.is_none());
             }
 
             let json = serde_json::to_value(&output).expect("serialize info output to json");
@@ -8928,26 +9197,30 @@ mod tests {
             };
             let flavor = super::detect_filesystem_at_path(&cx, &path)
                 .expect("detect ext4 image for inspect quota test");
-            let sb = match flavor {
-                super::FsFlavor::Ext4(sb) => sb,
-                other => panic!("expected ext4 flavor, got {other:?}"),
+            assert!(
+                matches!(flavor, super::FsFlavor::Ext4(_)),
+                "expected ext4 flavor"
+            );
+            let super::FsFlavor::Ext4(sb) = flavor else {
+                return;
             };
 
             let output = super::inspect_ext4_output(&cx, &path, &open_opts, &sb)
                 .expect("build inspect output with ext4 quota metadata");
 
-            match output {
-                super::InspectOutput::Ext4 { quota_inodes, .. } => {
-                    assert_eq!(
-                        quota_inodes,
-                        Some(ffs_ondisk::ext4::Ext4QuotaInodes {
-                            user: Some(3),
-                            group: Some(4),
-                            project: Some(11),
-                        })
-                    );
-                }
-                other => panic!("expected ext4 inspect output, got {other:?}"),
+            assert!(
+                matches!(output, super::InspectOutput::Ext4 { .. }),
+                "expected ext4 inspect output"
+            );
+            if let super::InspectOutput::Ext4 { quota_inodes, .. } = output {
+                assert_eq!(
+                    quota_inodes,
+                    Some(ffs_ondisk::ext4::Ext4QuotaInodes {
+                        user: Some(3),
+                        group: Some(4),
+                        project: Some(11),
+                    })
+                );
             }
 
             let json = serde_json::to_value(&output).expect("serialize inspect output to json");
