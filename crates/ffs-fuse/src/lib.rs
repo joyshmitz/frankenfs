@@ -29,9 +29,11 @@ use std::os::raw::c_int;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -628,6 +630,7 @@ struct FuseInner {
     backpressure: Option<BackpressureGate>,
     access_predictor: AccessPredictor,
     readahead: ReadaheadManager,
+    inode_locks: FuseInodeLocks,
 }
 
 impl std::fmt::Debug for FuseInner {
@@ -638,6 +641,98 @@ impl std::fmt::Debug for FuseInner {
             .field("read_only", &self.read_only)
             .finish_non_exhaustive()
     }
+}
+
+#[derive(Default)]
+struct FuseInodeLocks {
+    table: Mutex<BTreeMap<InodeNumber, Arc<FuseInodeLock>>>,
+}
+
+impl FuseInodeLocks {
+    fn acquire(&self, inodes: &[InodeNumber]) -> FuseInodeGuards {
+        let mut ordered = inodes.to_vec();
+        ordered.sort_unstable_by_key(|ino| ino.0);
+        ordered.dedup();
+
+        let locks = {
+            let mut table = match self.table.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    warn!("FuseInodeLocks table poisoned, recovering");
+                    poisoned.into_inner()
+                }
+            };
+            ordered
+                .into_iter()
+                .map(|ino| {
+                    Arc::clone(
+                        table
+                            .entry(ino)
+                            .or_insert_with(|| Arc::new(FuseInodeLock::default())),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        FuseInodeGuards {
+            _guards: locks.into_iter().map(|lock| lock.acquire()).collect(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct FuseInodeLock {
+    held: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl FuseInodeLock {
+    fn acquire(self: &Arc<Self>) -> FuseInodeGuard {
+        let mut held = match self.held.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("FuseInodeLock held flag poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+        while *held {
+            held = match self.ready.wait(held) {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    warn!("FuseInodeLock wait poisoned, recovering");
+                    poisoned.into_inner()
+                }
+            };
+        }
+        *held = true;
+        drop(held);
+        FuseInodeGuard {
+            lock: Arc::clone(self),
+        }
+    }
+}
+
+struct FuseInodeGuard {
+    lock: Arc<FuseInodeLock>,
+}
+
+impl Drop for FuseInodeGuard {
+    fn drop(&mut self) {
+        let mut held = match self.lock.held.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("FuseInodeLock held flag poisoned during drop, recovering");
+                poisoned.into_inner()
+            }
+        };
+        *held = false;
+        drop(held);
+        self.lock.ready.notify_one();
+    }
+}
+
+struct FuseInodeGuards {
+    _guards: Vec<FuseInodeGuard>,
 }
 
 /// Bounded queue capacity for the ioctl trace writer.  Sized so a busy
@@ -874,6 +969,7 @@ impl FrankenFuse {
                 backpressure: None,
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
+                inode_locks: FuseInodeLocks::default(),
             }),
         }
     }
@@ -897,6 +993,7 @@ impl FrankenFuse {
                 backpressure: Some(gate),
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
+                inode_locks: FuseInodeLocks::default(),
             }),
         }
     }
@@ -937,6 +1034,10 @@ impl FrankenFuse {
                 true
             }
         }
+    }
+
+    fn acquire_mutation_inode_guards(&self, inodes: &[InodeNumber]) -> FuseInodeGuards {
+        self.inner.inode_locks.acquire(inodes)
     }
 
     /// Create a `Cx` for a FUSE request.
@@ -1475,14 +1576,17 @@ impl FrankenFuse {
     ) -> Result<InodeAttr, MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Mkdir, parent)?;
         let cx = Self::cx_for_request();
-        self.with_request_scope(&cx, RequestOp::Mkdir, |cx, scope| {
-            let attr =
-                self.inner
-                    .ops
-                    .mkdir(cx, scope, InodeNumber(parent), name, mode, uid, gid)?;
-            self.inner.ops.commit_request_scope(scope)?;
-            Ok(attr)
-        })
+        {
+            let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
+            self.with_request_scope(&cx, RequestOp::Mkdir, |cx, scope| {
+                let attr =
+                    self.inner
+                        .ops
+                        .mkdir(cx, scope, InodeNumber(parent), name, mode, uid, gid)?;
+                self.inner.ops.commit_request_scope(scope)?;
+                Ok(attr)
+            })
+        }
         .map_err(|error| MutationDispatchError::Operation {
             error,
             offset: None,
@@ -1492,11 +1596,14 @@ impl FrankenFuse {
     fn dispatch_rmdir(&self, parent: u64, name: &OsStr) -> Result<(), MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Rmdir, parent)?;
         let cx = Self::cx_for_request();
-        self.with_request_scope(&cx, RequestOp::Rmdir, |cx, scope| {
-            self.inner.ops.rmdir(cx, scope, InodeNumber(parent), name)?;
-            self.inner.ops.commit_request_scope(scope)?;
-            Ok(())
-        })
+        {
+            let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
+            self.with_request_scope(&cx, RequestOp::Rmdir, |cx, scope| {
+                self.inner.ops.rmdir(cx, scope, InodeNumber(parent), name)?;
+                self.inner.ops.commit_request_scope(scope)?;
+                Ok(())
+            })
+        }
         .map_err(|error| MutationDispatchError::Operation {
             error,
             offset: None,
@@ -1512,18 +1619,22 @@ impl FrankenFuse {
     ) -> Result<(), MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Rename, parent)?;
         let cx = Self::cx_for_request();
-        self.with_request_scope(&cx, RequestOp::Rename, |cx, scope| {
-            self.inner.ops.rename(
-                cx,
-                scope,
-                InodeNumber(parent),
-                name,
-                InodeNumber(newparent),
-                newname,
-            )?;
-            self.inner.ops.commit_request_scope(scope)?;
-            Ok(())
-        })
+        {
+            let _inode_guards =
+                self.acquire_mutation_inode_guards(&[InodeNumber(parent), InodeNumber(newparent)]);
+            self.with_request_scope(&cx, RequestOp::Rename, |cx, scope| {
+                self.inner.ops.rename(
+                    cx,
+                    scope,
+                    InodeNumber(parent),
+                    name,
+                    InodeNumber(newparent),
+                    newname,
+                )?;
+                self.inner.ops.commit_request_scope(scope)?;
+                Ok(())
+            })
+        }
         .map_err(|error| MutationDispatchError::Operation {
             error,
             offset: None,
@@ -1540,8 +1651,9 @@ impl FrankenFuse {
         let byte_offset =
             u64::try_from(offset).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
         let cx = Self::cx_for_request();
-        let (written, _commit_seq) = self
-            .with_request_scope(&cx, RequestOp::Write, |cx, scope| {
+        let (written, _commit_seq) = {
+            let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(ino)]);
+            self.with_request_scope(&cx, RequestOp::Write, |cx, scope| {
                 let bytes = self
                     .inner
                     .ops
@@ -1549,10 +1661,11 @@ impl FrankenFuse {
                 let seq = self.inner.ops.commit_request_scope(scope)?;
                 Ok((bytes, seq))
             })
-            .map_err(|error| MutationDispatchError::Operation {
-                error,
-                offset: Some(byte_offset),
-            })?;
+        }
+        .map_err(|error| MutationDispatchError::Operation {
+            error,
+            offset: Some(byte_offset),
+        })?;
         self.inner.readahead.invalidate_inode(InodeNumber(ino));
         // Update writeback barrier if enabled.
         Ok(written)
@@ -5100,6 +5213,109 @@ mod tests {
         }
     }
 
+    fn record_max_active(max_active: &AtomicUsize, current: usize) {
+        let mut observed = max_active.load(Ordering::Relaxed);
+        while current > observed {
+            match max_active.compare_exchange_weak(
+                observed,
+                current,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+
+    struct RenameConcurrencyProbeFs {
+        active_renames: Arc<AtomicUsize>,
+        max_active_renames: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl RenameConcurrencyProbeFs {
+        fn new(delay: Duration) -> (Self, Arc<AtomicUsize>) {
+            let active_renames = Arc::new(AtomicUsize::new(0));
+            let max_active_renames = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    active_renames,
+                    max_active_renames: Arc::clone(&max_active_renames),
+                    delay,
+                },
+                max_active_renames,
+            )
+        }
+    }
+
+    impl FsOps for RenameConcurrencyProbeFs {
+        fn getattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<InodeAttr> {
+            Err(FfsError::NotFound("stub".into()))
+        }
+
+        fn lookup(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _parent: InodeNumber,
+            _name: &OsStr,
+        ) -> ffs_error::Result<InodeAttr> {
+            Err(FfsError::NotFound("stub".into()))
+        }
+
+        fn readdir(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+            _offset: u64,
+        ) -> ffs_error::Result<Vec<FfsDirEntry>> {
+            Ok(vec![])
+        }
+
+        fn read(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+            _offset: u64,
+            _size: u32,
+        ) -> ffs_error::Result<Vec<u8>> {
+            Ok(vec![])
+        }
+
+        fn readlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _ino: InodeNumber,
+        ) -> ffs_error::Result<Vec<u8>> {
+            Ok(vec![])
+        }
+
+        fn rename(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            _parent: InodeNumber,
+            _name: &OsStr,
+            _new_parent: InodeNumber,
+            _new_name: &OsStr,
+        ) -> ffs_error::Result<()> {
+            let current = self.active_renames.fetch_add(1, Ordering::SeqCst) + 1;
+            record_max_active(&self.max_active_renames, current);
+            std::thread::sleep(self.delay);
+            self.active_renames.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[test]
     fn dispatch_write_routes_to_fsops() {
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -5231,6 +5447,70 @@ mod tests {
                 new_name: "new".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn dispatch_rename_serializes_overlapping_parent_pairs() {
+        let (probe, max_active_renames) = RenameConcurrencyProbeFs::new(Duration::from_millis(40));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = Arc::new(FrankenFuse::with_options(Box::new(probe), &options));
+        let start = Arc::new(std::sync::Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            for (parent, name, new_parent, new_name) in
+                [(8, "alpha", 9, "beta"), (9, "beta", 8, "alpha")]
+            {
+                let fuse = Arc::clone(&fuse);
+                let start = Arc::clone(&start);
+                scope.spawn(move || {
+                    start.wait();
+                    fuse.dispatch_rename(
+                        parent,
+                        OsStr::new(name),
+                        new_parent,
+                        OsStr::new(new_name),
+                    )
+                    .expect("dispatch rename");
+                });
+            }
+        });
+
+        assert_eq!(max_active_renames.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dispatch_rename_allows_parallel_disjoint_parent_pairs() {
+        let (probe, max_active_renames) = RenameConcurrencyProbeFs::new(Duration::from_millis(40));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = Arc::new(FrankenFuse::with_options(Box::new(probe), &options));
+        let start = Arc::new(std::sync::Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            for (parent, name, new_parent, new_name) in
+                [(8, "alpha", 9, "beta"), (10, "gamma", 11, "delta")]
+            {
+                let fuse = Arc::clone(&fuse);
+                let start = Arc::clone(&start);
+                scope.spawn(move || {
+                    start.wait();
+                    fuse.dispatch_rename(
+                        parent,
+                        OsStr::new(name),
+                        new_parent,
+                        OsStr::new(new_name),
+                    )
+                    .expect("dispatch rename");
+                });
+            }
+        });
+
+        assert_eq!(max_active_renames.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -5516,6 +5796,7 @@ mod tests {
             backpressure: None,
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
+            inode_locks: FuseInodeLocks::default(),
         });
         let barrier = Arc::new(std::sync::Barrier::new(10));
 
@@ -6508,6 +6789,7 @@ CUSTOM("congestion_threshold=3")"#;
             backpressure: None,
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(8),
+            inode_locks: FuseInodeLocks::default(),
         };
         let dbg = format!("{inner:?}");
         assert_eq!(dbg, FUSE_INNER_DEBUG_GOLDEN);
