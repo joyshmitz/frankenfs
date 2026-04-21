@@ -32,6 +32,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     fs,
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::ffi::OsStrExt,
     path::Path,
     sync::{
@@ -1125,7 +1126,7 @@ fn open_btrfs_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathB
     (fs, tmp, image)
 }
 
-fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
+fn mkfs_writable_ext4_image(size_mb: u64) -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::TempDir::new().expect("tmpdir for writable ext4");
     let image = tmp.path().join("conformance.ext4");
     let file = std::fs::File::create(&image).expect("create ext4 image");
@@ -1166,7 +1167,11 @@ fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::pat
         String::from_utf8_lossy(&debugfs.stdout),
         String::from_utf8_lossy(&debugfs.stderr)
     );
+    (tmp, image)
+}
 
+fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::path::PathBuf) {
+    let (tmp, image) = mkfs_writable_ext4_image(size_mb);
     let cx = Cx::for_testing();
     let opts = OpenOptions {
         ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
@@ -1176,6 +1181,54 @@ fn open_writable_ext4_mkfs(size_mb: u64) -> (OpenFs, tempfile::TempDir, std::pat
     fs.enable_writes(&cx).expect("enable writes on ext4 image");
     assert!(fs.is_writable(), "test ext4 image should be writable");
     (fs, tmp, image)
+}
+
+fn patch_ext4_active_mmp(image_path: &Path, mmp_block: u64, seq: u32) {
+    let mut image = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image_path)
+        .expect("open ext4 image for MMP patching");
+
+    let mut superblock = vec![0_u8; ffs_types::EXT4_SUPERBLOCK_SIZE];
+    image
+        .seek(SeekFrom::Start(
+            u64::try_from(EXT4_SUPERBLOCK_OFFSET).expect("superblock offset fits u64"),
+        ))
+        .expect("seek ext4 superblock");
+    image
+        .read_exact(&mut superblock)
+        .expect("read ext4 superblock");
+
+    let mut feature_incompat_bytes = [0_u8; 4];
+    feature_incompat_bytes.copy_from_slice(&superblock[0x60..0x64]);
+    let feature_incompat = u32::from_le_bytes(feature_incompat_bytes) | Ext4IncompatFeatures::MMP.0;
+    superblock[0x60..0x64].copy_from_slice(&feature_incompat.to_le_bytes());
+    superblock[0x166..0x168].copy_from_slice(&5_u16.to_le_bytes());
+    superblock[0x168..0x170].copy_from_slice(&mmp_block.to_le_bytes());
+
+    image
+        .seek(SeekFrom::Start(
+            u64::try_from(EXT4_SUPERBLOCK_OFFSET).expect("superblock offset fits u64"),
+        ))
+        .expect("seek ext4 superblock for rewrite");
+    image
+        .write_all(&superblock)
+        .expect("rewrite ext4 superblock");
+
+    let mut mmp = vec![0_u8; 4096];
+    mmp[0x00..0x04].copy_from_slice(&ffs_ondisk::ext4::EXT4_MMP_MAGIC.to_le_bytes());
+    mmp[0x04..0x08].copy_from_slice(&seq.to_le_bytes());
+    mmp[0x08..0x10].copy_from_slice(&1_700_000_123_u64.to_le_bytes());
+    mmp[0x10..0x18].copy_from_slice(b"ffs-node");
+    mmp[0x50..0x60].copy_from_slice(b"/dev/conformance");
+    mmp[0x70..0x72].copy_from_slice(&5_u16.to_le_bytes());
+
+    image
+        .seek(SeekFrom::Start(mmp_block * 4096))
+        .expect("seek ext4 MMP block");
+    image.write_all(&mmp).expect("write ext4 MMP block");
+    image.flush().expect("flush ext4 MMP patch");
 }
 
 fn enable_e2compr_for_inode(image_path: &Path, ino: InodeNumber, flags: u32) {
@@ -3526,6 +3579,28 @@ fn ext4_mmp_block_fixture_conforms() {
         ffs_ondisk::Ext4MmpStatus::Clean,
         "status should be Clean"
     );
+}
+
+#[test]
+fn ext4_active_mmp_write_open_is_rejected() {
+    let (_tmp, image_path) = mkfs_writable_ext4_image(64);
+    patch_ext4_active_mmp(&image_path, 2048, 42);
+
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::Apply,
+        ..OpenOptions::default()
+    };
+    let err = OpenFs::open_with_options(&cx, &image_path, &opts)
+        .expect_err("active ext4 MMP state must refuse write-participating open");
+
+    assert!(
+        matches!(err, ffs_error::FfsError::UnsupportedFeature(ref message)
+            if message.contains("another writer may be active")
+                && message.contains("write-participating MMP is not implemented")),
+        "expected explicit active-MMP UnsupportedFeature, got {err:?}"
+    );
+    assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
 }
 
 #[test]
