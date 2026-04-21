@@ -77,7 +77,10 @@ validates `system.posix_acl_access` and `system.posix_acl_default` against
 list/get behavior, `XATTR_CREATE`=`EEXIST` and `XATTR_REPLACE`=`ENODATA`
 failure semantics for `user.*`, exact public `ENODATA` for missing
 `getxattr`/`removexattr` on `user.*`, plus missing-default `ENODATA` on the
-public FUSE surface.
+public FUSE surface. `crates/ffs-fuse/src/lib.rs` now also unit-freezes the
+shared FUSE dispatcher contract for invalid `setxattr` requests: conflicting
+`CREATE|REPLACE`, unsupported flag bits, and nonzero `position` all reject with
+exact `EINVAL` before any backend mutation call.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

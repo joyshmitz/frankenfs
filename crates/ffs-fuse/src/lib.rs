@@ -2066,6 +2066,35 @@ impl FrankenFuse {
         Ok(written)
     }
 
+    fn dispatch_setxattr(
+        &self,
+        ino: u64,
+        name: &str,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+    ) -> Result<XattrSetMode, MutationDispatchError> {
+        self.enforce_mutation_guards(RequestOp::Setxattr, ino)?;
+        let mode =
+            Self::parse_setxattr_mode(flags, position).map_err(MutationDispatchError::Errno)?;
+        let cx = Self::cx_for_request();
+        {
+            let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(ino)]);
+            self.with_request_scope(&cx, RequestOp::Setxattr, |cx, scope| {
+                self.inner
+                    .ops
+                    .setxattr(cx, scope, InodeNumber(ino), name, value, mode)?;
+                self.inner.ops.commit_request_scope(scope)?;
+                Ok(())
+            })
+        }
+        .map_err(|error| MutationDispatchError::Operation {
+            error,
+            offset: None,
+        })?;
+        Ok(mode)
+    }
+
     fn read_with_readahead(
         &self,
         cx: &Cx,
@@ -2472,21 +2501,13 @@ impl Filesystem for FrankenFuse {
             reply.error(libc::EINVAL);
             return;
         };
-        let Ok(mode) = Self::parse_setxattr_mode(flags, position) else {
-            reply.error(libc::EINVAL);
-            return;
-        };
-
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Setxattr, |cx, scope| {
-            self.inner
-                .ops
-                .setxattr(cx, scope, InodeNumber(ino), name, value, mode)?;
-            self.inner.ops.commit_request_scope(scope)?;
-            Ok(())
-        }) {
-            Ok(()) => reply.ok(),
-            Err(e) => {
+        match self.dispatch_setxattr(ino, name, value, flags, position) {
+            Ok(_) => reply.ok(),
+            Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
+            Err(MutationDispatchError::Operation { error: e, .. }) => {
+                let mode = Self::parse_setxattr_mode(flags, position)
+                    .expect("dispatch_setxattr operation errors require a valid request");
                 if matches!(mode, XattrSetMode::Replace)
                     && matches!(e, FfsError::NotFound(_))
                     && self
@@ -6373,6 +6394,12 @@ mod tests {
             new_parent: InodeNumber,
             new_name: String,
         },
+        Setxattr {
+            ino: InodeNumber,
+            name: String,
+            value: Vec<u8>,
+            mode: XattrSetMode,
+        },
     }
 
     struct MutationRecordingFs {
@@ -6513,6 +6540,27 @@ mod tests {
                     data: data.to_vec(),
                 });
             Ok(u32::try_from(data.len()).unwrap_or(u32::MAX))
+        }
+
+        fn setxattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            name: &str,
+            value: &[u8],
+            mode: XattrSetMode,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Setxattr {
+                    ino,
+                    name: name.to_owned(),
+                    value: value.to_vec(),
+                    mode,
+                });
+            Ok(())
         }
     }
 
@@ -6884,6 +6932,43 @@ mod tests {
             .expect_err("write should be shed");
         assert!(matches!(err, MutationDispatchError::Errno(libc::EBUSY)));
         assert!(calls.lock().expect("lock calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_setxattr_rejects_invalid_requests_before_backend_mutation() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+        let invalid_cases = [
+            (
+                "create_replace",
+                XATTR_FLAG_CREATE | XATTR_FLAG_REPLACE,
+                0_u32,
+            ),
+            ("unknown_flag_bits", 0x40, 0_u32),
+            ("nonzero_position", XATTR_FLAG_CREATE, 1_u32),
+        ];
+
+        for (label, flags, position) in invalid_cases {
+            let err = fuse
+                .dispatch_setxattr(42, "user.bad", b"value", flags, position)
+                .unwrap_err();
+            assert!(
+                matches!(err, MutationDispatchError::Errno(libc::EINVAL)),
+                "{label} should reject with EINVAL, got {err:?}"
+            );
+        }
+
+        assert!(
+            calls.lock().expect("lock calls").is_empty(),
+            "invalid requests must not touch the backend"
+        );
     }
 
     #[test]
