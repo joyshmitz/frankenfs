@@ -15,7 +15,7 @@ use ffs_core::{
     InodeAttr, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
-use ffs_types::InodeNumber;
+use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
 use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLseek, ReplyOpen, ReplyStatfs,
@@ -1084,11 +1084,14 @@ impl FrankenFuse {
             return Err(libc::EINVAL);
         }
 
-        let donor_fd = u32::from_ne_bytes(
+        let donor_fd = i32::from_ne_bytes(
             in_data[MOVE_EXT_DONOR_FD_OFFSET..MOVE_EXT_DONOR_FD_OFFSET + 4]
                 .try_into()
                 .map_err(|_| libc::EINVAL)?,
         );
+        if donor_fd < 0 {
+            return Err(libc::EBADF);
+        }
         let orig_start = u64::from_ne_bytes(
             in_data[MOVE_EXT_ORIG_START_OFFSET..MOVE_EXT_ORIG_START_OFFSET + 8]
                 .try_into()
@@ -1109,7 +1112,12 @@ impl FrankenFuse {
             return Err(libc::EINVAL);
         }
 
-        Ok((donor_fd, orig_start, donor_start, len))
+        Ok((
+            u32::try_from(donor_fd).map_err(|_| libc::EBADF)?,
+            orig_start,
+            donor_start,
+            len,
+        ))
     }
 
     fn parse_inode_flags(in_data: &[u8]) -> Result<u32, c_int> {
@@ -1212,6 +1220,19 @@ impl FrankenFuse {
             return Err(libc::EINVAL);
         }
 
+        Ok(())
+    }
+
+    fn validate_move_ext_source(attr: &InodeAttr, flags: u32) -> Result<(), c_int> {
+        if attr.kind != FfsFileType::RegularFile {
+            return Err(libc::EINVAL);
+        }
+        if attr.size == 0 {
+            return Err(libc::EINVAL);
+        }
+        if flags & EXT4_EXTENTS_FL == 0 {
+            return Err(libc::EOPNOTSUPP);
+        }
         Ok(())
     }
 
@@ -1347,6 +1368,12 @@ impl FrankenFuse {
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
                     let attr = self.inner.ops.getattr(cx, scope, InodeNumber(ino))?;
+                    let flags = self
+                        .inner
+                        .ops
+                        .get_inode_flags(cx, scope, InodeNumber(ino))?;
+                    Self::validate_move_ext_source(&attr, flags)
+                        .map_err(|errno| FfsError::Io(std::io::Error::from_raw_os_error(errno)))?;
                     Self::validate_move_ext_range(attr.blksize, orig_start, donor_start, len)
                         .map_err(|_| FfsError::InvalidGeometry("invalid move_ext range".into()))?;
                     let moved_len = self.inner.ops.move_ext(
@@ -3326,6 +3353,8 @@ mod tests {
         encryption_policy_errno: Option<i32>,
         flags: u32,
         generation: u32,
+        attr_kind: FfsFileType,
+        attr_size: u64,
         blksize: u32,
         move_ext_result: Option<u64>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
@@ -3338,6 +3367,8 @@ mod tests {
                 encryption_policy_errno: None,
                 flags,
                 generation: 0,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: None,
                 calls,
@@ -3350,6 +3381,8 @@ mod tests {
                 encryption_policy_errno: None,
                 flags,
                 generation,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: None,
                 calls,
@@ -3365,6 +3398,8 @@ mod tests {
                 encryption_policy_errno: None,
                 flags: 0,
                 generation: 0,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: None,
                 calls,
@@ -3377,6 +3412,8 @@ mod tests {
                 encryption_policy_errno: Some(errno),
                 flags: 0,
                 generation: 0,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: None,
                 calls,
@@ -3387,8 +3424,10 @@ mod tests {
             Self {
                 encryption_policy: None,
                 encryption_policy_errno: None,
-                flags: 0,
+                flags: EXT4_EXTENTS_FL,
                 generation: 0,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
                 blksize: 4096,
                 move_ext_result: Some(moved_len),
                 calls,
@@ -3399,9 +3438,30 @@ mod tests {
             Self {
                 encryption_policy: None,
                 encryption_policy_errno: None,
-                flags: 0,
+                flags: EXT4_EXTENTS_FL,
                 generation: 0,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
                 blksize,
+                move_ext_result: Some(1),
+                calls,
+            }
+        }
+
+        fn with_move_ext_source(
+            kind: FfsFileType,
+            size: u64,
+            flags: u32,
+            calls: Arc<Mutex<Vec<IoctlCall>>>,
+        ) -> Self {
+            Self {
+                encryption_policy: None,
+                encryption_policy_errno: None,
+                flags,
+                generation: 0,
+                attr_kind: kind,
+                attr_size: size,
+                blksize: 4096,
                 move_ext_result: Some(1),
                 calls,
             }
@@ -3430,13 +3490,13 @@ mod tests {
                 .push(IoctlCall::Getattr(ino));
             Ok(InodeAttr {
                 ino,
-                size: 64 * 1024,
+                size: self.attr_size,
                 blocks: 0,
                 atime: SystemTime::UNIX_EPOCH,
                 mtime: SystemTime::UNIX_EPOCH,
                 ctime: SystemTime::UNIX_EPOCH,
                 crtime: SystemTime::UNIX_EPOCH,
-                kind: FfsFileType::RegularFile,
+                kind: self.attr_kind,
                 perm: 0o644,
                 nlink: 1,
                 uid: 0,
@@ -3889,6 +3949,141 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ioctl_move_ext_rejects_negative_donor_fd() {
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
+            &options,
+        );
+        let mut request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+        request[MOVE_EXT_DONOR_FD_OFFSET..MOVE_EXT_DONOR_FD_OFFSET + 4]
+            .copy_from_slice(&(-1_i32).to_ne_bytes());
+
+        let response = fuse.dispatch_ioctl(
+            5,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EBADF));
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_non_extent_source_inode() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_source(
+                FfsFileType::RegularFile,
+                64 * 1024,
+                0,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+
+        let response = fuse.dispatch_ioctl(
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::Getattr(InodeNumber(9)),
+                IoctlCall::GetFlags(InodeNumber(9)),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_non_regular_source_inode() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_source(
+                FfsFileType::Directory,
+                64 * 1024,
+                EXT4_EXTENTS_FL,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+
+        let response = fuse.dispatch_ioctl(
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::Getattr(InodeNumber(9)),
+                IoctlCall::GetFlags(InodeNumber(9)),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejects_empty_source_inode() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_source(
+                FfsFileType::RegularFile,
+                0,
+                EXT4_EXTENTS_FL,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+
+        let response = fuse.dispatch_ioctl(
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::Getattr(InodeNumber(9)),
+                IoctlCall::GetFlags(InodeNumber(9)),
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
     fn dispatch_ioctl_move_ext_rejects_overflowing_ranges() {
         let options = MountOptions {
             read_only: false,
@@ -3953,7 +4148,12 @@ mod tests {
             ..MountOptions::default()
         };
         let fuse = FrankenFuse::with_options(
-            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
+            Box::new(IoctlRecordingFs::with_move_ext_source(
+                FfsFileType::RegularFile,
+                64 * 1024,
+                EXT4_EXTENTS_FL,
+                Arc::new(Mutex::new(Vec::new())),
+            )),
             &options,
         );
 
@@ -4033,6 +4233,7 @@ mod tests {
             &[
                 IoctlCall::Begin(RequestOp::IoctlWrite),
                 IoctlCall::Getattr(InodeNumber(9)),
+                IoctlCall::GetFlags(InodeNumber(9)),
                 IoctlCall::MoveExt(InodeNumber(9), 7, 11, 22, 33),
                 IoctlCall::Commit,
                 IoctlCall::End(RequestOp::IoctlWrite),
