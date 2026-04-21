@@ -3620,6 +3620,31 @@ fn py_setxattr(path: &Path, name: &str, value: &[u8]) {
     );
 }
 
+fn py_setxattr_report(path: &Path, name: &str, value: &[u8], flags: i32) -> Value {
+    let hex_val = value.iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    let script = format!(
+        "import json, os\ntry:\n os.setxattr({path:?}, {name:?}, bytes.fromhex({hex_val:?}), {flags})\n print(json.dumps({{'ok': True}}))\nexcept OSError as e:\n print(json.dumps({{'errno': e.errno, 'message': str(e)}}))",
+        path = path.to_str().unwrap(),
+        name = name,
+        hex_val = hex_val,
+        flags = flags,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 setxattr JSON");
+    assert!(
+        out.status.success(),
+        "python3 setxattr JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse setxattr JSON")
+}
+
 /// Helper: get an extended attribute value from a file using Python's `os.getxattr`.
 /// Returns `None` if the attribute does not exist.
 fn py_getxattr(path: &Path, name: &str) -> Option<Vec<u8>> {
@@ -3818,6 +3843,90 @@ fn fuse_xattr_remove_nonexistent_fails() {
         assert!(
             !py_removexattr(&path, "user.no_such_attr"),
             "removexattr for nonexistent attr should fail"
+        );
+    });
+}
+
+#[test]
+fn fuse_xattr_ext4_create_existing_reports_eexist_without_side_effects() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+        let original_file = fs::read(&path).expect("read original file bytes");
+
+        py_setxattr(&path, "user.locked", b"original");
+        py_setxattr(&path, "user.keep", b"preserve");
+
+        let report = py_setxattr_report(&path, "user.locked", b"replacement", libc::XATTR_CREATE);
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::EEXIST)),
+            "XATTR_CREATE should reject an existing xattr with EEXIST: {report}"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.locked").expect("existing xattr should remain readable"),
+            b"original",
+            "XATTR_CREATE failure must preserve the original xattr value"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("unrelated xattr should remain readable"),
+            b"preserve",
+            "XATTR_CREATE failure must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read file bytes after create failure"),
+            original_file,
+            "XATTR_CREATE failure must not mutate file contents"
+        );
+
+        let names = py_listxattr(&path);
+        assert!(
+            names.iter().any(|name| name == "user.locked"),
+            "existing xattr should still be listed after XATTR_CREATE failure: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "user.keep"),
+            "unrelated xattr should still be listed after XATTR_CREATE failure: {names:?}"
+        );
+    });
+}
+
+#[test]
+fn fuse_xattr_ext4_replace_missing_reports_enodata_without_side_effects() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+        let original_file = fs::read(&path).expect("read original file bytes");
+
+        py_setxattr(&path, "user.keep", b"preserve");
+
+        let report = py_setxattr_report(&path, "user.missing", b"replacement", libc::XATTR_REPLACE);
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENODATA)),
+            "XATTR_REPLACE should reject a missing xattr with ENODATA: {report}"
+        );
+        assert!(
+            py_getxattr(&path, "user.missing").is_none(),
+            "XATTR_REPLACE failure must not create the missing xattr"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("unrelated xattr should remain readable"),
+            b"preserve",
+            "XATTR_REPLACE failure must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read file bytes after replace failure"),
+            original_file,
+            "XATTR_REPLACE failure must not mutate file contents"
+        );
+
+        let names = py_listxattr(&path);
+        assert!(
+            !names.iter().any(|name| name == "user.missing"),
+            "missing xattr should remain absent after XATTR_REPLACE failure: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "user.keep"),
+            "unrelated xattr should still be listed after XATTR_REPLACE failure: {names:?}"
         );
     });
 }
