@@ -30,8 +30,8 @@ use ffs_fuse::{MountConfig, MountOptions, mount_managed};
 use ffs_harness::ParityReport;
 use ffs_ondisk::{
     BtrfsSuperblock, Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex, Ext4GroupDesc,
-    Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree, parse_dx_root, parse_extent_tree,
-    parse_inode_extent_tree,
+    Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree, ext4::Ext4QuotaInodes, parse_dx_root,
+    parse_extent_tree, parse_inode_extent_tree,
 };
 use ffs_repair::scrub::{
     BlockValidator, BtrfsSuperblockValidator, BtrfsTreeBlockValidator, CompositeValidator,
@@ -527,6 +527,8 @@ enum InspectOutput {
         free_blocks_total: u64,
         free_inodes_total: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
+        quota_inodes: Option<Ext4QuotaInodes>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         free_space_mismatch: Option<FreeSpaceMismatch>,
         #[serde(skip_serializing_if = "Option::is_none")]
         orphan_diagnostics: Option<Ext4OrphanDiagnosticsOutput>,
@@ -626,6 +628,8 @@ enum SuperblockInfoOutput {
         feature_ro_compat: String,
         checksum_type: String,
         checksum_seed: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quota_inodes: Option<Ext4QuotaInodes>,
         mtime: u32,
         wtime: u32,
         lastcheck: u32,
@@ -1442,15 +1446,7 @@ fn inspect(path: &PathBuf, json: bool, list_subvolumes: bool, list_snapshots: bo
     }
 
     let output = match &flavor {
-        FsFlavor::Ext4(sb) => inspect_ext4_output(
-            &cx,
-            path,
-            &open_opts,
-            sb.block_size,
-            sb.inodes_count,
-            sb.blocks_count,
-            &sb.volume_name,
-        )?,
+        FsFlavor::Ext4(sb) => inspect_ext4_output(&cx, path, &open_opts, sb)?,
         FsFlavor::Btrfs(sb) => InspectOutput::Btrfs {
             sectorsize: sb.sectorsize,
             nodesize: sb.nodesize,
@@ -1497,6 +1493,7 @@ fn print_inspect_output(output: &InspectOutput) {
             volume_name,
             free_blocks_total,
             free_inodes_total,
+            quota_inodes,
             free_space_mismatch,
             orphan_diagnostics,
         } => {
@@ -1507,6 +1504,9 @@ fn print_inspect_output(output: &InspectOutput) {
             println!("volume_name: {volume_name}");
             println!("free_blocks: {free_blocks_total}");
             println!("free_inodes: {free_inodes_total}");
+            if let Some(quota_inodes) = quota_inodes {
+                println!("quota_inodes: {}", format_ext4_quota_inodes(quota_inodes));
+            }
             if let Some(mismatch) = free_space_mismatch {
                 println!(
                     "WARNING: mismatch with group descriptors (gd_free_blocks={}, gd_free_inodes={})",
@@ -1781,6 +1781,26 @@ pub fn filesystem_name(flavor: &FsFlavor) -> &'static str {
     }
 }
 
+fn ext4_quota_inodes_for_output(sb: &Ext4Superblock) -> Option<Ext4QuotaInodes> {
+    let quota_inodes = sb.quota_inodes();
+    (quota_inodes.user.is_some() || quota_inodes.group.is_some() || quota_inodes.project.is_some())
+        .then_some(quota_inodes)
+}
+
+fn format_ext4_quota_inodes(quota_inodes: &Ext4QuotaInodes) -> String {
+    let mut entries = Vec::new();
+    if let Some(user) = quota_inodes.user {
+        entries.push(format!("user={user}"));
+    }
+    if let Some(group) = quota_inodes.group {
+        entries.push(format!("group={group}"));
+    }
+    if let Some(project) = quota_inodes.project {
+        entries.push(format!("project={project}"));
+    }
+    entries.join(" ")
+}
+
 fn superblock_info_for(flavor: &FsFlavor) -> SuperblockInfoOutput {
     match flavor {
         FsFlavor::Ext4(sb) => {
@@ -1810,6 +1830,7 @@ fn superblock_info_for(flavor: &FsFlavor) -> SuperblockInfoOutput {
                 feature_ro_compat: format!("{}", sb.feature_ro_compat),
                 checksum_type,
                 checksum_seed: sb.csum_seed(),
+                quota_inodes: ext4_quota_inodes_for_output(sb),
                 mtime: sb.mtime,
                 wtime: sb.wtime,
                 lastcheck: sb.lastcheck,
@@ -2323,6 +2344,7 @@ fn print_superblock_info(superblock: &SuperblockInfoOutput) {
             feature_ro_compat,
             checksum_type,
             checksum_seed,
+            quota_inodes,
             mtime,
             wtime,
             lastcheck,
@@ -2348,6 +2370,9 @@ fn print_superblock_info(superblock: &SuperblockInfoOutput) {
             println!("  feature_ro_compat: {feature_ro_compat}");
             println!("  checksum_type: {checksum_type}");
             println!("  checksum_seed: {checksum_seed}");
+            if let Some(quota_inodes) = quota_inodes {
+                println!("  quota_inodes: {}", format_ext4_quota_inodes(quota_inodes));
+            }
             println!("  mtime: {mtime}");
             println!("  wtime: {wtime}");
             println!("  lastcheck: {lastcheck}");
@@ -3595,10 +3620,7 @@ fn inspect_ext4_output(
     cx: &Cx,
     path: &PathBuf,
     open_opts: &OpenOptions,
-    block_size: u32,
-    inodes_count: u32,
-    blocks_count: u64,
-    volume_name: &str,
+    sb: &Ext4Superblock,
 ) -> Result<InspectOutput> {
     // Open the filesystem to read bitmaps for free space and orphan diagnostics.
     let open_fs = OpenFs::open_with_options(cx, path, open_opts)
@@ -3628,12 +3650,13 @@ fn inspect_ext4_output(
     };
 
     Ok(InspectOutput::Ext4 {
-        block_size,
-        inodes_count,
-        blocks_count,
-        volume_name: volume_name.to_owned(),
+        block_size: sb.block_size,
+        inodes_count: sb.inodes_count,
+        blocks_count: sb.blocks_count,
+        volume_name: sb.volume_name.clone(),
         free_blocks_total: summary.free_blocks_total,
         free_inodes_total: summary.free_inodes_total,
+        quota_inodes: ext4_quota_inodes_for_output(sb),
         free_space_mismatch: mismatch,
         orphan_diagnostics,
     })
@@ -5408,6 +5431,18 @@ mod tests {
         let gdt_off = block_size as usize;
         image[gdt_off + 0x08..gdt_off + 0x0C].copy_from_slice(&5_u32.to_le_bytes()); // inode table block
 
+        image
+    }
+
+    fn build_test_ext4_image_with_quota_inodes(state: u16) -> Vec<u8> {
+        let mut image = build_test_ext4_image_with_state(state);
+        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+        let ro_compat =
+            ffs_ondisk::Ext4RoCompatFeatures::QUOTA.0 | ffs_ondisk::Ext4RoCompatFeatures::PROJECT.0;
+        image[sb_off + 0x64..sb_off + 0x68].copy_from_slice(&ro_compat.to_le_bytes());
+        image[sb_off + 0x240..sb_off + 0x244].copy_from_slice(&3_u32.to_le_bytes());
+        image[sb_off + 0x244..sb_off + 0x248].copy_from_slice(&4_u32.to_le_bytes());
+        image[sb_off + 0x26C..sb_off + 0x270].copy_from_slice(&11_u32.to_le_bytes());
         image
     }
 
@@ -8791,6 +8826,134 @@ mod tests {
             assert!(!output.limitations.iter().any(|limitation| {
                 limitation.contains("transaction/SSI counters are not yet wired")
             }));
+        });
+    }
+
+    #[test]
+    fn build_info_output_ext4_superblock_exposes_quota_inodes() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_quota_inodes(EXT4_VALID_FS);
+
+        with_temp_image_path(&image, |path| {
+            let cx = super::cli_cx();
+            let open_opts = super::OpenOptions {
+                ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+                ..super::OpenOptions::default()
+            };
+            let open_fs = super::OpenFs::open_with_options(&cx, &path, &open_opts)
+                .expect("open ext4 image for quota info output test");
+
+            let output = build_info_output(
+                &path,
+                &cx,
+                &open_fs,
+                InfoCommandOptions {
+                    sections: InfoSections::empty(),
+                    json: true,
+                },
+            )
+            .expect("build info output with ext4 quota metadata");
+
+            match output.superblock {
+                super::SuperblockInfoOutput::Ext4 { quota_inodes, .. } => {
+                    assert_eq!(
+                        quota_inodes,
+                        Some(ffs_ondisk::ext4::Ext4QuotaInodes {
+                            user: Some(3),
+                            group: Some(4),
+                            project: Some(11),
+                        })
+                    );
+                }
+                other => panic!("expected ext4 superblock output, got {other:?}"),
+            }
+
+            let json = serde_json::to_value(&output).expect("serialize info output to json");
+            assert_eq!(json["superblock"]["quota_inodes"]["user"], 3);
+            assert_eq!(json["superblock"]["quota_inodes"]["group"], 4);
+            assert_eq!(json["superblock"]["quota_inodes"]["project"], 11);
+        });
+    }
+
+    #[test]
+    fn build_info_output_ext4_superblock_omits_quota_inodes_when_features_absent() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+
+        with_temp_image_path(&image, |path| {
+            let cx = super::cli_cx();
+            let open_opts = super::OpenOptions {
+                ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+                ..super::OpenOptions::default()
+            };
+            let open_fs = super::OpenFs::open_with_options(&cx, &path, &open_opts)
+                .expect("open ext4 image without quota features");
+
+            let output = build_info_output(
+                &path,
+                &cx,
+                &open_fs,
+                InfoCommandOptions {
+                    sections: InfoSections::empty(),
+                    json: true,
+                },
+            )
+            .expect("build info output without ext4 quota metadata");
+
+            match output.superblock {
+                super::SuperblockInfoOutput::Ext4 { quota_inodes, .. } => {
+                    assert!(quota_inodes.is_none());
+                }
+                other => panic!("expected ext4 superblock output, got {other:?}"),
+            }
+
+            let json = serde_json::to_value(&output).expect("serialize info output to json");
+            assert!(
+                json["superblock"].get("quota_inodes").is_none(),
+                "quota_inodes should be omitted when quota features are absent"
+            );
+        });
+    }
+
+    #[test]
+    fn inspect_ext4_output_exposes_quota_inodes() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_quota_inodes(EXT4_VALID_FS);
+
+        with_temp_image_path(&image, |path| {
+            let cx = super::cli_cx();
+            let open_opts = super::OpenOptions {
+                ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+                ..super::OpenOptions::default()
+            };
+            let flavor = super::detect_filesystem_at_path(&cx, &path)
+                .expect("detect ext4 image for inspect quota test");
+            let sb = match flavor {
+                super::FsFlavor::Ext4(sb) => sb,
+                other => panic!("expected ext4 flavor, got {other:?}"),
+            };
+
+            let output = super::inspect_ext4_output(&cx, &path, &open_opts, &sb)
+                .expect("build inspect output with ext4 quota metadata");
+
+            match output {
+                super::InspectOutput::Ext4 { quota_inodes, .. } => {
+                    assert_eq!(
+                        quota_inodes,
+                        Some(ffs_ondisk::ext4::Ext4QuotaInodes {
+                            user: Some(3),
+                            group: Some(4),
+                            project: Some(11),
+                        })
+                    );
+                }
+                other => panic!("expected ext4 inspect output, got {other:?}"),
+            }
+
+            let json = serde_json::to_value(&output).expect("serialize inspect output to json");
+            assert_eq!(json["quota_inodes"]["user"], 3);
+            assert_eq!(json["quota_inodes"]["group"], 4);
+            assert_eq!(json["quota_inodes"]["project"], 11);
         });
     }
 
