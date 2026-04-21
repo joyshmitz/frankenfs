@@ -86,6 +86,8 @@ exact `EINVAL` before any backend mutation call.
 Mounted-path read-only setattr coverage now also freezes the public `EROFS`
 contract for `chmod`, `truncate(2)`, and `utime(2)` on both ext4 and btrfs,
 including a no-drift postcondition on file bytes and visible metadata.
+Mounted-path btrfs read-only namespace coverage now also freezes exact `EROFS`
+for `create`, `mkdir`, `link`, and `symlink`, with no directory-entry or seed-file drift.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

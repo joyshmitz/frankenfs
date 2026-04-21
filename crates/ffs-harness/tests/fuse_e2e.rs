@@ -5080,6 +5080,96 @@ fn assert_read_only_xattr_mutation_contract(path: &Path, scenario_id: &str) {
     );
 }
 
+fn assert_read_only_namespace_mutation_contract(dir: &Path, seed: &Path, scenario_id: &str) {
+    let entries_before = snapshot_directory_entries(dir);
+    let seed_before = snapshot_file_state(seed);
+    let seed_name = seed
+        .file_name()
+        .expect("seed file name")
+        .to_string_lossy()
+        .into_owned();
+
+    let create_path = dir.join("blocked_create.txt");
+    let create_err = fs::write(&create_path, b"blocked create")
+        .expect_err("read-only create should fail with EROFS");
+    assert_eq!(
+        create_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only create should surface exact EROFS: {create_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&create_path).is_err(),
+        "read-only create must not leave a new file behind"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected create must not change visible directory entries"
+    );
+    assert_file_state_unchanged(seed, &seed_before, "rejected create");
+
+    let mkdir_path = dir.join("blocked_dir");
+    let mkdir_err = fs::create_dir(&mkdir_path).expect_err("read-only mkdir should fail");
+    assert_eq!(
+        mkdir_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only mkdir should surface exact EROFS: {mkdir_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&mkdir_path).is_err(),
+        "read-only mkdir must not leave a new directory behind"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected mkdir must not change visible directory entries"
+    );
+    assert_file_state_unchanged(seed, &seed_before, "rejected mkdir");
+
+    let link_path = dir.join("blocked_link.txt");
+    let link_err = fs::hard_link(seed, &link_path).expect_err("read-only link should fail");
+    assert_eq!(
+        link_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only hard link should surface exact EROFS: {link_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&link_path).is_err(),
+        "read-only hard link must not leave a new directory entry behind"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected hard link must not change visible directory entries"
+    );
+    assert_file_state_unchanged(seed, &seed_before, "rejected hard link");
+
+    let symlink_path = dir.join("blocked_symlink.txt");
+    let symlink_err = std::os::unix::fs::symlink(&seed_name, &symlink_path)
+        .expect_err("read-only symlink should fail");
+    assert_eq!(
+        symlink_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only symlink should surface exact EROFS: {symlink_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&symlink_path).is_err(),
+        "read-only symlink must not leave a new directory entry behind"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected symlink must not change visible directory entries"
+    );
+    assert_file_state_unchanged(seed, &seed_before, "rejected symlink");
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("create+mkdir+link+symlink=EROFS_no_drift"),
+    );
+}
+
 #[test]
 fn fuse_xattr_set_get_list_remove() {
     with_rw_mount(|mnt| {
@@ -5980,6 +6070,41 @@ fn btrfs_fuse_setattr_read_only_rejects_chmod_truncate_and_utimes_with_erofs() {
     assert_read_only_setattr_contract(
         &mnt.join(BTRFS_TEST_WORKSPACE).join("readonly_seed.txt"),
         "btrfs_ro_setattr_rejects_erofs_no_drift",
+    );
+}
+
+#[test]
+fn btrfs_fuse_read_only_create_mkdir_link_and_symlink_report_erofs_without_dirent_drift() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image_with_seeded_file(
+        tmp.path(),
+        "readonly_namespace_seed.txt",
+        b"readonly btrfs namespace seed\n",
+    );
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_btrfs_ro(&image, &mnt) else {
+        return;
+    };
+
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    let seed = workspace.join("readonly_namespace_seed.txt");
+    assert_eq!(
+        fs::read(&seed).expect("read seeded btrfs namespace file"),
+        b"readonly btrfs namespace seed\n",
+        "read-only remount must preserve the seeded namespace file bytes"
+    );
+
+    assert_read_only_namespace_mutation_contract(
+        &workspace,
+        &seed,
+        "btrfs_ro_create_mkdir_link_symlink_reject_erofs_no_drift",
     );
 }
 
