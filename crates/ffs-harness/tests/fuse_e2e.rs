@@ -5382,35 +5382,89 @@ fn btrfs_fuse_xattr_overwrite_value() {
 }
 
 #[test]
-fn btrfs_fuse_xattr_get_nonexistent_returns_error() {
+fn btrfs_fuse_xattr_get_missing_reports_enodata_without_side_effects() {
     with_btrfs_rw_mount(|mnt| {
-        let scenario_id = "btrfs_rw_xattr_get_nonexistent_returns_error";
+        let scenario_id = "btrfs_rw_xattr_get_missing_reports_enodata";
         let path = mnt.join("nonexistent_xattr.txt");
         fs::write(&path, b"nonexistent xattr test\n").expect("write for nonexistent xattr");
+        let original_file = fs::read(&path).expect("read original btrfs file bytes");
+        py_setxattr(&path, "user.keep", b"preserve");
 
-        // Getting a nonexistent xattr should fail.
-        assert!(
-            py_getxattr(&path, "user.does_not_exist").is_none(),
-            "getxattr for nonexistent attr on btrfs should return None/error"
+        let report = py_getxattr_report(&path, "user.does_not_exist");
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENODATA)),
+            "missing btrfs getxattr should surface ENODATA on Linux FUSE: {report}"
         );
-        emit_scenario_result(scenario_id, "PASS", Some("getxattr_on_unset_name_fails"));
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("unrelated xattr should remain readable"),
+            b"preserve",
+            "missing btrfs getxattr must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read btrfs file bytes after missing getxattr"),
+            original_file,
+            "missing btrfs getxattr must not mutate file contents"
+        );
+
+        let names = py_listxattr(&path);
+        assert!(
+            !names.iter().any(|name| name == "user.does_not_exist"),
+            "missing xattr should remain absent after btrfs ENODATA getxattr: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "user.keep"),
+            "unrelated xattr should remain listed after btrfs ENODATA getxattr: {names:?}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("errno=ENODATA_with_no_side_effects"),
+        );
     });
 }
 
 #[test]
-fn btrfs_fuse_xattr_remove_nonexistent_fails() {
+fn btrfs_fuse_xattr_remove_missing_reports_enodata_without_side_effects() {
     with_btrfs_rw_mount(|mnt| {
-        let scenario_id = "btrfs_rw_xattr_remove_nonexistent_fails";
+        let scenario_id = "btrfs_rw_xattr_remove_missing_reports_enodata";
         let path = mnt.join("remove_nonexistent_xattr.txt");
         fs::write(&path, b"remove nonexistent xattr test\n")
             .expect("write for remove nonexistent xattr");
+        let original_file = fs::read(&path).expect("read original btrfs file bytes");
+        py_setxattr(&path, "user.keep", b"preserve");
 
-        // Removing a nonexistent xattr should fail.
-        assert!(
-            !py_removexattr(&path, "user.no_such_attr"),
-            "removexattr for nonexistent attr on btrfs should fail"
+        let report = py_removexattr_report(&path, "user.no_such_attr");
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENODATA)),
+            "missing btrfs removexattr should surface ENODATA on Linux FUSE: {report}"
         );
-        emit_scenario_result(scenario_id, "PASS", Some("removexattr_on_unset_name_fails"));
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("unrelated xattr should remain readable"),
+            b"preserve",
+            "missing btrfs removexattr must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read btrfs file bytes after missing removexattr"),
+            original_file,
+            "missing btrfs removexattr must not mutate file contents"
+        );
+
+        let names = py_listxattr(&path);
+        assert!(
+            !names.iter().any(|name| name == "user.no_such_attr"),
+            "missing xattr should remain absent after btrfs ENODATA removexattr: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "user.keep"),
+            "unrelated xattr should remain listed after btrfs ENODATA removexattr: {names:?}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("errno=ENODATA_with_no_side_effects"),
+        );
     });
 }
 
