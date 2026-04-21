@@ -581,6 +581,13 @@ pub struct OpenFs {
     /// set. This allows the repair subsystem to mark the corresponding groups
     /// as dirty and queue repair symbol refresh (per spec §12.1.3).
     repair_flush_lifecycle: Option<Arc<dyn RepairFlushLifecycle>>,
+    /// Userspace ioctl donor-fd registrations for ext4 `EXT4_IOC_MOVE_EXT`.
+    ///
+    /// FUSE currently passes the raw donor file descriptor through the ioctl
+    /// payload. `ffs-core` resolves that fd to an inode via this registry so
+    /// backend tests and future stateful open/release tracking can share the
+    /// same contract.
+    move_ext_donor_fds: Mutex<BTreeMap<u32, InodeNumber>>,
 }
 
 // Compile-time assertion: OpenFs must be Send + Sync for multi-threaded FUSE dispatch.
@@ -613,6 +620,7 @@ impl std::fmt::Debug for OpenFs {
             .field("jbd2_writer", &self.jbd2_writer.is_some())
             .field("writable", &self.is_writable())
             .field("repair_lifecycle", &self.repair_flush_lifecycle.is_some())
+            .field("move_ext_donor_fds", &self.move_ext_donor_fds.lock().len())
             .finish_non_exhaustive()
     }
 }
@@ -2296,6 +2304,7 @@ impl OpenFs {
             btrfs_alloc_state: None,
             extent_cache: ffs_extent::ExtentCache::new(),
             repair_flush_lifecycle: None,
+            move_ext_donor_fds: Mutex::new(BTreeMap::new()),
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -14124,6 +14133,30 @@ impl OpenFs {
     pub fn statfs(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<FsStat> {
         self.with_latest_scope(|scope| <Self as FsOps>::statfs(self, cx, scope, ino))
     }
+
+    #[doc(hidden)]
+    pub fn register_ioctl_fd_for_testing(
+        &self,
+        fd: u32,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                self.move_ext_donor_fds
+                    .lock()
+                    .insert(fd, Self::ext4_canonical_inode(ino));
+                Ok(())
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "ioctl fd registration is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn unregister_ioctl_fd_for_testing(&self, fd: u32) {
+        self.move_ext_donor_fds.lock().remove(&fd);
+    }
 }
 
 // ── FsOps for OpenFs (device-based ext4 adapter) ──────────────────────────
@@ -14483,6 +14516,314 @@ impl OpenFs {
             return Ok(offset);
         }
         Ok(covered_until.max(offset).min(file_size))
+    }
+
+    fn ext4_move_ext_resolve_donor(&self, donor_fd: u32) -> ffs_error::Result<InodeNumber> {
+        self.move_ext_donor_fds
+            .lock()
+            .get(&donor_fd)
+            .copied()
+            .ok_or_else(|| FfsError::Io(std::io::Error::from_raw_os_error(libc::EBADF)))
+    }
+
+    fn ext4_move_ext_validate_inode(
+        inode: &Ext4Inode,
+        role: &'static str,
+    ) -> ffs_error::Result<()> {
+        if !inode.is_regular() {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
+        }
+        if !inode.uses_extents() {
+            return Err(FfsError::UnsupportedFeature(format!(
+                "ext4 move_ext requires an extent-backed {role} inode"
+            )));
+        }
+        if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
+            return Err(FfsError::UnsupportedFeature(format!(
+                "ext4 move_ext does not support inline-data {role} inodes"
+            )));
+        }
+        if inode.flags & (ffs_types::EXT4_COMPR_FL | EXT4_COMPRBLK_FL) != 0 {
+            return Err(FfsError::UnsupportedFeature(format!(
+                "ext4 move_ext does not support compressed {role} inodes"
+            )));
+        }
+        if inode.is_encrypted() {
+            return Err(FfsError::UnsupportedFeature(format!(
+                "ext4 move_ext does not support encrypted {role} inodes"
+            )));
+        }
+        Ok(())
+    }
+
+    fn ext4_move_ext_file_block_count(inode: &Ext4Inode, block_size: u64) -> u64 {
+        inode.size.div_ceil(block_size)
+    }
+
+    fn ext4_move_ext_collect_range(
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        root_bytes: &[u8; 60],
+        source_start: u32,
+        dest_start: u32,
+        count: u64,
+        role: &'static str,
+    ) -> ffs_error::Result<Vec<Ext4Extent>> {
+        ffs_extent::map_logical_to_physical(cx, dev, root_bytes, source_start, count)?
+            .into_iter()
+            .map(|mapping| {
+                if mapping.physical_start == 0 {
+                    return Err(FfsError::UnsupportedFeature(format!(
+                        "ext4 move_ext does not support hole-backed {role} ranges"
+                    )));
+                }
+                if mapping.unwritten {
+                    return Err(FfsError::UnsupportedFeature(format!(
+                        "ext4 move_ext does not support unwritten {role} ranges"
+                    )));
+                }
+
+                let relative =
+                    mapping
+                        .logical_start
+                        .checked_sub(source_start)
+                        .ok_or_else(|| FfsError::Corruption {
+                            block: 0,
+                            detail: format!(
+                                "ext4 move_ext produced out-of-range {role} mapping at {}",
+                                mapping.logical_start
+                            ),
+                        })?;
+                let logical_block = dest_start.checked_add(relative).ok_or_else(|| {
+                    FfsError::InvalidGeometry(format!(
+                        "ext4 move_ext logical block overflow for {role} range"
+                    ))
+                })?;
+                let raw_len = u16::try_from(mapping.count).map_err(|_| {
+                    FfsError::InvalidGeometry(format!(
+                        "ext4 move_ext extent count {} exceeds u16",
+                        mapping.count
+                    ))
+                })?;
+
+                Ok(Ext4Extent {
+                    logical_block,
+                    raw_len,
+                    physical_start: mapping.physical_start,
+                })
+            })
+            .collect()
+    }
+
+    fn ext4_move_ext_exchange_ranges(
+        &self,
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        alloc: &mut Ext4AllocState,
+        orig_root: &mut [u8; 60],
+        donor_root: &mut [u8; 60],
+        orig_start: u32,
+        donor_start: u32,
+        count: u64,
+    ) -> ffs_error::Result<()> {
+        let orig_extents = Self::ext4_move_ext_collect_range(
+            cx,
+            dev,
+            orig_root,
+            orig_start,
+            donor_start,
+            count,
+            "source",
+        )?;
+        let donor_extents = Self::ext4_move_ext_collect_range(
+            cx,
+            dev,
+            donor_root,
+            donor_start,
+            orig_start,
+            count,
+            "donor",
+        )?;
+
+        {
+            let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                cx,
+                dev,
+                geo: &alloc.geo,
+                groups: &mut alloc.groups,
+                hint: AllocHint::default(),
+                pctx: &alloc.persist_ctx,
+            };
+            let _ =
+                ffs_btree::delete_range(cx, dev, orig_root, orig_start, count, &mut tree_alloc)?;
+        }
+        {
+            let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                cx,
+                dev,
+                geo: &alloc.geo,
+                groups: &mut alloc.groups,
+                hint: AllocHint::default(),
+                pctx: &alloc.persist_ctx,
+            };
+            let _ =
+                ffs_btree::delete_range(cx, dev, donor_root, donor_start, count, &mut tree_alloc)?;
+        }
+        {
+            let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                cx,
+                dev,
+                geo: &alloc.geo,
+                groups: &mut alloc.groups,
+                hint: AllocHint::default(),
+                pctx: &alloc.persist_ctx,
+            };
+            for extent in donor_extents {
+                ffs_btree::insert(cx, dev, orig_root, extent, &mut tree_alloc)?;
+            }
+        }
+        {
+            let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                cx,
+                dev,
+                geo: &alloc.geo,
+                groups: &mut alloc.groups,
+                hint: AllocHint::default(),
+                pctx: &alloc.persist_ctx,
+            };
+            for extent in orig_extents {
+                ffs_btree::insert(cx, dev, donor_root, extent, &mut tree_alloc)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[expect(clippy::too_many_lines)]
+    fn ext4_move_ext(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        donor_fd: u32,
+        orig_start: u64,
+        donor_start: u64,
+        len: u64,
+    ) -> ffs_error::Result<u64> {
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let orig_ino = Self::ext4_canonical_inode(ino);
+        let donor_ino = self.ext4_move_ext_resolve_donor(donor_fd)?;
+        if donor_ino == orig_ino {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
+        }
+
+        let alloc_mutex = self.require_alloc_state()?;
+        let block_dev = self.block_device_adapter();
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let csum_seed = sb.csum_seed();
+        let block_size = u64::from(sb.block_size);
+        let orig_start_u32 = u32::try_from(orig_start).map_err(|_| {
+            FfsError::InvalidGeometry("ext4 move_ext source start exceeds u32 block range".into())
+        })?;
+        let donor_start_u32 = u32::try_from(donor_start).map_err(|_| {
+            FfsError::InvalidGeometry("ext4 move_ext donor start exceeds u32 block range".into())
+        })?;
+
+        let mut orig_inode = self.read_inode_with_scope(cx, scope, orig_ino)?;
+        let mut donor_inode = self.read_inode_with_scope(cx, scope, donor_ino)?;
+        Self::ext4_move_ext_validate_inode(&orig_inode, "source")?;
+        Self::ext4_move_ext_validate_inode(&donor_inode, "donor")?;
+
+        let orig_blocks = Self::ext4_move_ext_file_block_count(&orig_inode, block_size);
+        let donor_blocks = Self::ext4_move_ext_file_block_count(&donor_inode, block_size);
+        if orig_start >= orig_blocks || donor_start >= donor_blocks {
+            return Ok(0);
+        }
+
+        let moved_len = len
+            .min(orig_blocks.saturating_sub(orig_start))
+            .min(donor_blocks.saturating_sub(donor_start));
+        if moved_len == 0 {
+            return Ok(0);
+        }
+
+        let mut orig_root = Self::extent_root(&orig_inode);
+        let mut donor_root = Self::extent_root(&donor_inode);
+        let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
+
+        let mut alloc = alloc_mutex.lock();
+        let mut apply_exchange =
+            |dev: &dyn BlockDevice, alloc: &mut Ext4AllocState| -> ffs_error::Result<()> {
+                self.ext4_move_ext_exchange_ranges(
+                    cx,
+                    dev,
+                    alloc,
+                    &mut orig_root,
+                    &mut donor_root,
+                    orig_start_u32,
+                    donor_start_u32,
+                    moved_len,
+                )?;
+
+                Self::set_extent_root(&mut orig_inode, &orig_root);
+                Self::set_extent_root(&mut donor_inode, &donor_root);
+                ffs_inode::touch_ctime(&mut orig_inode, tstamp_secs, tstamp_nanos);
+                ffs_inode::touch_ctime(&mut donor_inode, tstamp_secs, tstamp_nanos);
+
+                ffs_inode::write_inode(
+                    cx,
+                    dev,
+                    &alloc.geo,
+                    &alloc.groups,
+                    orig_ino,
+                    &orig_inode,
+                    csum_seed,
+                )?;
+                ffs_inode::write_inode(
+                    cx,
+                    dev,
+                    &alloc.geo,
+                    &alloc.groups,
+                    donor_ino,
+                    &donor_inode,
+                    csum_seed,
+                )?;
+                Ok(())
+            };
+
+        if let Some(tx) = &mut scope.tx {
+            let tx_dev = TransactionBlockAdapter {
+                base: &block_dev,
+                tx: Mutex::new(tx),
+            };
+            apply_exchange(&tx_dev, &mut alloc)?;
+        } else {
+            apply_exchange(&block_dev, &mut alloc)?;
+        }
+
+        self.extent_cache.invalidate_all();
+        debug!(
+            target: "ffs::write",
+            op = "move_ext",
+            ino = orig_ino.0,
+            donor_ino = donor_ino.0,
+            donor_fd,
+            orig_start,
+            donor_start,
+            moved_len,
+            "ext4 move_ext completed"
+        );
+
+        Ok(moved_len)
     }
 }
 
@@ -15253,6 +15594,26 @@ impl FsOps for OpenFs {
             }
             FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
                 "set_inode_flags is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
+    fn move_ext(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        donor_fd: u32,
+        orig_start: u64,
+        donor_start: u64,
+        len: u64,
+    ) -> ffs_error::Result<u64> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                self.ext4_move_ext(cx, scope, ino, donor_fd, orig_start, donor_start, len)
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "move_ext is not supported for btrfs".to_owned(),
             )),
         }
     }
@@ -19561,6 +19922,260 @@ mod tests {
     }
 
     #[test]
+    fn move_ext_rejects_unregistered_donor_fd() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let source = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("move-ext-source.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source inode");
+        fs.write(&cx, source.ino, 0, &[0x53; 4096])
+            .expect("seed source data");
+
+        let err = ext4_move_ext_request(&fs, &cx, source.ino, 999, 0, 0, 1)
+            .expect_err("unknown donor fd should fail");
+        assert_eq!(err.to_errno(), libc::EBADF);
+    }
+
+    #[test]
+    fn move_ext_exchanges_requested_ext4_extent_range() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let source = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("move-ext-source.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source inode");
+        let donor = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("move-ext-donor.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create donor inode");
+
+        let block_size = usize::try_from(fs.ext4_superblock().expect("ext4 superblock").block_size)
+            .expect("block size fits usize");
+        let mut payload = Vec::with_capacity(block_size * 3);
+        payload.extend(std::iter::repeat_n(0x41_u8, block_size));
+        payload.extend(std::iter::repeat_n(0x42_u8, block_size));
+        payload.extend(std::iter::repeat_n(0x43_u8, block_size));
+        fs.write(&cx, source.ino, 0, &payload)
+            .expect("seed source data");
+        fs.write(&cx, donor.ino, 0, &payload)
+            .expect("seed donor data");
+
+        fs.register_ioctl_fd_for_testing(7, donor.ino)
+            .expect("register donor fd");
+
+        let source_before = [
+            ext4_block_mapping(&fs, &cx, source.ino, 0),
+            ext4_block_mapping(&fs, &cx, source.ino, 1),
+            ext4_block_mapping(&fs, &cx, source.ino, 2),
+        ];
+        let donor_before = [
+            ext4_block_mapping(&fs, &cx, donor.ino, 0),
+            ext4_block_mapping(&fs, &cx, donor.ino, 1),
+            ext4_block_mapping(&fs, &cx, donor.ino, 2),
+        ];
+
+        let moved =
+            ext4_move_ext_request(&fs, &cx, source.ino, 7, 1, 1, 1).expect("exchange middle block");
+        assert_eq!(moved, 1);
+
+        let source_after = [
+            ext4_block_mapping(&fs, &cx, source.ino, 0),
+            ext4_block_mapping(&fs, &cx, source.ino, 1),
+            ext4_block_mapping(&fs, &cx, source.ino, 2),
+        ];
+        let donor_after = [
+            ext4_block_mapping(&fs, &cx, donor.ino, 0),
+            ext4_block_mapping(&fs, &cx, donor.ino, 1),
+            ext4_block_mapping(&fs, &cx, donor.ino, 2),
+        ];
+
+        assert_eq!(
+            source_after[0].physical_start, source_before[0].physical_start,
+            "source prefix block should stay mapped to its original extent"
+        );
+        assert_eq!(
+            source_after[1].physical_start, donor_before[1].physical_start,
+            "source middle block should now point at donor's former extent"
+        );
+        assert_eq!(
+            source_after[2].physical_start, source_before[2].physical_start,
+            "source suffix block should stay mapped to its original extent"
+        );
+        assert_eq!(
+            donor_after[0].physical_start, donor_before[0].physical_start,
+            "donor prefix block should stay mapped to its original extent"
+        );
+        assert_eq!(
+            donor_after[1].physical_start, source_before[1].physical_start,
+            "donor middle block should now point at source's former extent"
+        );
+        assert_eq!(
+            donor_after[2].physical_start, donor_before[2].physical_start,
+            "donor suffix block should stay mapped to its original extent"
+        );
+
+        assert_eq!(
+            ext4_read_exact(&fs, &cx, source.ino, payload.len() as u64),
+            payload,
+            "source contents must remain stable when donor data matches"
+        );
+        assert_eq!(
+            ext4_read_exact(&fs, &cx, donor.ino, payload.len() as u64),
+            payload,
+            "donor contents must remain stable when donor data matches"
+        );
+
+        fs.unregister_ioctl_fd_for_testing(7);
+    }
+
+    #[test]
+    fn move_ext_returns_short_moved_len_at_eof() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let source = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("move-ext-short-source.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source inode");
+        let donor = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("move-ext-short-donor.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create donor inode");
+
+        let payload = vec![0x4D; 4096];
+        fs.write(&cx, source.ino, 0, &payload)
+            .expect("seed source block");
+        fs.write(&cx, donor.ino, 0, &payload)
+            .expect("seed donor block");
+        fs.register_ioctl_fd_for_testing(8, donor.ino)
+            .expect("register donor fd");
+
+        let source_before = ext4_block_mapping(&fs, &cx, source.ino, 0);
+        let donor_before = ext4_block_mapping(&fs, &cx, donor.ino, 0);
+        let moved = ext4_move_ext_request(&fs, &cx, source.ino, 8, 0, 0, 4)
+            .expect("range should clamp to EOF");
+        assert_eq!(
+            moved, 1,
+            "moved length should clamp to the shorter file tail"
+        );
+
+        let source_after = ext4_block_mapping(&fs, &cx, source.ino, 0);
+        let donor_after = ext4_block_mapping(&fs, &cx, donor.ino, 0);
+        assert_eq!(source_after.physical_start, donor_before.physical_start);
+        assert_eq!(donor_after.physical_start, source_before.physical_start);
+        assert_eq!(
+            ext4_read_exact(&fs, &cx, source.ino, payload.len() as u64),
+            payload
+        );
+        assert_eq!(
+            ext4_read_exact(&fs, &cx, donor.ino, payload.len() as u64),
+            payload
+        );
+
+        fs.unregister_ioctl_fd_for_testing(8);
+    }
+
+    #[test]
+    fn move_ext_rejects_hole_backed_ranges() {
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(64) else {
+            eprintln!("mkfs.ext4 not available, skipping");
+            return;
+        };
+
+        let cx = Cx::for_testing();
+        let source = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("move-ext-hole-source.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source inode");
+        let donor = fs
+            .create(
+                &cx,
+                InodeNumber(2),
+                OsStr::new("move-ext-hole-donor.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create donor inode");
+
+        let block_size = u64::from(fs.ext4_superblock().expect("ext4 superblock").block_size);
+        let first_block = vec![0x48; usize::try_from(block_size).expect("small block size")];
+        fs.write(&cx, source.ino, 0, &first_block)
+            .expect("seed source data");
+        fs.write(&cx, donor.ino, 0, &first_block)
+            .expect("seed donor data");
+
+        let sparse_extend = SetAttrRequest {
+            mode: None,
+            uid: None,
+            gid: None,
+            size: Some(block_size * 2),
+            atime: None,
+            mtime: None,
+        };
+        fs.setattr(&cx, source.ino, &sparse_extend)
+            .expect("sparse-extend source");
+        fs.setattr(&cx, donor.ino, &sparse_extend)
+            .expect("sparse-extend donor");
+        fs.register_ioctl_fd_for_testing(9, donor.ino)
+            .expect("register donor fd");
+
+        let err = ext4_move_ext_request(&fs, &cx, source.ino, 9, 1, 1, 1)
+            .expect_err("hole-backed range should be rejected");
+        assert!(matches!(err, FfsError::UnsupportedFeature(_)));
+
+        fs.unregister_ioctl_fd_for_testing(9);
+    }
+
+    #[test]
     fn read_file_data_leaf() {
         let image = build_ext4_image_with_extents();
         let dev = TestDevice::from_vec(image);
@@ -22510,6 +23125,45 @@ mod tests {
     fn ext4_read_exact(fs: &OpenFs, cx: &Cx, ino: InodeNumber, size: u64) -> Vec<u8> {
         fs.read(cx, ino, 0, u32::try_from(size).expect("small test file"))
             .expect("read exact bytes")
+    }
+
+    fn ext4_block_mapping(
+        fs: &OpenFs,
+        cx: &Cx,
+        ino: InodeNumber,
+        logical_block: u32,
+    ) -> ffs_extent::ExtentMapping {
+        let inode = fs
+            .read_inode(cx, ino)
+            .expect("read inode for extent mapping");
+        let root_bytes = OpenFs::extent_root(&inode);
+        let block_dev = fs.block_device_adapter();
+        let mut mappings =
+            ffs_extent::map_logical_to_physical(cx, &block_dev, &root_bytes, logical_block, 1)
+                .expect("map logical block");
+        mappings.pop().expect("single logical block mapping")
+    }
+
+    fn ext4_move_ext_request(
+        fs: &OpenFs,
+        cx: &Cx,
+        ino: InodeNumber,
+        donor_fd: u32,
+        orig_start: u64,
+        donor_start: u64,
+        len: u64,
+    ) -> ffs_error::Result<u64> {
+        let mut scope = fs
+            .begin_request_scope(cx, RequestOp::IoctlWrite)
+            .expect("begin ioctl write scope");
+        let result = fs.move_ext(cx, &mut scope, ino, donor_fd, orig_start, donor_start, len);
+        if result.is_ok() {
+            fs.commit_request_scope(&mut scope)
+                .expect("commit ioctl write scope");
+        }
+        fs.end_request_scope(cx, RequestOp::IoctlWrite, scope)
+            .expect("end ioctl write scope");
+        result
     }
 
     fn assert_ext4_crash_event(
