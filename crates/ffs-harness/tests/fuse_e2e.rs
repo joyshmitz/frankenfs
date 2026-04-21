@@ -5018,6 +5018,53 @@ fn btrfs_fuse_xattr_replace_missing_reports_enodata_without_side_effects() {
 }
 
 #[test]
+fn btrfs_fuse_xattr_overwrite_value() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("overwrite_xattr.txt");
+        fs::write(&path, b"overwrite xattr test\n").expect("write for overwrite xattr");
+
+        // Set initial value.
+        py_setxattr(&path, "user.mutable", b"original");
+        assert_eq!(py_getxattr(&path, "user.mutable").unwrap(), b"original");
+
+        // Overwrite with different value.
+        py_setxattr(&path, "user.mutable", b"updated_value");
+        assert_eq!(
+            py_getxattr(&path, "user.mutable").unwrap(),
+            b"updated_value"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_get_nonexistent_returns_error() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("nonexistent_xattr.txt");
+        fs::write(&path, b"nonexistent xattr test\n").expect("write for nonexistent xattr");
+
+        // Getting a nonexistent xattr should fail.
+        assert!(
+            py_getxattr(&path, "user.does_not_exist").is_none(),
+            "getxattr for nonexistent attr on btrfs should return None/error"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_remove_nonexistent_fails() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("remove_nonexistent_xattr.txt");
+        fs::write(&path, b"remove nonexistent xattr test\n").expect("write for remove nonexistent xattr");
+
+        // Removing a nonexistent xattr should fail.
+        assert!(
+            !py_removexattr(&path, "user.no_such_attr"),
+            "removexattr for nonexistent attr on btrfs should fail"
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_write_large_file() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
