@@ -6005,6 +6005,53 @@ fn btrfs_fuse_listxattr_size_probe_and_erange_without_side_effects() {
 }
 
 #[test]
+fn btrfs_fuse_empty_listxattr_size_probe_and_zero_length_payload() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_empty_listxattr_size_probe";
+        let path = mnt.join("empty_listxattr_probe.txt");
+        let original_file = b"btrfs empty listxattr probe coverage\n";
+        fs::write(&path, original_file).expect("write btrfs empty listxattr probe file");
+
+        let initial_names = py_listxattr(&path);
+        assert!(
+            initial_names.is_empty(),
+            "fresh btrfs file should expose no visible xattrs: {initial_names:?}"
+        );
+
+        let probe_report = py_listxattr_probe_report(&path, 0);
+        assert_eq!(
+            probe_report["len"].as_u64(),
+            Some(0),
+            "empty listxattr size probe should report length 0: {probe_report}"
+        );
+
+        // For an empty xattr set, the exact-fit payload size is also zero.
+        let zero_len_payload_report = py_listxattr_probe_report(&path, 0);
+        assert_eq!(
+            zero_len_payload_report["len"].as_u64(),
+            Some(0),
+            "empty listxattr zero-length payload should succeed with length 0: {zero_len_payload_report}"
+        );
+
+        let names_after = py_listxattr(&path);
+        assert!(
+            names_after.is_empty(),
+            "empty listxattr probe paths must not create visible xattrs: {names_after:?}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read btrfs file bytes after empty listxattr probe"),
+            original_file,
+            "empty listxattr probe paths must not mutate file contents"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("empty_len_zero_and_zero_length_success"),
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_ioctl_fs_info_via_mounted_path() {
     if !command_available("python3") {
         eprintln!("python3 not available, skipping");
