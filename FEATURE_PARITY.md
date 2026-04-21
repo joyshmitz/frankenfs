@@ -93,6 +93,9 @@ for create-via-write and overwrite-on-existing-file paths, with no file-byte or 
 Mounted-path read-only namespace-removal coverage now also freezes exact `EROFS`
 for `unlink`, `rmdir`, and `rename` on both ext4 and btrfs, with no
 directory-entry drift and no surviving-file data drift.
+Mounted-path ext4 namespace refusal coverage now also freezes exact `ENOTDIR`
+for `rmdir` on a regular file, distinct from the existing missing-directory and
+non-empty-directory contracts.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

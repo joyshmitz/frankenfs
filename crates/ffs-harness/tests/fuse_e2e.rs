@@ -1850,6 +1850,32 @@ fn fuse_rmdir_removes_empty_directory() {
 }
 
 #[test]
+fn fuse_rmdir_on_file_reports_enotdir() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_rmdir_on_file_reports_enotdir";
+        let path = mnt.join("hello.txt");
+        let original_bytes = fs::read(&path).expect("read hello.txt before rmdir-on-file");
+
+        let err = fs::remove_dir(&path).expect_err("rmdir on regular file should fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ENOTDIR),
+            "rmdir on a regular file should surface exact ENOTDIR: {err}"
+        );
+        assert!(
+            path.is_file(),
+            "failed rmdir on regular file must leave the file in place"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read hello.txt after failed rmdir-on-file"),
+            original_bytes,
+            "failed rmdir on regular file must not mutate file contents"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=ENOTDIR_no_drift"));
+    });
+}
+
+#[test]
 fn fuse_rmdir_non_empty_fails() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("non_empty_dir");
