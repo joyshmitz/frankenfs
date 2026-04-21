@@ -7968,6 +7968,77 @@ fn encode_btrfs_fs_info_args(sb: &ffs_ondisk::BtrfsSuperblock) -> Vec<u8> {
     buf
 }
 
+/// Encoded size of `struct btrfs_ioctl_dev_info_args` on x86_64.  The kernel
+/// pads the struct out to 4096 bytes: 40 bytes of named input/output fields
+/// (`devid`, `uuid[16]`, `bytes_used`, `total_bytes`), 3032 bytes of reserved
+/// `__u64 unused[379]`, and a 1024-byte trailing `path[BTRFS_DEVICE_PATH_NAME_MAX]`.
+pub const BTRFS_DEV_INFO_ARGS_SIZE: usize = 4096;
+
+/// Offset of the trailing `path[1024]` field inside `btrfs_ioctl_dev_info_args`.
+const BTRFS_DEV_INFO_PATH_OFFSET: usize = 0x0C08;
+/// Maximum device-path length in the reply (= `BTRFS_DEVICE_PATH_NAME_MAX`).
+const BTRFS_DEV_INFO_PATH_MAX: usize = 1024;
+
+/// Errno-adjacent discriminant for `BTRFS_IOC_DEV_INFO` lookup failures.
+/// The kernel surfaces "no such device" as `ENODEV`; we thread that back up
+/// through `FfsError::Io(ENODEV)` so the FUSE dispatcher's generic
+/// `to_errno()` path forwards the right value to userspace.
+fn btrfs_dev_info_enodev() -> FfsError {
+    FfsError::Io(std::io::Error::from_raw_os_error(libc::ENODEV))
+}
+
+/// Encode a `struct btrfs_ioctl_dev_info_args` reply from the btrfs
+/// superblock, validating the caller-supplied `devid` + `uuid` lookup keys.
+///
+/// Kernel semantics (from `btrfs_find_device`): the caller asks for *a*
+/// device identified by either `devid` (non-zero) or `uuid` (non-all-zero)
+/// or both.  For the single-device btrfs images FrankenFS currently serves
+/// we accept:
+///   * `devid == 0 || devid == 1` — `0` means "don't filter by devid",
+///     `1` is the canonical single-device id ext4-era btrfs tools assume.
+///   * `uuid` all-zero (don't filter) or `uuid == sb.fsid` (the device UUID
+///     for a single-device volume is the filesystem UUID).
+/// Any other combination returns `ENODEV`, matching the kernel's
+/// "no such device" rejection path.
+///
+/// Layout of the 4096-byte reply:
+/// ```text
+///   0x0000  __u64     devid            (echoed)
+///   0x0008  __u8[16]  uuid             (= sb.fsid for single-device volumes)
+///   0x0018  __u64     bytes_used
+///   0x0020  __u64     total_bytes
+///   0x0028  __u64[379] unused          (zero)
+///   0x0C08  __u8[1024] path            (empty on FUSE — we have no
+///                                      backing block-device path to report)
+/// ```
+fn encode_btrfs_dev_info_args(
+    sb: &ffs_ondisk::BtrfsSuperblock,
+    devid_in: u64,
+    uuid_in: &[u8; 16],
+) -> Result<Vec<u8>, FfsError> {
+    const CANONICAL_DEVID: u64 = 1;
+    if devid_in != 0 && devid_in != CANONICAL_DEVID {
+        return Err(btrfs_dev_info_enodev());
+    }
+    let uuid_is_wildcard = uuid_in.iter().all(|b| *b == 0);
+    if !uuid_is_wildcard && uuid_in != &sb.fsid {
+        return Err(btrfs_dev_info_enodev());
+    }
+
+    let mut buf = vec![0_u8; BTRFS_DEV_INFO_ARGS_SIZE];
+    buf[0x00..0x08].copy_from_slice(&CANONICAL_DEVID.to_le_bytes());
+    buf[0x08..0x18].copy_from_slice(&sb.fsid);
+    buf[0x18..0x20].copy_from_slice(&sb.bytes_used.to_le_bytes());
+    buf[0x20..0x28].copy_from_slice(&sb.total_bytes.to_le_bytes());
+    // `unused[379]` (0x28..0x0C08) stays zeroed.  `path[1024]` (0x0C08..4096)
+    // also stays zeroed — FrankenFS serves btrfs images out of a backing
+    // file, not a /dev/* node, so there is no meaningful device path to
+    // report and the kernel itself zeroes this field on filesystems that
+    // lack a resolvable device path.
+    debug_assert_eq!(BTRFS_DEV_INFO_PATH_OFFSET + BTRFS_DEV_INFO_PATH_MAX, buf.len());
+    Ok(buf)
+}
+
 fn parse_to_ffs_error(e: &ParseError) -> FfsError {
     match e {
         ParseError::InvalidField { field, reason } => {
@@ -15727,6 +15798,53 @@ impl FsOps for OpenFs {
                 "BTRFS_IOC_FS_INFO is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(sb) => Ok(encode_btrfs_fs_info_args(sb)),
+        }
+    }
+
+    fn btrfs_ino_lookup(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        treeid: u64,
+        objectid: u64,
+    ) -> ffs_error::Result<(u64, Vec<u8>)> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_INO_LOOKUP is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(sb) => {
+                // For now, only support the root inode case (objectid == 256).
+                // The kernel uses this to discover the subvolume tree ID.
+                const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
+                if objectid == BTRFS_FIRST_FREE_OBJECTID {
+                    // Return the resolved treeid and an empty path.
+                    // If treeid is 0, use the mounted subvolume's tree.
+                    let resolved_treeid = if treeid == 0 {
+                        sb.root_dir_objectid
+                    } else {
+                        treeid
+                    };
+                    Ok((resolved_treeid, vec![0_u8])) // NUL-terminated empty path
+                } else {
+                    // Full back-reference walking not implemented yet.
+                    Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENOENT)))
+                }
+            }
+        }
+    }
+
+    fn get_btrfs_dev_info(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        devid_in: u64,
+        uuid_in: [u8; 16],
+    ) -> ffs_error::Result<Vec<u8>> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
+                "BTRFS_IOC_DEV_INFO is not supported on ext4 filesystems".to_owned(),
+            )),
+            FsFlavor::Btrfs(sb) => encode_btrfs_dev_info_args(sb, devid_in, &uuid_in),
         }
     }
 

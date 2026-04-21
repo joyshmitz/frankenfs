@@ -786,6 +786,52 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Look up an inode path for `BTRFS_IOC_INO_LOOKUP`.
+    ///
+    /// Given a `treeid` (subvolume tree objectid, or 0 for the mounted tree)
+    /// and an `objectid` (inode number), returns the path from the subvolume
+    /// root to that inode. For the subvolume root itself (objectid == 256),
+    /// returns an empty path and fills in the actual treeid.
+    ///
+    /// Returns `(treeid, path)` where `treeid` is the resolved tree objectid
+    /// and `path` is the NUL-terminated path bytes (empty for root).
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`.
+    fn btrfs_ino_lookup(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _treeid: u64,
+        _objectid: u64,
+    ) -> ffs_error::Result<(u64, Vec<u8>)> {
+        Err(FfsError::UnsupportedFeature(
+            "btrfs_ino_lookup is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Return the btrfs per-device-info payload for `BTRFS_IOC_DEV_INFO`.
+    ///
+    /// `devid_in` and `uuid_in` are the lookup keys supplied in the ioctl
+    /// input struct: the kernel resolves whichever of them is non-zero (or
+    /// both) to a device and writes back the full `btrfs_ioctl_dev_info_args`
+    /// struct (4096 bytes).  Implementations return the encoded payload on
+    /// match, or `FfsError::Io(ENODEV)` when the caller's lookup keys do not
+    /// identify a device this filesystem tracks.
+    ///
+    /// Non-btrfs backends must return `FfsError::UnsupportedFeature`, which
+    /// `ffs-fuse` maps to `EOPNOTSUPP`.
+    fn get_btrfs_dev_info(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _devid_in: u64,
+        _uuid_in: [u8; 16],
+    ) -> ffs_error::Result<Vec<u8>> {
+        Err(FfsError::UnsupportedFeature(
+            "get_btrfs_dev_info is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Set filesystem-specific inode flags (ext4 `EXT4_IOC_SETFLAGS`).
     ///
     /// Updates the raw `i_flags` field. The implementation should validate

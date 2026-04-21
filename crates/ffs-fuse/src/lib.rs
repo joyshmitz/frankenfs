@@ -91,6 +91,24 @@ const BTRFS_IOC_FS_INFO: u32 = 0x8400_941F;
 /// reject undersized out buffers with `EINVAL` before dispatching to
 /// the backend.
 const BTRFS_IOC_FS_INFO_SIZE: u32 = 1024;
+/// `BTRFS_IOC_DEV_INFO` = `_IOWR(0x94, 0x1E, struct btrfs_ioctl_dev_info_args)`
+/// on x86_64.  `_IOWR` means the ioctl carries both input (caller-selected
+/// `devid` + `uuid` lookup keys) and output (resolved device metadata).  The
+/// args struct is 4096 bytes: 40 bytes of named fields (devid, uuid[16],
+/// bytes_used, total_bytes), 3032 bytes of reserved `__u64 unused[379]`, and
+/// a 1024-byte `path` tail.
+const BTRFS_IOC_DEV_INFO: u32 = 0xD000_941E;
+/// Size of the `btrfs_ioctl_dev_info_args` payload (input and output share
+/// the same struct shape for `_IOWR` ioctls).  Mirrored from
+/// `ffs_core::BTRFS_DEV_INFO_ARGS_SIZE`.
+const BTRFS_IOC_DEV_INFO_SIZE: u32 = 4096;
+/// `BTRFS_IOC_INO_LOOKUP` = `_IOWR(0x94, 18, struct btrfs_ioctl_ino_lookup_args)`
+/// on x86_64. The args struct is 4096 bytes: treeid(u64) + objectid(u64) + name[4080].
+const BTRFS_IOC_INO_LOOKUP: u32 = 0xD000_9412;
+/// Size of `btrfs_ioctl_ino_lookup_args`: 8 + 8 + 4080 = 4096 bytes.
+const BTRFS_INO_LOOKUP_ARGS_SIZE: u32 = 4096;
+/// First free objectid in btrfs (root directory inode).
+const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FSCRYPT_POLICY_V2_SIZE: usize = 24;
 const FSCRYPT_POLICY_EX_HEADER_SIZE: usize = 8;
@@ -1762,6 +1780,65 @@ impl FrankenFuse {
                         let mut buf = vec![0_u8; BTRFS_IOC_FS_INFO_SIZE as usize];
                         let copy_len = payload.len().min(buf.len());
                         buf[..copy_len].copy_from_slice(&payload[..copy_len]);
+                        IoctlResult::Data(buf)
+                    }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_DEV_INFO => {
+                // `_IOWR`: the caller's in_data carries `devid` + `uuid` lookup
+                // keys (24 bytes are enough — offsets 0x00..0x08 + 0x08..0x18),
+                // and the caller's out buffer must be able to hold the full
+                // 4096-byte struct reply.  Any smaller shape is rejected
+                // deterministically rather than silently truncated.
+                if in_data.len() < 24 || out_size < BTRFS_IOC_DEV_INFO_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let devid_in = u64::from_le_bytes(
+                    in_data[0..8]
+                        .try_into()
+                        .expect("slice of exactly 8 bytes fits in u64"),
+                );
+                let mut uuid_in = [0_u8; 16];
+                uuid_in.copy_from_slice(&in_data[8..24]);
+
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner
+                        .ops
+                        .get_btrfs_dev_info(cx, scope, devid_in, uuid_in)
+                }) {
+                    Ok(payload) => {
+                        let mut buf = vec![0_u8; BTRFS_IOC_DEV_INFO_SIZE as usize];
+                        let copy_len = payload.len().min(buf.len());
+                        buf[..copy_len].copy_from_slice(&payload[..copy_len]);
+                        IoctlResult::Data(buf)
+                    }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            BTRFS_IOC_INO_LOOKUP => {
+                // Require full 4096-byte buffer for input and output.
+                if in_data.len() < BTRFS_INO_LOOKUP_ARGS_SIZE as usize
+                    || out_size < BTRFS_INO_LOOKUP_ARGS_SIZE
+                {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                // Parse input: treeid (u64 le at offset 0), objectid (u64 le at offset 8).
+                let treeid = u64::from_le_bytes(in_data[0..8].try_into().unwrap());
+                let objectid = u64::from_le_bytes(in_data[8..16].try_into().unwrap());
+
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.btrfs_ino_lookup(cx, scope, treeid, objectid)
+                }) {
+                    Ok((resolved_treeid, path)) => {
+                        // Build output: treeid (8 bytes) + objectid (8 bytes) + name[4080].
+                        let mut buf = vec![0_u8; BTRFS_INO_LOOKUP_ARGS_SIZE as usize];
+                        buf[0..8].copy_from_slice(&resolved_treeid.to_le_bytes());
+                        buf[8..16].copy_from_slice(&objectid.to_le_bytes());
+                        let path_len = path.len().min(4080);
+                        buf[16..16 + path_len].copy_from_slice(&path[..path_len]);
                         IoctlResult::Data(buf)
                     }
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -3725,6 +3802,8 @@ mod tests {
         GetFlags(InodeNumber),
         GetFsLabel,
         GetBtrfsFsInfo,
+        GetBtrfsDevInfo(u64, [u8; 16]),
+        BtrfsInoLookup(u64, u64),
         Getattr(InodeNumber),
         GetVersion(InodeNumber),
         MoveExt(InodeNumber, u32, u64, u64, u64),
@@ -3746,6 +3825,8 @@ mod tests {
         move_ext_result: Option<u64>,
         fs_label: Vec<u8>,
         btrfs_fs_info: Option<Vec<u8>>,
+        btrfs_dev_info: Option<Vec<u8>>,
+        btrfs_ino_lookup_result: Option<(u64, Vec<u8>)>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
     }
 
@@ -3762,6 +3843,8 @@ mod tests {
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -3778,6 +3861,8 @@ mod tests {
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -3797,6 +3882,8 @@ mod tests {
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -3813,6 +3900,8 @@ mod tests {
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -3829,6 +3918,8 @@ mod tests {
                 move_ext_result: Some(moved_len),
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -3845,6 +3936,8 @@ mod tests {
                 move_ext_result: Some(1),
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -3866,6 +3959,8 @@ mod tests {
                 move_ext_result: Some(1),
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: None,
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -3882,6 +3977,8 @@ mod tests {
                 move_ext_result: None,
                 fs_label: label.to_vec(),
                 btrfs_fs_info: None,
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -3898,6 +3995,26 @@ mod tests {
                 move_ext_result: None,
                 fs_label: b"test_label\0".to_vec(),
                 btrfs_fs_info: Some(payload),
+                btrfs_dev_info: None,
+                btrfs_ino_lookup_result: None,
+                calls,
+            }
+        }
+
+        fn with_btrfs_dev_info(payload: Vec<u8>, calls: Arc<Mutex<Vec<IoctlCall>>>) -> Self {
+            Self {
+                encryption_policy: None,
+                encryption_policy_errno: None,
+                flags: 0,
+                generation: 0,
+                attr_kind: FfsFileType::RegularFile,
+                attr_size: 64 * 1024,
+                blksize: 4096,
+                move_ext_result: None,
+                fs_label: b"test_label\0".to_vec(),
+                btrfs_fs_info: None,
+                btrfs_dev_info: Some(payload),
+                btrfs_ino_lookup_result: None,
                 calls,
             }
         }
@@ -4114,6 +4231,42 @@ mod tests {
             self.btrfs_fs_info.clone().ok_or_else(|| {
                 FfsError::UnsupportedFeature(
                     "get_btrfs_fs_info: recorder not configured with a payload".into(),
+                )
+            })
+        }
+
+        fn btrfs_ino_lookup(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            treeid: u64,
+            objectid: u64,
+        ) -> ffs_error::Result<(u64, Vec<u8>)> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::BtrfsInoLookup(treeid, objectid));
+            self.btrfs_ino_lookup_result.clone().ok_or_else(|| {
+                FfsError::UnsupportedFeature(
+                    "btrfs_ino_lookup: recorder not configured with a result".into(),
+                )
+            })
+        }
+
+        fn get_btrfs_dev_info(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            devid_in: u64,
+            uuid_in: [u8; 16],
+        ) -> ffs_error::Result<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetBtrfsDevInfo(devid_in, uuid_in));
+            self.btrfs_dev_info.clone().ok_or_else(|| {
+                FfsError::UnsupportedFeature(
+                    "get_btrfs_dev_info: recorder not configured with a payload".into(),
                 )
             })
         }
@@ -4543,6 +4696,144 @@ mod tests {
             &[
                 IoctlCall::Begin(RequestOp::IoctlRead),
                 IoctlCall::GetBtrfsFsInfo,
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    /// Helper: build the 24-byte input prefix (`devid` || `uuid`) a
+    /// well-formed BTRFS_IOC_DEV_INFO request needs to carry.
+    fn btrfs_dev_info_in(devid: u64, uuid: &[u8; 16]) -> Vec<u8> {
+        let mut buf = vec![0_u8; 24];
+        buf[0..8].copy_from_slice(&devid.to_le_bytes());
+        buf[8..24].copy_from_slice(uuid);
+        buf
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_dev_info_returns_backend_payload_verbatim() {
+        // Canned 4096-byte payload with distinctive marker values at every
+        // named field offset so the dispatcher can't silently corrupt them.
+        let mut payload = vec![0_u8; BTRFS_IOC_DEV_INFO_SIZE as usize];
+        payload[0x00..0x08].copy_from_slice(&1_u64.to_le_bytes()); // devid
+        payload[0x08..0x18].copy_from_slice(&[0x77_u8; 16]);       // uuid
+        payload[0x18..0x20].copy_from_slice(&0xCAFE_BABE_u64.to_le_bytes()); // bytes_used
+        payload[0x20..0x28].copy_from_slice(&(128_u64 * 1024 * 1024).to_le_bytes()); // total_bytes
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_dev_info(
+            payload.clone(),
+            Arc::clone(&calls),
+        )));
+
+        let devid_in = 1_u64;
+        let uuid_in = [0x77_u8; 16];
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_DEV_INFO,
+            &btrfs_dev_info_in(devid_in, &uuid_in),
+            BTRFS_IOC_DEV_INFO_SIZE,
+        );
+        let IoctlResult::Data(bytes) = response else {
+            panic!("expected IoctlResult::Data, got {response:?}");
+        };
+        assert_eq!(
+            bytes.len(),
+            BTRFS_IOC_DEV_INFO_SIZE as usize,
+            "reply must be exactly 4096 bytes"
+        );
+        assert_eq!(&bytes[..], &payload[..], "dispatcher must forward backend payload verbatim");
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetBtrfsDevInfo(devid_in, uuid_in),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_dev_info_rejects_too_small_output_buffer() {
+        // Anything below the full 4096-byte struct width must short-circuit
+        // with EINVAL *before* touching the backend — a partial struct in
+        // userspace is worse than no answer.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_dev_info(
+            vec![0_u8; BTRFS_IOC_DEV_INFO_SIZE as usize],
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_DEV_INFO,
+            &btrfs_dev_info_in(0, &[0_u8; 16]),
+            BTRFS_IOC_DEV_INFO_SIZE - 1,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(
+            calls.lock().expect("lock ioctl calls").is_empty(),
+            "backend must not be called when the out buffer is undersized"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_dev_info_rejects_short_input_buffer_with_einval() {
+        // Same short-circuit guard for the input side: we need 24 bytes
+        // (devid + uuid) to have well-defined lookup keys; anything shorter
+        // must fail before dispatch.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_dev_info(
+            vec![0_u8; BTRFS_IOC_DEV_INFO_SIZE as usize],
+            Arc::clone(&calls),
+        )));
+
+        let short_in = vec![0_u8; 23]; // one byte shy of the 24-byte keys prefix
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_DEV_INFO,
+            &short_in,
+            BTRFS_IOC_DEV_INFO_SIZE,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(
+            calls.lock().expect("lock ioctl calls").is_empty(),
+            "backend must not be called when the input keys are truncated"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_btrfs_dev_info_surfaces_backend_unsupported_as_eopnotsupp() {
+        // The default recorder has no btrfs_dev_info payload → the trait
+        // impl returns UnsupportedFeature, which the dispatcher must map
+        // to EOPNOTSUPP so an ext4 caller sees the deterministic "not a
+        // btrfs filesystem" errno.  Note: the dispatcher still performs
+        // its input-length guard *before* reaching the backend, so the
+        // caller must supply a well-formed 24-byte keys prefix even in
+        // the unsupported-backend path.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            1,
+            0,
+            BTRFS_IOC_DEV_INFO,
+            &btrfs_dev_info_in(1, &[0_u8; 16]),
+            BTRFS_IOC_DEV_INFO_SIZE,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetBtrfsDevInfo(1, [0_u8; 16]),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
         );
