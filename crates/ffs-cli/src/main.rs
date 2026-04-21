@@ -4123,14 +4123,7 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
     );
 
     let cx = cli_cx();
-    let open_opts = OpenOptions {
-        ext4_journal_replay_mode: ext4_mount_replay_mode(options.read_write),
-        ext4_data_err_policy: options.ext4_data_err_policy,
-        ext4_verify_journal_checksums: options.ext4_verify_journal_checksums,
-        mount_mode: options.mount_mode,
-        btrfs_mount_selection: options.btrfs_mount_selection.clone(),
-        ..OpenOptions::default()
-    };
+    let open_opts = build_mount_open_options(options);
     let mut open_fs = match OpenFs::open_with_options(&cx, image_path, &open_opts) {
         Ok(open_fs) => open_fs,
         Err(error) => {
@@ -4199,6 +4192,17 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
     );
 
     Ok(())
+}
+
+fn build_mount_open_options(options: &MountCmdOptions) -> OpenOptions {
+    OpenOptions {
+        ext4_journal_replay_mode: ext4_mount_replay_mode(options.read_write),
+        ext4_data_err_policy: options.ext4_data_err_policy,
+        ext4_verify_journal_checksums: options.ext4_verify_journal_checksums,
+        mount_mode: options.mount_mode,
+        btrfs_mount_selection: options.btrfs_mount_selection.clone(),
+        ..OpenOptions::default()
+    }
 }
 
 fn parse_btrfs_mount_selection(
@@ -5415,11 +5419,11 @@ mod tests {
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
         MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions,
         RepairFlags, btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output,
-        build_info_output, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
-        ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
-        log_mount_runtime_selected, mount_cmd, mount_operation_id, parse_btrfs_mount_selection,
-        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
-        summarize_repair_staleness, unavailable_repair_info,
+        build_info_output, build_mount_open_options, choose_btrfs_scrub_block_size,
+        ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
+        log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
+        parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
+        read_file_region, summarize_repair_staleness, unavailable_repair_info,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -5683,8 +5687,30 @@ mod tests {
         image[item_offset + 21..item_offset + 25].copy_from_slice(&data_size.to_le_bytes());
     }
 
+    fn stamp_btrfs_test_tree_block_crc32c(image: &mut [u8], logical: usize) {
+        let block = &mut image[logical..logical + 16 * 1024];
+        let checksum = crc32c::crc32c(&block[0x20..]);
+        block[0..4].copy_from_slice(&checksum.to_le_bytes());
+    }
+
+    fn map_btrfs_test_chunk_physical_offset(
+        logical_start: u64,
+        physical_start: u64,
+        logical_bytenr: u64,
+    ) -> usize {
+        let delta = logical_bytenr
+            .checked_sub(logical_start)
+            .expect("test logical bytenr should be inside the synthetic chunk");
+        usize::try_from(physical_start + delta).expect("mapped tree block offset should fit")
+    }
+
     #[allow(clippy::cast_possible_truncation)]
-    fn build_test_btrfs_image_with_root_inode_item() -> Vec<u8> {
+    fn build_test_btrfs_image_with_root_inode_item_for_chunk(
+        logical_start: u64,
+        logical_length: u64,
+        physical_start: u64,
+        chunk_type: u64,
+    ) -> Vec<u8> {
         let image_size: usize = 512 * 1024;
         let mut image = vec![0_u8; image_size];
         let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
@@ -5695,10 +5721,10 @@ mod tests {
         let mut sb = build_test_btrfs_superblock_with_single_chunk(
             primary_offset as u64,
             11,
-            0,
-            image_size as u64,
-            0,
-            2,
+            logical_start,
+            logical_length,
+            physical_start,
+            chunk_type,
         );
         sb[0x50..0x58].copy_from_slice(&root_tree_logical.to_le_bytes());
         sb[0x80..0x88].copy_from_slice(&root_dir_objectid.to_le_bytes());
@@ -5708,7 +5734,8 @@ mod tests {
         sb[0..4].copy_from_slice(&checksum.to_le_bytes());
         image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
 
-        let root_leaf_offset = usize::try_from(root_tree_logical).expect("root tree offset fits");
+        let root_leaf_offset =
+            map_btrfs_test_chunk_physical_offset(logical_start, physical_start, root_tree_logical);
         write_btrfs_leaf_header(&mut image, root_leaf_offset, root_tree_logical, 1, 1);
         let root_item_offset = 3000_u32;
         let root_item_size = 239_u32;
@@ -5732,7 +5759,8 @@ mod tests {
             root_leaf_offset + usize::try_from(root_item_offset).expect("root item offset fits");
         image[root_data_start..root_data_start + root_item.len()].copy_from_slice(&root_item);
 
-        let fs_leaf_offset = usize::try_from(fs_tree_logical).expect("fs tree offset fits");
+        let fs_leaf_offset =
+            map_btrfs_test_chunk_physical_offset(logical_start, physical_start, fs_tree_logical);
         write_btrfs_leaf_header(
             &mut image,
             fs_leaf_offset,
@@ -5774,7 +5802,15 @@ mod tests {
             fs_leaf_offset + usize::try_from(inode_data_offset).expect("inode offset fits");
         image[inode_data_start..inode_data_start + inode_bytes.len()].copy_from_slice(&inode_bytes);
 
+        stamp_btrfs_test_tree_block_crc32c(&mut image, root_leaf_offset);
+        stamp_btrfs_test_tree_block_crc32c(&mut image, fs_leaf_offset);
+
         image
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_test_btrfs_image_with_root_inode_item() -> Vec<u8> {
+        build_test_btrfs_image_with_root_inode_item_for_chunk(0, 512 * 1024, 0, 2)
     }
 
     fn encode_btrfs_dir_index_entry(name: &[u8], child_objectid: u64, file_type: u8) -> Vec<u8> {
@@ -5926,6 +5962,9 @@ mod tests {
         );
         image[fs_leaf_offset + data_cursor..fs_leaf_offset + data_cursor + child_inode_bytes.len()]
             .copy_from_slice(&child_inode_bytes);
+
+        stamp_btrfs_test_tree_block_crc32c(&mut image, root_leaf_offset);
+        stamp_btrfs_test_tree_block_crc32c(&mut image, fs_leaf_offset);
 
         image
     }
@@ -7389,6 +7428,143 @@ mod tests {
             message.contains("mutually exclusive"),
             "unexpected error message: {message}"
         );
+    }
+
+    #[test]
+    fn build_mount_open_options_defaults_to_btrfs_root_selection() {
+        let open_options = build_mount_open_options(&MountCmdOptions {
+            allow_other: false,
+            read_write: false,
+            mount_mode: MountMode::Compat,
+            btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
+            ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+            ext4_verify_journal_checksums: true,
+            runtime: MountRuntimeConfig {
+                mode: MountRuntimeMode::Standard,
+                managed_unmount_timeout_secs: None,
+            },
+        });
+        assert_eq!(
+            open_options.btrfs_mount_selection,
+            BtrfsMountSelection::DefaultRoot
+        );
+    }
+
+    #[test]
+    fn build_mount_open_options_threads_explicit_btrfs_subvolume_selection() {
+        let open_options = build_mount_open_options(&MountCmdOptions {
+            allow_other: false,
+            read_write: true,
+            mount_mode: MountMode::Compat,
+            btrfs_mount_selection: BtrfsMountSelection::Subvolume("home".to_owned()),
+            ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+            ext4_verify_journal_checksums: true,
+            runtime: MountRuntimeConfig {
+                mode: MountRuntimeMode::Standard,
+                managed_unmount_timeout_secs: None,
+            },
+        });
+        assert_eq!(
+            open_options.btrfs_mount_selection,
+            BtrfsMountSelection::Subvolume("home".to_owned())
+        );
+        assert_eq!(
+            open_options.ext4_journal_replay_mode,
+            ext4_mount_replay_mode(true)
+        );
+    }
+
+    #[test]
+    fn build_mount_open_options_threads_explicit_btrfs_snapshot_selection() {
+        let open_options = build_mount_open_options(&MountCmdOptions {
+            allow_other: false,
+            read_write: false,
+            mount_mode: MountMode::Native,
+            btrfs_mount_selection: BtrfsMountSelection::Snapshot("snap-1".to_owned()),
+            ext4_data_err_policy: Ext4DataErrPolicy::Abort,
+            ext4_verify_journal_checksums: false,
+            runtime: MountRuntimeConfig {
+                mode: MountRuntimeMode::Standard,
+                managed_unmount_timeout_secs: None,
+            },
+        });
+        assert_eq!(
+            open_options.btrfs_mount_selection,
+            BtrfsMountSelection::Snapshot("snap-1".to_owned())
+        );
+        assert_eq!(open_options.mount_mode, MountMode::Native);
+        assert_eq!(open_options.ext4_data_err_policy, Ext4DataErrPolicy::Abort);
+        assert!(!open_options.ext4_verify_journal_checksums);
+    }
+
+    #[test]
+    fn mount_cmd_missing_btrfs_subvolume_reports_stable_open_error() {
+        let image = build_test_btrfs_image_with_root_inode_item();
+        with_temp_image_path(&image, |path| {
+            let err = mount_cmd(
+                &path,
+                &PathBuf::from("/definitely/not-used"),
+                &MountCmdOptions {
+                    allow_other: false,
+                    read_write: false,
+                    mount_mode: MountMode::Compat,
+                    btrfs_mount_selection: BtrfsMountSelection::Subvolume("missing".to_owned()),
+                    ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                    ext4_verify_journal_checksums: true,
+                    runtime: MountRuntimeConfig {
+                        mode: MountRuntimeMode::Standard,
+                        managed_unmount_timeout_secs: None,
+                    },
+                },
+            )
+            .expect_err("missing btrfs subvolume should fail before FUSE mount");
+
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("failed to open filesystem image"),
+                "expected mount open context, got: {message}"
+            );
+            assert!(
+                message.contains("btrfs subvolume `missing`"),
+                "expected stable missing subvolume detail, got: {message}"
+            );
+        });
+    }
+
+    #[test]
+    fn mount_cmd_missing_btrfs_snapshot_reports_stable_open_error() {
+        let image = build_test_btrfs_image_with_root_inode_item();
+        with_temp_image_path(&image, |path| {
+            let err = mount_cmd(
+                &path,
+                &PathBuf::from("/definitely/not-used"),
+                &MountCmdOptions {
+                    allow_other: false,
+                    read_write: false,
+                    mount_mode: MountMode::Compat,
+                    btrfs_mount_selection: BtrfsMountSelection::Snapshot(
+                        "missing-snapshot".to_owned(),
+                    ),
+                    ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                    ext4_verify_journal_checksums: true,
+                    runtime: MountRuntimeConfig {
+                        mode: MountRuntimeMode::Standard,
+                        managed_unmount_timeout_secs: None,
+                    },
+                },
+            )
+            .expect_err("missing btrfs snapshot should fail before FUSE mount");
+
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("failed to open filesystem image"),
+                "expected mount open context, got: {message}"
+            );
+            assert!(
+                message.contains("btrfs snapshot `missing-snapshot`"),
+                "expected stable missing snapshot detail, got: {message}"
+            );
+        });
     }
 
     #[test]
@@ -8883,17 +9059,12 @@ mod tests {
 
     #[test]
     fn build_info_output_btrfs_groups_reports_chunk_layout() {
-        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
-        let mut image = vec![0_u8; 2 * 1024 * 1024];
-        let sb = build_test_btrfs_superblock_with_single_chunk(
-            primary_offset as u64,
-            11,
+        let image = build_test_btrfs_image_with_root_inode_item_for_chunk(
             0x0,
             0x10000,
             0x20000,
             1 | 4, // DATA|METADATA
         );
-        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
 
         with_temp_image_path(&image, |path| {
             let cx = super::cli_cx();
@@ -8943,17 +9114,12 @@ mod tests {
 
     #[test]
     fn build_dump_group_output_btrfs_returns_chunk_mapping() {
-        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
-        let mut image = vec![0_u8; 2 * 1024 * 1024];
-        let sb = build_test_btrfs_superblock_with_single_chunk(
-            primary_offset as u64,
-            11,
+        let image = build_test_btrfs_image_with_root_inode_item_for_chunk(
             0x0,
             0x10000,
             0x20000,
             1 | 2, // DATA|SYSTEM
         );
-        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
 
         with_temp_image_path(&image, |path| {
             let output = super::build_dump_group_output(&path, 0, true)
