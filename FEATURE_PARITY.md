@@ -76,8 +76,9 @@ validates `system.posix_acl_access` and `system.posix_acl_default` against
 `debugfs`, while `crates/ffs-harness/tests/fuse_e2e.rs` covers mounted-path
 list/get behavior, `XATTR_CREATE`=`EEXIST` and `XATTR_REPLACE`=`ENODATA`
 failure semantics for `user.*`, exact public `ENODATA` for missing
-`getxattr`/`removexattr` on `user.*`, plus missing-default `ENODATA` on the
-public FUSE surface. `crates/ffs-fuse/src/lib.rs` now also unit-freezes the
+`getxattr`/`removexattr` on `user.*`, empty `listxattr` length-0 probe and
+exact-fit zero-length success on mounted files with no visible xattrs, plus
+missing-default `ENODATA` on the public FUSE surface. `crates/ffs-fuse/src/lib.rs` now also unit-freezes the
 shared FUSE dispatcher contract for invalid `setxattr` requests: conflicting
 `CREATE|REPLACE`, unsupported flag bits, and nonzero `position` all reject with
 exact `EINVAL` before any backend mutation call.

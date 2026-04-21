@@ -4806,6 +4806,52 @@ fn fuse_xattr_ext4_get_missing_reports_enodata_without_side_effects() {
 }
 
 #[test]
+fn fuse_xattr_ext4_empty_listxattr_size_probe_and_zero_length_payload() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_empty_listxattr_size_probe";
+        let path = mnt.join("empty_listxattr_probe.txt");
+        let original_file = b"ext4 empty listxattr probe coverage\n";
+        fs::write(&path, original_file).expect("write ext4 empty listxattr probe file");
+
+        let initial_names = py_listxattr(&path);
+        assert!(
+            initial_names.is_empty(),
+            "fresh ext4 file should expose no visible xattrs: {initial_names:?}"
+        );
+
+        let probe_report = py_listxattr_probe_report(&path, 0);
+        assert_eq!(
+            probe_report["len"].as_u64(),
+            Some(0),
+            "empty listxattr size probe should report length 0: {probe_report}"
+        );
+
+        let zero_len_payload_report = py_listxattr_probe_report(&path, 0);
+        assert_eq!(
+            zero_len_payload_report["len"].as_u64(),
+            Some(0),
+            "empty listxattr zero-length payload should succeed with length 0: {zero_len_payload_report}"
+        );
+
+        let names_after = py_listxattr(&path);
+        assert!(
+            names_after.is_empty(),
+            "empty listxattr probe paths must not create visible xattrs: {names_after:?}"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read ext4 file bytes after empty listxattr probe"),
+            original_file,
+            "empty listxattr probe paths must not mutate file contents"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("empty_len_zero_and_zero_length_success"),
+        );
+    });
+}
+
+#[test]
 fn fuse_xattr_ext4_remove_missing_reports_enodata_without_side_effects() {
     with_rw_mount(|mnt| {
         let scenario_id = "ext4_rw_xattr_remove_missing_reports_enodata";
