@@ -80,6 +80,10 @@ const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
+/// `FS_IOC_SETFSLABEL` = `_IOW(0x94, 0x32, char[FSLABEL_MAX])` on x86_64.
+const FS_IOC_SETFSLABEL: u32 = 0x4100_9432;
+const FSLABEL_MAX: usize = 256;
+const FSLABEL_MAX_U32: u32 = 256;
 /// `BTRFS_IOC_FS_INFO` = `_IOR(0x94, 0x1F, struct btrfs_ioctl_fs_info_args)`
 /// on x86_64.  The args struct is 1024 bytes of read-only fs metadata
 /// (`max_id`, `num_devices`, `fsid`, `nodesize`, `sectorsize`,
@@ -107,11 +111,12 @@ const BTRFS_IOC_DEV_INFO_SIZE: u32 = 4096;
 const BTRFS_IOC_INO_LOOKUP: u32 = 0xD000_9412;
 /// Size of `btrfs_ioctl_ino_lookup_args`: 8 + 8 + 4080 = 4096 bytes.
 const BTRFS_INO_LOOKUP_ARGS_SIZE: u32 = 4096;
-/// First free objectid in btrfs (root directory inode).
-const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
-const FSCRYPT_POLICY_V2_SIZE: usize = 24;
+#[cfg(test)]
+const FSCRYPT_POLICY_V1_SIZE_U32: u32 = 12;
 const FSCRYPT_POLICY_EX_HEADER_SIZE: usize = 8;
+#[cfg(test)]
+const FSCRYPT_POLICY_EX_HEADER_SIZE_U32: u32 = 8;
 const FIEMAP_START_OFFSET: usize = 0;
 const FIEMAP_LENGTH_OFFSET: usize = 8;
 const FIEMAP_FLAGS_OFFSET: usize = 16;
@@ -984,6 +989,17 @@ enum MutationDispatchError {
     },
 }
 
+#[derive(Clone, Copy)]
+struct MoveExtLogContext<'a> {
+    operation_id: &'a str,
+    ino: u64,
+    donor_ino: Option<InodeNumber>,
+    donor_fd: u32,
+    orig_start: u64,
+    donor_start: u64,
+    len: u64,
+}
+
 impl FrankenFuse {
     fn with_inner(
         ops: Box<dyn FsOps>,
@@ -1271,6 +1287,14 @@ impl FrankenFuse {
         Ok(u32::from_ne_bytes(bytes))
     }
 
+    fn parse_fs_label_request(in_data: &[u8]) -> Result<Vec<u8>, c_int> {
+        let parse_window = &in_data[..in_data.len().min(FSLABEL_MAX)];
+        let Some(nul_pos) = parse_window.iter().position(|&byte| byte == 0) else {
+            return Err(libc::EINVAL);
+        };
+        Ok(parse_window[..nul_pos].to_vec())
+    }
+
     fn clamp_fiemap_extent_count(requested: u32, out_size: u32) -> usize {
         let max_extents_by_count = usize::try_from(requested).unwrap_or(usize::MAX);
         let max_extents_by_size = if usize::try_from(out_size).unwrap_or(0) > FIEMAP_HEADER_SIZE {
@@ -1409,43 +1433,28 @@ impl FrankenFuse {
         }
     }
 
-    fn log_move_ext_success(
-        operation_id: &str,
-        ino: u64,
-        donor_ino: InodeNumber,
-        donor_fd: u32,
-        orig_start: u64,
-        donor_start: u64,
-        len: u64,
-        moved_len: u64,
-    ) {
+    fn log_move_ext_success(ctx: MoveExtLogContext<'_>, moved_len: u64) {
+        let donor_ino = ctx
+            .donor_ino
+            .expect("move_ext success logging requires a resolved donor inode");
         info!(
             target: "ffs::ioctl",
-            operation_id,
+            operation_id = ctx.operation_id,
             scenario_id = MOVE_EXT_SCENARIO_ID,
             outcome = "applied",
             error_class = MOVE_EXT_SUCCESS_ERROR_CLASS,
-            ino,
+            ino = ctx.ino,
             donor_ino = donor_ino.0,
-            donor_fd,
-            orig_start,
-            donor_start,
-            len,
+            donor_fd = ctx.donor_fd,
+            orig_start = ctx.orig_start,
+            donor_start = ctx.donor_start,
+            len = ctx.len,
             moved_len,
             "ext4 move_ext completed"
         );
     }
 
-    fn log_move_ext_error(
-        operation_id: &str,
-        ino: u64,
-        donor_ino: Option<InodeNumber>,
-        donor_fd: u32,
-        orig_start: u64,
-        donor_start: u64,
-        len: u64,
-        error: &FfsError,
-    ) {
+    fn log_move_ext_error(ctx: MoveExtLogContext<'_>, error: &FfsError) {
         let error_class = Self::classify_move_ext_error(error);
         let outcome = match error.to_errno() {
             libc::EBADF
@@ -1458,16 +1467,16 @@ impl FrankenFuse {
         };
         warn!(
             target: "ffs::ioctl",
-            operation_id,
+            operation_id = ctx.operation_id,
             scenario_id = MOVE_EXT_SCENARIO_ID,
             outcome,
             error_class,
-            ino,
-            donor_ino = donor_ino.map(|ino| ino.0),
-            donor_fd,
-            orig_start,
-            donor_start,
-            len,
+            ino = ctx.ino,
+            donor_ino = ctx.donor_ino.map(|ino| ino.0),
+            donor_fd = ctx.donor_fd,
+            orig_start = ctx.orig_start,
+            donor_start = ctx.donor_start,
+            len = ctx.len,
             errno = error.to_errno(),
             error = %error,
             "ext4 move_ext rejected"
@@ -1672,6 +1681,15 @@ impl FrankenFuse {
                     };
                 let operation_id =
                     Self::move_ext_operation_id(ino, donor_fd, orig_start, donor_start, len);
+                let log_ctx = MoveExtLogContext {
+                    operation_id: &operation_id,
+                    ino,
+                    donor_ino: None,
+                    donor_fd,
+                    orig_start,
+                    donor_start,
+                    len,
+                };
 
                 let cx = Self::cx_for_request();
                 let mut donor_ino = None;
@@ -1704,17 +1722,9 @@ impl FrankenFuse {
                     Ok(moved_len)
                 }) {
                     Ok(moved_len) => {
-                        let donor_ino = donor_ino.expect("move_ext success should resolve donor");
-                        Self::log_move_ext_success(
-                            &operation_id,
-                            ino,
-                            donor_ino,
-                            donor_fd,
-                            orig_start,
-                            donor_start,
-                            len,
-                            moved_len,
-                        );
+                        let mut success_ctx = log_ctx;
+                        success_ctx.donor_ino = donor_ino;
+                        Self::log_move_ext_success(success_ctx, moved_len);
                         IoctlResult::Data(Self::encode_move_ext_response(
                             donor_fd,
                             orig_start,
@@ -1727,23 +1737,15 @@ impl FrankenFuse {
                         if donor_ino.is_some() {
                             self.inner.ops.unregister_move_ext_donor_fd(donor_fd);
                         }
-                        Self::log_move_ext_error(
-                            &operation_id,
-                            ino,
-                            donor_ino,
-                            donor_fd,
-                            orig_start,
-                            donor_start,
-                            len,
-                            &error,
-                        );
+                        let mut error_ctx = log_ctx;
+                        error_ctx.donor_ino = donor_ino;
+                        Self::log_move_ext_error(error_ctx, &error);
                         IoctlResult::Error(error.to_errno())
                     }
                 }
             }
             FS_IOC_GETFSLABEL => {
-                const FSLABEL_MAX: usize = 256;
-                if out_size < FSLABEL_MAX as u32 {
+                if out_size < FSLABEL_MAX_U32 {
                     return IoctlResult::Error(libc::EINVAL);
                 }
                 let cx = Self::cx_for_request();
@@ -1759,6 +1761,25 @@ impl FrankenFuse {
                         }
                         IoctlResult::Data(buf)
                     }
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FS_IOC_SETFSLABEL => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let label = match Self::parse_fs_label_request(in_data) {
+                    Ok(label) => label,
+                    Err(errno) => return IoctlResult::Error(errno),
+                };
+
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.set_fs_label(cx, scope, &label)?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(())
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -3801,6 +3822,7 @@ mod tests {
         GetEncryptionPolicyEx(InodeNumber),
         GetFlags(InodeNumber),
         GetFsLabel,
+        SetFsLabel(Vec<u8>),
         GetBtrfsFsInfo,
         GetBtrfsDevInfo(u64, [u8; 16]),
         BtrfsInoLookup(u64, u64),
@@ -4219,6 +4241,19 @@ mod tests {
             Ok(self.fs_label.clone())
         }
 
+        fn set_fs_label(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            label: &[u8],
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::SetFsLabel(label.to_vec()));
+            Ok(())
+        }
+
         fn get_btrfs_fs_info(
             &self,
             _cx: &Cx,
@@ -4600,20 +4635,66 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ioctl_setfslabel_passes_label_to_backend_and_commits() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+
+        let requested = b"ffs-renamed";
+        let mut buffer = vec![0_u8; FSLABEL_MAX];
+        buffer[..requested.len()].copy_from_slice(requested);
+        buffer[requested.len()] = 0;
+
+        let response = dispatch_ioctl_for_testing(&fuse, 2, 0, FS_IOC_SETFSLABEL, &buffer, 0);
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::SetFsLabel(requested.to_vec()),
+                IoctlCall::Commit,
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_setfslabel_rejects_non_terminated_input() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 2, 0, FS_IOC_SETFSLABEL, b"not-terminated", 0);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
     fn dispatch_ioctl_btrfs_fs_info_returns_backend_payload_verbatim() {
         // Canned 1024-byte payload with distinctive marker bytes at each
         // named field offset so the dispatcher can't silently corrupt them.
         let mut payload = vec![0_u8; BTRFS_IOC_FS_INFO_SIZE as usize];
         payload[0x00..0x08].copy_from_slice(&7_u64.to_le_bytes()); // max_id
         payload[0x08..0x10].copy_from_slice(&3_u64.to_le_bytes()); // num_devices
-        payload[0x10..0x20].copy_from_slice(&[0x22_u8; 16]);       // fsid
+        payload[0x10..0x20].copy_from_slice(&[0x22_u8; 16]); // fsid
         payload[0x20..0x24].copy_from_slice(&16_u32.pow(2).to_le_bytes()); // nodesize = 256
-        payload[0x24..0x28].copy_from_slice(&4096_u32.to_le_bytes());       // sectorsize
-        payload[0x28..0x2C].copy_from_slice(&4096_u32.to_le_bytes());       // clone_alignment
+        payload[0x24..0x28].copy_from_slice(&4096_u32.to_le_bytes()); // sectorsize
+        payload[0x28..0x2C].copy_from_slice(&4096_u32.to_le_bytes()); // clone_alignment
         payload[0x2C..0x2E].copy_from_slice(&0_u16.to_le_bytes()); // csum_type (CRC32C)
         payload[0x2E..0x30].copy_from_slice(&4_u16.to_le_bytes()); // csum_size
         payload[0x38..0x40].copy_from_slice(&0xDEAD_BEEF_1234_5678_u64.to_le_bytes()); // generation
-        payload[0x40..0x50].copy_from_slice(&[0x22_u8; 16]);       // metadata_uuid == fsid
+        payload[0x40..0x50].copy_from_slice(&[0x22_u8; 16]); // metadata_uuid == fsid
 
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_btrfs_fs_info(
@@ -4621,14 +4702,8 @@ mod tests {
             Arc::clone(&calls),
         )));
 
-        let response = dispatch_ioctl_for_testing(
-            &fuse,
-            1,
-            0,
-            BTRFS_IOC_FS_INFO,
-            &[],
-            BTRFS_IOC_FS_INFO_SIZE,
-        );
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_FS_INFO, &[], BTRFS_IOC_FS_INFO_SIZE);
         let IoctlResult::Data(bytes) = response else {
             panic!("expected IoctlResult::Data, got {response:?}");
         };
@@ -4637,7 +4712,11 @@ mod tests {
             BTRFS_IOC_FS_INFO_SIZE as usize,
             "reply must be exactly 1024 bytes"
         );
-        assert_eq!(&bytes[..], &payload[..], "dispatcher must forward backend payload verbatim");
+        assert_eq!(
+            &bytes[..],
+            &payload[..],
+            "dispatcher must forward backend payload verbatim"
+        );
         assert_eq!(
             calls.lock().expect("lock ioctl calls").as_slice(),
             &[
@@ -4682,14 +4761,8 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
 
-        let response = dispatch_ioctl_for_testing(
-            &fuse,
-            1,
-            0,
-            BTRFS_IOC_FS_INFO,
-            &[],
-            BTRFS_IOC_FS_INFO_SIZE,
-        );
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_FS_INFO, &[], BTRFS_IOC_FS_INFO_SIZE);
         assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
         assert_eq!(
             calls.lock().expect("lock ioctl calls").as_slice(),
@@ -4716,7 +4789,7 @@ mod tests {
         // named field offset so the dispatcher can't silently corrupt them.
         let mut payload = vec![0_u8; BTRFS_IOC_DEV_INFO_SIZE as usize];
         payload[0x00..0x08].copy_from_slice(&1_u64.to_le_bytes()); // devid
-        payload[0x08..0x18].copy_from_slice(&[0x77_u8; 16]);       // uuid
+        payload[0x08..0x18].copy_from_slice(&[0x77_u8; 16]); // uuid
         payload[0x18..0x20].copy_from_slice(&0xCAFE_BABE_u64.to_le_bytes()); // bytes_used
         payload[0x20..0x28].copy_from_slice(&(128_u64 * 1024 * 1024).to_le_bytes()); // total_bytes
 
@@ -4744,7 +4817,11 @@ mod tests {
             BTRFS_IOC_DEV_INFO_SIZE as usize,
             "reply must be exactly 4096 bytes"
         );
-        assert_eq!(&bytes[..], &payload[..], "dispatcher must forward backend payload verbatim");
+        assert_eq!(
+            &bytes[..],
+            &payload[..],
+            "dispatcher must forward backend payload verbatim"
+        );
         assert_eq!(
             calls.lock().expect("lock ioctl calls").as_slice(),
             &[
@@ -4842,7 +4919,9 @@ mod tests {
     #[test]
     fn dispatch_ioctl_get_encryption_policy_ex_encodes_v1_policy() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let policy = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B];
+        let policy = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+        ];
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy(
             policy,
             Arc::clone(&calls),
@@ -4854,7 +4933,7 @@ mod tests {
             0,
             FS_IOC_GET_ENCRYPTION_POLICY_EX,
             &[],
-            FSCRYPT_POLICY_EX_HEADER_SIZE as u32 + FSCRYPT_POLICY_V1_SIZE as u32,
+            FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V1_SIZE_U32,
         );
         assert!(
             matches!(response, IoctlResult::Data(_)),
@@ -4863,7 +4942,10 @@ mod tests {
         let IoctlResult::Data(bytes) = response else {
             unreachable!("asserted IoctlResult::Data above");
         };
-        assert_eq!(bytes.len(), FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V1_SIZE);
+        assert_eq!(
+            bytes.len(),
+            FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V1_SIZE
+        );
         let policy_size = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
         assert_eq!(policy_size, FSCRYPT_POLICY_V1_SIZE as u64);
         assert_eq!(&bytes[8..], &policy);
@@ -4891,7 +4973,7 @@ mod tests {
             0,
             FS_IOC_GET_ENCRYPTION_POLICY_EX,
             &[],
-            FSCRYPT_POLICY_EX_HEADER_SIZE as u32 + FSCRYPT_POLICY_V1_SIZE as u32 - 1,
+            FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V1_SIZE_U32 - 1,
         );
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
@@ -4911,7 +4993,7 @@ mod tests {
             0,
             FS_IOC_GET_ENCRYPTION_POLICY_EX,
             &[],
-            FSCRYPT_POLICY_EX_HEADER_SIZE as u32 + FSCRYPT_POLICY_V1_SIZE as u32,
+            FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V1_SIZE_U32,
         );
         assert_eq!(response, IoctlResult::Error(libc::ENODATA));
         assert_eq!(

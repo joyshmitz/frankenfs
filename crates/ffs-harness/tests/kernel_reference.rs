@@ -1342,6 +1342,7 @@ fn ext4_kernel_vs_ffs_inode_metadata() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn ext4_kernel_vs_ffs_xattr_reference() {
     if !ext4_tools_available() {
         eprintln!("SKIPPED: ext4 kernel tools not available");

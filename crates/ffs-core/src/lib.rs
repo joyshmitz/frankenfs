@@ -7910,11 +7910,13 @@ fn extent_root_namespace(inode: &Ext4Inode) -> u64 {
     h
 }
 
-/// Encoded size of `struct btrfs_ioctl_fs_info_args` on x86_64.  The kernel's
-/// stable UAPI layout is 1024 bytes: 80 bytes of named fields followed by
-/// 944 bytes of reserved padding (newer kernels reuse the first 16 bytes of
-/// reserved for `fs_tree_generation` + `block_group_tree_generation`, which
-/// is forward-compatible with our zero-initialised output).
+/// Encoded size of `struct btrfs_ioctl_fs_info_args` on x86_64.
+///
+/// The kernel's stable UAPI layout is 1024 bytes: 80 bytes of named fields
+/// followed by 944 bytes of reserved padding (newer kernels reuse the first
+/// 16 bytes of reserved for `fs_tree_generation` +
+/// `block_group_tree_generation`, which is forward-compatible with our
+/// zero-initialised output).
 pub const BTRFS_FS_INFO_ARGS_SIZE: usize = 1024;
 
 /// Map a btrfs csum_type code to the digest width in bytes advertised by
@@ -7968,10 +7970,12 @@ fn encode_btrfs_fs_info_args(sb: &ffs_ondisk::BtrfsSuperblock) -> Vec<u8> {
     buf
 }
 
-/// Encoded size of `struct btrfs_ioctl_dev_info_args` on x86_64.  The kernel
-/// pads the struct out to 4096 bytes: 40 bytes of named input/output fields
-/// (`devid`, `uuid[16]`, `bytes_used`, `total_bytes`), 3032 bytes of reserved
-/// `__u64 unused[379]`, and a 1024-byte trailing `path[BTRFS_DEVICE_PATH_NAME_MAX]`.
+/// Encoded size of `struct btrfs_ioctl_dev_info_args` on x86_64.
+///
+/// The kernel pads the struct out to 4096 bytes: 40 bytes of named
+/// input/output fields (`devid`, `uuid[16]`, `bytes_used`, `total_bytes`),
+/// 3032 bytes of reserved `__u64 unused[379]`, and a 1024-byte trailing
+/// `path[BTRFS_DEVICE_PATH_NAME_MAX]`.
 pub const BTRFS_DEV_INFO_ARGS_SIZE: usize = 4096;
 
 /// Offset of the trailing `path[1024]` field inside `btrfs_ioctl_dev_info_args`.
@@ -7998,6 +8002,7 @@ fn btrfs_dev_info_enodev() -> FfsError {
 ///     `1` is the canonical single-device id ext4-era btrfs tools assume.
 ///   * `uuid` all-zero (don't filter) or `uuid == sb.fsid` (the device UUID
 ///     for a single-device volume is the filesystem UUID).
+///
 /// Any other combination returns `ENODEV`, matching the kernel's
 /// "no such device" rejection path.
 ///
@@ -8035,7 +8040,10 @@ fn encode_btrfs_dev_info_args(
     // file, not a /dev/* node, so there is no meaningful device path to
     // report and the kernel itself zeroes this field on filesystems that
     // lack a resolvable device path.
-    debug_assert_eq!(BTRFS_DEV_INFO_PATH_OFFSET + BTRFS_DEV_INFO_PATH_MAX, buf.len());
+    debug_assert_eq!(
+        BTRFS_DEV_INFO_PATH_OFFSET + BTRFS_DEV_INFO_PATH_MAX,
+        buf.len()
+    );
     Ok(buf)
 }
 
@@ -14814,32 +14822,29 @@ impl OpenFs {
     }
 
     fn ext4_move_ext_exchange_ranges(
-        &self,
         cx: &Cx,
         dev: &dyn BlockDevice,
         alloc: &mut Ext4AllocState,
         orig_root: &mut [u8; 60],
         donor_root: &mut [u8; 60],
-        orig_start: u32,
-        donor_start: u32,
-        count: u64,
+        range: Ext4MoveExtRange,
     ) -> ffs_error::Result<()> {
         let orig_extents = Self::ext4_move_ext_collect_range(
             cx,
             dev,
             orig_root,
-            orig_start,
-            donor_start,
-            count,
+            range.orig_start,
+            range.donor_start,
+            range.count,
             "source",
         )?;
         let donor_extents = Self::ext4_move_ext_collect_range(
             cx,
             dev,
             donor_root,
-            donor_start,
-            orig_start,
-            count,
+            range.donor_start,
+            range.orig_start,
+            range.count,
             "donor",
         )?;
 
@@ -14852,8 +14857,14 @@ impl OpenFs {
                 hint: AllocHint::default(),
                 pctx: &alloc.persist_ctx,
             };
-            let _ =
-                ffs_btree::delete_range(cx, dev, orig_root, orig_start, count, &mut tree_alloc)?;
+            let _ = ffs_btree::delete_range(
+                cx,
+                dev,
+                orig_root,
+                range.orig_start,
+                range.count,
+                &mut tree_alloc,
+            )?;
         }
         {
             let mut tree_alloc = ffs_extent::GroupBlockAllocator {
@@ -14864,8 +14875,14 @@ impl OpenFs {
                 hint: AllocHint::default(),
                 pctx: &alloc.persist_ctx,
             };
-            let _ =
-                ffs_btree::delete_range(cx, dev, donor_root, donor_start, count, &mut tree_alloc)?;
+            let _ = ffs_btree::delete_range(
+                cx,
+                dev,
+                donor_root,
+                range.donor_start,
+                range.count,
+                &mut tree_alloc,
+            )?;
         }
         {
             let mut tree_alloc = ffs_extent::GroupBlockAllocator {
@@ -14897,23 +14914,42 @@ impl OpenFs {
         Ok(())
     }
 
-    #[expect(clippy::too_many_lines)]
+    fn ext4_move_ext_block_indices(request: Ext4MoveExtRequest) -> ffs_error::Result<(u32, u32)> {
+        let orig_start = u32::try_from(request.orig_start).map_err(|_| {
+            FfsError::InvalidGeometry("ext4 move_ext source start exceeds u32 block range".into())
+        })?;
+        let donor_start = u32::try_from(request.donor_start).map_err(|_| {
+            FfsError::InvalidGeometry("ext4 move_ext donor start exceeds u32 block range".into())
+        })?;
+        Ok((orig_start, donor_start))
+    }
+
+    fn ext4_move_ext_effective_len(
+        request: Ext4MoveExtRequest,
+        orig_blocks: u64,
+        donor_blocks: u64,
+    ) -> u64 {
+        if request.orig_start >= orig_blocks || request.donor_start >= donor_blocks {
+            return 0;
+        }
+        request
+            .len
+            .min(orig_blocks.saturating_sub(request.orig_start))
+            .min(donor_blocks.saturating_sub(request.donor_start))
+    }
+
     fn ext4_move_ext(
         &self,
         cx: &Cx,
         scope: &mut RequestScope,
-        ino: InodeNumber,
-        donor_fd: u32,
-        orig_start: u64,
-        donor_start: u64,
-        len: u64,
+        request: Ext4MoveExtRequest,
     ) -> ffs_error::Result<u64> {
-        if len == 0 {
+        if request.len == 0 {
             return Ok(0);
         }
 
-        let orig_ino = Self::ext4_canonical_inode(ino);
-        let donor_ino = self.ext4_move_ext_resolve_donor(donor_fd)?;
+        let orig_ino = Self::ext4_canonical_inode(request.ino);
+        let donor_ino = self.ext4_move_ext_resolve_donor(request.donor_fd)?;
         if donor_ino == orig_ino {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(
                 libc::EINVAL,
@@ -14927,12 +14963,7 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
         let block_size = u64::from(sb.block_size);
-        let orig_start_u32 = u32::try_from(orig_start).map_err(|_| {
-            FfsError::InvalidGeometry("ext4 move_ext source start exceeds u32 block range".into())
-        })?;
-        let donor_start_u32 = u32::try_from(donor_start).map_err(|_| {
-            FfsError::InvalidGeometry("ext4 move_ext donor start exceeds u32 block range".into())
-        })?;
+        let (orig_start_u32, donor_start_u32) = Self::ext4_move_ext_block_indices(request)?;
 
         let mut orig_inode = self.read_inode_with_scope(cx, scope, orig_ino)?;
         let mut donor_inode = self.read_inode_with_scope(cx, scope, donor_ino)?;
@@ -14941,13 +14972,7 @@ impl OpenFs {
 
         let orig_blocks = Self::ext4_move_ext_file_block_count(&orig_inode, block_size);
         let donor_blocks = Self::ext4_move_ext_file_block_count(&donor_inode, block_size);
-        if orig_start >= orig_blocks || donor_start >= donor_blocks {
-            return Ok(0);
-        }
-
-        let moved_len = len
-            .min(orig_blocks.saturating_sub(orig_start))
-            .min(donor_blocks.saturating_sub(donor_start));
+        let moved_len = Self::ext4_move_ext_effective_len(request, orig_blocks, donor_blocks);
         if moved_len == 0 {
             return Ok(0);
         }
@@ -14955,19 +14980,22 @@ impl OpenFs {
         let mut orig_root = Self::extent_root(&orig_inode);
         let mut donor_root = Self::extent_root(&donor_inode);
         let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
+        let range = Ext4MoveExtRange {
+            orig_start: orig_start_u32,
+            donor_start: donor_start_u32,
+            count: moved_len,
+        };
 
         let mut alloc = alloc_mutex.lock();
         let mut apply_exchange =
             |dev: &dyn BlockDevice, alloc: &mut Ext4AllocState| -> ffs_error::Result<()> {
-                self.ext4_move_ext_exchange_ranges(
+                Self::ext4_move_ext_exchange_ranges(
                     cx,
                     dev,
                     alloc,
                     &mut orig_root,
                     &mut donor_root,
-                    orig_start_u32,
-                    donor_start_u32,
-                    moved_len,
+                    range,
                 )?;
 
                 Self::set_extent_root(&mut orig_inode, &orig_root);
@@ -15012,15 +15040,31 @@ impl OpenFs {
             op = "move_ext",
             ino = orig_ino.0,
             donor_ino = donor_ino.0,
-            donor_fd,
-            orig_start,
-            donor_start,
+            donor_fd = request.donor_fd,
+            orig_start = request.orig_start,
+            donor_start = request.donor_start,
             moved_len,
             "ext4 move_ext completed"
         );
 
         Ok(moved_len)
     }
+}
+
+#[derive(Clone, Copy)]
+struct Ext4MoveExtRange {
+    orig_start: u32,
+    donor_start: u32,
+    count: u64,
+}
+
+#[derive(Clone, Copy)]
+struct Ext4MoveExtRequest {
+    ino: InodeNumber,
+    donor_fd: u32,
+    orig_start: u64,
+    donor_start: u64,
+    len: u64,
 }
 
 const EXT4_POSIX_ACL_STORAGE_VERSION: u32 = 0x0001;
@@ -15773,9 +15817,12 @@ impl FsOps for OpenFs {
         }
     }
 
-    fn get_fs_label(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
+    fn get_fs_label(&self, cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
-            FsFlavor::Ext4(sb) => {
+            FsFlavor::Ext4(_) => {
+                let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
+                let sb = Ext4Superblock::parse_superblock_region(&sb_region)
+                    .map_err(|e| parse_to_ffs_error(&e))?;
                 let mut label = sb.volume_name.as_bytes().to_vec();
                 label.push(0);
                 Ok(label)
@@ -15788,11 +15835,66 @@ impl FsOps for OpenFs {
         }
     }
 
-    fn get_btrfs_fs_info(
+    fn set_fs_label(
         &self,
-        _cx: &Cx,
-        _scope: &mut RequestScope,
-    ) -> ffs_error::Result<Vec<u8>> {
+        cx: &Cx,
+        scope: &mut RequestScope,
+        label: &[u8],
+    ) -> ffs_error::Result<()> {
+        const EXT4_LABEL_MAX: usize = 16;
+        const EXT4_VOLUME_NAME_OFFSET: usize = 0x78;
+
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                if label.len() > EXT4_LABEL_MAX || label.contains(&0) {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EINVAL,
+                    )));
+                }
+
+                let sb = self
+                    .ext4_superblock()
+                    .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+                let block_dev = self.direct_block_device_adapter();
+                let mut block_data = block_dev
+                    .read_block(cx, BlockNumber(0))?
+                    .as_slice()
+                    .to_vec();
+
+                let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+                let label_start = sb_off + EXT4_VOLUME_NAME_OFFSET;
+                let label_end = label_start + EXT4_LABEL_MAX;
+                block_data[label_start..label_end].fill(0);
+                block_data[label_start..label_start + label.len()].copy_from_slice(label);
+
+                if sb.has_metadata_csum() {
+                    let checksum = ffs_ondisk::ext4::ext4_chksum(
+                        !0u32,
+                        &block_data[sb_off..sb_off + EXT4_SB_CHECKSUM_OFFSET],
+                    );
+                    block_data
+                        [sb_off + EXT4_SB_CHECKSUM_OFFSET..sb_off + EXT4_SB_CHECKSUM_OFFSET + 4]
+                        .copy_from_slice(&checksum.to_le_bytes());
+                }
+
+                if let Some(tx) = &mut scope.tx {
+                    let tx_dev = TransactionBlockAdapter {
+                        base: &block_dev,
+                        tx: Mutex::new(tx),
+                    };
+                    tx_dev.write_block(cx, BlockNumber(0), &block_data)?;
+                } else {
+                    block_dev.write_block(cx, BlockNumber(0), &block_data)?;
+                }
+                Ok(())
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "set_fs_label is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
+    fn get_btrfs_fs_info(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
         match &self.flavor {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_FS_INFO is not supported on ext4 filesystems".to_owned(),
@@ -15827,7 +15929,9 @@ impl FsOps for OpenFs {
                     Ok((resolved_treeid, vec![0_u8])) // NUL-terminated empty path
                 } else {
                     // Full back-reference walking not implemented yet.
-                    Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENOENT)))
+                    Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::ENOENT,
+                    )))
                 }
             }
         }
@@ -16018,9 +16122,17 @@ impl FsOps for OpenFs {
         len: u64,
     ) -> ffs_error::Result<u64> {
         match &self.flavor {
-            FsFlavor::Ext4(_) => {
-                self.ext4_move_ext(cx, scope, ino, donor_fd, orig_start, donor_start, len)
-            }
+            FsFlavor::Ext4(_) => self.ext4_move_ext(
+                cx,
+                scope,
+                Ext4MoveExtRequest {
+                    ino,
+                    donor_fd,
+                    orig_start,
+                    donor_start,
+                    len,
+                },
+            ),
             FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
                 "move_ext is not supported for btrfs".to_owned(),
             )),
@@ -18273,6 +18385,68 @@ mod tests {
             .get_encryption_policy_v1(&cx, &mut RequestScope::empty(), InodeNumber(11))
             .expect_err("old ioctl must reject newer fscrypt policy versions");
         assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn set_fs_label_updates_ext4_superblock_and_survives_reopen() {
+        let Some(tmp_path) = create_temp_ext4_image("setfslabel") else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+            ..OpenOptions::default()
+        };
+
+        let requested = b"ffs-renamed";
+
+        {
+            let mut fs = OpenFs::open_with_options(&cx, &tmp_path, &opts)
+                .expect("open ext4 image for setfslabel");
+            fs.enable_writes(&cx).expect("enable writes");
+            fs.set_fs_label(&cx, &mut RequestScope::empty(), requested)
+                .expect("set fs label");
+
+            let current = fs
+                .get_fs_label(&cx, &mut RequestScope::empty())
+                .expect("read updated fs label");
+            let end = current
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(current.len());
+            assert_eq!(&current[..end], requested);
+        }
+
+        let reopened = OpenFs::open_with_options(&cx, &tmp_path, &opts).expect("reopen ext4 image");
+        let persisted = reopened
+            .get_fs_label(&cx, &mut RequestScope::empty())
+            .expect("read persisted fs label");
+        let end = persisted
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(persisted.len());
+        assert_eq!(&persisted[..end], requested);
+    }
+
+    #[test]
+    fn set_fs_label_rejects_ext4_labels_longer_than_16_bytes() {
+        let Some(tmp_path) = create_temp_ext4_image("setfslabel-long") else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+            ..OpenOptions::default()
+        };
+
+        let mut fs =
+            OpenFs::open_with_options(&cx, &tmp_path, &opts).expect("open ext4 image for write");
+        fs.enable_writes(&cx).expect("enable writes");
+
+        let err = fs
+            .set_fs_label(&cx, &mut RequestScope::empty(), b"label-longer-than-16")
+            .expect_err("ext4 labels longer than 16 bytes must be rejected");
+        assert_eq!(err.to_errno(), libc::EINVAL);
     }
 
     #[test]

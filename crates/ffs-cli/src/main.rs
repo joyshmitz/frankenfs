@@ -7186,6 +7186,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn mount_cmd_logs_ext4_mmp_refusal_states() {
         const EXT4_VALID_FS: u16 = 0x0001;
         let cases = [

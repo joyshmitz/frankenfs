@@ -762,6 +762,22 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Set the filesystem label (`FS_IOC_SETFSLABEL`).
+    ///
+    /// `label` is the userspace payload without the terminating NUL byte.
+    /// Backends should reject labels that exceed their filesystem-specific
+    /// maximum length with `EINVAL`.
+    fn set_fs_label(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _label: &[u8],
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "set_fs_label is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Return the btrfs filesystem-info payload for `BTRFS_IOC_FS_INFO`.
     ///
     /// Implementations should encode a `struct btrfs_ioctl_fs_info_args`
@@ -776,11 +792,7 @@ pub trait FsOps: Send + Sync {
     /// `FfsError::UnsupportedFeature`, which `ffs-fuse` maps to
     /// `EOPNOTSUPP` so callers on ext4 see a deterministic rejection
     /// rather than a bogus success.
-    fn get_btrfs_fs_info(
-        &self,
-        _cx: &Cx,
-        _scope: &mut RequestScope,
-    ) -> ffs_error::Result<Vec<u8>> {
+    fn get_btrfs_fs_info(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
         Err(FfsError::UnsupportedFeature(
             "get_btrfs_fs_info is not supported by this backend".to_owned(),
         ))

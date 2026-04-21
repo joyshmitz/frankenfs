@@ -13,7 +13,7 @@
 //! Only `fuse_setattr_chown` remains `#[ignore]` as it requires root.
 
 use asupersync::Cx;
-use ffs_core::{Ext4JournalReplayMode, OpenFs, OpenOptions};
+use ffs_core::{Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope};
 use ffs_fuse::{MountOptions, mount_background};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -34,6 +34,8 @@ const FIEMAP_REQUEST_FLAG_XATTR: u32 = 0x0002;
 const FIEMAP_EXTENT_LAST_FLAG: u32 = 0x0001;
 const FIEMAP_EXTENT_UNWRITTEN_FLAG: u32 = 0x0800;
 const FS_IOC_GET_ENCRYPTION_POLICY_CMD: u32 = 0x400C_6615;
+const FS_IOC_GETFSLABEL_CMD: u32 = 0x8100_9431;
+const FS_IOC_SETFSLABEL_CMD: u32 = 0x4100_9432;
 const EXT4_IOC_GETFLAGS_CMD: u32 = 0x8008_6601;
 const EXT4_IOC_SETFLAGS_CMD: u32 = 0x4008_6602;
 const EXT4_IOC_MOVE_EXT_CMD: u32 = 0xC028_660F;
@@ -817,7 +819,7 @@ request_flags = int(sys.argv[3], 0)
 response_size = int(sys.argv[4])
 buffer = bytearray(response_size)
 if response_size < FIEMAP_HEADER_SIZE:
-    raise ValueError(f'fiemap response buffer too small: {response_size}')
+    raise ValueError('fiemap response buffer too small: {}'.format(response_size))
 struct.pack_into('@Q', buffer, 0, 0)
 struct.pack_into('@Q', buffer, 8, (1 << 64) - 1)
 struct.pack_into('@I', buffer, 16, request_flags)
@@ -858,7 +860,7 @@ print(json.dumps({
     ";
 
     let response_size = response_size
-        .unwrap_or(32 + usize::try_from(extent_count).expect("extent_count fits") * 56);
+        .unwrap_or_else(|| 32 + usize::try_from(extent_count).expect("extent_count fits") * 56);
 
     let output = Command::new("python3")
         .args([
@@ -877,6 +879,10 @@ print(json.dumps({
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("decode fiemap JSON")
+}
+
+fn fiemap_extent_flags(extent: &Value) -> u32 {
+    u32::try_from(extent["flags"].as_u64().unwrap_or(0)).expect("fiemap flags should fit u32")
 }
 
 fn ext4_inode_flags_ioctl(path: &Path, command: &str, flags: Option<u32>) -> Value {
@@ -977,6 +983,64 @@ with open(sys.argv[1], 'rb', buffering=0) as fh:
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("decode encryption policy ioctl JSON")
+}
+
+fn fs_label_ioctl(path: &Path, command: &str, label: Option<&str>) -> Value {
+    let script = r"
+import fcntl, json, sys
+
+FS_IOC_GETFSLABEL = 0x81009431
+FS_IOC_SETFSLABEL = 0x41009432
+FSLABEL_MAX = 256
+
+with open(sys.argv[1], 'rb', buffering=0) as fh:
+    command = sys.argv[2]
+    try:
+        if command == 'get':
+            buffer = bytearray(FSLABEL_MAX)
+            fcntl.ioctl(fh.fileno(), FS_IOC_GETFSLABEL, buffer, True)
+            end = buffer.find(0)
+            if end < 0:
+                end = len(buffer)
+            label_bytes = bytes(buffer[:end])
+            print(json.dumps({
+                'label': label_bytes.decode('utf-8', 'surrogateescape'),
+                'label_hex': label_bytes.hex(),
+            }))
+        elif command == 'set':
+            label = sys.argv[3].encode('utf-8', 'surrogateescape')
+            if len(label) >= FSLABEL_MAX:
+                raise ValueError('label too long for ioctl buffer')
+            buffer = bytearray(FSLABEL_MAX)
+            buffer[:len(label)] = label
+            buffer[len(label)] = 0
+            fcntl.ioctl(fh.fileno(), FS_IOC_SETFSLABEL, buffer)
+            print(json.dumps({'ok': True}))
+        else:
+            raise ValueError(f'unsupported ioctl command: {command}')
+    except OSError as exc:
+        print(json.dumps({
+            'errno': exc.errno,
+            'message': str(exc),
+        }))
+        sys.exit(0)
+    ";
+
+    let mut args = vec!["-c", script, path.to_str().expect("path utf8"), command];
+    if let Some(label) = label {
+        args.push(label);
+    }
+
+    let output = Command::new("python3")
+        .args(args)
+        .output()
+        .expect("python3 fs label ioctl");
+    assert!(
+        output.status.success(),
+        "python3 fs label ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode fs label ioctl JSON")
 }
 
 fn ext4_move_ext_ioctl(
@@ -2293,7 +2357,7 @@ fn btrfs_fuse_ioctl_fiemap_reports_inline_extent_with_zero_physical() {
     assert_eq!(extent["physical"].as_u64().unwrap_or(u64::MAX), 0);
     assert_eq!(extent["length"].as_u64().unwrap_or(0), payload.len() as u64);
     assert_eq!(
-        extent["flags"].as_u64().unwrap_or(0) as u32,
+        fiemap_extent_flags(extent),
         FIEMAP_EXTENT_LAST_FLAG,
         "inline btrfs FIEMAP extent should only carry LAST: {report}"
     );
@@ -2385,7 +2449,7 @@ fn btrfs_fuse_ioctl_fiemap_marks_keep_size_prealloc_extent_unwritten() {
     let has_materialized_prefix = extents.iter().any(|extent| {
         extent["logical"].as_u64() == Some(0)
             && extent["physical"].as_u64().unwrap_or(0) > 0
-            && extent["flags"].as_u64().unwrap_or(0) as u32 & FIEMAP_EXTENT_UNWRITTEN_FLAG == 0
+            && fiemap_extent_flags(extent) & FIEMAP_EXTENT_UNWRITTEN_FLAG == 0
     });
     assert!(
         has_materialized_prefix,
@@ -2396,8 +2460,8 @@ fn btrfs_fuse_ioctl_fiemap_marks_keep_size_prealloc_extent_unwritten() {
         extent["logical"].as_u64() == Some(4096)
             && extent["length"].as_u64() == Some(4096)
             && extent["physical"].as_u64().unwrap_or(0) > 0
-            && extent["flags"].as_u64().unwrap_or(0) as u32 & FIEMAP_EXTENT_UNWRITTEN_FLAG != 0
-            && extent["flags"].as_u64().unwrap_or(0) as u32 & FIEMAP_EXTENT_LAST_FLAG != 0
+            && fiemap_extent_flags(extent) & FIEMAP_EXTENT_UNWRITTEN_FLAG != 0
+            && fiemap_extent_flags(extent) & FIEMAP_EXTENT_LAST_FLAG != 0
     });
     assert!(
         has_unwritten_prealloc,
@@ -2513,6 +2577,123 @@ fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn fuse_ioctl_ext4_setfslabel_updates_label_and_survives_remount() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-fslabel.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_setfslabel_roundtrip";
+    let path = mnt.join("fslabel-target.txt");
+    fs::write(&path, b"fs label ioctl target\n").expect("create fslabel ioctl target");
+    let requested = "ffs-renamed";
+
+    let set_report = fs_label_ioctl(&path, "set", Some(requested));
+    let set_trace = read_ioctl_trace(&ioctl_trace_path);
+    if let Some(errno) = set_report["errno"].as_i64() {
+        if errno == i64::from(libc::EPERM)
+            || errno == i64::from(libc::ENOTTY)
+            || errno == EOPNOTSUPP_ERRNO
+        {
+            assert!(
+                !trace_contains_cmd(&set_trace, FS_IOC_SETFSLABEL_CMD),
+                "SETFSLABEL should not return {errno} after reaching ffs-fuse::ioctl: {set_trace}"
+            );
+            emit_scenario_result(
+                scenario_id,
+                "SKIP",
+                Some("kernel_or_vfs_rejected_setfslabel_before_userspace"),
+            );
+            return;
+        }
+    }
+    assert!(
+        trace_contains_cmd(&set_trace, FS_IOC_SETFSLABEL_CMD),
+        "successful SETFSLABEL should hit ffs-fuse::ioctl: {set_trace}"
+    );
+    assert!(
+        set_report["errno"].is_null(),
+        "SETFSLABEL should succeed on rw ext4 mount: {set_report}"
+    );
+
+    drop(session);
+
+    let Some(_remount) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+    let remount_report = fs_label_ioctl(&path, "get", None);
+    let remount_trace = read_ioctl_trace(&ioctl_trace_path);
+    if let Some(errno) = remount_report["errno"].as_i64() {
+        assert!(
+            errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO,
+            "unexpected errno for remount GETFSLABEL fallback: {remount_report}"
+        );
+        assert!(
+            !trace_contains_cmd(&remount_trace, FS_IOC_GETFSLABEL_CMD),
+            "GETFSLABEL should not return {errno} after reaching ffs-fuse::ioctl: {remount_trace}"
+        );
+
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+            ..OpenOptions::default()
+        };
+        let fs = OpenFs::open_with_options(&cx, &image, &opts)
+            .expect("open image to verify persisted fs label");
+        let label = fs
+            .get_fs_label(&cx, &mut RequestScope::empty())
+            .expect("read persisted fs label directly");
+        let end = label
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(label.len());
+        assert_eq!(
+            &label[..end],
+            requested.as_bytes(),
+            "SETFSLABEL should persist even when remount GETFSLABEL is transport-blocked"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("setfslabel_persisted_direct_verify_after_remount"),
+        );
+        return;
+    }
+
+    assert!(
+        trace_contains_cmd(&remount_trace, FS_IOC_GETFSLABEL_CMD),
+        "successful GETFSLABEL after remount should hit ffs-fuse::ioctl: {remount_trace}"
+    );
+    assert_eq!(
+        remount_report["label"].as_str(),
+        Some(requested),
+        "SETFSLABEL should persist across remount: {remount_report}"
+    );
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("setfslabel_persisted_after_remount"),
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn fuse_ioctl_ext4_setflags_enables_compr_and_roundtrips_data_on_mounted_path() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -2744,6 +2925,7 @@ fn fuse_ioctl_ext4_setflags_rejects_compr_without_compression_feature() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn fuse_ioctl_ext4_get_encryption_policy_v1_reports_legacy_policy_on_mounted_path() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -2915,6 +3097,7 @@ fn fuse_ioctl_ext4_get_encryption_policy_returns_enodata_for_unencrypted_inode()
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn fuse_ioctl_ext4_move_ext_swaps_middle_extent_on_mounted_path() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -3094,6 +3277,7 @@ fn fuse_ioctl_ext4_move_ext_swaps_middle_extent_on_mounted_path() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn fuse_ioctl_ext4_move_ext_rejects_hole_backed_range_on_mounted_path() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -3241,6 +3425,7 @@ fn fuse_ioctl_ext4_move_ext_rejects_hole_backed_range_on_mounted_path() {
 /// non-acceptable outcome is "ffs-fuse dispatched and mutated the image
 /// anyway", which the post-state byte compare pins down.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn fuse_ioctl_ext4_mutation_ioctls_fast_fail_erofs_on_read_only_mount() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -3262,7 +3447,7 @@ fn fuse_ioctl_ext4_mutation_ioctls_fast_fail_erofs_on_read_only_mount() {
     let setup_mount_opts = MountOptions {
         read_only: false,
         auto_unmount: true,
-        ioctl_trace_path: Some(setup_trace_path.clone()),
+        ioctl_trace_path: Some(setup_trace_path),
         ..MountOptions::default()
     };
     let block_size = 4096_usize;
@@ -4979,7 +5164,11 @@ fn btrfs_fuse_xattr_create_existing_reports_eexist_without_side_effects() {
             names.iter().any(|name| name == "user.keep"),
             "unrelated xattr should still be listed after btrfs XATTR_CREATE failure: {names:?}"
         );
-        emit_scenario_result(scenario_id, "PASS", Some("errno=EEXIST_with_no_side_effects"));
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("errno=EEXIST_with_no_side_effects"),
+        );
     });
 }
 
@@ -5023,7 +5212,11 @@ fn btrfs_fuse_xattr_replace_missing_reports_enodata_without_side_effects() {
             names.iter().any(|name| name == "user.keep"),
             "unrelated xattr should still be listed after btrfs XATTR_REPLACE failure: {names:?}"
         );
-        emit_scenario_result(scenario_id, "PASS", Some("errno=ENODATA_with_no_side_effects"));
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("errno=ENODATA_with_no_side_effects"),
+        );
     });
 }
 
@@ -5069,7 +5262,8 @@ fn btrfs_fuse_xattr_remove_nonexistent_fails() {
     with_btrfs_rw_mount(|mnt| {
         let scenario_id = "btrfs_rw_xattr_remove_nonexistent_fails";
         let path = mnt.join("remove_nonexistent_xattr.txt");
-        fs::write(&path, b"remove nonexistent xattr test\n").expect("write for remove nonexistent xattr");
+        fs::write(&path, b"remove nonexistent xattr test\n")
+            .expect("write for remove nonexistent xattr");
 
         // Removing a nonexistent xattr should fail.
         assert!(
@@ -5152,7 +5346,9 @@ fn btrfs_fuse_xattr_posix_acl_list_and_get() {
 
         let file_names = py_listxattr(&file_path);
         assert!(
-            file_names.iter().any(|name| name == "system.posix_acl_access"),
+            file_names
+                .iter()
+                .any(|name| name == "system.posix_acl_access"),
             "listxattr on btrfs file should expose system.posix_acl_access, got: {file_names:?}"
         );
 
@@ -5164,7 +5360,9 @@ fn btrfs_fuse_xattr_posix_acl_list_and_get() {
 
         let dir_names = py_listxattr(&dir_path);
         assert!(
-            dir_names.iter().any(|name| name == "system.posix_acl_default"),
+            dir_names
+                .iter()
+                .any(|name| name == "system.posix_acl_default"),
             "listxattr on btrfs dir should expose system.posix_acl_default, got: {dir_names:?}"
         );
 
