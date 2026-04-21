@@ -5198,6 +5198,75 @@ fn btrfs_fuse_xattr_posix_acl_default_missing_on_regular_file_reports_enodata() 
 }
 
 #[test]
+fn ext4_fuse_security_xattr_requires_privilege() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // Attempting to set security.* xattr without CAP_SYS_ADMIN should fail.
+        // This tests the security namespace enforcement path.
+        let report = py_setxattr_report(&path, "security.test", b"test_value", 0);
+
+        // Expect EPERM (operation not permitted) for unprivileged security xattr write.
+        // Some kernels may return EOPNOTSUPP if security xattrs are disabled.
+        let errno = report["errno"].as_i64();
+        assert!(
+            errno == Some(i64::from(libc::EPERM)) || errno == Some(i64::from(libc::EOPNOTSUPP)),
+            "security.* xattr write should fail with EPERM or EOPNOTSUPP, got: {report}"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_security_xattr_requires_privilege() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("security_test.txt");
+        fs::write(&path, b"security xattr test\n").expect("create test file");
+
+        // Attempting to set security.* xattr without CAP_SYS_ADMIN should fail.
+        let report = py_setxattr_report(&path, "security.test", b"test_value", 0);
+
+        // Expect EPERM (operation not permitted) for unprivileged security xattr write.
+        let errno = report["errno"].as_i64();
+        assert!(
+            errno == Some(i64::from(libc::EPERM)) || errno == Some(i64::from(libc::EOPNOTSUPP)),
+            "btrfs security.* xattr write should fail with EPERM or EOPNOTSUPP, got: {report}"
+        );
+    });
+}
+
+#[test]
+fn ext4_fuse_security_xattr_not_listed_without_privilege() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // Verify security.* xattrs are not visible to unprivileged listxattr.
+        // The file shouldn't have any security.* xattrs by default.
+        let names = py_listxattr(&path);
+        let has_security = names.iter().any(|n| n.starts_with("security."));
+        assert!(
+            !has_security,
+            "unprivileged listxattr should not expose security.* xattrs, got: {names:?}"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_security_xattr_not_listed_without_privilege() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("security_list_test.txt");
+        fs::write(&path, b"security list test\n").expect("create test file");
+
+        // Verify security.* xattrs are not visible to unprivileged listxattr.
+        let names = py_listxattr(&path);
+        let has_security = names.iter().any(|n| n.starts_with("security."));
+        assert!(
+            !has_security,
+            "btrfs unprivileged listxattr should not expose security.* xattrs, got: {names:?}"
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_write_large_file() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
