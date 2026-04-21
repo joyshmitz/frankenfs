@@ -8,7 +8,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = "0.2.5"
+asupersync = "0.3.0"
 libfuzzer-sys = "0.4"
 
 [dependencies.ffs-block]
