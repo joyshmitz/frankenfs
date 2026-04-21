@@ -771,6 +771,25 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Register a userspace donor fd mapping for `EXT4_IOC_MOVE_EXT`.
+    ///
+    /// FUSE dispatch can resolve the caller's donor fd to a mounted-path inode
+    /// before invoking [`FsOps::move_ext`]. Backends that key move-ext donor
+    /// lookup by userspace fd can override this hook; other backends may keep
+    /// the default no-op implementation.
+    fn register_move_ext_donor_fd(
+        &self,
+        _donor_fd: u32,
+        _donor_ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        Ok(())
+    }
+
+    /// Release a temporary donor-fd registration for `EXT4_IOC_MOVE_EXT`.
+    ///
+    /// Called after `move_ext` returns, regardless of success.
+    fn unregister_move_ext_donor_fd(&self, _donor_fd: u32) {}
+
     /// Set inode attributes. Returns updated attributes.
     fn setattr(
         &self,

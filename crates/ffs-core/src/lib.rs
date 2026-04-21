@@ -15618,6 +15618,28 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn register_move_ext_donor_fd(
+        &self,
+        donor_fd: u32,
+        donor_ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                self.move_ext_donor_fds
+                    .lock()
+                    .insert(donor_fd, Self::ext4_canonical_inode(donor_ino));
+                Ok(())
+            }
+            FsFlavor::Btrfs(_) => Ok(()),
+        }
+    }
+
+    fn unregister_move_ext_donor_fd(&self, donor_fd: u32) {
+        if matches!(self.flavor, FsFlavor::Ext4(_)) {
+            self.move_ext_donor_fds.lock().remove(&donor_fd);
+        }
+    }
+
     fn setattr(
         &self,
         cx: &Cx,
