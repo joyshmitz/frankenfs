@@ -1368,6 +1368,59 @@ finally:
     serde_json::from_slice(&output.stdout).expect("decode fallocate probe JSON")
 }
 
+fn query_directory_fallocate(path: &Path, mode: i32, offset: u64, length: u64) -> Value {
+    let script = r#"
+import ctypes, errno, json, os, sys
+
+path = sys.argv[1]
+mode = int(sys.argv[2], 0)
+offset = int(sys.argv[3])
+length = int(sys.argv[4])
+
+try:
+    fd = os.open(path, os.O_RDWR | os.O_DIRECTORY)
+except OSError as exc:
+    print(json.dumps({
+        "errno": exc.errno,
+        "name": errno.errorcode.get(exc.errno, "UNKNOWN"),
+        "message": str(exc),
+        "phase": "open",
+    }))
+    sys.exit(0)
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong]
+libc.fallocate.restype = ctypes.c_int
+try:
+    res = libc.fallocate(fd, mode, offset, length)
+    err = ctypes.get_errno()
+    payload = {"res": res, "errno": err, "phase": "fallocate"}
+    if err:
+        payload["name"] = errno.errorcode.get(err, "UNKNOWN")
+    print(json.dumps(payload))
+finally:
+    os.close(fd)
+"#;
+
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            script,
+            path.to_str().expect("path utf8"),
+            &format!("{mode:#x}"),
+            &offset.to_string(),
+            &length.to_string(),
+        ])
+        .output()
+        .expect("python3 directory fallocate probe");
+    assert!(
+        output.status.success(),
+        "python3 directory fallocate probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode directory fallocate probe JSON")
+}
+
 fn py_fallocate_report(path: &Path, mode: i32, offset: u64, length: u64) -> Value {
     let script = r#"
 import ctypes, errno, json, os, sys
@@ -7913,6 +7966,52 @@ fn btrfs_fuse_fallocate_zero_range_zeroes_range() {
         );
         assert_eq!(&readback[8192..], &data[8192..], "suffix must be preserved");
         emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
+fn btrfs_fuse_fallocate_on_directory_reports_eisdir() {
+    if !command_available("python3") {
+        eprintln!("python3 not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fallocate_on_directory_errno_eisdir";
+        let dir = mnt.join("fallocate_dir");
+        fs::create_dir(&dir).expect("mkdir btrfs fallocate directory target");
+        let child = dir.join("child.txt");
+        fs::write(&child, b"directory child stays intact\n").expect("seed btrfs directory child");
+
+        let entries_before = snapshot_directory_entries(&dir);
+        let child_before = snapshot_file_state(&child);
+        let report = query_directory_fallocate(&dir, 0, 0, 4096);
+
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::EISDIR)),
+            "btrfs directory fallocate should surface exact EISDIR: {report}"
+        );
+        assert_eq!(
+            report["name"].as_str(),
+            Some("EISDIR"),
+            "btrfs directory fallocate should surface the EISDIR alias: {report}"
+        );
+        let phase = report["phase"]
+            .as_str()
+            .expect("directory fallocate rejection phase");
+        assert!(
+            matches!(phase, "open" | "fallocate"),
+            "unexpected directory fallocate rejection phase: {report}"
+        );
+
+        let entries_after = snapshot_directory_entries(&dir);
+        assert_eq!(
+            entries_after, entries_before,
+            "directory fallocate rejection must not change directory entries"
+        );
+        assert_file_state_unchanged(&child, &child_before, "directory fallocate rejection");
+        emit_scenario_result(scenario_id, "PASS", Some(phase));
     });
 }
 
