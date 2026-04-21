@@ -1986,6 +1986,71 @@ fn fuse_mkdir_existing_directory_fails() {
 }
 
 #[test]
+fn fuse_create_and_mkdir_under_non_directory_parent_report_enotdir() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_create_and_mkdir_under_non_directory_parent";
+        let regular_parent = mnt.join("hello.txt");
+        let root_entries_before = snapshot_directory_entries(mnt);
+        let parent_before = snapshot_file_state(&regular_parent);
+
+        let create_target = regular_parent.join("child.txt");
+        let create_err = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&create_target)
+            .expect_err("create beneath regular-file parent should fail");
+        assert_eq!(
+            create_err.raw_os_error(),
+            Some(libc::ENOTDIR),
+            "create beneath a regular-file parent should surface exact ENOTDIR: {create_err}"
+        );
+        assert!(
+            fs::symlink_metadata(&create_target).is_err(),
+            "rejected create must not leave a nested child entry behind"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rejected create must not change visible root entries"
+        );
+        assert_file_state_unchanged(
+            &regular_parent,
+            &parent_before,
+            "non-directory parent after rejected create",
+        );
+
+        let mkdir_target = regular_parent.join("child_dir");
+        let mkdir_err = fs::create_dir(&mkdir_target)
+            .expect_err("mkdir beneath regular-file parent should fail");
+        assert_eq!(
+            mkdir_err.raw_os_error(),
+            Some(libc::ENOTDIR),
+            "mkdir beneath a regular-file parent should surface exact ENOTDIR: {mkdir_err}"
+        );
+        assert!(
+            fs::symlink_metadata(&mkdir_target).is_err(),
+            "rejected mkdir must not leave a nested directory entry behind"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rejected mkdir must not change visible root entries"
+        );
+        assert_file_state_unchanged(
+            &regular_parent,
+            &parent_before,
+            "non-directory parent after rejected mkdir",
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("create=ENOTDIR_mkdir=ENOTDIR_no_drift"),
+        );
+    });
+}
+
+#[test]
 fn fuse_unlink_removes_file() {
     with_rw_mount(|mnt| {
         // hello.txt exists from create_test_image.
