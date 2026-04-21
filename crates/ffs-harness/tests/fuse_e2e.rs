@@ -4555,6 +4555,63 @@ fn assert_file_state_unchanged(path: &Path, before: &FileStateSnapshot, context:
     );
 }
 
+fn snapshot_directory_entries(path: &Path) -> HashSet<String> {
+    fs::read_dir(path)
+        .expect("readdir directory state")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+fn assert_read_only_file_sync_contract(
+    path: &Path,
+    scenario_id: &str,
+    sync_name: &str,
+    sync_fn: impl FnOnce(&fs::File) -> std::io::Result<()>,
+) {
+    let before = snapshot_file_state(path);
+    let file = fs::File::open(path).expect("open file for read-only sync contract");
+    let err = sync_fn(&file).expect_err("read-only sync should fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only {sync_name} should surface exact EROFS: {err}"
+    );
+    drop(file);
+
+    let context = format!("rejected {sync_name}");
+    assert_file_state_unchanged(path, &before, &context);
+    emit_scenario_result(scenario_id, "PASS", Some("sync=EROFS_no_drift"));
+}
+
+fn assert_read_only_dir_sync_contract(dir: &Path, child: &Path, scenario_id: &str) {
+    let entries_before = snapshot_directory_entries(dir);
+    let child_before = snapshot_file_state(child);
+
+    let dirfd = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(dir)
+        .expect("open directory fd for read-only sync contract");
+    let err = dirfd
+        .sync_all()
+        .expect_err("read-only directory sync should fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only fsyncdir should surface exact EROFS: {err}"
+    );
+    drop(dirfd);
+
+    let entries_after = snapshot_directory_entries(dir);
+    assert_eq!(
+        entries_after, entries_before,
+        "rejected fsyncdir must not change directory entries on a read-only mount"
+    );
+    assert_file_state_unchanged(child, &child_before, "rejected fsyncdir");
+    emit_scenario_result(scenario_id, "PASS", Some("fsyncdir=EROFS_no_drift"));
+}
+
 fn assert_read_only_setattr_contract(path: &Path, scenario_id: &str) {
     let before = snapshot_file_state(path);
     let requested_mode = if before.mode == 0o755 { 0o600 } else { 0o755 };
@@ -5196,6 +5253,52 @@ fn create_btrfs_test_image_with_seeded_file(
     image
 }
 
+fn create_btrfs_test_image_with_seeded_sync_fixture(dir: &Path) -> std::path::PathBuf {
+    let image = dir.join("test.btrfs");
+    let seed_root = dir.join("seed_root");
+    let seed_workspace = seed_root.join(BTRFS_TEST_WORKSPACE);
+    let seed_dir = seed_workspace.join("readonly_sync_dir");
+
+    let f = fs::File::create(&image).expect("create seeded btrfs sync image");
+    f.set_len(128 * 1024 * 1024)
+        .expect("set seeded btrfs sync image size");
+    drop(f);
+
+    fs::create_dir_all(&seed_dir).expect("create seeded btrfs sync dir");
+    fs::set_permissions(&seed_root, fs::Permissions::from_mode(0o777))
+        .expect("chmod seeded btrfs sync root");
+    fs::set_permissions(&seed_workspace, fs::Permissions::from_mode(0o777))
+        .expect("chmod seeded btrfs sync workspace");
+    fs::set_permissions(&seed_dir, fs::Permissions::from_mode(0o777))
+        .expect("chmod seeded btrfs sync dir");
+    fs::write(
+        seed_workspace.join("readonly_sync_seed.txt"),
+        b"readonly btrfs sync seed content\n",
+    )
+    .expect("write seeded btrfs sync file");
+    fs::write(seed_dir.join("child.txt"), b"readonly btrfs sync child\n")
+        .expect("write seeded btrfs sync child");
+
+    let out = Command::new("mkfs.btrfs")
+        .args([
+            "-f",
+            "-L",
+            "ffs-btrfs-e2e",
+            "--rootdir",
+            seed_root.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("mkfs.btrfs seeded sync image");
+    assert!(
+        out.status.success(),
+        "mkfs.btrfs seeded sync image failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    image
+}
+
 fn try_mount_btrfs_ro(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
     let cx = Cx::for_testing();
     let opts = OpenOptions {
@@ -5249,6 +5352,29 @@ fn with_btrfs_rw_mount(f: impl FnOnce(&Path)) {
         );
         f(&workspace);
     });
+}
+
+fn with_btrfs_ro_sync_fixture(f: impl FnOnce(&Path, &Path, &Path)) {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image_with_seeded_sync_fixture(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_btrfs_ro(&image, &mnt) else {
+        return;
+    };
+
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    f(
+        &workspace.join("readonly_sync_seed.txt"),
+        &workspace.join("readonly_sync_dir"),
+        &workspace.join("readonly_sync_dir").join("child.txt"),
+    );
 }
 
 #[test]
@@ -6797,6 +6923,41 @@ fn btrfs_fuse_fsyncdir_emits_scenario_result_and_preserves_dirent() {
             "directory sync payload\n"
         );
         emit_scenario_result(scenario_id, "PASS", Some("dirfd_sync_all"));
+    });
+}
+
+#[test]
+fn btrfs_fuse_read_only_fsync_reports_erofs_without_data_drift() {
+    with_btrfs_ro_sync_fixture(|file_path, _, _| {
+        assert_read_only_file_sync_contract(
+            file_path,
+            "btrfs_ro_fsync_rejects_erofs_no_drift",
+            "fsync",
+            fs::File::sync_all,
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_read_only_sync_data_reports_erofs_without_data_drift() {
+    with_btrfs_ro_sync_fixture(|file_path, _, _| {
+        assert_read_only_file_sync_contract(
+            file_path,
+            "btrfs_ro_fdatasync_rejects_erofs_no_drift",
+            "fdatasync",
+            fs::File::sync_data,
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_read_only_fsyncdir_reports_erofs_without_dirent_drift() {
+    with_btrfs_ro_sync_fixture(|_, dir_path, child_path| {
+        assert_read_only_dir_sync_contract(
+            dir_path,
+            child_path,
+            "btrfs_ro_fsyncdir_rejects_erofs_no_drift",
+        );
     });
 }
 
