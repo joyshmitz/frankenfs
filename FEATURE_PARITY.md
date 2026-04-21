@@ -82,6 +82,10 @@ shared FUSE dispatcher contract for invalid `setxattr` requests: conflicting
 `CREATE|REPLACE`, unsupported flag bits, and nonzero `position` all reject with
 exact `EINVAL` before any backend mutation call.
 
+Mounted-path read-only setattr coverage now also freezes the public `EROFS`
+contract for `chmod`, `truncate(2)`, and `utime(2)` on both ext4 and btrfs,
+including a no-drift postcondition on file bytes and visible metadata.
+
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 
 The table below is the authoritative btrfs experimental RW contract for `bd-h6nz.3.1`.

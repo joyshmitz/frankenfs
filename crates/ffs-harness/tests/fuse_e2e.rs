@@ -1759,6 +1759,28 @@ fn fuse_setattr_utimes() {
 }
 
 #[test]
+fn fuse_setattr_read_only_rejects_chmod_truncate_and_utimes_with_erofs() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs(&image, &mnt) else {
+        return;
+    };
+
+    assert_read_only_setattr_contract(
+        &mnt.join("hello.txt"),
+        "ext4_ro_setattr_rejects_erofs_no_drift",
+    );
+}
+
+#[test]
 fn ext4_fuse_fallocate_preallocate_extends_size() {
     if !command_available("fallocate") {
         eprintln!("fallocate not available, skipping");
@@ -4409,6 +4431,134 @@ fn py_removexattr_report(path: &Path, name: &str) -> Value {
     serde_json::from_slice(&out.stdout).expect("parse removexattr JSON")
 }
 
+fn py_chmod_report(path: &Path, mode: u32) -> Value {
+    let script = format!(
+        "import json, os\ntry:\n os.chmod({path:?}, {mode})\n print(json.dumps({{'ok': True}}))\nexcept OSError as e:\n print(json.dumps({{'errno': e.errno, 'message': str(e)}}))",
+        path = path.to_str().unwrap(),
+        mode = mode,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 chmod JSON");
+    assert!(
+        out.status.success(),
+        "python3 chmod JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse chmod JSON")
+}
+
+fn py_truncate_report(path: &Path, size: u64) -> Value {
+    let script = format!(
+        "import json, os\ntry:\n os.truncate({path:?}, {size})\n print(json.dumps({{'ok': True}}))\nexcept OSError as e:\n print(json.dumps({{'errno': e.errno, 'message': str(e)}}))",
+        path = path.to_str().unwrap(),
+        size = size,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 truncate JSON");
+    assert!(
+        out.status.success(),
+        "python3 truncate JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse truncate JSON")
+}
+
+fn py_utime_report(path: &Path, atime: i64, mtime: i64) -> Value {
+    let script = format!(
+        "import json, os\ntry:\n os.utime({path:?}, ({atime}, {mtime}))\n print(json.dumps({{'ok': True}}))\nexcept OSError as e:\n print(json.dumps({{'errno': e.errno, 'message': str(e)}}))",
+        path = path.to_str().unwrap(),
+        atime = atime,
+        mtime = mtime,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 utime JSON");
+    assert!(
+        out.status.success(),
+        "python3 utime JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse utime JSON")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStateSnapshot {
+    bytes: Vec<u8>,
+    mode: u32,
+    len: u64,
+    atime: i64,
+    atime_nsec: i64,
+    mtime: i64,
+    mtime_nsec: i64,
+}
+
+fn snapshot_file_state(path: &Path) -> FileStateSnapshot {
+    let meta = fs::metadata(path).expect("stat file state");
+    FileStateSnapshot {
+        bytes: fs::read(path).expect("read file state"),
+        mode: meta.permissions().mode() & 0o7777,
+        len: meta.len(),
+        atime: meta.atime(),
+        atime_nsec: meta.atime_nsec(),
+        mtime: meta.mtime(),
+        mtime_nsec: meta.mtime_nsec(),
+    }
+}
+
+fn assert_file_state_unchanged(path: &Path, before: &FileStateSnapshot, context: &str) {
+    let after = snapshot_file_state(path);
+    assert_eq!(
+        after, *before,
+        "{context} must not change file contents or metadata on a read-only mount"
+    );
+}
+
+fn assert_read_only_setattr_contract(path: &Path, scenario_id: &str) {
+    let before = snapshot_file_state(path);
+    let requested_mode = if before.mode == 0o755 { 0o600 } else { 0o755 };
+    let truncate_len = if before.len == 5 { 6 } else { 5 };
+    let requested_time = if before.mtime == 1_700_000_000 {
+        1_700_000_123
+    } else {
+        1_700_000_000
+    };
+
+    let chmod_report = py_chmod_report(path, requested_mode);
+    assert_eq!(
+        chmod_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only chmod should surface exact EROFS: {chmod_report}"
+    );
+    assert_file_state_unchanged(path, &before, "rejected chmod");
+
+    let truncate_report = py_truncate_report(path, truncate_len);
+    assert_eq!(
+        truncate_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only truncate should surface exact EROFS: {truncate_report}"
+    );
+    assert_file_state_unchanged(path, &before, "rejected truncate");
+
+    let utime_report = py_utime_report(path, requested_time, requested_time);
+    assert_eq!(
+        utime_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only utime should surface exact EROFS: {utime_report}"
+    );
+    assert_file_state_unchanged(path, &before, "rejected utime");
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("chmod+truncate+utimes=EROFS_no_drift"),
+    );
+}
+
 #[test]
 fn fuse_xattr_set_get_list_remove() {
     with_rw_mount(|mnt| {
@@ -4856,6 +5006,74 @@ fn try_mount_btrfs_rw(image: &Path, mountpoint: &Path) -> Option<fuser::Backgrou
     try_mount_btrfs_rw_with_options(image, mountpoint, &mount_opts)
 }
 
+/// Create a btrfs image with one deterministic seeded file for read-only
+/// mounted-path setattr coverage.
+fn create_btrfs_test_image_with_seeded_file(
+    dir: &Path,
+    file_name: &str,
+    contents: &[u8],
+) -> std::path::PathBuf {
+    let image = dir.join("test.btrfs");
+    let seed_root = dir.join("seed_root");
+    let seed_workspace = seed_root.join(BTRFS_TEST_WORKSPACE);
+
+    let f = fs::File::create(&image).expect("create seeded btrfs image");
+    f.set_len(128 * 1024 * 1024)
+        .expect("set seeded btrfs image size");
+    drop(f);
+
+    fs::create_dir_all(&seed_workspace).expect("create seeded btrfs workspace");
+    fs::set_permissions(&seed_root, fs::Permissions::from_mode(0o777))
+        .expect("chmod seeded btrfs root");
+    fs::set_permissions(&seed_workspace, fs::Permissions::from_mode(0o777))
+        .expect("chmod seeded btrfs workspace");
+    fs::write(seed_workspace.join(file_name), contents).expect("write seeded btrfs file");
+
+    let out = Command::new("mkfs.btrfs")
+        .args([
+            "-f",
+            "-L",
+            "ffs-btrfs-e2e",
+            "--rootdir",
+            seed_root.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("mkfs.btrfs seeded image");
+    assert!(
+        out.status.success(),
+        "mkfs.btrfs seeded image failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    image
+}
+
+fn try_mount_btrfs_ro(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        skip_validation: false,
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    let fs = OpenFs::open_with_options(&cx, image, &opts).expect("open btrfs image");
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    match mount_background(Box::new(fs), mountpoint, &mount_opts) {
+        Ok(session) => {
+            thread::sleep(Duration::from_millis(300));
+            Some(session)
+        }
+        Err(e) => {
+            eprintln!("btrfs read-only FUSE mount failed (skipping test): {e}");
+            None
+        }
+    }
+}
+
 /// Helper: create btrfs image, mount rw, run a closure against the mount root.
 fn with_btrfs_rw_root_mount(f: impl FnOnce(&Path)) {
     if !btrfs_fuse_available() {
@@ -5101,6 +5319,32 @@ fn btrfs_fuse_setattr_utimes() {
             "mtime should be 1700000000 after os.utime on btrfs"
         );
     });
+}
+
+#[test]
+fn btrfs_fuse_setattr_read_only_rejects_chmod_truncate_and_utimes_with_erofs() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image_with_seeded_file(
+        tmp.path(),
+        "readonly_seed.txt",
+        b"readonly btrfs seed content\n",
+    );
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_btrfs_ro(&image, &mnt) else {
+        return;
+    };
+
+    assert_read_only_setattr_contract(
+        &mnt.join(BTRFS_TEST_WORKSPACE).join("readonly_seed.txt"),
+        "btrfs_ro_setattr_rejects_erofs_no_drift",
+    );
 }
 
 #[test]
