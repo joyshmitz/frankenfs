@@ -535,6 +535,9 @@ pub struct Ext4Superblock {
     pub log_groups_per_flex: u8,
     pub mmp_update_interval: u16,
     pub mmp_block: u64,
+    pub usr_quota_inum: u32,
+    pub grp_quota_inum: u32,
+    pub prj_quota_inum: u32,
     pub backup_bgs: [u32; 2],
 
     // ── Checksums ────────────────────────────────────────────────────────
@@ -556,6 +559,13 @@ pub struct Ext4OnlineResizeGroupAddPlan {
     pub reserved_gdt_blocks_consumed_per_copy: u32,
     pub reserved_gdt_blocks_remaining_per_copy: u32,
     pub descriptor_blocks_outside_reserved_window_per_copy: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ext4QuotaInodes {
+    pub user: Option<u32>,
+    pub group: Option<u32>,
+    pub project: Option<u32>,
 }
 
 impl Ext4Superblock {
@@ -687,6 +697,9 @@ impl Ext4Superblock {
             mmp_update_interval: read_le_u16(region, 0x166)?,
             mmp_block: u64::from(read_le_u32(region, 0x168)?)
                 | (u64::from(read_le_u32(region, 0x16C)?) << 32),
+            usr_quota_inum: read_le_u32(region, 0x240)?,
+            grp_quota_inum: read_le_u32(region, 0x244)?,
+            prj_quota_inum: read_le_u32(region, 0x26C)?,
             backup_bgs: [read_le_u32(region, 0x24C)?, read_le_u32(region, 0x250)?],
 
             // Checksums
@@ -878,6 +891,24 @@ impl Ext4Superblock {
         self.mmp_enabled()
             .then_some(self.mmp_block)
             .filter(|block| *block != 0)
+    }
+
+    #[must_use]
+    pub fn quota_inodes(&self) -> Ext4QuotaInodes {
+        Ext4QuotaInodes {
+            user: self
+                .has_ro_compat(Ext4RoCompatFeatures::QUOTA)
+                .then_some(self.usr_quota_inum)
+                .filter(|inode| *inode != 0),
+            group: self
+                .has_ro_compat(Ext4RoCompatFeatures::QUOTA)
+                .then_some(self.grp_quota_inum)
+                .filter(|inode| *inode != 0),
+            project: self
+                .has_ro_compat(Ext4RoCompatFeatures::PROJECT)
+                .then_some(self.prj_quota_inum)
+                .filter(|inode| *inode != 0),
+        }
     }
 
     #[must_use]
@@ -5722,6 +5753,58 @@ mod tests {
         assert!(parsed.has_backup_superblock(GroupNumber(19)));
         assert!(!parsed.has_backup_superblock(GroupNumber(1)));
         assert!(!parsed.has_backup_superblock(GroupNumber(9)));
+    }
+
+    #[test]
+    fn parse_ext4_superblock_region_reads_quota_inode_fields() {
+        let mut sb = make_valid_sb();
+        sb[0x240..0x244].copy_from_slice(&3_u32.to_le_bytes());
+        sb[0x244..0x248].copy_from_slice(&4_u32.to_le_bytes());
+        sb[0x26C..0x270].copy_from_slice(&11_u32.to_le_bytes());
+
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse");
+        assert_eq!(parsed.usr_quota_inum, 3);
+        assert_eq!(parsed.grp_quota_inum, 4);
+        assert_eq!(parsed.prj_quota_inum, 11);
+    }
+
+    #[test]
+    fn quota_inodes_require_feature_bits() {
+        let mut sb = make_valid_sb();
+        sb[0x240..0x244].copy_from_slice(&3_u32.to_le_bytes());
+        sb[0x244..0x248].copy_from_slice(&4_u32.to_le_bytes());
+        sb[0x26C..0x270].copy_from_slice(&11_u32.to_le_bytes());
+
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse");
+        assert_eq!(
+            parsed.quota_inodes(),
+            Ext4QuotaInodes {
+                user: None,
+                group: None,
+                project: None,
+            }
+        );
+    }
+
+    #[test]
+    fn quota_inodes_report_enabled_superblock_metadata() {
+        let mut sb = make_valid_sb();
+        let ro_compat =
+            (Ext4RoCompatFeatures::QUOTA.0 | Ext4RoCompatFeatures::PROJECT.0).to_le_bytes();
+        sb[0x64..0x68].copy_from_slice(&ro_compat);
+        sb[0x240..0x244].copy_from_slice(&3_u32.to_le_bytes());
+        sb[0x244..0x248].copy_from_slice(&4_u32.to_le_bytes());
+        sb[0x26C..0x270].copy_from_slice(&11_u32.to_le_bytes());
+
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse");
+        assert_eq!(
+            parsed.quota_inodes(),
+            Ext4QuotaInodes {
+                user: Some(3),
+                group: Some(4),
+                project: Some(11),
+            }
+        );
     }
 
     #[test]

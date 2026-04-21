@@ -5,6 +5,7 @@ pub use ffs_ondisk::ext4::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ffs_types::{EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_SIZE};
 
     #[test]
     fn ext4_state_constants_are_reexported() {
@@ -32,12 +33,47 @@ mod tests {
         );
     }
 
+    fn make_valid_superblock_region() -> [u8; EXT4_SUPERBLOCK_SIZE] {
+        let mut sb = [0_u8; EXT4_SUPERBLOCK_SIZE];
+        sb[0x38..0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+        sb[0x18..0x1C].copy_from_slice(&2_u32.to_le_bytes());
+        sb[0x1C..0x20].copy_from_slice(&2_u32.to_le_bytes());
+        sb[0x00..0x04].copy_from_slice(&8192_u32.to_le_bytes());
+        sb[0x04..0x08].copy_from_slice(&32768_u32.to_le_bytes());
+        sb[0x20..0x24].copy_from_slice(&32768_u32.to_le_bytes());
+        sb[0x24..0x28].copy_from_slice(&32768_u32.to_le_bytes());
+        sb[0x28..0x2C].copy_from_slice(&8192_u32.to_le_bytes());
+        sb[0x58..0x5A].copy_from_slice(&256_u16.to_le_bytes());
+        sb
+    }
+
     #[test]
     fn dir_block_parser_reexport_handles_zero_initialized_block() {
         let block = vec![0_u8; 4096];
         let (entries, tail) = parse_dir_block(&block, 4096).expect("zero block parses");
         assert!(entries.is_empty());
         assert!(tail.is_none());
+    }
+
+    #[test]
+    fn superblock_reexport_exposes_quota_inode_metadata() {
+        let mut sb = make_valid_superblock_region();
+        let ro_compat =
+            (Ext4RoCompatFeatures::QUOTA.0 | Ext4RoCompatFeatures::PROJECT.0).to_le_bytes();
+        sb[0x64..0x68].copy_from_slice(&ro_compat);
+        sb[0x240..0x244].copy_from_slice(&3_u32.to_le_bytes());
+        sb[0x244..0x248].copy_from_slice(&4_u32.to_le_bytes());
+        sb[0x26C..0x270].copy_from_slice(&11_u32.to_le_bytes());
+
+        let parsed = Ext4Superblock::parse_superblock_region(&sb).expect("parse");
+        assert_eq!(
+            parsed.quota_inodes(),
+            Ext4QuotaInodes {
+                user: Some(3),
+                group: Some(4),
+                project: Some(11),
+            }
+        );
     }
 
     // ── Feature flag tests ──────────────────────────────────────────────
@@ -2126,6 +2162,9 @@ missing required: FILETYPE, EXTENTS; rejected: ENCRYPT; unknown incompat: \
             log_groups_per_flex: 4,
             mmp_update_interval: 0,
             mmp_block: 0,
+            usr_quota_inum: 0,
+            grp_quota_inum: 0,
+            prj_quota_inum: 0,
             backup_bgs: [0; 2],
             checksum_type: 0,
             checksum_seed: 0,
