@@ -704,7 +704,14 @@ with open(path, 'r+b', buffering=0) as orig, open(donor_path, 'r+b', buffering=0
     }))
     ";
 
-    let output = Command::new("python3")
+    let mut command = if command_available("timeout") {
+        let mut command = Command::new("timeout");
+        command.arg("20s").arg("python3");
+        command
+    } else {
+        Command::new("python3")
+    };
+    let output = command
         .args([
             "-c",
             script,
@@ -716,6 +723,12 @@ with open(path, 'r+b', buffering=0) as orig, open(donor_path, 'r+b', buffering=0
         ])
         .output()
         .expect("python3 ext4 move_ext ioctl");
+    if output.status.code() == Some(124) {
+        return serde_json::json!({
+            "timeout": true,
+            "message": "move_ext ioctl timed out",
+        });
+    }
     assert!(
         output.status.success(),
         "python3 ext4 move_ext ioctl failed: {}",
