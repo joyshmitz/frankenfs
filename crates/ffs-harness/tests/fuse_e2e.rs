@@ -29,6 +29,8 @@ use tempfile::TempDir;
 const EOPNOTSUPP_ERRNO: i64 = 95;
 const BTRFS_TEST_WORKSPACE: &str = "testdir";
 const FS_IOC_FIEMAP_CMD: u32 = 0xC020_660B;
+const FIEMAP_REQUEST_FLAG_SYNC: u32 = 0x0001;
+const FIEMAP_REQUEST_FLAG_XATTR: u32 = 0x0002;
 const FIEMAP_EXTENT_LAST_FLAG: u32 = 0x0001;
 const FIEMAP_EXTENT_UNWRITTEN_FLAG: u32 = 0x0800;
 const FS_IOC_GET_ENCRYPTION_POLICY_CMD: u32 = 0x400C_6615;
@@ -766,6 +768,15 @@ fn with_rw_mount_sized(image_size_bytes: u64, f: impl FnOnce(&Path)) {
 }
 
 fn query_fiemap(path: &Path, extent_count: u32) -> Value {
+    query_fiemap_with_options(path, extent_count, 0, None)
+}
+
+fn query_fiemap_with_options(
+    path: &Path,
+    extent_count: u32,
+    request_flags: u32,
+    response_size: Option<usize>,
+) -> Value {
     let script = r"
 import fcntl, json, struct, sys
 
@@ -776,9 +787,14 @@ FIEMAP_EXTENT_LAST = 0x0001
 
 path = sys.argv[1]
 extent_count = int(sys.argv[2])
-buffer = bytearray(FIEMAP_HEADER_SIZE + extent_count * FIEMAP_EXTENT_SIZE)
+request_flags = int(sys.argv[3], 0)
+response_size = int(sys.argv[4])
+buffer = bytearray(response_size)
+if response_size < FIEMAP_HEADER_SIZE:
+    raise ValueError(f'fiemap response buffer too small: {response_size}')
 struct.pack_into('@Q', buffer, 0, 0)
 struct.pack_into('@Q', buffer, 8, (1 << 64) - 1)
+struct.pack_into('@I', buffer, 16, request_flags)
 struct.pack_into('@I', buffer, 24, extent_count)
 
 with open(path, 'rb', buffering=0) as fh:
@@ -815,12 +831,17 @@ print(json.dumps({
 }))
     ";
 
+    let response_size = response_size
+        .unwrap_or(32 + usize::try_from(extent_count).expect("extent_count fits") * 56);
+
     let output = Command::new("python3")
         .args([
             "-c",
             script,
             path.to_str().expect("path utf8"),
             &extent_count.to_string(),
+            &request_flags.to_string(),
+            &response_size.to_string(),
         ])
         .output()
         .expect("python3 fiemap ioctl");
@@ -1927,6 +1948,156 @@ fn fuse_ioctl_fiemap_reports_valid_extents() {
         saw_last,
         "expected FIEMAP_EXTENT_LAST in returned extents: {report}"
     );
+}
+
+#[test]
+fn fuse_ioctl_fiemap_sync_flag_reports_valid_extents_on_rw_mount() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-fiemap-sync.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_fiemap_sync_flag";
+    let path = mnt.join("fiemap_sync_seed.bin");
+    let payload = patterned_bytes(12 * 1024, 241, 7);
+    fs::write(&path, &payload).expect("write fiemap sync seed file");
+
+    let meta = fs::metadata(&path).expect("stat fiemap sync seed file");
+    let report = query_fiemap_with_options(&path, 16, FIEMAP_REQUEST_FLAG_SYNC, None);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+            "FIEMAP SYNC returned EOPNOTSUPP after reaching ffs-fuse::ioctl: {ioctl_trace}"
+        );
+        eprintln!(
+            "FIEMAP SYNC ioctl skipped: kernel/VFS returned EOPNOTSUPP before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+        "successful FIEMAP SYNC should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    assert!(
+        report["errno"].is_null(),
+        "FIEMAP SYNC should succeed on the mounted ext4 path once userspace sees the ioctl: \
+         {report}"
+    );
+
+    let extents = report["extents"].as_array().expect("fiemap extents array");
+    assert!(
+        report["mapped_extents"].as_u64().unwrap_or(0) >= 1,
+        "expected at least one mapped extent from FIEMAP SYNC: {report}"
+    );
+    assert_eq!(
+        report["requested_extents"].as_u64().unwrap_or(0),
+        16,
+        "kernel should preserve requested extent count in the FIEMAP SYNC response header"
+    );
+
+    let mut covered = 0_u64;
+    let mut saw_last = false;
+    for extent in extents {
+        let physical = extent["physical"].as_u64().expect("physical");
+        let length = extent["length"].as_u64().expect("length");
+        let last = extent["last"].as_bool().expect("last flag");
+        assert!(
+            physical > 0,
+            "FIEMAP SYNC should return non-zero physical offsets for regular extents: {report}"
+        );
+        assert!(
+            length > 0,
+            "FIEMAP SYNC extent length should be non-zero: {report}"
+        );
+        covered = covered.saturating_add(length);
+        saw_last |= last;
+    }
+
+    assert!(
+        covered >= meta.len(),
+        "FIEMAP SYNC extents should cover file length (covered={covered}, len={}): {report}",
+        meta.len()
+    );
+    assert!(
+        saw_last,
+        "FIEMAP SYNC should surface FIEMAP_EXTENT_LAST: {report}"
+    );
+    emit_scenario_result(scenario_id, "PASS", Some("request_flags=sync"));
+}
+
+#[test]
+fn fuse_ioctl_fiemap_rejects_unsupported_request_flags_on_mounted_path() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-fiemap-invalid-flag.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_fiemap_invalid_request_flags";
+    let path = mnt.join("fiemap_invalid_flag_seed.bin");
+    let payload = patterned_bytes(8 * 1024, 239, 11);
+    fs::write(&path, &payload).expect("write fiemap invalid-flag seed file");
+
+    let report = query_fiemap_with_options(&path, 16, FIEMAP_REQUEST_FLAG_XATTR, None);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+            "invalid-flag FIEMAP returned EOPNOTSUPP after reaching ffs-fuse::ioctl: \
+             {ioctl_trace}"
+        );
+        eprintln!(
+            "FIEMAP invalid-flag ioctl skipped: kernel/VFS returned EOPNOTSUPP before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+        "unsupported FIEMAP request flags should still hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    assert_eq!(
+        report["errno"].as_i64(),
+        Some(i64::from(libc::EBADR)),
+        "unsupported FIEMAP request flags should reject with EBADR: {report}"
+    );
+    assert_eq!(
+        fs::read(&path).expect("read after invalid FIEMAP flag rejection"),
+        payload,
+        "FIEMAP invalid-flag rejection must not mutate file data"
+    );
+    emit_scenario_result(scenario_id, "PASS", Some("errno=53_ebadr"));
 }
 
 #[test]
