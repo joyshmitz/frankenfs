@@ -31,6 +31,7 @@ const BTRFS_TEST_WORKSPACE: &str = "testdir";
 const FS_IOC_FIEMAP_CMD: u32 = 0xC020_660B;
 const EXT4_IOC_GETFLAGS_CMD: u32 = 0x8008_6601;
 const EXT4_IOC_SETFLAGS_CMD: u32 = 0x4008_6602;
+const EXT4_IOC_MOVE_EXT_CMD: u32 = 0xC028_660F;
 
 fn patterned_bytes(len: usize, modulus: usize, offset: usize) -> Vec<u8> {
     assert!(
@@ -643,6 +644,89 @@ with open(path, 'r+b', buffering=0) as fh:
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("decode ext4 ioctl JSON")
+}
+
+fn ext4_move_ext_ioctl(
+    path: &Path,
+    donor_path: &Path,
+    orig_start: u64,
+    donor_start: u64,
+    len: u64,
+) -> Value {
+    let script = r"
+import fcntl, json, struct, sys
+
+EXT4_IOC_MOVE_EXT = 0xC028660F
+MOVE_EXT_SIZE = 40
+
+path = sys.argv[1]
+donor_path = sys.argv[2]
+orig_start = int(sys.argv[3])
+donor_start = int(sys.argv[4])
+length = int(sys.argv[5])
+
+buffer = bytearray(MOVE_EXT_SIZE)
+struct.pack_into('@Q', buffer, 8, orig_start)
+struct.pack_into('@Q', buffer, 16, donor_start)
+struct.pack_into('@Q', buffer, 24, length)
+
+with open(path, 'r+b', buffering=0) as orig, open(donor_path, 'r+b', buffering=0) as donor:
+    struct.pack_into('@i', buffer, 4, donor.fileno())
+    try:
+        fcntl.ioctl(orig.fileno(), EXT4_IOC_MOVE_EXT, buffer, True)
+    except OSError as exc:
+        print(json.dumps({
+            'errno': exc.errno,
+            'message': str(exc),
+        }))
+        sys.exit(0)
+
+    print(json.dumps({
+        'donor_fd': donor.fileno(),
+        'orig_start': struct.unpack_from('@Q', buffer, 8)[0],
+        'donor_start': struct.unpack_from('@Q', buffer, 16)[0],
+        'len': struct.unpack_from('@Q', buffer, 24)[0],
+        'moved_len': struct.unpack_from('@Q', buffer, 32)[0],
+    }))
+    ";
+
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            script,
+            path.to_str().expect("path utf8"),
+            donor_path.to_str().expect("donor path utf8"),
+            &orig_start.to_string(),
+            &donor_start.to_string(),
+            &len.to_string(),
+        ])
+        .output()
+        .expect("python3 ext4 move_ext ioctl");
+    assert!(
+        output.status.success(),
+        "python3 ext4 move_ext ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode ext4 move_ext ioctl JSON")
+}
+
+fn physical_blocks_by_logical_block(report: &Value, block_size: u64) -> Vec<u64> {
+    let extents = report["extents"].as_array().expect("fiemap extents array");
+    let mut blocks = Vec::new();
+    for extent in extents {
+        let logical = extent["logical"].as_u64().expect("logical") / block_size;
+        let physical = extent["physical"].as_u64().expect("physical") / block_size;
+        let block_count = extent["length"].as_u64().expect("length") / block_size;
+        for idx in 0..block_count {
+            let logical_block =
+                usize::try_from(logical + idx).expect("logical block index should fit usize");
+            if blocks.len() <= logical_block {
+                blocks.resize(logical_block + 1, 0);
+            }
+            blocks[logical_block] = physical + idx;
+        }
+    }
+    blocks
 }
 
 fn query_seek(path: &Path, offset: u64, whence: &str) -> Value {

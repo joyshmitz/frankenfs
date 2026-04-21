@@ -3172,6 +3172,7 @@ mod tests {
         DirEntry as FfsDirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, RequestScope,
     };
     use ffs_types::CommitSeq;
+    use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Instant, SystemTime};
@@ -3617,9 +3618,11 @@ mod tests {
         Getattr(InodeNumber),
         GetVersion(InodeNumber),
         MoveExt(InodeNumber, u32, u64, u64, u64),
+        RegisterMoveExtDonor(u32, InodeNumber),
         SetFlags(InodeNumber, u32),
         Commit,
         End(RequestOp),
+        UnregisterMoveExtDonor(u32),
     }
 
     struct IoctlRecordingFs {
@@ -3760,6 +3763,37 @@ mod tests {
         out_size: u32,
     ) -> IoctlResult {
         fuse.dispatch_ioctl(std::process::id(), ino, fh, cmd, in_data, out_size)
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock shared log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    fn parse_first_json_line(buffer: &SharedLogBuffer) -> serde_json::Value {
+        let bytes = buffer.0.lock().expect("lock shared log buffer").clone();
+        let text = String::from_utf8(bytes).expect("log buffer should be utf8");
+        let line = text.lines().find(|line| !line.is_empty()).expect("json log line");
+        serde_json::from_str(line).expect("decode json log line")
     }
 
     impl FsOps for IoctlRecordingFs {
@@ -3941,6 +3975,25 @@ mod tests {
                     len,
                 ));
             Ok(self.move_ext_result.unwrap_or(len))
+        }
+
+        fn register_move_ext_donor_fd(
+            &self,
+            donor_fd: u32,
+            donor_ino: InodeNumber,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::RegisterMoveExtDonor(donor_fd, donor_ino));
+            Ok(())
+        }
+
+        fn unregister_move_ext_donor_fd(&self, donor_fd: u32) {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::UnregisterMoveExtDonor(donor_fd));
         }
 
         fn begin_request_scope(&self, _cx: &Cx, op: RequestOp) -> ffs_error::Result<RequestScope> {
@@ -4499,7 +4552,8 @@ mod tests {
         );
         let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
 
-        let response = fuse.dispatch_ioctl(
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
             5,
             0,
             EXT4_IOC_MOVE_EXT,
@@ -4523,7 +4577,10 @@ mod tests {
             )),
             &options,
         );
-        let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+        let donor_file = std::fs::File::open("/dev/null").expect("open donor fd");
+        let donor_fd = u32::try_from(donor_file.as_raw_fd()).expect("donor fd fits u32");
+        let donor_ino = InodeNumber(donor_file.metadata().expect("donor metadata").ino());
+        let request = FrankenFuse::encode_move_ext_response(donor_fd, 11, 22, 33, 0);
 
         let response = dispatch_ioctl_for_testing(
             &fuse,
@@ -4535,7 +4592,9 @@ mod tests {
         );
         assert_eq!(
             response,
-            IoctlResult::Data(FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 21))
+            IoctlResult::Data(FrankenFuse::encode_move_ext_response(
+                donor_fd, 11, 22, 33, 21,
+            ))
         );
         assert_eq!(
             calls.lock().expect("lock ioctl calls").as_slice(),
@@ -4543,10 +4602,132 @@ mod tests {
                 IoctlCall::Begin(RequestOp::IoctlWrite),
                 IoctlCall::Getattr(InodeNumber(9)),
                 IoctlCall::GetFlags(InodeNumber(9)),
-                IoctlCall::MoveExt(InodeNumber(9), 7, 11, 22, 33),
+                IoctlCall::RegisterMoveExtDonor(donor_fd, donor_ino),
+                IoctlCall::MoveExt(InodeNumber(9), donor_fd, 11, 22, 33),
+                IoctlCall::UnregisterMoveExtDonor(donor_fd),
                 IoctlCall::Commit,
                 IoctlCall::End(RequestOp::IoctlWrite),
             ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_success_logs_contract_fields() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_result(
+                21,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let donor_file = std::fs::File::open("/dev/null").expect("open donor fd");
+        let donor_fd = u32::try_from(donor_file.as_raw_fd()).expect("donor fd fits u32");
+        let request = FrankenFuse::encode_move_ext_response(donor_fd, 11, 22, 33, 0);
+
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(buffer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _default = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(
+            response,
+            IoctlResult::Data(FrankenFuse::encode_move_ext_response(
+                donor_fd, 11, 22, 33, 21,
+            ))
+        );
+
+        let json = parse_first_json_line(&buffer);
+        assert_eq!(json["scenario_id"], MOVE_EXT_SCENARIO_ID);
+        assert_eq!(json["outcome"], "applied");
+        assert_eq!(json["error_class"], MOVE_EXT_SUCCESS_ERROR_CLASS);
+        assert_eq!(json["target"], "ffs::ioctl");
+        assert_eq!(json["ino"].as_u64(), Some(9));
+        assert_eq!(json["donor_fd"].as_u64(), Some(u64::from(donor_fd)));
+        assert_eq!(json["moved_len"].as_u64(), Some(21));
+        assert!(
+            json["operation_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_move_ext_rejection_logs_contract_fields() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::with_move_ext_source(
+                FfsFileType::RegularFile,
+                64 * 1024,
+                0,
+                Arc::clone(&calls),
+            )),
+            &options,
+        );
+        let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
+
+        let buffer = SharedLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(buffer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _default = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            9,
+            0,
+            EXT4_IOC_MOVE_EXT,
+            &request,
+            u32::try_from(MOVE_EXT_SIZE).expect("move_ext size fits"),
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
+
+        let json = parse_first_json_line(&buffer);
+        assert_eq!(json["scenario_id"], MOVE_EXT_SCENARIO_ID);
+        assert_eq!(json["outcome"], "rejected");
+        assert_eq!(json["error_class"], "unsupported_feature");
+        assert_eq!(json["target"], "ffs::ioctl");
+        assert_eq!(json["ino"].as_u64(), Some(9));
+        assert_eq!(json["donor_fd"].as_u64(), Some(7));
+        assert_eq!(
+            json["errno"].as_i64(),
+            Some(i64::from(libc::EOPNOTSUPP))
+        );
+        assert!(
+            json["operation_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
         );
     }
 
@@ -4560,7 +4741,8 @@ mod tests {
         request[FIEMAP_FLAGS_OFFSET..FIEMAP_FLAGS_OFFSET + 4]
             .copy_from_slice(&FIEMAP_FLAG_XATTR.to_ne_bytes());
 
-        let response = fuse.dispatch_ioctl(
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
             5,
             0,
             FS_IOC_FIEMAP,
@@ -4590,7 +4772,8 @@ mod tests {
         request[FIEMAP_FLAGS_OFFSET..FIEMAP_FLAGS_OFFSET + 4]
             .copy_from_slice(&FIEMAP_FLAG_SYNC.to_ne_bytes());
 
-        let response = fuse.dispatch_ioctl(
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
             13,
             91,
             FS_IOC_FIEMAP,
@@ -4622,7 +4805,7 @@ mod tests {
             Arc::new(Mutex::new(Vec::new())),
         )));
 
-        let response = fuse.dispatch_ioctl(1, 0, 0xDEAD_BEEF, &[], 0);
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, 0xDEAD_BEEF, &[], 0);
         assert_eq!(response, IoctlResult::Error(libc::ENOTTY));
     }
 
@@ -4740,11 +4923,12 @@ mod tests {
         );
 
         // 3 bytes is too short for a u32 flags value.
-        let response = fuse.dispatch_ioctl(5, 0, EXT4_IOC_SETFLAGS, &[0x01, 0x02, 0x03], 0);
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 5, 0, EXT4_IOC_SETFLAGS, &[0x01, 0x02, 0x03], 0);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
 
         // Empty payload is also rejected.
-        let response = fuse.dispatch_ioctl(5, 0, EXT4_IOC_SETFLAGS, &[], 0);
+        let response = dispatch_ioctl_for_testing(&fuse, 5, 0, EXT4_IOC_SETFLAGS, &[], 0);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
     }
 
@@ -4757,7 +4941,8 @@ mod tests {
 
         // Header shorter than FIEMAP_HEADER_SIZE (32 bytes).
         let short_header = vec![0_u8; 16];
-        let response = fuse.dispatch_ioctl(
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
             3,
             0,
             FS_IOC_FIEMAP,
