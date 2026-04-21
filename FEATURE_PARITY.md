@@ -88,6 +88,8 @@ contract for `chmod`, `truncate(2)`, and `utime(2)` on both ext4 and btrfs,
 including a no-drift postcondition on file bytes and visible metadata.
 Mounted-path btrfs read-only namespace coverage now also freezes exact `EROFS`
 for `create`, `mkdir`, `link`, and `symlink`, with no directory-entry or seed-file drift.
+Mounted-path btrfs read-only regular-file coverage now also freezes exact `EROFS`
+for create-via-write and overwrite-on-existing-file paths, with no file-byte or directory-entry drift.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

@@ -5170,6 +5170,56 @@ fn assert_read_only_namespace_mutation_contract(dir: &Path, seed: &Path, scenari
     );
 }
 
+fn assert_read_only_regular_write_contract(dir: &Path, seed: &Path, scenario_id: &str) {
+    let entries_before = snapshot_directory_entries(dir);
+    let seed_before = snapshot_file_state(seed);
+
+    let create_path = dir.join("blocked_write_create.txt");
+    let create_err = fs::write(&create_path, b"blocked create via write")
+        .expect_err("read-only create-via-write should fail");
+    assert_eq!(
+        create_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only create-via-write should surface exact EROFS: {create_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&create_path).is_err(),
+        "read-only create-via-write must not leave a new file behind"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected create-via-write must not change visible directory entries"
+    );
+    assert_file_state_unchanged(seed, &seed_before, "rejected create-via-write");
+
+    let overwrite_err = fs::OpenOptions::new()
+        .write(true)
+        .open(seed)
+        .and_then(|mut file| {
+            file.write_all(b"blocked overwrite write")?;
+            file.flush()
+        })
+        .expect_err("read-only overwrite should fail with EROFS");
+    assert_eq!(
+        overwrite_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only overwrite should surface exact EROFS: {overwrite_err}"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected overwrite must not change visible directory entries"
+    );
+    assert_file_state_unchanged(seed, &seed_before, "rejected overwrite");
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("create_via_write+overwrite=EROFS_no_drift"),
+    );
+}
+
 #[test]
 fn fuse_xattr_set_get_list_remove() {
     with_rw_mount(|mnt| {
@@ -6105,6 +6155,41 @@ fn btrfs_fuse_read_only_create_mkdir_link_and_symlink_report_erofs_without_diren
         &workspace,
         &seed,
         "btrfs_ro_create_mkdir_link_symlink_reject_erofs_no_drift",
+    );
+}
+
+#[test]
+fn btrfs_fuse_read_only_regular_writes_report_erofs_without_file_or_dirent_drift() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image_with_seeded_file(
+        tmp.path(),
+        "readonly_write_seed.txt",
+        b"readonly btrfs write seed\n",
+    );
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_btrfs_ro(&image, &mnt) else {
+        return;
+    };
+
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    let seed = workspace.join("readonly_write_seed.txt");
+    assert_eq!(
+        fs::read(&seed).expect("read seeded btrfs write file"),
+        b"readonly btrfs write seed\n",
+        "read-only remount must preserve the seeded write target bytes"
+    );
+
+    assert_read_only_regular_write_contract(
+        &workspace,
+        &seed,
+        "btrfs_ro_regular_writes_reject_erofs_no_drift",
     );
 }
 
