@@ -116,18 +116,19 @@ pub trait DegradationPolicy: Send + Sync {
 // ── Degradation FSM ─────────────────────────────────────────────────────────
 
 /// Formal degradation levels matching `SystemPressure::degradation_level()`.
+/// asupersync 0.3 thresholds: >= 0.9 normal, >= 0.65 light, >= 0.35 moderate, >= 0.1 heavy, < 0.1 emergency
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum DegradationLevel {
-    /// headroom >= 0.5 — full service
+    /// headroom >= 0.9 — full service
     Normal = 0,
-    /// headroom >= 0.3 — background tasks paused
+    /// headroom >= 0.65 — background tasks paused (asupersync: "light")
     Warning = 1,
-    /// headroom >= 0.15 — caches reduced
+    /// headroom >= 0.35 — caches reduced (asupersync: "moderate")
     Degraded = 2,
-    /// headroom >= 0.05 — writes throttled
+    /// headroom >= 0.1 — writes throttled (asupersync: "heavy")
     Critical = 3,
-    /// headroom < 0.05 — read-only mode
+    /// headroom < 0.1 — read-only mode
     Emergency = 4,
 }
 

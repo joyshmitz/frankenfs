@@ -29074,25 +29074,26 @@ mod tests {
 
     #[test]
     fn system_pressure_degradation_levels() {
+        // asupersync 0.3 thresholds: >= 0.9 normal, >= 0.65 light, >= 0.35 moderate, >= 0.1 heavy, < 0.1 emergency
         let p = SystemPressure::new();
 
-        p.set_headroom(0.8);
+        p.set_headroom(0.95);
         assert_eq!(p.degradation_level(), 0);
         assert_eq!(p.level_label(), "normal");
 
-        p.set_headroom(0.4);
+        p.set_headroom(0.7);
         assert_eq!(p.degradation_level(), 1);
-        assert_eq!(p.level_label(), "warning");
+        assert_eq!(p.level_label(), "light");
+
+        p.set_headroom(0.5);
+        assert_eq!(p.degradation_level(), 2);
+        assert_eq!(p.level_label(), "moderate");
 
         p.set_headroom(0.2);
-        assert_eq!(p.degradation_level(), 2);
-        assert_eq!(p.level_label(), "degraded");
-
-        p.set_headroom(0.1);
         assert_eq!(p.degradation_level(), 3);
-        assert_eq!(p.level_label(), "critical");
+        assert_eq!(p.level_label(), "heavy");
 
-        p.set_headroom(0.02);
+        p.set_headroom(0.05);
         assert_eq!(p.degradation_level(), 4);
         assert_eq!(p.level_label(), "emergency");
     }
@@ -29101,13 +29102,13 @@ mod tests {
     fn system_pressure_recovery() {
         let p = SystemPressure::new();
 
-        // Degrade
-        p.set_headroom(0.1);
-        assert_eq!(p.degradation_level(), 3);
+        // Degrade (headroom 0.05 -> level 4 emergency in asupersync 0.3)
+        p.set_headroom(0.05);
+        assert_eq!(p.degradation_level(), 4);
         assert!(p.should_degrade(0.5));
 
-        // Recover
-        p.set_headroom(0.8);
+        // Recover (headroom 0.95 -> level 0 normal)
+        p.set_headroom(0.95);
         assert_eq!(p.degradation_level(), 0);
         assert!(!p.should_degrade(0.5));
     }
@@ -29165,6 +29166,7 @@ mod tests {
 
     #[test]
     fn cx_pressure_propagation() {
+        // asupersync 0.3: >= 0.1 heavy (level 3)
         let pressure = Arc::new(SystemPressure::with_headroom(0.5));
         let cx = Cx::for_testing().with_pressure(Arc::clone(&pressure));
 
@@ -29173,8 +29175,8 @@ mod tests {
         assert!((p.headroom() - 0.5).abs() < f32::EPSILON);
 
         // Update from external monitor.
-        pressure.set_headroom(0.1);
-        assert!((p.headroom() - 0.1).abs() < f32::EPSILON);
+        pressure.set_headroom(0.2);
+        assert!((p.headroom() - 0.2).abs() < f32::EPSILON);
         assert_eq!(p.degradation_level(), 3);
     }
 
@@ -29218,13 +29220,14 @@ mod tests {
 
     #[test]
     fn fsm_escalates_immediately() {
+        // asupersync 0.3: >= 0.1 heavy (level 3 / Critical)
         let pressure = Arc::new(SystemPressure::new());
         let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
 
         assert_eq!(fsm.level(), DegradationLevel::Normal);
 
         // Drop to critical headroom — should escalate immediately.
-        pressure.set_headroom(0.1);
+        pressure.set_headroom(0.2);
         let transition = fsm.tick();
         assert!(transition.is_some());
         let t = transition.unwrap();
@@ -29235,16 +29238,17 @@ mod tests {
 
     #[test]
     fn fsm_requires_sustained_recovery() {
+        // asupersync 0.3: >= 0.1 heavy (level 3), >= 0.9 normal (level 0)
         let pressure = Arc::new(SystemPressure::new());
         let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
 
         // Escalate to critical.
-        pressure.set_headroom(0.1);
+        pressure.set_headroom(0.2);
         fsm.tick();
         assert_eq!(fsm.level(), DegradationLevel::Critical);
 
         // Recover to normal headroom — should NOT de-escalate after 1 tick.
-        pressure.set_headroom(0.8);
+        pressure.set_headroom(0.95);
         assert!(fsm.tick().is_none());
         assert_eq!(fsm.level(), DegradationLevel::Critical);
 
@@ -29260,25 +29264,26 @@ mod tests {
 
     #[test]
     fn fsm_recovery_resets_on_pressure_return() {
+        // asupersync 0.3: >= 0.1 heavy (level 3), >= 0.9 normal (level 0)
         let pressure = Arc::new(SystemPressure::new());
         let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
 
         // Escalate.
-        pressure.set_headroom(0.1);
+        pressure.set_headroom(0.2);
         fsm.tick();
 
         // Start recovering.
-        pressure.set_headroom(0.8);
+        pressure.set_headroom(0.95);
         fsm.tick(); // recovery_count = 1
         fsm.tick(); // recovery_count = 2
 
         // Pressure returns before recovery completes.
-        pressure.set_headroom(0.1);
+        pressure.set_headroom(0.2);
         fsm.tick();
         assert_eq!(fsm.level(), DegradationLevel::Critical);
 
         // Must restart recovery from scratch.
-        pressure.set_headroom(0.8);
+        pressure.set_headroom(0.95);
         fsm.tick();
         fsm.tick();
         assert_eq!(fsm.level(), DegradationLevel::Critical); // still not recovered
@@ -29303,25 +29308,27 @@ mod tests {
 
     #[test]
     fn fsm_transition_count() {
+        // asupersync 0.3: >= 0.1 heavy (level 3), >= 0.9 normal (level 0)
         let pressure = Arc::new(SystemPressure::new());
         let fsm = DegradationFsm::new(Arc::clone(&pressure), 1);
 
         assert_eq!(fsm.transition_count(), 0);
 
         // Escalate.
-        pressure.set_headroom(0.1);
+        pressure.set_headroom(0.2);
         fsm.tick();
         assert_eq!(fsm.transition_count(), 1);
 
         // De-escalate (recovery_samples=1 so one tick suffices).
-        pressure.set_headroom(0.8);
+        pressure.set_headroom(0.95);
         fsm.tick();
         assert_eq!(fsm.transition_count(), 2);
     }
 
     #[test]
     fn backpressure_gate_normal_proceeds() {
-        let pressure = Arc::new(SystemPressure::with_headroom(0.8));
+        // asupersync 0.3: >= 0.9 normal (level 0)
+        let pressure = Arc::new(SystemPressure::with_headroom(0.95));
         let fsm = Arc::new(DegradationFsm::new(pressure, 3));
         let gate = BackpressureGate::new(fsm);
 
@@ -29333,7 +29340,8 @@ mod tests {
 
     #[test]
     fn backpressure_gate_emergency_sheds_writes() {
-        let pressure = Arc::new(SystemPressure::with_headroom(0.02));
+        // asupersync 0.3: < 0.1 emergency (level 4)
+        let pressure = Arc::new(SystemPressure::with_headroom(0.05));
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
         // Tick to pick up emergency level.
         fsm.tick();
@@ -29349,7 +29357,8 @@ mod tests {
 
     #[test]
     fn backpressure_gate_degraded_throttles_writes() {
-        let pressure = Arc::new(SystemPressure::with_headroom(0.2));
+        // asupersync 0.3: >= 0.35 moderate (level 2) - writes throttled at this level
+        let pressure = Arc::new(SystemPressure::with_headroom(0.45));
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
         fsm.tick();
         let gate = BackpressureGate::new(fsm);
@@ -29360,7 +29369,8 @@ mod tests {
 
     #[test]
     fn backpressure_gate_hot_loop_million_checks() {
-        let pressure = Arc::new(SystemPressure::with_headroom(0.2));
+        // asupersync 0.3: >= 0.35 moderate (level 2) - writes throttled
+        let pressure = Arc::new(SystemPressure::with_headroom(0.45));
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
         fsm.tick();
         let gate = BackpressureGate::new(fsm);
@@ -29470,30 +29480,31 @@ mod tests {
     fn degrade_fsm_walks_all_thresholds_upward() {
         // Escalate through every level boundary in sequence and verify
         // each transition is immediate (no hysteresis on escalation).
+        // asupersync 0.3: >= 0.9 normal, >= 0.65 light, >= 0.35 moderate, >= 0.1 heavy, < 0.1 emergency
         let pressure = Arc::new(SystemPressure::new());
         let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
         assert_eq!(fsm.level(), DegradationLevel::Normal);
 
-        // Normal → Warning (headroom 0.4 maps to degradation_level 1)
-        pressure.set_headroom(0.4);
+        // Normal → Warning (headroom 0.75 maps to level 1)
+        pressure.set_headroom(0.75);
         let t = fsm.tick().expect("should transition to Warning");
         assert_eq!(t.from, DegradationLevel::Normal);
         assert_eq!(t.to, DegradationLevel::Warning);
 
-        // Warning → Degraded (headroom 0.2 maps to degradation_level 2)
-        pressure.set_headroom(0.2);
+        // Warning → Degraded (headroom 0.45 maps to level 2)
+        pressure.set_headroom(0.45);
         let t = fsm.tick().expect("should transition to Degraded");
         assert_eq!(t.from, DegradationLevel::Warning);
         assert_eq!(t.to, DegradationLevel::Degraded);
 
-        // Degraded → Critical (headroom 0.1 maps to degradation_level 3)
-        pressure.set_headroom(0.1);
+        // Degraded → Critical (headroom 0.2 maps to level 3)
+        pressure.set_headroom(0.2);
         let t = fsm.tick().expect("should transition to Critical");
         assert_eq!(t.from, DegradationLevel::Degraded);
         assert_eq!(t.to, DegradationLevel::Critical);
 
-        // Critical → Emergency (headroom 0.02 maps to degradation_level 4)
-        pressure.set_headroom(0.02);
+        // Critical → Emergency (headroom 0.05 maps to level 4)
+        pressure.set_headroom(0.05);
         let t = fsm.tick().expect("should transition to Emergency");
         assert_eq!(t.from, DegradationLevel::Critical);
         assert_eq!(t.to, DegradationLevel::Emergency);
@@ -29505,34 +29516,35 @@ mod tests {
     fn degrade_fsm_walks_all_thresholds_downward() {
         // Start at Emergency and recover through each level, requiring
         // `recovery_samples` consecutive improved ticks at each step.
+        // asupersync 0.3: >= 0.9 normal, >= 0.65 light, >= 0.35 moderate, >= 0.1 heavy, < 0.1 emergency
         let pressure = Arc::new(SystemPressure::new());
         let fsm = DegradationFsm::new(Arc::clone(&pressure), 2);
 
         // Escalate to Emergency.
-        pressure.set_headroom(0.02);
+        pressure.set_headroom(0.05);
         fsm.tick();
         assert_eq!(fsm.level(), DegradationLevel::Emergency);
 
-        // Recover to Critical: headroom 0.1 → level 3, need 2 ticks.
-        pressure.set_headroom(0.1);
+        // Recover to Critical: headroom 0.2 → level 3, need 2 ticks.
+        pressure.set_headroom(0.2);
         assert!(fsm.tick().is_none()); // recovery_count=1
         let t = fsm.tick().expect("should de-escalate to Critical");
         assert_eq!(t.to, DegradationLevel::Critical);
 
-        // Recover to Degraded: headroom 0.2 → level 2, need 2 ticks.
-        pressure.set_headroom(0.2);
+        // Recover to Degraded: headroom 0.45 → level 2, need 2 ticks.
+        pressure.set_headroom(0.45);
         assert!(fsm.tick().is_none());
         let t = fsm.tick().expect("should de-escalate to Degraded");
         assert_eq!(t.to, DegradationLevel::Degraded);
 
-        // Recover to Warning: headroom 0.4 → level 1, need 2 ticks.
-        pressure.set_headroom(0.4);
+        // Recover to Warning: headroom 0.75 → level 1, need 2 ticks.
+        pressure.set_headroom(0.75);
         assert!(fsm.tick().is_none());
         let t = fsm.tick().expect("should de-escalate to Warning");
         assert_eq!(t.to, DegradationLevel::Warning);
 
-        // Recover to Normal: headroom 0.8 → level 0, need 2 ticks.
-        pressure.set_headroom(0.8);
+        // Recover to Normal: headroom 0.95 → level 0, need 2 ticks.
+        pressure.set_headroom(0.95);
         assert!(fsm.tick().is_none());
         let t = fsm.tick().expect("should de-escalate to Normal");
         assert_eq!(t.to, DegradationLevel::Normal);
@@ -29542,22 +29554,23 @@ mod tests {
     fn degrade_fsm_no_oscillation_borderline_pressure() {
         // Simulate borderline pressure that alternates between two
         // adjacent levels. Hysteresis should prevent flickering.
+        // asupersync 0.3: >= 0.35 moderate (level 2), >= 0.65 light (level 1)
         let pressure = Arc::new(SystemPressure::new());
         let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
 
         // Escalate to Degraded.
-        pressure.set_headroom(0.2);
+        pressure.set_headroom(0.45);
         fsm.tick();
         assert_eq!(fsm.level(), DegradationLevel::Degraded);
 
         // Now alternate: 1 tick at Warning headroom, 1 tick at Degraded.
         // With recovery_samples=3, the level should never de-escalate.
         for _ in 0..10 {
-            pressure.set_headroom(0.4); // Warning-level headroom
+            pressure.set_headroom(0.75); // Warning-level headroom (light)
             assert!(fsm.tick().is_none());
             assert_eq!(fsm.level(), DegradationLevel::Degraded);
 
-            pressure.set_headroom(0.2); // back to Degraded headroom
+            pressure.set_headroom(0.45); // back to Degraded headroom (moderate)
             fsm.tick();
             assert_eq!(fsm.level(), DegradationLevel::Degraded);
         }
@@ -29571,7 +29584,8 @@ mod tests {
     fn degrade_gate_critical_throttles_all_write_variants() {
         // At Critical level, every write operation should be throttled
         // while every read operation should proceed.
-        let pressure = Arc::new(SystemPressure::with_headroom(0.1));
+        // asupersync 0.3: >= 0.1 heavy (level 3)
+        let pressure = Arc::new(SystemPressure::with_headroom(0.2));
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
         fsm.tick();
         assert_eq!(fsm.level(), DegradationLevel::Critical);
@@ -29640,7 +29654,8 @@ mod tests {
     #[test]
     fn degrade_gate_warning_all_ops_proceed() {
         // At Warning level, all operations (read and write) proceed.
-        let pressure = Arc::new(SystemPressure::with_headroom(0.4));
+        // asupersync 0.3: >= 0.65 light (level 1)
+        let pressure = Arc::new(SystemPressure::with_headroom(0.75));
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
         fsm.tick();
         assert_eq!(fsm.level(), DegradationLevel::Warning);
@@ -29657,19 +29672,20 @@ mod tests {
     fn degrade_cx_pressure_visible_through_budget() {
         // Cx with attached SystemPressure: updates from the
         // ComputeBudget are visible through the Cx's pressure handle.
-        let pressure = Arc::new(SystemPressure::with_headroom(0.6));
+        // asupersync 0.3: >= 0.9 normal, >= 0.1 heavy
+        let pressure = Arc::new(SystemPressure::with_headroom(0.95));
         let cx = Cx::for_testing().with_pressure(Arc::clone(&pressure));
 
         let p = cx.pressure().expect("pressure attached");
-        assert_eq!(p.degradation_level(), 0); // Normal at 0.6
+        assert_eq!(p.degradation_level(), 0); // Normal at 0.95
 
         // External update simulating increased load.
-        pressure.set_headroom(0.1);
-        assert_eq!(p.degradation_level(), 3); // Critical
-        assert!(p.headroom() < 0.15);
+        pressure.set_headroom(0.2);
+        assert_eq!(p.degradation_level(), 3); // Critical (heavy)
+        assert!(p.headroom() < 0.35);
 
         // Recover.
-        pressure.set_headroom(0.8);
+        pressure.set_headroom(0.95);
         assert_eq!(p.degradation_level(), 0); // Back to Normal
     }
 
@@ -29690,14 +29706,15 @@ mod tests {
     fn degrade_pressure_cpu_headroom_mapping() {
         // Verify that specific headroom values map to the correct
         // SystemPressure degradation levels.
+        // asupersync 0.3: >= 0.9 normal, >= 0.65 light, >= 0.35 moderate, >= 0.1 heavy, < 0.1 emergency
         let p = SystemPressure::new();
 
         let thresholds: [(f32, u8, &str); 5] = [
-            (0.8, 0, "normal"),
-            (0.35, 1, "warning"),
-            (0.2, 2, "degraded"),
-            (0.08, 3, "critical"),
-            (0.01, 4, "emergency"),
+            (0.95, 0, "normal"),
+            (0.75, 1, "light"),
+            (0.45, 2, "moderate"),
+            (0.2, 3, "heavy"),
+            (0.05, 4, "emergency"),
         ];
 
         for (headroom, expected_level, expected_label) in &thresholds {
@@ -29716,6 +29733,7 @@ mod tests {
         // PressureMonitor.sample() both reads system load AND ticks
         // the FSM. Verify that multiple samples with changing pressure
         // drive level transitions correctly.
+        // asupersync 0.3: < 0.1 emergency, >= 0.9 normal
         let pressure = Arc::new(SystemPressure::new());
         let monitor = PressureMonitor::new(Arc::clone(&pressure), 1);
 
@@ -29723,18 +29741,18 @@ mod tests {
         assert_eq!(monitor.sample_count(), 0);
 
         // Force pressure down, then sample to tick FSM.
-        pressure.set_headroom(0.02);
+        pressure.set_headroom(0.05);
         monitor.sample();
         // After sample, level_cache should have been updated via tick.
         // Note: sample() reads /proc which may override our headroom,
         // so re-set and tick directly.
-        pressure.set_headroom(0.02);
+        pressure.set_headroom(0.05);
         monitor.fsm().tick();
         assert_eq!(monitor.level(), DegradationLevel::Emergency);
         assert!(monitor.sample_count() >= 1);
 
         // Recover: with recovery_samples=1, one improved tick suffices.
-        pressure.set_headroom(0.8);
+        pressure.set_headroom(0.95);
         monitor.fsm().tick();
         assert_eq!(monitor.level(), DegradationLevel::Normal);
     }
@@ -35594,11 +35612,12 @@ mod tests {
 
     #[test]
     fn degradation_fsm_hysteresis_resets_on_equal_observed() {
+        // asupersync 0.3: >= 0.1 heavy (level 3)
         let pressure = Arc::new(SystemPressure::new());
         let fsm = DegradationFsm::new(Arc::clone(&pressure), 3);
 
-        // Escalate to Critical (headroom ~0.06)
-        pressure.set_headroom(0.06);
+        // Escalate to Critical (headroom 0.2 → level 3 heavy)
+        pressure.set_headroom(0.2);
         fsm.tick();
         assert_eq!(fsm.level(), DegradationLevel::Critical);
 
@@ -35607,7 +35626,7 @@ mod tests {
         fsm.tick(); // recovery_count = 1
 
         // Now set headroom back to Critical range → observed == current
-        pressure.set_headroom(0.06);
+        pressure.set_headroom(0.2);
         fsm.tick(); // recovery_count resets to 0
 
         // Recovery should now need full 3 samples again
@@ -35651,7 +35670,7 @@ mod tests {
         let pressure = Arc::new(SystemPressure::new());
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
 
-        pressure.set_headroom(0.06); // Critical
+        pressure.set_headroom(0.15); // Critical (asupersync 0.3: heavy, level 3)
         fsm.tick();
 
         let gate = BackpressureGate::new(Arc::clone(&fsm));
@@ -35666,7 +35685,7 @@ mod tests {
         let pressure = Arc::new(SystemPressure::new());
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
 
-        pressure.set_headroom(0.35); // Warning
+        pressure.set_headroom(0.75); // Warning (asupersync 0.3: light, level 1)
         fsm.tick();
 
         let gate = BackpressureGate::new(Arc::clone(&fsm));
@@ -35676,7 +35695,7 @@ mod tests {
     }
 
     const REPRESENTATIVE_BACKPRESSURE_DIAGNOSTICS_GOLDEN: &str = concat!(
-        "transition=DegradationTransition { from: Normal, to: Critical, headroom: 60 }\n",
+        "transition=DegradationTransition { from: Normal, to: Critical, headroom: 200 }\n",
         "fsm=DegradationFsm { level: Critical, recovery_count: 0, transitions: 1, recovery_samples: 3, .. }\n",
         "gate=BackpressureGate { level: Critical }\n",
         "decision.write=Throttle\n",
@@ -35686,9 +35705,10 @@ mod tests {
     );
 
     fn representative_backpressure_diagnostics_text() -> String {
+        // asupersync 0.3: >= 0.1 heavy (level 3 / Critical)
         let pressure = Arc::new(SystemPressure::new());
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 3));
-        pressure.set_headroom(0.06);
+        pressure.set_headroom(0.2);
         let transition = fsm.tick().expect("critical transition");
         let gate = BackpressureGate::new(Arc::clone(&fsm));
 
@@ -35975,9 +35995,10 @@ mod tests {
             ) {
                 let pressure = Arc::new(SystemPressure::new());
                 // Set headroom to match the target level
+                // asupersync 0.3: >= 0.9 normal, >= 0.65 light (Warning)
                 let headroom = match level {
-                    DegradationLevel::Normal => 0.6,
-                    DegradationLevel::Warning => 0.35,
+                    DegradationLevel::Normal => 0.95,
+                    DegradationLevel::Warning => 0.75,
                     _ => unreachable!(),
                 };
                 pressure.set_headroom(headroom);
