@@ -70,6 +70,10 @@ const EXT4_IOC_GETFLAGS: u32 = 0x8008_6601;
 /// The ext4 generation value is likewise surfaced through a `u32` payload in
 /// the FUSE fileattr path.
 const EXT4_IOC_GETVERSION: u32 = 0x8008_6603;
+/// `EXT4_IOC_SETVERSION` = `_IOW('f', 4, long)` on x86_64.
+///
+/// The write-side FUSE payload is likewise treated as a 4-byte `u32`.
+const EXT4_IOC_SETVERSION: u32 = 0x4008_6604;
 /// `FS_IOC_GET_ENCRYPTION_POLICY` = `_IOW('f', 21, struct fscrypt_policy_v1)` on x86_64.
 const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
 /// `FS_IOC_GET_ENCRYPTION_POLICY_EX` = `_IOWR('f', 22, struct fscrypt_get_policy_ex_arg)` on x86_64.
@@ -1278,13 +1282,17 @@ impl FrankenFuse {
         ))
     }
 
-    fn parse_inode_flags(in_data: &[u8]) -> Result<u32, c_int> {
+    fn parse_u32_ioctl_arg(in_data: &[u8]) -> Result<u32, c_int> {
         if in_data.len() < std::mem::size_of::<u32>() {
             return Err(libc::EINVAL);
         }
         let mut bytes = [0_u8; std::mem::size_of::<u32>()];
         bytes.copy_from_slice(&in_data[..std::mem::size_of::<u32>()]);
         Ok(u32::from_ne_bytes(bytes))
+    }
+
+    fn parse_inode_flags(in_data: &[u8]) -> Result<u32, c_int> {
+        Self::parse_u32_ioctl_arg(in_data)
     }
 
     fn parse_fs_label_request(in_data: &[u8]) -> Result<Vec<u8>, c_int> {
@@ -1587,6 +1595,27 @@ impl FrankenFuse {
                         .get_inode_generation(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(generation) => IoctlResult::Data(generation.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_SETVERSION => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let generation = match Self::parse_u32_ioctl_arg(in_data) {
+                    Ok(generation) => generation,
+                    Err(errno) => return IoctlResult::Error(errno),
+                };
+
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner
+                        .ops
+                        .set_inode_generation(cx, scope, InodeNumber(ino), generation)?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(())
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -3828,6 +3857,7 @@ mod tests {
         BtrfsInoLookup(u64, u64),
         Getattr(InodeNumber),
         GetVersion(InodeNumber),
+        SetVersion(InodeNumber, u32),
         MoveExt(InodeNumber, u32, u64, u64, u64),
         RegisterMoveExtDonor(u32, InodeNumber),
         SetFlags(InodeNumber, u32),
@@ -4195,6 +4225,20 @@ mod tests {
             Ok(self.generation)
         }
 
+        fn set_inode_generation(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            generation: u32,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::SetVersion(ino, generation));
+            Ok(())
+        }
+
         fn get_encryption_policy_v1(
             &self,
             _cx: &Cx,
@@ -4505,6 +4549,54 @@ mod tests {
         )));
 
         let response = dispatch_ioctl_for_testing(&fuse, 11, 0, EXT4_IOC_GETVERSION, &[], 3);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+    }
+
+    #[test]
+    fn dispatch_ioctl_setversion_passes_generation_to_backend_and_commits() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &options,
+        );
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            11,
+            0,
+            EXT4_IOC_SETVERSION,
+            &0x2468_ACED_u32.to_ne_bytes(),
+            0,
+        );
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlWrite),
+                IoctlCall::SetVersion(InodeNumber(11), 0x2468_ACED),
+                IoctlCall::Commit,
+                IoctlCall::End(RequestOp::IoctlWrite),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_setversion_rejects_too_small_input_buffer() {
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
+            &options,
+        );
+
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 11, 0, EXT4_IOC_SETVERSION, &[0x01, 0x02, 0x03], 0);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
     }
 

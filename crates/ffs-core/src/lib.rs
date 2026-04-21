@@ -15750,6 +15750,61 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn set_inode_generation(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        generation: u32,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let canonical = Self::ext4_canonical_inode(ino);
+                let alloc_mutex = self.require_alloc_state()?;
+                let block_dev = self.block_device_adapter();
+                let sb = self
+                    .ext4_superblock()
+                    .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+                let csum_seed = sb.csum_seed();
+
+                let mut inode = self.read_inode_with_scope(cx, scope, canonical)?;
+                inode.generation = generation;
+
+                if let Some(tx) = &mut scope.tx {
+                    let tx_dev = TransactionBlockAdapter {
+                        base: &block_dev,
+                        tx: Mutex::new(tx),
+                    };
+                    let alloc = alloc_mutex.lock();
+                    ffs_inode::write_inode(
+                        cx,
+                        &tx_dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        canonical,
+                        &inode,
+                        csum_seed,
+                    )?;
+                } else {
+                    let alloc = alloc_mutex.lock();
+                    ffs_inode::write_inode(
+                        cx,
+                        &block_dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        canonical,
+                        &inode,
+                        csum_seed,
+                    )?;
+                }
+                Ok(())
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "set_inode_generation is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
     fn get_encryption_policy_v1(
         &self,
         cx: &Cx,
@@ -20526,6 +20581,44 @@ mod tests {
             .get_inode_generation(&cx, &mut scope, InodeNumber(11))
             .unwrap();
         assert_eq!(generation, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn set_inode_generation_updates_ext4_inode_and_survives_reopen() {
+        let Some(tmp_path) = create_temp_ext4_image("setversion") else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let opts = OpenOptions {
+            ext4_journal_replay_mode: Ext4JournalReplayMode::Skip,
+            ..OpenOptions::default()
+        };
+        let requested = 0x1357_9BDF_u32;
+        let ino;
+
+        {
+            let fs = OpenFs::open_with_options(&cx, &tmp_path, &opts)
+                .expect("open ext4 image for setversion");
+            let created = fs
+                .create(&cx, InodeNumber(2), OsStr::new("version.txt"), 0o644, 0, 0)
+                .expect("create version.txt");
+            ino = created.ino;
+
+            fs.set_inode_generation(&cx, &mut RequestScope::empty(), ino, requested)
+                .expect("set inode generation");
+
+            let current = fs
+                .get_inode_generation(&cx, &mut RequestScope::empty(), ino)
+                .expect("read updated inode generation");
+            assert_eq!(current, requested);
+        }
+
+        let reopened = OpenFs::open_with_options(&cx, &tmp_path, &opts)
+            .expect("reopen ext4 image after setversion");
+        let persisted = reopened
+            .get_inode_generation(&cx, &mut RequestScope::empty(), ino)
+            .expect("read persisted inode generation");
+        assert_eq!(persisted, requested);
     }
 
     #[test]

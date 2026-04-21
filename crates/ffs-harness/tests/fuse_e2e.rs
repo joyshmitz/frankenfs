@@ -38,6 +38,8 @@ const FS_IOC_GETFSLABEL_CMD: u32 = 0x8100_9431;
 const FS_IOC_SETFSLABEL_CMD: u32 = 0x4100_9432;
 const EXT4_IOC_GETFLAGS_CMD: u32 = 0x8008_6601;
 const EXT4_IOC_SETFLAGS_CMD: u32 = 0x4008_6602;
+const EXT4_IOC_GETVERSION_CMD: u32 = 0x8008_6603;
+const EXT4_IOC_SETVERSION_CMD: u32 = 0x4008_6604;
 const EXT4_IOC_MOVE_EXT_CMD: u32 = 0xC028_660F;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
@@ -944,6 +946,68 @@ with open(path, 'r+b', buffering=0) as fh:
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("decode ext4 ioctl JSON")
+}
+
+fn ext4_inode_generation_ioctl(path: &Path, command: &str, generation: Option<u32>) -> Value {
+    let script = r"
+import fcntl, json, struct, sys
+
+EXT4_IOC_GETVERSION = 0x80086603
+EXT4_IOC_SETVERSION = 0x40086604
+
+command = sys.argv[1]
+path = sys.argv[2]
+word_size = struct.calcsize('@L')
+
+def setversion_buffer(generation: int) -> bytes:
+    if word_size >= 8:
+        return struct.pack('@Q', generation)
+    return struct.pack('@I', generation)
+
+mode = 'r+b' if command == 'set' else 'rb'
+with open(path, mode, buffering=0) as fh:
+    try:
+        if command == 'get':
+            buffer = bytearray(word_size)
+            fcntl.ioctl(fh.fileno(), EXT4_IOC_GETVERSION, buffer, True)
+            print(json.dumps({
+                'generation': struct.unpack_from('@I', buffer, 0)[0],
+            }))
+        elif command == 'set':
+            generation = int(sys.argv[3], 0)
+            buffer = setversion_buffer(generation)
+            fcntl.ioctl(fh.fileno(), EXT4_IOC_SETVERSION, buffer)
+            print(json.dumps({'ok': True}))
+        else:
+            raise ValueError(f'unsupported ioctl command: {command}')
+    except OSError as exc:
+        print(json.dumps({
+            'errno': exc.errno,
+            'message': str(exc),
+        }))
+        sys.exit(0)
+    ";
+
+    let mut args = vec![
+        "-c".to_owned(),
+        script.to_owned(),
+        command.to_owned(),
+        path.to_str().expect("path utf8").to_owned(),
+    ];
+    if let Some(generation) = generation {
+        args.push(generation.to_string());
+    }
+
+    let output = Command::new("python3")
+        .args(args)
+        .output()
+        .expect("python3 ext4 setversion ioctl");
+    assert!(
+        output.status.success(),
+        "python3 ext4 setversion ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode ext4 setversion ioctl JSON")
 }
 
 fn ext4_get_encryption_policy_ioctl(path: &Path) -> Value {
@@ -5524,6 +5588,116 @@ finally:
             "EXT4_IOC_GETVERSION via mounted path failed unexpectedly: stdout={stdout}, stderr={stderr}"
         );
     });
+}
+
+#[test]
+fn ext4_fuse_ioctl_setversion_roundtrips_via_mounted_path() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-setversion.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_setversion_roundtrip";
+    let path = mnt.join("version-target.txt");
+    fs::write(&path, b"setversion mounted path target\n").expect("create setversion target");
+
+    let original_report = ext4_inode_generation_ioctl(&path, "get", None);
+    let get_trace = read_ioctl_trace(&ioctl_trace_path);
+    if let Some(errno) = original_report["errno"].as_i64() {
+        let transport_errno = errno == i64::from(libc::ENOTTY)
+            || errno == i64::from(libc::EINVAL)
+            || errno == EOPNOTSUPP_ERRNO;
+        assert!(
+            transport_errno,
+            "unexpected errno for mounted-path GETVERSION preflight: {original_report}"
+        );
+        assert!(
+            !trace_contains_cmd(&get_trace, EXT4_IOC_GETVERSION_CMD),
+            "GETVERSION returned transport errno after reaching ffs-fuse::ioctl: {get_trace}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "SKIP",
+            Some("kernel_or_vfs_rejected_getversion_before_userspace"),
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&get_trace, EXT4_IOC_GETVERSION_CMD),
+        "successful GETVERSION should hit ffs-fuse::ioctl: {get_trace}"
+    );
+
+    let original = u32::try_from(
+        original_report["generation"]
+            .as_u64()
+            .expect("original generation u64"),
+    )
+    .expect("original generation should fit u32");
+    let requested = original ^ 0x1357_9BDF_u32;
+
+    let set_report = ext4_inode_generation_ioctl(&path, "set", Some(requested));
+    let set_trace = read_ioctl_trace(&ioctl_trace_path);
+    if let Some(errno) = set_report["errno"].as_i64() {
+        let transport_errno = errno == i64::from(libc::ENOTTY) || errno == i64::from(libc::EINVAL);
+        assert!(
+            transport_errno,
+            "unexpected errno for mounted-path SETVERSION: {set_report}"
+        );
+        assert!(
+            !trace_contains_cmd(&set_trace, EXT4_IOC_SETVERSION_CMD),
+            "SETVERSION returned transport errno after reaching ffs-fuse::ioctl: {set_trace}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "SKIP",
+            Some("kernel_or_vfs_rejected_setversion_before_userspace"),
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&set_trace, EXT4_IOC_SETVERSION_CMD),
+        "successful SETVERSION should hit ffs-fuse::ioctl: {set_trace}"
+    );
+    assert!(
+        set_report["errno"].is_null(),
+        "mounted-path SETVERSION should succeed on rw ext4 mount: {set_report}"
+    );
+
+    let updated_report = ext4_inode_generation_ioctl(&path, "get", None);
+    let updated_trace = read_ioctl_trace(&ioctl_trace_path);
+    assert!(
+        trace_contains_cmd(&updated_trace, EXT4_IOC_GETVERSION_CMD),
+        "post-set GETVERSION should hit ffs-fuse::ioctl: {updated_trace}"
+    );
+    assert!(
+        updated_report["errno"].is_null(),
+        "post-set GETVERSION should succeed after mounted-path SETVERSION: {updated_report}"
+    );
+    assert_eq!(
+        updated_report["generation"].as_u64(),
+        Some(u64::from(requested)),
+        "mounted-path GETVERSION should roundtrip the SETVERSION payload: {updated_report}"
+    );
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("setversion_roundtrip_via_getversion"),
+    );
 }
 
 #[test]

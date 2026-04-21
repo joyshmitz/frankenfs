@@ -719,6 +719,19 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Set ext4 inode generation (`EXT4_IOC_SETVERSION`).
+    fn set_inode_generation(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _generation: u32,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "set_inode_generation is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Get the legacy fscrypt v1 encryption policy (`FS_IOC_GET_ENCRYPTION_POLICY`).
     ///
     /// Returns the raw 12-byte `struct fscrypt_policy_v1` payload for the given
