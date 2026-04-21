@@ -96,6 +96,32 @@ fn create_test_image(dir: &Path) -> std::path::PathBuf {
     create_test_image_with_size(dir, 4 * 1024 * 1024)
 }
 
+fn create_test_image_with_ext4_incompat_features(
+    dir: &Path,
+    image_size_bytes: u64,
+    incompat_bits: u32,
+) -> std::path::PathBuf {
+    let image = create_test_image_with_size(dir, image_size_bytes);
+    let mut data = fs::read(&image).expect("read ext4 image");
+    let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+    let incompat_off = sb_off + 0x60;
+    let checksum_off = sb_off + ffs_types::EXT4_SB_CHECKSUM_OFFSET;
+    let mut feature_incompat = u32::from_le_bytes(
+        data[incompat_off..incompat_off + 4]
+            .try_into()
+            .expect("feature_incompat bytes"),
+    );
+    feature_incompat |= incompat_bits;
+    data[incompat_off..incompat_off + 4].copy_from_slice(&feature_incompat.to_le_bytes());
+    let checksum = ffs_ondisk::ext4::ext4_chksum(
+        !0u32,
+        &data[sb_off..sb_off + ffs_types::EXT4_SB_CHECKSUM_OFFSET],
+    );
+    data[checksum_off..checksum_off + 4].copy_from_slice(&checksum.to_le_bytes());
+    fs::write(&image, data).expect("rewrite ext4 image with incompat bits");
+    image
+}
+
 #[allow(clippy::too_many_lines)]
 fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::PathBuf {
     let image = dir.join("test.ext4");
@@ -2487,6 +2513,237 @@ fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
 }
 
 #[test]
+fn fuse_ioctl_ext4_setflags_enables_compr_and_roundtrips_data_on_mounted_path() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_ext4_incompat_features(
+        tmp.path(),
+        4 * 1024 * 1024,
+        ffs_ondisk::Ext4IncompatFeatures::COMPRESSION.0,
+    );
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-compr-setflags.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_setflags_compr_enable";
+    let path = mnt.join("compr-enable.bin");
+    fs::write(&path, b"").expect("create empty file for COMPR enable");
+
+    let original_report = ext4_inode_flags_ioctl(&path, "get", None);
+    let get_trace = read_ioctl_trace(&ioctl_trace_path);
+    if original_report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&get_trace, EXT4_IOC_GETFLAGS_CMD),
+            "GETFLAGS returned EOPNOTSUPP after reaching ffs-fuse::ioctl: {get_trace}"
+        );
+        eprintln!(
+            "EXT4 GETFLAGS ioctl skipped for COMPR enable: kernel/VFS returned EOPNOTSUPP \
+             before ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&get_trace, EXT4_IOC_GETFLAGS_CMD),
+        "successful GETFLAGS should hit ffs-fuse::ioctl: {get_trace}"
+    );
+    let original = u32::try_from(
+        original_report["flags"]
+            .as_u64()
+            .expect("original COMPR flags u64"),
+    )
+    .expect("original COMPR flags should fit u32");
+    assert_ne!(
+        original & ffs_types::EXT4_EXTENTS_FL,
+        0,
+        "fresh ext4 file should start extent-based before COMPR enable: {original_report}"
+    );
+
+    let set_report =
+        ext4_inode_flags_ioctl(&path, "set", Some(original | ffs_types::EXT4_COMPR_FL));
+    let set_trace = read_ioctl_trace(&ioctl_trace_path);
+    if set_report["errno"].as_i64() == Some(i64::from(libc::ENOTTY)) {
+        assert!(
+            !trace_contains_cmd(&set_trace, EXT4_IOC_SETFLAGS_CMD),
+            "COMPR SETFLAGS returned ENOTTY after reaching ffs-fuse::ioctl: {set_trace}"
+        );
+        eprintln!(
+            "EXT4 COMPR SETFLAGS ioctl skipped: kernel/VFS returned ENOTTY before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&set_trace, EXT4_IOC_SETFLAGS_CMD),
+        "successful COMPR SETFLAGS should hit ffs-fuse::ioctl: {set_trace}"
+    );
+    assert!(
+        set_report["errno"].is_null(),
+        "ext4 COMPR enable via SETFLAGS should succeed on rw mount: {set_report}"
+    );
+
+    let updated_report = ext4_inode_flags_ioctl(&path, "get", None);
+    let updated = u32::try_from(
+        updated_report["flags"]
+            .as_u64()
+            .expect("updated COMPR flags u64"),
+    )
+    .expect("updated COMPR flags should fit u32");
+    assert_ne!(
+        updated & ffs_types::EXT4_COMPR_FL,
+        0,
+        "SETFLAGS should publish EXT4_COMPR_FL after COMPR enable: {updated_report}"
+    );
+    assert_eq!(
+        updated & ffs_types::EXT4_EXTENTS_FL,
+        0,
+        "COMPR enable should clear EXTENTS on the mounted path: {updated_report}"
+    );
+
+    let payload = vec![b'C'; 4096];
+    fs::write(&path, &payload).expect("write compressible payload after COMPR enable");
+    let readback = fs::read(&path).expect("readback after COMPR enable");
+    assert_eq!(
+        readback, payload,
+        "COMPR-enabled mounted path should preserve file bytes across write/read"
+    );
+
+    let post_write_report = ext4_inode_flags_ioctl(&path, "get", None);
+    let post_write = u32::try_from(
+        post_write_report["flags"]
+            .as_u64()
+            .expect("post-write COMPR flags u64"),
+    )
+    .expect("post-write COMPR flags should fit u32");
+    assert_ne!(
+        post_write & ffs_types::EXT4_COMPRBLK_FL,
+        0,
+        "compressed mounted-path write should set COMPRBLK after COMPR enable: {post_write_report}"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("compr_flag_enabled_and_compressed_write_roundtrips"),
+    );
+}
+
+#[test]
+fn fuse_ioctl_ext4_setflags_rejects_compr_without_compression_feature() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-compr-reject.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_setflags_compr_requires_feature";
+    let path = mnt.join("compr-reject.bin");
+    fs::write(&path, b"").expect("create empty file for COMPR rejection");
+
+    let original_report = ext4_inode_flags_ioctl(&path, "get", None);
+    let get_trace = read_ioctl_trace(&ioctl_trace_path);
+    if original_report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&get_trace, EXT4_IOC_GETFLAGS_CMD),
+            "GETFLAGS returned EOPNOTSUPP after reaching ffs-fuse::ioctl: {get_trace}"
+        );
+        eprintln!(
+            "EXT4 GETFLAGS ioctl skipped for COMPR rejection: kernel/VFS returned EOPNOTSUPP \
+             before ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&get_trace, EXT4_IOC_GETFLAGS_CMD),
+        "successful GETFLAGS should hit ffs-fuse::ioctl: {get_trace}"
+    );
+    let original = u32::try_from(
+        original_report["flags"]
+            .as_u64()
+            .expect("original rejection flags u64"),
+    )
+    .expect("original rejection flags should fit u32");
+
+    let set_report =
+        ext4_inode_flags_ioctl(&path, "set", Some(original | ffs_types::EXT4_COMPR_FL));
+    let set_trace = read_ioctl_trace(&ioctl_trace_path);
+    if set_report["errno"].as_i64() == Some(i64::from(libc::ENOTTY)) {
+        assert!(
+            !trace_contains_cmd(&set_trace, EXT4_IOC_SETFLAGS_CMD),
+            "COMPR rejection SETFLAGS returned ENOTTY after reaching ffs-fuse::ioctl: {set_trace}"
+        );
+        eprintln!(
+            "EXT4 COMPR rejection SETFLAGS ioctl skipped: kernel/VFS returned ENOTTY before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&set_trace, EXT4_IOC_SETFLAGS_CMD),
+        "rejected COMPR SETFLAGS should still hit ffs-fuse::ioctl: {set_trace}"
+    );
+    assert_eq!(
+        set_report["errno"].as_i64(),
+        Some(EOPNOTSUPP_ERRNO),
+        "COMPR enable without the COMPRESSION feature should surface EOPNOTSUPP: {set_report}"
+    );
+    assert_eq!(
+        set_report["message"].as_str(),
+        Some("[Errno 95] Operation not supported"),
+        "COMPR rejection should keep the stable mounted-path errno string: {set_report}"
+    );
+
+    let updated_report = ext4_inode_flags_ioctl(&path, "get", None);
+    let updated = u32::try_from(
+        updated_report["flags"]
+            .as_u64()
+            .expect("updated rejection flags u64"),
+    )
+    .expect("updated rejection flags should fit u32");
+    assert_eq!(
+        updated & ffs_types::EXT4_COMPR_FL,
+        0,
+        "failed COMPR enable must not set EXT4_COMPR_FL: {updated_report}"
+    );
+    assert_eq!(
+        updated, original,
+        "failed COMPR enable must leave mounted-path inode flags unchanged: {updated_report}"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("compr_enable_without_feature_rejected"),
+    );
+}
+
+#[test]
 fn fuse_ioctl_ext4_get_encryption_policy_v1_reports_legacy_policy_on_mounted_path() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -2963,6 +3220,173 @@ fn fuse_ioctl_ext4_move_ext_rejects_hole_backed_range_on_mounted_path() {
     );
 
     emit_scenario_result(scenario_id, "PASS", Some("errno=95_hole_backed_range"));
+}
+
+/// Mounted-path proof that ext4 mutation ioctls (SETFLAGS and MOVE_EXT) surface
+/// a deterministic read-only rejection when the mount is `read_only: true`.
+///
+/// The backend already rejects these ioctls with `EROFS` at dispatch time for
+/// read-only sessions (see `ffs-fuse` unit tests), but until now the
+/// harness-level, real-kernel path only proved the writable happy-path and the
+/// writable hole-backed rejection.  This scenario stitches the two phases
+/// together: seed source + donor files via a brief rw mount, drop the session,
+/// remount the same image read-only, and then prove — against the real FUSE
+/// transport — that both mutation ioctls fail and the seeded file contents
+/// remain byte-identical afterwards.
+///
+/// Per bd-l1sr3 the rejection path is a documented disjunction: either the
+/// kernel/VFS short-circuits before dispatch (trace does **not** contain the
+/// command) or the request reaches `ffs-fuse::ioctl` which then returns
+/// `EROFS` (trace **does** contain it).  Both are acceptable; the
+/// non-acceptable outcome is "ffs-fuse dispatched and mutated the image
+/// anyway", which the post-state byte compare pins down.
+#[test]
+fn fuse_ioctl_ext4_mutation_ioctls_fast_fail_erofs_on_read_only_mount() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 8 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    // ── Phase 1: rw mount, seed source + donor, then tear down. ────────────
+    // `auto_unmount: true` so the kernel FUSE mount is released when the
+    // `BackgroundSession` is dropped, leaving the backing image ready for a
+    // fresh ro remount.  The seed payloads are 4 blocks of distinct fill each
+    // so any accidental MOVE_EXT swap through the ro-rejection path is
+    // instantly visible in the post-state compare.
+    let setup_trace_path: PathBuf = tmp.path().join("ioctl-ext4-erofs-setup.log");
+    let setup_mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: true,
+        ioctl_trace_path: Some(setup_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let block_size = 4096_usize;
+    let source_rel = "erofs_source.bin";
+    let donor_rel = "erofs_donor.bin";
+    let source_payload: Vec<u8> = std::iter::repeat_n(0x5A_u8, block_size * 4).collect();
+    let donor_payload: Vec<u8> = std::iter::repeat_n(0xA5_u8, block_size * 4).collect();
+    {
+        let Some(setup_session) = try_mount_ffs_rw_with_options(&image, &mnt, &setup_mount_opts)
+        else {
+            return;
+        };
+        fs::write(mnt.join(source_rel), &source_payload).expect("write ro source seed");
+        fs::write(mnt.join(donor_rel), &donor_payload).expect("write ro donor seed");
+        drop(setup_session);
+    }
+    // Give the kernel a beat to release the mount before Phase 2 rebinds it.
+    thread::sleep(Duration::from_millis(500));
+
+    // ── Phase 2: ro mount, attempt mutation ioctls, assert EROFS + no drift.
+    let ro_trace_path: PathBuf = tmp.path().join("ioctl-ext4-erofs.log");
+    let ro_mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ro_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_ro_session) = try_mount_ffs_with_options(&image, &mnt, &ro_mount_opts) else {
+        return;
+    };
+
+    let source_path = mnt.join(source_rel);
+    let donor_path = mnt.join(donor_rel);
+
+    let source_before = fs::read(&source_path).expect("read source on ro mount");
+    let donor_before = fs::read(&donor_path).expect("read donor on ro mount");
+    assert_eq!(
+        source_before, source_payload,
+        "ro remount must expose seeded source bytes identically"
+    );
+    assert_eq!(
+        donor_before, donor_payload,
+        "ro remount must expose seeded donor bytes identically"
+    );
+
+    let scenario_id = "ext4_ioctl_mutation_rejects_erofs_on_ro_mount";
+
+    // SETFLAGS: adding NOATIME to a file on an ro mount must not succeed.
+    let setflags_report =
+        ext4_inode_flags_ioctl(&source_path, "set", Some(ffs_types::EXT4_NOATIME_FL));
+    let setflags_trace = read_ioctl_trace(&ro_trace_path);
+    match setflags_report["errno"].as_i64() {
+        Some(errno) if errno == i64::from(libc::EROFS) => {
+            // Accepted: either the kernel/VFS short-circuited, or ffs-fuse
+            // rejected after dispatch — both land EROFS on the caller.
+        }
+        Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO => {
+            assert!(
+                !trace_contains_cmd(&setflags_trace, EXT4_IOC_SETFLAGS_CMD),
+                "SETFLAGS surfaced transport-unsupported errno after reaching \
+                 ffs-fuse::ioctl on ro mount: {setflags_trace}"
+            );
+            eprintln!(
+                "SETFLAGS ro rejection: kernel/VFS returned transport-unsupported errno \
+                 before ffs-fuse::ioctl — acceptable per documented transport behaviour"
+            );
+        }
+        other => panic!(
+            "unexpected SETFLAGS errno on ro mount: {other:?} report={setflags_report} \
+             trace={setflags_trace}"
+        ),
+    }
+
+    // MOVE_EXT: swap 1 block between source and donor.  On ro, must reject.
+    let move_ext_report = ext4_move_ext_ioctl(&source_path, &donor_path, 0, 0, 1);
+    let move_ext_trace = read_ioctl_trace(&ro_trace_path);
+    if move_ext_report["timeout"].as_bool() == Some(true) {
+        assert!(
+            !trace_contains_cmd(&move_ext_trace, EXT4_IOC_MOVE_EXT_CMD),
+            "MOVE_EXT timed out after reaching ffs-fuse::ioctl on ro mount: {move_ext_trace}"
+        );
+        eprintln!(
+            "MOVE_EXT ro rejection skipped: kernel/FUSE stack timed out before ffs-fuse::ioctl"
+        );
+        return;
+    }
+    match move_ext_report["errno"].as_i64() {
+        Some(errno) if errno == i64::from(libc::EROFS) => {}
+        Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO => {
+            assert!(
+                !trace_contains_cmd(&move_ext_trace, EXT4_IOC_MOVE_EXT_CMD),
+                "MOVE_EXT surfaced transport-unsupported errno after reaching \
+                 ffs-fuse::ioctl on ro mount: {move_ext_trace}"
+            );
+            eprintln!(
+                "MOVE_EXT ro rejection: kernel/VFS returned transport-unsupported errno \
+                 before ffs-fuse::ioctl — acceptable per documented transport behaviour"
+            );
+        }
+        other => panic!(
+            "unexpected MOVE_EXT errno on ro mount: {other:?} report={move_ext_report} \
+             trace={move_ext_trace}"
+        ),
+    }
+
+    // Post-state byte compare: neither rejected mutation may have perturbed
+    // the seeded file contents — this is the real "no accidental mutation"
+    // invariant the bead is protecting.
+    let source_after = fs::read(&source_path).expect("read source after ro ioctls");
+    let donor_after = fs::read(&donor_path).expect("read donor after ro ioctls");
+    assert_eq!(
+        source_after, source_payload,
+        "rejected SETFLAGS/MOVE_EXT must not mutate source bytes on ro mount"
+    );
+    assert_eq!(
+        donor_after, donor_payload,
+        "rejected MOVE_EXT must not mutate donor bytes on ro mount"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("setflags+move_ext=EROFS_no_drift"),
+    );
 }
 
 #[test]
