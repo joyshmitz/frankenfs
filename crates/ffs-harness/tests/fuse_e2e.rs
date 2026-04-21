@@ -4917,6 +4917,25 @@ fn ext4_fuse_flush_emits_scenario_result_and_preserves_data() {
 }
 
 #[test]
+fn ext4_fuse_read_only_flush_succeeds_without_data_drift() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs(&image, &mnt) else {
+        return;
+    };
+
+    assert_read_only_flush_contract(&mnt.join("hello.txt"), "ext4_ro_flush_succeeds_no_drift");
+}
+
+#[test]
 fn fuse_fsync_after_multiple_writes() {
     with_rw_mount(|mnt| {
         let path = mnt.join("multi_write_sync.txt");
@@ -5213,6 +5232,16 @@ fn snapshot_directory_entries(path: &Path) -> HashSet<String> {
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect()
+}
+
+fn assert_read_only_flush_contract(path: &Path, scenario_id: &str) {
+    let before = snapshot_file_state(path);
+    let mut file = fs::File::open(path).expect("open file for read-only flush contract");
+    file.flush().expect("read-only flush should succeed");
+    drop(file);
+
+    assert_file_state_unchanged(path, &before, "read-only flush");
+    emit_scenario_result(scenario_id, "PASS", Some("flush_ok_no_drift"));
 }
 
 fn assert_read_only_file_sync_contract(
@@ -8141,6 +8170,13 @@ fn btrfs_fuse_flush_emits_scenario_result_and_preserves_data() {
         let content = fs::read_to_string(&path).expect("read after btrfs flush+close");
         assert_eq!(content, "flushed content\n");
         emit_scenario_result(scenario_id, "PASS", Some("explicit_flush_and_close"));
+    });
+}
+
+#[test]
+fn btrfs_fuse_read_only_flush_succeeds_without_data_drift() {
+    with_btrfs_ro_sync_fixture(|file_path, _, _| {
+        assert_read_only_flush_contract(file_path, "btrfs_ro_flush_succeeds_no_drift");
     });
 }
 
