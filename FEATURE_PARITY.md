@@ -90,6 +90,8 @@ Mounted-path btrfs read-only namespace coverage now also freezes exact `EROFS`
 for `create`, `mkdir`, `link`, and `symlink`, with no directory-entry or seed-file drift.
 Mounted-path btrfs read-only regular-file coverage now also freezes exact `EROFS`
 for create-via-write and overwrite-on-existing-file paths, with no file-byte or directory-entry drift.
+Mounted-path btrfs read-only namespace-removal coverage now also freezes exact `EROFS`
+for `unlink`, `rmdir`, and `rename`, with no directory-entry drift and no surviving-file data drift.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

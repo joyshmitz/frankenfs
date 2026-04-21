@@ -5220,6 +5220,84 @@ fn assert_read_only_regular_write_contract(dir: &Path, seed: &Path, scenario_id:
     );
 }
 
+fn assert_read_only_unlink_rmdir_and_rename_contract(
+    dir: &Path,
+    keep_file: &Path,
+    empty_dir: &Path,
+    rename_source: &Path,
+    scenario_id: &str,
+) {
+    let entries_before = snapshot_directory_entries(dir);
+    let keep_before = snapshot_file_state(keep_file);
+    let rename_before = snapshot_file_state(rename_source);
+
+    let unlink_err = fs::remove_file(keep_file).expect_err("read-only unlink should fail");
+    assert_eq!(
+        unlink_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only unlink should surface exact EROFS: {unlink_err}"
+    );
+    assert!(
+        fs::symlink_metadata(keep_file).is_ok(),
+        "read-only unlink must leave the source file in place"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected unlink must not change visible directory entries"
+    );
+    assert_file_state_unchanged(keep_file, &keep_before, "rejected unlink");
+    assert_file_state_unchanged(rename_source, &rename_before, "rejected unlink");
+
+    let rmdir_err = fs::remove_dir(empty_dir).expect_err("read-only rmdir should fail");
+    assert_eq!(
+        rmdir_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only rmdir should surface exact EROFS: {rmdir_err}"
+    );
+    assert!(
+        fs::symlink_metadata(empty_dir).is_ok(),
+        "read-only rmdir must leave the empty directory in place"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected rmdir must not change visible directory entries"
+    );
+    assert_file_state_unchanged(keep_file, &keep_before, "rejected rmdir");
+    assert_file_state_unchanged(rename_source, &rename_before, "rejected rmdir");
+
+    let rename_target = dir.join("readonly_rename_target.txt");
+    let rename_err =
+        fs::rename(rename_source, &rename_target).expect_err("read-only rename should fail");
+    assert_eq!(
+        rename_err.raw_os_error(),
+        Some(libc::EROFS),
+        "read-only rename should surface exact EROFS: {rename_err}"
+    );
+    assert!(
+        fs::symlink_metadata(rename_source).is_ok(),
+        "read-only rename must leave the source entry in place"
+    );
+    assert!(
+        fs::symlink_metadata(&rename_target).is_err(),
+        "read-only rename must not create the destination entry"
+    );
+    assert_eq!(
+        snapshot_directory_entries(dir),
+        entries_before,
+        "rejected rename must not change visible directory entries"
+    );
+    assert_file_state_unchanged(keep_file, &keep_before, "rejected rename");
+    assert_file_state_unchanged(rename_source, &rename_before, "rejected rename");
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("unlink+rmdir+rename=EROFS_no_drift"),
+    );
+}
+
 #[test]
 fn fuse_xattr_set_get_list_remove() {
     with_rw_mount(|mnt| {
@@ -5802,6 +5880,55 @@ fn create_btrfs_test_image_with_seeded_sync_fixture(dir: &Path) -> std::path::Pa
     image
 }
 
+fn create_btrfs_test_image_with_seeded_namespace_removal_fixture(dir: &Path) -> std::path::PathBuf {
+    let image = dir.join("test.btrfs");
+    let seed_root = dir.join("seed_root");
+    let seed_workspace = seed_root.join(BTRFS_TEST_WORKSPACE);
+    let empty_dir = seed_workspace.join("readonly_empty_dir");
+
+    let f = fs::File::create(&image).expect("create seeded btrfs namespace removal image");
+    f.set_len(128 * 1024 * 1024)
+        .expect("set seeded btrfs namespace removal image size");
+    drop(f);
+
+    fs::create_dir_all(&empty_dir).expect("create seeded btrfs namespace removal dir");
+    fs::set_permissions(&seed_root, fs::Permissions::from_mode(0o777))
+        .expect("chmod seeded btrfs namespace removal root");
+    fs::set_permissions(&seed_workspace, fs::Permissions::from_mode(0o777))
+        .expect("chmod seeded btrfs namespace removal workspace");
+    fs::set_permissions(&empty_dir, fs::Permissions::from_mode(0o777))
+        .expect("chmod seeded btrfs namespace removal dir");
+    fs::write(
+        seed_workspace.join("readonly_unlink_seed.txt"),
+        b"readonly btrfs unlink seed\n",
+    )
+    .expect("write seeded btrfs unlink file");
+    fs::write(
+        seed_workspace.join("readonly_rename_source.txt"),
+        b"readonly btrfs rename source\n",
+    )
+    .expect("write seeded btrfs rename source file");
+
+    let out = Command::new("mkfs.btrfs")
+        .args([
+            "-f",
+            "-L",
+            "ffs-btrfs-e2e",
+            "--rootdir",
+            seed_root.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("mkfs.btrfs seeded namespace removal image");
+    assert!(
+        out.status.success(),
+        "mkfs.btrfs seeded namespace removal image failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    image
+}
+
 fn try_mount_btrfs_ro(image: &Path, mountpoint: &Path) -> Option<fuser::BackgroundSession> {
     let cx = Cx::for_testing();
     let opts = OpenOptions {
@@ -6190,6 +6317,50 @@ fn btrfs_fuse_read_only_regular_writes_report_erofs_without_file_or_dirent_drift
         &workspace,
         &seed,
         "btrfs_ro_regular_writes_reject_erofs_no_drift",
+    );
+}
+
+#[test]
+fn btrfs_fuse_read_only_unlink_rmdir_and_rename_report_erofs_without_dirent_drift() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image_with_seeded_namespace_removal_fixture(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_btrfs_ro(&image, &mnt) else {
+        return;
+    };
+
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    let keep_file = workspace.join("readonly_unlink_seed.txt");
+    let empty_dir = workspace.join("readonly_empty_dir");
+    let rename_source = workspace.join("readonly_rename_source.txt");
+    assert_eq!(
+        fs::read(&keep_file).expect("read seeded btrfs unlink file"),
+        b"readonly btrfs unlink seed\n",
+        "read-only remount must preserve the seeded unlink target bytes"
+    );
+    assert_eq!(
+        fs::read(&rename_source).expect("read seeded btrfs rename source file"),
+        b"readonly btrfs rename source\n",
+        "read-only remount must preserve the seeded rename source bytes"
+    );
+    assert!(
+        empty_dir.is_dir(),
+        "read-only remount must preserve the seeded empty directory"
+    );
+
+    assert_read_only_unlink_rmdir_and_rename_contract(
+        &workspace,
+        &keep_file,
+        &empty_dir,
+        &rename_source,
+        "btrfs_ro_unlink_rmdir_rename_reject_erofs_no_drift",
     );
 }
 
