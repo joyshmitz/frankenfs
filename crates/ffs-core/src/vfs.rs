@@ -735,6 +735,22 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Get the fscrypt encryption policy (`FS_IOC_GET_ENCRYPTION_POLICY_EX`).
+    ///
+    /// Returns the policy version (0 for v1, 2 for v2) and the raw policy bytes.
+    /// For v1: 12 bytes; for v2: 24 bytes.
+    /// Returns `ENODATA` if the inode is not encrypted.
+    fn get_encryption_policy_ex(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<(u8, Vec<u8>)> {
+        Err(FfsError::UnsupportedFeature(
+            "get_encryption_policy_ex is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Get the filesystem label (`FS_IOC_GETFSLABEL`).
     ///
     /// Returns the filesystem label as a null-terminated byte vector.

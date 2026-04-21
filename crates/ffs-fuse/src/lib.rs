@@ -72,6 +72,8 @@ const EXT4_IOC_GETFLAGS: u32 = 0x8008_6601;
 const EXT4_IOC_GETVERSION: u32 = 0x8008_6603;
 /// `FS_IOC_GET_ENCRYPTION_POLICY` = `_IOW('f', 21, struct fscrypt_policy_v1)` on x86_64.
 const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
+/// `FS_IOC_GET_ENCRYPTION_POLICY_EX` = `_IOWR('f', 22, struct fscrypt_get_policy_ex_arg)` on x86_64.
+const FS_IOC_GET_ENCRYPTION_POLICY_EX: u32 = 0xC016_6616;
 /// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
@@ -79,6 +81,8 @@ const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
+const FSCRYPT_POLICY_V2_SIZE: usize = 24;
+const FSCRYPT_POLICY_EX_HEADER_SIZE: usize = 8;
 const FIEMAP_START_OFFSET: usize = 0;
 const FIEMAP_LENGTH_OFFSET: usize = 8;
 const FIEMAP_FLAGS_OFFSET: usize = 16;
@@ -1569,6 +1573,38 @@ impl FrankenFuse {
                         .get_encryption_policy_v1(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(policy) => IoctlResult::Data(policy.to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FS_IOC_GET_ENCRYPTION_POLICY_EX => {
+                // The _EX ioctl uses a struct fscrypt_get_policy_ex_arg:
+                //   policy_size: u64 (in/out)
+                //   policy: union { v1: [u8; 12], v2: [u8; 24] }
+                // Input: caller sets policy_size to buffer capacity
+                // Output: kernel sets policy_size to actual size
+                let min_out_size = FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V1_SIZE;
+                if (out_size as usize) < min_out_size {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner
+                        .ops
+                        .get_encryption_policy_ex(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok((version, policy)) => {
+                        let policy_size = policy.len() as u64;
+                        let mut buf = vec![0_u8; FSCRYPT_POLICY_EX_HEADER_SIZE + policy.len()];
+                        buf[..8].copy_from_slice(&policy_size.to_ne_bytes());
+                        buf[8..8 + policy.len()].copy_from_slice(&policy);
+                        if version == 0 {
+                            // v1 policy: version byte is already 0 in position 8
+                        } else {
+                            // v2 policy: set version byte at position 8
+                            buf[8] = version;
+                        }
+                        IoctlResult::Data(buf)
+                    }
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -3651,6 +3687,7 @@ mod tests {
         Fiemap(InodeNumber, u64, u64),
         Fsync(InodeNumber, u64, bool),
         GetEncryptionPolicy(InodeNumber),
+        GetEncryptionPolicyEx(InodeNumber),
         GetFlags(InodeNumber),
         GetFsLabel,
         Getattr(InodeNumber),
@@ -3975,6 +4012,26 @@ mod tests {
             self.encryption_policy.ok_or_else(|| {
                 FfsError::UnsupportedFeature("get_encryption_policy_v1 not configured".into())
             })
+        }
+
+        fn get_encryption_policy_ex(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<(u8, Vec<u8>)> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetEncryptionPolicyEx(ino));
+            if let Some(errno) = self.encryption_policy_errno {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(errno)));
+            }
+            self.encryption_policy
+                .map(|p| (0_u8, p.to_vec()))
+                .ok_or_else(|| {
+                    FfsError::UnsupportedFeature("get_encryption_policy_ex not configured".into())
+                })
         }
 
         fn get_fs_label(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
@@ -4311,6 +4368,91 @@ mod tests {
         let response = dispatch_ioctl_for_testing(&fuse, 2, 0, FS_IOC_GETFSLABEL, &[], 255);
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_ex_encodes_v1_policy() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let policy = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B];
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy(
+            policy,
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            11,
+            0,
+            FS_IOC_GET_ENCRYPTION_POLICY_EX,
+            &[],
+            FSCRYPT_POLICY_EX_HEADER_SIZE as u32 + FSCRYPT_POLICY_V1_SIZE as u32,
+        );
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected ioctl data response"
+        );
+        let IoctlResult::Data(bytes) = response else {
+            unreachable!("asserted IoctlResult::Data above");
+        };
+        assert_eq!(bytes.len(), FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V1_SIZE);
+        let policy_size = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        assert_eq!(policy_size, FSCRYPT_POLICY_V1_SIZE as u64);
+        assert_eq!(&bytes[8..], &policy);
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetEncryptionPolicyEx(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_ex_rejects_too_small_output_buffer() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy(
+            [0; FSCRYPT_POLICY_V1_SIZE],
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            11,
+            0,
+            FS_IOC_GET_ENCRYPTION_POLICY_EX,
+            &[],
+            FSCRYPT_POLICY_EX_HEADER_SIZE as u32 + FSCRYPT_POLICY_V1_SIZE as u32 - 1,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_ex_propagates_enodata() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy_errno(
+            libc::ENODATA,
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            11,
+            0,
+            FS_IOC_GET_ENCRYPTION_POLICY_EX,
+            &[],
+            FSCRYPT_POLICY_EX_HEADER_SIZE as u32 + FSCRYPT_POLICY_V1_SIZE as u32,
+        );
+        assert_eq!(response, IoctlResult::Error(libc::ENODATA));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetEncryptionPolicyEx(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
     }
 
     #[test]

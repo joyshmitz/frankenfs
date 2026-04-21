@@ -70,6 +70,9 @@ const LINUX_PATH_MAX: u64 = 4096;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
+const FSCRYPT_POLICY_V2_VERSION: u8 = 2;
+const FSCRYPT_POLICY_V2_SIZE: usize = 24;
+const FSCRYPT_CONTEXT_V2_SIZE: usize = 40;
 const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
 
 /// Adler-32 checksum with a 32-bit seed, matching the e2compr convention.
@@ -15653,6 +15656,79 @@ impl FsOps for OpenFs {
                 label.push(0);
                 Ok(label)
             }
+        }
+    }
+
+    fn get_encryption_policy_ex(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<(u8, Vec<u8>)> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let sb = self
+                    .ext4_superblock()
+                    .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+                if !sb.has_incompat(ffs_ondisk::Ext4IncompatFeatures::ENCRYPT) {
+                    return Err(FfsError::UnsupportedFeature(
+                        "ext4 ENCRYPT incompat feature is not enabled".into(),
+                    ));
+                }
+
+                let inode =
+                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                if !inode.is_encrypted() {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::ENODATA,
+                    )));
+                }
+
+                let mut xattrs =
+                    ffs_ondisk::parse_ibody_xattrs(&inode).map_err(|e| parse_to_ffs_error(&e))?;
+                if inode.file_acl != 0 {
+                    let block_data = self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
+                    let block_xattrs = ffs_ondisk::parse_xattr_block(&block_data)
+                        .map_err(|e| parse_to_ffs_error(&e))?;
+                    xattrs.extend(block_xattrs);
+                }
+
+                let context = xattrs
+                    .into_iter()
+                    .find(|xattr| {
+                        xattr.name_index == ffs_types::EXT4_XATTR_INDEX_ENCRYPTION
+                            && xattr.name == EXT4_ENCRYPTION_XATTR_NAME
+                    })
+                    .map(|xattr| xattr.value)
+                    .ok_or_else(|| {
+                        FfsError::Format("encrypted inode is missing fscrypt context".into())
+                    })?;
+
+                let Some(version) = context.first().copied() else {
+                    return Err(FfsError::Format("fscrypt context is empty".into()));
+                };
+
+                match version {
+                    FSCRYPT_POLICY_V1_VERSION => {
+                        if context.len() < FSCRYPT_CONTEXT_V1_SIZE {
+                            return Err(FfsError::Format("fscrypt v1 context is truncated".into()));
+                        }
+                        Ok((version, context[..FSCRYPT_POLICY_V1_SIZE].to_vec()))
+                    }
+                    FSCRYPT_POLICY_V2_VERSION => {
+                        if context.len() < FSCRYPT_CONTEXT_V2_SIZE {
+                            return Err(FfsError::Format("fscrypt v2 context is truncated".into()));
+                        }
+                        Ok((version, context[..FSCRYPT_POLICY_V2_SIZE].to_vec()))
+                    }
+                    _ => Err(FfsError::Format(format!(
+                        "unsupported fscrypt policy version {version}"
+                    ))),
+                }
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "get_encryption_policy_ex is not supported for btrfs".to_owned(),
+            )),
         }
     }
 
