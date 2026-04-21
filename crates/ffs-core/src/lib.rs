@@ -30,8 +30,9 @@ use ffs_btrfs::{
     BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM, BtrfsBTree,
     BtrfsBlockGroupItem, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem,
     BtrfsKey, BtrfsLeafEntry, BtrfsMutationError, BtrfsTreeItem, InMemoryCowBtrfsTree,
-    map_logical_to_physical, parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item,
-    parse_xattr_items, walk_chunk_tree, walk_tree,
+    enumerate_snapshots, enumerate_subvolumes, map_logical_to_physical, parse_dir_items,
+    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
+    walk_tree,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
@@ -268,6 +269,8 @@ pub struct OpenOptions {
     /// blocks live on a separate device. Provide the external journal image path
     /// here so FrankenFS can validate UUID pairing and replay the journal.
     pub external_journal_path: Option<std::path::PathBuf>,
+    /// Which btrfs tree should be exposed as the mounted root.
+    pub btrfs_mount_selection: BtrfsMountSelection,
     /// ext4 `data_err=` policy for ordered-mode file data writeback errors.
     pub ext4_data_err_policy: Ext4DataErrPolicy,
     /// Whether JBD2 descriptor/commit/revoke checksums are enforced during replay.
@@ -284,6 +287,7 @@ impl Default for OpenOptions {
             mvcc_wal_path: None,
             mvcc_replay_policy: TailPolicy::default(),
             external_journal_path: None,
+            btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
             ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
             ext4_verify_journal_checksums: true,
         }
@@ -362,6 +366,37 @@ pub struct BtrfsContext {
     pub subvol_objectid: u64,
     /// Root inode objectid inside the mounted subvolume's filesystem tree.
     pub subvol_root_dirid: u64,
+}
+
+/// Which btrfs tree should be exposed as the mounted root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BtrfsMountSelection {
+    /// Mount the default filesystem tree (`FS_TREE`, objectid 5).
+    #[default]
+    DefaultRoot,
+    /// Mount the named subvolume.
+    Subvolume(String),
+    /// Mount the named snapshot.
+    Snapshot(String),
+}
+
+impl BtrfsMountSelection {
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::DefaultRoot => "default_root",
+            Self::Subvolume(_) => "subvolume",
+            Self::Snapshot(_) => "snapshot",
+        }
+    }
+
+    #[must_use]
+    pub fn requested_name(&self) -> Option<&str> {
+        match self {
+            Self::DefaultRoot => None,
+            Self::Subvolume(name) | Self::Snapshot(name) => Some(name),
+        }
+    }
 }
 
 /// Mutable ext4 allocation state for write operations.
@@ -2188,8 +2223,7 @@ impl OpenFs {
                     }
                 }
 
-                let subvol_objectid = BTRFS_FS_TREE_OBJECTID;
-                let subvol_root_dirid = {
+                let root_tree_items = {
                     let nodesize = sb.nodesize;
                     let chunks_ref = &chunks;
                     let mut read_phys =
@@ -2203,38 +2237,20 @@ impl OpenFs {
                             Ok(buf)
                         };
 
-                    match walk_tree(
+                    walk_tree(
                         &mut read_phys,
                         chunks_ref,
                         sb.root,
                         sb.nodesize,
                         sb.csum_type,
                     )
-                    .and_then(|items| {
-                        items
-                            .into_iter()
-                            .find(|item| {
-                                item.key.objectid == subvol_objectid
-                                    && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
-                            })
-                            .ok_or(ParseError::InvalidField {
-                                field: "root_tree",
-                                reason: "default FS_TREE ROOT_ITEM not found",
-                            })
-                    })
-                    .and_then(|item| parse_root_item(&item.data))
-                    {
-                        Ok(root_item) => root_item.root_dirid,
-                        Err(err) => {
-                            warn!(
-                                error = %err,
-                                fallback = sb.root_dir_objectid,
-                                "failed to resolve default btrfs subvolume root_dirid; falling back to superblock root_dir_objectid"
-                            );
-                            sb.root_dir_objectid
-                        }
-                    }
+                    .map_err(|e| parse_to_ffs_error(&e))?
                 };
+                let (subvol_objectid, subvol_root_dirid) = Self::resolve_btrfs_mount_selection(
+                    &root_tree_items,
+                    &options.btrfs_mount_selection,
+                    sb.root_dir_objectid,
+                )?;
 
                 let ctx = BtrfsContext {
                     chunks,
@@ -2349,6 +2365,91 @@ impl OpenFs {
         }
 
         Ok(fs)
+    }
+
+    fn resolve_btrfs_mount_selection(
+        root_tree_items: &[BtrfsLeafEntry],
+        selection: &BtrfsMountSelection,
+        default_root_dirid: u64,
+    ) -> Result<(u64, u64), FfsError> {
+        let subvol_objectid = match selection {
+            BtrfsMountSelection::DefaultRoot => BTRFS_FS_TREE_OBJECTID,
+            BtrfsMountSelection::Subvolume(name) => {
+                Self::resolve_named_btrfs_subvolume(root_tree_items, name)?
+            }
+            BtrfsMountSelection::Snapshot(name) => {
+                Self::resolve_named_btrfs_snapshot(root_tree_items, name)?
+            }
+        };
+
+        let root_item_entry = root_tree_items
+            .iter()
+            .find(|item| {
+                item.key.objectid == subvol_objectid && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
+            })
+            .ok_or_else(|| {
+                let selector = selection.requested_name().unwrap_or("default");
+                FfsError::NotFound(format!(
+                    "btrfs ROOT_ITEM for {} `{selector}` (objectid {subvol_objectid})",
+                    selection.kind()
+                ))
+            })?;
+
+        match parse_root_item(&root_item_entry.data).map_err(|e| parse_to_ffs_error(&e)) {
+            Ok(root_item) => Ok((subvol_objectid, root_item.root_dirid)),
+            Err(err) if matches!(selection, BtrfsMountSelection::DefaultRoot) => {
+                warn!(
+                    error = %err,
+                    fallback = default_root_dirid,
+                    "failed to resolve default btrfs subvolume root_dirid; falling back to superblock root_dir_objectid"
+                );
+                Ok((subvol_objectid, default_root_dirid))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn resolve_named_btrfs_subvolume(
+        root_tree_items: &[BtrfsLeafEntry],
+        requested_name: &str,
+    ) -> Result<u64, FfsError> {
+        let matches: Vec<_> = enumerate_subvolumes(root_tree_items)
+            .into_iter()
+            .filter(|subvol| subvol.name == requested_name)
+            .collect();
+        Self::resolve_named_btrfs_match("subvolume", requested_name, matches.iter().map(|m| m.id))
+    }
+
+    fn resolve_named_btrfs_snapshot(
+        root_tree_items: &[BtrfsLeafEntry],
+        requested_name: &str,
+    ) -> Result<u64, FfsError> {
+        let matches: Vec<_> = enumerate_snapshots(root_tree_items)
+            .into_iter()
+            .filter(|snapshot| snapshot.name == requested_name)
+            .collect();
+        Self::resolve_named_btrfs_match("snapshot", requested_name, matches.iter().map(|m| m.id))
+    }
+
+    fn resolve_named_btrfs_match<I>(
+        kind: &str,
+        requested_name: &str,
+        mut matches: I,
+    ) -> Result<u64, FfsError>
+    where
+        I: Iterator<Item = u64>,
+    {
+        let Some(first) = matches.next() else {
+            return Err(FfsError::NotFound(format!(
+                "btrfs {kind} `{requested_name}`"
+            )));
+        };
+        if let Some(second) = matches.next() {
+            return Err(FfsError::Format(format!(
+                "multiple btrfs {kind}s named `{requested_name}` (objectids {first} and {second})"
+            )));
+        }
+        Ok(first)
     }
 
     /// Initialize MVCC store, optionally replaying a WAL.
@@ -20749,6 +20850,172 @@ mod tests {
         image[file_data_off..file_data_off + file_bytes.len()].copy_from_slice(file_bytes);
 
         image
+    }
+
+    fn btrfs_test_root_item(
+        objectid: u64,
+        root_dirid: u64,
+        bytenr: u64,
+        uuid: [u8; 16],
+        parent_uuid: [u8; 16],
+    ) -> BtrfsLeafEntry {
+        let mut data = vec![0_u8; 272];
+        data[160..168].copy_from_slice(&1_u64.to_le_bytes()); // generation
+        data[168..176].copy_from_slice(&root_dirid.to_le_bytes());
+        data[176..184].copy_from_slice(&bytenr.to_le_bytes());
+        data[216..224].copy_from_slice(&1_u64.to_le_bytes()); // refs
+        data[224..240].copy_from_slice(&uuid);
+        data[240..256].copy_from_slice(&parent_uuid);
+        data[271] = 0; // level
+        BtrfsLeafEntry {
+            key: BtrfsKey {
+                objectid,
+                item_type: BTRFS_ITEM_ROOT_ITEM,
+                offset: 0,
+            },
+            data,
+        }
+    }
+
+    fn btrfs_test_root_ref(
+        parent_objectid: u64,
+        child_objectid: u64,
+        name: &str,
+    ) -> BtrfsLeafEntry {
+        let name = name.as_bytes();
+        let mut data = vec![0_u8; 18 + name.len()];
+        let name_len = u16::try_from(name.len()).expect("root ref name length must fit u16");
+        data[0..8].copy_from_slice(&parent_objectid.to_le_bytes());
+        data[8..16].copy_from_slice(&0_u64.to_le_bytes()); // sequence
+        data[16..18].copy_from_slice(&name_len.to_le_bytes());
+        data[18..18 + name.len()].copy_from_slice(name);
+        BtrfsLeafEntry {
+            key: BtrfsKey {
+                objectid: parent_objectid,
+                item_type: ffs_btrfs::BTRFS_ITEM_ROOT_REF,
+                offset: child_objectid,
+            },
+            data,
+        }
+    }
+
+    #[test]
+    fn resolve_default_btrfs_mount_selection_uses_fs_tree_root_item() {
+        let root_tree_items = vec![btrfs_test_root_item(
+            BTRFS_FS_TREE_OBJECTID,
+            256,
+            0x1_000,
+            [0; 16],
+            [0; 16],
+        )];
+
+        let (subvol_objectid, root_dirid) = OpenFs::resolve_btrfs_mount_selection(
+            &root_tree_items,
+            &BtrfsMountSelection::DefaultRoot,
+            999,
+        )
+        .expect("default btrfs root should resolve");
+
+        assert_eq!(subvol_objectid, BTRFS_FS_TREE_OBJECTID);
+        assert_eq!(root_dirid, 256);
+    }
+
+    #[test]
+    fn resolve_named_btrfs_subvolume_mount_selection_by_name() {
+        let subvol_id = BTRFS_FIRST_FREE_OBJECTID;
+        let root_tree_items = vec![
+            btrfs_test_root_item(subvol_id, 777, 0x2_000, [0; 16], [0; 16]),
+            btrfs_test_root_ref(BTRFS_FS_TREE_OBJECTID, subvol_id, "home"),
+        ];
+
+        let (subvol_objectid, root_dirid) = OpenFs::resolve_btrfs_mount_selection(
+            &root_tree_items,
+            &BtrfsMountSelection::Subvolume("home".to_owned()),
+            999,
+        )
+        .expect("named subvolume should resolve");
+
+        assert_eq!(subvol_objectid, subvol_id);
+        assert_eq!(root_dirid, 777);
+    }
+
+    #[test]
+    fn resolve_named_btrfs_snapshot_mount_selection_by_name() {
+        let source_id = BTRFS_FIRST_FREE_OBJECTID;
+        let snapshot_id = source_id + 1;
+        let source_uuid = [1_u8; 16];
+        let snapshot_uuid = [2_u8; 16];
+        let root_tree_items = vec![
+            btrfs_test_root_item(source_id, 256, 0x3_000, source_uuid, [0; 16]),
+            btrfs_test_root_item(snapshot_id, 888, 0x4_000, snapshot_uuid, source_uuid),
+            btrfs_test_root_ref(source_id, snapshot_id, "snap-1"),
+        ];
+
+        let (subvol_objectid, root_dirid) = OpenFs::resolve_btrfs_mount_selection(
+            &root_tree_items,
+            &BtrfsMountSelection::Snapshot("snap-1".to_owned()),
+            999,
+        )
+        .expect("named snapshot should resolve");
+
+        assert_eq!(subvol_objectid, snapshot_id);
+        assert_eq!(root_dirid, 888);
+    }
+
+    #[test]
+    fn resolve_missing_btrfs_subvolume_mount_selection_reports_not_found() {
+        let err = OpenFs::resolve_btrfs_mount_selection(
+            &[],
+            &BtrfsMountSelection::Subvolume("missing".to_owned()),
+            999,
+        )
+        .expect_err("missing subvolume should error");
+
+        assert!(
+            matches!(&err, FfsError::NotFound(message) if message == "btrfs subvolume `missing`"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_duplicate_btrfs_snapshot_mount_selection_reports_format_error() {
+        let source_id = BTRFS_FIRST_FREE_OBJECTID;
+        let first_snapshot_id = source_id + 1;
+        let second_snapshot_id = source_id + 2;
+        let source_uuid = [3_u8; 16];
+        let first_snapshot_uuid = [4_u8; 16];
+        let second_snapshot_uuid = [5_u8; 16];
+        let root_tree_items = vec![
+            btrfs_test_root_item(source_id, 256, 0x5_000, source_uuid, [0; 16]),
+            btrfs_test_root_item(
+                first_snapshot_id,
+                888,
+                0x6_000,
+                first_snapshot_uuid,
+                source_uuid,
+            ),
+            btrfs_test_root_item(
+                second_snapshot_id,
+                999,
+                0x7_000,
+                second_snapshot_uuid,
+                source_uuid,
+            ),
+            btrfs_test_root_ref(source_id, first_snapshot_id, "snap-dup"),
+            btrfs_test_root_ref(source_id, second_snapshot_id, "snap-dup"),
+        ];
+
+        let err = OpenFs::resolve_btrfs_mount_selection(
+            &root_tree_items,
+            &BtrfsMountSelection::Snapshot("snap-dup".to_owned()),
+            999,
+        )
+        .expect_err("duplicate snapshot names should error");
+
+        assert!(
+            matches!(&err, FfsError::Format(message) if message.contains("multiple btrfs snapshots named `snap-dup`")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

@@ -23,8 +23,8 @@ use ffs_btrfs::{
     parse_inode_item, parse_root_item,
 };
 use ffs_core::{
-    CrashRecoveryOutcome, Ext4DataErrPolicy, Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs,
-    OpenOptions, detect_filesystem_at_path,
+    BtrfsMountSelection, CrashRecoveryOutcome, Ext4DataErrPolicy, Ext4JournalReplayMode, FsFlavor,
+    FsOps, OpenFs, OpenOptions, detect_filesystem_at_path,
 };
 use ffs_fuse::{MountConfig, MountOptions, mount_managed};
 use ffs_harness::ParityReport;
@@ -148,11 +148,12 @@ impl MountRuntimeConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MountCmdOptions {
     allow_other: bool,
     read_write: bool,
     mount_mode: MountMode,
+    btrfs_mount_selection: BtrfsMountSelection,
     ext4_data_err_policy: Ext4DataErrPolicy,
     ext4_verify_journal_checksums: bool,
     runtime: MountRuntimeConfig,
@@ -364,13 +365,9 @@ enum Command {
         #[arg(long = "ext4-nojournal-checksum")]
         ext4_nojournal_checksum: bool,
         /// Mount a specific btrfs subvolume by name.
-        ///
-        /// Not yet supported — passing this flag will return an error.
         #[arg(long)]
         subvol: Option<String>,
         /// Mount a specific btrfs snapshot by name.
-        ///
-        /// Not yet supported — passing this flag will return an error.
         #[arg(long)]
         snapshot: Option<String>,
     },
@@ -1344,11 +1341,11 @@ fn run() -> Result<()> {
             subvol,
             snapshot,
         } => {
-            validate_btrfs_mount_selection(subvol.as_deref(), snapshot.as_deref())?;
+            let btrfs_mount_selection = parse_btrfs_mount_selection(subvol, snapshot)?;
             mount_cmd(
                 &image,
                 &mountpoint,
-                MountCmdOptions {
+                &MountCmdOptions {
                     allow_other,
                     read_write: rw,
                     mount_mode: if native {
@@ -1356,6 +1353,7 @@ fn run() -> Result<()> {
                     } else {
                         MountMode::Compat
                     },
+                    btrfs_mount_selection,
                     ext4_data_err_policy: if ext4_data_err_abort {
                         Ext4DataErrPolicy::Abort
                     } else {
@@ -3950,7 +3948,7 @@ fn log_mount_shutdown_metrics(
 }
 
 #[allow(clippy::too_many_lines)]
-fn mount_cmd(image_path: &Path, mountpoint: &Path, options: MountCmdOptions) -> Result<()> {
+fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) -> Result<()> {
     let auto_unmount = env_bool("FFS_AUTO_UNMOUNT", true)?;
     let requested_runtime = options.runtime;
     let operation_id = mount_operation_id(
@@ -4013,10 +4011,21 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: MountCmdOptions) -> 
         ext4_data_err_policy: options.ext4_data_err_policy,
         ext4_verify_journal_checksums: options.ext4_verify_journal_checksums,
         mount_mode: options.mount_mode,
+        btrfs_mount_selection: options.btrfs_mount_selection.clone(),
         ..OpenOptions::default()
     };
     let mut open_fs = OpenFs::open_with_options(&cx, image_path, &open_opts)
         .with_context(|| format!("failed to open filesystem image: {}", image_path.display()))?;
+    if !matches!(
+        options.btrfs_mount_selection,
+        BtrfsMountSelection::DefaultRoot
+    ) && !open_fs.is_btrfs()
+    {
+        bail!(
+            "{} requires a btrfs image",
+            btrfs_mount_selection_flag(&options.btrfs_mount_selection)
+        );
+    }
     emit_mount_banner(&open_fs, mountpoint, options.read_write, runtime.mode);
     emit_optional_recovery_banner(&open_fs);
 
@@ -4067,16 +4076,24 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: MountCmdOptions) -> 
     Ok(())
 }
 
-fn validate_btrfs_mount_selection(subvol: Option<&str>, snapshot: Option<&str>) -> Result<()> {
-    if subvol.is_some() || snapshot.is_some() {
-        let subvol = subvol.unwrap_or("(none)");
-        let snapshot = snapshot.unwrap_or("(none)");
-        bail!(
-            "btrfs subvolume/snapshot mounting is not yet supported (subvol={subvol}, snapshot={snapshot}); \
-             use `ffs inspect --subvolumes/--snapshots` to list and mount the default root subvolume"
-        );
+fn parse_btrfs_mount_selection(
+    subvol: Option<String>,
+    snapshot: Option<String>,
+) -> Result<BtrfsMountSelection> {
+    match (subvol, snapshot) {
+        (Some(_), Some(_)) => bail!("--subvol and --snapshot are mutually exclusive"),
+        (Some(name), None) => Ok(BtrfsMountSelection::Subvolume(name)),
+        (None, Some(name)) => Ok(BtrfsMountSelection::Snapshot(name)),
+        (None, None) => Ok(BtrfsMountSelection::DefaultRoot),
     }
-    Ok(())
+}
+
+fn btrfs_mount_selection_flag(selection: &BtrfsMountSelection) -> &'static str {
+    match selection {
+        BtrfsMountSelection::DefaultRoot => "(default btrfs root)",
+        BtrfsMountSelection::Subvolume(_) => "--subvol",
+        BtrfsMountSelection::Snapshot(_) => "--snapshot",
+    }
 }
 
 // ── Scrub command ──────────────────────────────────────────────────────────
@@ -5268,16 +5285,16 @@ fn mkfs_cmd_with_program(
 #[cfg(test)]
 mod tests {
     use super::{
-        BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem, Cli,
-        Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode, FsckCommandOptions,
-        FsckFlags, InfoCommandOptions, InfoSections, LogFormat, MountCmdOptions, MountMode,
-        MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions, RepairFlags,
-        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
-        choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
-        format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
-        mount_cmd, mount_operation_id, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
-        read_file_region, summarize_repair_staleness, unavailable_repair_info,
-        validate_btrfs_mount_selection,
+        BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
+        BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
+        FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
+        MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions,
+        RepairFlags, btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output,
+        build_info_output, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
+        ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
+        log_mount_runtime_selected, mount_cmd, mount_operation_id, parse_btrfs_mount_selection,
+        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
+        summarize_repair_staleness, unavailable_repair_info,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -6986,10 +7003,11 @@ mod tests {
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
             &PathBuf::from("/definitely/missing-mountpoint"),
-            MountCmdOptions {
+            &MountCmdOptions {
                 allow_other: false,
                 read_write: false,
                 mount_mode: MountMode::Compat,
+                btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
                 ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
                 ext4_verify_journal_checksums: true,
                 runtime: MountRuntimeConfig {
@@ -7014,10 +7032,11 @@ mod tests {
         let err = mount_cmd(
             &PathBuf::from("/definitely/missing.img"),
             &PathBuf::from("/definitely/missing-mountpoint"),
-            MountCmdOptions {
+            &MountCmdOptions {
                 allow_other: false,
                 read_write: false,
                 mount_mode: MountMode::Compat,
+                btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
                 ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
                 ext4_verify_journal_checksums: true,
                 runtime: MountRuntimeConfig {
@@ -7035,23 +7054,36 @@ mod tests {
     }
 
     #[test]
-    fn mount_rejects_subvol_flag() {
-        let err = validate_btrfs_mount_selection(Some("home"), None)
-            .expect_err("subvol mount should be rejected until supported");
-        let message = err.to_string();
-        assert!(
-            message.contains("not yet supported"),
-            "unexpected error message: {message}"
+    fn parse_btrfs_mount_selection_defaults_to_root() {
+        let selection =
+            parse_btrfs_mount_selection(None, None).expect("default selection should parse");
+        assert_eq!(selection, BtrfsMountSelection::DefaultRoot);
+    }
+
+    #[test]
+    fn parse_btrfs_mount_selection_accepts_subvol_flag() {
+        let selection = parse_btrfs_mount_selection(Some("home".to_owned()), None)
+            .expect("subvolume selection should parse");
+        assert_eq!(selection, BtrfsMountSelection::Subvolume("home".to_owned()));
+    }
+
+    #[test]
+    fn parse_btrfs_mount_selection_accepts_snapshot_flag() {
+        let selection = parse_btrfs_mount_selection(None, Some("snap-1".to_owned()))
+            .expect("snapshot selection should parse");
+        assert_eq!(
+            selection,
+            BtrfsMountSelection::Snapshot("snap-1".to_owned())
         );
     }
 
     #[test]
-    fn mount_rejects_snapshot_flag() {
-        let err = validate_btrfs_mount_selection(None, Some("snap-1"))
-            .expect_err("snapshot mount should be rejected until supported");
+    fn parse_btrfs_mount_selection_rejects_conflicting_flags() {
+        let err = parse_btrfs_mount_selection(Some("home".to_owned()), Some("snap-1".to_owned()))
+            .expect_err("conflicting mount selections should be rejected");
         let message = err.to_string();
         assert!(
-            message.contains("not yet supported"),
+            message.contains("mutually exclusive"),
             "unexpected error message: {message}"
         );
     }

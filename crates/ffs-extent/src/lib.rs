@@ -980,6 +980,7 @@ mod tests {
             feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
             log_groups_per_flex: 0,
             backup_bgs: [0, 0],
+            first_meta_bg: 0,
             first_inode: 11,
             cluster_ratio: 1,
         }
