@@ -8437,6 +8437,51 @@ fn btrfs_fuse_rename_across_directories() {
 }
 
 #[test]
+fn btrfs_fuse_rename_into_non_directory_parent_reports_enotdir() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_rename_into_non_directory_parent_errno_enotdir";
+        let source = mnt.join("rename_source.txt");
+        let non_directory_parent = mnt.join("rename_parent_file.txt");
+        fs::write(&source, b"rename source payload\n").expect("write btrfs rename source");
+        fs::write(&non_directory_parent, b"not a directory\n")
+            .expect("write btrfs non-directory parent");
+
+        let entries_before = snapshot_directory_entries(mnt);
+        let source_before = snapshot_file_state(&source);
+        let parent_before = snapshot_file_state(&non_directory_parent);
+        let target = non_directory_parent.join("child.txt");
+
+        let err =
+            fs::rename(&source, &target).expect_err("rename into non-directory parent should fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ENOTDIR),
+            "rename into a non-directory parent should surface exact ENOTDIR: {err}"
+        );
+        assert!(
+            fs::symlink_metadata(&source).is_ok(),
+            "rejected rename must leave the source entry in place"
+        );
+        assert!(
+            fs::symlink_metadata(&target).is_err(),
+            "rejected rename must not create the target entry"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            entries_before,
+            "rejected rename must not change visible root entries"
+        );
+        assert_file_state_unchanged(&source, &source_before, "rejected rename source");
+        assert_file_state_unchanged(
+            &non_directory_parent,
+            &parent_before,
+            "rejected rename non-directory parent",
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=ENOTDIR_no_drift"));
+    });
+}
+
+#[test]
 fn btrfs_fuse_rename_overwrite() {
     with_btrfs_rw_mount(|mnt| {
         let src = mnt.join("src.txt");
