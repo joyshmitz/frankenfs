@@ -96,6 +96,9 @@ directory-entry drift and no surviving-file data drift.
 Mounted-path ext4 namespace refusal coverage now also freezes exact `ENOTDIR`
 for `rmdir` on a regular file, distinct from the existing missing-directory and
 non-empty-directory contracts.
+Mounted-path ext4 symlink/refusal coverage now also freezes exact `EINVAL` for
+`readlink` on both regular-file and directory non-symlink paths, with no
+directory-entry or file-byte drift.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

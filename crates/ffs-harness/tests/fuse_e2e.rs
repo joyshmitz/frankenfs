@@ -1985,6 +1985,53 @@ fn fuse_symlink_create_and_follow() {
 }
 
 #[test]
+fn fuse_readlink_on_non_symlink_reports_einval() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_readlink_on_non_symlink_reports_einval";
+        let file_path = mnt.join("hello.txt");
+        let dir_path = mnt.join("testdir");
+        let root_entries_before = snapshot_directory_entries(mnt);
+        let file_before = snapshot_file_state(&file_path);
+        let dir_entries_before = snapshot_directory_entries(&dir_path);
+
+        let file_err = fs::read_link(&file_path).expect_err("readlink on regular file should fail");
+        assert_eq!(
+            file_err.raw_os_error(),
+            Some(libc::EINVAL),
+            "readlink on regular file should surface exact EINVAL: {file_err}"
+        );
+        assert_file_state_unchanged(
+            &file_path,
+            &file_before,
+            "readlink rejection on regular file",
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rejected readlink on regular file must not change root entries"
+        );
+
+        let dir_err = fs::read_link(&dir_path).expect_err("readlink on directory should fail");
+        assert_eq!(
+            dir_err.raw_os_error(),
+            Some(libc::EINVAL),
+            "readlink on directory should surface exact EINVAL: {dir_err}"
+        );
+        assert_eq!(
+            snapshot_directory_entries(&dir_path),
+            dir_entries_before,
+            "rejected readlink on directory must not change directory entries"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rejected readlink on directory must not change root entries"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("file+dir_errno=EINVAL_no_drift"));
+    });
+}
+
+#[test]
 fn fuse_setattr_truncate() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
