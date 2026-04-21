@@ -1530,6 +1530,81 @@ fn assert_seek_leading_hole_contract(path: &Path, scenario_id: &str) {
     );
 }
 
+fn assert_seek_all_hole_contract(path: &Path, scenario_id: &str) {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .expect("create all-hole seek test file");
+    file.set_len(8192)
+        .expect("set logical size for all-hole seek test file");
+    drop(file);
+
+    let readback = fs::read(path).expect("read all-hole seek test file");
+    assert_eq!(
+        readback.len(),
+        8192,
+        "all-hole seek test file should preserve its logical size"
+    );
+    assert!(
+        readback.iter().all(|&byte| byte == 0),
+        "all-hole seek test file must read back as zeros"
+    );
+
+    let data0 = query_seek(path, 0, "SEEK_DATA");
+    if seek_transport_skipped(&data0) {
+        eprintln!(
+            "SEEK_DATA/SEEK_HOLE skipped: current kernel/FUSE stack reports transport-layer \
+             rejection before FrankenFS can prove all-hole seek semantics: {data0}"
+        );
+        return;
+    }
+
+    assert_eq!(
+        data0["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_DATA from file start should surface ENXIO on an all-hole file: {data0}"
+    );
+
+    let hole0 = query_seek(path, 0, "SEEK_HOLE");
+    assert_eq!(
+        hole0["offset"].as_u64(),
+        Some(0),
+        "SEEK_HOLE from file start should report the all-hole sparse range immediately: {hole0}"
+    );
+
+    let data_middle = query_seek(path, 4096, "SEEK_DATA");
+    assert_eq!(
+        data_middle["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_DATA from inside an all-hole file should still surface ENXIO: {data_middle}"
+    );
+
+    let hole_middle = query_seek(path, 4096, "SEEK_HOLE");
+    assert_eq!(
+        hole_middle["offset"].as_u64(),
+        Some(4096),
+        "SEEK_HOLE from inside an all-hole file should return the queried hole offset: {hole_middle}"
+    );
+
+    let eof_data = query_seek(path, readback.len() as u64, "SEEK_DATA");
+    assert_eq!(
+        eof_data["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_DATA at EOF should surface ENXIO on an all-hole file: {eof_data}"
+    );
+
+    let eof_hole = query_seek(path, readback.len() as u64, "SEEK_HOLE");
+    assert_eq!(
+        eof_hole["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_HOLE at EOF should surface ENXIO on an all-hole file: {eof_hole}"
+    );
+
+    emit_scenario_result(scenario_id, "PASS", Some("all_hole_seek_offsets_verified"));
+}
+
 #[test]
 fn fuse_create_and_read_file() {
     with_rw_mount(|mnt| {
@@ -3869,6 +3944,15 @@ fn ext4_fuse_seek_data_hole_reports_leading_sparse_hole_offsets() {
 }
 
 #[test]
+fn ext4_fuse_seek_data_hole_reports_all_hole_sparse_file_offsets() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_seek_all_hole";
+        let path = mnt.join("ext4_seek_all_hole.bin");
+        assert_seek_all_hole_contract(&path, scenario_id);
+    });
+}
+
+#[test]
 fn fuse_statfs_returns_valid_stats() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -5901,6 +5985,15 @@ fn btrfs_fuse_seek_data_hole_reports_leading_sparse_hole_offsets() {
         let scenario_id = "btrfs_rw_seek_leading_hole";
         let path = mnt.join("btrfs_seek_leading_hole.bin");
         assert_seek_leading_hole_contract(&path, scenario_id);
+    });
+}
+
+#[test]
+fn btrfs_fuse_seek_data_hole_reports_all_hole_sparse_file_offsets() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_seek_all_hole";
+        let path = mnt.join("btrfs_seek_all_hole.bin");
+        assert_seek_all_hole_contract(&path, scenario_id);
     });
 }
 
