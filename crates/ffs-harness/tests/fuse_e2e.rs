@@ -5065,6 +5065,54 @@ fn btrfs_fuse_xattr_remove_nonexistent_fails() {
 }
 
 #[test]
+fn btrfs_fuse_ioctl_fs_info_via_mounted_path() {
+    if !command_available("python3") {
+        eprintln!("python3 not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        // Use direct ioctl via Python to exercise BTRFS_IOC_FS_INFO (0x8400941F).
+        // The ioctl returns a 1024-byte btrfs_ioctl_fs_info_args struct.
+        let script = format!(
+            r#"
+import os, fcntl, struct
+fd = os.open({mnt:?}, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    buf = bytearray(1024)
+    # BTRFS_IOC_FS_INFO = _IOR(0x94, 0x1f, 1024) = 0x8400941f
+    fcntl.ioctl(fd, 0x8400941f, buf)
+    # Parse first fields: max_id(u64), num_devices(u64), fsid(16 bytes), nodesize(u32)
+    max_id, num_devices = struct.unpack_from('<QQ', buf, 0)
+    fsid = buf[0x10:0x20]
+    nodesize, sectorsize = struct.unpack_from('<II', buf, 0x20)
+    print("max_id=%d num_devices=%d nodesize=%d sectorsize=%d" % (max_id, num_devices, nodesize, sectorsize))
+    print("fsid=%s" % fsid.hex())
+    assert num_devices >= 1, "num_devices should be at least 1"
+    assert nodesize in (4096, 8192, 16384, 32768, 65536), "unexpected nodesize %d" % nodesize
+    assert sectorsize in (512, 1024, 2048, 4096), "unexpected sectorsize %d" % sectorsize
+    print("PASS")
+finally:
+    os.close(fd)
+"#,
+            mnt = mnt.to_str().unwrap()
+        );
+
+        let out = Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run python3 ioctl script");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("PASS"),
+            "BTRFS_IOC_FS_INFO via mounted path failed: stdout={stdout}, stderr={stderr}"
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_write_large_file() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
