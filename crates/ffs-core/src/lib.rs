@@ -21608,6 +21608,7 @@ mod tests {
         extent
     }
 
+    const BTRFS_TEST_ROOT_TREE_LOGICAL: usize = 0x4_000;
     const BTRFS_TEST_FS_TREE_LOGICAL: usize = 0x8_000;
     const BTRFS_TEST_FILE_DATA_LOGICAL: usize = 0x12_000;
     const BTRFS_TEST_FILE_INODE_OFF: usize = 2860;
@@ -21615,6 +21616,13 @@ mod tests {
     const BTRFS_TEST_EXTENT_ITEM_INDEX: usize = 3;
     const BTRFS_TEST_LEAF_HEADER_SIZE: usize = 101;
     const BTRFS_TEST_LEAF_ITEM_SIZE: usize = 25;
+    const BTRFS_TEST_NODESIZE: usize = 4096;
+
+    fn stamp_btrfs_test_tree_block_crc32c(image: &mut [u8], logical: usize) {
+        let block = &mut image[logical..logical + BTRFS_TEST_NODESIZE];
+        let csum = ffs_types::crc32c(&block[0x20..]);
+        block[0..4].copy_from_slice(&csum.to_le_bytes());
+    }
 
     fn btrfs_test_extent_item_off() -> usize {
         BTRFS_TEST_FS_TREE_LOGICAL
@@ -21639,26 +21647,31 @@ mod tests {
         let size_off = BTRFS_TEST_FS_TREE_LOGICAL + BTRFS_TEST_FILE_INODE_OFF + 16;
         image[size_off..size_off + 8].copy_from_slice(&size.to_le_bytes());
         image[size_off + 8..size_off + 16].copy_from_slice(&size.to_le_bytes());
+        stamp_btrfs_test_tree_block_crc32c(image, BTRFS_TEST_FS_TREE_LOGICAL);
     }
 
     fn set_btrfs_test_extent_key_offset(image: &mut [u8], logical_offset: u64) {
         let item_off = btrfs_test_extent_item_off();
         image[item_off + 9..item_off + 17].copy_from_slice(&logical_offset.to_le_bytes());
+        stamp_btrfs_test_tree_block_crc32c(image, BTRFS_TEST_FS_TREE_LOGICAL);
     }
 
     fn set_btrfs_test_extent_data_size(image: &mut [u8], data_size: u32) {
         let item_off = btrfs_test_extent_item_off();
         image[item_off + 21..item_off + 25].copy_from_slice(&data_size.to_le_bytes());
+        stamp_btrfs_test_tree_block_crc32c(image, BTRFS_TEST_FS_TREE_LOGICAL);
     }
 
     fn set_btrfs_test_extent_type(image: &mut [u8], extent_type: u8) {
         let extent_off = btrfs_test_extent_payload_off();
         image[extent_off + 20] = extent_type;
+        stamp_btrfs_test_tree_block_crc32c(image, BTRFS_TEST_FS_TREE_LOGICAL);
     }
 
     fn set_btrfs_test_extent_compression(image: &mut [u8], compression: u8) {
         let extent_off = btrfs_test_extent_payload_off();
         image[extent_off + 16] = compression;
+        stamp_btrfs_test_tree_block_crc32c(image, BTRFS_TEST_FS_TREE_LOGICAL);
     }
 
     fn set_btrfs_test_extent_lengths(image: &mut [u8], length: u64) {
@@ -21667,11 +21680,13 @@ mod tests {
         image[extent_off + 29..extent_off + 37].copy_from_slice(&length.to_le_bytes()); // disk_num_bytes
         image[extent_off + 45..extent_off + 53].copy_from_slice(&length.to_le_bytes());
         // num_bytes
+        stamp_btrfs_test_tree_block_crc32c(image, BTRFS_TEST_FS_TREE_LOGICAL);
     }
 
     fn write_btrfs_test_extent_payload(image: &mut [u8], payload: &[u8]) {
         let extent_off = btrfs_test_extent_payload_off();
         image[extent_off..extent_off + payload.len()].copy_from_slice(payload);
+        stamp_btrfs_test_tree_block_crc32c(image, BTRFS_TEST_FS_TREE_LOGICAL);
     }
 
     fn write_btrfs_test_file_data(image: &mut [u8], data: &[u8]) {
@@ -21834,6 +21849,9 @@ mod tests {
 
         let file_data_off = file_data_logical as usize;
         image[file_data_off..file_data_off + file_bytes.len()].copy_from_slice(file_bytes);
+
+        stamp_btrfs_test_tree_block_crc32c(&mut image, BTRFS_TEST_ROOT_TREE_LOGICAL);
+        stamp_btrfs_test_tree_block_crc32c(&mut image, BTRFS_TEST_FS_TREE_LOGICAL);
 
         image
     }
@@ -22266,6 +22284,9 @@ mod tests {
             .copy_from_slice(&file_inode);
         image[fs_leaf + extent_off as usize..fs_leaf + extent_off as usize + inline_extent.len()]
             .copy_from_slice(&inline_extent);
+
+        stamp_btrfs_test_tree_block_crc32c(&mut image, BTRFS_TEST_ROOT_TREE_LOGICAL);
+        stamp_btrfs_test_tree_block_crc32c(&mut image, BTRFS_TEST_FS_TREE_LOGICAL);
 
         image
     }
@@ -34490,6 +34511,116 @@ mod tests {
             .unwrap();
         assert_eq!(data.len(), 4096);
         assert!(data.iter().all(|&b| b == 0x42));
+    }
+
+    #[test]
+    fn btrfs_fiemap_reports_inline_extent_with_zero_physical() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let payload = b"inline-fiemap";
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("inline-fiemap.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, payload)
+            .unwrap();
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            1,
+            "inline file should expose one FIEMAP extent"
+        );
+
+        let extent = &extents[0];
+        assert_eq!(extent.logical, 0);
+        assert_eq!(
+            extent.physical, 0,
+            "inline FIEMAP physical offset must be zero"
+        );
+        assert_eq!(extent.length, payload.len() as u64);
+        assert_eq!(
+            extent.flags, FIEMAP_EXTENT_LAST,
+            "inline FIEMAP extent should only carry LAST"
+        );
+    }
+
+    #[test]
+    fn btrfs_fiemap_marks_keep_size_prealloc_extent_unwritten() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let payload = b"existing";
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("prealloc-fiemap.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, payload)
+            .unwrap();
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            4096,
+            4096,
+            libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .unwrap();
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            2,
+            "inline-to-regular keep-size preallocation should expose data plus unwritten extent"
+        );
+
+        let data_extent = &extents[0];
+        assert_eq!(data_extent.logical, 0);
+        assert!(data_extent.physical > 0);
+        assert_eq!(data_extent.length, payload.len() as u64);
+        assert_eq!(
+            data_extent.flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "materialized prefix extent must not be marked unwritten"
+        );
+
+        let prealloc_extent = &extents[1];
+        assert_eq!(prealloc_extent.logical, 4096);
+        assert!(prealloc_extent.physical > 0);
+        assert_eq!(prealloc_extent.length, 4096);
+        assert_ne!(
+            prealloc_extent.flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "keep-size preallocation must surface FIEMAP_EXTENT_UNWRITTEN"
+        );
+        assert_ne!(
+            prealloc_extent.flags & FIEMAP_EXTENT_LAST,
+            0,
+            "trailing preallocation extent must surface FIEMAP_EXTENT_LAST"
+        );
+
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 64)
+            .unwrap();
+        assert_eq!(&data[..payload.len()], payload);
     }
 
     #[test]

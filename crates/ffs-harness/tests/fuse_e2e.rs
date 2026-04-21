@@ -29,6 +29,8 @@ use tempfile::TempDir;
 const EOPNOTSUPP_ERRNO: i64 = 95;
 const BTRFS_TEST_WORKSPACE: &str = "testdir";
 const FS_IOC_FIEMAP_CMD: u32 = 0xC020_660B;
+const FIEMAP_EXTENT_LAST_FLAG: u32 = 0x0001;
+const FIEMAP_EXTENT_UNWRITTEN_FLAG: u32 = 0x0800;
 const FS_IOC_GET_ENCRYPTION_POLICY_CMD: u32 = 0x400C_6615;
 const EXT4_IOC_GETFLAGS_CMD: u32 = 0x8008_6601;
 const EXT4_IOC_SETFLAGS_CMD: u32 = 0x4008_6602;
@@ -2022,6 +2024,187 @@ fn btrfs_fuse_ioctl_fiemap_reports_valid_extents() {
     assert!(
         saw_last,
         "expected FIEMAP_EXTENT_LAST in returned btrfs extents: {report}"
+    );
+}
+
+#[test]
+fn btrfs_fuse_ioctl_fiemap_reports_inline_extent_with_zero_physical() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-btrfs-fiemap-inline.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_btrfs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    let path = workspace.join("fiemap_inline_seed.bin");
+    let payload = b"inline-fiemap";
+    fs::write(&path, payload).expect("write inline btrfs fiemap seed file");
+
+    let report = query_fiemap(&path, 16);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+            "inline btrfs FIEMAP returned EOPNOTSUPP after reaching ffs-fuse::ioctl: \
+             {ioctl_trace}"
+        );
+        eprintln!(
+            "btrfs inline FIEMAP ioctl skipped: kernel/VFS returned EOPNOTSUPP before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+        "successful inline btrfs FIEMAP should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    assert!(
+        report["errno"].is_null(),
+        "inline btrfs FIEMAP should succeed once userspace sees the ioctl: {report}"
+    );
+
+    let extents = report["extents"]
+        .as_array()
+        .expect("inline btrfs fiemap extents array");
+    assert_eq!(
+        extents.len(),
+        1,
+        "inline btrfs FIEMAP should report a single inline extent: {report}"
+    );
+    assert_eq!(
+        report["mapped_extents"].as_u64().unwrap_or(0),
+        1,
+        "inline btrfs FIEMAP should map exactly one extent: {report}"
+    );
+
+    let extent = &extents[0];
+    assert_eq!(extent["logical"].as_u64().unwrap_or(u64::MAX), 0);
+    assert_eq!(extent["physical"].as_u64().unwrap_or(u64::MAX), 0);
+    assert_eq!(extent["length"].as_u64().unwrap_or(0), payload.len() as u64);
+    assert_eq!(
+        extent["flags"].as_u64().unwrap_or(0) as u32,
+        FIEMAP_EXTENT_LAST_FLAG,
+        "inline btrfs FIEMAP extent should only carry LAST: {report}"
+    );
+    assert!(
+        extent["last"].as_bool().unwrap_or(false),
+        "inline btrfs FIEMAP extent should surface LAST: {report}"
+    );
+}
+
+#[test]
+fn btrfs_fuse_ioctl_fiemap_marks_keep_size_prealloc_extent_unwritten() {
+    if !btrfs_fuse_available() || !command_available("fallocate") {
+        eprintln!("btrfs FIEMAP keep-size prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-btrfs-fiemap-prealloc.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_btrfs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    let path = workspace.join("fiemap_prealloc_seed.bin");
+    fs::write(&path, b"existing").expect("write keep-size seed file");
+
+    let out = Command::new("fallocate")
+        .args([
+            "--keep-size",
+            "-o",
+            "4096",
+            "-l",
+            "4096",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run keep-size fallocate on btrfs");
+    assert!(
+        out.status.success(),
+        "btrfs keep-size fallocate for FIEMAP failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read(&path).expect("read after keep-size fallocate"),
+        b"existing",
+        "keep-size preallocation should preserve visible file data"
+    );
+
+    let report = query_fiemap(&path, 16);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+            "keep-size btrfs FIEMAP returned EOPNOTSUPP after reaching ffs-fuse::ioctl: \
+             {ioctl_trace}"
+        );
+        eprintln!(
+            "btrfs keep-size FIEMAP ioctl skipped: kernel/VFS returned EOPNOTSUPP before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+        "successful keep-size btrfs FIEMAP should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    assert!(
+        report["errno"].is_null(),
+        "keep-size btrfs FIEMAP should succeed once userspace sees the ioctl: {report}"
+    );
+
+    let extents = report["extents"]
+        .as_array()
+        .expect("keep-size btrfs fiemap extents array");
+    assert!(
+        report["mapped_extents"].as_u64().unwrap_or(0) >= 2,
+        "keep-size btrfs FIEMAP should report data plus unwritten prealloc extents: {report}"
+    );
+
+    let has_materialized_prefix = extents.iter().any(|extent| {
+        extent["logical"].as_u64() == Some(0)
+            && extent["physical"].as_u64().unwrap_or(0) > 0
+            && extent["flags"].as_u64().unwrap_or(0) as u32 & FIEMAP_EXTENT_UNWRITTEN_FLAG == 0
+    });
+    assert!(
+        has_materialized_prefix,
+        "keep-size btrfs FIEMAP should expose the materialized prefix extent: {report}"
+    );
+
+    let has_unwritten_prealloc = extents.iter().any(|extent| {
+        extent["logical"].as_u64() == Some(4096)
+            && extent["length"].as_u64() == Some(4096)
+            && extent["physical"].as_u64().unwrap_or(0) > 0
+            && extent["flags"].as_u64().unwrap_or(0) as u32 & FIEMAP_EXTENT_UNWRITTEN_FLAG != 0
+            && extent["flags"].as_u64().unwrap_or(0) as u32 & FIEMAP_EXTENT_LAST_FLAG != 0
+    });
+    assert!(
+        has_unwritten_prealloc,
+        "keep-size btrfs FIEMAP should expose a trailing unwritten prealloc extent: {report}"
     );
 }
 
