@@ -388,6 +388,16 @@ fn escape_xml(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn repo_xfstests_allowlist_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts")
+            .join("e2e")
+            .join("xfstests_allowlist.json")
+    }
 
     #[test]
     fn parse_check_output_classifies_statuses_and_duration() {
@@ -451,6 +461,56 @@ generic/001  2s ... pass\n";
         assert_eq!(
             run.tests[0].failure_reason.as_deref(),
             Some("requires unsupported ioctl")
+        );
+    }
+
+    #[test]
+    fn ext4_ioctl_allowlist_entries_match_current_runtime_evidence() {
+        let allowlist = load_allowlist(&repo_xfstests_allowlist_path()).expect("load allowlist");
+        let by_test: BTreeMap<&str, &XfstestsAllowlistEntry> = allowlist
+            .iter()
+            .map(|entry| (entry.test_id.as_str(), entry))
+            .collect();
+
+        let ext4_001 = by_test.get("ext4/001").expect("ext4/001 allowlist entry");
+        assert_eq!(ext4_001.status, "likely_pass");
+        assert!(
+            ext4_001.failure_reason.contains("ZERO_RANGE"),
+            "ext4/001 should reference zero-range coverage: {}",
+            ext4_001.failure_reason
+        );
+        assert!(
+            ext4_001.failure_reason.contains("FIEMAP"),
+            "ext4/001 should reference fiemap coverage: {}",
+            ext4_001.failure_reason
+        );
+        assert!(
+            ext4_001
+                .failure_reason
+                .contains("no longer blocked on missing FIEMAP forwarding"),
+            "ext4/001 should not regress to the stale FIEMAP-forwarding claim: {}",
+            ext4_001.failure_reason
+        );
+
+        let ext4_005 = by_test.get("ext4/005").expect("ext4/005 allowlist entry");
+        assert_eq!(ext4_005.status, "known_fail");
+        assert!(
+            ext4_005.failure_reason.contains("chattr -e"),
+            "ext4/005 should name the real xfstests operation: {}",
+            ext4_005.failure_reason
+        );
+        assert!(
+            ext4_005.failure_reason.contains("EXT4_EXTENTS_FL"),
+            "ext4/005 should call out the system-managed extent flag: {}",
+            ext4_005.failure_reason
+        );
+        assert!(
+            ext4_005
+                .failure_reason
+                .contains("mounted-path EXT4_IOC_GETFLAGS")
+                && ext4_005.failure_reason.contains("EXT4_IOC_SETFLAGS"),
+            "ext4/005 should distinguish the unsupported extent conversion from supported flag ioctls: {}",
+            ext4_005.failure_reason
         );
     }
 

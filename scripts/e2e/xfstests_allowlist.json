@@ -21,8 +21,8 @@
   },
   {
     "test_id": "ext4/001",
-    "failure_reason": "Requires fallocate FALLOC_FL_ZERO_RANGE + FIEMAP ioctl; FUSE does not forward FIEMAP and zero_range may not be exposed",
-    "status": "known_fail"
+    "failure_reason": "Mounted-path close analogues now prove ext4 FALLOC_FL_ZERO_RANGE and FS_IOC_FIEMAP separately (`ext4_fuse_fallocate_zero_range_zeroes_range`, `fuse_ioctl_fiemap_reports_valid_extents`). Keep allowlisted as likely-pass until the exact xfstests `fzero` + `fiemap` sequence is rerun end-to-end; this is no longer blocked on missing FIEMAP forwarding.",
+    "status": "likely_pass"
   },
   {
     "test_id": "ext4/003",
@@ -31,7 +31,7 @@
   },
   {
     "test_id": "ext4/005",
-    "failure_reason": "Requires chattr -e for extent-to-non-extent conversion; ext4 inode flag manipulation through FUSE is not supported",
+    "failure_reason": "Requires `chattr -e` to clear the system-managed EXTENTS flag and convert an extent file to the legacy non-extent format. FrankenFS now proves mounted-path EXT4_IOC_GETFLAGS and user-settable EXT4_IOC_SETFLAGS, but intentionally preserves EXT4_EXTENTS_FL, so this specific extent-conversion path remains unsupported.",
     "status": "known_fail"
   },
   {
