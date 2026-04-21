@@ -769,6 +769,11 @@ Extended attributes (xattrs) provide per-file key-value metadata outside the sta
 | Security | `security.*` | `CAP_SYS_ADMIN` | SELinux labels, IMA |
 | Trusted | `trusted.*` | `CAP_SYS_ADMIN` | Privileged daemon data |
 
+Kernel-reference coverage now differentially validates
+`system.posix_acl_access` and `system.posix_acl_default` against `debugfs`, and
+the FUSE E2E suite covers mounted-path list/get behavior for those POSIX ACL
+xattrs plus the missing-default absence contract on regular files.
+
 ### Hybrid Storage Model
 
 xattrs use a two-tier storage strategy:

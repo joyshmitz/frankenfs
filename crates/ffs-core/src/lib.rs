@@ -14891,6 +14891,70 @@ impl OpenFs {
     }
 }
 
+const EXT4_POSIX_ACL_STORAGE_VERSION: u32 = 0x0001;
+const POSIX_ACL_XATTR_VERSION: u32 = 0x0002;
+const POSIX_ACL_TAG_USER: u16 = 0x0002;
+const POSIX_ACL_TAG_GROUP: u16 = 0x0008;
+const POSIX_ACL_UNDEFINED_ID: u32 = u32::MAX;
+
+fn ext4_present_xattr_value(xattr: Ext4Xattr) -> ffs_error::Result<Vec<u8>> {
+    if xattr.name_index == ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_ACCESS
+        || xattr.name_index == ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT
+    {
+        return ext4_expand_posix_acl_xattr_value(&xattr.value);
+    }
+    Ok(xattr.value)
+}
+
+fn ext4_expand_posix_acl_xattr_value(stored: &[u8]) -> ffs_error::Result<Vec<u8>> {
+    if stored.len() < 4 {
+        return Err(FfsError::Format(
+            "ext4 POSIX ACL xattr shorter than 4-byte header".to_owned(),
+        ));
+    }
+
+    let version = u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]);
+    match version {
+        POSIX_ACL_XATTR_VERSION => Ok(stored.to_vec()),
+        EXT4_POSIX_ACL_STORAGE_VERSION => {
+            let mut cursor = 4_usize;
+            let mut expanded = Vec::with_capacity(stored.len() + 16);
+            expanded.extend_from_slice(&POSIX_ACL_XATTR_VERSION.to_le_bytes());
+
+            while cursor < stored.len() {
+                if cursor + 4 > stored.len() {
+                    return Err(FfsError::Format(
+                        "ext4 POSIX ACL xattr entry header truncated".to_owned(),
+                    ));
+                }
+
+                let tag = u16::from_le_bytes([stored[cursor], stored[cursor + 1]]);
+                let perm = u16::from_le_bytes([stored[cursor + 2], stored[cursor + 3]]);
+                cursor += 4;
+
+                expanded.extend_from_slice(&tag.to_le_bytes());
+                expanded.extend_from_slice(&perm.to_le_bytes());
+                if tag == POSIX_ACL_TAG_USER || tag == POSIX_ACL_TAG_GROUP {
+                    if cursor + 4 > stored.len() {
+                        return Err(FfsError::Format(
+                            "ext4 POSIX ACL xattr entry id truncated".to_owned(),
+                        ));
+                    }
+                    expanded.extend_from_slice(&stored[cursor..cursor + 4]);
+                    cursor += 4;
+                } else {
+                    expanded.extend_from_slice(&POSIX_ACL_UNDEFINED_ID.to_le_bytes());
+                }
+            }
+
+            Ok(expanded)
+        }
+        other => Err(FfsError::Format(format!(
+            "unsupported ext4 POSIX ACL xattr version {other}"
+        ))),
+    }
+}
+
 impl FsOps for OpenFs {
     fn getattr(
         &self,
@@ -15172,7 +15236,8 @@ impl FsOps for OpenFs {
                 Ok(xattrs
                     .into_iter()
                     .find(|x| x.full_name() == name)
-                    .map(|x| x.value))
+                    .map(ext4_present_xattr_value)
+                    .transpose()?)
             }
             FsFlavor::Btrfs(_) => self.btrfs_getxattr(cx, ino, name),
         }
@@ -19333,7 +19398,7 @@ mod tests {
                 u8::try_from(entry.name.len()).expect("inline xattr name should fit in u8");
             region[next_entry + 1] = entry.name_index;
             region[next_entry + 2..next_entry + 4].copy_from_slice(
-                &u16::try_from(value_start + 4)
+                &u16::try_from(value_start)
                     .expect("inline xattr value offset should fit in u16")
                     .to_le_bytes(),
             );
@@ -19348,6 +19413,16 @@ mod tests {
         }
 
         out[4..].copy_from_slice(&region);
+        out
+    }
+
+    fn build_test_stored_posix_acl(entries: &[(u16, u16)]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + (entries.len() * 4));
+        out.extend_from_slice(&EXT4_POSIX_ACL_STORAGE_VERSION.to_le_bytes());
+        for (tag, perm) in entries {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&perm.to_le_bytes());
+        }
         out
     }
 
@@ -19378,6 +19453,30 @@ mod tests {
                 name_index: ffs_types::EXT4_XATTR_INDEX_ENCRYPTION,
                 name: EXT4_ENCRYPTION_XATTR_NAME.to_vec(),
                 value: context.to_vec(),
+            }],
+        );
+        let xattr_off = ino_off + 128 + 32;
+        image[xattr_off..xattr_off + ibody.len()].copy_from_slice(&ibody);
+
+        let ibm = 3 * 4096;
+        let bit = 10_usize;
+        image[ibm + bit / 8] |= 1 << (bit % 8);
+        image
+    }
+
+    fn build_ext4_image_with_posix_acl_xattr(value: &[u8], name_index: u8) -> Vec<u8> {
+        let mut image = build_ext4_image_with_inode();
+        let ino_off = test_inode_offset(11);
+        image[ino_off..ino_off + 2].copy_from_slice(&(ffs_types::S_IFREG | 0o600).to_le_bytes());
+        image[ino_off + 0x1A..ino_off + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+        image[ino_off + 0x80..ino_off + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+        let ibody = build_test_inline_ibody(
+            256 - (128 + 32),
+            &[ffs_ondisk::Ext4Xattr {
+                name_index,
+                name: Vec::new(),
+                value: value.to_vec(),
             }],
         );
         let xattr_off = ino_off + 128 + 32;
@@ -19438,6 +19537,41 @@ mod tests {
         assert_eq!(attr.nlink, 2);
         assert_eq!(attr.size, 4096);
         assert_eq!(attr.blksize, 4096);
+    }
+
+    #[test]
+    fn ext4_getxattr_expands_posix_acl_access_to_userspace_format() {
+        const ACL_USER_OBJ_TAG: u16 = 0x0001;
+        const ACL_GROUP_OBJ_TAG: u16 = 0x0004;
+        const ACL_OTHER_TAG: u16 = 0x0020;
+
+        let stored = build_test_stored_posix_acl(&[
+            (ACL_USER_OBJ_TAG, 0o6),
+            (ACL_GROUP_OBJ_TAG, 0o4),
+            (ACL_OTHER_TAG, 0),
+        ]);
+        let expected = ext4_expand_posix_acl_xattr_value(&stored).expect("expand compact ACL");
+        let image = build_ext4_image_with_posix_acl_xattr(
+            &stored,
+            ffs_types::EXT4_XATTR_INDEX_POSIX_ACL_ACCESS,
+        );
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let value = fs
+            .getxattr(&cx, InodeNumber(11), "system.posix_acl_access")
+            .expect("getxattr should succeed")
+            .expect("ACL xattr should be present");
+
+        assert_eq!(value, expected);
+        assert_eq!(
+            value,
+            [
+                0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x06, 0x00, 0xff, 0xff, 0xff, 0xff, 0x04, 0x00,
+                0x04, 0x00, 0xff, 0xff, 0xff, 0xff, 0x20, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+            ]
+        );
     }
 
     #[test]

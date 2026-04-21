@@ -70,6 +70,12 @@
 | ext4 JOURNAL_DEV paired-open | `fs/ext4/super.c` | ✅ | Standalone journal device detection (JOURNAL_DEV incompat flag → clear error with guidance). Data filesystems with non-zero `journal_dev` now support paired-open replay through `OpenOptions::external_journal_path`: UUID and block-size validation, external JBD2 replay into the data device, and deterministic refusal when crash recovery is required but the external journal is missing or mismatched. Harness integration coverage in `crates/ffs-harness/tests/ext4_journal_recovery.rs` exercises paired-open replay plus missing/mismatched journal refusal, and `fuzz/fuzz_targets/fuzz_jbd2_replay.rs` now coverage-fuzzes the main JBD2 descriptor/commit/revoke replay engine over equivalent region and segment layouts. |
 | ext4 JBD2 checksum verification | `fs/jbd2/recovery.c` | ✅ | CRC32C verification for JBD2 descriptor, revoke, and commit blocks (V2/V3 features). Implemented in `verify_jbd2_block_checksum()` with V3 UUID-seeded checksums and tail-position validation. Direct `ffs-journal` coverage now proves descriptor/revoke checksum roundtrips, tamper detection, and commit-block V3 UUID-seed validation. |
 
+Ext4 xattr parity includes the POSIX ACL namespaces in addition to `user.*` and
+`security.*`: `crates/ffs-harness/tests/kernel_reference.rs` now differentially
+validates `system.posix_acl_access` and `system.posix_acl_default` against
+`debugfs`, while `crates/ffs-harness/tests/fuse_e2e.rs` covers mounted-path
+list/get behavior plus missing-default `ENODATA` on the public FUSE surface.
+
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 
 The table below is the authoritative btrfs experimental RW contract for `bd-h6nz.3.1`.

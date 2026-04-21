@@ -198,7 +198,7 @@ fn build_inline_ibody(ibody_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u8>
     }
 
     out[0..4].copy_from_slice(&EXT4_XATTR_MAGIC.to_le_bytes());
-    let encoded = encode_entries_region(ibody_len - INLINE_HEADER_LEN, entries, INLINE_HEADER_LEN)?;
+    let encoded = encode_entries_region(ibody_len - INLINE_HEADER_LEN, entries, 0)?;
     out[INLINE_HEADER_LEN..].copy_from_slice(&encoded);
     Ok(out)
 }
@@ -1910,7 +1910,7 @@ mod tests {
     }
 
     #[test]
-    fn build_inline_ibody_value_offset_is_relative_to_ibody_header() {
+    fn build_inline_ibody_value_offset_is_relative_to_entry_region() {
         let entry = Ext4Xattr {
             name_index: EXT4_XATTR_INDEX_USER,
             name: b"mime".to_vec(),
@@ -1918,9 +1918,10 @@ mod tests {
         };
         let out = build_inline_ibody(96, &[entry]).unwrap();
         let value_offs = u16::from_le_bytes([out[6], out[7]]);
-        assert_eq!(value_offs, 88);
+        assert_eq!(value_offs, 84);
         assert_eq!(
-            &out[usize::from(value_offs)..usize::from(value_offs) + 5],
+            &out[INLINE_HEADER_LEN + usize::from(value_offs)
+                ..INLINE_HEADER_LEN + usize::from(value_offs) + 5],
             b"image"
         );
     }

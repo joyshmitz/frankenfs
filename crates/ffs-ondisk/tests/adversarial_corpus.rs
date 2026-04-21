@@ -181,7 +181,7 @@ fn inline_data_adversarial_samples() -> Vec<(String, Vec<u8>)> {
     valid_ibody_xattr[entry_start + 2..entry_start + 4].copy_from_slice(&80_u16.to_le_bytes());
     valid_ibody_xattr[entry_start + 8..entry_start + 12].copy_from_slice(&5_u32.to_le_bytes());
     valid_ibody_xattr[entry_start + 16..entry_start + 20].copy_from_slice(b"seed");
-    let value_start = ibody_start + 80;
+    let value_start = entry_start + 80;
     valid_ibody_xattr[value_start..value_start + 5].copy_from_slice(b"fuzz!");
     samples.push((
         "synthetic_ext4_inline_data_ibody_valid_xattr.bin".to_owned(),

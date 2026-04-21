@@ -27,7 +27,10 @@ use ffs_ondisk::{
     Ext4ImageReader, dx_hash, parse_dx_root, parse_ibody_xattrs, parse_xattr_block,
     stamp_dir_block_checksum, verify_dir_block_checksum, verify_inode_checksum,
 };
-use ffs_types::{BlockNumber, EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_USER};
+use ffs_types::{
+    BlockNumber, EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
+    EXT4_XATTR_INDEX_SECURITY, EXT4_XATTR_INDEX_USER,
+};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,6 +64,11 @@ const DIR_INDEX_HASH_SEED: &str = "11111111-2222-3333-4444-555555555555";
 const INLINE_XATTR_USER_VALUE: &str = "image/png";
 const INLINE_XATTR_SECURITY_VALUE: &str = "system_u:object_r:tmp_t:s0";
 const EXTERNAL_XATTR_VALUE_LEN: usize = 512;
+const POSIX_ACL_XATTR_VERSION: u32 = 0x0002;
+const ACL_USER_OBJ_TAG: u16 = 0x0001;
+const ACL_GROUP_OBJ_TAG: u16 = 0x0004;
+const ACL_OTHER_TAG: u16 = 0x0020;
+const ACL_UNDEFINED_ID: u32 = u32::MAX;
 // Keep this large enough that e2fsck -D reliably promotes /htree into a real
 // hash-indexed directory across supported e2fsprogs versions.
 const DIR_INDEX_FILE_COUNT: usize = 256;
@@ -340,8 +348,24 @@ fn create_xattr_base_image(image_path: &Path) -> PathBuf {
         image_path,
         &format!("write {} /xattrs/external.txt", payload_path.display()),
     );
+    run_debugfs_w(
+        image_path,
+        &format!("write {} /xattrs/acl_access.txt", payload_path.display()),
+    );
+    run_debugfs_w(image_path, "mkdir /xattrs/acl_dir");
     std::fs::remove_file(&payload_path).ok();
     image_path.to_path_buf()
+}
+
+fn build_posix_acl_xattr(entries: &[(u16, u16)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + (entries.len() * 8));
+    out.extend_from_slice(&POSIX_ACL_XATTR_VERSION.to_le_bytes());
+    for (tag, perm) in entries {
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&perm.to_le_bytes());
+        out.extend_from_slice(&ACL_UNDEFINED_ID.to_le_bytes());
+    }
+    out
 }
 
 fn apply_xattr_reference_mutations(image_path: &Path) {
@@ -359,6 +383,43 @@ fn apply_xattr_reference_mutations(image_path: &Path) {
         image_path,
         &format!("ea_set /xattrs/external.txt user.big {external_value}"),
     );
+
+    let acl_access_path = image_path.with_extension("acl_access.bin");
+    let acl_default_path = image_path.with_extension("acl_default.bin");
+    std::fs::write(
+        &acl_access_path,
+        build_posix_acl_xattr(&[
+            (ACL_USER_OBJ_TAG, 0o6),
+            (ACL_GROUP_OBJ_TAG, 0o4),
+            (ACL_OTHER_TAG, 0),
+        ]),
+    )
+    .expect("write ACL access blob");
+    std::fs::write(
+        &acl_default_path,
+        build_posix_acl_xattr(&[
+            (ACL_USER_OBJ_TAG, 0o7),
+            (ACL_GROUP_OBJ_TAG, 0o5),
+            (ACL_OTHER_TAG, 0o1),
+        ]),
+    )
+    .expect("write ACL default blob");
+    run_debugfs_w(
+        image_path,
+        &format!(
+            "ea_set -f {} /xattrs/acl_access.txt system.posix_acl_access",
+            acl_access_path.display()
+        ),
+    );
+    run_debugfs_w(
+        image_path,
+        &format!(
+            "ea_set -f {} /xattrs/acl_dir system.posix_acl_default",
+            acl_default_path.display()
+        ),
+    );
+    std::fs::remove_file(&acl_access_path).ok();
+    std::fs::remove_file(&acl_default_path).ok();
 }
 
 fn canonicalize_xattr_block_for_writer_reference(block: &[u8]) -> Vec<u8> {
@@ -585,6 +646,10 @@ fn capture_xattrs(image: &Path, path: &str) -> Vec<KernelXattr> {
 }
 
 fn capture_xattr_value(image: &Path, path: &str, name: &str) -> String {
+    if is_posix_acl_xattr(name) {
+        return capture_stat_xattr_value(image, path, name);
+    }
+
     let out = Command::new("debugfs")
         .args(["-R", &format!("ea_get {path} {name}")])
         .arg(image)
@@ -615,18 +680,125 @@ fn capture_xattr_value(image: &Path, path: &str, name: &str) -> String {
     attr.value
 }
 
+fn capture_xattr_raw_value(image: &Path, path: &str, name: &str) -> Vec<u8> {
+    if is_posix_acl_xattr(name) {
+        let out = Command::new("debugfs")
+            .args(["-R", &format!("stat {path}")])
+            .arg(image)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .expect("run debugfs stat for ACL xattr");
+        assert!(out.status.success(), "debugfs stat failed for {path}");
+        return parse_debugfs_xattr_hex(&out.stdout, path, name);
+    }
+
+    let out = Command::new("debugfs")
+        .args(["-R", &format!("ea_get -x {path} {name}")])
+        .arg(image)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("run debugfs ea_get");
+    assert!(
+        out.status.success(),
+        "debugfs ea_get failed for {path} {name}"
+    );
+    parse_debugfs_xattr_hex(&out.stdout, path, name)
+}
+
+fn capture_stat_xattr_value(image: &Path, path: &str, name: &str) -> String {
+    let out = Command::new("debugfs")
+        .args(["-R", &format!("stat {path}")])
+        .arg(image)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("run debugfs stat for xattr");
+    assert!(out.status.success(), "debugfs stat failed for {path}");
+
+    let attr = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("debugfs") {
+                return None;
+            }
+            let (lhs, rhs) = line.split_once(" = ")?;
+            let (attr_name, _) = lhs.split_once(" (")?;
+            Some(KernelXattr {
+                name: attr_name.to_string(),
+                value: rhs.trim().trim_matches('"').to_string(),
+            })
+        })
+        .filter(|attr| attr.name == name)
+        .unwrap_or_else(|| panic!("debugfs stat returned no xattr for {path} {name}"));
+    attr.value
+}
+
+fn parse_debugfs_xattr_hex(stdout: &[u8], path: &str, name: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut collecting = false;
+
+    for line in String::from_utf8_lossy(stdout).lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("debugfs") {
+            continue;
+        }
+
+        let fragment = if let Some((prefix, suffix)) = line.split_once(" = ") {
+            if !prefix.starts_with(name) {
+                continue;
+            }
+            collecting = true;
+            suffix
+        } else if collecting {
+            line
+        } else {
+            continue;
+        };
+
+        for token in fragment.split_whitespace() {
+            if token.len() != 2 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            bytes.push(
+                u8::from_str_radix(token, 16)
+                    .unwrap_or_else(|err| panic!("decode debugfs hex token {token}: {err}")),
+            );
+        }
+    }
+
+    assert!(
+        collecting,
+        "debugfs ea_get -x produced no xattr payload for {path} {name}"
+    );
+    bytes
+}
+
 fn normalize_ffs_xattrs(xattrs: Vec<ffs_ondisk::Ext4Xattr>) -> Vec<KernelXattr> {
     let mut normalized: Vec<_> = xattrs
         .into_iter()
         .map(|xattr| KernelXattr {
             name: xattr.full_name(),
-            value: String::from_utf8(xattr.value).unwrap_or_else(|err| {
-                panic!("xattr value should be utf-8 for test fixture: {err}")
-            }),
+            value: render_reference_xattr_value(&xattr),
         })
         .collect();
     normalized.sort_unstable();
     normalized
+}
+
+fn render_reference_xattr_value(xattr: &ffs_ondisk::Ext4Xattr) -> String {
+    if xattr.name_index == EXT4_XATTR_INDEX_POSIX_ACL_ACCESS
+        || xattr.name_index == EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT
+    {
+        return xattr
+            .value
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    String::from_utf8(xattr.value.clone())
+        .unwrap_or_else(|err| panic!("xattr value should be utf-8 for test fixture: {err}"))
 }
 
 fn xattr_writer_access() -> ffs_xattr::XattrWriteAccess {
@@ -635,6 +807,10 @@ fn xattr_writer_access() -> ffs_xattr::XattrWriteAccess {
         has_cap_fowner: true,
         has_cap_sys_admin: true,
     }
+}
+
+fn is_posix_acl_xattr(name: &str) -> bool {
+    matches!(name, "system.posix_acl_access" | "system.posix_acl_default")
 }
 
 fn unique_temp_ext4_path(tag: &str) -> PathBuf {
@@ -649,10 +825,25 @@ fn parse_reference_xattr_name(full_name: &str) -> (u8, Vec<u8>) {
     if let Some(name) = full_name.strip_prefix("user.") {
         return (EXT4_XATTR_INDEX_USER, name.as_bytes().to_vec());
     }
+    if full_name == "system.posix_acl_access" {
+        return (EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, Vec::new());
+    }
+    if full_name == "system.posix_acl_default" {
+        return (EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT, Vec::new());
+    }
     if let Some(name) = full_name.strip_prefix("security.") {
         return (EXT4_XATTR_INDEX_SECURITY, name.as_bytes().to_vec());
     }
     panic!("unsupported reference xattr name {full_name}");
+}
+
+fn kernel_xattr_missing(image: &Path, path: &str, name: &str) -> bool {
+    let out = Command::new("debugfs")
+        .args(["-R", &format!("ea_get {path} {name}")])
+        .arg(image)
+        .output()
+        .expect("run debugfs ea_get missing probe");
+    String::from_utf8_lossy(&out.stderr).contains("Extended attribute key not found")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1166,6 +1357,8 @@ fn ext4_kernel_vs_ffs_xattr_reference() {
     for (path, expect_external) in [
         ("/xattrs/inline.txt", false),
         ("/xattrs/external.txt", true),
+        ("/xattrs/acl_access.txt", false),
+        ("/xattrs/acl_dir", false),
     ] {
         let kernel_attrs = capture_xattrs(&tmp, path);
         let (_, inode) = reader
@@ -1218,14 +1411,46 @@ fn ext4_kernel_vs_ffs_xattr_reference() {
                 .get_xattr(&image, &inode, name_index, &name)
                 .unwrap_or_else(|err| panic!("get_xattr {path} {}: {err}", kernel_attr.name))
                 .unwrap_or_else(|| panic!("missing xattr {} in ffs-ondisk", kernel_attr.name));
-            assert_eq!(
-                observed,
-                kernel_attr.value.as_bytes(),
-                "{path}: get_xattr mismatch for {}",
-                kernel_attr.name
-            );
+            if name_index == EXT4_XATTR_INDEX_POSIX_ACL_ACCESS
+                || name_index == EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT
+            {
+                assert_eq!(
+                    observed,
+                    capture_xattr_raw_value(&tmp, path, &kernel_attr.name),
+                    "{path}: get_xattr mismatch for {}",
+                    kernel_attr.name
+                );
+            } else {
+                assert_eq!(
+                    String::from_utf8(observed)
+                        .unwrap_or_else(|err| panic!("utf-8 xattr {}: {err}", kernel_attr.name)),
+                    kernel_attr.value,
+                    "{path}: get_xattr mismatch for {}",
+                    kernel_attr.name
+                );
+            }
         }
     }
+
+    let (_, acl_access_inode) = reader
+        .resolve_path(&image, "/xattrs/acl_access.txt")
+        .expect("resolve acl_access.txt");
+    assert!(
+        kernel_xattr_missing(&tmp, "/xattrs/acl_access.txt", "system.posix_acl_default"),
+        "debugfs should report a missing default ACL on a regular file"
+    );
+    assert_eq!(
+        reader
+            .get_xattr(
+                &image,
+                &acl_access_inode,
+                EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT,
+                &[],
+            )
+            .expect("get_xattr missing default ACL"),
+        None,
+        "ffs-ondisk should report no default ACL on a regular file"
+    );
 
     std::fs::remove_file(&tmp).ok();
 }

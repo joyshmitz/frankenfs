@@ -38,6 +38,11 @@ const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const EXT4_ENCRYPT_INODE_FL: u32 = 0x0000_0800;
 const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
+const POSIX_ACL_XATTR_VERSION: u32 = 0x0002;
+const ACL_USER_OBJ_TAG: u16 = 0x0001;
+const ACL_GROUP_OBJ_TAG: u16 = 0x0004;
+const ACL_OTHER_TAG: u16 = 0x0020;
+const ACL_UNDEFINED_ID: u32 = u32::MAX;
 
 fn patterned_bytes(len: usize, modulus: usize, offset: usize) -> Vec<u8> {
     assert!(
@@ -263,6 +268,71 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
     image
 }
 
+fn build_posix_acl_xattr(entries: &[(u16, u16)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + (entries.len() * 8));
+    out.extend_from_slice(&POSIX_ACL_XATTR_VERSION.to_le_bytes());
+    for (tag, perm) in entries {
+        out.extend_from_slice(&tag.to_le_bytes());
+        out.extend_from_slice(&perm.to_le_bytes());
+        out.extend_from_slice(&ACL_UNDEFINED_ID.to_le_bytes());
+    }
+    out
+}
+
+fn set_debugfs_xattr_from_file(
+    image: &Path,
+    target: &str,
+    name: &str,
+    value: &[u8],
+    blob_path: &Path,
+) {
+    fs::write(blob_path, value).expect("write xattr blob");
+    let out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &format!("ea_set -f {} {target} {name}", blob_path.display()),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("debugfs ea_set -f");
+    assert!(
+        out.status.success(),
+        "debugfs ea_set -f failed for {target} {name}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fs::remove_file(blob_path).ok();
+}
+
+fn create_ext4_posix_acl_test_image(dir: &Path) -> (PathBuf, Vec<u8>, Vec<u8>) {
+    let image = create_test_image(dir);
+    let access_acl = build_posix_acl_xattr(&[
+        (ACL_USER_OBJ_TAG, 0o6),
+        (ACL_GROUP_OBJ_TAG, 0o4),
+        (ACL_OTHER_TAG, 0),
+    ]);
+    let default_acl = build_posix_acl_xattr(&[
+        (ACL_USER_OBJ_TAG, 0o7),
+        (ACL_GROUP_OBJ_TAG, 0o5),
+        (ACL_OTHER_TAG, 0o1),
+    ]);
+    set_debugfs_xattr_from_file(
+        &image,
+        "/hello.txt",
+        "system.posix_acl_access",
+        &access_acl,
+        &dir.join("acl_access.bin"),
+    );
+    set_debugfs_xattr_from_file(
+        &image,
+        "/testdir",
+        "system.posix_acl_default",
+        &default_acl,
+        &dir.join("acl_default.bin"),
+    );
+    (image, access_acl, default_acl)
+}
+
 fn build_fscrypt_context_v1(
     contents_mode: u8,
     filenames_mode: u8,
@@ -315,7 +385,7 @@ fn build_test_inline_ibody(ibody_len: usize, entries: &[ffs_ondisk::Ext4Xattr]) 
             u8::try_from(entry.name.len()).expect("inline xattr name should fit in u8");
         region[next_entry + 1] = entry.name_index;
         region[next_entry + 2..next_entry + 4].copy_from_slice(
-            &u16::try_from(value_start + 4)
+            &u16::try_from(value_start)
                 .expect("inline xattr value offset should fit in u16")
                 .to_le_bytes(),
         );
@@ -3215,6 +3285,24 @@ fn py_getxattr(path: &Path, name: &str) -> Option<Vec<u8>> {
     }
 }
 
+fn py_getxattr_report(path: &Path, name: &str) -> Value {
+    let script = format!(
+        "import json, os\ntry:\n v=os.getxattr({path:?},{name:?})\n print(json.dumps({{'value_hex': v.hex(), 'len': len(v)}}))\nexcept OSError as e:\n print(json.dumps({{'errno': e.errno, 'message': str(e)}}))",
+        path = path.to_str().unwrap(),
+        name = name,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 getxattr JSON");
+    assert!(
+        out.status.success(),
+        "python3 getxattr JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse getxattr JSON")
+}
+
 /// Helper: list extended attribute names on a file using Python's `os.listxattr`.
 fn py_listxattr(path: &Path) -> Vec<String> {
     let script = format!(
@@ -3378,6 +3466,95 @@ fn fuse_xattr_remove_nonexistent_fails() {
             "removexattr for nonexistent attr should fail"
         );
     });
+}
+
+#[test]
+fn fuse_xattr_ext4_posix_acl_list_and_get() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let (image, access_acl, default_acl) = create_ext4_posix_acl_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs(&image, &mnt) else {
+        return;
+    };
+
+    let file_path = mnt.join("hello.txt");
+    let dir_path = mnt.join("testdir");
+    let expected_access_hex = hex::encode(&access_acl);
+    let expected_default_hex = hex::encode(&default_acl);
+
+    let file_names = py_listxattr(&file_path);
+    assert!(
+        file_names
+            .iter()
+            .any(|name| name == "system.posix_acl_access"),
+        "listxattr on hello.txt should expose system.posix_acl_access, got: {file_names:?}"
+    );
+    let access_report = py_getxattr_report(&file_path, "system.posix_acl_access");
+    assert!(
+        access_report["errno"].is_null(),
+        "mounted-path getxattr for system.posix_acl_access should succeed: {access_report}"
+    );
+    assert_eq!(
+        access_report["value_hex"].as_str(),
+        Some(expected_access_hex.as_str()),
+        "mounted-path access ACL bytes should remain stable: {access_report}"
+    );
+
+    let dir_names = py_listxattr(&dir_path);
+    assert!(
+        dir_names
+            .iter()
+            .any(|name| name == "system.posix_acl_default"),
+        "listxattr on testdir should expose system.posix_acl_default, got: {dir_names:?}"
+    );
+    let default_report = py_getxattr_report(&dir_path, "system.posix_acl_default");
+    assert!(
+        default_report["errno"].is_null(),
+        "mounted-path getxattr for system.posix_acl_default should succeed: {default_report}"
+    );
+    assert_eq!(
+        default_report["value_hex"].as_str(),
+        Some(expected_default_hex.as_str()),
+        "mounted-path default ACL bytes should remain stable: {default_report}"
+    );
+}
+
+#[test]
+fn fuse_xattr_ext4_posix_acl_default_missing_on_regular_file_reports_enodata() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let (image, _access_acl, _default_acl) = create_ext4_posix_acl_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs(&image, &mnt) else {
+        return;
+    };
+
+    let file_path = mnt.join("hello.txt");
+    let names = py_listxattr(&file_path);
+    assert!(
+        !names.iter().any(|name| name == "system.posix_acl_default"),
+        "regular file should not list a default ACL xattr, got: {names:?}"
+    );
+
+    let report = py_getxattr_report(&file_path, "system.posix_acl_default");
+    assert_eq!(
+        report["errno"].as_i64(),
+        Some(i64::from(libc::ENODATA)),
+        "missing default ACL on a regular file should surface ENODATA: {report}"
+    );
 }
 
 // ── btrfs FUSE E2E tests ────────────────────────────────────────────────────
