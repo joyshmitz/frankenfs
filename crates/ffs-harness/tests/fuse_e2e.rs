@@ -655,6 +655,7 @@ fn ext4_move_ext_ioctl(
 ) -> Value {
     let script = r"
 import fcntl, json, struct, sys
+import signal
 
 EXT4_IOC_MOVE_EXT = 0xC028660F
 MOVE_EXT_SIZE = 40
@@ -670,16 +671,29 @@ struct.pack_into('@Q', buffer, 8, orig_start)
 struct.pack_into('@Q', buffer, 16, donor_start)
 struct.pack_into('@Q', buffer, 24, length)
 
+def _timeout(_signum, _frame):
+    raise TimeoutError('move_ext ioctl timed out')
+
 with open(path, 'r+b', buffering=0) as orig, open(donor_path, 'r+b', buffering=0) as donor:
     struct.pack_into('@i', buffer, 4, donor.fileno())
+    signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(15)
     try:
         fcntl.ioctl(orig.fileno(), EXT4_IOC_MOVE_EXT, buffer, True)
+    except (TimeoutError, InterruptedError) as exc:
+        print(json.dumps({
+            'timeout': True,
+            'message': str(exc),
+        }))
+        sys.exit(0)
     except OSError as exc:
         print(json.dumps({
             'errno': exc.errno,
             'message': str(exc),
         }))
         sys.exit(0)
+    finally:
+        signal.alarm(0)
 
     print(json.dumps({
         'donor_fd': donor.fileno(),
@@ -1876,6 +1890,16 @@ fn fuse_ioctl_ext4_move_ext_swaps_middle_extent_on_mounted_path() {
     }
     let report = ext4_move_ext_ioctl(&source, &donor, 1, 1, 1);
     let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["timeout"].as_bool() == Some(true) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, EXT4_IOC_MOVE_EXT_CMD),
+            "MOVE_EXT timed out after reaching ffs-fuse::ioctl: {ioctl_trace}"
+        );
+        eprintln!(
+            "EXT4 MOVE_EXT ioctl skipped: kernel/FUSE stack timed out before ffs-fuse::ioctl"
+        );
+        return;
+    }
     if matches!(
         report["errno"].as_i64(),
         Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO
@@ -2062,6 +2086,17 @@ fn fuse_ioctl_ext4_move_ext_rejects_hole_backed_range_on_mounted_path() {
 
     let report = ext4_move_ext_ioctl(&source, &donor, 1, 1, 1);
     let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["timeout"].as_bool() == Some(true) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, EXT4_IOC_MOVE_EXT_CMD),
+            "MOVE_EXT hole rejection timed out after reaching ffs-fuse::ioctl: {ioctl_trace}"
+        );
+        eprintln!(
+            "EXT4 MOVE_EXT hole rejection skipped: kernel/FUSE stack timed out before \
+             ffs-fuse::ioctl"
+        );
+        return;
+    }
     if matches!(
         report["errno"].as_i64(),
         Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO
