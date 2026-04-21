@@ -4508,6 +4508,92 @@ fn btrfs_fuse_xattr_on_directory() {
 }
 
 #[test]
+fn btrfs_fuse_xattr_create_existing_reports_eexist_without_side_effects() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("btrfs_xattr_modes.txt");
+        fs::write(&path, b"btrfs xattr mode coverage\n").expect("write btrfs xattr mode file");
+        let original_file = fs::read(&path).expect("read original btrfs file bytes");
+
+        py_setxattr(&path, "user.locked", b"original");
+        py_setxattr(&path, "user.keep", b"preserve");
+
+        let report = py_setxattr_report(&path, "user.locked", b"replacement", libc::XATTR_CREATE);
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::EEXIST)),
+            "btrfs XATTR_CREATE should reject an existing xattr with EEXIST: {report}"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.locked").expect("existing xattr should remain readable"),
+            b"original",
+            "btrfs XATTR_CREATE failure must preserve the original xattr value"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("unrelated xattr should remain readable"),
+            b"preserve",
+            "btrfs XATTR_CREATE failure must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read btrfs file bytes after create failure"),
+            original_file,
+            "btrfs XATTR_CREATE failure must not mutate file contents"
+        );
+
+        let names = py_listxattr(&path);
+        assert!(
+            names.iter().any(|name| name == "user.locked"),
+            "existing xattr should still be listed after btrfs XATTR_CREATE failure: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "user.keep"),
+            "unrelated xattr should still be listed after btrfs XATTR_CREATE failure: {names:?}"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_replace_missing_reports_enodata_without_side_effects() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("btrfs_xattr_modes.txt");
+        fs::write(&path, b"btrfs xattr mode coverage\n").expect("write btrfs xattr mode file");
+        let original_file = fs::read(&path).expect("read original btrfs file bytes");
+
+        py_setxattr(&path, "user.keep", b"preserve");
+
+        let report = py_setxattr_report(&path, "user.missing", b"replacement", libc::XATTR_REPLACE);
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENODATA)),
+            "btrfs XATTR_REPLACE should reject a missing xattr with ENODATA on Linux FUSE: {report}"
+        );
+        assert!(
+            py_getxattr(&path, "user.missing").is_none(),
+            "btrfs XATTR_REPLACE failure must not create the missing xattr"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("unrelated xattr should remain readable"),
+            b"preserve",
+            "btrfs XATTR_REPLACE failure must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read btrfs file bytes after replace failure"),
+            original_file,
+            "btrfs XATTR_REPLACE failure must not mutate file contents"
+        );
+
+        let names = py_listxattr(&path);
+        assert!(
+            !names.iter().any(|name| name == "user.missing"),
+            "missing xattr should remain absent after btrfs XATTR_REPLACE failure: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "user.keep"),
+            "unrelated xattr should still be listed after btrfs XATTR_REPLACE failure: {names:?}"
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_write_large_file() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
