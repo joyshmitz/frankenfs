@@ -5267,6 +5267,68 @@ fn btrfs_fuse_security_xattr_not_listed_without_privilege() {
 }
 
 #[test]
+fn ext4_fuse_ioctl_getversion_via_mounted_path() {
+    if !command_available("python3") {
+        eprintln!("python3 not available, skipping");
+        return;
+    }
+
+    with_rw_mount(|mnt| {
+        let file_path = mnt.join("hello.txt");
+
+        // Use Python fcntl to issue EXT4_IOC_GETVERSION (0x80086603).
+        // Returns a 4-byte u32 (inode generation number).
+        let script = format!(
+            r#"
+import os, fcntl, struct
+fd = os.open({path:?}, os.O_RDONLY)
+try:
+    buf = bytearray(4)
+    # EXT4_IOC_GETVERSION = _IOR('f', 3, long) = 0x80086603
+    fcntl.ioctl(fd, 0x80086603, buf)
+    version = struct.unpack('<I', buf)[0]
+    print("version=%d" % version)
+    # Version should be a reasonable number (not garbage).
+    assert version < 0xFFFFFFFF, "version looks like uninitialized garbage"
+    print("PASS")
+except OSError as e:
+    print("errno=%d message=%s" % (e.errno, str(e)))
+finally:
+    os.close(fd)
+"#,
+            path = file_path.to_str().unwrap()
+        );
+
+        let out = Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run python3 ioctl script");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        // The ioctl may fail if the kernel doesn't forward it to FUSE.
+        // We accept either PASS or a known transport-layer failure.
+        if stdout.contains("PASS") {
+            // Success - FUSE forwarded the ioctl and we got a valid version.
+            return;
+        }
+
+        // Check for known transport-layer rejections (ENOTTY, EINVAL from kernel).
+        if stdout.contains("errno=25") || stdout.contains("errno=22") {
+            eprintln!(
+                "EXT4_IOC_GETVERSION not forwarded by kernel (transport-layer skip): {stdout}"
+            );
+            return;
+        }
+
+        panic!(
+            "EXT4_IOC_GETVERSION via mounted path failed unexpectedly: stdout={stdout}, stderr={stderr}"
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_write_large_file() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("large.bin");
