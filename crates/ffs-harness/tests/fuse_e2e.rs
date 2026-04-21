@@ -1424,19 +1424,31 @@ fn assert_seek_fully_allocated_contract(path: &Path, scenario_id: &str) {
 }
 
 fn assert_seek_leading_hole_contract(path: &Path, scenario_id: &str) {
-    let data = patterned_bytes(4096, 253, 1);
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
-        .expect("create leading-hole seek test file");
-    file.seek(SeekFrom::Start(4096))
-        .expect("seek to first data offset for leading-hole test");
-    file.write_all(&data)
-        .expect("write data extent for leading-hole test");
-    file.sync_all().expect("flush leading-hole seek test data");
-    drop(file);
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    let data = patterned_bytes(8192, 253, 1);
+    fs::write(path, &data).expect("seed leading-hole seek test file");
+
+    let out = Command::new("fallocate")
+        .args([
+            "--keep-size",
+            "--punch-hole",
+            "-o",
+            "0",
+            "-l",
+            "4096",
+            path.to_str().expect("path utf8"),
+        ])
+        .output()
+        .expect("run fallocate --punch-hole for leading-hole seek test");
+    assert!(
+        out.status.success(),
+        "leading-hole punch-hole failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let readback = fs::read(path).expect("read leading-hole seek test file");
     assert_eq!(
@@ -1450,7 +1462,7 @@ fn assert_seek_leading_hole_contract(path: &Path, scenario_id: &str) {
     );
     assert_eq!(
         &readback[4096..],
-        data.as_slice(),
+        &data[4096..],
         "leading-hole seek test suffix must preserve written payload"
     );
 
@@ -5871,6 +5883,24 @@ fn btrfs_fuse_seek_data_hole_reports_punched_range_offsets() {
         let scenario_id = "btrfs_rw_seek_data_hole";
         let path = mnt.join("btrfs_seek_layout.bin");
         assert_seek_data_hole_contract(&path, scenario_id);
+    });
+}
+
+#[test]
+fn btrfs_fuse_seek_hole_reports_virtual_eof_for_fully_allocated_file() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_seek_hole_fully_allocated";
+        let path = mnt.join("btrfs_seek_fully_allocated.bin");
+        assert_seek_fully_allocated_contract(&path, scenario_id);
+    });
+}
+
+#[test]
+fn btrfs_fuse_seek_data_hole_reports_leading_sparse_hole_offsets() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_seek_leading_hole";
+        let path = mnt.join("btrfs_seek_leading_hole.bin");
+        assert_seek_leading_hole_contract(&path, scenario_id);
     });
 }
 
