@@ -1368,6 +1368,59 @@ finally:
     serde_json::from_slice(&output.stdout).expect("decode fallocate probe JSON")
 }
 
+fn py_fallocate_report(path: &Path, mode: i32, offset: u64, length: u64) -> Value {
+    let script = r#"
+import ctypes, errno, json, os, sys
+
+path = sys.argv[1]
+mode = int(sys.argv[2], 0)
+offset = int(sys.argv[3])
+length = int(sys.argv[4])
+libc = ctypes.CDLL(None, use_errno=True)
+libc.fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong]
+libc.fallocate.restype = ctypes.c_int
+
+try:
+    fd = os.open(path, os.O_RDWR)
+except OSError as e:
+    print(json.dumps({
+        "stage": "open",
+        "errno": e.errno,
+        "name": errno.errorcode.get(e.errno, "UNKNOWN"),
+        "message": str(e),
+    }))
+    raise SystemExit(0)
+
+try:
+    res = libc.fallocate(fd, mode, offset, length)
+    err = ctypes.get_errno()
+    payload = {"stage": "fallocate", "res": res, "errno": err}
+    if err:
+        payload["name"] = errno.errorcode.get(err, "UNKNOWN")
+    print(json.dumps(payload))
+finally:
+    os.close(fd)
+"#;
+
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            script,
+            path.to_str().expect("path utf8"),
+            &format!("{mode:#x}"),
+            &offset.to_string(),
+            &length.to_string(),
+        ])
+        .output()
+        .expect("python3 read-only fallocate probe");
+    assert!(
+        output.status.success(),
+        "python3 read-only fallocate probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode read-only fallocate probe JSON")
+}
+
 fn assert_seek_data_hole_contract(path: &Path, scenario_id: &str) {
     let data = patterned_bytes(12_288, 251, 1);
     fs::write(path, &data).expect("seed seek test file");
@@ -2258,6 +2311,54 @@ fn fuse_read_only_unlink_rmdir_and_rename_report_erofs_without_dirent_drift() {
         &empty_dir,
         &rename_source,
         "ext4_ro_unlink_rmdir_rename_reject_erofs_no_drift",
+    );
+}
+
+#[test]
+fn fuse_read_only_fallocate_mutation_attempts_report_erofs_without_file_drift() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs(&image, &mnt) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ro_fallocate_mutation_attempts_reject_erofs_no_drift";
+    let path = mnt.join("hello.txt");
+    let before = snapshot_file_state(&path);
+
+    let preallocate_report = py_fallocate_report(&path, 0, 0, before.len + 4096);
+    assert_eq!(
+        preallocate_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only preallocate should surface exact EROFS: {preallocate_report}"
+    );
+    assert_file_state_unchanged(&path, &before, "rejected read-only preallocate");
+
+    let punch_hole_report = py_fallocate_report(
+        &path,
+        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+        0,
+        before.len.min(8),
+    );
+    assert_eq!(
+        punch_hole_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only punch-hole should surface exact EROFS: {punch_hole_report}"
+    );
+    assert_file_state_unchanged(&path, &before, "rejected read-only punch-hole");
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("preallocate+punch_hole=EROFS_no_file_drift"),
     );
 }
 
