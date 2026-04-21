@@ -4853,6 +4853,7 @@ fn btrfs_fuse_seek_data_hole_reports_punched_range_offsets() {
 #[test]
 fn btrfs_fuse_xattr_set_get_list_remove() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_xattr_set_get_list_remove";
         let path = mnt.join("xattr_test.txt");
         fs::write(&path, b"xattr test content\n").expect("write for xattr");
 
@@ -4881,12 +4882,14 @@ fn btrfs_fuse_xattr_set_get_list_remove() {
             py_getxattr(&path, "user.test_key").is_none(),
             "xattr should be absent after removexattr on btrfs"
         );
+        emit_scenario_result(scenario_id, "PASS", Some("user_namespace_full_cycle"));
     });
 }
 
 #[test]
 fn btrfs_fuse_xattr_multiple_attributes() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_xattr_multiple_attributes";
         let path = mnt.join("multi_xattr.txt");
         fs::write(&path, b"multi xattr content\n").expect("write for multi xattr");
 
@@ -4908,12 +4911,14 @@ fn btrfs_fuse_xattr_multiple_attributes() {
                 "listxattr on btrfs should contain {expected}, got: {names:?}"
             );
         }
+        emit_scenario_result(scenario_id, "PASS", Some("three_distinct_user_xattrs"));
     });
 }
 
 #[test]
 fn btrfs_fuse_xattr_on_directory() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_xattr_on_directory";
         let dir = mnt.join("xattr_dir");
         fs::create_dir(&dir).expect("mkdir for xattr");
 
@@ -4928,12 +4933,14 @@ fn btrfs_fuse_xattr_on_directory() {
             names.iter().any(|n| n == "user.dir_attr"),
             "listxattr on btrfs dir should contain user.dir_attr, got: {names:?}"
         );
+        emit_scenario_result(scenario_id, "PASS", Some("user_xattr_on_directory_inode"));
     });
 }
 
 #[test]
 fn btrfs_fuse_xattr_create_existing_reports_eexist_without_side_effects() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_xattr_create_existing_reports_eexist";
         let path = mnt.join("btrfs_xattr_modes.txt");
         fs::write(&path, b"btrfs xattr mode coverage\n").expect("write btrfs xattr mode file");
         let original_file = fs::read(&path).expect("read original btrfs file bytes");
@@ -4972,12 +4979,14 @@ fn btrfs_fuse_xattr_create_existing_reports_eexist_without_side_effects() {
             names.iter().any(|name| name == "user.keep"),
             "unrelated xattr should still be listed after btrfs XATTR_CREATE failure: {names:?}"
         );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=EEXIST_with_no_side_effects"));
     });
 }
 
 #[test]
 fn btrfs_fuse_xattr_replace_missing_reports_enodata_without_side_effects() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_xattr_replace_missing_reports_enodata";
         let path = mnt.join("btrfs_xattr_modes.txt");
         fs::write(&path, b"btrfs xattr mode coverage\n").expect("write btrfs xattr mode file");
         let original_file = fs::read(&path).expect("read original btrfs file bytes");
@@ -5014,12 +5023,14 @@ fn btrfs_fuse_xattr_replace_missing_reports_enodata_without_side_effects() {
             names.iter().any(|name| name == "user.keep"),
             "unrelated xattr should still be listed after btrfs XATTR_REPLACE failure: {names:?}"
         );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=ENODATA_with_no_side_effects"));
     });
 }
 
 #[test]
 fn btrfs_fuse_xattr_overwrite_value() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_xattr_overwrite_value";
         let path = mnt.join("overwrite_xattr.txt");
         fs::write(&path, b"overwrite xattr test\n").expect("write for overwrite xattr");
 
@@ -5033,12 +5044,14 @@ fn btrfs_fuse_xattr_overwrite_value() {
             py_getxattr(&path, "user.mutable").unwrap(),
             b"updated_value"
         );
+        emit_scenario_result(scenario_id, "PASS", Some("second_setxattr_updates_value"));
     });
 }
 
 #[test]
 fn btrfs_fuse_xattr_get_nonexistent_returns_error() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_xattr_get_nonexistent_returns_error";
         let path = mnt.join("nonexistent_xattr.txt");
         fs::write(&path, b"nonexistent xattr test\n").expect("write for nonexistent xattr");
 
@@ -5047,12 +5060,14 @@ fn btrfs_fuse_xattr_get_nonexistent_returns_error() {
             py_getxattr(&path, "user.does_not_exist").is_none(),
             "getxattr for nonexistent attr on btrfs should return None/error"
         );
+        emit_scenario_result(scenario_id, "PASS", Some("getxattr_on_unset_name_fails"));
     });
 }
 
 #[test]
 fn btrfs_fuse_xattr_remove_nonexistent_fails() {
     with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_xattr_remove_nonexistent_fails";
         let path = mnt.join("remove_nonexistent_xattr.txt");
         fs::write(&path, b"remove nonexistent xattr test\n").expect("write for remove nonexistent xattr");
 
@@ -5061,6 +5076,7 @@ fn btrfs_fuse_xattr_remove_nonexistent_fails() {
             !py_removexattr(&path, "user.no_such_attr"),
             "removexattr for nonexistent attr on btrfs should fail"
         );
+        emit_scenario_result(scenario_id, "PASS", Some("removexattr_on_unset_name_fails"));
     });
 }
 
@@ -5108,6 +5124,75 @@ finally:
         assert!(
             out.status.success() && stdout.contains("PASS"),
             "BTRFS_IOC_FS_INFO via mounted path failed: stdout={stdout}, stderr={stderr}"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_posix_acl_list_and_get() {
+    with_btrfs_rw_mount(|mnt| {
+        let file_path = mnt.join("acl_test_file.txt");
+        let dir_path = mnt.join("acl_test_dir");
+        fs::write(&file_path, b"POSIX ACL test content\n").expect("create test file for ACL");
+        fs::create_dir(&dir_path).expect("create test dir for ACL");
+
+        let access_acl = build_posix_acl_xattr(&[
+            (ACL_USER_OBJ_TAG, 0o6),
+            (ACL_GROUP_OBJ_TAG, 0o4),
+            (ACL_OTHER_TAG, 0),
+        ]);
+        let default_acl = build_posix_acl_xattr(&[
+            (ACL_USER_OBJ_TAG, 0o7),
+            (ACL_GROUP_OBJ_TAG, 0o5),
+            (ACL_OTHER_TAG, 0o1),
+        ]);
+
+        py_setxattr(&file_path, "system.posix_acl_access", &access_acl);
+        py_setxattr(&dir_path, "system.posix_acl_default", &default_acl);
+
+        let file_names = py_listxattr(&file_path);
+        assert!(
+            file_names.iter().any(|name| name == "system.posix_acl_access"),
+            "listxattr on btrfs file should expose system.posix_acl_access, got: {file_names:?}"
+        );
+
+        let access_report = py_getxattr_report(&file_path, "system.posix_acl_access");
+        assert!(
+            access_report["value_hex"].is_string(),
+            "btrfs getxattr for system.posix_acl_access should succeed: {access_report}"
+        );
+
+        let dir_names = py_listxattr(&dir_path);
+        assert!(
+            dir_names.iter().any(|name| name == "system.posix_acl_default"),
+            "listxattr on btrfs dir should expose system.posix_acl_default, got: {dir_names:?}"
+        );
+
+        let default_report = py_getxattr_report(&dir_path, "system.posix_acl_default");
+        assert!(
+            default_report["value_hex"].is_string(),
+            "btrfs getxattr for system.posix_acl_default should succeed: {default_report}"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_posix_acl_default_missing_on_regular_file_reports_enodata() {
+    with_btrfs_rw_mount(|mnt| {
+        let file_path = mnt.join("no_acl_file.txt");
+        fs::write(&file_path, b"file without default ACL\n").expect("create test file");
+
+        let names = py_listxattr(&file_path);
+        assert!(
+            !names.iter().any(|name| name == "system.posix_acl_default"),
+            "btrfs regular file should not list a default ACL xattr, got: {names:?}"
+        );
+
+        let report = py_getxattr_report(&file_path, "system.posix_acl_default");
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENODATA)),
+            "btrfs getxattr for missing system.posix_acl_default should return ENODATA: {report}"
         );
     });
 }
