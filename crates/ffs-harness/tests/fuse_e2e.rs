@@ -302,6 +302,78 @@ fn create_test_image_with_size(dir: &Path, image_size_bytes: u64) -> std::path::
     image
 }
 
+fn create_test_image_with_seeded_namespace_removal_fixture(dir: &Path) -> std::path::PathBuf {
+    let image = create_test_image_with_size(dir, 4 * 1024 * 1024);
+    let empty_dir = "readonly_empty_dir";
+    let unlink_seed_src = dir.join("readonly_unlink_seed_src.txt");
+    let rename_seed_src = dir.join("readonly_rename_source_src.txt");
+
+    fs::write(&unlink_seed_src, b"readonly ext4 unlink seed\n")
+        .expect("write ext4 unlink namespace-removal seed");
+    fs::write(&rename_seed_src, b"readonly ext4 rename source\n")
+        .expect("write ext4 rename namespace-removal seed");
+
+    let mkdir_out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &format!("mkdir {empty_dir}"),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("debugfs mkdir readonly_empty_dir");
+    assert!(
+        mkdir_out.status.success(),
+        "debugfs mkdir readonly_empty_dir failed: {}",
+        String::from_utf8_lossy(&mkdir_out.stderr)
+    );
+
+    let chmod_out = Command::new("debugfs")
+        .args([
+            "-w",
+            "-R",
+            &format!("set_inode_field {empty_dir} mode 040777"),
+            image.to_str().unwrap(),
+        ])
+        .output()
+        .expect("debugfs chmod readonly_empty_dir");
+    assert!(
+        chmod_out.status.success(),
+        "debugfs chmod readonly_empty_dir failed: {}",
+        String::from_utf8_lossy(&chmod_out.stderr)
+    );
+
+    for (src, target, desc) in [
+        (
+            &unlink_seed_src,
+            "readonly_unlink_seed.txt",
+            "readonly unlink seed",
+        ),
+        (
+            &rename_seed_src,
+            "readonly_rename_source.txt",
+            "readonly rename source",
+        ),
+    ] {
+        let out = Command::new("debugfs")
+            .args([
+                "-w",
+                "-R",
+                &format!("write {} {target}", src.display()),
+                image.to_str().unwrap(),
+            ])
+            .output()
+            .expect("debugfs write namespace-removal seed");
+        assert!(
+            out.status.success(),
+            "debugfs write {desc} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    image
+}
+
 fn build_posix_acl_xattr(entries: &[(u16, u16)]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + (entries.len() * 8));
     out.extend_from_slice(&POSIX_ACL_XATTR_VERSION.to_le_bytes());
@@ -2070,6 +2142,49 @@ fn fuse_setattr_read_only_rejects_chmod_truncate_and_utimes_with_erofs() {
     assert_read_only_setattr_contract(
         &mnt.join("hello.txt"),
         "ext4_ro_setattr_rejects_erofs_no_drift",
+    );
+}
+
+#[test]
+fn fuse_read_only_unlink_rmdir_and_rename_report_erofs_without_dirent_drift() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_seeded_namespace_removal_fixture(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs(&image, &mnt) else {
+        return;
+    };
+
+    let keep_file = mnt.join("readonly_unlink_seed.txt");
+    let empty_dir = mnt.join("readonly_empty_dir");
+    let rename_source = mnt.join("readonly_rename_source.txt");
+    assert_eq!(
+        fs::read(&keep_file).expect("read seeded ext4 unlink file"),
+        b"readonly ext4 unlink seed\n",
+        "read-only remount must preserve the seeded unlink target bytes"
+    );
+    assert_eq!(
+        fs::read(&rename_source).expect("read seeded ext4 rename source file"),
+        b"readonly ext4 rename source\n",
+        "read-only remount must preserve the seeded rename source bytes"
+    );
+    assert!(
+        empty_dir.is_dir(),
+        "read-only remount must preserve the seeded empty directory"
+    );
+
+    assert_read_only_unlink_rmdir_and_rename_contract(
+        &mnt,
+        &keep_file,
+        &empty_dir,
+        &rename_source,
+        "ext4_ro_unlink_rmdir_rename_reject_erofs_no_drift",
     );
 }
 
