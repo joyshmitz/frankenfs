@@ -110,6 +110,9 @@ and btrfs, with no file-byte drift and no implied durability boundary.
 Mounted-path ext4 namespace refusal coverage now also freezes exact `ENOTDIR`
 for `rmdir` on a regular file, distinct from the existing missing-directory and
 non-empty-directory contracts.
+Mounted-path ext4 rename-over-hardlink coverage now also freezes same-inode
+destination semantics as a visible no-op: both names stay bound to the original
+inode/data and `st_nlink` remains 2.
 Mounted-path btrfs rename refusal coverage now also freezes exact `ENOTDIR`
 for rename attempts whose destination parent is a regular file, with no source
 or parent-file drift.
