@@ -15,10 +15,12 @@
 use asupersync::Cx;
 use ffs_core::{Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope};
 use ffs_fuse::{MountOptions, mount_background};
+use ffs_harness::load_sparse_fixture;
+use ffs_types::InodeNumber;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -123,6 +125,98 @@ fn create_test_image_with_ext4_incompat_features(
     );
     data[checksum_off..checksum_off + 4].copy_from_slice(&checksum.to_le_bytes());
     fs::write(&image, data).expect("rewrite ext4 image with incompat bits");
+    image
+}
+
+fn conformance_fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("conformance")
+        .join("fixtures")
+        .join(name)
+}
+
+fn build_ext4_inline_data_image(inode_fixture: &str) -> Vec<u8> {
+    let block_size: u32 = 4096;
+    let image_size: u32 = 256 * 1024;
+    let mut image = vec![0_u8; image_size as usize];
+    let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+
+    image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&ffs_types::EXT4_SUPER_MAGIC.to_le_bytes());
+    image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+    let blocks_count = image_size / block_size;
+    image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+    image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+    image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+    let incompat = (ffs_ondisk::Ext4IncompatFeatures::FILETYPE.0
+        | ffs_ondisk::Ext4IncompatFeatures::EXTENTS.0
+        | ffs_ondisk::Ext4IncompatFeatures::INLINE_DATA.0)
+        .to_le_bytes();
+    image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat);
+    image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+    let gd_off: usize = 4096;
+    image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+    image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+    let ino2 = 4 * 4096 + 256;
+    image[ino2..ino2 + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+    image[ino2 + 4..ino2 + 8].copy_from_slice(&4096_u32.to_le_bytes());
+    image[ino2 + 0x1A..ino2 + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+    image[ino2 + 0x80..ino2 + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let root_extent = ino2 + 0x28;
+    image[root_extent..root_extent + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[root_extent + 2..root_extent + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 4..root_extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[root_extent + 6..root_extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 12..root_extent + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[root_extent + 16..root_extent + 18].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 18..root_extent + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 20..root_extent + 24].copy_from_slice(&10_u32.to_le_bytes());
+
+    let inline_inode = load_sparse_fixture(&conformance_fixture_path(inode_fixture))
+        .expect("load inline inode fixture");
+    let ino11 = 4 * 4096 + 10 * 256;
+    image[ino11..ino11 + inline_inode.len()].copy_from_slice(&inline_inode);
+
+    let dir = 10 * 4096;
+    image[dir..dir + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir + 6] = 1;
+    image[dir + 7] = 2;
+    image[dir + 8] = b'.';
+
+    let dir = dir + 12;
+    image[dir..dir + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir + 6] = 2;
+    image[dir + 7] = 2;
+    image[dir + 8] = b'.';
+    image[dir + 9] = b'.';
+
+    let name = b"inline.bin";
+    let dir = dir + 12;
+    image[dir..dir + 4].copy_from_slice(&11_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&4072_u16.to_le_bytes());
+    image[dir + 6] = u8::try_from(name.len()).expect("inline fixture name length fits u8");
+    image[dir + 7] = 1;
+    image[dir + 8..dir + 8 + name.len()].copy_from_slice(name);
+
+    image
+}
+
+fn create_ext4_inline_data_test_image(dir: &Path, inode_fixture: &str) -> PathBuf {
+    let image = dir.join("inline-data.ext4");
+    fs::write(&image, build_ext4_inline_data_image(inode_fixture))
+        .expect("write ext4 inline-data fixture image");
     image
 }
 
@@ -670,6 +764,54 @@ fn fuse_read_hello_txt() {
 }
 
 #[test]
+fn ext4_fuse_inline_data_reads_direct_inode_payload() {
+    assert_mounted_ext4_inline_data_read_contract(
+        "ext4_inode_inline_data.json",
+        b"Hello from inline data!",
+        "ext4_ro_inline_data_direct_read_contract",
+        "layout=i_block_short_read_eof",
+    );
+}
+
+#[test]
+fn ext4_fuse_inline_data_reads_xattr_continuation_payload() {
+    let mut expected = vec![b'A'; 60];
+    expected.extend(std::iter::repeat_n(b'B', 16));
+    assert_mounted_ext4_inline_data_read_contract(
+        "ext4_inode_inline_data_with_continuation.json",
+        &expected,
+        "ext4_ro_inline_data_system_data_read_contract",
+        "layout=system.data_short_read_eof",
+    );
+}
+
+#[test]
+fn ext4_inline_data_mount_open_options_preserve_xattr_continuation_reads() {
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_ext4_inline_data_test_image(
+        tmp.path(),
+        "ext4_inode_inline_data_with_continuation.json",
+    );
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        skip_validation: false,
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    let fs = OpenFs::open_with_options(&cx, &image, &opts)
+        .expect("open inline-data image with mount options");
+    let mut expected = vec![b'A'; 60];
+    expected.extend(std::iter::repeat_n(b'B', 16));
+
+    assert_eq!(
+        fs.read(&cx, InodeNumber(11), 0, 4096)
+            .expect("read inline-data continuation through mount options"),
+        expected,
+        "OpenFs mount options should preserve inline-data continuation reads before FUSE transport"
+    );
+}
+
+#[test]
 fn fuse_readdir_root() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -867,6 +1009,64 @@ fn with_rw_mount_sized(image_size_bytes: u64, f: impl FnOnce(&Path)) {
         return;
     };
     f(&mnt);
+}
+
+fn with_ext4_inline_data_mount(inode_fixture: &str, f: impl FnOnce(&Path)) {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_ext4_inline_data_test_image(tmp.path(), inode_fixture);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs(&image, &mnt) else {
+        return;
+    };
+    f(&mnt);
+}
+
+fn assert_mounted_ext4_inline_data_read_contract(
+    inode_fixture: &str,
+    expected: &[u8],
+    scenario_id: &str,
+    detail: &str,
+) {
+    with_ext4_inline_data_mount(inode_fixture, |mnt| {
+        let path = mnt.join("inline.bin");
+        assert_eq!(
+            fs::metadata(&path).expect("stat inline.bin via FUSE").len(),
+            u64::try_from(expected.len()).expect("expected inline size fits u64"),
+            "mounted inline-data file should report the expected byte length"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read inline.bin via FUSE"),
+            expected,
+            "mounted inline-data file should expose the expected payload"
+        );
+
+        let mut file = fs::File::open(&path).expect("open inline.bin for boundary reads");
+        let short_offset =
+            u64::try_from(expected.len().saturating_sub(4)).expect("offset fits u64");
+        file.seek(SeekFrom::Start(short_offset))
+            .expect("seek near inline-data EOF");
+        let mut buf = [0_u8; 8];
+        let read = file
+            .read(&mut buf)
+            .expect("short read near inline-data EOF");
+        assert_eq!(
+            &buf[..read],
+            &expected[expected.len() - read..],
+            "near-EOF mounted inline-data read should truncate to the remaining tail bytes"
+        );
+        let eof_read = file
+            .read(&mut buf)
+            .expect("read exactly at inline-data EOF");
+        assert_eq!(eof_read, 0, "mounted inline-data EOF read should be empty");
+
+        emit_scenario_result(scenario_id, "PASS", Some(detail));
+    });
 }
 
 fn query_fiemap(path: &Path, extent_count: u32) -> Value {

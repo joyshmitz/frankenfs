@@ -15,7 +15,7 @@
     {"offset": 160, "hex": "000002ea", "_comment": "xattr magic = 0xEA020000 little-endian"},
     {"offset": 164, "hex": "04", "_comment": "name_len = 4 ('data')"},
     {"offset": 165, "hex": "07", "_comment": "name_index = 7 (EXT4_XATTR_INDEX_SYSTEM)"},
-    {"offset": 166, "hex": "5000", "_comment": "value_offs = 80 (offset from start of ibody, pointing to ibody[80] = byte 240)"},
+    {"offset": 166, "hex": "4c00", "_comment": "value_offs = 76 (offset from the first ibody xattr entry, pointing to byte 240)"},
     {"offset": 168, "hex": "00000000", "_comment": "value_block = 0"},
     {"offset": 172, "hex": "10000000", "_comment": "value_size = 16 bytes of continuation"},
     {"offset": 176, "hex": "00000000", "_comment": "hash = 0"},
