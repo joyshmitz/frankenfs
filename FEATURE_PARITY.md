@@ -96,6 +96,9 @@ directory-entry drift and no surviving-file data drift.
 Mounted-path ext4 read-only `fallocate` coverage now also freezes exact `EROFS`
 for representative preallocate and punch-hole mutation attempts, with no
 file-byte or apparent-size drift.
+Mounted-path btrfs read-only `fallocate` coverage now also freezes exact `EROFS`
+for representative preallocate and punch-hole mutation attempts, with no
+file-byte or apparent-size drift.
 Mounted-path ext4 namespace refusal coverage now also freezes exact `ENOTDIR`
 for `rmdir` on a regular file, distinct from the existing missing-directory and
 non-empty-directory contracts.

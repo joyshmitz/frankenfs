@@ -6540,6 +6540,60 @@ fn btrfs_fuse_setattr_read_only_rejects_chmod_truncate_and_utimes_with_erofs() {
 }
 
 #[test]
+fn btrfs_fuse_read_only_fallocate_mutation_attempts_report_erofs_without_file_drift() {
+    if !btrfs_fuse_available() || !command_available("python3") {
+        eprintln!("btrfs FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image_with_seeded_file(
+        tmp.path(),
+        "readonly_fallocate_seed.txt",
+        b"readonly btrfs fallocate seed\n",
+    );
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_btrfs_ro(&image, &mnt) else {
+        return;
+    };
+
+    let scenario_id = "btrfs_ro_fallocate_mutation_attempts_reject_erofs_no_drift";
+    let path = mnt
+        .join(BTRFS_TEST_WORKSPACE)
+        .join("readonly_fallocate_seed.txt");
+    let before = snapshot_file_state(&path);
+
+    let preallocate_report = py_fallocate_report(&path, 0, 0, before.len + 4096);
+    assert_eq!(
+        preallocate_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only btrfs preallocate should surface exact EROFS: {preallocate_report}"
+    );
+    assert_file_state_unchanged(&path, &before, "rejected read-only btrfs preallocate");
+
+    let punch_hole_report = py_fallocate_report(
+        &path,
+        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+        0,
+        before.len.min(8),
+    );
+    assert_eq!(
+        punch_hole_report["errno"].as_i64(),
+        Some(i64::from(libc::EROFS)),
+        "read-only btrfs punch-hole should surface exact EROFS: {punch_hole_report}"
+    );
+    assert_file_state_unchanged(&path, &before, "rejected read-only btrfs punch-hole");
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("preallocate+punch_hole=EROFS_no_file_drift"),
+    );
+}
+
+#[test]
 fn btrfs_fuse_read_only_create_mkdir_link_and_symlink_report_erofs_without_dirent_drift() {
     if !btrfs_fuse_available() {
         eprintln!("btrfs FUSE prerequisites not met, skipping");
