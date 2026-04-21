@@ -1822,6 +1822,281 @@ fn fuse_ioctl_ext4_getflags_setflags_roundtrip_preserves_system_bits() {
 }
 
 #[test]
+fn fuse_ioctl_ext4_move_ext_swaps_middle_extent_on_mounted_path() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 8 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-move-ext.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_move_ext_swaps_middle_extent";
+    let source = mnt.join("move_ext_source.bin");
+    let donor = mnt.join("move_ext_donor.bin");
+    let block_size = 4096_usize;
+
+    let mut source_payload = Vec::with_capacity(block_size * 3);
+    source_payload.extend(std::iter::repeat_n(0x11_u8, block_size));
+    source_payload.extend(std::iter::repeat_n(0x22_u8, block_size));
+    source_payload.extend(std::iter::repeat_n(0x33_u8, block_size));
+    let mut donor_payload = Vec::with_capacity(block_size * 3);
+    donor_payload.extend(std::iter::repeat_n(0xAA_u8, block_size));
+    donor_payload.extend(std::iter::repeat_n(0xBB_u8, block_size));
+    donor_payload.extend(std::iter::repeat_n(0xCC_u8, block_size));
+
+    fs::write(&source, &source_payload).expect("write source payload");
+    fs::write(&donor, &donor_payload).expect("write donor payload");
+
+    let source_before = query_fiemap(&source, 16);
+    let donor_before = query_fiemap(&donor, 16);
+    if matches!(
+        source_before["errno"].as_i64(),
+        Some(errno) if errno == EOPNOTSUPP_ERRNO || errno == i64::from(libc::ENOTTY)
+    ) || matches!(
+        donor_before["errno"].as_i64(),
+        Some(errno) if errno == EOPNOTSUPP_ERRNO || errno == i64::from(libc::ENOTTY)
+    ) {
+        eprintln!(
+            "EXT4 MOVE_EXT swap proof skipped: FIEMAP unavailable on current kernel/FUSE stack"
+        );
+        return;
+    }
+    let report = ext4_move_ext_ioctl(&source, &donor, 1, 1, 1);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if matches!(
+        report["errno"].as_i64(),
+        Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO
+    ) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, EXT4_IOC_MOVE_EXT_CMD),
+            "MOVE_EXT returned kernel/VFS-level unsupported errno after reaching ffs-fuse::ioctl: \
+             {ioctl_trace}"
+        );
+        eprintln!(
+            "EXT4 MOVE_EXT ioctl skipped: kernel/VFS returned unsupported errno before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, EXT4_IOC_MOVE_EXT_CMD),
+        "successful MOVE_EXT should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    assert!(
+        report["errno"].is_null(),
+        "EXT4 MOVE_EXT ioctl should succeed on fully mapped extents: {report}"
+    );
+    assert_eq!(
+        report["moved_len"].as_u64(),
+        Some(1),
+        "MOVE_EXT should report the swapped block count: {report}"
+    );
+
+    let source_after = fs::read(&source).expect("read source after move_ext");
+    let donor_after = fs::read(&donor).expect("read donor after move_ext");
+    assert_eq!(
+        &source_after[..block_size],
+        &source_payload[..block_size],
+        "source prefix block should stay in place"
+    );
+    assert_eq!(
+        &source_after[block_size..2 * block_size],
+        &donor_payload[block_size..2 * block_size],
+        "source middle block should come from donor"
+    );
+    assert_eq!(
+        &source_after[2 * block_size..],
+        &source_payload[2 * block_size..],
+        "source suffix block should stay in place"
+    );
+    assert_eq!(
+        &donor_after[..block_size],
+        &donor_payload[..block_size],
+        "donor prefix block should stay in place"
+    );
+    assert_eq!(
+        &donor_after[block_size..2 * block_size],
+        &source_payload[block_size..2 * block_size],
+        "donor middle block should come from source"
+    );
+    assert_eq!(
+        &donor_after[2 * block_size..],
+        &donor_payload[2 * block_size..],
+        "donor suffix block should stay in place"
+    );
+
+    let source_after_report = query_fiemap(&source, 16);
+    let donor_after_report = query_fiemap(&donor, 16);
+    assert!(
+        source_after_report["errno"].is_null() && donor_after_report["errno"].is_null(),
+        "post-move FIEMAP must succeed to prove extent exchange: source={source_after_report} \
+         donor={donor_after_report}"
+    );
+    let source_before_blocks = physical_blocks_by_logical_block(&source_before, block_size as u64);
+    let donor_before_blocks = physical_blocks_by_logical_block(&donor_before, block_size as u64);
+    let source_after_blocks =
+        physical_blocks_by_logical_block(&source_after_report, block_size as u64);
+    let donor_after_blocks =
+        physical_blocks_by_logical_block(&donor_after_report, block_size as u64);
+    assert!(
+        source_before_blocks.len() >= 3
+            && donor_before_blocks.len() >= 3
+            && source_after_blocks.len() >= 3
+            && donor_after_blocks.len() >= 3,
+        "expected block-level FIEMAP coverage for three-block move_ext scenario"
+    );
+    assert_eq!(
+        source_after_blocks[0], source_before_blocks[0],
+        "source logical block 0 should keep its original physical block"
+    );
+    assert_eq!(
+        source_after_blocks[1], donor_before_blocks[1],
+        "source logical block 1 should adopt donor's original physical block"
+    );
+    assert_eq!(
+        source_after_blocks[2], source_before_blocks[2],
+        "source logical block 2 should keep its original physical block"
+    );
+    assert_eq!(
+        donor_after_blocks[0], donor_before_blocks[0],
+        "donor logical block 0 should keep its original physical block"
+    );
+    assert_eq!(
+        donor_after_blocks[1], source_before_blocks[1],
+        "donor logical block 1 should adopt source's original physical block"
+    );
+    assert_eq!(
+        donor_after_blocks[2], donor_before_blocks[2],
+        "donor logical block 2 should keep its original physical block"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("moved_len=1_middle_block_swapped"),
+    );
+}
+
+#[test]
+fn fuse_ioctl_ext4_move_ext_rejects_hole_backed_range_on_mounted_path() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+    if !command_available("fallocate") {
+        eprintln!("fallocate not available, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 8 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-move-ext-hole.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_move_ext_rejects_hole_backed_range";
+    let source = mnt.join("move_ext_hole_source.bin");
+    let donor = mnt.join("move_ext_hole_donor.bin");
+    let block_size = 4096_usize;
+
+    let mut source_payload = Vec::with_capacity(block_size * 3);
+    source_payload.extend(std::iter::repeat_n(0x31_u8, block_size));
+    source_payload.extend(std::iter::repeat_n(0x32_u8, block_size));
+    source_payload.extend(std::iter::repeat_n(0x33_u8, block_size));
+    let mut donor_payload = Vec::with_capacity(block_size * 3);
+    donor_payload.extend(std::iter::repeat_n(0x61_u8, block_size));
+    donor_payload.extend(std::iter::repeat_n(0x62_u8, block_size));
+    donor_payload.extend(std::iter::repeat_n(0x63_u8, block_size));
+
+    fs::write(&source, &source_payload).expect("write source payload");
+    fs::write(&donor, &donor_payload).expect("write donor payload");
+
+    let out = Command::new("fallocate")
+        .args([
+            "--keep-size",
+            "--punch-hole",
+            "-o",
+            "4096",
+            "-l",
+            "4096",
+            source.to_str().expect("source path utf8"),
+        ])
+        .output()
+        .expect("run fallocate --punch-hole for move_ext source");
+    assert!(
+        out.status.success(),
+        "move_ext hole setup failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let expected_source = fs::read(&source).expect("read source after punching hole");
+    assert!(
+        expected_source[block_size..2 * block_size]
+            .iter()
+            .all(|&byte| byte == 0),
+        "punched move_ext source block should read back as zeros"
+    );
+    let donor_before = fs::read(&donor).expect("read donor before move_ext");
+
+    let report = ext4_move_ext_ioctl(&source, &donor, 1, 1, 1);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if matches!(
+        report["errno"].as_i64(),
+        Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO
+    ) && !trace_contains_cmd(&ioctl_trace, EXT4_IOC_MOVE_EXT_CMD)
+    {
+        eprintln!(
+            "EXT4 MOVE_EXT hole rejection skipped: kernel/VFS returned unsupported errno before \
+             ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, EXT4_IOC_MOVE_EXT_CMD),
+        "MOVE_EXT hole rejection should still reach ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    assert_eq!(
+        report["errno"].as_i64(),
+        Some(EOPNOTSUPP_ERRNO),
+        "hole-backed MOVE_EXT range should reject with EOPNOTSUPP: {report}"
+    );
+    assert_eq!(
+        fs::read(&source).expect("read source after rejected move_ext"),
+        expected_source,
+        "rejected MOVE_EXT must leave the source file unchanged"
+    );
+    assert_eq!(
+        fs::read(&donor).expect("read donor after rejected move_ext"),
+        donor_before,
+        "rejected MOVE_EXT must leave the donor file unchanged"
+    );
+
+    emit_scenario_result(scenario_id, "PASS", Some("errno=95_hole_backed_range"));
+}
+
+#[test]
 fn ext4_fuse_seek_data_hole_reports_punched_range_offsets() {
     if !command_available("fallocate") {
         eprintln!("fallocate not available, skipping");

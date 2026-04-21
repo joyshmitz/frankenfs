@@ -1439,7 +1439,11 @@ impl FrankenFuse {
         );
     }
 
-    fn resolve_move_ext_donor(&self, caller_pid: u32, donor_fd: u32) -> ffs_error::Result<InodeNumber> {
+    fn resolve_move_ext_donor(
+        &self,
+        caller_pid: u32,
+        donor_fd: u32,
+    ) -> ffs_error::Result<InodeNumber> {
         let proc_fd_path = PathBuf::from(format!("/proc/{caller_pid}/fd/{donor_fd}"));
         let donor_file = std::fs::File::open(&proc_fd_path)
             .map_err(|_| FfsError::Io(std::io::Error::from_raw_os_error(libc::EBADF)))?;
@@ -3772,7 +3776,10 @@ mod tests {
 
     impl std::io::Write for SharedLogWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("lock shared log buffer").extend_from_slice(buf);
+            self.0
+                .lock()
+                .expect("lock shared log buffer")
+                .extend_from_slice(buf);
             Ok(buf.len())
         }
 
@@ -3792,7 +3799,10 @@ mod tests {
     fn parse_first_json_line(buffer: &SharedLogBuffer) -> serde_json::Value {
         let bytes = buffer.0.lock().expect("lock shared log buffer").clone();
         let text = String::from_utf8(bytes).expect("log buffer should be utf8");
-        let line = text.lines().find(|line| !line.is_empty()).expect("json log line");
+        let line = text
+            .lines()
+            .find(|line| !line.is_empty())
+            .expect("json log line");
         serde_json::from_str(line).expect("decode json log line")
     }
 
@@ -4190,14 +4200,8 @@ mod tests {
             &options,
         );
 
-        let response = dispatch_ioctl_for_testing(
-            &fuse,
-            9,
-            0,
-            EXT4_IOC_SETFLAGS,
-            &0x42_u32.to_ne_bytes(),
-            0,
-        );
+        let response =
+            dispatch_ioctl_for_testing(&fuse, 9, 0, EXT4_IOC_SETFLAGS, &0x42_u32.to_ne_bytes(), 0);
         assert_eq!(response, IoctlResult::Data(Vec::new()));
         assert_eq!(
             calls.lock().expect("lock ioctl calls").as_slice(),
@@ -4720,10 +4724,7 @@ mod tests {
         assert_eq!(json["target"], "ffs::ioctl");
         assert_eq!(json["ino"].as_u64(), Some(9));
         assert_eq!(json["donor_fd"].as_u64(), Some(7));
-        assert_eq!(
-            json["errno"].as_i64(),
-            Some(i64::from(libc::EOPNOTSUPP))
-        );
+        assert_eq!(json["errno"].as_i64(), Some(i64::from(libc::EOPNOTSUPP)));
         assert!(
             json["operation_id"]
                 .as_str()
@@ -6173,6 +6174,7 @@ mod tests {
             metrics: Arc::new(AtomicMetrics::new()),
             thread_count: 4,
             read_only: true,
+            mountpoint: None,
             ioctl_trace: None,
             backpressure: None,
             access_predictor: AccessPredictor::default(),
@@ -7158,6 +7160,7 @@ CUSTOM("congestion_threshold=3")"#;
             "bytes_read: 0, requests_throttled: 0, requests_shed: 0 }, ",
             "thread_count: 2, ",
             "read_only: false, ",
+            "mountpoint: None, ",
             ".. }"
         );
 
@@ -7166,6 +7169,7 @@ CUSTOM("congestion_threshold=3")"#;
             metrics: Arc::new(AtomicMetrics::new()),
             thread_count: 2,
             read_only: false,
+            mountpoint: None,
             ioctl_trace: None,
             backpressure: None,
             access_predictor: AccessPredictor::default(),
