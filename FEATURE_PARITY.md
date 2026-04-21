@@ -108,6 +108,9 @@ file-byte or apparent-size drift.
 Mounted-path btrfs directory `fallocate` coverage now also freezes exact
 `EISDIR`, with no directory-entry drift and no child-file drift regardless of
 whether the kernel rejects at directory open or at the `fallocate` boundary.
+Mounted-path ext4 directory-fd `FIEMAP` coverage now also freezes exact
+`EISDIR` once the ioctl reaches FrankenFS userspace, with an explicit soft-skip
+for transport-layer `EOPNOTSUPP` before dispatch and no directory or child-file drift.
 Mounted-path btrfs directory-fd `FIEMAP` coverage now also freezes exact
 `EISDIR` once the ioctl reaches FrankenFS userspace, with an explicit soft-skip
 for transport-layer `EOPNOTSUPP` before dispatch and no directory or child-file drift.

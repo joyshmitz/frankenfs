@@ -3393,6 +3393,77 @@ fn fuse_ioctl_fiemap_rejects_unsupported_request_flags_on_mounted_path() {
 }
 
 #[test]
+fn fuse_ioctl_fiemap_directory_fd_reports_eisdir() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-fiemap-directory.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let dir = mnt.join("fiemap_dir_target");
+    fs::create_dir(&dir).expect("mkdir ext4 fiemap directory target");
+    let child = dir.join("child.txt");
+    fs::write(&child, b"fiemap directory child\n").expect("seed ext4 fiemap directory child");
+
+    let entries_before = snapshot_directory_entries(&dir);
+    let child_before = snapshot_file_state(&child);
+    let report = query_directory_fiemap_with_options(&dir, 16, 0, None);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+            "directory-fd ext4 FIEMAP returned EOPNOTSUPP after reaching ffs-fuse::ioctl: {ioctl_trace}"
+        );
+        emit_scenario_result(
+            "ext4_ioctl_fiemap_directory_fd_errno_eisdir",
+            "SKIP",
+            Some("kernel_or_vfs_rejected_before_userspace"),
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+        "directory-fd ext4 FIEMAP should hit ffs-fuse::ioctl when not transport-rejected: {ioctl_trace}"
+    );
+    assert_eq!(
+        report["errno"].as_i64(),
+        Some(i64::from(libc::EISDIR)),
+        "directory-fd ext4 FIEMAP should surface exact EISDIR: {report}"
+    );
+    assert_eq!(
+        report["name"].as_str(),
+        Some("EISDIR"),
+        "directory-fd ext4 FIEMAP should surface the EISDIR alias: {report}"
+    );
+
+    let entries_after = snapshot_directory_entries(&dir);
+    assert_eq!(
+        entries_after, entries_before,
+        "directory-fd FIEMAP rejection must not change directory entries"
+    );
+    assert_file_state_unchanged(&child, &child_before, "directory-fd FIEMAP rejection");
+    emit_scenario_result(
+        "ext4_ioctl_fiemap_directory_fd_errno_eisdir",
+        "PASS",
+        Some("errno=21_eisdir"),
+    );
+}
+
+#[test]
 fn btrfs_fuse_ioctl_fiemap_reports_valid_extents() {
     if !btrfs_fuse_available() {
         eprintln!("btrfs FUSE prerequisites not met, skipping");
