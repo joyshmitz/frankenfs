@@ -4377,6 +4377,25 @@ fn py_getxattr_report(path: &Path, name: &str) -> Value {
     serde_json::from_slice(&out.stdout).expect("parse getxattr JSON")
 }
 
+fn py_getxattr_probe_report(path: &Path, name: &str, size: usize) -> Value {
+    let script = format!(
+        "import ctypes, json, os\nlibc = ctypes.CDLL(None, use_errno=True)\nlibc.getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]\nlibc.getxattr.restype = ctypes.c_ssize_t\nbuf = None if {size} == 0 else ctypes.create_string_buffer({size})\nret = libc.getxattr({path:?}.encode(), {name:?}.encode(), None if buf is None else ctypes.byref(buf), {size})\nif ret >= 0:\n out = {{'len': ret}}\n if buf is not None:\n  out['value_hex'] = ctypes.string_at(buf, ret).hex()\n print(json.dumps(out))\nelse:\n errno = ctypes.get_errno()\n print(json.dumps({{'errno': errno, 'message': os.strerror(errno)}}))",
+        path = path.to_str().unwrap(),
+        name = name,
+        size = size,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 getxattr probe JSON");
+    assert!(
+        out.status.success(),
+        "python3 getxattr probe JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse getxattr probe JSON")
+}
+
 /// Helper: list extended attribute names on a file using Python's `os.listxattr`.
 fn py_listxattr(path: &Path) -> Vec<String> {
     let script = format!(
@@ -4397,6 +4416,24 @@ fn py_listxattr(path: &Path) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect()
+}
+
+fn py_listxattr_probe_report(path: &Path, size: usize) -> Value {
+    let script = format!(
+        "import ctypes, json, os\nlibc = ctypes.CDLL(None, use_errno=True)\nlibc.listxattr.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]\nlibc.listxattr.restype = ctypes.c_ssize_t\nbuf = None if {size} == 0 else ctypes.create_string_buffer({size})\nret = libc.listxattr({path:?}.encode(), None if buf is None else ctypes.byref(buf), {size})\nif ret >= 0:\n out = {{'len': ret}}\n if buf is not None:\n  raw = ctypes.string_at(buf, ret)\n  out['names'] = [chunk.decode() for chunk in raw.split(b'\\0') if chunk]\n print(json.dumps(out))\nelse:\n errno = ctypes.get_errno()\n print(json.dumps({{'errno': errno, 'message': os.strerror(errno)}}))",
+        path = path.to_str().unwrap(),
+        size = size,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 listxattr probe JSON");
+    assert!(
+        out.status.success(),
+        "python3 listxattr probe JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse listxattr probe JSON")
 }
 
 /// Helper: remove an extended attribute. Returns true if removal succeeded.
@@ -5825,6 +5862,144 @@ fn btrfs_fuse_xattr_remove_missing_reports_enodata_without_side_effects() {
             scenario_id,
             "PASS",
             Some("errno=ENODATA_with_no_side_effects"),
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_getxattr_size_probe_and_erange_without_side_effects() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_getxattr_size_probe_and_erange";
+        let path = mnt.join("getxattr_probe.txt");
+        let original_file = b"btrfs getxattr probe coverage\n";
+        let expected_value = b"probe-value";
+        fs::write(&path, original_file).expect("write btrfs getxattr probe file");
+        py_setxattr(&path, "user.probed", expected_value);
+        py_setxattr(&path, "user.keep", b"preserve");
+
+        let probe_report = py_getxattr_probe_report(&path, "user.probed", 0);
+        assert_eq!(
+            probe_report["len"].as_u64(),
+            Some(expected_value.len() as u64),
+            "zero-sized getxattr probe should report exact required length: {probe_report}"
+        );
+
+        let exact_report = py_getxattr_probe_report(&path, "user.probed", expected_value.len());
+        let expected_value_hex = hex::encode(expected_value);
+        assert_eq!(
+            exact_report["len"].as_u64(),
+            Some(expected_value.len() as u64),
+            "exact-sized getxattr should report the payload length: {exact_report}"
+        );
+        assert_eq!(
+            exact_report["value_hex"].as_str(),
+            Some(expected_value_hex.as_str()),
+            "exact-sized getxattr should return the full payload: {exact_report}"
+        );
+
+        let erange_report =
+            py_getxattr_probe_report(&path, "user.probed", expected_value.len() - 1);
+        assert_eq!(
+            erange_report["errno"].as_i64(),
+            Some(i64::from(libc::ERANGE)),
+            "undersized getxattr buffer should fail with ERANGE: {erange_report}"
+        );
+
+        assert_eq!(
+            py_getxattr(&path, "user.probed").expect("probed xattr should remain readable"),
+            expected_value,
+            "getxattr probe/ERANGE paths must not disturb the target xattr"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("keep xattr should remain readable"),
+            b"preserve",
+            "getxattr probe/ERANGE paths must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read btrfs file bytes after getxattr probe"),
+            original_file,
+            "getxattr probe/ERANGE paths must not mutate file contents"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("probe_len_exact_and_erange_no_side_effects"),
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_listxattr_size_probe_and_erange_without_side_effects() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_listxattr_size_probe_and_erange";
+        let path = mnt.join("listxattr_probe.txt");
+        let original_file = b"btrfs listxattr probe coverage\n";
+        fs::write(&path, original_file).expect("write btrfs listxattr probe file");
+        py_setxattr(&path, "user.alpha", b"one");
+        py_setxattr(&path, "user.beta", b"two");
+
+        let expected_names = py_listxattr(&path);
+        let expected_len: usize = expected_names.iter().map(|name| name.len() + 1).sum();
+
+        let probe_report = py_listxattr_probe_report(&path, 0);
+        assert_eq!(
+            probe_report["len"].as_u64(),
+            Some(expected_len as u64),
+            "zero-sized listxattr probe should report exact required length: {probe_report}"
+        );
+
+        let exact_report = py_listxattr_probe_report(&path, expected_len);
+        assert_eq!(
+            exact_report["len"].as_u64(),
+            Some(expected_len as u64),
+            "exact-sized listxattr should report the serialized name length: {exact_report}"
+        );
+        let mut actual_names: Vec<String> = exact_report["names"]
+            .as_array()
+            .expect("listxattr exact-sized names")
+            .iter()
+            .map(|value| value.as_str().expect("listxattr name string").to_string())
+            .collect();
+        let mut expected_sorted = expected_names;
+        actual_names.sort();
+        expected_sorted.sort();
+        assert_eq!(
+            actual_names, expected_sorted,
+            "exact-sized listxattr should return the full mounted-path name set"
+        );
+
+        let erange_report = py_listxattr_probe_report(&path, expected_len - 1);
+        assert_eq!(
+            erange_report["errno"].as_i64(),
+            Some(i64::from(libc::ERANGE)),
+            "undersized listxattr buffer should fail with ERANGE: {erange_report}"
+        );
+
+        let mut names_after = py_listxattr(&path);
+        names_after.sort();
+        assert_eq!(
+            names_after, expected_sorted,
+            "listxattr probe/ERANGE paths must not disturb the visible xattr set"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.alpha").expect("alpha xattr should remain readable"),
+            b"one",
+            "listxattr probe/ERANGE paths must not disturb alpha"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.beta").expect("beta xattr should remain readable"),
+            b"two",
+            "listxattr probe/ERANGE paths must not disturb beta"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read btrfs file bytes after listxattr probe"),
+            original_file,
+            "listxattr probe/ERANGE paths must not mutate file contents"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("probe_len_exact_and_erange_no_side_effects"),
         );
     });
 }
