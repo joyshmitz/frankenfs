@@ -2070,6 +2070,18 @@ fn fuse_ioctl_ext4_move_ext_rejects_hole_backed_range_on_mounted_path() {
     fs::write(&source, &source_payload).expect("write source payload");
     fs::write(&donor, &donor_payload).expect("write donor payload");
 
+    let fiemap_preflight = query_fiemap(&donor, 4);
+    if matches!(
+        fiemap_preflight["errno"].as_i64(),
+        Some(errno) if errno == EOPNOTSUPP_ERRNO || errno == i64::from(libc::ENOTTY)
+    ) {
+        eprintln!(
+            "EXT4 MOVE_EXT hole rejection skipped: current kernel/FUSE stack does not \
+             route prerequisite ioctl coverage to userspace"
+        );
+        return;
+    }
+
     let out = Command::new("fallocate")
         .args([
             "--keep-size",
