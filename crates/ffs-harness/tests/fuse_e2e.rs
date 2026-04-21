@@ -1354,6 +1354,170 @@ fn assert_seek_data_hole_contract(path: &Path, scenario_id: &str) {
     );
 }
 
+fn seek_transport_skipped(report: &Value) -> bool {
+    report["errno"].as_i64().is_some_and(|errno| {
+        errno == i64::from(libc::EINVAL)
+            || errno == i64::from(libc::ENOSYS)
+            || errno == EOPNOTSUPP_ERRNO
+    })
+}
+
+fn assert_seek_fully_allocated_contract(path: &Path, scenario_id: &str) {
+    let data = patterned_bytes(8192, 251, 1);
+    fs::write(path, &data).expect("seed fully allocated seek test file");
+
+    let data0 = query_seek(path, 0, "SEEK_DATA");
+    if seek_transport_skipped(&data0) {
+        eprintln!(
+            "SEEK_DATA/SEEK_HOLE skipped: current kernel/FUSE stack reports transport-layer \
+             rejection before FrankenFS can prove fully allocated seek semantics: {data0}"
+        );
+        return;
+    }
+
+    assert_eq!(
+        data0["offset"].as_u64(),
+        Some(0),
+        "SEEK_DATA at file start should return the first byte of a fully allocated file: {data0}"
+    );
+
+    let data_middle = query_seek(path, 4096, "SEEK_DATA");
+    assert_eq!(
+        data_middle["offset"].as_u64(),
+        Some(4096),
+        "SEEK_DATA inside a fully allocated extent should return the queried offset: {data_middle}"
+    );
+
+    let hole0 = query_seek(path, 0, "SEEK_HOLE");
+    assert_eq!(
+        hole0["offset"].as_u64(),
+        Some(data.len() as u64),
+        "SEEK_HOLE from file start should report the virtual EOF hole on a fully allocated file: {hole0}"
+    );
+
+    let hole_middle = query_seek(path, 4096, "SEEK_HOLE");
+    assert_eq!(
+        hole_middle["offset"].as_u64(),
+        Some(data.len() as u64),
+        "SEEK_HOLE inside a fully allocated extent should report the virtual EOF hole: {hole_middle}"
+    );
+
+    let eof_data = query_seek(path, data.len() as u64, "SEEK_DATA");
+    assert_eq!(
+        eof_data["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_DATA at EOF should surface ENXIO on a fully allocated file: {eof_data}"
+    );
+
+    let eof_hole = query_seek(path, data.len() as u64, "SEEK_HOLE");
+    assert_eq!(
+        eof_hole["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_HOLE at EOF should surface ENXIO on a fully allocated file: {eof_hole}"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("fully_allocated_seek_offsets_verified"),
+    );
+}
+
+fn assert_seek_leading_hole_contract(path: &Path, scenario_id: &str) {
+    let data = patterned_bytes(4096, 253, 1);
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .expect("create leading-hole seek test file");
+    file.seek(SeekFrom::Start(4096))
+        .expect("seek to first data offset for leading-hole test");
+    file.write_all(&data)
+        .expect("write data extent for leading-hole test");
+    file.sync_all().expect("flush leading-hole seek test data");
+    drop(file);
+
+    let readback = fs::read(path).expect("read leading-hole seek test file");
+    assert_eq!(
+        readback.len(),
+        8192,
+        "leading-hole seek test file should be sparse with a 4KiB hole prefix"
+    );
+    assert!(
+        readback[..4096].iter().all(|&byte| byte == 0),
+        "leading-hole seek test prefix must read back as zeros"
+    );
+    assert_eq!(
+        &readback[4096..],
+        data.as_slice(),
+        "leading-hole seek test suffix must preserve written payload"
+    );
+
+    let data0 = query_seek(path, 0, "SEEK_DATA");
+    if seek_transport_skipped(&data0) {
+        eprintln!(
+            "SEEK_DATA/SEEK_HOLE skipped: current kernel/FUSE stack reports transport-layer \
+             rejection before FrankenFS can prove leading-hole seek semantics: {data0}"
+        );
+        return;
+    }
+
+    assert_eq!(
+        data0["offset"].as_u64(),
+        Some(4096),
+        "SEEK_DATA from file start should advance to the first real extent after a leading hole: {data0}"
+    );
+
+    let hole0 = query_seek(path, 0, "SEEK_HOLE");
+    assert_eq!(
+        hole0["offset"].as_u64(),
+        Some(0),
+        "SEEK_HOLE from file start should report the leading sparse hole immediately: {hole0}"
+    );
+
+    let data_middle = query_seek(path, 1024, "SEEK_DATA");
+    assert_eq!(
+        data_middle["offset"].as_u64(),
+        Some(4096),
+        "SEEK_DATA from inside the leading hole should advance to the first data extent: {data_middle}"
+    );
+
+    let hole_middle = query_seek(path, 1024, "SEEK_HOLE");
+    assert_eq!(
+        hole_middle["offset"].as_u64(),
+        Some(1024),
+        "SEEK_HOLE from inside the leading hole should return the queried hole offset: {hole_middle}"
+    );
+
+    let hole_data_region = query_seek(path, 4096, "SEEK_HOLE");
+    assert_eq!(
+        hole_data_region["offset"].as_u64(),
+        Some(readback.len() as u64),
+        "SEEK_HOLE from the data extent should report the virtual EOF hole: {hole_data_region}"
+    );
+
+    let eof_data = query_seek(path, readback.len() as u64, "SEEK_DATA");
+    assert_eq!(
+        eof_data["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_DATA at EOF should surface ENXIO on a leading-hole file: {eof_data}"
+    );
+
+    let eof_hole = query_seek(path, readback.len() as u64, "SEEK_HOLE");
+    assert_eq!(
+        eof_hole["errno"].as_i64(),
+        Some(i64::from(libc::ENXIO)),
+        "SEEK_HOLE at EOF should surface ENXIO on a leading-hole file: {eof_hole}"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("leading_hole_seek_offsets_verified"),
+    );
+}
+
 #[test]
 fn fuse_create_and_read_file() {
     with_rw_mount(|mnt| {
@@ -3671,6 +3835,24 @@ fn ext4_fuse_seek_data_hole_reports_punched_range_offsets() {
         let scenario_id = "ext4_rw_seek_data_hole";
         let path = mnt.join("ext4_seek_layout.bin");
         assert_seek_data_hole_contract(&path, scenario_id);
+    });
+}
+
+#[test]
+fn ext4_fuse_seek_hole_reports_virtual_eof_for_fully_allocated_file() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_seek_hole_fully_allocated";
+        let path = mnt.join("ext4_seek_fully_allocated.bin");
+        assert_seek_fully_allocated_contract(&path, scenario_id);
+    });
+}
+
+#[test]
+fn ext4_fuse_seek_data_hole_reports_leading_sparse_hole_offsets() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_seek_leading_hole";
+        let path = mnt.join("ext4_seek_leading_hole.bin");
+        assert_seek_leading_hole_contract(&path, scenario_id);
     });
 }
 
