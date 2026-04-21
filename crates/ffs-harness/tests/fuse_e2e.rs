@@ -955,6 +955,69 @@ print(json.dumps({
     serde_json::from_slice(&output.stdout).expect("decode fiemap JSON")
 }
 
+fn query_directory_fiemap_with_options(
+    path: &Path,
+    extent_count: u32,
+    request_flags: u32,
+    response_size: Option<usize>,
+) -> Value {
+    let script = r"
+import errno, fcntl, json, os, struct, sys
+
+FS_IOC_FIEMAP = 0xC020660B
+FIEMAP_HEADER_SIZE = 32
+
+path = sys.argv[1]
+extent_count = int(sys.argv[2])
+request_flags = int(sys.argv[3], 0)
+response_size = int(sys.argv[4])
+buffer = bytearray(response_size)
+if response_size < FIEMAP_HEADER_SIZE:
+    raise ValueError('fiemap response buffer too small: {}'.format(response_size))
+struct.pack_into('@Q', buffer, 0, 0)
+struct.pack_into('@Q', buffer, 8, (1 << 64) - 1)
+struct.pack_into('@I', buffer, 16, request_flags)
+struct.pack_into('@I', buffer, 24, extent_count)
+
+fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    try:
+        fcntl.ioctl(fd, FS_IOC_FIEMAP, buffer, True)
+    except OSError as exc:
+        print(json.dumps({
+            'errno': exc.errno,
+            'name': errno.errorcode.get(exc.errno, 'UNKNOWN'),
+            'message': str(exc),
+        }))
+        sys.exit(0)
+finally:
+    os.close(fd)
+
+print(json.dumps({'ok': True}))
+";
+
+    let response_size = response_size
+        .unwrap_or_else(|| 32 + usize::try_from(extent_count).expect("extent_count fits") * 56);
+
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            script,
+            path.to_str().expect("path utf8"),
+            &extent_count.to_string(),
+            &request_flags.to_string(),
+            &response_size.to_string(),
+        ])
+        .output()
+        .expect("python3 directory fiemap ioctl");
+    assert!(
+        output.status.success(),
+        "python3 directory fiemap ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode directory fiemap JSON")
+}
+
 fn fiemap_extent_flags(extent: &Value) -> u32 {
     u32::try_from(extent["flags"].as_u64().unwrap_or(0)).expect("fiemap flags should fit u32")
 }
@@ -3049,6 +3112,78 @@ fn btrfs_fuse_ioctl_fiemap_reports_valid_extents() {
     assert!(
         saw_last,
         "expected FIEMAP_EXTENT_LAST in returned btrfs extents: {report}"
+    );
+}
+
+#[test]
+fn btrfs_fuse_ioctl_fiemap_directory_fd_reports_eisdir() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-btrfs-fiemap-directory.log");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_btrfs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    let dir = workspace.join("fiemap_dir_target");
+    fs::create_dir(&dir).expect("mkdir btrfs fiemap directory target");
+    let child = dir.join("child.txt");
+    fs::write(&child, b"fiemap directory child\n").expect("seed btrfs fiemap directory child");
+
+    let entries_before = snapshot_directory_entries(&dir);
+    let child_before = snapshot_file_state(&child);
+    let report = query_directory_fiemap_with_options(&dir, 16, 0, None);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+            "directory-fd btrfs FIEMAP returned EOPNOTSUPP after reaching ffs-fuse::ioctl: {ioctl_trace}"
+        );
+        emit_scenario_result(
+            "btrfs_ioctl_fiemap_directory_fd_errno_eisdir",
+            "SKIP",
+            Some("kernel_or_vfs_rejected_before_userspace"),
+        );
+        return;
+    }
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_FIEMAP_CMD),
+        "directory-fd btrfs FIEMAP should hit ffs-fuse::ioctl when not transport-rejected: {ioctl_trace}"
+    );
+    assert_eq!(
+        report["errno"].as_i64(),
+        Some(i64::from(libc::EISDIR)),
+        "directory-fd btrfs FIEMAP should surface exact EISDIR: {report}"
+    );
+    assert_eq!(
+        report["name"].as_str(),
+        Some("EISDIR"),
+        "directory-fd btrfs FIEMAP should surface the EISDIR alias: {report}"
+    );
+
+    let entries_after = snapshot_directory_entries(&dir);
+    assert_eq!(
+        entries_after, entries_before,
+        "directory-fd FIEMAP rejection must not change directory entries"
+    );
+    assert_file_state_unchanged(&child, &child_before, "directory-fd FIEMAP rejection");
+    emit_scenario_result(
+        "btrfs_ioctl_fiemap_directory_fd_errno_eisdir",
+        "PASS",
+        Some("errno=21_eisdir"),
     );
 }
 
