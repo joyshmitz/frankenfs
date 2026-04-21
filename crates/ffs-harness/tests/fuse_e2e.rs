@@ -1254,6 +1254,48 @@ finally:
     serde_json::from_slice(&output.stdout).expect("decode seek probe JSON")
 }
 
+fn query_fallocate(path: &Path, mode: i32, offset: u64, length: u64) -> Value {
+    let script = r#"
+import ctypes, errno, json, os, sys
+
+path = sys.argv[1]
+mode = int(sys.argv[2], 0)
+offset = int(sys.argv[3])
+length = int(sys.argv[4])
+fd = os.open(path, os.O_RDWR)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong]
+libc.fallocate.restype = ctypes.c_int
+try:
+    res = libc.fallocate(fd, mode, offset, length)
+    err = ctypes.get_errno()
+    payload = {"res": res, "errno": err}
+    if err:
+        payload["name"] = errno.errorcode.get(err, "UNKNOWN")
+    print(json.dumps(payload))
+finally:
+    os.close(fd)
+"#;
+
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            script,
+            path.to_str().expect("path utf8"),
+            &format!("{mode:#x}"),
+            &offset.to_string(),
+            &length.to_string(),
+        ])
+        .output()
+        .expect("python3 fallocate probe");
+    assert!(
+        output.status.success(),
+        "python3 fallocate probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode fallocate probe JSON")
+}
+
 fn assert_seek_data_hole_contract(path: &Path, scenario_id: &str) {
     let data = patterned_bytes(12_288, 251, 1);
     fs::write(path, &data).expect("seed seek test file");
@@ -2208,6 +2250,49 @@ fn ext4_fuse_fallocate_punch_hole_keep_size_zeroes_range() {
         );
         assert_eq!(&readback[8192..], &data[8192..], "suffix must be preserved");
         emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
+fn ext4_fuse_invalid_punch_hole_without_keep_size_reports_einval() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_invalid_punch_hole_without_keep_size_errno_einval";
+        let path = mnt.join("ext4_invalid_punch_hole_mode.bin");
+        let data = patterned_bytes(12_288, 251, 1);
+        fs::write(&path, &data).expect("seed invalid-punch-hole file on ext4");
+
+        let report = query_fallocate(&path, libc::FALLOC_FL_PUNCH_HOLE, 4096, 4096);
+        let meta = fs::metadata(&path).expect("stat after invalid ext4 punch-hole rejection");
+        assert_eq!(
+            meta.len(),
+            data.len() as u64,
+            "invalid ext4 punch-hole rejection must preserve file size"
+        );
+        let readback = fs::read(&path).expect("read after invalid ext4 punch-hole rejection");
+        assert_eq!(
+            readback, data,
+            "invalid ext4 punch-hole rejection must preserve file data"
+        );
+
+        if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+            eprintln!(
+                "invalid ext4 punch-hole mode collapsed to transport-layer errno 95 before \
+                 FrankenFS could prove mounted-path EINVAL semantics: {report}"
+            );
+            return;
+        }
+
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "ext4 invalid punch-hole mode should surface EINVAL when dispatched to FrankenFS: {report}"
+        );
+        assert_eq!(
+            report["name"].as_str(),
+            Some("EINVAL"),
+            "ext4 invalid punch-hole mode should surface the EINVAL alias: {report}"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=22"));
     });
 }
 
@@ -7075,6 +7160,49 @@ fn btrfs_fuse_fallocate_zero_range_zeroes_range() {
         );
         assert_eq!(&readback[8192..], &data[8192..], "suffix must be preserved");
         emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
+fn btrfs_fuse_invalid_punch_hole_without_keep_size_reports_einval() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_invalid_punch_hole_without_keep_size_errno_einval";
+        let path = mnt.join("invalid_punch_hole_mode.bin");
+        let data = patterned_bytes(12_288, 253, 1);
+        fs::write(&path, &data).expect("seed invalid-punch-hole file on btrfs");
+
+        let report = query_fallocate(&path, libc::FALLOC_FL_PUNCH_HOLE, 4096, 4096);
+        let meta = fs::metadata(&path).expect("stat after invalid btrfs punch-hole rejection");
+        assert_eq!(
+            meta.len(),
+            data.len() as u64,
+            "invalid btrfs punch-hole rejection must preserve file size"
+        );
+        let readback = fs::read(&path).expect("read after invalid btrfs punch-hole rejection");
+        assert_eq!(
+            readback, data,
+            "invalid btrfs punch-hole rejection must preserve file data"
+        );
+
+        if report["errno"].as_i64() == Some(EOPNOTSUPP_ERRNO) {
+            eprintln!(
+                "invalid btrfs punch-hole mode collapsed to transport-layer errno 95 before \
+                 FrankenFS could prove mounted-path EINVAL semantics: {report}"
+            );
+            return;
+        }
+
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "btrfs invalid punch-hole mode should surface EINVAL when dispatched to FrankenFS: {report}"
+        );
+        assert_eq!(
+            report["name"].as_str(),
+            Some("EINVAL"),
+            "btrfs invalid punch-hole mode should surface the EINVAL alias: {report}"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=22"));
     });
 }
 
