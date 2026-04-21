@@ -6678,6 +6678,129 @@ fn btrfs_fuse_hard_link() {
     });
 }
 
+fn assert_btrfs_hard_link_directory_source_refusal(mnt: &Path) {
+    let dir_source = mnt.join("dir_source");
+    fs::create_dir(&dir_source).expect("create directory hard-link source");
+    let root_entries_before = snapshot_directory_entries(mnt);
+
+    let dir_err = fs::hard_link(&dir_source, mnt.join("dir_hardlink"))
+        .expect_err("hard-linking a directory should fail");
+    assert_eq!(
+        dir_err.raw_os_error(),
+        Some(libc::EPERM),
+        "hard-linking a directory should surface exact EPERM: {dir_err}"
+    );
+    assert!(
+        fs::symlink_metadata(mnt.join("dir_hardlink")).is_err(),
+        "directory-source refusal must not leave a new entry behind"
+    );
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        root_entries_before,
+        "directory-source refusal must not change visible root entries"
+    );
+}
+
+fn assert_btrfs_hard_link_non_directory_parent_refusal(mnt: &Path) {
+    let source = mnt.join("link_src.txt");
+    let non_directory_parent = mnt.join("not_a_dir.txt");
+    fs::write(&source, b"link source payload\n").expect("write hard-link source");
+    fs::write(&non_directory_parent, b"not a directory\n").expect("write non-directory parent");
+    let root_entries_before = snapshot_directory_entries(mnt);
+    let source_before = snapshot_file_state(&source);
+    let parent_before = snapshot_file_state(&non_directory_parent);
+    let source_nlink_before = fs::metadata(&source).expect("stat source before").nlink();
+    let nested_target = non_directory_parent.join("child.txt");
+
+    let parent_err = fs::hard_link(&source, &nested_target)
+        .expect_err("hard link into non-directory parent should fail");
+    assert_eq!(
+        parent_err.raw_os_error(),
+        Some(libc::ENOTDIR),
+        "hard link into non-directory parent should surface exact ENOTDIR: {parent_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&nested_target).is_err(),
+        "non-directory-parent refusal must not create the nested destination"
+    );
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        root_entries_before,
+        "non-directory-parent refusal must not change visible root entries"
+    );
+    assert_file_state_unchanged(&source, &source_before, "rejected hard-link source");
+    assert_file_state_unchanged(
+        &non_directory_parent,
+        &parent_before,
+        "rejected hard-link non-directory parent",
+    );
+    assert_eq!(
+        fs::metadata(&source).expect("stat source after").nlink(),
+        source_nlink_before,
+        "non-directory-parent refusal must not change source link count"
+    );
+}
+
+fn assert_btrfs_hard_link_occupied_destination_refusal(mnt: &Path) {
+    let occupied_target = mnt.join("occupied_target.txt");
+    let occupied_destination = mnt.join("occupied_destination.txt");
+    fs::write(&occupied_target, b"occupied target payload\n").expect("write occupied target");
+    fs::write(&occupied_destination, b"occupied destination payload\n")
+        .expect("write occupied destination");
+    let root_entries_before = snapshot_directory_entries(mnt);
+    let target_before = snapshot_file_state(&occupied_target);
+    let destination_before = snapshot_file_state(&occupied_destination);
+    let target_nlink_before = fs::metadata(&occupied_target)
+        .expect("stat occupied target before")
+        .nlink();
+
+    let exists_err = fs::hard_link(&occupied_target, &occupied_destination)
+        .expect_err("hard link onto existing destination should fail");
+    assert_eq!(
+        exists_err.raw_os_error(),
+        Some(libc::EEXIST),
+        "hard link onto existing destination should surface exact EEXIST: {exists_err}"
+    );
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        root_entries_before,
+        "occupied-destination refusal must not change visible root entries"
+    );
+    assert_file_state_unchanged(
+        &occupied_target,
+        &target_before,
+        "rejected occupied-destination source",
+    );
+    assert_file_state_unchanged(
+        &occupied_destination,
+        &destination_before,
+        "rejected occupied destination",
+    );
+    assert_eq!(
+        fs::metadata(&occupied_target)
+            .expect("stat occupied target after")
+            .nlink(),
+        target_nlink_before,
+        "occupied-destination refusal must not change source link count"
+    );
+}
+
+#[test]
+fn btrfs_fuse_hard_link_refusal_contracts() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_hard_link_refusal_contracts";
+        assert_btrfs_hard_link_directory_source_refusal(mnt);
+        assert_btrfs_hard_link_non_directory_parent_refusal(mnt);
+        assert_btrfs_hard_link_occupied_destination_refusal(mnt);
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("dir=EPERM_parent=ENOTDIR_exists=EEXIST_no_drift"),
+        );
+    });
+}
+
 #[test]
 fn btrfs_fuse_symlink_create_and_follow() {
     with_btrfs_rw_mount(|mnt| {

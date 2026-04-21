@@ -113,6 +113,9 @@ non-empty-directory contracts.
 Mounted-path ext4 rename-over-hardlink coverage now also freezes same-inode
 destination semantics as a visible no-op: both names stay bound to the original
 inode/data and `st_nlink` remains 2.
+Mounted-path btrfs hard-link refusal coverage now also freezes exact `EPERM`
+for directory sources, `ENOTDIR` for non-directory parents, and `EEXIST` for
+occupied destinations, with no dirent or source-`st_nlink` drift.
 Mounted-path btrfs rename refusal coverage now also freezes exact `ENOTDIR`
 for rename attempts whose destination parent is a regular file, with no source
 or parent-file drift.
