@@ -4391,6 +4391,24 @@ fn py_removexattr(path: &Path, name: &str) -> bool {
     out.status.success()
 }
 
+fn py_removexattr_report(path: &Path, name: &str) -> Value {
+    let script = format!(
+        "import json, os\ntry:\n os.removexattr({path:?}, {name:?})\n print(json.dumps({{'ok': True}}))\nexcept OSError as e:\n print(json.dumps({{'errno': e.errno, 'message': str(e)}}))",
+        path = path.to_str().unwrap(),
+        name = name,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 removexattr JSON");
+    assert!(
+        out.status.success(),
+        "python3 removexattr JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse removexattr JSON")
+}
+
 #[test]
 fn fuse_xattr_set_get_list_remove() {
     with_rw_mount(|mnt| {
@@ -4495,27 +4513,85 @@ fn fuse_xattr_on_directory() {
 }
 
 #[test]
-fn fuse_xattr_get_nonexistent_returns_error() {
+fn fuse_xattr_ext4_get_missing_reports_enodata_without_side_effects() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_xattr_get_missing_reports_enodata";
         let path = mnt.join("hello.txt");
+        let original_file = fs::read(&path).expect("read original file bytes");
+        py_setxattr(&path, "user.keep", b"preserve");
 
-        // Getting a nonexistent xattr should fail.
+        let report = py_getxattr_report(&path, "user.does_not_exist");
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENODATA)),
+            "missing ext4 getxattr should surface ENODATA: {report}"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("unrelated xattr should remain readable"),
+            b"preserve",
+            "missing getxattr must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read file bytes after missing getxattr"),
+            original_file,
+            "missing getxattr must not mutate file contents"
+        );
+
+        let names = py_listxattr(&path);
         assert!(
-            py_getxattr(&path, "user.does_not_exist").is_none(),
-            "getxattr for nonexistent attr should return None/error"
+            !names.iter().any(|name| name == "user.does_not_exist"),
+            "missing xattr should remain absent after ENODATA getxattr: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "user.keep"),
+            "unrelated xattr should remain listed after ENODATA getxattr: {names:?}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("errno=ENODATA_with_no_side_effects"),
         );
     });
 }
 
 #[test]
-fn fuse_xattr_remove_nonexistent_fails() {
+fn fuse_xattr_ext4_remove_missing_reports_enodata_without_side_effects() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_xattr_remove_missing_reports_enodata";
         let path = mnt.join("hello.txt");
+        let original_file = fs::read(&path).expect("read original file bytes");
+        py_setxattr(&path, "user.keep", b"preserve");
 
-        // Removing a nonexistent xattr should fail.
+        let report = py_removexattr_report(&path, "user.no_such_attr");
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENODATA)),
+            "missing ext4 removexattr should surface ENODATA: {report}"
+        );
+        assert_eq!(
+            py_getxattr(&path, "user.keep").expect("unrelated xattr should remain readable"),
+            b"preserve",
+            "missing removexattr must not disturb unrelated xattrs"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read file bytes after missing removexattr"),
+            original_file,
+            "missing removexattr must not mutate file contents"
+        );
+
+        let names = py_listxattr(&path);
         assert!(
-            !py_removexattr(&path, "user.no_such_attr"),
-            "removexattr for nonexistent attr should fail"
+            !names.iter().any(|name| name == "user.no_such_attr"),
+            "missing xattr should remain absent after ENODATA removexattr: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "user.keep"),
+            "unrelated xattr should remain listed after ENODATA removexattr: {names:?}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("errno=ENODATA_with_no_side_effects"),
         );
     });
 }
