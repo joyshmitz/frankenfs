@@ -3031,6 +3031,52 @@ fn ext4_fuse_invalid_punch_hole_without_keep_size_reports_einval() {
 }
 
 #[test]
+fn ext4_fuse_fallocate_on_directory_reports_eisdir() {
+    if !command_available("python3") {
+        eprintln!("python3 not available, skipping");
+        return;
+    }
+
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_fallocate_on_directory_errno_eisdir";
+        let dir = mnt.join("ext4_fallocate_dir");
+        fs::create_dir(&dir).expect("mkdir ext4 fallocate directory target");
+        let child = dir.join("child.txt");
+        fs::write(&child, b"directory child stays intact\n").expect("seed ext4 directory child");
+
+        let entries_before = snapshot_directory_entries(&dir);
+        let child_before = snapshot_file_state(&child);
+        let report = query_directory_fallocate(&dir, 0, 0, 4096);
+
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::EISDIR)),
+            "ext4 directory fallocate should surface exact EISDIR: {report}"
+        );
+        assert_eq!(
+            report["name"].as_str(),
+            Some("EISDIR"),
+            "ext4 directory fallocate should surface the EISDIR alias: {report}"
+        );
+        let phase = report["phase"]
+            .as_str()
+            .expect("directory fallocate rejection phase");
+        assert!(
+            matches!(phase, "open" | "fallocate"),
+            "unexpected directory fallocate rejection phase: {report}"
+        );
+
+        let entries_after = snapshot_directory_entries(&dir);
+        assert_eq!(
+            entries_after, entries_before,
+            "directory fallocate rejection must not change directory entries"
+        );
+        assert_file_state_unchanged(&child, &child_before, "directory fallocate rejection");
+        emit_scenario_result(scenario_id, "PASS", Some(phase));
+    });
+}
+
+#[test]
 fn ext4_fuse_unsupported_fallocate_mode_bits_errno_eopnotsupp() {
     with_rw_mount(|mnt| {
         let scenario_id = "ext4_rw_unsupported_fallocate_mode_bits_errno_eopnotsupp";

@@ -99,6 +99,9 @@ root-entry or parent-file drift.
 Mounted-path ext4 read-only `fallocate` coverage now also freezes exact `EROFS`
 for representative preallocate and punch-hole mutation attempts, with no
 file-byte or apparent-size drift.
+Mounted-path ext4 directory `fallocate` coverage now also freezes exact
+`EISDIR`, with no directory-entry drift and no child-file drift regardless of
+whether the kernel rejects at directory open or at the `fallocate` boundary.
 Mounted-path btrfs read-only `fallocate` coverage now also freezes exact `EROFS`
 for representative preallocate and punch-hole mutation attempts, with no
 file-byte or apparent-size drift.
