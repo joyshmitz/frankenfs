@@ -160,6 +160,75 @@ unrestricted ioctls for FIEMAP / EXT4_IOC_* parity.
 
 ---
 
+## 2026-04-22: Full Review Session (cc-fs)
+
+Agent: cc-fs | Mode: FULL REVIEW
+
+### Test/Clippy Status
+
+- **Clippy:** PASS (0 errors, 6 warnings in vendored fuser)
+- **Workspace tests:** 4 conformance failures (pre-existing, tracked in bd-uyjcz)
+
+### Bugs Fixed
+
+| Bead | Description | Fix |
+|------|-------------|-----|
+| bd-5o3i6 | 6 btrfs readdir tests failing (CRC32C mismatch) | Added checksum stamping to `build_btrfs_readdir_image` in ffs-core/src/lib.rs |
+| bd-tnmo2 | 2 degraded_pressure tests failing (threshold mismatch) | Updated headroom values for asupersync 0.3 (0.75 Warning, 0.15 Critical) |
+| - | 2 cross_crate_integration tests failing | Added checksum stamping to `build_btrfs_fsops_image` in cross_crate_integration.rs |
+| - | Clippy too_many_lines error | Added `#[allow(clippy::too_many_lines)]` to `create_btrfs_image_with_subvolumes` |
+| - | Missing fuzz corpus directory | Created `fuzz/corpus/fuzz_ioctl_dispatch/` |
+
+### Fuzz Coverage Audit (/testing-fuzzing)
+
+**Existing coverage:** 23 fuzz targets covering all critical parsing paths.
+
+**Gaps identified and beads filed (17 total):**
+
+| ID | Target | Priority |
+|----|--------|----------|
+| bd-gznge | fuzz_btrfs_xattr_items | P2 |
+| bd-ik16s | fuzz_detect_filesystem | P2 |
+| bd-i1vkz | fuzz_native_cow_recovery | P2 |
+| bd-eiae2 | fuzz_repair_evidence_ledger | P2 |
+| bd-6ut5x | fuzz_repair_codec_roundtrip | P2 |
+| bd-37w4o | fuzz_verify_ext4_integrity | P2 |
+| bd-i820d | fuzz_ffs_inspect | P2 |
+| bd-uqfhd | fuzz_por_authenticator | P2 |
+| bd-11yv0 | fuzz_lrc_repair | P2 |
+| bd-snm7k | btrfs checksum verification | P2 |
+| bd-atkc6 | Ext4ImageReader | P2 |
+| bd-w1nsv | ffs-dir operations | P2 |
+| bd-1dkja | ffs-xattr parsing | P2 |
+| bd-e6rh8 | ffs-cli btrfs parsers | P2 |
+| bd-9zg6j | ffs-inode roundtrip | P2 |
+| bd-cz3rv | parse_dx_root large_dir=true | P3 |
+| bd-qk6am | fuzz_alloc_bitmap | P3 |
+
+### Known Issues (Pre-existing)
+
+| Bead | Issue |
+|------|-------|
+| bd-uyjcz | 4 conformance tests failing (btrfs checksum, fixture manifest, e2compr) |
+| bd-scqdb | dispatch_ioctl_move_ext_rejection_logs flaky (tracing isolation) |
+
+### Crates Audited
+
+All 19 crates in workspace audited for fuzz coverage gaps:
+ffs-core, ffs-ondisk, ffs-btrfs, ffs-journal, ffs-mvcc, ffs-repair,
+ffs-dir, ffs-xattr, ffs-inode, ffs-alloc, ffs-cli, ffs-block, ffs-btree,
+ffs-extent, ffs-error, ffs-types, ffs-tui, ffs-harness, ffs
+
+### Saturation Check (cod-fs)
+
+- Final `/testing-fuzzing` re-scan focused on `ffs-core` open/recovery/journal/path/ioctl surfaces.
+- No new fuzz-target findings surfaced beyond the already-filed backlog.
+- Existing dedicated coverage remains in place for `OpenFs::from_device`, journal replay, MVCC WAL recovery, path-component validation, ioctl dispatch, path-encoding mount behavior, and repair-symbol mutation.
+- The only obvious remaining parser-style gap in `ffs-core` is still `verify_ext4_integrity(image: &[u8], ...)`, which is already tracked as `bd-37w4o`.
+- Status: **DONE** for additional `ffs-core` fuzz-target discovery on this frontier; idle until the code surface changes or one of the filed fuzz beads lands.
+
+---
+
 ## 2026-04-21: asupersync 0.2.5 → 0.3.0
 
 **Commits:**
