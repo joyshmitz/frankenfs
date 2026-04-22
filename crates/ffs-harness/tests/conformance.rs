@@ -2,29 +2,28 @@
 
 use asupersync::Cx;
 use ffs_btrfs::{
-    BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
+    parse_send_stream, replay_tree_log, walk_chunk_tree, walk_device_tree, BtrfsDeviceSet,
+    SendCommand, BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
     BTRFS_FS_TREE_OBJECTID, BTRFS_FT_REG_FILE, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
     BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
-    BtrfsDeviceSet, SendCommand, parse_send_stream, replay_tree_log, walk_chunk_tree,
-    walk_device_tree,
 };
 use ffs_core::{Ext4JournalReplayMode, FileType, OpenFs, OpenOptions, RequestScope};
 use ffs_harness::{
-    GoldenReference, ParityReport,
-    e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
+    e2e::{run_crash_replay_suite, run_fsx_stress, CrashReplaySuiteConfig, FsxStressConfig},
     load_sparse_fixture, validate_btrfs_chunk_fixture, validate_btrfs_fixture,
     validate_btrfs_leaf_fixture, validate_dir_block_fixture, validate_ext4_fixture,
     validate_extent_tree_fixture, validate_group_desc_fixture, validate_inode_fixture,
+    GoldenReference, ParityReport,
 };
 use ffs_ondisk::{
-    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock, Ext4IncompatFeatures, Ext4Superblock,
-    ExtentTree, lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block,
-    stamp_dir_block_checksum, verify_dir_block_checksum,
+    lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block, stamp_dir_block_checksum,
+    verify_dir_block_checksum, BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock,
+    Ext4IncompatFeatures, Ext4Superblock, ExtentTree,
 };
 use ffs_types::{
-    BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL, EXT4_COMPR_FL, EXT4_COMPRBLK_FL,
-    EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
-    InodeNumber, ParseError,
+    GroupNumber, InodeNumber, ParseError, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL,
+    EXT4_COMPRBLK_FL, EXT4_COMPR_FL, EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPERBLOCK_OFFSET,
+    EXT4_SUPER_MAGIC,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -36,8 +35,8 @@ use std::{
     os::unix::ffi::OsStrExt,
     path::Path,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        Arc,
     },
 };
 
@@ -1231,23 +1230,14 @@ fn patch_ext4_active_mmp(image_path: &Path, mmp_block: u64, seq: u32) {
     image.flush().expect("flush ext4 MMP patch");
 }
 
-fn enable_e2compr_for_inode(image_path: &Path, ino: InodeNumber, flags: u32) {
-    let command = format!("set_inode_field <{}> flags {}", ino.0, flags);
-    let debugfs = std::process::Command::new("debugfs")
-        .args([
-            "-w",
-            "-R",
-            &command,
-            image_path.to_str().expect("utf8 image path"),
-        ])
-        .output()
-        .expect("spawn debugfs for e2compr inode flags");
-    assert!(
-        debugfs.status.success(),
-        "debugfs command {command:?} failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&debugfs.stdout),
-        String::from_utf8_lossy(&debugfs.stderr)
-    );
+fn enable_e2compr_for_inode(fs: &OpenFs, cx: &Cx, ino: InodeNumber, flags: u32) {
+    let mut inode = fs
+        .read_inode(cx, ino)
+        .expect("read inode for e2compr conformance setup");
+    inode.flags = flags;
+    inode.extent_bytes.fill(0);
+    fs.persist_ext4_inode_for_testing(cx, ino, &inode)
+        .expect("persist e2compr inode flags for conformance");
 }
 
 fn reopen_writable_ext4(image_path: &Path) -> OpenFs {
@@ -1780,8 +1770,8 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         e2compr_flags |= 2_u32 << 23;
         e2compr_flags |= u32::from(method_idx & 0x1F) << 26;
 
+        enable_e2compr_for_inode(&fs, &cx, attr.ino, e2compr_flags);
         drop(fs);
-        enable_e2compr_for_inode(&image_path, attr.ino, e2compr_flags);
         fs = reopen_writable_ext4(&image_path);
 
         let attr = fs
@@ -1790,11 +1780,6 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
         let inode_after_setup = fs
             .read_inode(&cx, attr.ino)
             .expect("inode after e2compr test setup");
-        assert_eq!(
-            inode_after_setup.flags & EXT4_INLINE_DATA_FL,
-            0,
-            "{label}: e2compr setup must clear inline-data before write-side conformance",
-        );
         assert_ne!(
             inode_after_setup.flags & EXT4_COMPR_FL,
             0,
@@ -1805,6 +1790,9 @@ fn ext4_e2compr_write_readback_conforms_for_gzip_and_lzo() {
             0,
             "{label}: e2compr setup must clear EXTENTS_FL before write-side conformance",
         );
+        // The historic e2compr method field overlaps the later
+        // EXT4_INLINE_DATA_FL bit assignment, so write-side conformance must
+        // validate behavior rather than the raw aliased flag word.
 
         let (baseline_free_blocks, baseline_gd_free_blocks) = ext4_free_block_counters(&fs, &cx);
         let first = vec![byte; 4096];

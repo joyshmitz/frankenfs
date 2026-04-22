@@ -9519,7 +9519,7 @@ impl OpenFs {
         if inode.is_symlink() {
             return Err(FfsError::Format("cannot fallocate a symlink".into()));
         }
-        if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
+        if Self::ext4_inode_uses_inline_data(&inode) {
             return Err(FfsError::UnsupportedFeature(
                 "ext4 inline-data fallocate mutation is not supported".into(),
             ));
@@ -9864,7 +9864,7 @@ impl OpenFs {
                 tstamp_nanos,
             );
         }
-        if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
+        if Self::ext4_inode_uses_inline_data(&inode) {
             return Err(FfsError::UnsupportedFeature(
                 "ext4 inline-data write-side mutation is not supported".into(),
             ));
@@ -11237,6 +11237,14 @@ impl OpenFs {
                 | Self::BTRFS_FALLOC_FL_PUNCH_HOLE
                 | Self::BTRFS_FALLOC_FL_ZERO_RANGE);
         (keep_size, punch_hole, zero_range, unsupported_bits)
+    }
+
+    fn ext4_inode_uses_inline_data(inode: &Ext4Inode) -> bool {
+        // The historic e2compr method field reuses bits later assigned to
+        // EXT4_INLINE_DATA_FL. Treat COMPR_FL as authoritative so gzip-backed
+        // compressed inodes are not misclassified as inline-data files.
+        inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0
+            && inode.flags & ffs_types::EXT4_COMPR_FL == 0
     }
 
     fn seed_e2compr_defaults_for_inode(inode: &mut Ext4Inode) {
@@ -14762,7 +14770,7 @@ impl OpenFs {
                 "ext4 move_ext requires an extent-backed {role} inode"
             )));
         }
-        if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
+        if Self::ext4_inode_uses_inline_data(inode) {
             return Err(FfsError::UnsupportedFeature(format!(
                 "ext4 move_ext does not support inline-data {role} inodes"
             )));
@@ -15266,7 +15274,7 @@ impl FsOps for OpenFs {
                 }
 
                 // Inline data: file content stored directly in inode's i_block area.
-                if inode.flags & ffs_types::EXT4_INLINE_DATA_FL != 0 {
+                if Self::ext4_inode_uses_inline_data(&inode) {
                     return Ok(Self::read_ext4_inline_data(&inode, offset, size));
                 }
 
@@ -20914,6 +20922,10 @@ mod tests {
             OpenFs::EXT4_E2COMPR_DEFAULT_METHOD_IDX,
             "COMPR enable must seed the default compression method"
         );
+        assert!(
+            !OpenFs::ext4_inode_uses_inline_data(&inode_after_setflags),
+            "the historical e2compr alias must not make compressed inodes look like inline-data files"
+        );
 
         let payload = vec![b'C'; 4096];
         fs.write(&cx, created.ino, 0, &payload)
@@ -26190,10 +26202,9 @@ mod tests {
         let inode = fs
             .read_inode(&cx, attr.ino)
             .expect("inode after e2compr enable");
-        assert_eq!(
-            inode.flags & ffs_types::EXT4_INLINE_DATA_FL,
-            0,
-            "e2compr helper must clear inline-data before write-side mutation tests",
+        assert!(
+            !OpenFs::ext4_inode_uses_inline_data(&inode),
+            "e2compr helper must not leave the inode logically classified as inline-data",
         );
 
         let baseline = fs.free_space_summary(&cx).expect("baseline free space");
