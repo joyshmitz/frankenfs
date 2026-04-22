@@ -23,6 +23,9 @@ path = "../crates/ffs-ondisk"
 [dependencies.ffs-btrfs]
 path = "../crates/ffs-btrfs"
 
+[dependencies.ffs-core]
+path = "../crates/ffs-core"
+
 [dependencies.ffs-mvcc]
 path = "../crates/ffs-mvcc"
 
@@ -121,4 +124,9 @@ doc = false
 [[bin]]
 name = "fuzz_btrfs_tree_items"
 path = "fuzz_targets/fuzz_btrfs_tree_items.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_openfs_recovery"
+path = "fuzz_targets/fuzz_openfs_recovery.rs"
 doc = false
