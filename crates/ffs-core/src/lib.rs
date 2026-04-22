@@ -18491,14 +18491,8 @@ mod tests {
 
     #[test]
     fn get_encryption_policy_ex_reads_hidden_ext4_fscrypt_v2_context() {
-        let context = build_fscrypt_context_v2(
-            1,
-            4,
-            0,
-            9,
-            *b"0123456789abcdef",
-            *b"fedcba9876543210",
-        );
+        let context =
+            build_fscrypt_context_v2(1, 4, 0, 9, *b"0123456789abcdef", *b"fedcba9876543210");
         let image = build_ext4_image_with_encryption_context(&context, true);
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();
