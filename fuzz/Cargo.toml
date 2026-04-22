@@ -132,6 +132,11 @@ path = "fuzz_targets/fuzz_native_cow_recovery.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_verify_ext4_integrity"
+path = "fuzz_targets/fuzz_verify_ext4_integrity.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_lrc_repair"
 path = "fuzz_targets/fuzz_lrc_repair.rs"
 doc = false
