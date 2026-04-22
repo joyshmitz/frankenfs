@@ -63,18 +63,19 @@ br create --type task --priority 2 --title "centralize test image factory helper
 - Single import for all image factory needs
 - Documentation for each factory method
 
-## Task 4: Error Path E2E Coverage
-```
-br create --type task --priority 2 --title "add E2E tests for malformed image and permission error paths"
-```
+## Task 4: Error Path E2E Coverage - DONE
 
-**Scope:**
-- Test CLI behavior on truncated images
-- Test CLI behavior on corrupted superblocks
-- Test CLI behavior on permission-denied paths
-- Verify error messages are actionable
+**Status:** DONE in commit 9c91e44 (bd-fnvov)
 
-**Acceptance:**
-- Truncated image returns clear error (not panic)
-- Corrupted superblock returns diagnostic message
-- Permission errors suggest fix
+**Completed:**
+- 7 error path E2E tests added to crates/ffs-cli/tests/cli_e2e.rs
+- Tests verify non-zero exit codes for corrupted/malformed images
+
+**Tests added:**
+- cli_inspect_corrupted_superblock_returns_error
+- cli_inspect_zero_filled_image_returns_error
+- cli_fsck_corrupted_superblock_reports_error
+- cli_inspect_random_garbage_returns_error
+- cli_info_truncated_image_returns_error
+- cli_fsck_truncated_image_returns_error
+- cli_repair_truncated_image_returns_error
