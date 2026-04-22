@@ -102,6 +102,9 @@ workspace-entry or parent-file drift.
 Mounted-path btrfs symlink refusal coverage now also freezes exact `EEXIST` for
 occupied destinations and exact `ENOTDIR` for non-directory parents, with no
 visible workspace-entry or parent-file drift.
+Mounted-path ext4 `renameat2` flag-rejection coverage now also freezes exact
+`EINVAL` for `RENAME_NOREPLACE` and `RENAME_EXCHANGE`, with no source,
+destination, or root-entry drift.
 Mounted-path ext4 read-only `fallocate` coverage now also freezes exact `EROFS`
 for representative preallocate and punch-hole mutation attempts, with no
 file-byte or apparent-size drift.

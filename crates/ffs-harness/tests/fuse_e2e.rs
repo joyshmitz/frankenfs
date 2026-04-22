@@ -2438,6 +2438,82 @@ fn fuse_rename_over_same_inode_hardlink_is_noop() {
 }
 
 #[test]
+fn fuse_renameat2_flag_rejection_reports_einval() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_renameat2_flag_rejection";
+        if !command_available("python3") {
+            eprintln!("python3 not available, skipping");
+            return;
+        }
+
+        let noreplace_src = mnt.join("renameat2-noreplace-src.txt");
+        let noreplace_dst = mnt.join("renameat2-noreplace-dst.txt");
+        let exchange_src = mnt.join("renameat2-exchange-src.txt");
+        let exchange_dst = mnt.join("renameat2-exchange-dst.txt");
+
+        fs::write(&noreplace_src, b"noreplace src\n").expect("write renameat2 noreplace src");
+        fs::write(&exchange_src, b"exchange src\n").expect("write renameat2 exchange src");
+        fs::write(&exchange_dst, b"exchange dst\n").expect("write renameat2 exchange dst");
+
+        let root_entries_before = snapshot_directory_entries(mnt);
+        let noreplace_src_before = snapshot_file_state(&noreplace_src);
+        let exchange_src_before = snapshot_file_state(&exchange_src);
+        let exchange_dst_before = snapshot_file_state(&exchange_dst);
+
+        let noreplace_report =
+            py_renameat2_report(&noreplace_src, &noreplace_dst, libc::RENAME_NOREPLACE);
+        assert_eq!(
+            noreplace_report["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "renameat2(RENAME_NOREPLACE) should surface exact EINVAL: {noreplace_report:?}"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rejected RENAME_NOREPLACE must not change visible root entries"
+        );
+        assert_file_state_unchanged(
+            &noreplace_src,
+            &noreplace_src_before,
+            "renameat2 RENAME_NOREPLACE source",
+        );
+        assert!(
+            fs::symlink_metadata(&noreplace_dst).is_err(),
+            "rejected RENAME_NOREPLACE must not create a new destination entry"
+        );
+
+        let exchange_report =
+            py_renameat2_report(&exchange_src, &exchange_dst, libc::RENAME_EXCHANGE);
+        assert_eq!(
+            exchange_report["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "renameat2(RENAME_EXCHANGE) should surface exact EINVAL: {exchange_report:?}"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rejected RENAME_EXCHANGE must not change visible root entries"
+        );
+        assert_file_state_unchanged(
+            &exchange_src,
+            &exchange_src_before,
+            "renameat2 RENAME_EXCHANGE source",
+        );
+        assert_file_state_unchanged(
+            &exchange_dst,
+            &exchange_dst_before,
+            "renameat2 RENAME_EXCHANGE destination",
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("noreplace=EINVAL_exchange=EINVAL_no_drift"),
+        );
+    });
+}
+
+#[test]
 fn fuse_hard_link() {
     with_rw_mount(|mnt| {
         let original = mnt.join("hello.txt");
@@ -5826,6 +5902,25 @@ fn py_utime_report(path: &Path, atime: i64, mtime: i64) -> Value {
         String::from_utf8_lossy(&out.stderr)
     );
     serde_json::from_slice(&out.stdout).expect("parse utime JSON")
+}
+
+fn py_renameat2_report(old_path: &Path, new_path: &Path, flags: u32) -> Value {
+    let script = format!(
+        "import ctypes, json, os\nAT_FDCWD = -100\nlibc = ctypes.CDLL(None, use_errno=True)\nrenameat2 = libc.renameat2\nrenameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]\nrenameat2.restype = ctypes.c_int\nret = renameat2(AT_FDCWD, {old_path:?}.encode(), AT_FDCWD, {new_path:?}.encode(), {flags})\nif ret == 0:\n print(json.dumps({{'ok': True}}))\nelse:\n errno = ctypes.get_errno()\n print(json.dumps({{'errno': errno, 'message': os.strerror(errno)}}))",
+        old_path = old_path.to_str().unwrap(),
+        new_path = new_path.to_str().unwrap(),
+        flags = flags,
+    );
+    let out = Command::new("python3")
+        .args(["-c", &script])
+        .output()
+        .expect("python3 renameat2 JSON");
+    assert!(
+        out.status.success(),
+        "python3 renameat2 JSON helper failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("parse renameat2 JSON")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
