@@ -225,7 +225,43 @@ ffs-extent, ffs-error, ffs-types, ffs-tui, ffs-harness, ffs
 - No new fuzz-target findings surfaced beyond the already-filed backlog.
 - Existing dedicated coverage remains in place for `OpenFs::from_device`, journal replay, MVCC WAL recovery, path-component validation, ioctl dispatch, path-encoding mount behavior, and repair-symbol mutation.
 - The only obvious remaining parser-style gap in `ffs-core` is still `verify_ext4_integrity(image: &[u8], ...)`, which is already tracked as `bd-37w4o`.
-- Status: **DONE** for additional `ffs-core` fuzz-target discovery on this frontier; idle until the code surface changes or one of the filed fuzz beads lands.
+- Repeated `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_frankenfs_cod cargo test --workspace --all-targets` passes converged on the same 4 `ffs-harness` conformance failures already tracked by `bd-uyjcz`, `bd-efc2j`, `bd-r8c8r`, and `bd-ew490`; no new failure class surfaced.
+- Status: **DONE** for additional `cod-fs` review/fuzz discovery on this frontier; idle until the code surface changes or one of the filed beads lands.
+
+### Final Report (cod-fs)
+
+- FrankenFS `cod-fs` work complete for this frontier.
+- Closed or reconciled 36 beads across parity coverage, stale-tracker cleanup, fuzz-harness implementation, and blocked syscall-boundary closeouts.
+- Filed 17+ review/fuzz follow-up beads covering workspace gate failures, conformance regressions, and remaining `ffs-core` / `ffs-fuse` fuzz targets.
+- Current remote workspace status: `cargo test --workspace --all-targets` is green until `ffs-harness` conformance and then fails only the 4 known tests tracked by `bd-uyjcz`, `bd-efc2j`, `bd-r8c8r`, and `bd-ew490`; no new failure class surfaced in repeated `rch` passes.
+- Current dependency status: `asupersync` is consistently pinned to `0.3.1` across the workspace, `ffs-*` crates, and `Cargo.lock`.
+- Final state: **DONE** and idle pending new code-surface changes or prioritization of the remaining open review beads.
+
+### Session Complete
+
+**Final verification (2026-04-22T13:xx):**
+- `cargo clippy --workspace --all-targets -- -D warnings`: PASS (6 warnings in vendored fuser only)
+- `cargo test --workspace --all-targets`: 4 conformance failures (pre-existing bd-uyjcz)
+- Fuzz audit: Saturated after 5+ passes — no new gaps beyond 17 filed beads
+
+**Session outcome:**
+- 5 bugs fixed (CRC32C checksums, asupersync thresholds, clippy, corpus dir)
+- 17 fuzz beads filed (P2/P3)
+- 2 pre-existing issues remain (bd-uyjcz conformance, bd-scqdb flaky)
+- All 19 workspace crates audited
+
+### FINAL REPORT (cc-fs) — 2026-04-22
+
+| Metric | Value |
+|--------|-------|
+| Clippy | PASS |
+| Tests | 4 failures (pre-existing) |
+| Fuzz audit | Saturated |
+| Bugs fixed | 5 |
+| Beads filed | 17 |
+| Crates audited | 19/19 |
+
+**cc-fs: IDLE** — no actionable work.
 
 ---
 
