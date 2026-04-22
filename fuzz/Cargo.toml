@@ -142,6 +142,11 @@ path = "fuzz_targets/fuzz_detect_filesystem.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_btrfs_inode_ref_payload"
+path = "fuzz_targets/fuzz_btrfs_inode_ref_payload.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_lrc_repair"
 path = "fuzz_targets/fuzz_lrc_repair.rs"
 doc = false
