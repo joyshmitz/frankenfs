@@ -96,6 +96,9 @@ directory-entry drift and no surviving-file data drift.
 Mounted-path ext4 namespace-refusal coverage now also freezes exact `ENOTDIR`
 for create and mkdir attempts beneath a regular-file parent, with no visible
 root-entry or parent-file drift.
+Mounted-path ext4 mkdir/rmdir coverage now also freezes parent `st_nlink`
+accounting across child-directory creation/removal, with visible root entries
+returning to baseline after `rmdir`.
 Mounted-path ext4 write-path coverage now also freezes exact `EISDIR` for
 opening a directory for write, with no directory-entry drift and no child-file drift.
 Mounted-path btrfs write-path coverage now also freezes exact `EISDIR` for

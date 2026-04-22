@@ -2356,6 +2356,75 @@ fn fuse_unlink_directory_reports_eisdir() {
 }
 
 #[test]
+fn fuse_mkdir_rmdir_parent_nlink_accounting() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_mkdir_rmdir_parent_nlink_accounting";
+        let parent = mnt;
+        let child_name = "nlink-accounting-dir";
+        let child = parent.join(child_name);
+        let parent_entries_before = snapshot_directory_entries(parent);
+        let parent_nlink_before = fs::metadata(parent)
+            .expect("stat parent before mkdir")
+            .nlink();
+
+        assert!(
+            !parent_entries_before.contains(child_name),
+            "test directory name should be absent before mkdir"
+        );
+
+        fs::create_dir(&child).expect("mkdir child directory");
+
+        let parent_nlink_after_mkdir = fs::metadata(parent)
+            .expect("stat parent after mkdir")
+            .nlink();
+        let child_nlink_after_mkdir = fs::metadata(&child)
+            .expect("stat child after mkdir")
+            .nlink();
+        let mut parent_entries_expected_after_mkdir = parent_entries_before.clone();
+        parent_entries_expected_after_mkdir.insert(child_name.to_string());
+        assert_eq!(
+            parent_nlink_after_mkdir,
+            parent_nlink_before + 1,
+            "mkdir must increment parent st_nlink by one for the new child directory"
+        );
+        assert_eq!(
+            child_nlink_after_mkdir, 2,
+            "new directory must expose the canonical '.'/'..' link count"
+        );
+        assert_eq!(
+            snapshot_directory_entries(parent),
+            parent_entries_expected_after_mkdir,
+            "mkdir must add exactly one visible root entry"
+        );
+
+        fs::remove_dir(&child).expect("rmdir child directory");
+
+        let parent_nlink_after_rmdir = fs::metadata(parent)
+            .expect("stat parent after rmdir")
+            .nlink();
+        assert_eq!(
+            parent_nlink_after_rmdir, parent_nlink_before,
+            "rmdir must restore the parent st_nlink once the child directory is gone"
+        );
+        assert_eq!(
+            snapshot_directory_entries(parent),
+            parent_entries_before,
+            "rmdir must restore the visible parent entries to baseline"
+        );
+        assert!(
+            fs::symlink_metadata(&child).is_err(),
+            "removed child directory must no longer be visible"
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("mkdir_parent_nlink_plus_one_rmdir_restored"),
+        );
+    });
+}
+
+#[test]
 fn fuse_rmdir_non_empty_fails() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("non_empty_dir");
