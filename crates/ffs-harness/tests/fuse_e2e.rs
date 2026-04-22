@@ -9853,6 +9853,16 @@ fn btrfs_fuse_rename_into_non_directory_parent_reports_enotdir() {
 }
 
 #[test]
+fn btrfs_fuse_rename_file_directory_type_mismatch_reports_eisdir_and_enotdir() {
+    with_btrfs_rw_mount(|mnt| {
+        assert_rename_file_directory_type_mismatch_contract(
+            mnt,
+            "btrfs_rw_rename_file_directory_type_mismatch",
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_rename_missing_source_reports_enoent() {
     with_btrfs_rw_mount(|mnt| {
         assert_rename_missing_source_reports_enoent(

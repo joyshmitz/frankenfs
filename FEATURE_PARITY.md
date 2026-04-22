@@ -155,6 +155,9 @@ overwrites, with no root-entry, source-child, or file-byte drift.
 Mounted-path btrfs rename coverage now also freezes same-name source/destination
 semantics as a visible no-op, with no directory-entry drift and no inode/data
 drift.
+Mounted-path btrfs rename refusal coverage now also freezes exact `EISDIR` for
+file-over-directory overwrites and exact `ENOTDIR` for directory-over-file
+overwrites, with no root-entry, source-child, or file-byte drift.
 Mounted-path btrfs cross-parent directory rename coverage now also freezes
 parent `st_nlink` accounting: moving a child directory decrements the source
 parent, increments the destination parent, and preserves the moved inode.
