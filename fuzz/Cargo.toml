@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 asupersync = "0.3.1"
+crc32c = "0.6.8"
 libfuzzer-sys = "0.4"
 
 [dependencies.ffs-block]
@@ -123,6 +124,11 @@ doc = false
 [[bin]]
 name = "fuzz_repair_codec_roundtrip"
 path = "fuzz_targets/fuzz_repair_codec_roundtrip.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_native_cow_recovery"
+path = "fuzz_targets/fuzz_native_cow_recovery.rs"
 doc = false
 
 [[bin]]
