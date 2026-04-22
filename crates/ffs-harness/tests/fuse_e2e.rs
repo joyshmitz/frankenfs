@@ -13,8 +13,10 @@
 //! Only `fuse_setattr_chown` remains `#[ignore]` as it requires root.
 
 use asupersync::Cx;
-use ffs_core::{BtrfsMountSelection, Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope};
-use ffs_fuse::{MountOptions, mount_background};
+use ffs_core::{
+    BtrfsMountSelection, Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope,
+};
+use ffs_fuse::{mount_background, MountOptions};
 use ffs_harness::load_sparse_fixture;
 use ffs_types::InodeNumber;
 use serde_json::Value;
@@ -169,11 +171,10 @@ fn build_ext4_featured_dir_image(
     image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
     image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
     image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
-    let incompat =
-        (ffs_ondisk::Ext4IncompatFeatures::FILETYPE.0
-            | ffs_ondisk::Ext4IncompatFeatures::EXTENTS.0
-            | incompat_feature)
-            .to_le_bytes();
+    let incompat = (ffs_ondisk::Ext4IncompatFeatures::FILETYPE.0
+        | ffs_ondisk::Ext4IncompatFeatures::EXTENTS.0
+        | incompat_feature)
+        .to_le_bytes();
     image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat);
     image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
 
@@ -850,7 +851,8 @@ fn build_ext4_fscrypt_policy_v2_image() -> Vec<u8> {
         !0_u32,
         &image[sb_off..sb_off + ffs_types::EXT4_SB_CHECKSUM_OFFSET],
     );
-    image[sb_off + ffs_types::EXT4_SB_CHECKSUM_OFFSET..sb_off + ffs_types::EXT4_SB_CHECKSUM_OFFSET + 4]
+    image[sb_off + ffs_types::EXT4_SB_CHECKSUM_OFFSET
+        ..sb_off + ffs_types::EXT4_SB_CHECKSUM_OFFSET + 4]
         .copy_from_slice(&checksum.to_le_bytes());
 
     let gd_off: usize = 4096;
@@ -4813,7 +4815,10 @@ fn fuse_ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes_on_mounted_path
 
     let encrypted_path = mnt.join(Path::new(std::ffi::OsStr::from_bytes(raw_name)));
     let metadata = fs::metadata(&encrypted_path).expect("lookup encrypted entry via raw bytes");
-    assert!(metadata.is_file(), "raw-byte lookup should resolve the encrypted file");
+    assert!(
+        metadata.is_file(),
+        "raw-byte lookup should resolve the encrypted file"
+    );
     assert_eq!(
         metadata.ino(),
         11,
@@ -7694,7 +7699,10 @@ fn fuse_xattr_ext4_boundary_name_length_accepted() {
 
         py_setxattr(&path, &max_name, b"boundary");
         let readback = py_getxattr(&path, &max_name).expect("255-byte suffix xattr should exist");
-        assert_eq!(readback, b"boundary", "boundary-length xattr should round-trip");
+        assert_eq!(
+            readback, b"boundary",
+            "boundary-length xattr should round-trip"
+        );
     });
 }
 
@@ -7708,7 +7716,10 @@ fn fuse_xattr_ext4_boundary_value_size_accepted() {
 
         py_setxattr(&path, "user.maxval", &max_value);
         let readback = py_getxattr(&path, "user.maxval").expect("64KB xattr value should exist");
-        assert_eq!(readback, max_value, "boundary-size xattr value should round-trip");
+        assert_eq!(
+            readback, max_value,
+            "boundary-size xattr value should round-trip"
+        );
     });
 }
 
@@ -7999,9 +8010,7 @@ fn can_run_sudo() -> bool {
 
 /// Create a btrfs image with subvolumes and snapshots using kernel btrfs tools.
 /// Requires sudo access. Returns (image_path, subvol_names, snapshot_names).
-fn create_btrfs_image_with_subvolumes(
-    dir: &Path,
-) -> Option<(PathBuf, Vec<String>, Vec<String>)> {
+fn create_btrfs_image_with_subvolumes(dir: &Path) -> Option<(PathBuf, Vec<String>, Vec<String>)> {
     if !can_run_sudo() {
         eprintln!("sudo not available, skipping subvolume test");
         return None;
@@ -8025,37 +8034,63 @@ fn create_btrfs_image_with_subvolumes(
         .output()
         .expect("mkfs.btrfs");
     if !out.status.success() {
-        eprintln!("mkfs.btrfs failed: {}", String::from_utf8_lossy(&out.stderr));
+        eprintln!(
+            "mkfs.btrfs failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         return None;
     }
 
     // Mount with kernel driver to create subvolumes
     fs::create_dir_all(&kernel_mnt).expect("create kernel mount dir");
     let out = Command::new("sudo")
-        .args(["mount", "-t", "btrfs", image.to_str().unwrap(), kernel_mnt.to_str().unwrap()])
+        .args([
+            "mount",
+            "-t",
+            "btrfs",
+            image.to_str().unwrap(),
+            kernel_mnt.to_str().unwrap(),
+        ])
         .output()
         .expect("sudo mount");
     if !out.status.success() {
-        eprintln!("sudo mount failed: {}", String::from_utf8_lossy(&out.stderr));
+        eprintln!(
+            "sudo mount failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         return None;
     }
 
     // Create subvolume "data"
     let subvol_path = kernel_mnt.join("data");
     let out = Command::new("sudo")
-        .args(["btrfs", "subvolume", "create", subvol_path.to_str().unwrap()])
+        .args([
+            "btrfs",
+            "subvolume",
+            "create",
+            subvol_path.to_str().unwrap(),
+        ])
         .output()
         .expect("btrfs subvolume create");
     if !out.status.success() {
-        let _ = Command::new("sudo").args(["umount", kernel_mnt.to_str().unwrap()]).output();
-        eprintln!("btrfs subvolume create failed: {}", String::from_utf8_lossy(&out.stderr));
+        let _ = Command::new("sudo")
+            .args(["umount", kernel_mnt.to_str().unwrap()])
+            .output();
+        eprintln!(
+            "btrfs subvolume create failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         return None;
     }
 
     // Write a marker file in the subvolume
     let marker = subvol_path.join("subvol_marker.txt");
     let out = Command::new("sudo")
-        .args(["sh", "-c", &format!("echo 'in-data-subvol' > '{}'", marker.display())])
+        .args([
+            "sh",
+            "-c",
+            &format!("echo 'in-data-subvol' > '{}'", marker.display()),
+        ])
         .output()
         .expect("write marker");
     if !out.status.success() {
@@ -8065,7 +8100,11 @@ fn create_btrfs_image_with_subvolumes(
     // Write a marker file in the root (not visible when mounting subvolume)
     let root_marker = kernel_mnt.join("root_marker.txt");
     let out = Command::new("sudo")
-        .args(["sh", "-c", &format!("echo 'in-root' > '{}'", root_marker.display())])
+        .args([
+            "sh",
+            "-c",
+            &format!("echo 'in-root' > '{}'", root_marker.display()),
+        ])
         .output()
         .expect("write root marker");
     if !out.status.success() {
@@ -8075,7 +8114,13 @@ fn create_btrfs_image_with_subvolumes(
     // Create snapshot "snap-data" of "data"
     let snap_path = kernel_mnt.join("snap-data");
     let out = Command::new("sudo")
-        .args(["btrfs", "subvolume", "snapshot", subvol_path.to_str().unwrap(), snap_path.to_str().unwrap()])
+        .args([
+            "btrfs",
+            "subvolume",
+            "snapshot",
+            subvol_path.to_str().unwrap(),
+            snap_path.to_str().unwrap(),
+        ])
         .output()
         .expect("btrfs snapshot");
     let has_snapshot = out.status.success();
@@ -8083,7 +8128,11 @@ fn create_btrfs_image_with_subvolumes(
         // Write different content in snapshot
         let snap_marker = snap_path.join("snapshot_marker.txt");
         let _ = Command::new("sudo")
-            .args(["sh", "-c", &format!("echo 'in-snapshot' > '{}'", snap_marker.display())])
+            .args([
+                "sh",
+                "-c",
+                &format!("echo 'in-snapshot' > '{}'", snap_marker.display()),
+            ])
             .output();
     }
 
@@ -8093,11 +8142,18 @@ fn create_btrfs_image_with_subvolumes(
         .output()
         .expect("sudo umount");
     if !out.status.success() {
-        eprintln!("sudo umount failed: {}", String::from_utf8_lossy(&out.stderr));
+        eprintln!(
+            "sudo umount failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     let subvols = vec!["data".to_string()];
-    let snaps = if has_snapshot { vec!["snap-data".to_string()] } else { vec![] };
+    let snaps = if has_snapshot {
+        vec!["snap-data".to_string()]
+    } else {
+        vec![]
+    };
     Some((image, subvols, snaps))
 }
 
@@ -8580,6 +8636,56 @@ fn btrfs_fuse_symlink_create_and_follow() {
         // Symlink metadata should differ from target.
         let link_meta = fs::symlink_metadata(&link).expect("lstat symlink on btrfs");
         assert!(link_meta.file_type().is_symlink());
+    });
+}
+
+#[test]
+fn btrfs_fuse_readlink_on_non_symlink_reports_einval() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_readlink_on_non_symlink_reports_einval";
+        let file_path = mnt.join("readlink_non_symlink.txt");
+        let dir_path = mnt.join("readlink_non_symlink_dir");
+        fs::write(&file_path, b"btrfs readlink refusal witness\n").expect("seed regular file");
+        fs::create_dir(&dir_path).expect("seed directory");
+        let root_entries_before = snapshot_directory_entries(mnt);
+        let file_before = snapshot_file_state(&file_path);
+        let dir_entries_before = snapshot_directory_entries(&dir_path);
+
+        let file_err = fs::read_link(&file_path).expect_err("readlink on regular file should fail");
+        assert_eq!(
+            file_err.raw_os_error(),
+            Some(libc::EINVAL),
+            "readlink on regular file should surface exact EINVAL: {file_err}"
+        );
+        assert_file_state_unchanged(
+            &file_path,
+            &file_before,
+            "btrfs readlink rejection on regular file",
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rejected readlink on regular file must not change root entries"
+        );
+
+        let dir_err = fs::read_link(&dir_path).expect_err("readlink on directory should fail");
+        assert_eq!(
+            dir_err.raw_os_error(),
+            Some(libc::EINVAL),
+            "readlink on directory should surface exact EINVAL: {dir_err}"
+        );
+        assert_eq!(
+            snapshot_directory_entries(&dir_path),
+            dir_entries_before,
+            "rejected readlink on directory must not change directory entries"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rejected readlink on directory must not change root entries"
+        );
+
+        emit_scenario_result(scenario_id, "PASS", Some("file+dir_errno=EINVAL_no_drift"));
     });
 }
 
@@ -9759,8 +9865,12 @@ fn btrfs_fuse_xattr_boundary_name_length_accepted() {
         let max_name = format!("user.{max_suffix}");
 
         py_setxattr(&path, &max_name, b"boundary");
-        let readback = py_getxattr(&path, &max_name).expect("btrfs 255-byte suffix xattr should exist");
-        assert_eq!(readback, b"boundary", "btrfs boundary-length xattr should round-trip");
+        let readback =
+            py_getxattr(&path, &max_name).expect("btrfs 255-byte suffix xattr should exist");
+        assert_eq!(
+            readback, b"boundary",
+            "btrfs boundary-length xattr should round-trip"
+        );
     });
 }
 
@@ -9774,8 +9884,12 @@ fn btrfs_fuse_xattr_boundary_value_size_accepted() {
         let max_value = vec![0xAB_u8; 65536];
 
         py_setxattr(&path, "user.maxval", &max_value);
-        let readback = py_getxattr(&path, "user.maxval").expect("btrfs 64KB xattr value should exist");
-        assert_eq!(readback, max_value, "btrfs boundary-size xattr value should round-trip");
+        let readback =
+            py_getxattr(&path, "user.maxval").expect("btrfs 64KB xattr value should exist");
+        assert_eq!(
+            readback, max_value,
+            "btrfs boundary-size xattr value should round-trip"
+        );
     });
 }
 
@@ -10954,7 +11068,10 @@ fn btrfs_fuse_mount_subvolume_scopes_root_to_subvol() {
     let Some((image, subvols, _)) = create_btrfs_image_with_subvolumes(tmp.path()) else {
         return;
     };
-    assert!(subvols.contains(&"data".to_string()), "test setup should create 'data' subvolume");
+    assert!(
+        subvols.contains(&"data".to_string()),
+        "test setup should create 'data' subvolume"
+    );
 
     let mnt = tmp.path().join("mnt");
     fs::create_dir_all(&mnt).expect("create mountpoint");
@@ -10969,7 +11086,8 @@ fn btrfs_fuse_mount_subvolume_scopes_root_to_subvol() {
         ..MountOptions::default()
     };
 
-    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts) else {
+    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts)
+    else {
         panic!("mounting subvolume 'data' should succeed");
     };
 
@@ -11035,7 +11153,8 @@ fn btrfs_fuse_mount_snapshot_scopes_root_to_snapshot() {
         ..MountOptions::default()
     };
 
-    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts) else {
+    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts)
+    else {
         panic!("mounting snapshot 'snap-data' should succeed");
     };
 
@@ -11124,7 +11243,8 @@ fn btrfs_fuse_mount_default_root_shows_subvolumes_as_directories() {
         ..MountOptions::default()
     };
 
-    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts) else {
+    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts)
+    else {
         panic!("mounting default root should succeed");
     };
 
@@ -11134,10 +11254,7 @@ fn btrfs_fuse_mount_default_root_shows_subvolumes_as_directories() {
         data_dir.exists(),
         "'data' subvolume should appear as directory when mounting default root"
     );
-    assert!(
-        data_dir.is_dir(),
-        "'data' subvolume should be a directory"
-    );
+    assert!(data_dir.is_dir(), "'data' subvolume should be a directory");
 
     // root_marker.txt should be visible at root
     let root_marker = mnt.join("root_marker.txt");
