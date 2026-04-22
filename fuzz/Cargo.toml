@@ -205,3 +205,8 @@ doc = false
 name = "fuzz_repair_evidence_ledger"
 path = "fuzz_targets/fuzz_repair_evidence_ledger.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_ext4_image_reader"
+path = "fuzz_targets/fuzz_ext4_image_reader.rs"
+doc = false
