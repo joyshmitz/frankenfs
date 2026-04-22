@@ -29,6 +29,33 @@ fn cli_prerequisites_available() -> bool {
     command_available("mkfs.ext4") && command_available("debugfs")
 }
 
+fn btrfs_prerequisites_available() -> bool {
+    command_available("mkfs.btrfs")
+}
+
+fn create_minimal_btrfs_image(dir: &Path, size_mb: u32) -> std::path::PathBuf {
+    let image = dir.join("test.btrfs");
+
+    let dd_status = Command::new("dd")
+        .args(["if=/dev/zero", &format!("of={}", image.display()), "bs=1M"])
+        .arg(format!("count={}", size_mb))
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("dd failed");
+    assert!(dd_status.success(), "dd failed to create image file");
+
+    let mkfs_status = Command::new("mkfs.btrfs")
+        .args(["-f", "-q"])
+        .arg(&image)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("mkfs.btrfs failed");
+    assert!(mkfs_status.success(), "mkfs.btrfs failed");
+
+    image
+}
+
 fn create_minimal_ext4_image(dir: &Path, size_mb: u32) -> std::path::PathBuf {
     let image = dir.join("test.ext4");
     let size_str = format!("{}M", size_mb);
@@ -496,5 +523,165 @@ fn cli_repair_truncated_image_returns_error() {
             Some("expected error for truncated image"),
         );
         panic!("expected ffs repair to fail on truncated image");
+    }
+}
+
+// ── Btrfs CLI E2E Tests ─────────────────────────────────────────────────────
+
+#[test]
+fn cli_inspect_btrfs_returns_json() {
+    if !btrfs_prerequisites_available() {
+        eprintln!("SKIP: mkfs.btrfs not available");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = create_minimal_btrfs_image(tmpdir.path(), 128);
+
+    let output = run_ffs_cli(&["inspect", "--json", image.to_str().unwrap()]);
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("\"filesystem\"") && stdout.contains("btrfs") {
+            emit_scenario_result("cli_inspect_btrfs_json_valid", "PASS", None);
+        } else {
+            emit_scenario_result(
+                "cli_inspect_btrfs_json_valid",
+                "FAIL",
+                Some("JSON output missing expected fields"),
+            );
+            panic!("JSON output missing expected fields: {}", stdout);
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        emit_scenario_result(
+            "cli_inspect_btrfs_json_valid",
+            "FAIL",
+            Some(&format!("exit code {:?}", output.status.code())),
+        );
+        panic!("ffs inspect failed: {}", stderr);
+    }
+}
+
+#[test]
+fn cli_inspect_btrfs_human_readable() {
+    if !btrfs_prerequisites_available() {
+        eprintln!("SKIP: mkfs.btrfs not available");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = create_minimal_btrfs_image(tmpdir.path(), 128);
+
+    let output = run_ffs_cli(&["inspect", image.to_str().unwrap()]);
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("btrfs") || stdout.contains("Btrfs") {
+            emit_scenario_result("cli_inspect_btrfs_human_output", "PASS", None);
+        } else {
+            emit_scenario_result(
+                "cli_inspect_btrfs_human_output",
+                "FAIL",
+                Some("output missing btrfs identifier"),
+            );
+            panic!("output missing btrfs identifier: {}", stdout);
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        emit_scenario_result(
+            "cli_inspect_btrfs_human_output",
+            "FAIL",
+            Some(&format!("exit code {:?}", output.status.code())),
+        );
+        panic!("ffs inspect failed: {}", stderr);
+    }
+}
+
+#[test]
+fn cli_info_btrfs_shows_superblock() {
+    if !btrfs_prerequisites_available() {
+        eprintln!("SKIP: mkfs.btrfs not available");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = create_minimal_btrfs_image(tmpdir.path(), 128);
+
+    let output = run_ffs_cli(&["info", image.to_str().unwrap()]);
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("sector_size")
+            || stdout.contains("node_size")
+            || stdout.contains("generation")
+        {
+            emit_scenario_result("cli_info_btrfs_superblock", "PASS", None);
+        } else {
+            emit_scenario_result(
+                "cli_info_btrfs_superblock",
+                "FAIL",
+                Some("output missing superblock fields"),
+            );
+            panic!("output missing expected superblock fields: {}", stdout);
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        emit_scenario_result(
+            "cli_info_btrfs_superblock",
+            "FAIL",
+            Some(&format!("exit code {:?}", output.status.code())),
+        );
+        panic!("ffs info failed: {}", stderr);
+    }
+}
+
+#[test]
+fn cli_fsck_btrfs_clean_image() {
+    if !btrfs_prerequisites_available() {
+        eprintln!("SKIP: mkfs.btrfs not available");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = create_minimal_btrfs_image(tmpdir.path(), 128);
+
+    let output = run_ffs_cli(&["fsck", image.to_str().unwrap()]);
+
+    if output.status.success() {
+        emit_scenario_result("cli_fsck_btrfs_clean_image", "PASS", None);
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        emit_scenario_result(
+            "cli_fsck_btrfs_clean_image",
+            "FAIL",
+            Some(&format!("exit code {:?}", output.status.code())),
+        );
+        panic!("ffs fsck failed on clean btrfs image: {}", stderr);
+    }
+}
+
+#[test]
+fn cli_inspect_btrfs_subvolumes() {
+    if !btrfs_prerequisites_available() {
+        eprintln!("SKIP: mkfs.btrfs not available");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = create_minimal_btrfs_image(tmpdir.path(), 128);
+
+    let output = run_ffs_cli(&["inspect", "--subvolumes", image.to_str().unwrap()]);
+
+    if output.status.success() {
+        emit_scenario_result("cli_inspect_btrfs_subvolumes", "PASS", None);
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        emit_scenario_result(
+            "cli_inspect_btrfs_subvolumes",
+            "FAIL",
+            Some(&format!("exit code {:?}", output.status.code())),
+        );
+        panic!("ffs inspect --subvolumes failed: {}", stderr);
     }
 }
