@@ -298,11 +298,11 @@ impl DegradationFsm {
         drop(state);
 
         // Notify policies with current headroom (regardless of transition).
-        {
-            let policies = self.policies.lock();
-            for policy in policies.iter() {
-                policy.apply(headroom);
-            }
+        // Clone Arc pointers and release lock before calling apply() to prevent
+        // self-deadlock if any policy implementation calls back into the FSM.
+        let policies: Vec<_> = self.policies.lock().iter().cloned().collect();
+        for policy in policies {
+            policy.apply(headroom);
         }
 
         if new == prev {
