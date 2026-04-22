@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -136,6 +137,101 @@ fn conformance_fixture_path(name: &str) -> PathBuf {
         .join("conformance")
         .join("fixtures")
         .join(name)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn build_ext4_featured_dir_image(
+    raw_name: &[u8],
+    incompat_feature: u32,
+    root_inode_flags: u32,
+) -> Vec<u8> {
+    assert!(
+        raw_name.len() < 256,
+        "raw encrypted ext4 name must fit in a single dirent"
+    );
+
+    let block_size: u32 = 4096;
+    let image_size: u32 = 256 * 1024;
+    let mut image = vec![0_u8; image_size as usize];
+    let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+
+    image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&ffs_types::EXT4_SUPER_MAGIC.to_le_bytes());
+    image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+    let blocks_count = image_size / block_size;
+    image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+    image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+    image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+    let incompat =
+        (ffs_ondisk::Ext4IncompatFeatures::FILETYPE.0
+            | ffs_ondisk::Ext4IncompatFeatures::EXTENTS.0
+            | incompat_feature)
+            .to_le_bytes();
+    image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat);
+    image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+    let gd_off: usize = 4096;
+    image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+    image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+    let root_ino = 4 * 4096 + 256;
+    image[root_ino..root_ino + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+    image[root_ino + 4..root_ino + 8].copy_from_slice(&4096_u32.to_le_bytes());
+    image[root_ino + 0x1A..root_ino + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+    image[root_ino + 0x20..root_ino + 0x24].copy_from_slice(&root_inode_flags.to_le_bytes());
+    image[root_ino + 0x80..root_ino + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let root_extent = root_ino + 0x28;
+    image[root_extent..root_extent + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[root_extent + 2..root_extent + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 4..root_extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[root_extent + 6..root_extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 12..root_extent + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[root_extent + 16..root_extent + 18].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 18..root_extent + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 20..root_extent + 24].copy_from_slice(&10_u32.to_le_bytes());
+
+    let file_ino = 4 * 4096 + 10 * 256;
+    image[file_ino..file_ino + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+    image[file_ino + 4..file_ino + 8].copy_from_slice(&5_u32.to_le_bytes());
+    image[file_ino + 0x1A..file_ino + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+    image[file_ino + 0x80..file_ino + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let dir = 10 * 4096;
+    image[dir..dir + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir + 6] = 1;
+    image[dir + 7] = 2;
+    image[dir + 8] = b'.';
+
+    let dir = dir + 12;
+    image[dir..dir + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir + 6] = 2;
+    image[dir + 7] = 2;
+    image[dir + 8] = b'.';
+    image[dir + 9] = b'.';
+
+    let dir = dir + 12;
+    image[dir..dir + 4].copy_from_slice(&11_u32.to_le_bytes());
+    image[dir + 4..dir + 6].copy_from_slice(&4072_u16.to_le_bytes());
+    image[dir + 6] = u8::try_from(raw_name.len()).expect("fscrypt raw name length fits u8");
+    image[dir + 7] = 1;
+    image[dir + 8..dir + 8 + raw_name.len()].copy_from_slice(raw_name);
+
+    image
+}
+
+fn build_ext4_encrypt_image_with_dir(raw_name: &[u8]) -> Vec<u8> {
+    build_ext4_featured_dir_image(
+        raw_name,
+        ffs_ondisk::Ext4IncompatFeatures::ENCRYPT.0,
+        0x0008_0000,
+    )
 }
 
 fn build_ext4_inline_data_image(inode_fixture: &str) -> Vec<u8> {
@@ -4501,6 +4597,57 @@ fn fuse_ioctl_ext4_setflags_rejects_compr_without_compression_feature() {
         scenario_id,
         "PASS",
         Some("compr_enable_without_feature_rejected"),
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fuse_ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes_on_mounted_path() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let raw_name = b"\xFFenc\x80";
+    let image_path = tmp.path().join("fscrypt-nokey-raw-name.ext4");
+    fs::write(&image_path, build_ext4_encrypt_image_with_dir(raw_name))
+        .expect("write fscrypt raw-name image");
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let Some(_session) = try_mount_ffs(&image_path, &mnt) else {
+        return;
+    };
+
+    let scenario_id = "ext4_fscrypt_nokey_raw_name_lookup_and_readdir";
+    let entries = fs::read_dir(&mnt)
+        .expect("readdir mounted root")
+        .map(|entry| entry.expect("mounted root dirent").file_name())
+        .collect::<Vec<_>>();
+    assert!(
+        entries.iter().any(|name| name.as_bytes() == raw_name),
+        "mounted-path readdir should preserve encrypted raw bytes, got: {entries:?}"
+    );
+
+    let encrypted_path = mnt.join(Path::new(std::ffi::OsStr::from_bytes(raw_name)));
+    let metadata = fs::metadata(&encrypted_path).expect("lookup encrypted entry via raw bytes");
+    assert!(metadata.is_file(), "raw-byte lookup should resolve the encrypted file");
+    assert_eq!(
+        metadata.ino(),
+        11,
+        "raw-byte lookup should resolve inode 11 for the encrypted entry"
+    );
+    assert_eq!(
+        fs::read(&encrypted_path).expect("read encrypted file via raw-byte path"),
+        vec![0_u8; 5],
+        "encrypted fixture file should remain readable through the raw-byte name"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("readdir_and_lookup_preserve_raw_bytes"),
     );
 }
 
