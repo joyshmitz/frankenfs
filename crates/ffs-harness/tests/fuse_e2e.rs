@@ -2876,6 +2876,75 @@ fn fuse_rename_file_directory_type_mismatch_reports_eisdir_and_enotdir() {
 }
 
 #[test]
+fn fuse_rename_over_nonempty_directory_reports_enotempty() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_rename_over_nonempty_directory_errno_enotempty";
+        let source_dir = mnt.join("rename_nonempty_source");
+        let destination_dir = mnt.join("rename_nonempty_destination");
+        fs::create_dir(&source_dir).expect("create rename source directory");
+        fs::create_dir(&destination_dir).expect("create rename destination directory");
+
+        let source_child = source_dir.join("source_child.txt");
+        let destination_child = destination_dir.join("destination_child.txt");
+        fs::write(&source_child, b"source child\n").expect("write source child");
+        fs::write(&destination_child, b"destination child\n").expect("write destination child");
+
+        let root_entries_before = snapshot_directory_entries(mnt);
+        let source_entries_before = snapshot_directory_entries(&source_dir);
+        let destination_entries_before = snapshot_directory_entries(&destination_dir);
+        let source_child_before = snapshot_file_state(&source_child);
+        let destination_child_before = snapshot_file_state(&destination_child);
+
+        let err = fs::rename(&source_dir, &destination_dir)
+            .expect_err("rename over non-empty directory should fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ENOTEMPTY),
+            "rename over non-empty directory should surface exact ENOTEMPTY: {err}"
+        );
+        assert!(
+            fs::metadata(&source_dir)
+                .expect("stat source directory after rejected rename")
+                .is_dir(),
+            "rejected rename must leave the source directory in place"
+        );
+        assert!(
+            fs::metadata(&destination_dir)
+                .expect("stat destination directory after rejected rename")
+                .is_dir(),
+            "rejected rename must leave the destination directory in place"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "rename over non-empty directory must not change visible root entries"
+        );
+        assert_eq!(
+            snapshot_directory_entries(&source_dir),
+            source_entries_before,
+            "rejected rename must not disturb source directory children"
+        );
+        assert_eq!(
+            snapshot_directory_entries(&destination_dir),
+            destination_entries_before,
+            "rejected rename must not disturb destination directory children"
+        );
+        assert_file_state_unchanged(
+            &source_child,
+            &source_child_before,
+            "rename over non-empty directory source child",
+        );
+        assert_file_state_unchanged(
+            &destination_child,
+            &destination_child_before,
+            "rename over non-empty directory destination child",
+        );
+
+        emit_scenario_result(scenario_id, "PASS", Some("errno=ENOTEMPTY_no_drift"));
+    });
+}
+
+#[test]
 fn fuse_renameat2_flag_rejection_reports_einval() {
     with_rw_mount(|mnt| {
         let scenario_id = "ext4_rw_renameat2_flag_rejection";
