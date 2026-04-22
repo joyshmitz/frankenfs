@@ -11,7 +11,8 @@ pub use degradation::{
 };
 pub use vfs::{
     DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat,
-    InodeAttr, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
+    InodeAttr, QuotaEntry, QuotaInfo, QuotaType, RequestOp, RequestScope, SeekWhence,
+    SetAttrRequest, XattrSetMode,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -15890,6 +15891,28 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_quota_info(&self, cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<QuotaInfo> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let sb_region = read_ext4_superblock_region(cx, self.dev.as_ref())?;
+                let sb = Ext4Superblock::parse_superblock_region(&sb_region)
+                    .map_err(|e| parse_to_ffs_error(&e))?;
+                let quota_inodes = sb.quota_inodes();
+                Ok(QuotaInfo {
+                    user_quota_enabled: quota_inodes.user.is_some(),
+                    user_quota_inum: quota_inodes.user,
+                    group_quota_enabled: quota_inodes.group.is_some(),
+                    group_quota_inum: quota_inodes.group,
+                    project_quota_enabled: quota_inodes.project.is_some(),
+                    project_quota_inum: quota_inodes.project,
+                })
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "btrfs uses qgroups, not traditional quotas".to_owned(),
+            )),
+        }
+    }
+
     fn set_fs_label(
         &self,
         cx: &Cx,
@@ -18443,6 +18466,57 @@ mod tests {
     }
 
     #[test]
+    fn get_encryption_policy_ex_reads_hidden_ext4_fscrypt_v1_context() {
+        let context = build_fscrypt_context_v1(1, 4, 0, *b"mkdesc42", *b"0123456789abcdef");
+        let image = build_ext4_image_with_encryption_context(&context, true);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let (version, policy) = fs
+            .get_encryption_policy_ex(&cx, &mut RequestScope::empty(), InodeNumber(11))
+            .expect("v1 fscrypt policy-ex should be readable");
+        assert_eq!(version, FSCRYPT_POLICY_V1_VERSION);
+        assert_eq!(policy, context[..FSCRYPT_POLICY_V1_SIZE].to_vec());
+    }
+
+    #[test]
+    fn get_encryption_policy_ex_reads_hidden_ext4_fscrypt_v2_context() {
+        let context = build_fscrypt_context_v2(
+            1,
+            4,
+            0,
+            9,
+            *b"0123456789abcdef",
+            *b"fedcba9876543210",
+        );
+        let image = build_ext4_image_with_encryption_context(&context, true);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let (version, policy) = fs
+            .get_encryption_policy_ex(&cx, &mut RequestScope::empty(), InodeNumber(11))
+            .expect("v2 fscrypt policy-ex should be readable");
+        assert_eq!(version, FSCRYPT_POLICY_V2_VERSION);
+        assert_eq!(policy, context[..FSCRYPT_POLICY_V2_SIZE].to_vec());
+    }
+
+    #[test]
+    fn get_encryption_policy_ex_returns_enodata_for_unencrypted_inode() {
+        let context = build_fscrypt_context_v1(1, 4, 0, *b"mkdesc42", *b"0123456789abcdef");
+        let image = build_ext4_image_with_encryption_context(&context, false);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let err = fs
+            .get_encryption_policy_ex(&cx, &mut RequestScope::empty(), InodeNumber(11))
+            .expect_err("unencrypted inode should not have a policy-ex payload");
+        assert_eq!(err.to_errno(), libc::ENODATA);
+    }
+
+    #[test]
     fn set_fs_label_updates_ext4_superblock_and_survives_reopen() {
         let Some(tmp_path) = create_temp_ext4_image("setfslabel") else {
             return;
@@ -19851,6 +19925,26 @@ mod tests {
         context
     }
 
+    fn build_fscrypt_context_v2(
+        contents_mode: u8,
+        filenames_mode: u8,
+        flags: u8,
+        log2_data_unit_size: u8,
+        identifier: [u8; 16],
+        nonce: [u8; 16],
+    ) -> Vec<u8> {
+        let mut context = Vec::with_capacity(FSCRYPT_CONTEXT_V2_SIZE);
+        context.push(FSCRYPT_POLICY_V2_VERSION);
+        context.push(contents_mode);
+        context.push(filenames_mode);
+        context.push(flags);
+        context.push(log2_data_unit_size);
+        context.extend_from_slice(&[0_u8; 3]);
+        context.extend_from_slice(&identifier);
+        context.extend_from_slice(&nonce);
+        context
+    }
+
     fn test_inode_offset(ino: u32) -> usize {
         assert!(ino > 0, "inode numbers are 1-based");
         let inode_index = usize::try_from(ino.saturating_sub(1)).expect("inode index should fit");
@@ -20619,6 +20713,24 @@ mod tests {
             .get_inode_generation(&cx, &mut RequestScope::empty(), ino)
             .expect("read persisted inode generation");
         assert_eq!(persisted, requested);
+    }
+
+    #[test]
+    fn get_quota_info_reports_disabled_on_standard_ext4() {
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let mut scope = RequestScope::empty();
+        let quota = fs.get_quota_info(&cx, &mut scope).unwrap();
+
+        assert!(!quota.user_quota_enabled);
+        assert!(!quota.group_quota_enabled);
+        assert!(!quota.project_quota_enabled);
+        assert!(quota.user_quota_inum.is_none());
+        assert!(quota.group_quota_inum.is_none());
+        assert!(quota.project_quota_inum.is_none());
     }
 
     #[test]

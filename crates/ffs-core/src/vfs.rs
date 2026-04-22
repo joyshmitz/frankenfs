@@ -377,6 +377,53 @@ pub struct FsStat {
     pub fragment_size: u32,
 }
 
+/// Quota type (user, group, or project).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum QuotaType {
+    /// User quota (per-UID limits).
+    User,
+    /// Group quota (per-GID limits).
+    Group,
+    /// Project quota (per-project-ID limits).
+    Project,
+}
+
+/// Quota usage and limits for a single ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaEntry {
+    /// The ID (UID, GID, or project ID depending on quota type).
+    pub id: u32,
+    /// Current space usage in bytes.
+    pub space_used: u64,
+    /// Soft limit for space in bytes (0 = no limit).
+    pub space_soft_limit: u64,
+    /// Hard limit for space in bytes (0 = no limit).
+    pub space_hard_limit: u64,
+    /// Current inode usage count.
+    pub inodes_used: u64,
+    /// Soft limit for inode count (0 = no limit).
+    pub inodes_soft_limit: u64,
+    /// Hard limit for inode count (0 = no limit).
+    pub inodes_hard_limit: u64,
+}
+
+/// Summary of filesystem quota configuration and status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaInfo {
+    /// Whether user quotas are enabled.
+    pub user_quota_enabled: bool,
+    /// User quota inode number (if enabled).
+    pub user_quota_inum: Option<u32>,
+    /// Whether group quotas are enabled.
+    pub group_quota_enabled: bool,
+    /// Group quota inode number (if enabled).
+    pub group_quota_inum: Option<u32>,
+    /// Whether project quotas are enabled.
+    pub project_quota_enabled: bool,
+    /// Project quota inode number (if enabled).
+    pub project_quota_inum: Option<u32>,
+}
+
 /// VFS operations trait for filesystem access.
 ///
 /// This is the internal interface that FUSE and the test harness call.
@@ -854,6 +901,22 @@ pub trait FsOps: Send + Sync {
     ) -> ffs_error::Result<Vec<u8>> {
         Err(FfsError::UnsupportedFeature(
             "get_btrfs_dev_info is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Get quota configuration and status.
+    ///
+    /// Returns a summary of which quota types are enabled and their
+    /// corresponding inode numbers. This allows inspection of quota
+    /// configuration without parsing quota file contents.
+    ///
+    /// ext4: Reads `s_usr_quota_inum`, `s_grp_quota_inum`, `s_prj_quota_inum`
+    /// from the superblock, conditioned on QUOTA/PROJECT feature bits.
+    ///
+    /// btrfs: Returns `UnsupportedFeature` (btrfs uses qgroups, not inodes).
+    fn get_quota_info(&self, _cx: &Cx, _scope: &mut RequestScope) -> ffs_error::Result<QuotaInfo> {
+        Err(FfsError::UnsupportedFeature(
+            "get_quota_info is not supported by this backend".to_owned(),
         ))
     }
 
