@@ -6174,6 +6174,39 @@ fn assert_unlink_missing_reports_enoent(mnt: &Path, scenario_id: &str) {
     emit_scenario_result(scenario_id, "PASS", Some("errno=ENOENT_no_drift"));
 }
 
+fn assert_rename_missing_source_reports_enoent(mnt: &Path, scenario_id: &str) {
+    let missing_source = mnt.join("missing_rename_source.txt");
+    let target = mnt.join("missing_rename_target.txt");
+    let witness = mnt.join("rename_missing_witness.txt");
+    fs::write(&witness, b"rename missing witness\n").expect("write rename missing witness");
+    let root_entries_before = snapshot_directory_entries(mnt);
+    let witness_before = snapshot_file_state(&witness);
+
+    let err =
+        fs::rename(&missing_source, &target).expect_err("rename with missing source should fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::ENOENT),
+        "rename with a missing source should surface exact ENOENT: {err}"
+    );
+    assert!(
+        fs::symlink_metadata(&missing_source).is_err(),
+        "rejected rename must leave the missing source absent"
+    );
+    assert!(
+        fs::symlink_metadata(&target).is_err(),
+        "rejected rename must not create the target entry"
+    );
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        root_entries_before,
+        "rejected rename with missing source must not change visible root entries"
+    );
+    assert_file_state_unchanged(&witness, &witness_before, "rename missing-source rejection");
+
+    emit_scenario_result(scenario_id, "PASS", Some("errno=ENOENT_no_drift"));
+}
+
 fn assert_read_only_flush_contract(path: &Path, scenario_id: &str) {
     let before = snapshot_file_state(path);
     let mut file = fs::File::open(path).expect("open file for read-only flush contract");
@@ -9691,6 +9724,16 @@ fn btrfs_fuse_rename_into_non_directory_parent_reports_enotdir() {
             "rejected rename non-directory parent",
         );
         emit_scenario_result(scenario_id, "PASS", Some("errno=ENOTDIR_no_drift"));
+    });
+}
+
+#[test]
+fn btrfs_fuse_rename_missing_source_reports_enoent() {
+    with_btrfs_rw_mount(|mnt| {
+        assert_rename_missing_source_reports_enoent(
+            mnt,
+            "btrfs_rw_rename_missing_source_errno_enoent",
+        );
     });
 }
 

@@ -163,6 +163,8 @@ targets, with no visible workspace-entry or witness-file drift.
 Mounted-path btrfs rename refusal coverage now also freezes exact `ENOTDIR`
 for rename attempts whose destination parent is a regular file, with no source
 or parent-file drift.
+Mounted-path btrfs rename coverage now also freezes exact `ENOENT` for missing
+source paths, with no visible workspace-entry or witness-file drift.
 Mounted-path ext4 symlink/refusal coverage now also freezes exact `EINVAL` for
 `readlink` on both regular-file and directory non-symlink paths, with no
 directory-entry or file-byte drift.
