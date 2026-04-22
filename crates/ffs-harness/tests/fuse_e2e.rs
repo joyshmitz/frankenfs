@@ -9297,6 +9297,85 @@ fn btrfs_fuse_rename_overwrite() {
     });
 }
 
+#[test]
+fn btrfs_fuse_renameat2_flag_rejection_reports_einval() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_renameat2_flag_rejection";
+        if !command_available("python3") {
+            emit_scenario_result(scenario_id, "SKIP", Some("python3_unavailable"));
+            return;
+        }
+
+        let noreplace_src = mnt.join("renameat2-btrfs-noreplace-src.txt");
+        let noreplace_dst = mnt.join("renameat2-btrfs-noreplace-dst.txt");
+        let exchange_src = mnt.join("renameat2-btrfs-exchange-src.txt");
+        let exchange_dst = mnt.join("renameat2-btrfs-exchange-dst.txt");
+
+        fs::write(&noreplace_src, b"btrfs noreplace src\n")
+            .expect("write btrfs renameat2 noreplace source");
+        fs::write(&exchange_src, b"btrfs exchange src\n")
+            .expect("write btrfs renameat2 exchange source");
+        fs::write(&exchange_dst, b"btrfs exchange dst\n")
+            .expect("write btrfs renameat2 exchange destination");
+
+        let entries_before = snapshot_directory_entries(mnt);
+        let noreplace_src_before = snapshot_file_state(&noreplace_src);
+        let exchange_src_before = snapshot_file_state(&exchange_src);
+        let exchange_dst_before = snapshot_file_state(&exchange_dst);
+
+        let noreplace_report =
+            py_renameat2_report(&noreplace_src, &noreplace_dst, libc::RENAME_NOREPLACE);
+        assert_eq!(
+            noreplace_report["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "renameat2(RENAME_NOREPLACE) should surface exact EINVAL on btrfs: {noreplace_report:?}"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            entries_before,
+            "rejected btrfs RENAME_NOREPLACE must not change visible workspace entries"
+        );
+        assert_file_state_unchanged(
+            &noreplace_src,
+            &noreplace_src_before,
+            "btrfs renameat2 RENAME_NOREPLACE source",
+        );
+        assert!(
+            fs::symlink_metadata(&noreplace_dst).is_err(),
+            "rejected btrfs RENAME_NOREPLACE must not create a new destination entry"
+        );
+
+        let exchange_report =
+            py_renameat2_report(&exchange_src, &exchange_dst, libc::RENAME_EXCHANGE);
+        assert_eq!(
+            exchange_report["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "renameat2(RENAME_EXCHANGE) should surface exact EINVAL on btrfs: {exchange_report:?}"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            entries_before,
+            "rejected btrfs RENAME_EXCHANGE must not change visible workspace entries"
+        );
+        assert_file_state_unchanged(
+            &exchange_src,
+            &exchange_src_before,
+            "btrfs renameat2 RENAME_EXCHANGE source",
+        );
+        assert_file_state_unchanged(
+            &exchange_dst,
+            &exchange_dst_before,
+            "btrfs renameat2 RENAME_EXCHANGE destination",
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("noreplace=EINVAL_exchange=EINVAL_no_drift"),
+        );
+    });
+}
+
 // ── New CI-compatible E2E scenarios ────────────────────────────────
 
 #[test]
