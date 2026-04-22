@@ -318,6 +318,13 @@ fn build_btrfs_fsops_image() -> Vec<u8> {
     let file_data_off = file_data_logical as usize;
     image[file_data_off..file_data_off + file_bytes.len()].copy_from_slice(file_bytes);
 
+    // Stamp CRC32C checksums on tree blocks (nodesize=4096)
+    let nodesize = 4096_usize;
+    let csum_root = ffs_types::crc32c(&image[root_leaf + 0x20..root_leaf + nodesize]);
+    image[root_leaf..root_leaf + 4].copy_from_slice(&csum_root.to_le_bytes());
+    let csum_fs = ffs_types::crc32c(&image[fs_leaf + 0x20..fs_leaf + nodesize]);
+    image[fs_leaf..fs_leaf + 4].copy_from_slice(&csum_fs.to_le_bytes());
+
     image
 }
 

@@ -8010,6 +8010,7 @@ fn can_run_sudo() -> bool {
 
 /// Create a btrfs image with subvolumes and snapshots using kernel btrfs tools.
 /// Requires sudo access. Returns (image_path, subvol_names, snapshot_names).
+#[allow(clippy::too_many_lines)]
 fn create_btrfs_image_with_subvolumes(dir: &Path) -> Option<(PathBuf, Vec<String>, Vec<String>)> {
     if !can_run_sudo() {
         eprintln!("sudo not available, skipping subvolume test");

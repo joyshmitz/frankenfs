@@ -8691,8 +8691,8 @@ CUSTOM("congestion_threshold=3")"#;
         use asupersync::SystemPressure;
         use ffs_core::{BackpressureGate, DegradationFsm, RequestOp};
 
-        // Warning level: headroom 0.35 → no impact on foreground
-        let pressure = Arc::new(SystemPressure::with_headroom(0.35));
+        // Warning level: headroom 0.75 → no impact on foreground (asupersync 0.3: light)
+        let pressure = Arc::new(SystemPressure::with_headroom(0.75));
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
         fsm.tick();
         let gate = BackpressureGate::new(fsm);
@@ -8708,8 +8708,8 @@ CUSTOM("congestion_threshold=3")"#;
         use asupersync::SystemPressure;
         use ffs_core::{BackpressureGate, DegradationFsm, RequestOp};
 
-        // Critical level: headroom 0.08
-        let pressure = Arc::new(SystemPressure::with_headroom(0.08));
+        // Critical level: headroom 0.15 (asupersync 0.3: heavy, level 3)
+        let pressure = Arc::new(SystemPressure::with_headroom(0.15));
         let fsm = Arc::new(DegradationFsm::new(Arc::clone(&pressure), 1));
         fsm.tick();
         let gate = BackpressureGate::new(fsm);
