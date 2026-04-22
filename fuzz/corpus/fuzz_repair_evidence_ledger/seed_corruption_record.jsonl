@@ -1,0 +1,1 @@
+{"timestamp_ns":1,"event_type":"CorruptionDetected","block_group":7,"corruption":{"blocks_affected":1,"corruption_kind":"checksum_mismatch","severity":"error","detail":"seed-corruption"}}

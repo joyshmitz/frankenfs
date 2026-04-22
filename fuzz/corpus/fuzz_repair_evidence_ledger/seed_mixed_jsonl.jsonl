@@ -1,0 +1,3 @@
+{"timestamp_ns":2,"event_type":"CorruptionDetected","block_group":3,"corruption":{"blocks_affected":2,"corruption_kind":"bad_magic","severity":"critical","detail":"seed-a"}}
+{"timestamp_ns":3,"event_type":"RepairSucceeded","block_group":3,"repair":{"generation":4,"corrupt_count":1,"symbols_used":2,"symbols_available":5,"decoder_stats":{"peeled":6,"inactivated":1,"gauss_ops":9,"pivots_selected":2},"verify_pass":true}}
+{"timestamp_ns":
