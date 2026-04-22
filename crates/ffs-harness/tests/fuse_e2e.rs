@@ -13,7 +13,7 @@
 //! Only `fuse_setattr_chown` remains `#[ignore]` as it requires root.
 
 use asupersync::Cx;
-use ffs_core::{Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope};
+use ffs_core::{BtrfsMountSelection, Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope};
 use ffs_fuse::{MountOptions, mount_background};
 use ffs_harness::load_sparse_fixture;
 use ffs_types::InodeNumber;
@@ -7370,6 +7370,145 @@ fn try_mount_btrfs_ro(image: &Path, mountpoint: &Path) -> Option<fuser::Backgrou
     }
 }
 
+/// Try to mount a btrfs image with explicit OpenOptions (for BtrfsMountSelection tests).
+fn try_mount_btrfs_with_open_options(
+    image: &Path,
+    mountpoint: &Path,
+    open_opts: &OpenOptions,
+    mount_opts: &MountOptions,
+) -> Option<fuser::BackgroundSession> {
+    let cx = Cx::for_testing();
+    let fs = match OpenFs::open_with_options(&cx, image, open_opts) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("btrfs open with options failed (may be expected): {e}");
+            return None;
+        }
+    };
+    match mount_background(Box::new(fs), mountpoint, mount_opts) {
+        Ok(session) => {
+            thread::sleep(Duration::from_millis(300));
+            Some(session)
+        }
+        Err(e) => {
+            eprintln!("btrfs FUSE mount failed: {e}");
+            None
+        }
+    }
+}
+
+/// Check if we can run sudo commands (for tests that create btrfs subvolumes).
+fn can_run_sudo() -> bool {
+    Command::new("sudo")
+        .args(["-n", "true"])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Create a btrfs image with subvolumes and snapshots using kernel btrfs tools.
+/// Requires sudo access. Returns (image_path, subvol_names, snapshot_names).
+fn create_btrfs_image_with_subvolumes(
+    dir: &Path,
+) -> Option<(PathBuf, Vec<String>, Vec<String>)> {
+    if !can_run_sudo() {
+        eprintln!("sudo not available, skipping subvolume test");
+        return None;
+    }
+    if !command_available("btrfs") {
+        eprintln!("btrfs command not available, skipping subvolume test");
+        return None;
+    }
+
+    let image = dir.join("subvol_test.btrfs");
+    let kernel_mnt = dir.join("kernel_mnt");
+
+    // Create 256MiB image
+    let f = fs::File::create(&image).expect("create btrfs image");
+    f.set_len(256 * 1024 * 1024).expect("set image size");
+    drop(f);
+
+    // mkfs.btrfs
+    let out = Command::new("mkfs.btrfs")
+        .args(["-f", "-L", "ffs-subvol-e2e", image.to_str().unwrap()])
+        .output()
+        .expect("mkfs.btrfs");
+    if !out.status.success() {
+        eprintln!("mkfs.btrfs failed: {}", String::from_utf8_lossy(&out.stderr));
+        return None;
+    }
+
+    // Mount with kernel driver to create subvolumes
+    fs::create_dir_all(&kernel_mnt).expect("create kernel mount dir");
+    let out = Command::new("sudo")
+        .args(["mount", "-t", "btrfs", image.to_str().unwrap(), kernel_mnt.to_str().unwrap()])
+        .output()
+        .expect("sudo mount");
+    if !out.status.success() {
+        eprintln!("sudo mount failed: {}", String::from_utf8_lossy(&out.stderr));
+        return None;
+    }
+
+    // Create subvolume "data"
+    let subvol_path = kernel_mnt.join("data");
+    let out = Command::new("sudo")
+        .args(["btrfs", "subvolume", "create", subvol_path.to_str().unwrap()])
+        .output()
+        .expect("btrfs subvolume create");
+    if !out.status.success() {
+        let _ = Command::new("sudo").args(["umount", kernel_mnt.to_str().unwrap()]).output();
+        eprintln!("btrfs subvolume create failed: {}", String::from_utf8_lossy(&out.stderr));
+        return None;
+    }
+
+    // Write a marker file in the subvolume
+    let marker = subvol_path.join("subvol_marker.txt");
+    let out = Command::new("sudo")
+        .args(["sh", "-c", &format!("echo 'in-data-subvol' > '{}'", marker.display())])
+        .output()
+        .expect("write marker");
+    if !out.status.success() {
+        eprintln!("write marker failed");
+    }
+
+    // Write a marker file in the root (not visible when mounting subvolume)
+    let root_marker = kernel_mnt.join("root_marker.txt");
+    let out = Command::new("sudo")
+        .args(["sh", "-c", &format!("echo 'in-root' > '{}'", root_marker.display())])
+        .output()
+        .expect("write root marker");
+    if !out.status.success() {
+        eprintln!("write root marker failed");
+    }
+
+    // Create snapshot "snap-data" of "data"
+    let snap_path = kernel_mnt.join("snap-data");
+    let out = Command::new("sudo")
+        .args(["btrfs", "subvolume", "snapshot", subvol_path.to_str().unwrap(), snap_path.to_str().unwrap()])
+        .output()
+        .expect("btrfs snapshot");
+    let has_snapshot = out.status.success();
+    if has_snapshot {
+        // Write different content in snapshot
+        let snap_marker = snap_path.join("snapshot_marker.txt");
+        let _ = Command::new("sudo")
+            .args(["sh", "-c", &format!("echo 'in-snapshot' > '{}'", snap_marker.display())])
+            .output();
+    }
+
+    // Unmount
+    let out = Command::new("sudo")
+        .args(["umount", kernel_mnt.to_str().unwrap()])
+        .output()
+        .expect("sudo umount");
+    if !out.status.success() {
+        eprintln!("sudo umount failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    let subvols = vec!["data".to_string()];
+    let snaps = if has_snapshot { vec!["snap-data".to_string()] } else { vec![] };
+    Some((image, subvols, snaps))
+}
+
 /// Helper: create btrfs image, mount rw, run a closure against the mount root.
 fn with_btrfs_rw_root_mount(f: impl FnOnce(&Path)) {
     if !btrfs_fuse_available() {
@@ -10116,4 +10255,225 @@ fn fuse_overwrite_preserves_inode() {
             "second"
         );
     });
+}
+
+// =============================================================================
+// btrfs subvolume/snapshot mount selection E2E tests
+// =============================================================================
+
+#[test]
+#[ignore = "requires sudo for btrfs subvolume creation"]
+fn btrfs_fuse_mount_subvolume_scopes_root_to_subvol() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+    let tmp = TempDir::new().expect("tmpdir");
+    let Some((image, subvols, _)) = create_btrfs_image_with_subvolumes(tmp.path()) else {
+        return;
+    };
+    assert!(subvols.contains(&"data".to_string()), "test setup should create 'data' subvolume");
+
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let open_opts = OpenOptions {
+        btrfs_mount_selection: BtrfsMountSelection::Subvolume("data".to_string()),
+        ..OpenOptions::default()
+    };
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+
+    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts) else {
+        panic!("mounting subvolume 'data' should succeed");
+    };
+
+    // The mounted root should be the subvolume, so subvol_marker.txt should be at root
+    let subvol_marker = mnt.join("subvol_marker.txt");
+    assert!(
+        subvol_marker.exists(),
+        "subvol_marker.txt should exist at mount root when mounting 'data' subvolume"
+    );
+    let content = fs::read_to_string(&subvol_marker).expect("read subvol marker");
+    assert!(
+        content.contains("in-data-subvol"),
+        "marker content should confirm we're in the subvolume"
+    );
+
+    // root_marker.txt should NOT be visible (it's in the fs root, not the subvolume)
+    let root_marker = mnt.join("root_marker.txt");
+    assert!(
+        !root_marker.exists(),
+        "root_marker.txt should NOT exist when mounting subvolume (scoped to subvol tree)"
+    );
+
+    // The 'data' directory itself should NOT exist (we're inside it)
+    let data_dir = mnt.join("data");
+    assert!(
+        !data_dir.exists(),
+        "'data' directory should not exist inside itself"
+    );
+
+    emit_scenario_result(
+        "btrfs_mount_subvolume_scopes_root",
+        "PASS",
+        Some("subvolume mounted as root, parent tree not visible"),
+    );
+}
+
+#[test]
+#[ignore = "requires sudo for btrfs subvolume creation"]
+fn btrfs_fuse_mount_snapshot_scopes_root_to_snapshot() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+    let tmp = TempDir::new().expect("tmpdir");
+    let Some((image, _, snaps)) = create_btrfs_image_with_subvolumes(tmp.path()) else {
+        return;
+    };
+    if !snaps.contains(&"snap-data".to_string()) {
+        eprintln!("snapshot creation was not successful, skipping snapshot test");
+        return;
+    }
+
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let open_opts = OpenOptions {
+        btrfs_mount_selection: BtrfsMountSelection::Snapshot("snap-data".to_string()),
+        ..OpenOptions::default()
+    };
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+
+    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts) else {
+        panic!("mounting snapshot 'snap-data' should succeed");
+    };
+
+    // The snapshot should have both markers (snapshot of subvolume + its own marker)
+    let subvol_marker = mnt.join("subvol_marker.txt");
+    assert!(
+        subvol_marker.exists(),
+        "subvol_marker.txt should exist in snapshot (inherited from source)"
+    );
+
+    let snap_marker = mnt.join("snapshot_marker.txt");
+    assert!(
+        snap_marker.exists(),
+        "snapshot_marker.txt should exist (written after snapshot)"
+    );
+
+    emit_scenario_result(
+        "btrfs_mount_snapshot_scopes_root",
+        "PASS",
+        Some("snapshot mounted as root with inherited + snapshot-specific content"),
+    );
+}
+
+#[test]
+#[ignore = "requires sudo for btrfs subvolume creation"]
+fn btrfs_fuse_mount_missing_subvolume_returns_not_found() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+    let tmp = TempDir::new().expect("tmpdir");
+    let Some((image, _, _)) = create_btrfs_image_with_subvolumes(tmp.path()) else {
+        return;
+    };
+
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let open_opts = OpenOptions {
+        btrfs_mount_selection: BtrfsMountSelection::Subvolume("nonexistent".to_string()),
+        ..OpenOptions::default()
+    };
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+
+    // This should fail to mount because the subvolume doesn't exist
+    let session = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts);
+    assert!(
+        session.is_none(),
+        "mounting nonexistent subvolume should fail"
+    );
+
+    emit_scenario_result(
+        "btrfs_mount_missing_subvolume_not_found",
+        "PASS",
+        Some("nonexistent subvolume correctly rejected"),
+    );
+}
+
+#[test]
+#[ignore = "requires sudo for btrfs subvolume creation"]
+fn btrfs_fuse_mount_default_root_shows_subvolumes_as_directories() {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+    let tmp = TempDir::new().expect("tmpdir");
+    let Some((image, subvols, _)) = create_btrfs_image_with_subvolumes(tmp.path()) else {
+        return;
+    };
+    assert!(subvols.contains(&"data".to_string()));
+
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+
+    let open_opts = OpenOptions {
+        btrfs_mount_selection: BtrfsMountSelection::DefaultRoot,
+        ..OpenOptions::default()
+    };
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+
+    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts) else {
+        panic!("mounting default root should succeed");
+    };
+
+    // Default root should show subvolumes as directories
+    let data_dir = mnt.join("data");
+    assert!(
+        data_dir.exists(),
+        "'data' subvolume should appear as directory when mounting default root"
+    );
+    assert!(
+        data_dir.is_dir(),
+        "'data' subvolume should be a directory"
+    );
+
+    // root_marker.txt should be visible at root
+    let root_marker = mnt.join("root_marker.txt");
+    assert!(
+        root_marker.exists(),
+        "root_marker.txt should exist when mounting default root"
+    );
+
+    // The subvolume's marker should be accessible via the directory
+    let nested_marker = data_dir.join("subvol_marker.txt");
+    assert!(
+        nested_marker.exists(),
+        "subvol_marker.txt should be accessible via data/ directory"
+    );
+
+    emit_scenario_result(
+        "btrfs_mount_default_root_shows_subvols",
+        "PASS",
+        Some("default root shows subvolumes as directories"),
+    );
 }
