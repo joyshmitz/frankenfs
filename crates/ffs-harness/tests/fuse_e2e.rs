@@ -6721,6 +6721,7 @@ fn assert_rename_missing_source_reports_enoent(mnt: &Path, scenario_id: &str) {
     emit_scenario_result(scenario_id, "PASS", Some("errno=ENOENT_no_drift"));
 }
 
+#[allow(clippy::too_many_lines)]
 fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: &str) {
     let file_source = mnt.join("rename_file_over_dir_src.txt");
     let directory_target = mnt.join("rename_file_over_dir_dst");
@@ -10568,9 +10569,9 @@ fn btrfs_fuse_cross_parent_directory_rename_updates_parent_nlink_accounting() {
         fs::rename(&source_child, &destination_child)
             .expect("cross-parent directory rename on btrfs");
 
-        let mut source_entries_expected_after = source_entries_before.clone();
+        let mut source_entries_expected_after = source_entries_before;
         source_entries_expected_after.remove("moved_dir");
-        let mut destination_entries_expected_after = destination_entries_before.clone();
+        let mut destination_entries_expected_after = destination_entries_before;
         destination_entries_expected_after.insert("moved_dir".to_string());
 
         assert!(
