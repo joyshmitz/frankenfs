@@ -137,6 +137,11 @@ path = "fuzz_targets/fuzz_verify_ext4_integrity.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_detect_filesystem"
+path = "fuzz_targets/fuzz_detect_filesystem.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_lrc_repair"
 path = "fuzz_targets/fuzz_lrc_repair.rs"
 doc = false
