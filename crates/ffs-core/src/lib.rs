@@ -2264,6 +2264,15 @@ impl OpenFs {
                     sb.root_dir_objectid,
                 )?;
 
+                info!(
+                    target: "ffs::btrfs",
+                    selection_kind = options.btrfs_mount_selection.kind(),
+                    requested_name = options.btrfs_mount_selection.requested_name(),
+                    resolved_objectid = subvol_objectid,
+                    resolved_root_dirid = subvol_root_dirid,
+                    "btrfs_mount_selection_resolved"
+                );
+
                 let ctx = BtrfsContext {
                     chunks,
                     nodesize: sb.nodesize,
