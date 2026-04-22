@@ -138,3 +138,8 @@ doc = false
 name = "fuzz_ioctl_dispatch"
 path = "fuzz_targets/fuzz_ioctl_dispatch.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_path_encoding_mount"
+path = "fuzz_targets/fuzz_path_encoding_mount.rs"
+doc = false

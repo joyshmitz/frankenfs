@@ -11,8 +11,9 @@ pub mod per_core;
 
 use asupersync::Cx;
 use ffs_core::{
-    BackpressureDecision, BackpressureGate, FiemapExtent, FileType as FfsFileType, FsOps,
-    InodeAttr, RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
+    BackpressureDecision, BackpressureGate, DirEntry as FfsDirEntry, FiemapExtent,
+    FileType as FfsFileType, FsOps, InodeAttr, RequestOp, RequestScope, SeekWhence, SetAttrRequest,
+    XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -23,11 +24,11 @@ use fuser::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::os::raw::c_int;
 #[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -1098,6 +1099,196 @@ impl FrankenFuse {
             IoctlResult::Data(data) => Ok(data),
             IoctlResult::Error(errno) => Err(errno),
         }
+    }
+
+    /// Execute lookup with raw path-component bytes and return the backend
+    /// result without a live kernel mount.
+    #[doc(hidden)]
+    pub fn lookup_for_fuzzing(
+        &self,
+        parent: u64,
+        name_bytes: &[u8],
+    ) -> std::result::Result<InodeAttr, c_int> {
+        #[cfg(not(unix))]
+        let owned_name = OsString::from(String::from_utf8_lossy(name_bytes).into_owned());
+        #[cfg(unix)]
+        let name = OsStr::from_bytes(name_bytes);
+        #[cfg(not(unix))]
+        let name = owned_name.as_os_str();
+
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Lookup, |cx, scope| {
+            self.inner.ops.lookup(cx, scope, InodeNumber(parent), name)
+        })
+        .map_err(|error| error.to_errno())
+    }
+
+    /// Execute readdir and force the same raw-byte name conversion the live
+    /// FUSE path performs before replying.
+    #[doc(hidden)]
+    pub fn readdir_for_fuzzing(
+        &self,
+        ino: u64,
+        offset: u64,
+    ) -> std::result::Result<Vec<FfsDirEntry>, c_int> {
+        let cx = Self::cx_for_request();
+        let entries = self
+            .with_request_scope(&cx, RequestOp::Readdir, |cx, scope| {
+                self.inner.ops.readdir(cx, scope, InodeNumber(ino), offset)
+            })
+            .map_err(|error| error.to_errno())?;
+
+        for entry in &entries {
+            #[cfg(unix)]
+            let _ = OsStr::from_bytes(&entry.name);
+            #[cfg(not(unix))]
+            let _ = entry.name_str();
+        }
+
+        Ok(entries)
+    }
+
+    /// Execute readlink without a live mount.
+    #[doc(hidden)]
+    pub fn readlink_for_fuzzing(&self, ino: u64) -> std::result::Result<Vec<u8>, c_int> {
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Readlink, |cx, scope| {
+            self.inner.ops.readlink(cx, scope, InodeNumber(ino))
+        })
+        .map_err(|error| error.to_errno())
+    }
+
+    /// Execute create with raw path-component bytes without a live kernel
+    /// mount.
+    #[doc(hidden)]
+    pub fn create_for_fuzzing(
+        &self,
+        parent: u64,
+        name_bytes: &[u8],
+        mode: u16,
+        uid: u32,
+        gid: u32,
+    ) -> std::result::Result<InodeAttr, c_int> {
+        if self.inner.read_only {
+            return Err(libc::EROFS);
+        }
+        if self.should_shed(RequestOp::Create) {
+            return Err(libc::EBUSY);
+        }
+
+        #[cfg(not(unix))]
+        let owned_name = OsString::from(String::from_utf8_lossy(name_bytes).into_owned());
+        #[cfg(unix)]
+        let name = OsStr::from_bytes(name_bytes);
+        #[cfg(not(unix))]
+        let name = owned_name.as_os_str();
+
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
+            let attr =
+                self.inner
+                    .ops
+                    .create(cx, scope, InodeNumber(parent), name, mode, uid, gid)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(attr)
+        })
+        .map_err(|error| error.to_errno())
+    }
+
+    /// Execute mkdir with raw path-component bytes without a live kernel mount.
+    #[doc(hidden)]
+    pub fn mkdir_for_fuzzing(
+        &self,
+        parent: u64,
+        name_bytes: &[u8],
+        mode: u16,
+        uid: u32,
+        gid: u32,
+    ) -> std::result::Result<InodeAttr, c_int> {
+        #[cfg(not(unix))]
+        let owned_name = OsString::from(String::from_utf8_lossy(name_bytes).into_owned());
+        #[cfg(unix)]
+        let name = OsStr::from_bytes(name_bytes);
+        #[cfg(not(unix))]
+        let name = owned_name.as_os_str();
+
+        self.dispatch_mkdir(parent, name, mode, uid, gid)
+            .map_err(|error| match error {
+                MutationDispatchError::Errno(errno) => errno,
+                MutationDispatchError::Operation { error, .. } => error.to_errno(),
+            })
+    }
+
+    /// Execute rename with raw path-component bytes without a live kernel
+    /// mount.
+    #[doc(hidden)]
+    pub fn rename_for_fuzzing(
+        &self,
+        parent: u64,
+        name_bytes: &[u8],
+        newparent: u64,
+        newname_bytes: &[u8],
+    ) -> std::result::Result<(), c_int> {
+        #[cfg(not(unix))]
+        let owned_name = OsString::from(String::from_utf8_lossy(name_bytes).into_owned());
+        #[cfg(unix)]
+        let name = OsStr::from_bytes(name_bytes);
+        #[cfg(not(unix))]
+        let name = owned_name.as_os_str();
+
+        #[cfg(not(unix))]
+        let owned_newname = OsString::from(String::from_utf8_lossy(newname_bytes).into_owned());
+        #[cfg(unix)]
+        let new_name = OsStr::from_bytes(newname_bytes);
+        #[cfg(not(unix))]
+        let new_name = owned_newname.as_os_str();
+
+        self.dispatch_rename(parent, name, newparent, new_name)
+            .map_err(|error| match error {
+                MutationDispatchError::Errno(errno) => errno,
+                MutationDispatchError::Operation { error, .. } => error.to_errno(),
+            })
+    }
+
+    /// Execute symlink with raw path/name bytes without a live kernel mount.
+    #[doc(hidden)]
+    pub fn symlink_for_fuzzing(
+        &self,
+        parent: u64,
+        name_bytes: &[u8],
+        target_bytes: &[u8],
+        uid: u32,
+        gid: u32,
+    ) -> std::result::Result<InodeAttr, c_int> {
+        if self.inner.read_only {
+            return Err(libc::EROFS);
+        }
+        if self.should_shed(RequestOp::Symlink) {
+            return Err(libc::EBUSY);
+        }
+
+        #[cfg(not(unix))]
+        let owned_name = OsString::from(String::from_utf8_lossy(name_bytes).into_owned());
+        #[cfg(unix)]
+        let name = OsStr::from_bytes(name_bytes);
+        #[cfg(not(unix))]
+        let name = owned_name.as_os_str();
+
+        #[cfg(unix)]
+        let target = PathBuf::from(OsString::from_vec(target_bytes.to_vec()));
+        #[cfg(not(unix))]
+        let target = PathBuf::from(String::from_utf8_lossy(target_bytes).into_owned());
+
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Symlink, |cx, scope| {
+            let attr =
+                self.inner
+                    .ops
+                    .symlink(cx, scope, InodeNumber(parent), name, &target, uid, gid)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(attr)
+        })
+        .map_err(|error| error.to_errno())
     }
 
     /// Check backpressure for an operation. Returns `true` if the operation
