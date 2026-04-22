@@ -2157,6 +2157,42 @@ fn fuse_write_with_offset_extends_file_and_zero_fills_gap() {
 }
 
 #[test]
+fn fuse_write_to_directory_reports_eisdir() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_write_to_directory_errno_eisdir";
+        let dir = mnt.join("ext4_write_dir");
+        fs::create_dir(&dir).expect("mkdir ext4 write directory target");
+        let child = dir.join("child.txt");
+        fs::write(&child, b"directory child stays intact\n")
+            .expect("seed ext4 write directory child");
+
+        let entries_before = snapshot_directory_entries(&dir);
+        let child_before = snapshot_file_state(&child);
+
+        let err = fs::OpenOptions::new()
+            .write(true)
+            .open(&dir)
+            .expect_err("opening a directory for write should fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EISDIR),
+            "opening a directory for write should surface exact EISDIR: {err}"
+        );
+        assert!(
+            dir.is_dir(),
+            "directory-write rejection must leave the directory in place"
+        );
+        assert_eq!(
+            snapshot_directory_entries(&dir),
+            entries_before,
+            "directory-write rejection must not change directory entries"
+        );
+        assert_file_state_unchanged(&child, &child_before, "directory write rejection");
+        emit_scenario_result(scenario_id, "PASS", Some("open=EISDIR_no_drift"));
+    });
+}
+
+#[test]
 fn fuse_mkdir_and_nested_create() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("newdir");
