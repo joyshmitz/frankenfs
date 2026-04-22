@@ -2,28 +2,29 @@
 
 use asupersync::Cx;
 use ffs_btrfs::{
-    parse_send_stream, replay_tree_log, walk_chunk_tree, walk_device_tree, BtrfsDeviceSet,
-    SendCommand, BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
+    BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID, BTRFS_FILE_EXTENT_REG,
     BTRFS_FS_TREE_OBJECTID, BTRFS_FT_REG_FILE, BTRFS_ITEM_CHUNK, BTRFS_ITEM_DEV_ITEM,
     BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM, BTRFS_SEND_STREAM_MAGIC,
+    BtrfsDeviceSet, SendCommand, parse_send_stream, replay_tree_log, walk_chunk_tree,
+    walk_device_tree,
 };
 use ffs_core::{Ext4JournalReplayMode, FileType, OpenFs, OpenOptions, RequestScope};
 use ffs_harness::{
-    e2e::{run_crash_replay_suite, run_fsx_stress, CrashReplaySuiteConfig, FsxStressConfig},
+    GoldenReference, ParityReport,
+    e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     load_sparse_fixture, validate_btrfs_chunk_fixture, validate_btrfs_fixture,
     validate_btrfs_leaf_fixture, validate_dir_block_fixture, validate_ext4_fixture,
     validate_extent_tree_fixture, validate_group_desc_fixture, validate_inode_fixture,
-    GoldenReference, ParityReport,
 };
 use ffs_ondisk::{
-    lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block, stamp_dir_block_checksum,
-    verify_dir_block_checksum, BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock,
-    Ext4IncompatFeatures, Ext4Superblock, ExtentTree,
+    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, BtrfsSuperblock, Ext4IncompatFeatures, Ext4Superblock,
+    ExtentTree, lookup_in_dir_block_casefold, parse_dev_item, parse_dir_block,
+    stamp_dir_block_checksum, verify_dir_block_checksum,
 };
 use ffs_types::{
-    GroupNumber, InodeNumber, ParseError, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL,
-    EXT4_COMPRBLK_FL, EXT4_COMPR_FL, EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPERBLOCK_OFFSET,
-    EXT4_SUPER_MAGIC,
+    BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL, EXT4_COMPR_FL, EXT4_COMPRBLK_FL,
+    EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
+    InodeNumber, ParseError,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -35,8 +36,8 @@ use std::{
     os::unix::ffi::OsStrExt,
     path::Path,
     sync::{
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
         Arc,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
     },
 };
 
@@ -775,13 +776,34 @@ fn btrfs_tree_block_checksum_tamper_detection_conforms() {
     data[corrupt_offset] ^= 0xFF;
     std::fs::write(&image_path, data).unwrap();
 
-    let fs = open_btrfs_image(&image_path);
-    let res = fs.readdir(&cx, InodeNumber(1), 0);
+    let opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    let reopen = OpenFs::open_with_options(&cx, &image_path, &opts);
 
-    assert!(
-        res.is_err(),
-        "Reading corrupted btrfs tree block should fail checksum verification"
-    );
+    match reopen {
+        Ok(fs) => {
+            let res = fs.readdir(&cx, InodeNumber(1), 0);
+            assert!(
+                matches!(
+                    res,
+                    Err(ffs_error::FfsError::Format(ref detail))
+                        if detail.contains("tree_block_csum")
+                ),
+                "Reading corrupted btrfs tree block should fail checksum verification, got {res:?}"
+            );
+        }
+        Err(ffs_error::FfsError::Format(detail)) => {
+            assert!(
+                detail.contains("tree_block_csum"),
+                "Tampered btrfs image should surface the tree-block checksum failure, got {detail:?}"
+            );
+        }
+        Err(err) => panic!(
+            "Tampered btrfs image should fail only on tree-block checksum verification, got {err:?}"
+        ),
+    }
 }
 
 #[test]
