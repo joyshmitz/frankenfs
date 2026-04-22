@@ -2,8 +2,8 @@
 
 use ffs_btrfs::{
     parse_dir_items, parse_extent_data, parse_inode_item, parse_root_item, parse_root_ref,
-    BtrfsDirItem, BtrfsExtentData, BtrfsInodeItem, BtrfsRootItem, BtrfsRootRef,
-    BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
+    parse_xattr_items, BtrfsDirItem, BtrfsExtentData, BtrfsInodeItem, BtrfsRootItem, BtrfsRootRef,
+    BtrfsXattrItem, BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -99,13 +99,11 @@ fn assert_dir_item_invariants(data: &[u8], parsed: &[BtrfsDirItem]) {
         let data_len = usize::from(read_u16(data, cur + 25).unwrap_or_default());
         let name_len = usize::from(read_u16(data, cur + 27).unwrap_or_default());
         let name_start = cur + HEADER;
-        let name_end = match name_start.checked_add(name_len) {
-            Some(end) => end,
-            None => panic!("name length overflow at dir-item offset {cur}"),
+        let Some(name_end) = name_start.checked_add(name_len) else {
+            return;
         };
-        let payload_end = match name_end.checked_add(data_len) {
-            Some(end) => end,
-            None => panic!("payload length overflow at dir-item offset {cur}"),
+        let Some(payload_end) = name_end.checked_add(data_len) else {
+            return;
         };
 
         assert!(
@@ -128,6 +126,51 @@ fn assert_dir_item_invariants(data: &[u8], parsed: &[BtrfsDirItem]) {
         cur,
         data.len(),
         "successful dir-item decode must consume the full concatenated payload"
+    );
+}
+
+fn assert_xattr_item_invariants(data: &[u8], parsed: &[BtrfsXattrItem]) {
+    const HEADER: usize = 30;
+
+    if parsed.is_empty() {
+        assert!(
+            data.is_empty(),
+            "successful empty XATTR_ITEM decode should only happen on an empty payload"
+        );
+        return;
+    }
+
+    let mut cur = 0_usize;
+    for item in parsed {
+        assert!(
+            cur + HEADER <= data.len(),
+            "successful parse must leave a full xattr-item header at {cur}"
+        );
+
+        let data_len = usize::from(read_u16(data, cur + 25).unwrap_or_default());
+        let name_len = usize::from(read_u16(data, cur + 27).unwrap_or_default());
+        let name_start = cur + HEADER;
+        let Some(name_end) = name_start.checked_add(name_len) else {
+            return;
+        };
+        let Some(value_end) = name_end.checked_add(data_len) else {
+            return;
+        };
+
+        assert!(
+            value_end <= data.len(),
+            "successful xattr-item parse must stay within the payload"
+        );
+        assert_eq!(item.name.as_slice(), &data[name_start..name_end]);
+        assert_eq!(item.value.as_slice(), &data[name_end..value_end]);
+
+        cur = value_end;
+    }
+
+    assert_eq!(
+        cur,
+        data.len(),
+        "successful xattr-item decode must consume the full concatenated payload"
     );
 }
 
@@ -215,6 +258,16 @@ fuzz_target!(|data: &[u8]| {
     );
     if let Ok(parsed) = &dir_items {
         assert_dir_item_invariants(data, parsed);
+    }
+
+    let xattr_items = parse_xattr_items(data);
+    assert_eq!(
+        xattr_items,
+        parse_xattr_items(data),
+        "xattr-item parsing should be deterministic for identical bytes"
+    );
+    if let Ok(parsed) = &xattr_items {
+        assert_xattr_item_invariants(data, parsed);
     }
 
     let extent_data = parse_extent_data(data);
