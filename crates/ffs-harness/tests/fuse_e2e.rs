@@ -2587,6 +2587,16 @@ fn fuse_rename_same_name_is_noop() {
 }
 
 #[test]
+fn fuse_rename_file_directory_type_mismatch_reports_eisdir_and_enotdir() {
+    with_rw_mount(|mnt| {
+        assert_rename_file_directory_type_mismatch_contract(
+            mnt,
+            "ext4_rw_rename_file_directory_type_mismatch",
+        );
+    });
+}
+
+#[test]
 fn fuse_renameat2_flag_rejection_reports_einval() {
     with_rw_mount(|mnt| {
         let scenario_id = "ext4_rw_renameat2_flag_rejection";
@@ -6205,6 +6215,121 @@ fn assert_rename_missing_source_reports_enoent(mnt: &Path, scenario_id: &str) {
     assert_file_state_unchanged(&witness, &witness_before, "rename missing-source rejection");
 
     emit_scenario_result(scenario_id, "PASS", Some("errno=ENOENT_no_drift"));
+}
+
+fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: &str) {
+    let file_source = mnt.join("rename_file_over_dir_src.txt");
+    let directory_target = mnt.join("rename_file_over_dir_dst");
+    fs::write(&file_source, b"rename file source\n").expect("write rename file source");
+    fs::create_dir(&directory_target).expect("create rename directory target");
+    let directory_child = directory_target.join("child.txt");
+    fs::write(&directory_child, b"rename dir child\n").expect("write rename directory child");
+
+    let file_over_dir_entries_before = snapshot_directory_entries(mnt);
+    let file_source_before = snapshot_file_state(&file_source);
+    let directory_child_before = snapshot_file_state(&directory_child);
+    let directory_entries_before = snapshot_directory_entries(&directory_target);
+
+    let file_over_dir_err = fs::rename(&file_source, &directory_target)
+        .expect_err("rename file over directory should fail");
+    assert_eq!(
+        file_over_dir_err.raw_os_error(),
+        Some(libc::EISDIR),
+        "rename file over directory should surface exact EISDIR: {file_over_dir_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&file_source).is_ok(),
+        "rejected rename must leave the file source entry in place"
+    );
+    assert!(
+        fs::metadata(&directory_target)
+            .expect("stat directory target after rejected rename")
+            .is_dir(),
+        "rejected rename must leave the destination as a directory"
+    );
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        file_over_dir_entries_before,
+        "rename file over directory must not change visible root entries"
+    );
+    assert_eq!(
+        snapshot_directory_entries(&directory_target),
+        directory_entries_before,
+        "rename file over directory must not change directory child entries"
+    );
+    assert_file_state_unchanged(
+        &file_source,
+        &file_source_before,
+        "rename file over directory source",
+    );
+    assert_file_state_unchanged(
+        &directory_child,
+        &directory_child_before,
+        "rename file over directory child",
+    );
+
+    let directory_source = mnt.join("rename_dir_over_file_src");
+    let file_target = mnt.join("rename_dir_over_file_dst.txt");
+    fs::create_dir(&directory_source).expect("create rename directory source");
+    let source_child = directory_source.join("nested.txt");
+    fs::write(&source_child, b"rename dir source child\n")
+        .expect("write rename directory source child");
+    fs::write(&file_target, b"rename file target\n").expect("write rename file target");
+
+    let dir_over_file_entries_before = snapshot_directory_entries(mnt);
+    let source_entries_before = snapshot_directory_entries(&directory_source);
+    let source_child_before = snapshot_file_state(&source_child);
+    let file_target_before = snapshot_file_state(&file_target);
+
+    let dir_over_file_err = fs::rename(&directory_source, &file_target)
+        .expect_err("rename directory over file should fail");
+    assert_eq!(
+        dir_over_file_err.raw_os_error(),
+        Some(libc::ENOTDIR),
+        "rename directory over file should surface exact ENOTDIR: {dir_over_file_err}"
+    );
+    assert!(
+        fs::metadata(&directory_source)
+            .expect("stat directory source after rejected rename")
+            .is_dir(),
+        "rejected rename must leave the source as a directory"
+    );
+    assert!(
+        fs::symlink_metadata(&source_child).is_ok(),
+        "rejected rename must preserve the source directory child entry"
+    );
+    assert!(
+        fs::metadata(&file_target)
+            .expect("stat file target after rejected rename")
+            .is_file(),
+        "rejected rename must leave the destination as a file"
+    );
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        dir_over_file_entries_before,
+        "rename directory over file must not change visible root entries"
+    );
+    assert_eq!(
+        snapshot_directory_entries(&directory_source),
+        source_entries_before,
+        "rename directory over file must not change source directory entries"
+    );
+    assert_file_state_unchanged(
+        &source_child,
+        &source_child_before,
+        "rename directory over file child",
+    );
+    assert_file_state_unchanged(
+        &file_target,
+        &file_target_before,
+        "rename directory over file target",
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("file_over_dir=EISDIR_dir_over_file=ENOTDIR_no_drift"),
+    );
 }
 
 fn assert_read_only_flush_contract(path: &Path, scenario_id: &str) {

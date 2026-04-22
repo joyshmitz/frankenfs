@@ -149,6 +149,9 @@ inode/data and `st_nlink` remains 2.
 Mounted-path ext4 rename coverage now also freezes same-name source/destination
 semantics as a visible no-op, with no directory-entry drift and no inode/data
 drift.
+Mounted-path ext4 rename refusal coverage now also freezes exact `EISDIR` for
+file-over-directory overwrites and exact `ENOTDIR` for directory-over-file
+overwrites, with no root-entry, source-child, or file-byte drift.
 Mounted-path btrfs rename coverage now also freezes same-name source/destination
 semantics as a visible no-op, with no directory-entry drift and no inode/data
 drift.
