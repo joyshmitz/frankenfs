@@ -75,7 +75,7 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 fuser = { version = "0.16.0", features = ["abi-7-31"] }
 zstd = "0.13.3"
 brotli = "8.0.2"
-flate2 = "1.0"
+flate2 = "1.1.9"
 lzokay-native = "0.1"
 
 # Sibling project dependencies (crates.io; local path overrides via [patch] if needed)
