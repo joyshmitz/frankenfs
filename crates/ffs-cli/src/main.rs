@@ -4,42 +4,42 @@ mod cmd_evidence;
 mod cmd_repair;
 
 use cmd_repair::{
-    append_btrfs_repair_detail, block_range_contains, build_ext4_repair_group_specs,
-    coordinate_repair_write_access, detect_flavor_with_optional_btrfs_bootstrap,
-    discover_btrfs_repair_group_specs, primary_btrfs_superblock_block,
-    probe_btrfs_repair_staleness, probe_ext4_repair_staleness, recover_btrfs_corrupt_blocks,
-    recover_primary_btrfs_superblock_from_backup,
+    DEFAULT_REPAIR_OVERHEAD_RATIO, Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_FSCK,
+    RepairCoordinationOutput, append_btrfs_repair_detail, block_range_contains,
+    build_ext4_repair_group_specs, coordinate_repair_write_access,
+    detect_flavor_with_optional_btrfs_bootstrap, discover_btrfs_repair_group_specs,
+    primary_btrfs_superblock_block, probe_btrfs_repair_staleness, probe_ext4_repair_staleness,
+    recover_btrfs_corrupt_blocks, recover_primary_btrfs_superblock_from_backup,
     repair_corrupt_btrfs_superblock_mirrors_from_primary, report_has_error_or_higher_for_block,
-    scrub_range_for_repair, Ext4RepairStaleness, RepairCoordinationOutput,
-    DEFAULT_REPAIR_OVERHEAD_RATIO, REPAIR_COORDINATION_SCENARIO_FSCK,
+    scrub_range_for_repair,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use asupersync::Cx;
 use clap::{Parser, Subcommand, ValueEnum};
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
 use ffs_btrfs::{
-    parse_inode_item, parse_root_item, BtrfsInodeItem, BTRFS_FS_TREE_OBJECTID,
-    BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM,
+    BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
+    parse_inode_item, parse_root_item,
 };
 use ffs_core::{
-    detect_filesystem_at_path, BtrfsMountSelection, CrashRecoveryOutcome, Ext4DataErrPolicy,
-    Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions,
+    BtrfsMountSelection, CrashRecoveryOutcome, Ext4DataErrPolicy, Ext4JournalReplayMode, FsFlavor,
+    FsOps, OpenFs, OpenOptions, detect_filesystem_at_path,
 };
-use ffs_fuse::{mount_managed, MountConfig, MountOptions};
+use ffs_fuse::{MountConfig, MountOptions, mount_managed};
 use ffs_harness::ParityReport;
 use ffs_ondisk::{
-    ext4::Ext4QuotaInodes, parse_dx_root, parse_extent_tree, parse_inode_extent_tree,
     BtrfsSuperblock, Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex, Ext4GroupDesc,
-    Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree,
+    Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree, ext4::Ext4QuotaInodes, parse_dx_root,
+    parse_extent_tree, parse_inode_extent_tree,
 };
 use ffs_repair::scrub::{
     BlockValidator, BtrfsSuperblockValidator, BtrfsTreeBlockValidator, CompositeValidator,
     Ext4SuperblockValidator, ScrubReport, Scrubber, Severity, ZeroCheckValidator,
 };
 use ffs_types::{
-    BlockNumber, GroupNumber, InodeNumber, MountMode, BTRFS_SUPER_INFO_OFFSET,
-    BTRFS_SUPER_INFO_SIZE, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE,
+    BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, EXT4_SUPERBLOCK_OFFSET,
+    EXT4_SUPERBLOCK_SIZE, GroupNumber, InodeNumber, MountMode,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -5435,27 +5435,29 @@ fn mkfs_cmd_with_program(
 #[cfg(test)]
 mod tests {
     use super::{
-        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
-        build_mount_open_options, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
-        ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
-        log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
-        parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
-        read_file_region, summarize_repair_staleness, unavailable_repair_info, BtrfsInodeItem,
+        BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
         BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
         MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions,
-        RepairFlags, BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM,
+        RepairFlags, btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output,
+        build_info_output, build_mount_open_options, choose_btrfs_scrub_block_size,
+        ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
+        log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
+        open_filesystem_for_mount, parse_btrfs_mount_selection, read_ext4_group_desc_from_path,
+        read_ext4_inode_from_path, read_file_region, summarize_repair_staleness,
+        unavailable_repair_info,
     };
     use crate::cmd_evidence::{
-        load_evidence_records, load_metrics_report_for_test, EvidenceHistogramBucket,
-        EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
+        EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
+        load_evidence_records, load_metrics_report_for_test,
     };
     use crate::cmd_repair::{
-        btrfs_super_mirror_offsets, build_btrfs_repair_group_spec, build_repair_output,
-        coordinate_repair_write_access, merge_scrub_reports, normalize_btrfs_superblock_as_primary,
-        partition_scrub_range, repair_coordination_record_path, repair_worker_limit,
-        select_btrfs_repair_groups, select_ext4_repair_groups, Ext4RepairStaleness,
-        RepairCoordinationRecord, RepairCoordinationStatus, REPAIR_COORDINATION_SCENARIO_REPAIR,
+        Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_REPAIR, RepairCoordinationRecord,
+        RepairCoordinationStatus, btrfs_super_mirror_offsets, build_btrfs_repair_group_spec,
+        build_repair_output, coordinate_repair_write_access, merge_scrub_reports,
+        normalize_btrfs_superblock_as_primary, partition_scrub_range,
+        repair_coordination_record_path, repair_worker_limit, select_btrfs_repair_groups,
+        select_ext4_repair_groups,
     };
     use clap::Parser;
     use ffs_block::CacheRuntimeMetricsSnapshot;
@@ -6446,9 +6448,11 @@ mod tests {
             let records = load_evidence_records(&path, Some("repair_failed"), None, None)
                 .expect("filtered evidence read should succeed");
             assert_eq!(records.len(), 2);
-            assert!(records
-                .iter()
-                .all(|record| record.event_type == EvidenceEventType::RepairFailed));
+            assert!(
+                records
+                    .iter()
+                    .all(|record| record.event_type == EvidenceEventType::RepairFailed)
+            );
             assert_eq!(records[0].block_group, 2);
             assert_eq!(records[1].block_group, 3);
         });
@@ -6547,9 +6551,11 @@ mod tests {
                 .expect("repair-failures preset should work");
             assert_eq!(records.len(), 5);
             // wal_recovery should be excluded
-            assert!(records
-                .iter()
-                .all(|r| r.event_type != EvidenceEventType::WalRecovery));
+            assert!(
+                records
+                    .iter()
+                    .all(|r| r.event_type != EvidenceEventType::WalRecovery)
+            );
         });
     }
 
@@ -6567,9 +6573,11 @@ mod tests {
                 .expect("pressure-transitions preset should work");
             assert_eq!(records.len(), 4);
             // repair_failed should be excluded
-            assert!(records
-                .iter()
-                .all(|r| r.event_type != EvidenceEventType::RepairFailed));
+            assert!(
+                records
+                    .iter()
+                    .all(|r| r.event_type != EvidenceEventType::RepairFailed)
+            );
         });
     }
 
@@ -6587,9 +6595,11 @@ mod tests {
             let records = load_evidence_records(&path, None, None, Some("contention"))
                 .expect("contention preset should work");
             assert_eq!(records.len(), 5);
-            assert!(records
-                .iter()
-                .all(|r| r.event_type != EvidenceEventType::RepairFailed));
+            assert!(
+                records
+                    .iter()
+                    .all(|r| r.event_type != EvidenceEventType::RepairFailed)
+            );
             assert_eq!(records[0].event_type, EvidenceEventType::MergeProofChecked);
             assert_eq!(records[1].event_type, EvidenceEventType::MergeApplied);
             assert_eq!(records[2].event_type, EvidenceEventType::PolicySwitched);
@@ -6700,7 +6710,7 @@ mod tests {
 
     #[test]
     fn preset_event_types_returns_none_for_unknown() {
-        use crate::cmd_evidence::{preset_event_types, KNOWN_PRESETS};
+        use crate::cmd_evidence::{KNOWN_PRESETS, preset_event_types};
         assert!(preset_event_types("nonexistent").is_none());
         for name in KNOWN_PRESETS {
             assert!(
@@ -6995,9 +7005,11 @@ mod tests {
         with_temp_image_path(b"{}", |path| {
             let err = load_metrics_report_for_test(&path, "not-a-real-preset")
                 .expect_err("unsupported metrics preset should fail");
-            assert!(err
-                .to_string()
-                .contains("metrics report requested for unsupported preset 'not-a-real-preset'"));
+            assert!(
+                err.to_string().contains(
+                    "metrics report requested for unsupported preset 'not-a-real-preset'"
+                )
+            );
         });
     }
 
@@ -7028,9 +7040,10 @@ mod tests {
                     true,
                 )
                 .expect_err("metrics preset should reject --summary");
-                assert!(err
-                    .to_string()
-                    .contains("--summary is only supported for ledger-backed evidence presets"));
+                assert!(
+                    err.to_string()
+                        .contains("--summary is only supported for ledger-backed evidence presets")
+                );
             },
         );
     }
@@ -7062,9 +7075,10 @@ mod tests {
                     false,
                 )
                 .expect_err("metrics preset should reject --tail");
-                assert!(err
-                    .to_string()
-                    .contains("--tail is only supported for ledger-backed evidence presets"));
+                assert!(
+                    err.to_string()
+                        .contains("--tail is only supported for ledger-backed evidence presets")
+                );
             },
         );
     }
@@ -7469,12 +7483,16 @@ mod tests {
         assert_eq!(json["command"], "repair");
         assert_eq!(json["level"], "INFO");
         assert_eq!(json["target"], "ffs::test");
-        assert!(json["operation_id"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()));
-        assert!(json["coordination_file"]
-            .as_str()
-            .is_some_and(|value| { value.ends_with(".ffs-repair-owner.json") }));
+        assert!(
+            json["operation_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert!(
+            json["coordination_file"]
+                .as_str()
+                .is_some_and(|value| { value.ends_with(".ffs-repair-owner.json") })
+        );
         assert_eq!(json["local_host"], json["owner_host"]);
     }
 
@@ -7517,9 +7535,11 @@ mod tests {
         assert_eq!(json["level"], "WARN");
         assert_eq!(json["target"], "ffs::test");
         assert_eq!(json["owner_host"], "remote-host");
-        assert!(json["operation_id"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()));
+        assert!(
+            json["operation_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
     }
 
     #[test]
@@ -9563,10 +9583,12 @@ mod tests {
             assert_eq!(output.group, 0);
             assert!(output.descriptor.is_none());
             assert!(output.raw_hex.is_none());
-            assert!(output
-                .limitations
-                .iter()
-                .any(|limitation| limitation.contains("raw hex for btrfs chunk dump")));
+            assert!(
+                output
+                    .limitations
+                    .iter()
+                    .any(|limitation| limitation.contains("raw hex for btrfs chunk dump"))
+            );
 
             let chunk = output
                 .btrfs_chunk
@@ -9601,10 +9623,11 @@ mod tests {
             assert_eq!(parsed.gid, 1000);
             assert_eq!(parsed.nlink, 2);
             assert!(output.raw_hex.as_ref().is_some_and(|raw| !raw.is_empty()));
-            assert!(output
-                .limitations
-                .iter()
-                .any(|limitation| { limitation.contains("inode 1 maps to btrfs root objectid") }));
+            assert!(
+                output.limitations.iter().any(|limitation| {
+                    limitation.contains("inode 1 maps to btrfs root objectid")
+                })
+            );
         });
     }
 
@@ -9620,10 +9643,12 @@ mod tests {
             assert!(output.htree.is_none());
             // The root-only fixture has no on-disk directory-entry items.
             assert!(output.raw_hex_blocks.is_some());
-            assert!(output
-                .raw_hex_blocks
-                .as_ref()
-                .is_some_and(std::vec::Vec::is_empty));
+            assert!(
+                output
+                    .raw_hex_blocks
+                    .as_ref()
+                    .is_some_and(std::vec::Vec::is_empty)
+            );
             assert!(output.entries.iter().all(|entry| entry.rec_len == 0));
             assert!(output.entries.iter().any(|entry| entry.name == "."));
             assert!(output.entries.iter().any(|entry| entry.name == ".."));
@@ -9645,12 +9670,16 @@ mod tests {
                 .as_ref()
                 .expect("btrfs hex dump should include raw blocks");
             assert!(!raw_hex_blocks.is_empty());
-            assert!(raw_hex_blocks
-                .iter()
-                .any(|block| block.item_kind.as_deref() == Some("dir_index")));
-            assert!(raw_hex_blocks
-                .iter()
-                .all(|block| !block.hex.trim().is_empty()));
+            assert!(
+                raw_hex_blocks
+                    .iter()
+                    .any(|block| block.item_kind.as_deref() == Some("dir_index"))
+            );
+            assert!(
+                raw_hex_blocks
+                    .iter()
+                    .all(|block| !block.hex.trim().is_empty())
+            );
             assert!(output.entries.iter().any(|entry| entry.name == "hello.txt"));
         });
     }
@@ -9830,9 +9859,11 @@ mod tests {
 
         let flags = btrfs_chunk_type_flag_names(1 | (1_u64 << 9));
         assert!(flags.iter().any(|flag| flag == "DATA"));
-        assert!(flags
-            .iter()
-            .any(|flag| flag.starts_with("UNKNOWN(0x0000000000000200)")));
+        assert!(
+            flags
+                .iter()
+                .any(|flag| flag.starts_with("UNKNOWN(0x0000000000000200)"))
+        );
     }
 
     #[test]
@@ -9891,10 +9922,12 @@ mod tests {
             .expect("checksum_scrub phase should be present");
         assert_eq!(scrub_phase.status, "skipped");
         assert!(scrub_phase.detail.contains("pass --force for full scrub"));
-        assert!(output
-            .limitations
-            .iter()
-            .any(|limitation| limitation.contains("skipped block-level scrub")));
+        assert!(
+            output
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("skipped block-level scrub"))
+        );
     }
 
     #[test]
@@ -9919,10 +9952,12 @@ mod tests {
             .find(|phase| phase.phase == "checksum_scrub")
             .expect("checksum_scrub phase should be present");
         assert_eq!(scrub_phase.status, "ok");
-        assert!(!output
-            .limitations
-            .iter()
-            .any(|limitation| limitation.contains("skipped block-level scrub")));
+        assert!(
+            !output
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("skipped block-level scrub"))
+        );
     }
 
     #[test]
@@ -9993,9 +10028,11 @@ mod tests {
             select_btrfs_repair_groups(RepairFlags::empty(), &all, &staleness, &mut limitations);
 
         assert_eq!(selected, vec![1, 3]);
-        assert!(limitations
-            .iter()
-            .any(|limitation| limitation.contains("selected 2/4 btrfs groups")));
+        assert!(
+            limitations
+                .iter()
+                .any(|limitation| limitation.contains("selected 2/4 btrfs groups"))
+        );
     }
 
     #[test]
@@ -10035,10 +10072,12 @@ mod tests {
             .expect("build repair output for verify-only rebuild request")
         });
 
-        assert!(output
-            .limitations
-            .iter()
-            .any(|limitation| limitation.contains("ignored when --verify-only")));
+        assert!(
+            output
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("ignored when --verify-only"))
+        );
         assert!(matches!(
             output.action,
             super::RepairActionOutput::VerifyOnly
@@ -10192,10 +10231,12 @@ mod tests {
             super::RepairActionOutput::RepairRequested
         ));
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
-        assert!(output
-            .limitations
-            .iter()
-            .any(|limitation| limitation.contains("restored primary btrfs superblock")));
+        assert!(
+            output
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("restored primary btrfs superblock"))
+        );
     }
 
     #[test]
@@ -10248,10 +10289,12 @@ mod tests {
         );
         assert_eq!(output.exit_code, 2);
         assert!(backup_still_corrupt);
-        assert!(output
-            .limitations
-            .iter()
-            .any(|limitation| { limitation.contains("Multi-host repair is out of scope") }));
+        assert!(
+            output
+                .limitations
+                .iter()
+                .any(|limitation| { limitation.contains("Multi-host repair is out of scope") })
+        );
     }
 
     #[test]
@@ -10432,9 +10475,11 @@ mod tests {
             .find(|phase| phase.phase == "repair")
             .expect("repair phase should be present");
         assert_eq!(repair_phase.status, "ok");
-        assert!(repair_phase
-            .detail
-            .contains("restored primary btrfs superblock"));
+        assert!(
+            repair_phase
+                .detail
+                .contains("restored primary btrfs superblock")
+        );
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
         assert!(output.scrub.scanned > 0);
     }
@@ -10549,9 +10594,11 @@ mod tests {
             .find(|phase| phase.phase == "repair")
             .expect("repair phase should be present");
         assert_eq!(repair_phase.status, "ok");
-        assert!(repair_phase
-            .detail
-            .contains("restored 1 btrfs superblock mirror(s) from primary superblock"));
+        assert!(
+            repair_phase
+                .detail
+                .contains("restored 1 btrfs superblock mirror(s) from primary superblock")
+        );
         assert_eq!(parsed_backup.bytenr, backup_offset as u64);
     }
 
@@ -10597,10 +10644,11 @@ mod tests {
             super::RepairActionOutput::RepairRequested
         ));
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
-        assert!(output
-            .limitations
-            .iter()
-            .any(|limitation| limitation.contains("bootstrap restored primary btrfs superblock")));
+        assert!(
+            output.limitations.iter().any(
+                |limitation| limitation.contains("bootstrap restored primary btrfs superblock")
+            )
+        );
     }
 
     #[test]
@@ -10649,9 +10697,11 @@ mod tests {
             .find(|phase| phase.phase == "repair")
             .expect("repair phase should be present");
         assert_eq!(repair_phase.status, "ok");
-        assert!(repair_phase
-            .detail
-            .contains("bootstrap restored primary btrfs superblock"));
+        assert!(
+            repair_phase
+                .detail
+                .contains("bootstrap restored primary btrfs superblock")
+        );
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
         assert!(output.scrub.scanned > 0);
     }

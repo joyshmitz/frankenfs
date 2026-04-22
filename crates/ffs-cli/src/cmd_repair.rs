@@ -1,18 +1,18 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use asupersync::Cx;
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
-use ffs_core::{detect_filesystem_at_path, FsFlavor, OpenFs, OpenOptions};
+use ffs_core::{FsFlavor, OpenFs, OpenOptions, detect_filesystem_at_path};
 use ffs_ondisk::{
-    map_logical_to_physical, verify_btrfs_superblock_checksum, BtrfsChunkEntry, BtrfsSuperblock,
-    Ext4Superblock,
+    BtrfsChunkEntry, BtrfsSuperblock, Ext4Superblock, map_logical_to_physical,
+    verify_btrfs_superblock_checksum,
 };
 use ffs_repair::codec::encode_group;
 use ffs_repair::recovery::{GroupRecoveryOrchestrator, RecoveryOutcome};
 use ffs_repair::scrub::{ScrubReport, Scrubber, Severity};
-use ffs_repair::storage::{RepairGroupLayout, RepairGroupStorage, REPAIR_DESC_SLOT_COUNT};
+use ffs_repair::storage::{REPAIR_DESC_SLOT_COUNT, RepairGroupLayout, RepairGroupStorage};
 use ffs_repair::symbol::RepairGroupDescExt;
 use ffs_types::{
-    BlockNumber, ByteOffset, GroupNumber, BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE,
+    BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, GroupNumber,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,10 +22,10 @@ use std::time::Instant;
 use tracing::{info, info_span, warn};
 
 use crate::{
-    choose_btrfs_scrub_block_size, cli_cx, count_blocks_at_severity_or_higher,
+    RepairActionOutput, RepairCommandOptions, RepairFlags, RepairOutput, RepairScopeOutput,
+    RepairScrubOutput, choose_btrfs_scrub_block_size, cli_cx, count_blocks_at_severity_or_higher,
     ext4_appears_clean_state, ext4_group_scrub_scope, ext4_recovery_detail, filesystem_name,
-    run_ext4_mount_recovery, scrub_validator, RepairActionOutput, RepairCommandOptions,
-    RepairFlags, RepairOutput, RepairScopeOutput, RepairScrubOutput,
+    run_ext4_mount_recovery, scrub_validator,
 };
 
 pub fn repair_cmd(path: &PathBuf, options: RepairCommandOptions) -> Result<()> {
