@@ -2,35 +2,15 @@
 
 Created by CC agent 2026-04-22. Import when bead database clears.
 
-## DEADLOCK AUDIT: ffs-core (Priority 3 - Low)
-```
-br create --type bug --priority 3 --title "[DEADLOCK] latent callback reentrancy in DegradationFsm policy notification"
-```
+## DEADLOCK AUDIT: ffs-core - FIXED
+
+**Status:** FIXED in commit 3b8db67
 
 **Location:** `crates/ffs-core/src/degradation.rs:302-305`
 
-**Pattern:** Lock held across callback
-```rust
-let policies = self.policies.lock();
-for policy in policies.iter() {
-    policy.apply(headroom);  // Called while holding policies lock
-}
-```
+**Fix applied:** Clone Arc pointers, drop lock, then iterate - prevents callback reentrancy.
 
-**Risk:** If any `DegradationPolicy::apply()` impl calls back into `DegradationFsm::tick()`, 
-`add_policy()`, or `transition_count()`, self-deadlock on `current` or `policies` mutex.
-
-**Current severity:** LOW - no production implementations, only test mocks.
-
-**Fix:** Clone Arc pointers, drop lock, then iterate:
-```rust
-let policies: Vec<_> = self.policies.lock().iter().cloned().collect();
-for policy in policies {
-    policy.apply(headroom);
-}
-```
-
-**Audit result:** ffs-core is otherwise CLEAN - consistent lock ordering, no nested acquisitions,
+**Audit result:** ffs-core is CLEAN - consistent lock ordering, no nested acquisitions,
 no async/.await patterns, no OnceLock/Lazy hazards.
 
 ## Task 1: CLI Binary E2E Tests
