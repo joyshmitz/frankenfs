@@ -10,48 +10,48 @@ pub use degradation::{
     DegradationPolicy, DegradationTransition, PressureMonitor,
 };
 pub use vfs::{
-    DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat,
-    InodeAttr, QuotaEntry, QuotaInfo, QuotaType, RequestOp, RequestScope, SeekWhence,
-    SetAttrRequest, XattrSetMode,
+    DirEntry, FiemapExtent, FileType, FsOps, FsStat, InodeAttr, QuotaEntry, QuotaInfo, QuotaType,
+    RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode, FIEMAP_EXTENT_LAST,
+    FIEMAP_EXTENT_UNWRITTEN,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
 
 use asupersync::{Cx, RaptorQConfig};
-use ffs_alloc::{AllocHint, FsGeometry, GroupStats, PersistCtx, bitmap_count_free, bitmap_get};
+use ffs_alloc::{bitmap_count_free, bitmap_get, AllocHint, FsGeometry, GroupStats, PersistCtx};
 use ffs_block::{
-    BlockBuf, BlockDevice, ByteDevice, FileByteDevice, read_btrfs_superblock_region,
-    read_ext4_superblock_region,
+    read_btrfs_superblock_region, read_ext4_superblock_region, BlockBuf, BlockDevice, ByteDevice,
+    FileByteDevice,
 };
 use ffs_btrfs::{
-    BTRFS_BLOCK_GROUP_DATA, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
-    BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV, BTRFS_FT_CHRDEV,
-    BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK, BTRFS_FT_SYMLINK,
-    BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM,
-    BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM, BtrfsBTree,
-    BtrfsBlockGroupItem, BtrfsDirItem, BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem,
-    BtrfsKey, BtrfsLeafEntry, BtrfsMutationError, BtrfsTreeItem, InMemoryCowBtrfsTree,
     enumerate_snapshots, enumerate_subvolumes, map_logical_to_physical, parse_dir_items,
     parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_items, walk_chunk_tree,
-    walk_tree,
+    walk_tree, BtrfsBTree, BtrfsBlockGroupItem, BtrfsDirItem, BtrfsExtentAllocator,
+    BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry, BtrfsMutationError, BtrfsTreeItem,
+    InMemoryCowBtrfsTree, BTRFS_BLOCK_GROUP_DATA, BTRFS_FILE_EXTENT_PREALLOC,
+    BTRFS_FILE_EXTENT_REG, BTRFS_FIRST_FREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_FT_BLKDEV,
+    BTRFS_FT_CHRDEV, BTRFS_FT_DIR, BTRFS_FT_FIFO, BTRFS_FT_REG_FILE, BTRFS_FT_SOCK,
+    BTRFS_FT_SYMLINK, BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BTRFS_ITEM_EXTENT_DATA,
+    BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_INODE_REF, BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_XATTR_ITEM,
 };
 use ffs_error::FfsError;
 use ffs_journal::{
+    replay_fast_commit, replay_jbd2_segments_with_options, replay_jbd2_with_options,
     FcReplayResult, Jbd2Superblock, Jbd2WriteStats, Jbd2Writer, JournalSegment, ReplayOptions,
-    ReplayOutcome, replay_fast_commit, replay_jbd2_segments_with_options, replay_jbd2_with_options,
+    ReplayOutcome,
 };
 use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal_replay::{ReplayOutcome as MvccReplayOutcome, TailPolicy, WalReplayEngine};
 use ffs_mvcc::{CommitError, MvccBlockDevice, MvccStore, Transaction};
 use ffs_ondisk::{
-    BtrfsChunkEntry, BtrfsSuperblock, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS, Ext4DirEntry,
+    lookup_in_dir_block, lookup_in_dir_block_casefold, parse_dir_block, parse_extent_tree,
+    parse_inode_extent_tree, parse_sys_chunk_array, BtrfsChunkEntry, BtrfsSuperblock, Ext4DirEntry,
     Ext4Extent, Ext4FileType, Ext4GroupDesc, Ext4ImageReader, Ext4Inode, Ext4Superblock, Ext4Xattr,
-    ExtentTree, lookup_in_dir_block, lookup_in_dir_block_casefold, parse_dir_block,
-    parse_extent_tree, parse_inode_extent_tree, parse_sys_chunk_array,
+    ExtentTree, EXT4_ERROR_FS, EXT4_ORPHAN_FS, EXT4_VALID_FS,
 };
 use ffs_types::{
-    BlockNumber, ByteOffset, CommitSeq, EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET,
-    EXT4_SECTOR_SIZE, GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
+    BlockNumber, ByteOffset, CommitSeq, GroupNumber, InodeNumber, MountMode, ParseError, Snapshot,
+    EXT4_COMPRBLK_FL, EXT4_EXTENTS_FL, EXT4_SB_CHECKSUM_OFFSET, EXT4_SECTOR_SIZE,
 };
 use ffs_xattr::{XattrReadAccess, XattrWriteAccess};
 use parking_lot::{Mutex, RwLock};
@@ -59,8 +59,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::{debug, error, info, trace, warn};
@@ -4556,12 +4556,20 @@ impl OpenFs {
     /// ext4 uses inode `2` as root on disk, so we canonicalize at the FsOps
     /// boundary.
     const fn ext4_canonical_inode(ino: InodeNumber) -> InodeNumber {
-        if ino.0 == 1 { InodeNumber(2) } else { ino }
+        if ino.0 == 1 {
+            InodeNumber(2)
+        } else {
+            ino
+        }
     }
 
     /// Translate ext4 on-disk inode numbers back to VFS inode numbers.
     const fn ext4_presented_inode(ino: InodeNumber) -> InodeNumber {
-        if ino.0 == 2 { InodeNumber(1) } else { ino }
+        if ino.0 == 2 {
+            InodeNumber(1)
+        } else {
+            ino
+        }
     }
 
     fn ext4_present_attr(mut attr: InodeAttr) -> InodeAttr {
@@ -7866,8 +7874,8 @@ impl OpenFs {
         match alg_id {
             2 => {
                 // GZIP: raw deflate via flate2.
-                use flate2::Compression;
                 use flate2::write::ZlibEncoder;
+                use flate2::Compression;
                 use std::io::Write;
                 let level = match method_idx {
                     16 => 1,
@@ -16584,7 +16592,11 @@ fn erfc_approx(x: f64) -> f64 {
             + t * (-0.284_496_736
                 + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
     let result = poly * (-x * x).exp();
-    if x >= 0.0 { result } else { 2.0 - result }
+    if x >= 0.0 {
+        result
+    } else {
+        2.0 - result
+    }
 }
 
 /// ln(Beta(a, b)) = ln(Γ(a)) + ln(Γ(b)) - ln(Γ(a+b))
@@ -17331,8 +17343,8 @@ mod tests {
     use super::*;
     use asupersync::SystemPressure;
     use ffs_types::{
-        BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, ByteOffset, EXT4_SUPER_MAGIC,
-        EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE,
+        ByteOffset, BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE,
+        EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, EXT4_SUPER_MAGIC,
     };
     use serde_json::Value;
     use std::io::{self, Write};
@@ -18767,7 +18779,7 @@ mod tests {
         let sb_off = EXT4_SUPERBLOCK_OFFSET;
         image[sb_off + 0xE0..sb_off + 0xE4].copy_from_slice(&8_u32.to_le_bytes()); // journal_inum
         image[sb_off + 0xE4..sb_off + 0xE8].copy_from_slice(&1_u32.to_le_bytes()); // journal_dev
-        // Mark as clean so crash recovery is not required.
+                                                                                   // Mark as clean so crash recovery is not required.
         image[sb_off + 0x3A..sb_off + 0x3C].copy_from_slice(&EXT4_VALID_FS.to_le_bytes());
 
         let dev = TestDevice::from_vec(image);
@@ -18886,8 +18898,8 @@ mod tests {
 
     #[test]
     fn e2compr_decompress_gzip() {
-        use flate2::Compression;
         use flate2::write::ZlibEncoder;
+        use flate2::Compression;
         use std::io::Write;
 
         let original = b"Hello e2compr compressed world! This is test data.";
@@ -18949,8 +18961,8 @@ mod tests {
     fn e2compr_decompress_ulen_mismatch() {
         // Compress some data, then request wrong ulen — should still decompress
         // (ulen is a hint for pre-allocation, not a strict constraint in our impl).
-        use flate2::Compression;
         use flate2::write::ZlibEncoder;
+        use flate2::Compression;
         use std::io::Write;
         let data = b"test data for ulen mismatch";
         let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -18987,8 +18999,8 @@ mod tests {
     fn e2compr_cluster_header_roundtrip() {
         // Build a fake compressed cluster with proper header and verify
         // decompress_e2compr_cluster-style parsing can read it back.
-        use flate2::Compression;
         use flate2::write::ZlibEncoder;
+        use flate2::Compression;
         use std::io::Write;
 
         let block_size = 4096_usize;
@@ -19027,7 +19039,7 @@ mod tests {
         raw[0..2].copy_from_slice(&ffs_types::EXT2_COMPRESS_MAGIC.to_le_bytes());
         // Method
         raw[2] = 20; // gzip5
-        // Holemap nbytes
+                     // Holemap nbytes
         raw[3] = holemap_nbytes;
         // ulen
         raw[8..12].copy_from_slice(&ulen.to_le_bytes());
@@ -22127,6 +22139,7 @@ mod tests {
         image[sb_off + 0x48..sb_off + 0x50].copy_from_slice(&1_u64.to_le_bytes());
         // root (logical address of root tree leaf)
         let root_logical = 0x4000_u64;
+        let fs_tree_logical = 0x20_000_u64;
         image[sb_off + 0x50..sb_off + 0x58].copy_from_slice(&root_logical.to_le_bytes());
         // chunk_root (set to 0 — we only use sys_chunk_array)
         image[sb_off + 0x58..sb_off + 0x60].copy_from_slice(&0_u64.to_le_bytes());
@@ -22175,36 +22188,63 @@ mod tests {
         // root_level = 0 (leaf)
         image[sb_off + 0xC6] = 0;
 
-        // Write a leaf node at physical 0x4000 (= root_logical via identity map)
-        let leaf_off = root_logical as usize;
-        // btrfs header: bytenr
-        image[leaf_off + 0x30..leaf_off + 0x38].copy_from_slice(&root_logical.to_le_bytes());
-        // generation
-        image[leaf_off + 0x50..leaf_off + 0x58].copy_from_slice(&1_u64.to_le_bytes());
-        // owner (ROOT_TREE = 1)
-        image[leaf_off + 0x58..leaf_off + 0x60].copy_from_slice(&1_u64.to_le_bytes());
-        // nritems = 1
-        image[leaf_off + 0x60..leaf_off + 0x64].copy_from_slice(&1_u32.to_le_bytes());
-        // level = 0 (leaf)
-        image[leaf_off + 0x64] = 0;
+        // Root tree leaf with one parseable ROOT_ITEM for FS_TREE.
+        let root_leaf = root_logical as usize;
+        image[root_leaf + 0x30..root_leaf + 0x38].copy_from_slice(&root_logical.to_le_bytes());
+        image[root_leaf + 0x50..root_leaf + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+        image[root_leaf + 0x58..root_leaf + 0x60].copy_from_slice(&1_u64.to_le_bytes());
+        image[root_leaf + 0x60..root_leaf + 0x64].copy_from_slice(&1_u32.to_le_bytes());
+        image[root_leaf + 0x64] = 0;
 
-        // Leaf item 0 at header_size=101
-        let item_off = leaf_off + 101;
-        // key: objectid=256, type=132 (ROOT_ITEM), offset=0
-        image[item_off..item_off + 8].copy_from_slice(&256_u64.to_le_bytes());
-        image[item_off + 8] = 132;
-        image[item_off + 9..item_off + 17].copy_from_slice(&0_u64.to_le_bytes());
-        // data_offset=200 absolute within the block; on disk it is stored relative to the header.
-        image[item_off + 17..item_off + 21].copy_from_slice(&(200_u32 - 101).to_le_bytes());
-        image[item_off + 21..item_off + 25].copy_from_slice(&8_u32.to_le_bytes());
-        // Actual data at leaf_off + 200
-        image[leaf_off + 200..leaf_off + 208]
-            .copy_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF]);
+        let root_item_offset: u32 = 3000;
+        let root_item_size: u32 = 239;
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf,
+            0,
+            BTRFS_FS_TREE_OBJECTID,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            root_item_offset,
+            root_item_size,
+        );
+        let mut root_item = vec![0_u8; root_item_size as usize];
+        root_item[168..176].copy_from_slice(&256_u64.to_le_bytes());
+        root_item[176..184].copy_from_slice(&fs_tree_logical.to_le_bytes());
+        let root_item_last = root_item.len() - 1;
+        root_item[root_item_last] = 0;
+        let root_data_off = root_leaf + root_item_offset as usize;
+        image[root_data_off..root_data_off + root_item.len()].copy_from_slice(&root_item);
 
-        // Stamp tree block CRC32C checksum (bytes 0..4 = CRC32C of bytes 0x20..nodesize)
+        // Minimal FS tree leaf with just the root inode.
+        let fs_leaf = fs_tree_logical as usize;
+        image[fs_leaf + 0x30..fs_leaf + 0x38].copy_from_slice(&fs_tree_logical.to_le_bytes());
+        image[fs_leaf + 0x50..fs_leaf + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+        image[fs_leaf + 0x58..fs_leaf + 0x60].copy_from_slice(&5_u64.to_le_bytes());
+        image[fs_leaf + 0x60..fs_leaf + 0x64].copy_from_slice(&1_u32.to_le_bytes());
+        image[fs_leaf + 0x64] = 0;
+
+        let root_inode = encode_btrfs_inode_item(0o040_755, 4096, 4096, 2);
+        let fs_data_off = 4096_usize - root_inode.len();
+        write_btrfs_leaf_item(
+            &mut image,
+            fs_leaf,
+            0,
+            256,
+            BTRFS_ITEM_INODE_ITEM,
+            0,
+            fs_data_off as u32,
+            root_inode.len() as u32,
+        );
+        image[fs_leaf + fs_data_off..fs_leaf + fs_data_off + root_inode.len()]
+            .copy_from_slice(&root_inode);
+
+        // Stamp tree block CRC32C checksums (bytes 0..4 = CRC32C of bytes 0x20..nodesize).
         let nodesize = 4096_usize;
-        let csum = ffs_types::crc32c(&image[leaf_off + 0x20..leaf_off + nodesize]);
-        image[leaf_off..leaf_off + 4].copy_from_slice(&csum.to_le_bytes());
+        let root_csum = ffs_types::crc32c(&image[root_leaf + 0x20..root_leaf + nodesize]);
+        image[root_leaf..root_leaf + 4].copy_from_slice(&root_csum.to_le_bytes());
+        let fs_csum = ffs_types::crc32c(&image[fs_leaf + 0x20..fs_leaf + nodesize]);
+        image[fs_leaf..fs_leaf + 4].copy_from_slice(&fs_csum.to_le_bytes());
 
         image
     }
@@ -22741,12 +22781,11 @@ mod tests {
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
         let items = fs.walk_btrfs_root_tree(&cx).expect("walk root tree");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].key.objectid, 256);
-        assert_eq!(items[0].key.item_type, 132);
-        assert_eq!(
-            items[0].data,
-            vec![0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF]
-        );
+        assert_eq!(items[0].key.objectid, BTRFS_FS_TREE_OBJECTID);
+        assert_eq!(items[0].key.item_type, BTRFS_ITEM_ROOT_ITEM);
+        let root_item = parse_root_item(&items[0].data).expect("parse synthetic root item");
+        assert_eq!(root_item.root_dirid, 256);
+        assert_eq!(root_item.bytenr, 0x20_000);
     }
 
     #[test]
@@ -23329,6 +23368,12 @@ mod tests {
             item_idx += 1;
         }
 
+        // Stamp CRC32C checksums on both tree blocks
+        let csum_root = ffs_types::crc32c(&image[root_leaf + 0x20..root_leaf + nodesize]);
+        image[root_leaf..root_leaf + 4].copy_from_slice(&csum_root.to_le_bytes());
+        let csum_fs = ffs_types::crc32c(&image[fs_leaf + 0x20..fs_leaf + nodesize]);
+        image[fs_leaf..fs_leaf + 4].copy_from_slice(&csum_fs.to_le_bytes());
+
         image
     }
 
@@ -23366,11 +23411,9 @@ mod tests {
             .walk_btrfs_dir_entry_items(&cx, 1)
             .expect("read btrfs directory entry items");
         assert!(!items.is_empty());
-        assert!(
-            items
-                .iter()
-                .any(|(item_type, _, _)| *item_type == BTRFS_ITEM_DIR_INDEX)
-        );
+        assert!(items
+            .iter()
+            .any(|(item_type, _, _)| *item_type == BTRFS_ITEM_DIR_INDEX));
     }
 
     #[test]
@@ -25336,15 +25379,13 @@ mod tests {
             Some(b"application/octet-stream".to_vec())
         );
 
-        assert!(
-            fs.removexattr(&cx, ino, "user.mime")
-                .expect("removexattr first call")
-        );
+        assert!(fs
+            .removexattr(&cx, ino, "user.mime")
+            .expect("removexattr first call"));
         assert_eq!(fs.getxattr(&cx, ino, "user.mime").expect("getxattr"), None);
-        assert!(
-            !fs.removexattr(&cx, ino, "user.mime")
-                .expect("removexattr second call")
-        );
+        assert!(!fs
+            .removexattr(&cx, ino, "user.mime")
+            .expect("removexattr second call"));
     }
 
     #[test]
@@ -27264,12 +27305,10 @@ mod tests {
 
         // Verify symlink shows in directory listing
         let entries = fs.readdir(&cx, root, 0).expect("readdir");
-        assert!(
-            entries
-                .iter()
-                .map(DirEntry::name_str)
-                .any(|n| n == "fast_sym")
-        );
+        assert!(entries
+            .iter()
+            .map(DirEntry::name_str)
+            .any(|n| n == "fast_sym"));
     }
 
     #[test]
@@ -28679,12 +28718,10 @@ mod tests {
 
         // Child should be gone from readdir
         let entries = fs.readdir(&cx, root, 0).expect("readdir");
-        assert!(
-            !entries
-                .iter()
-                .map(DirEntry::name_str)
-                .any(|n| n == "subdir_nlink")
-        );
+        assert!(!entries
+            .iter()
+            .map(DirEntry::name_str)
+            .any(|n| n == "subdir_nlink"));
     }
 
     // ── Crash recovery tests ──────────────────────────────────────────
@@ -30704,15 +30741,14 @@ mod tests {
                 0,
             )
             .unwrap();
-        assert!(
-            ops.lookup(
+        assert!(ops
+            .lookup(
                 &cx,
                 &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("del.txt")
             )
-            .is_ok()
-        );
+            .is_ok());
 
         ops.unlink(
             &cx,
@@ -30734,10 +30770,9 @@ mod tests {
         assert_eq!(err.to_errno(), libc::ENOENT);
 
         // Inode should be fully purged (nlink was 1, now 0).
-        assert!(
-            ops.getattr(&cx, &mut RequestScope::empty(), attr.ino)
-                .is_err()
-        );
+        assert!(ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .is_err());
     }
 
     #[test]
@@ -30841,15 +30876,14 @@ mod tests {
         .unwrap();
 
         // Old name gone.
-        assert!(
-            ops.lookup(
+        assert!(ops
+            .lookup(
                 &cx,
                 &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("old.txt")
             )
-            .is_err()
-        );
+            .is_err());
         // New name resolves to same inode.
         let found = ops
             .lookup(
@@ -31893,10 +31927,9 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(2));
-        assert!(
-            ops.removexattr(&cx, &mut RequestScope::empty(), attr.ino, "user.key")
-                .unwrap()
-        );
+        assert!(ops
+            .removexattr(&cx, &mut RequestScope::empty(), attr.ino, "user.key")
+            .unwrap());
 
         let after_remove = ops
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
@@ -32821,7 +32854,7 @@ mod tests {
             assert!(!disabled.writeback_enabled);
             assert!(enabled.writeback_enabled);
             assert_eq!(disabled.epoch_transitions, 0); // Disabled → no epochs.
-            // Enabled should have some epoch transitions.
+                                                       // Enabled should have some epoch transitions.
             if workload.write_count() > 0 {
                 assert!(
                     enabled.epoch_transitions > 0 || enabled.fsync_barriers > 0,
@@ -32930,7 +32963,7 @@ mod tests {
         let inode = InodeNumber(2);
         b.stage_write(inode);
         b.commit_inode(inode); // Visible but not yet durable.
-        // Crash here: visible_epoch=1 but durable_epoch=0.
+                               // Crash here: visible_epoch=1 but durable_epoch=0.
         let r = recover_barrier(&b);
         verify_crash_recovery_invariants(&r, "crash_02_commit_no_sync");
         let state = r.inode_state(inode).unwrap();
@@ -32961,7 +32994,7 @@ mod tests {
         b.fsync_barrier(inode).unwrap(); // Epoch 1 fully durable.
         b.advance_epoch(); // Epoch 2.
         b.stage_write(inode); // Staged at epoch 2 but not committed.
-        // Crash here: epoch 2 writes lost, epoch 1 survives.
+                              // Crash here: epoch 2 writes lost, epoch 1 survives.
         let r = recover_barrier(&b);
         verify_crash_recovery_invariants(&r, "crash_04_epoch_advance");
         let state = r.inode_state(inode).unwrap();
@@ -33009,7 +33042,7 @@ mod tests {
         b.advance_epoch();
         b.stage_write(inode); // Epoch 2 staged.
         b.commit_inode(inode); // Epoch 2 visible but NOT durable.
-        // Crash: epoch 1 data survives, epoch 2 data lost.
+                               // Crash: epoch 1 data survives, epoch 2 data lost.
         let r = recover_barrier(&b);
         verify_crash_recovery_invariants(&r, "crash_07_post_fsync_writes");
         let state = r.inode_state(inode).unwrap();
@@ -33030,7 +33063,7 @@ mod tests {
         barrier.stage_write(ino_gamma);
         barrier.fsync_barrier(ino_alpha).unwrap(); // alpha durable at 1.
         barrier.fsync_barrier(ino_beta).unwrap(); // beta durable at 1.
-        // gamma not fsynced.
+                                                  // gamma not fsynced.
 
         barrier.advance_epoch(); // Epoch 2.
         barrier.stage_write(ino_alpha);
@@ -33067,7 +33100,7 @@ mod tests {
         let inode = InodeNumber(10);
         b.stage_write(inode); // Staged at epoch 1.
         b.advance_epoch(); // Epoch 2.
-        // Commit at epoch 2 (inode only staged at 1) → advances visible to 1.
+                           // Commit at epoch 2 (inode only staged at 1) → advances visible to 1.
         b.commit_inode(inode);
         let state = b.inode_state(inode).unwrap();
         assert_eq!(state.visible_epoch, 1);
@@ -33160,7 +33193,7 @@ mod tests {
         // Epoch 2 staged but NOT committed → not visible.
         assert!(barrier.is_epoch_visible(inode, 1)); // Epoch 1 still visible.
         assert!(!barrier.is_epoch_visible(inode, 2)); // Epoch 2 not yet.
-        // Untracked inodes are always visible.
+                                                      // Untracked inodes are always visible.
         assert!(barrier.is_epoch_visible(InodeNumber(999), 100));
         eprintln!("  [PASS] Deferred visibility preserves MVCC isolation");
 
@@ -33206,7 +33239,7 @@ mod tests {
         fence_barrier.stage_write(ino_a); // Epoch 1.
         fence_barrier.advance_epoch(); // Epoch 2.
         fence_barrier.stage_write(ino_b); // Epoch 2.
-        // Commit ino_a at epoch 2 — should advance to min(2, staged=1) = 1.
+                                          // Commit ino_a at epoch 2 — should advance to min(2, staged=1) = 1.
         fence_barrier.commit_inode(ino_a);
         assert_eq!(fence_barrier.inode_state(ino_a).unwrap().visible_epoch, 1);
         // Commit ino_b at epoch 2 — should advance to min(2, staged=2) = 2.
@@ -33737,10 +33770,9 @@ mod tests {
             OsStr::new("link.txt"),
         )
         .unwrap();
-        assert!(
-            ops.getattr(&cx, &mut RequestScope::empty(), attr.ino)
-                .is_err()
-        );
+        assert!(ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .is_err());
     }
 
     #[test]
@@ -34264,21 +34296,19 @@ mod tests {
         assert_eq!(data, b"winner data");
 
         // The old victim inode (nlink 0) should be purged.
-        assert!(
-            ops.getattr(&cx, &mut RequestScope::empty(), victim.ino)
-                .is_err()
-        );
+        assert!(ops
+            .getattr(&cx, &mut RequestScope::empty(), victim.ino)
+            .is_err());
 
         // winner.txt name should be gone.
-        assert!(
-            ops.lookup(
+        assert!(ops
+            .lookup(
                 &cx,
                 &mut RequestScope::empty(),
                 InodeNumber(1),
                 OsStr::new("winner.txt")
             )
-            .is_err()
-        );
+            .is_err());
     }
 
     #[test]
@@ -35377,7 +35407,11 @@ mod tests {
             .parent()
             .unwrap()
             .join("tests/fixtures/images/ext4_small.img");
-        if ws.exists() { Some(ws) } else { None }
+        if ws.exists() {
+            Some(ws)
+        } else {
+            None
+        }
     }
 
     /// Helper: load the ext4_small fixture image bytes, or skip test.
