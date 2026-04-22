@@ -59,7 +59,7 @@ hex = "0.4.3"
 insta = "1.47.2"
 libc = "0.2.185"
 memchr = "2.8.0"
-parking_lot = "0.12.3"
+parking_lot = "0.12.5"
 proptest = "1.6.0"
 rayon = "1.11.0"
 serde = { version = "1.0.218", features = ["derive"] }
