@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.85"
 name = "fuser"
-version = "0.16.0"
+version = "0.17.0"
 authors = ["Christopher Berner <me@cberner.com>"]
 build = "build.rs"
 autolib = false
