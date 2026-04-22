@@ -65,7 +65,7 @@ rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 sha2 = "0.11.0"
-smallvec = "1.14.0"
+smallvec = "1.15.1"
 tempfile = "3.17.1"
 thiserror = "2.0.11"
 toml = "0.8"
