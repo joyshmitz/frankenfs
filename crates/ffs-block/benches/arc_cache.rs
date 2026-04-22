@@ -2,7 +2,8 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use asupersync::Cx;
-use criterion::{Criterion, black_box, criterion_group};
+use criterion::{Criterion, criterion_group};
+use std::hint::black_box;
 use ffs_block::{ArcCache, ArcWritePolicy, BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice};
 use ffs_error::Result;
 use ffs_types::{BlockNumber, ByteOffset};

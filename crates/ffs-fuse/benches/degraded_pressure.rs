@@ -5,7 +5,8 @@
 //! Measures throughput impact of escalating pressure levels on foreground
 //! workloads, FSM tick overhead, and concurrent backpressure contention.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 
 fn make_gate(headroom: f32) -> ffs_core::BackpressureGate {

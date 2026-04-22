@@ -3,7 +3,8 @@
 //! Compares O(1) rank / O(log n) select via `SuccinctBitmap` against
 //! the plain `bitmap_count_free` / `bitmap_find_free` O(n) helpers.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use ffs_alloc::succinct::SuccinctBitmap;
 use ffs_alloc::{bitmap_count_free, bitmap_find_free};
 

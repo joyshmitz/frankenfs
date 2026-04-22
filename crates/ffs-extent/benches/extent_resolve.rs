@@ -8,7 +8,8 @@
 //! `map_logical_to_physical` function.
 
 use asupersync::Cx;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::Result as FfsResult;
 use ffs_types::BlockNumber;

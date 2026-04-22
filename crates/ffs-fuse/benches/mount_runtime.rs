@@ -6,7 +6,8 @@
 //! aggregate metrics collection, backpressure decisions, and atomic
 //! metrics recording. These operate without actual FUSE mounts.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use ffs_fuse::AtomicMetrics;
 use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher};
 use std::sync::atomic::Ordering;

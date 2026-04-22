@@ -7,7 +7,8 @@
 //! the I/O amortization benefit.
 
 use asupersync::Cx;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use ffs_alloc::{
     AllocHint, FsGeometry, GroupStats, PersistCtx, alloc_blocks_batch_persist, alloc_blocks_persist,
 };
