@@ -140,6 +140,11 @@ path = "fuzz_targets/fuzz_openfs_journal_replay.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_openfs_mvcc_wal_recovery"
+path = "fuzz_targets/fuzz_openfs_mvcc_wal_recovery.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_ioctl_dispatch"
 path = "fuzz_targets/fuzz_ioctl_dispatch.rs"
 doc = false
