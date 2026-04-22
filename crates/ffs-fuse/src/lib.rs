@@ -1869,6 +1869,10 @@ impl FrankenFuse {
                 //   policy: union { v1: [u8; 12], v2: [u8; 24] }
                 // Input: caller sets policy_size to buffer capacity
                 // Output: kernel sets policy_size to actual size
+                //
+                // We must check the caller's out_size against the ACTUAL policy size
+                // returned by the backend, not just the v1 minimum, to avoid returning
+                // more bytes than the caller can accept for v2 policies.
                 let min_out_size = FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V1_SIZE;
                 if (out_size as usize) < min_out_size {
                     return IoctlResult::Error(libc::EINVAL);
@@ -1880,8 +1884,14 @@ impl FrankenFuse {
                         .get_encryption_policy_ex(cx, scope, InodeNumber(ino))
                 }) {
                     Ok((version, policy)) => {
+                        let required_size = FSCRYPT_POLICY_EX_HEADER_SIZE + policy.len();
+                        if (out_size as usize) < required_size {
+                            // Caller buffer too small for the actual policy version.
+                            // Return ERANGE to indicate the buffer is insufficient.
+                            return IoctlResult::Error(libc::ERANGE);
+                        }
                         let policy_size = policy.len() as u64;
-                        let mut buf = vec![0_u8; FSCRYPT_POLICY_EX_HEADER_SIZE + policy.len()];
+                        let mut buf = vec![0_u8; required_size];
                         buf[..8].copy_from_slice(&policy_size.to_ne_bytes());
                         buf[8..8 + policy.len()].copy_from_slice(&policy);
                         if version == 0 {
@@ -5393,6 +5403,46 @@ mod tests {
         );
         assert_eq!(response, IoctlResult::Error(libc::EINVAL));
         assert!(calls.lock().expect("lock ioctl calls").is_empty());
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_ex_v2_rejects_v1_sized_buffer() {
+        // Regression test: v2 policy must not be returned to a caller that only
+        // advertised enough capacity for a v1 policy. The handler must check the
+        // actual policy size against out_size, not just the v1 minimum.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut policy = vec![0_u8; FSCRYPT_POLICY_V2_SIZE];
+        policy[0] = FSCRYPT_POLICY_V2_VERSION;
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy_ex(
+            FSCRYPT_POLICY_V2_VERSION,
+            &policy,
+            Arc::clone(&calls),
+        )));
+
+        // Caller advertises buffer capacity for v1 (header + 12 bytes)
+        // but the backend returns a v2 policy (24 bytes)
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            11,
+            0,
+            FS_IOC_GET_ENCRYPTION_POLICY_EX,
+            &[],
+            FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V1_SIZE_U32,
+        );
+
+        // Must reject with ERANGE since caller buffer is insufficient for v2 payload
+        assert_eq!(response, IoctlResult::Error(libc::ERANGE));
+
+        // The backend SHOULD have been called to retrieve the policy
+        // (we need to know the actual size to reject properly)
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetEncryptionPolicyEx(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
     }
 
     #[test]
