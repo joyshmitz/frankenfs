@@ -16,7 +16,7 @@ use asupersync::Cx;
 use ffs_core::{
     BtrfsMountSelection, Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope,
 };
-use ffs_fuse::{mount_background, MountOptions};
+use ffs_fuse::{MountOptions, mount_background};
 use ffs_harness::load_sparse_fixture;
 use ffs_types::InodeNumber;
 use serde_json::Value;
@@ -2970,6 +2970,58 @@ fn fuse_hard_link() {
         let link_nlink = fs::metadata(&link).expect("stat link").nlink();
         assert_eq!(orig_nlink, 2, "original should report two hard links");
         assert_eq!(link_nlink, 2, "link should report two hard links");
+    });
+}
+
+#[test]
+fn fuse_hard_link_to_symlink_preserves_symlink_type() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_hard_link_to_symlink_preserves_type";
+        let symlink_path = mnt.join("hello_symlink.txt");
+        let alias_path = mnt.join("hello_symlink_alias.txt");
+
+        std::os::unix::fs::symlink("hello.txt", &symlink_path).expect("create source symlink");
+        fs::hard_link(&symlink_path, &alias_path).expect("hard-link source symlink");
+
+        let symlink_meta = fs::symlink_metadata(&symlink_path).expect("lstat source symlink");
+        let alias_meta = fs::symlink_metadata(&alias_path).expect("lstat hard-link alias");
+        assert!(
+            symlink_meta.file_type().is_symlink(),
+            "source path must remain a symlink after hard-linking"
+        );
+        assert!(
+            alias_meta.file_type().is_symlink(),
+            "hard-link alias must preserve the symlink inode type"
+        );
+        assert_eq!(
+            symlink_meta.ino(),
+            alias_meta.ino(),
+            "hard-link alias should reference the same symlink inode"
+        );
+        assert_eq!(
+            symlink_meta.nlink(),
+            2,
+            "source symlink should report two hard-link names"
+        );
+        assert_eq!(
+            alias_meta.nlink(),
+            2,
+            "hard-link alias should report the shared symlink link count"
+        );
+
+        let symlink_target = fs::read_link(&symlink_path).expect("readlink source symlink");
+        let alias_target = fs::read_link(&alias_path).expect("readlink hard-link alias");
+        assert_eq!(symlink_target, PathBuf::from("hello.txt"));
+        assert_eq!(
+            alias_target, symlink_target,
+            "hard-link alias should expose the same symlink target bytes"
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("lstat=symlink_readlink=target_preserved"),
+        );
     });
 }
 
@@ -8491,6 +8543,61 @@ fn btrfs_fuse_hard_link() {
         let link_nlink = fs::metadata(&link).expect("stat link").nlink();
         assert_eq!(orig_nlink, 2, "original should report two hard links");
         assert_eq!(link_nlink, 2, "link should report two hard links");
+    });
+}
+
+#[test]
+fn btrfs_fuse_hard_link_to_symlink_preserves_symlink_type() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_hard_link_to_symlink_preserves_type";
+        let target = mnt.join("sym_target.txt");
+        fs::write(&target, b"symlink hard-link target\n").expect("write symlink target");
+
+        let symlink_path = mnt.join("sym_source.txt");
+        let alias_path = mnt.join("sym_alias.txt");
+        std::os::unix::fs::symlink("sym_target.txt", &symlink_path)
+            .expect("create btrfs source symlink");
+        fs::hard_link(&symlink_path, &alias_path).expect("hard-link btrfs source symlink");
+
+        let symlink_meta = fs::symlink_metadata(&symlink_path).expect("lstat btrfs source symlink");
+        let alias_meta = fs::symlink_metadata(&alias_path).expect("lstat btrfs hard-link alias");
+        assert!(
+            symlink_meta.file_type().is_symlink(),
+            "btrfs source path must remain a symlink after hard-linking"
+        );
+        assert!(
+            alias_meta.file_type().is_symlink(),
+            "btrfs hard-link alias must preserve the symlink inode type"
+        );
+        assert_eq!(
+            symlink_meta.ino(),
+            alias_meta.ino(),
+            "btrfs hard-link alias should reference the same symlink inode"
+        );
+        assert_eq!(
+            symlink_meta.nlink(),
+            2,
+            "btrfs source symlink should report two hard-link names"
+        );
+        assert_eq!(
+            alias_meta.nlink(),
+            2,
+            "btrfs hard-link alias should report the shared symlink link count"
+        );
+
+        let symlink_target = fs::read_link(&symlink_path).expect("readlink btrfs source symlink");
+        let alias_target = fs::read_link(&alias_path).expect("readlink btrfs hard-link alias");
+        assert_eq!(symlink_target, PathBuf::from("sym_target.txt"));
+        assert_eq!(
+            alias_target, symlink_target,
+            "btrfs hard-link alias should expose the same symlink target bytes"
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("lstat=symlink_readlink=target_preserved"),
+        );
     });
 }
 
