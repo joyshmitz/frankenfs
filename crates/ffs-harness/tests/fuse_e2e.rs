@@ -9500,6 +9500,94 @@ fn btrfs_fuse_rename_across_directories() {
 }
 
 #[test]
+fn btrfs_fuse_cross_parent_directory_rename_updates_parent_nlink_accounting() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_cross_parent_directory_rename_nlink_accounting";
+        let source_parent = mnt.join("rename_src_parent");
+        let destination_parent = mnt.join("rename_dst_parent");
+        fs::create_dir(&source_parent).expect("mkdir btrfs source parent");
+        fs::create_dir(&destination_parent).expect("mkdir btrfs destination parent");
+
+        let source_child = source_parent.join("moved_dir");
+        let destination_child = destination_parent.join("moved_dir");
+        fs::create_dir(&source_child).expect("mkdir btrfs child directory");
+
+        let source_entries_before = snapshot_directory_entries(&source_parent);
+        let destination_entries_before = snapshot_directory_entries(&destination_parent);
+        let source_parent_nlink_before = fs::metadata(&source_parent)
+            .expect("stat btrfs source parent before rename")
+            .nlink();
+        let destination_parent_nlink_before = fs::metadata(&destination_parent)
+            .expect("stat btrfs destination parent before rename")
+            .nlink();
+        let source_child_meta_before =
+            fs::metadata(&source_child).expect("stat btrfs child before rename");
+        let source_child_ino_before = source_child_meta_before.ino();
+        let source_child_nlink_before = source_child_meta_before.nlink();
+
+        fs::rename(&source_child, &destination_child)
+            .expect("cross-parent directory rename on btrfs");
+
+        let mut source_entries_expected_after = source_entries_before.clone();
+        source_entries_expected_after.remove("moved_dir");
+        let mut destination_entries_expected_after = destination_entries_before.clone();
+        destination_entries_expected_after.insert("moved_dir".to_string());
+
+        assert!(
+            fs::symlink_metadata(&source_child).is_err(),
+            "cross-parent rename must remove the source directory entry"
+        );
+        assert!(
+            fs::symlink_metadata(&destination_child).is_ok(),
+            "cross-parent rename must create the destination directory entry"
+        );
+        assert_eq!(
+            snapshot_directory_entries(&source_parent),
+            source_entries_expected_after,
+            "source parent entries must drop the moved directory"
+        );
+        assert_eq!(
+            snapshot_directory_entries(&destination_parent),
+            destination_entries_expected_after,
+            "destination parent entries must gain the moved directory"
+        );
+        assert_eq!(
+            fs::metadata(&source_parent)
+                .expect("stat btrfs source parent after rename")
+                .nlink(),
+            source_parent_nlink_before - 1,
+            "moving a child directory out must decrement the source parent st_nlink"
+        );
+        assert_eq!(
+            fs::metadata(&destination_parent)
+                .expect("stat btrfs destination parent after rename")
+                .nlink(),
+            destination_parent_nlink_before + 1,
+            "moving a child directory in must increment the destination parent st_nlink"
+        );
+
+        let destination_child_meta =
+            fs::metadata(&destination_child).expect("stat btrfs child after rename");
+        assert_eq!(
+            destination_child_meta.ino(),
+            source_child_ino_before,
+            "cross-parent rename must preserve the moved directory inode"
+        );
+        assert_eq!(
+            destination_child_meta.nlink(),
+            source_child_nlink_before,
+            "cross-parent rename must preserve the moved directory link count"
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("src_parent_minus_one_dst_parent_plus_one_child_preserved"),
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_rename_into_non_directory_parent_reports_enotdir() {
     with_btrfs_rw_mount(|mnt| {
         let scenario_id = "btrfs_rw_rename_into_non_directory_parent_errno_enotdir";
