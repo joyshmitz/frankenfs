@@ -7624,6 +7624,93 @@ fn fuse_xattr_ext4_posix_acl_default_missing_on_regular_file_reports_enodata() {
     );
 }
 
+#[test]
+fn fuse_xattr_ext4_name_too_long_reports_enametoolong() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+        let original_file = fs::read(&path).expect("read original file bytes");
+
+        // ext4 xattr name suffix is limited to 255 bytes (u8::MAX)
+        // The full name includes the "user." prefix (5 bytes), so a suffix of 256 bytes exceeds.
+        let long_suffix = "a".repeat(256);
+        let long_name = format!("user.{long_suffix}");
+
+        let report = py_setxattr_report(&path, &long_name, b"value", 0);
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENAMETOOLONG)),
+            "xattr name > 255-byte suffix should return ENAMETOOLONG: {report}"
+        );
+
+        // Verify no side effects
+        assert_eq!(
+            fs::read(&path).expect("read file bytes after name-too-long rejection"),
+            original_file,
+            "name-too-long rejection must not mutate file contents"
+        );
+    });
+}
+
+#[test]
+fn fuse_xattr_ext4_value_too_large_reports_einval() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+        let original_file = fs::read(&path).expect("read original file bytes");
+
+        // ext4 xattr value limit is 64KB (65536 bytes)
+        let oversized_value = vec![0x42_u8; 65537];
+
+        let report = py_setxattr_report(&path, "user.toobig", &oversized_value, 0);
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "xattr value > 64KB should return EINVAL: {report}"
+        );
+
+        // Verify the xattr was not created
+        assert!(
+            py_getxattr(&path, "user.toobig").is_none(),
+            "oversized xattr value should not be stored"
+        );
+
+        // Verify no side effects
+        assert_eq!(
+            fs::read(&path).expect("read file bytes after value-too-large rejection"),
+            original_file,
+            "value-too-large rejection must not mutate file contents"
+        );
+    });
+}
+
+#[test]
+fn fuse_xattr_ext4_boundary_name_length_accepted() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // The maximum suffix length is 255 bytes (u8::MAX)
+        let max_suffix = "z".repeat(255);
+        let max_name = format!("user.{max_suffix}");
+
+        py_setxattr(&path, &max_name, b"boundary");
+        let readback = py_getxattr(&path, &max_name).expect("255-byte suffix xattr should exist");
+        assert_eq!(readback, b"boundary", "boundary-length xattr should round-trip");
+    });
+}
+
+#[test]
+fn fuse_xattr_ext4_boundary_value_size_accepted() {
+    with_rw_mount(|mnt| {
+        let path = mnt.join("hello.txt");
+
+        // The maximum value size is 64KB (65536 bytes)
+        let max_value = vec![0xAB_u8; 65536];
+
+        py_setxattr(&path, "user.maxval", &max_value);
+        let readback = py_getxattr(&path, "user.maxval").expect("64KB xattr value should exist");
+        assert_eq!(readback, max_value, "boundary-size xattr value should round-trip");
+    });
+}
+
 // ── btrfs FUSE E2E tests ────────────────────────────────────────────────────
 
 /// Check if btrfs FUSE prerequisites are met.
@@ -9598,6 +9685,96 @@ fn btrfs_fuse_xattr_posix_acl_default_missing_on_regular_file_reports_enodata() 
             Some(i64::from(libc::ENODATA)),
             "btrfs getxattr for missing system.posix_acl_default should return ENODATA: {report}"
         );
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_name_too_long_reports_enametoolong() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("xattr_name_test.txt");
+        fs::write(&path, b"xattr name length test\n").expect("create test file");
+        let original_file = fs::read(&path).expect("read original file bytes");
+
+        // xattr name suffix is limited to 255 bytes (u8::MAX)
+        let long_suffix = "a".repeat(256);
+        let long_name = format!("user.{long_suffix}");
+
+        let report = py_setxattr_report(&path, &long_name, b"value", 0);
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::ENAMETOOLONG)),
+            "btrfs xattr name > 255-byte suffix should return ENAMETOOLONG: {report}"
+        );
+
+        // Verify no side effects
+        assert_eq!(
+            fs::read(&path).expect("read file bytes after name-too-long rejection"),
+            original_file,
+            "btrfs name-too-long rejection must not mutate file contents"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_value_too_large_reports_einval() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("xattr_value_test.txt");
+        fs::write(&path, b"xattr value size test\n").expect("create test file");
+        let original_file = fs::read(&path).expect("read original file bytes");
+
+        // xattr value limit is 64KB (65536 bytes)
+        let oversized_value = vec![0x42_u8; 65537];
+
+        let report = py_setxattr_report(&path, "user.toobig", &oversized_value, 0);
+        assert_eq!(
+            report["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "btrfs xattr value > 64KB should return EINVAL: {report}"
+        );
+
+        // Verify the xattr was not created
+        assert!(
+            py_getxattr(&path, "user.toobig").is_none(),
+            "btrfs oversized xattr value should not be stored"
+        );
+
+        // Verify no side effects
+        assert_eq!(
+            fs::read(&path).expect("read file bytes after value-too-large rejection"),
+            original_file,
+            "btrfs value-too-large rejection must not mutate file contents"
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_boundary_name_length_accepted() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("xattr_boundary_name.txt");
+        fs::write(&path, b"boundary name test\n").expect("create test file");
+
+        // The maximum suffix length is 255 bytes (u8::MAX)
+        let max_suffix = "z".repeat(255);
+        let max_name = format!("user.{max_suffix}");
+
+        py_setxattr(&path, &max_name, b"boundary");
+        let readback = py_getxattr(&path, &max_name).expect("btrfs 255-byte suffix xattr should exist");
+        assert_eq!(readback, b"boundary", "btrfs boundary-length xattr should round-trip");
+    });
+}
+
+#[test]
+fn btrfs_fuse_xattr_boundary_value_size_accepted() {
+    with_btrfs_rw_mount(|mnt| {
+        let path = mnt.join("xattr_boundary_value.txt");
+        fs::write(&path, b"boundary value test\n").expect("create test file");
+
+        // The maximum value size is 64KB (65536 bytes)
+        let max_value = vec![0xAB_u8; 65536];
+
+        py_setxattr(&path, "user.maxval", &max_value);
+        let readback = py_getxattr(&path, "user.maxval").expect("btrfs 64KB xattr value should exist");
+        assert_eq!(readback, max_value, "btrfs boundary-size xattr value should round-trip");
     });
 }
 
