@@ -7428,6 +7428,34 @@ fn btrfs_fuse_unlink_and_rmdir() {
 }
 
 #[test]
+fn btrfs_fuse_rmdir_on_file_reports_enotdir() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_rmdir_on_file_reports_enotdir";
+        let path = mnt.join("rmdir-on-file.txt");
+        fs::write(&path, b"btrfs rmdir-on-file witness\n").expect("write rmdir-on-file witness");
+        let original_bytes = fs::read(&path).expect("read witness before rmdir-on-file");
+
+        let err = fs::remove_dir(&path).expect_err("rmdir on regular file should fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ENOTDIR),
+            "rmdir on a regular file should surface exact ENOTDIR: {err}"
+        );
+        assert!(
+            path.is_file(),
+            "failed rmdir on regular file must leave the file in place"
+        );
+        assert_eq!(
+            fs::read(&path).expect("read witness after failed rmdir-on-file"),
+            original_bytes,
+            "failed rmdir on regular file must not mutate file contents"
+        );
+
+        emit_scenario_result(scenario_id, "PASS", Some("errno=ENOTDIR_no_drift"));
+    });
+}
+
+#[test]
 fn btrfs_fuse_unlink_directory_reports_eisdir() {
     with_btrfs_rw_mount(|mnt| {
         assert_unlink_directory_via_remove_file_reports_eisdir(
