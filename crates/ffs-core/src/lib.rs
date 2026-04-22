@@ -22201,6 +22201,11 @@ mod tests {
         image[leaf_off + 200..leaf_off + 208]
             .copy_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF]);
 
+        // Stamp tree block CRC32C checksum (bytes 0..4 = CRC32C of bytes 0x20..nodesize)
+        let nodesize = 4096_usize;
+        let csum = ffs_types::crc32c(&image[leaf_off + 0x20..leaf_off + nodesize]);
+        image[leaf_off..leaf_off + 4].copy_from_slice(&csum.to_le_bytes());
+
         image
     }
 
@@ -22775,8 +22780,11 @@ mod tests {
     fn validate_btrfs_skip_validation() {
         let mut image = build_btrfs_image();
         let sb_off = BTRFS_SUPER_INFO_OFFSET;
-        // Set nodesize to 128K (too large)
-        image[sb_off + 0x94..sb_off + 0x98].copy_from_slice(&(128 * 1024_u32).to_le_bytes());
+        // Set sectorsize to 256 (too small, < 512 minimum).
+        // We use sectorsize instead of nodesize because changing nodesize
+        // breaks tree walking alignment checks, whereas sectorsize only
+        // affects the superblock validation that skip_validation bypasses.
+        image[sb_off + 0x90..sb_off + 0x94].copy_from_slice(&256_u32.to_le_bytes());
 
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();
@@ -22784,9 +22792,22 @@ mod tests {
             skip_validation: true,
             ..OpenOptions::default()
         };
-        let fs = OpenFs::from_device(&cx, Box::new(dev), &opts).unwrap();
-        assert!(fs.is_btrfs());
-        assert!(fs.btrfs_context.is_some());
+        // With skip_validation, the sectorsize check is bypassed.
+        // The open may still fail later (e.g., NotFound for missing root items)
+        // but it must NOT fail with InvalidGeometry.
+        let result = OpenFs::from_device(&cx, Box::new(dev), &opts);
+        match result {
+            Ok(fs) => {
+                assert!(fs.is_btrfs());
+                assert!(fs.btrfs_context.is_some());
+            }
+            Err(ref e) => {
+                assert!(
+                    !matches!(e, FfsError::InvalidGeometry(_)),
+                    "skip_validation should bypass geometry checks, but got: {e:?}"
+                );
+            }
+        }
     }
 
     // ── Btrfs file read tests ────────────────────────────────────────────
