@@ -4,42 +4,42 @@ mod cmd_evidence;
 mod cmd_repair;
 
 use cmd_repair::{
-    DEFAULT_REPAIR_OVERHEAD_RATIO, Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_FSCK,
-    RepairCoordinationOutput, append_btrfs_repair_detail, block_range_contains,
-    build_ext4_repair_group_specs, coordinate_repair_write_access,
-    detect_flavor_with_optional_btrfs_bootstrap, discover_btrfs_repair_group_specs,
-    primary_btrfs_superblock_block, probe_btrfs_repair_staleness, probe_ext4_repair_staleness,
-    recover_btrfs_corrupt_blocks, recover_primary_btrfs_superblock_from_backup,
+    append_btrfs_repair_detail, block_range_contains, build_ext4_repair_group_specs,
+    coordinate_repair_write_access, detect_flavor_with_optional_btrfs_bootstrap,
+    discover_btrfs_repair_group_specs, primary_btrfs_superblock_block,
+    probe_btrfs_repair_staleness, probe_ext4_repair_staleness, recover_btrfs_corrupt_blocks,
+    recover_primary_btrfs_superblock_from_backup,
     repair_corrupt_btrfs_superblock_mirrors_from_primary, report_has_error_or_higher_for_block,
-    scrub_range_for_repair,
+    scrub_range_for_repair, Ext4RepairStaleness, RepairCoordinationOutput,
+    DEFAULT_REPAIR_OVERHEAD_RATIO, REPAIR_COORDINATION_SCENARIO_FSCK,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use asupersync::Cx;
 use clap::{Parser, Subcommand, ValueEnum};
 use ffs_block::{BlockDevice, ByteBlockDevice, ByteDevice, FileByteDevice};
 use ffs_btrfs::{
-    BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
-    parse_inode_item, parse_root_item,
+    parse_inode_item, parse_root_item, BtrfsInodeItem, BTRFS_FS_TREE_OBJECTID,
+    BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM,
 };
 use ffs_core::{
-    BtrfsMountSelection, CrashRecoveryOutcome, Ext4DataErrPolicy, Ext4JournalReplayMode, FsFlavor,
-    FsOps, OpenFs, OpenOptions, detect_filesystem_at_path,
+    detect_filesystem_at_path, BtrfsMountSelection, CrashRecoveryOutcome, Ext4DataErrPolicy,
+    Ext4JournalReplayMode, FsFlavor, FsOps, OpenFs, OpenOptions,
 };
-use ffs_fuse::{MountConfig, MountOptions, mount_managed};
+use ffs_fuse::{mount_managed, MountConfig, MountOptions};
 use ffs_harness::ParityReport;
 use ffs_ondisk::{
+    ext4::Ext4QuotaInodes, parse_dx_root, parse_extent_tree, parse_inode_extent_tree,
     BtrfsSuperblock, Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4ExtentIndex, Ext4GroupDesc,
-    Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree, ext4::Ext4QuotaInodes, parse_dx_root,
-    parse_extent_tree, parse_inode_extent_tree,
+    Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree,
 };
 use ffs_repair::scrub::{
     BlockValidator, BtrfsSuperblockValidator, BtrfsTreeBlockValidator, CompositeValidator,
     Ext4SuperblockValidator, ScrubReport, Scrubber, Severity, ZeroCheckValidator,
 };
 use ffs_types::{
-    BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, EXT4_SUPERBLOCK_OFFSET,
-    EXT4_SUPERBLOCK_SIZE, GroupNumber, InodeNumber, MountMode,
+    BlockNumber, GroupNumber, InodeNumber, MountMode, BTRFS_SUPER_INFO_OFFSET,
+    BTRFS_SUPER_INFO_SIZE, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE,
 };
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -4122,32 +4122,34 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
         options.read_write,
     );
 
-    let cx = cli_cx();
-    let open_opts = build_mount_open_options(options);
-    let mut open_fs = match OpenFs::open_with_options(&cx, image_path, &open_opts) {
+    let mut open_fs = match open_filesystem_for_mount(image_path, options) {
         Ok(open_fs) => open_fs,
         Err(error) => {
-            log_mount_open_rejected(&operation_id, scenario_id, options.read_write, &error);
-            return Err(anyhow::Error::new(error).context(format!(
-                "failed to open filesystem image: {}",
-                image_path.display()
-            )));
+            if let Some(ffs_error) = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<ffs_error::FfsError>())
+            {
+                log_mount_open_rejected(&operation_id, scenario_id, options.read_write, ffs_error);
+            } else {
+                error!(
+                    target: "ffs::cli::mount",
+                    operation_id,
+                    scenario_id,
+                    outcome = "mount_open_rejected",
+                    error_class = "filesystem_open_failed",
+                    read_write = options.read_write,
+                    reason = %error,
+                    "mount_open_rejected"
+                );
+            }
+            return Err(error);
         }
     };
-    if !matches!(
-        options.btrfs_mount_selection,
-        BtrfsMountSelection::DefaultRoot
-    ) && !open_fs.is_btrfs()
-    {
-        bail!(
-            "{} requires a btrfs image",
-            btrfs_mount_selection_flag(&options.btrfs_mount_selection)
-        );
-    }
     emit_mount_banner(&open_fs, mountpoint, options.read_write, runtime.mode);
     emit_optional_recovery_banner(&open_fs);
 
     if options.read_write {
+        let cx = cli_cx();
         open_fs
             .enable_writes(&cx)
             .context("failed to enable write support")?;
@@ -4192,6 +4194,25 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
     );
 
     Ok(())
+}
+
+fn open_filesystem_for_mount(image_path: &Path, options: &MountCmdOptions) -> Result<OpenFs> {
+    let cx = cli_cx();
+    let open_opts = build_mount_open_options(options);
+    let open_fs = OpenFs::open_with_options(&cx, image_path, &open_opts)
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("failed to open filesystem image: {}", image_path.display()))?;
+    if !matches!(
+        options.btrfs_mount_selection,
+        BtrfsMountSelection::DefaultRoot
+    ) && !open_fs.is_btrfs()
+    {
+        bail!(
+            "{} requires a btrfs image",
+            btrfs_mount_selection_flag(&options.btrfs_mount_selection)
+        );
+    }
+    Ok(open_fs)
 }
 
 fn build_mount_open_options(options: &MountCmdOptions) -> OpenOptions {
@@ -5414,28 +5435,27 @@ fn mkfs_cmd_with_program(
 #[cfg(test)]
 mod tests {
     use super::{
-        BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
+        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
+        build_mount_open_options, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
+        ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
+        log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
+        parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
+        read_file_region, summarize_repair_staleness, unavailable_repair_info, BtrfsInodeItem,
         BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
         MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions,
-        RepairFlags, btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output,
-        build_info_output, build_mount_open_options, choose_btrfs_scrub_block_size,
-        ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
-        log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
-        parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
-        read_file_region, summarize_repair_staleness, unavailable_repair_info,
+        RepairFlags, BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM,
     };
     use crate::cmd_evidence::{
-        EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
-        load_evidence_records, load_metrics_report_for_test,
+        load_evidence_records, load_metrics_report_for_test, EvidenceHistogramBucket,
+        EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
     };
     use crate::cmd_repair::{
-        Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_REPAIR, RepairCoordinationRecord,
-        RepairCoordinationStatus, btrfs_super_mirror_offsets, build_btrfs_repair_group_spec,
-        build_repair_output, coordinate_repair_write_access, merge_scrub_reports,
-        normalize_btrfs_superblock_as_primary, partition_scrub_range,
-        repair_coordination_record_path, repair_worker_limit, select_btrfs_repair_groups,
-        select_ext4_repair_groups,
+        btrfs_super_mirror_offsets, build_btrfs_repair_group_spec, build_repair_output,
+        coordinate_repair_write_access, merge_scrub_reports, normalize_btrfs_superblock_as_primary,
+        partition_scrub_range, repair_coordination_record_path, repair_worker_limit,
+        select_btrfs_repair_groups, select_ext4_repair_groups, Ext4RepairStaleness,
+        RepairCoordinationRecord, RepairCoordinationStatus, REPAIR_COORDINATION_SCENARIO_REPAIR,
     };
     use clap::Parser;
     use ffs_block::CacheRuntimeMetricsSnapshot;
@@ -5827,6 +5847,320 @@ mod tests {
         entry
     }
 
+    fn encode_btrfs_regular_extent(disk_bytenr: u64, num_bytes: u64) -> [u8; 53] {
+        let mut extent = [0_u8; 53];
+        extent[0..8].copy_from_slice(&1_u64.to_le_bytes());
+        extent[8..16].copy_from_slice(&num_bytes.to_le_bytes());
+        extent[20] = ffs_btrfs::BTRFS_FILE_EXTENT_REG;
+        extent[21..29].copy_from_slice(&disk_bytenr.to_le_bytes());
+        extent[29..37].copy_from_slice(&num_bytes.to_le_bytes());
+        extent[37..45].copy_from_slice(&0_u64.to_le_bytes());
+        extent[45..53].copy_from_slice(&num_bytes.to_le_bytes());
+        extent
+    }
+
+    fn build_test_btrfs_root_item(
+        bytenr: u64,
+        generation: u64,
+        root_dirid: u64,
+        flags: u64,
+        uuid: [u8; 16],
+        parent_uuid: [u8; 16],
+    ) -> Vec<u8> {
+        let mut root_item = vec![0_u8; 256];
+        root_item[160..168].copy_from_slice(&generation.to_le_bytes());
+        root_item[168..176].copy_from_slice(&root_dirid.to_le_bytes());
+        root_item[176..184].copy_from_slice(&bytenr.to_le_bytes());
+        root_item[208..216].copy_from_slice(&flags.to_le_bytes());
+        root_item[216..224].copy_from_slice(&1_u64.to_le_bytes());
+        root_item[224..240].copy_from_slice(&uuid);
+        root_item[240..256].copy_from_slice(&parent_uuid);
+        let last = root_item.len() - 1;
+        root_item[last] = 0;
+        root_item
+    }
+
+    fn build_test_btrfs_root_ref(name: &str, dirid: u64, sequence: u64) -> Vec<u8> {
+        let name_bytes = name.as_bytes();
+        let mut root_ref = Vec::with_capacity(18 + name_bytes.len());
+        root_ref.extend_from_slice(&dirid.to_le_bytes());
+        root_ref.extend_from_slice(&sequence.to_le_bytes());
+        root_ref.extend_from_slice(
+            &u16::try_from(name_bytes.len())
+                .expect("btrfs test root ref name length should fit in u16")
+                .to_le_bytes(),
+        );
+        root_ref.extend_from_slice(name_bytes);
+        root_ref
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_test_btrfs_regular_file_tree(
+        image: &mut [u8],
+        leaf_logical: u64,
+        tree_objectid: u64,
+        file_objectid: u64,
+        file_name: &str,
+        file_contents: &[u8],
+        data_logical: u64,
+    ) {
+        const ROOT_INODE_DATA_OFFSET: u32 = 3200;
+        const DIR_INDEX_DATA_OFFSET: u32 = 3060;
+        const FILE_INODE_DATA_OFFSET: u32 = 2860;
+        const EXTENT_DATA_OFFSET: u32 = 2780;
+        const ROOT_DIR_OBJECTID: u64 = 256;
+
+        let leaf_offset = usize::try_from(leaf_logical).expect("leaf logical should fit");
+        write_btrfs_leaf_header(image, leaf_offset, leaf_logical, tree_objectid, 4);
+
+        let root_inode = BtrfsInodeItem {
+            generation: 1,
+            size: 4096,
+            nbytes: 4096,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            mode: 0o040_755,
+            rdev: 0,
+            atime_sec: 10,
+            atime_nsec: 0,
+            ctime_sec: 10,
+            ctime_nsec: 0,
+            mtime_sec: 10,
+            mtime_nsec: 0,
+            otime_sec: 10,
+            otime_nsec: 0,
+        }
+        .to_bytes();
+        let file_size = u64::try_from(file_contents.len()).expect("file payload length should fit");
+        let file_inode = BtrfsInodeItem {
+            generation: 1,
+            size: file_size,
+            nbytes: file_size,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            mode: 0o100_644,
+            rdev: 0,
+            atime_sec: 10,
+            atime_nsec: 0,
+            ctime_sec: 10,
+            ctime_nsec: 0,
+            mtime_sec: 10,
+            mtime_nsec: 0,
+            otime_sec: 10,
+            otime_nsec: 0,
+        }
+        .to_bytes();
+        let dir_index = encode_btrfs_dir_index_entry(
+            file_name.as_bytes(),
+            file_objectid,
+            ffs_btrfs::BTRFS_FT_REG_FILE,
+        );
+        let extent = encode_btrfs_regular_extent(data_logical, file_size);
+
+        write_btrfs_leaf_item(
+            image,
+            leaf_offset,
+            0,
+            ROOT_DIR_OBJECTID,
+            BTRFS_ITEM_INODE_ITEM,
+            0,
+            ROOT_INODE_DATA_OFFSET,
+            u32::try_from(root_inode.len()).expect("root inode size should fit"),
+        );
+        write_btrfs_leaf_item(
+            image,
+            leaf_offset,
+            1,
+            ROOT_DIR_OBJECTID,
+            ffs_btrfs::BTRFS_ITEM_DIR_INDEX,
+            2,
+            DIR_INDEX_DATA_OFFSET,
+            u32::try_from(dir_index.len()).expect("dir index size should fit"),
+        );
+        write_btrfs_leaf_item(
+            image,
+            leaf_offset,
+            2,
+            file_objectid,
+            BTRFS_ITEM_INODE_ITEM,
+            0,
+            FILE_INODE_DATA_OFFSET,
+            u32::try_from(file_inode.len()).expect("file inode size should fit"),
+        );
+        write_btrfs_leaf_item(
+            image,
+            leaf_offset,
+            3,
+            file_objectid,
+            ffs_btrfs::BTRFS_ITEM_EXTENT_DATA,
+            0,
+            EXTENT_DATA_OFFSET,
+            u32::try_from(extent.len()).expect("extent size should fit"),
+        );
+
+        let root_inode_start =
+            leaf_offset + usize::try_from(ROOT_INODE_DATA_OFFSET).expect("root inode offset fits");
+        image[root_inode_start..root_inode_start + root_inode.len()].copy_from_slice(&root_inode);
+        let dir_index_start =
+            leaf_offset + usize::try_from(DIR_INDEX_DATA_OFFSET).expect("dir index offset fits");
+        image[dir_index_start..dir_index_start + dir_index.len()].copy_from_slice(&dir_index);
+        let file_inode_start =
+            leaf_offset + usize::try_from(FILE_INODE_DATA_OFFSET).expect("file inode offset fits");
+        image[file_inode_start..file_inode_start + file_inode.len()].copy_from_slice(&file_inode);
+        let extent_start =
+            leaf_offset + usize::try_from(EXTENT_DATA_OFFSET).expect("extent offset fits");
+        image[extent_start..extent_start + extent.len()].copy_from_slice(&extent);
+        stamp_btrfs_test_tree_block_crc32c(image, leaf_offset);
+
+        let file_data_start = usize::try_from(data_logical).expect("file data logical fits");
+        image[file_data_start..file_data_start + file_contents.len()]
+            .copy_from_slice(file_contents);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn build_test_btrfs_image_with_named_mount_selections() -> Vec<u8> {
+        const ROOT_TREE_LOGICAL: u64 = 0x4_000;
+        const SUBVOL_TREE_LOGICAL: u64 = 0x8_000;
+        const SNAPSHOT_TREE_LOGICAL: u64 = 0xC_000;
+        const SUBVOL_FILE_DATA_LOGICAL: u64 = 0x12_000;
+        const SNAPSHOT_FILE_DATA_LOGICAL: u64 = 0x14_000;
+        const ROOT_DIR_OBJECTID: u64 = 256;
+        const SUBVOL_FILE_OBJECTID: u64 = 257;
+        const SNAPSHOT_FILE_OBJECTID: u64 = 258;
+        const SUBVOL_ROOT_ITEM_OFFSET: u32 = 3400;
+        const SUBVOL_ROOT_REF_OFFSET: u32 = 3320;
+        const SNAPSHOT_ROOT_ITEM_OFFSET: u32 = 3000;
+        const SNAPSHOT_ROOT_REF_OFFSET: u32 = 2920;
+
+        let image_size: usize = 512 * 1024;
+        let primary_offset = super::BTRFS_SUPER_INFO_OFFSET;
+        let subvol_id = ffs_btrfs::BTRFS_FIRST_FREE_OBJECTID;
+        let snapshot_id = subvol_id + 1;
+        let subvol_uuid = [1_u8; 16];
+        let snapshot_uuid = [2_u8; 16];
+        let mut image = vec![0_u8; image_size];
+
+        let mut sb = build_test_btrfs_superblock_with_single_chunk(
+            primary_offset as u64,
+            11,
+            0,
+            image_size as u64,
+            0,
+            2,
+        );
+        sb[0x50..0x58].copy_from_slice(&ROOT_TREE_LOGICAL.to_le_bytes());
+        sb[0x80..0x88].copy_from_slice(&ROOT_DIR_OBJECTID.to_le_bytes());
+        sb[0x88..0x90].copy_from_slice(&1_u64.to_le_bytes());
+        sb[0xC6] = 0;
+        let checksum = crc32c::crc32c(&sb[0x20..super::BTRFS_SUPER_INFO_SIZE]);
+        sb[0..4].copy_from_slice(&checksum.to_le_bytes());
+        image[primary_offset..primary_offset + super::BTRFS_SUPER_INFO_SIZE].copy_from_slice(&sb);
+
+        let root_leaf_offset = usize::try_from(ROOT_TREE_LOGICAL).expect("root tree offset fits");
+        write_btrfs_leaf_header(&mut image, root_leaf_offset, ROOT_TREE_LOGICAL, 1, 4);
+
+        let subvol_root_item = build_test_btrfs_root_item(
+            SUBVOL_TREE_LOGICAL,
+            21,
+            ROOT_DIR_OBJECTID,
+            0,
+            subvol_uuid,
+            [0_u8; 16],
+        );
+        let subvol_root_ref = build_test_btrfs_root_ref("home", ROOT_DIR_OBJECTID, 1);
+        let snapshot_root_item = build_test_btrfs_root_item(
+            SNAPSHOT_TREE_LOGICAL,
+            22,
+            ROOT_DIR_OBJECTID,
+            1,
+            snapshot_uuid,
+            subvol_uuid,
+        );
+        let snapshot_root_ref = build_test_btrfs_root_ref("snap-home", ROOT_DIR_OBJECTID, 2);
+
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf_offset,
+            0,
+            subvol_id,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            SUBVOL_ROOT_ITEM_OFFSET,
+            u32::try_from(subvol_root_item.len()).expect("subvolume root item size should fit"),
+        );
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf_offset,
+            1,
+            BTRFS_FS_TREE_OBJECTID,
+            ffs_btrfs::BTRFS_ITEM_ROOT_REF,
+            subvol_id,
+            SUBVOL_ROOT_REF_OFFSET,
+            u32::try_from(subvol_root_ref.len()).expect("subvolume root ref size should fit"),
+        );
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf_offset,
+            2,
+            snapshot_id,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            SNAPSHOT_ROOT_ITEM_OFFSET,
+            u32::try_from(snapshot_root_item.len()).expect("snapshot root item size should fit"),
+        );
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf_offset,
+            3,
+            BTRFS_FS_TREE_OBJECTID,
+            ffs_btrfs::BTRFS_ITEM_ROOT_REF,
+            snapshot_id,
+            SNAPSHOT_ROOT_REF_OFFSET,
+            u32::try_from(snapshot_root_ref.len()).expect("snapshot root ref size should fit"),
+        );
+
+        let subvol_root_item_start =
+            root_leaf_offset + usize::try_from(SUBVOL_ROOT_ITEM_OFFSET).expect("offset fits");
+        image[subvol_root_item_start..subvol_root_item_start + subvol_root_item.len()]
+            .copy_from_slice(&subvol_root_item);
+        let subvol_root_ref_start =
+            root_leaf_offset + usize::try_from(SUBVOL_ROOT_REF_OFFSET).expect("offset fits");
+        image[subvol_root_ref_start..subvol_root_ref_start + subvol_root_ref.len()]
+            .copy_from_slice(&subvol_root_ref);
+        let snapshot_root_item_start =
+            root_leaf_offset + usize::try_from(SNAPSHOT_ROOT_ITEM_OFFSET).expect("offset fits");
+        image[snapshot_root_item_start..snapshot_root_item_start + snapshot_root_item.len()]
+            .copy_from_slice(&snapshot_root_item);
+        let snapshot_root_ref_start =
+            root_leaf_offset + usize::try_from(SNAPSHOT_ROOT_REF_OFFSET).expect("offset fits");
+        image[snapshot_root_ref_start..snapshot_root_ref_start + snapshot_root_ref.len()]
+            .copy_from_slice(&snapshot_root_ref);
+        stamp_btrfs_test_tree_block_crc32c(&mut image, root_leaf_offset);
+
+        write_test_btrfs_regular_file_tree(
+            &mut image,
+            SUBVOL_TREE_LOGICAL,
+            subvol_id,
+            SUBVOL_FILE_OBJECTID,
+            "selected.txt",
+            b"hello from subvolume root\n",
+            SUBVOL_FILE_DATA_LOGICAL,
+        );
+        write_test_btrfs_regular_file_tree(
+            &mut image,
+            SNAPSHOT_TREE_LOGICAL,
+            snapshot_id,
+            SNAPSHOT_FILE_OBJECTID,
+            "selected.txt",
+            b"hello from snapshot root\n",
+            SNAPSHOT_FILE_DATA_LOGICAL,
+        );
+
+        image
+    }
+
     #[allow(clippy::too_many_lines)]
     fn build_test_btrfs_image_with_dir_index_entry() -> Vec<u8> {
         let image_size: usize = 512 * 1024;
@@ -6112,11 +6446,9 @@ mod tests {
             let records = load_evidence_records(&path, Some("repair_failed"), None, None)
                 .expect("filtered evidence read should succeed");
             assert_eq!(records.len(), 2);
-            assert!(
-                records
-                    .iter()
-                    .all(|record| record.event_type == EvidenceEventType::RepairFailed)
-            );
+            assert!(records
+                .iter()
+                .all(|record| record.event_type == EvidenceEventType::RepairFailed));
             assert_eq!(records[0].block_group, 2);
             assert_eq!(records[1].block_group, 3);
         });
@@ -6215,11 +6547,9 @@ mod tests {
                 .expect("repair-failures preset should work");
             assert_eq!(records.len(), 5);
             // wal_recovery should be excluded
-            assert!(
-                records
-                    .iter()
-                    .all(|r| r.event_type != EvidenceEventType::WalRecovery)
-            );
+            assert!(records
+                .iter()
+                .all(|r| r.event_type != EvidenceEventType::WalRecovery));
         });
     }
 
@@ -6237,11 +6567,9 @@ mod tests {
                 .expect("pressure-transitions preset should work");
             assert_eq!(records.len(), 4);
             // repair_failed should be excluded
-            assert!(
-                records
-                    .iter()
-                    .all(|r| r.event_type != EvidenceEventType::RepairFailed)
-            );
+            assert!(records
+                .iter()
+                .all(|r| r.event_type != EvidenceEventType::RepairFailed));
         });
     }
 
@@ -6259,11 +6587,9 @@ mod tests {
             let records = load_evidence_records(&path, None, None, Some("contention"))
                 .expect("contention preset should work");
             assert_eq!(records.len(), 5);
-            assert!(
-                records
-                    .iter()
-                    .all(|r| r.event_type != EvidenceEventType::RepairFailed)
-            );
+            assert!(records
+                .iter()
+                .all(|r| r.event_type != EvidenceEventType::RepairFailed));
             assert_eq!(records[0].event_type, EvidenceEventType::MergeProofChecked);
             assert_eq!(records[1].event_type, EvidenceEventType::MergeApplied);
             assert_eq!(records[2].event_type, EvidenceEventType::PolicySwitched);
@@ -6374,7 +6700,7 @@ mod tests {
 
     #[test]
     fn preset_event_types_returns_none_for_unknown() {
-        use crate::cmd_evidence::{KNOWN_PRESETS, preset_event_types};
+        use crate::cmd_evidence::{preset_event_types, KNOWN_PRESETS};
         assert!(preset_event_types("nonexistent").is_none());
         for name in KNOWN_PRESETS {
             assert!(
@@ -6669,11 +6995,9 @@ mod tests {
         with_temp_image_path(b"{}", |path| {
             let err = load_metrics_report_for_test(&path, "not-a-real-preset")
                 .expect_err("unsupported metrics preset should fail");
-            assert!(
-                err.to_string().contains(
-                    "metrics report requested for unsupported preset 'not-a-real-preset'"
-                )
-            );
+            assert!(err
+                .to_string()
+                .contains("metrics report requested for unsupported preset 'not-a-real-preset'"));
         });
     }
 
@@ -6704,10 +7028,9 @@ mod tests {
                     true,
                 )
                 .expect_err("metrics preset should reject --summary");
-                assert!(
-                    err.to_string()
-                        .contains("--summary is only supported for ledger-backed evidence presets")
-                );
+                assert!(err
+                    .to_string()
+                    .contains("--summary is only supported for ledger-backed evidence presets"));
             },
         );
     }
@@ -6739,10 +7062,9 @@ mod tests {
                     false,
                 )
                 .expect_err("metrics preset should reject --tail");
-                assert!(
-                    err.to_string()
-                        .contains("--tail is only supported for ledger-backed evidence presets")
-                );
+                assert!(err
+                    .to_string()
+                    .contains("--tail is only supported for ledger-backed evidence presets"));
             },
         );
     }
@@ -7147,16 +7469,12 @@ mod tests {
         assert_eq!(json["command"], "repair");
         assert_eq!(json["level"], "INFO");
         assert_eq!(json["target"], "ffs::test");
-        assert!(
-            json["operation_id"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-        );
-        assert!(
-            json["coordination_file"]
-                .as_str()
-                .is_some_and(|value| { value.ends_with(".ffs-repair-owner.json") })
-        );
+        assert!(json["operation_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert!(json["coordination_file"]
+            .as_str()
+            .is_some_and(|value| { value.ends_with(".ffs-repair-owner.json") }));
         assert_eq!(json["local_host"], json["owner_host"]);
     }
 
@@ -7199,11 +7517,9 @@ mod tests {
         assert_eq!(json["level"], "WARN");
         assert_eq!(json["target"], "ffs::test");
         assert_eq!(json["owner_host"], "remote-host");
-        assert!(
-            json["operation_id"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
-        );
+        assert!(json["operation_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
     }
 
     #[test]
@@ -7528,6 +7844,9 @@ mod tests {
                 message.contains("btrfs subvolume `missing`"),
                 "expected stable missing subvolume detail, got: {message}"
             );
+            println!(
+                "SCENARIO_RESULT|scenario_id=cli_mount_btrfs_missing_subvolume_open_error|outcome=PASS|detail=missing=NotFound"
+            );
         });
     }
 
@@ -7563,6 +7882,122 @@ mod tests {
             assert!(
                 message.contains("btrfs snapshot `missing-snapshot`"),
                 "expected stable missing snapshot detail, got: {message}"
+            );
+            println!(
+                "SCENARIO_RESULT|scenario_id=cli_mount_btrfs_missing_snapshot_open_error|outcome=PASS|detail=missing=NotFound"
+            );
+        });
+    }
+
+    #[test]
+    fn open_filesystem_for_mount_scopes_named_btrfs_subvolume_operator_path() {
+        let image = build_test_btrfs_image_with_named_mount_selections();
+        with_temp_image_path(&image, |path| {
+            let fs = open_filesystem_for_mount(
+                &path,
+                &MountCmdOptions {
+                    allow_other: false,
+                    read_write: false,
+                    mount_mode: MountMode::Compat,
+                    btrfs_mount_selection: BtrfsMountSelection::Subvolume("home".to_owned()),
+                    ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                    ext4_verify_journal_checksums: true,
+                    runtime: MountRuntimeConfig {
+                        mode: MountRuntimeMode::Standard,
+                        managed_unmount_timeout_secs: None,
+                    },
+                },
+            )
+            .expect("named btrfs subvolume should open through mount operator path");
+
+            let cx = asupersync::Cx::for_testing();
+            let ctx = fs.btrfs_context().expect("btrfs context should be present");
+            assert_eq!(ctx.subvol_objectid, ffs_btrfs::BTRFS_FIRST_FREE_OBJECTID);
+            assert_eq!(ctx.subvol_root_dirid, 256);
+
+            let root_attr = fs
+                .getattr(&cx, ffs_types::InodeNumber(1))
+                .expect("get mounted subvolume root");
+            assert_eq!(root_attr.ino, ffs_types::InodeNumber(1));
+
+            let child = fs
+                .lookup(
+                    &cx,
+                    ffs_types::InodeNumber(1),
+                    std::ffi::OsStr::new("selected.txt"),
+                )
+                .expect("lookup file through selected subvolume root");
+            let entries = fs
+                .readdir(&cx, ffs_types::InodeNumber(1), 0)
+                .expect("readdir selected subvolume root");
+            let data = fs
+                .read(&cx, child.ino, 0, 128)
+                .expect("read selected subvolume file");
+
+            assert_eq!(entries.len(), 3);
+            assert_eq!(entries[2].name, b"selected.txt");
+            assert_eq!(&data, b"hello from subvolume root\n");
+
+            println!(
+                "SCENARIO_RESULT|scenario_id=cli_mount_btrfs_named_subvolume_operator_path|outcome=PASS|detail=selector=home_root_scoped=selected.txt"
+            );
+        });
+    }
+
+    #[test]
+    fn open_filesystem_for_mount_scopes_named_btrfs_snapshot_operator_path() {
+        let image = build_test_btrfs_image_with_named_mount_selections();
+        with_temp_image_path(&image, |path| {
+            let fs = open_filesystem_for_mount(
+                &path,
+                &MountCmdOptions {
+                    allow_other: false,
+                    read_write: false,
+                    mount_mode: MountMode::Compat,
+                    btrfs_mount_selection: BtrfsMountSelection::Snapshot("snap-home".to_owned()),
+                    ext4_data_err_policy: Ext4DataErrPolicy::Ignore,
+                    ext4_verify_journal_checksums: true,
+                    runtime: MountRuntimeConfig {
+                        mode: MountRuntimeMode::Standard,
+                        managed_unmount_timeout_secs: None,
+                    },
+                },
+            )
+            .expect("named btrfs snapshot should open through mount operator path");
+
+            let cx = asupersync::Cx::for_testing();
+            let ctx = fs.btrfs_context().expect("btrfs context should be present");
+            assert_eq!(
+                ctx.subvol_objectid,
+                ffs_btrfs::BTRFS_FIRST_FREE_OBJECTID + 1
+            );
+            assert_eq!(ctx.subvol_root_dirid, 256);
+
+            let root_attr = fs
+                .getattr(&cx, ffs_types::InodeNumber(1))
+                .expect("get mounted snapshot root");
+            assert_eq!(root_attr.ino, ffs_types::InodeNumber(1));
+
+            let child = fs
+                .lookup(
+                    &cx,
+                    ffs_types::InodeNumber(1),
+                    std::ffi::OsStr::new("selected.txt"),
+                )
+                .expect("lookup file through selected snapshot root");
+            let entries = fs
+                .readdir(&cx, ffs_types::InodeNumber(1), 0)
+                .expect("readdir selected snapshot root");
+            let data = fs
+                .read(&cx, child.ino, 0, 128)
+                .expect("read selected snapshot file");
+
+            assert_eq!(entries.len(), 3);
+            assert_eq!(entries[2].name, b"selected.txt");
+            assert_eq!(&data, b"hello from snapshot root\n");
+
+            println!(
+                "SCENARIO_RESULT|scenario_id=cli_mount_btrfs_named_snapshot_operator_path|outcome=PASS|detail=selector=snap-home_root_scoped=selected.txt"
             );
         });
     }
@@ -9128,12 +9563,10 @@ mod tests {
             assert_eq!(output.group, 0);
             assert!(output.descriptor.is_none());
             assert!(output.raw_hex.is_none());
-            assert!(
-                output
-                    .limitations
-                    .iter()
-                    .any(|limitation| limitation.contains("raw hex for btrfs chunk dump"))
-            );
+            assert!(output
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("raw hex for btrfs chunk dump")));
 
             let chunk = output
                 .btrfs_chunk
@@ -9168,11 +9601,10 @@ mod tests {
             assert_eq!(parsed.gid, 1000);
             assert_eq!(parsed.nlink, 2);
             assert!(output.raw_hex.as_ref().is_some_and(|raw| !raw.is_empty()));
-            assert!(
-                output.limitations.iter().any(|limitation| {
-                    limitation.contains("inode 1 maps to btrfs root objectid")
-                })
-            );
+            assert!(output
+                .limitations
+                .iter()
+                .any(|limitation| { limitation.contains("inode 1 maps to btrfs root objectid") }));
         });
     }
 
@@ -9188,12 +9620,10 @@ mod tests {
             assert!(output.htree.is_none());
             // The root-only fixture has no on-disk directory-entry items.
             assert!(output.raw_hex_blocks.is_some());
-            assert!(
-                output
-                    .raw_hex_blocks
-                    .as_ref()
-                    .is_some_and(std::vec::Vec::is_empty)
-            );
+            assert!(output
+                .raw_hex_blocks
+                .as_ref()
+                .is_some_and(std::vec::Vec::is_empty));
             assert!(output.entries.iter().all(|entry| entry.rec_len == 0));
             assert!(output.entries.iter().any(|entry| entry.name == "."));
             assert!(output.entries.iter().any(|entry| entry.name == ".."));
@@ -9215,16 +9645,12 @@ mod tests {
                 .as_ref()
                 .expect("btrfs hex dump should include raw blocks");
             assert!(!raw_hex_blocks.is_empty());
-            assert!(
-                raw_hex_blocks
-                    .iter()
-                    .any(|block| block.item_kind.as_deref() == Some("dir_index"))
-            );
-            assert!(
-                raw_hex_blocks
-                    .iter()
-                    .all(|block| !block.hex.trim().is_empty())
-            );
+            assert!(raw_hex_blocks
+                .iter()
+                .any(|block| block.item_kind.as_deref() == Some("dir_index")));
+            assert!(raw_hex_blocks
+                .iter()
+                .all(|block| !block.hex.trim().is_empty()));
             assert!(output.entries.iter().any(|entry| entry.name == "hello.txt"));
         });
     }
@@ -9404,11 +9830,9 @@ mod tests {
 
         let flags = btrfs_chunk_type_flag_names(1 | (1_u64 << 9));
         assert!(flags.iter().any(|flag| flag == "DATA"));
-        assert!(
-            flags
-                .iter()
-                .any(|flag| flag.starts_with("UNKNOWN(0x0000000000000200)"))
-        );
+        assert!(flags
+            .iter()
+            .any(|flag| flag.starts_with("UNKNOWN(0x0000000000000200)")));
     }
 
     #[test]
@@ -9467,12 +9891,10 @@ mod tests {
             .expect("checksum_scrub phase should be present");
         assert_eq!(scrub_phase.status, "skipped");
         assert!(scrub_phase.detail.contains("pass --force for full scrub"));
-        assert!(
-            output
-                .limitations
-                .iter()
-                .any(|limitation| limitation.contains("skipped block-level scrub"))
-        );
+        assert!(output
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("skipped block-level scrub")));
     }
 
     #[test]
@@ -9497,12 +9919,10 @@ mod tests {
             .find(|phase| phase.phase == "checksum_scrub")
             .expect("checksum_scrub phase should be present");
         assert_eq!(scrub_phase.status, "ok");
-        assert!(
-            !output
-                .limitations
-                .iter()
-                .any(|limitation| limitation.contains("skipped block-level scrub"))
-        );
+        assert!(!output
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("skipped block-level scrub")));
     }
 
     #[test]
@@ -9573,11 +9993,9 @@ mod tests {
             select_btrfs_repair_groups(RepairFlags::empty(), &all, &staleness, &mut limitations);
 
         assert_eq!(selected, vec![1, 3]);
-        assert!(
-            limitations
-                .iter()
-                .any(|limitation| limitation.contains("selected 2/4 btrfs groups"))
-        );
+        assert!(limitations
+            .iter()
+            .any(|limitation| limitation.contains("selected 2/4 btrfs groups")));
     }
 
     #[test]
@@ -9617,12 +10035,10 @@ mod tests {
             .expect("build repair output for verify-only rebuild request")
         });
 
-        assert!(
-            output
-                .limitations
-                .iter()
-                .any(|limitation| limitation.contains("ignored when --verify-only"))
-        );
+        assert!(output
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("ignored when --verify-only")));
         assert!(matches!(
             output.action,
             super::RepairActionOutput::VerifyOnly
@@ -9776,12 +10192,10 @@ mod tests {
             super::RepairActionOutput::RepairRequested
         ));
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
-        assert!(
-            output
-                .limitations
-                .iter()
-                .any(|limitation| limitation.contains("restored primary btrfs superblock"))
-        );
+        assert!(output
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("restored primary btrfs superblock")));
     }
 
     #[test]
@@ -9834,12 +10248,10 @@ mod tests {
         );
         assert_eq!(output.exit_code, 2);
         assert!(backup_still_corrupt);
-        assert!(
-            output
-                .limitations
-                .iter()
-                .any(|limitation| { limitation.contains("Multi-host repair is out of scope") })
-        );
+        assert!(output
+            .limitations
+            .iter()
+            .any(|limitation| { limitation.contains("Multi-host repair is out of scope") }));
     }
 
     #[test]
@@ -10020,11 +10432,9 @@ mod tests {
             .find(|phase| phase.phase == "repair")
             .expect("repair phase should be present");
         assert_eq!(repair_phase.status, "ok");
-        assert!(
-            repair_phase
-                .detail
-                .contains("restored primary btrfs superblock")
-        );
+        assert!(repair_phase
+            .detail
+            .contains("restored primary btrfs superblock"));
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
         assert!(output.scrub.scanned > 0);
     }
@@ -10139,11 +10549,9 @@ mod tests {
             .find(|phase| phase.phase == "repair")
             .expect("repair phase should be present");
         assert_eq!(repair_phase.status, "ok");
-        assert!(
-            repair_phase
-                .detail
-                .contains("restored 1 btrfs superblock mirror(s) from primary superblock")
-        );
+        assert!(repair_phase
+            .detail
+            .contains("restored 1 btrfs superblock mirror(s) from primary superblock"));
         assert_eq!(parsed_backup.bytenr, backup_offset as u64);
     }
 
@@ -10189,11 +10597,10 @@ mod tests {
             super::RepairActionOutput::RepairRequested
         ));
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
-        assert!(
-            output.limitations.iter().any(
-                |limitation| limitation.contains("bootstrap restored primary btrfs superblock")
-            )
-        );
+        assert!(output
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("bootstrap restored primary btrfs superblock")));
     }
 
     #[test]
@@ -10242,11 +10649,9 @@ mod tests {
             .find(|phase| phase.phase == "repair")
             .expect("repair phase should be present");
         assert_eq!(repair_phase.status, "ok");
-        assert!(
-            repair_phase
-                .detail
-                .contains("bootstrap restored primary btrfs superblock")
-        );
+        assert!(repair_phase
+            .detail
+            .contains("bootstrap restored primary btrfs superblock"));
         assert_eq!(parsed_primary.bytenr, primary_offset as u64);
         assert!(output.scrub.scanned > 0);
     }
