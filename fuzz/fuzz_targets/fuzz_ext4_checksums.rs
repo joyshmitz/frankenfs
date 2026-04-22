@@ -13,6 +13,9 @@ fuzz_target!(|data: &[u8]| {
 
     // Superblock-dependent checks.
     if let Ok(sb) = ffs_ondisk::Ext4Superblock::parse_superblock_region(data) {
+        let desc_size = sb.group_desc_size();
+        let checksum_kind = sb.group_desc_checksum_kind();
+
         // Inode checksum verification.
         let _ = ffs_ondisk::verify_inode_checksum(data, sb.checksum_seed, 2, 256);
 
@@ -23,7 +26,14 @@ fuzz_target!(|data: &[u8]| {
         let _ = ffs_ondisk::verify_extent_block_checksum(data, sb.checksum_seed, 11, 1);
 
         // Group descriptor checksum verification.
-        let _ = ffs_ondisk::verify_group_desc_checksum(data, sb.checksum_seed, 0, 64);
+        let _ = ffs_ondisk::verify_group_desc_checksum(
+            data,
+            &sb.uuid,
+            sb.checksum_seed,
+            0,
+            desc_size,
+            checksum_kind,
+        );
     }
 
     // Inode parsing then derived operations.
