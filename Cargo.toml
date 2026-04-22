@@ -80,7 +80,7 @@ lzokay-native = "0.1"
 
 # Sibling project dependencies (crates.io; local path overrides via [patch] if needed)
 asupersync = "0.3.1"
-ftui = "0.2.1"
+ftui = "0.3.1"
 
 # Workspace crate cross-references
 ffs = { path = "crates/ffs" }
