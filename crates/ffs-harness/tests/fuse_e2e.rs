@@ -2346,6 +2346,16 @@ fn fuse_rmdir_on_file_reports_enotdir() {
 }
 
 #[test]
+fn fuse_unlink_directory_reports_eisdir() {
+    with_rw_mount(|mnt| {
+        assert_unlink_directory_via_remove_file_reports_eisdir(
+            mnt,
+            "ext4_rw_unlink_directory_reports_eisdir",
+        );
+    });
+}
+
+#[test]
 fn fuse_rmdir_non_empty_fails() {
     with_rw_mount(|mnt| {
         let dir = mnt.join("non_empty_dir");
@@ -6033,6 +6043,41 @@ fn snapshot_directory_entries(path: &Path) -> HashSet<String> {
         .collect()
 }
 
+fn assert_unlink_directory_via_remove_file_reports_eisdir(mnt: &Path, scenario_id: &str) {
+    let dir = mnt.join("unlink_directory_target");
+    fs::create_dir(&dir).expect("create directory unlink target");
+    let child = dir.join("child.txt");
+    fs::write(&child, b"child").expect("seed child beneath unlink target");
+
+    let root_entries_before = snapshot_directory_entries(mnt);
+    let dir_entries_before = snapshot_directory_entries(&dir);
+    let child_before = snapshot_file_state(&child);
+
+    let err = fs::remove_file(&dir).expect_err("unlink on directory should fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::EISDIR),
+        "unlink on a directory should surface exact EISDIR: {err}"
+    );
+    assert!(
+        dir.is_dir(),
+        "failed unlink on directory must leave the directory in place"
+    );
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        root_entries_before,
+        "failed unlink on directory must not change visible root entries"
+    );
+    assert_eq!(
+        snapshot_directory_entries(&dir),
+        dir_entries_before,
+        "failed unlink on directory must not change child entries"
+    );
+    assert_file_state_unchanged(&child, &child_before, "directory unlink rejection");
+
+    emit_scenario_result(scenario_id, "PASS", Some("errno=EISDIR_no_drift"));
+}
+
 fn assert_read_only_flush_contract(path: &Path, scenario_id: &str) {
     let before = snapshot_file_state(path);
     let mut file = fs::File::open(path).expect("open file for read-only flush contract");
@@ -7283,6 +7328,16 @@ fn btrfs_fuse_unlink_and_rmdir() {
         assert!(dir.exists());
         fs::remove_dir(&dir).expect("rmdir on btrfs");
         assert!(!dir.exists());
+    });
+}
+
+#[test]
+fn btrfs_fuse_unlink_directory_reports_eisdir() {
+    with_btrfs_rw_mount(|mnt| {
+        assert_unlink_directory_via_remove_file_reports_eisdir(
+            mnt,
+            "btrfs_rw_unlink_directory_reports_eisdir",
+        );
     });
 }
 

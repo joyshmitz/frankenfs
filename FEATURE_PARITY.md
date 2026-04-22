@@ -100,6 +100,8 @@ Mounted-path ext4 write-path coverage now also freezes exact `EISDIR` for
 opening a directory for write, with no directory-entry drift and no child-file drift.
 Mounted-path btrfs write-path coverage now also freezes exact `EISDIR` for
 opening a directory for write, with no directory-entry drift and no child-file drift.
+Mounted-path unlink-vs-directory coverage now also freezes exact `EISDIR` for
+directory targets on both ext4 and btrfs, with no directory-entry or child-file drift.
 Mounted-path btrfs namespace-refusal coverage now also freezes exact `ENOTDIR`
 for create and mkdir attempts beneath a regular-file parent, with no visible
 workspace-entry or parent-file drift.
