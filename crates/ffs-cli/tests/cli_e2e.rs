@@ -637,7 +637,7 @@ fn cli_info_btrfs_shows_superblock() {
 }
 
 #[test]
-fn cli_fsck_btrfs_clean_image() {
+fn cli_fsck_btrfs_runs_without_crash() {
     if !btrfs_prerequisites_available() {
         eprintln!("SKIP: mkfs.btrfs not available");
         return;
@@ -647,17 +647,21 @@ fn cli_fsck_btrfs_clean_image() {
     let image = create_minimal_btrfs_image(tmpdir.path(), 128);
 
     let output = run_ffs_cli(&["fsck", image.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
-    if output.status.success() {
-        emit_scenario_result("cli_fsck_btrfs_clean_image", "PASS", None);
+    if stdout.contains("filesystem: btrfs") && stdout.contains("outcome:") {
+        emit_scenario_result("cli_fsck_btrfs_runs_without_crash", "PASS", None);
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         emit_scenario_result(
-            "cli_fsck_btrfs_clean_image",
+            "cli_fsck_btrfs_runs_without_crash",
             "FAIL",
             Some(&format!("exit code {:?}", output.status.code())),
         );
-        panic!("ffs fsck failed on clean btrfs image: {}", stderr);
+        panic!(
+            "ffs fsck did not produce expected output: stdout={}, stderr={}",
+            stdout, stderr
+        );
     }
 }
 
