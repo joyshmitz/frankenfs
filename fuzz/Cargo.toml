@@ -148,6 +148,11 @@ path = "fuzz_targets/fuzz_openfs_mvcc_wal_recovery.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_path_component_validation"
+path = "fuzz_targets/fuzz_path_component_validation.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_ioctl_dispatch"
 path = "fuzz_targets/fuzz_ioctl_dispatch.rs"
 doc = false
