@@ -331,3 +331,170 @@ fn cli_repair_verify_only_ext4() {
         }
     }
 }
+
+#[test]
+fn cli_inspect_corrupted_superblock_returns_error() {
+    if !cli_prerequisites_available() {
+        eprintln!("SKIP: mkfs.ext4 or debugfs not available");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = create_minimal_ext4_image(tmpdir.path(), 4);
+
+    let mut data = fs::read(&image).expect("read image");
+    let sb_off = 1024;
+    data[sb_off..sb_off + 64].fill(0xFF);
+    fs::write(&image, data).expect("write corrupted image");
+
+    let output = run_ffs_cli(&["inspect", image.to_str().unwrap()]);
+
+    if !output.status.success() {
+        emit_scenario_result("cli_inspect_corrupted_superblock_error", "PASS", None);
+    } else {
+        emit_scenario_result(
+            "cli_inspect_corrupted_superblock_error",
+            "FAIL",
+            Some("expected error for corrupted superblock"),
+        );
+        panic!("expected ffs inspect to fail on corrupted superblock");
+    }
+}
+
+#[test]
+fn cli_inspect_zero_filled_image_returns_error() {
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = tmpdir.path().join("zeros.img");
+
+    fs::write(&image, vec![0u8; 4 * 1024 * 1024]).expect("write zero-filled image");
+
+    let output = run_ffs_cli(&["inspect", image.to_str().unwrap()]);
+
+    if !output.status.success() {
+        emit_scenario_result("cli_inspect_zero_filled_error", "PASS", None);
+    } else {
+        emit_scenario_result(
+            "cli_inspect_zero_filled_error",
+            "FAIL",
+            Some("expected error for zero-filled image"),
+        );
+        panic!("expected ffs inspect to fail on zero-filled image");
+    }
+}
+
+#[test]
+fn cli_fsck_corrupted_superblock_reports_error() {
+    if !cli_prerequisites_available() {
+        eprintln!("SKIP: mkfs.ext4 or debugfs not available");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = create_minimal_ext4_image(tmpdir.path(), 4);
+
+    let mut data = fs::read(&image).expect("read image");
+    let sb_off = 1024;
+    data[sb_off..sb_off + 64].fill(0xFF);
+    fs::write(&image, data).expect("write corrupted image");
+
+    let output = run_ffs_cli(&["fsck", image.to_str().unwrap()]);
+
+    if !output.status.success() {
+        emit_scenario_result("cli_fsck_corrupted_superblock_error", "PASS", None);
+    } else {
+        emit_scenario_result(
+            "cli_fsck_corrupted_superblock_error",
+            "FAIL",
+            Some("expected error for corrupted superblock"),
+        );
+        panic!("expected ffs fsck to fail on corrupted superblock");
+    }
+}
+
+#[test]
+fn cli_inspect_random_garbage_returns_error() {
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = tmpdir.path().join("garbage.img");
+
+    let mut rng_data = vec![0u8; 4 * 1024 * 1024];
+    for (i, byte) in rng_data.iter_mut().enumerate() {
+        *byte = ((i * 7 + 13) % 256) as u8;
+    }
+    fs::write(&image, rng_data).expect("write garbage image");
+
+    let output = run_ffs_cli(&["inspect", image.to_str().unwrap()]);
+
+    if !output.status.success() {
+        emit_scenario_result("cli_inspect_random_garbage_error", "PASS", None);
+    } else {
+        emit_scenario_result(
+            "cli_inspect_random_garbage_error",
+            "FAIL",
+            Some("expected error for random garbage image"),
+        );
+        panic!("expected ffs inspect to fail on random garbage image");
+    }
+}
+
+#[test]
+fn cli_info_truncated_image_returns_error() {
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = tmpdir.path().join("truncated.img");
+
+    fs::write(&image, vec![0u8; 2048]).expect("write truncated image");
+
+    let output = run_ffs_cli(&["info", image.to_str().unwrap()]);
+
+    if !output.status.success() {
+        emit_scenario_result("cli_info_truncated_error", "PASS", None);
+    } else {
+        emit_scenario_result(
+            "cli_info_truncated_error",
+            "FAIL",
+            Some("expected error for truncated image"),
+        );
+        panic!("expected ffs info to fail on truncated image");
+    }
+}
+
+#[test]
+fn cli_fsck_truncated_image_returns_error() {
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = tmpdir.path().join("truncated.img");
+
+    fs::write(&image, vec![0u8; 2048]).expect("write truncated image");
+
+    let output = run_ffs_cli(&["fsck", image.to_str().unwrap()]);
+
+    if !output.status.success() {
+        emit_scenario_result("cli_fsck_truncated_error", "PASS", None);
+    } else {
+        emit_scenario_result(
+            "cli_fsck_truncated_error",
+            "FAIL",
+            Some("expected error for truncated image"),
+        );
+        panic!("expected ffs fsck to fail on truncated image");
+    }
+}
+
+#[test]
+fn cli_repair_truncated_image_returns_error() {
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = tmpdir.path().join("truncated.img");
+
+    fs::write(&image, vec![0u8; 2048]).expect("write truncated image");
+
+    let output = run_ffs_cli(&["repair", "--verify-only", image.to_str().unwrap()]);
+
+    if !output.status.success() {
+        emit_scenario_result("cli_repair_truncated_error", "PASS", None);
+    } else {
+        emit_scenario_result(
+            "cli_repair_truncated_error",
+            "FAIL",
+            Some("expected error for truncated image"),
+        );
+        panic!("expected ffs repair to fail on truncated image");
+    }
+}
