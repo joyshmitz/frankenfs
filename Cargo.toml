@@ -48,7 +48,7 @@ doc_markdown = { level = "allow", priority = 1 }
 # External dependencies
 anyhow = "1.0.102"
 arc-swap = "1.9.1"
-bitflags = "2.9.0"
+bitflags = "2.11.1"
 blake3 = "1.6.0"
 clap = { version = "4.5.0", features = ["derive"] }
 crc32c = "0.6.8"
