@@ -37,6 +37,7 @@ const FIEMAP_REQUEST_FLAG_XATTR: u32 = 0x0002;
 const FIEMAP_EXTENT_LAST_FLAG: u32 = 0x0001;
 const FIEMAP_EXTENT_UNWRITTEN_FLAG: u32 = 0x0800;
 const FS_IOC_GET_ENCRYPTION_POLICY_CMD: u32 = 0x400C_6615;
+const FS_IOC_GET_ENCRYPTION_POLICY_EX_CMD: u32 = 0xC016_6616;
 const FS_IOC_GETFSLABEL_CMD: u32 = 0x8100_9431;
 const FS_IOC_SETFSLABEL_CMD: u32 = 0x4100_9432;
 const EXT4_IOC_GETFLAGS_CMD: u32 = 0x8008_6601;
@@ -1478,6 +1479,59 @@ with open(sys.argv[1], 'rb', buffering=0) as fh:
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("decode encryption policy ioctl JSON")
+}
+
+fn ext4_get_encryption_policy_ex_ioctl(path: &Path) -> Value {
+    let script = r"
+import fcntl, json, struct, sys
+
+FS_IOC_GET_ENCRYPTION_POLICY_EX = 0xC0166616
+FSCRYPT_POLICY_V1_SIZE = 12
+FSCRYPT_POLICY_V2_SIZE = 24
+HEADER_SIZE = 8
+
+with open(sys.argv[1], 'rb', buffering=0) as fh:
+    buffer = bytearray(HEADER_SIZE + FSCRYPT_POLICY_V2_SIZE)
+    struct.pack_into('<Q', buffer, 0, FSCRYPT_POLICY_V2_SIZE)
+    try:
+        fcntl.ioctl(fh.fileno(), FS_IOC_GET_ENCRYPTION_POLICY_EX, buffer, True)
+        actual_size = struct.unpack_from('<Q', buffer, 0)[0]
+        policy = buffer[HEADER_SIZE:HEADER_SIZE + actual_size]
+        version = policy[0] if len(policy) > 0 else 255
+        result = {
+            'policy_size': actual_size,
+            'policy_version': version,
+            'policy_hex': policy.hex(),
+        }
+        if version == 0 and actual_size >= FSCRYPT_POLICY_V1_SIZE:
+            result['contents_mode'] = policy[1]
+            result['filenames_mode'] = policy[2]
+            result['flags'] = policy[3]
+            result['master_key_descriptor_hex'] = policy[4:12].hex()
+        elif version == 2 and actual_size >= FSCRYPT_POLICY_V2_SIZE:
+            result['contents_mode'] = policy[1]
+            result['filenames_mode'] = policy[2]
+            result['flags'] = policy[3]
+            result['master_key_identifier_hex'] = policy[8:24].hex()
+        print(json.dumps(result))
+    except OSError as exc:
+        print(json.dumps({
+            'errno': exc.errno,
+            'message': str(exc),
+        }))
+        sys.exit(0)
+    ";
+
+    let output = Command::new("python3")
+        .args(["-c", script, path.to_str().expect("path utf8")])
+        .output()
+        .expect("python3 get encryption policy ex ioctl");
+    assert!(
+        output.status.success(),
+        "python3 get encryption policy ex ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode encryption policy ex ioctl JSON")
 }
 
 fn fs_label_ioctl(path: &Path, command: &str, label: Option<&str>) -> Value {
@@ -4765,6 +4819,94 @@ fn fuse_ioctl_ext4_get_encryption_policy_v1_reports_legacy_policy_on_mounted_pat
         "expected the legacy policy ioctl to return exactly 12 bytes: {report}"
     );
     emit_scenario_result(scenario_id, "PASS", Some("policy_version=0_v1"));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fuse_ioctl_ext4_get_encryption_policy_ex_returns_v1_policy_on_mounted_path() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = build_ext4_fscrypt_policy_image(true);
+    let image_path = tmp.path().join("fscrypt-policy-ex-v1.ext4");
+    fs::write(&image_path, image).expect("write fscrypt policy-ex image");
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let ioctl_trace_path: PathBuf = tmp.path().join("ioctl-ext4-encryption-policy-ex.log");
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_with_options(&image_path, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let scenario_id = "ext4_ioctl_get_encryption_policy_ex_v1";
+    let path = mnt.join("policy.txt");
+    let report = ext4_get_encryption_policy_ex_ioctl(&path);
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+
+    if matches!(
+        report["errno"].as_i64(),
+        Some(errno) if errno == i64::from(libc::ENOTTY) || errno == EOPNOTSUPP_ERRNO
+    ) {
+        assert!(
+            !trace_contains_cmd(&ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_EX_CMD),
+            "GET_ENCRYPTION_POLICY_EX returned unsupported errno after reaching ffs-fuse::ioctl: \
+             {ioctl_trace}"
+        );
+        eprintln!(
+            "EXT4 GET_ENCRYPTION_POLICY_EX ioctl skipped: kernel/VFS returned unsupported errno \
+             before ffs-fuse::ioctl (trace empty)"
+        );
+        return;
+    }
+
+    assert!(
+        trace_contains_cmd(&ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_EX_CMD),
+        "successful GET_ENCRYPTION_POLICY_EX should hit ffs-fuse::ioctl: {ioctl_trace}"
+    );
+
+    assert!(
+        report["errno"].is_null(),
+        "GET_ENCRYPTION_POLICY_EX should succeed: {report}"
+    );
+    assert_eq!(
+        report["policy_version"].as_u64(),
+        Some(u64::from(FSCRYPT_POLICY_V1_VERSION)),
+        "expected fscrypt policy v1 via policy-ex: {report}"
+    );
+    assert_eq!(
+        report["policy_size"].as_u64(),
+        Some(FSCRYPT_POLICY_V1_SIZE as u64),
+        "expected policy size 12 for v1: {report}"
+    );
+    assert_eq!(
+        report["contents_mode"].as_u64(),
+        Some(1),
+        "unexpected fscrypt contents mode: {report}"
+    );
+    assert_eq!(
+        report["filenames_mode"].as_u64(),
+        Some(4),
+        "unexpected fscrypt filenames mode: {report}"
+    );
+    assert_eq!(
+        report["flags"].as_u64(),
+        Some(0),
+        "unexpected fscrypt policy flags: {report}"
+    );
+    assert_eq!(
+        report["master_key_descriptor_hex"].as_str(),
+        Some("6d6b646573633432"),
+        "unexpected fscrypt v1 master key descriptor: {report}"
+    );
+    emit_scenario_result(scenario_id, "PASS", Some("policy_ex_returns_v1"));
 }
 
 #[test]
