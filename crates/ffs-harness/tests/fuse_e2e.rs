@@ -7305,6 +7305,40 @@ fn btrfs_fuse_rename() {
 }
 
 #[test]
+fn btrfs_fuse_rename_same_name_is_noop() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_rename_same_name_noop";
+        let path = mnt.join("same-name.txt");
+        fs::write(&path, b"same name rename\n").expect("write rename same-name seed");
+
+        let entries_before = snapshot_directory_entries(mnt);
+        let before = snapshot_file_state(&path);
+        let ino_before = fs::metadata(&path)
+            .expect("stat before same-name rename")
+            .ino();
+
+        fs::rename(&path, &path).expect("rename same name should succeed");
+
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            entries_before,
+            "same-name rename should not change directory entries"
+        );
+        assert_file_state_unchanged(&path, &before, "same-name rename");
+
+        let ino_after = fs::metadata(&path)
+            .expect("stat after same-name rename")
+            .ino();
+        assert_eq!(
+            ino_after, ino_before,
+            "same-name rename should preserve the inode binding"
+        );
+
+        emit_scenario_result(scenario_id, "PASS", Some("visible_noop"));
+    });
+}
+
+#[test]
 fn btrfs_fuse_hard_link() {
     with_btrfs_rw_mount(|mnt| {
         let original = mnt.join("linkme.txt");
