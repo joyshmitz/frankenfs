@@ -1077,6 +1077,29 @@ impl FrankenFuse {
         self.inner.thread_count
     }
 
+    /// Execute the internal ioctl dispatcher without a live kernel mount.
+    ///
+    /// This is a narrow hook for fuzz/integration harnesses that need to drive
+    /// the real ioctl argument parser and backend routing from userspace.
+    /// The return shape intentionally mirrors the kernel contract:
+    /// successful commands yield the raw reply payload, failed commands yield
+    /// the errno that would be sent back through FUSE.
+    #[doc(hidden)]
+    pub fn dispatch_ioctl_for_fuzzing(
+        &self,
+        caller_pid: u32,
+        ino: u64,
+        fh: u64,
+        cmd: u32,
+        in_data: &[u8],
+        out_size: u32,
+    ) -> std::result::Result<Vec<u8>, c_int> {
+        match self.dispatch_ioctl(caller_pid, ino, fh, cmd, in_data, out_size) {
+            IoctlResult::Data(data) => Ok(data),
+            IoctlResult::Error(errno) => Err(errno),
+        }
+    }
+
     /// Check backpressure for an operation. Returns `true` if the operation
     /// should be rejected (shed).
     fn should_shed(&self, op: RequestOp) -> bool {

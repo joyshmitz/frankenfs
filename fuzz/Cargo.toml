@@ -17,6 +17,9 @@ path = "../crates/ffs-block"
 [dependencies.ffs-error]
 path = "../crates/ffs-error"
 
+[dependencies.ffs-fuse]
+path = "../crates/ffs-fuse"
+
 [dependencies.ffs-ondisk]
 path = "../crates/ffs-ondisk"
 
@@ -129,4 +132,9 @@ doc = false
 [[bin]]
 name = "fuzz_openfs_recovery"
 path = "fuzz_targets/fuzz_openfs_recovery.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ioctl_dispatch"
+path = "fuzz_targets/fuzz_ioctl_dispatch.rs"
 doc = false
