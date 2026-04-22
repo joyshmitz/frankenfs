@@ -38,6 +38,9 @@ path = "../crates/ffs-journal"
 [dependencies.ffs-repair]
 path = "../crates/ffs-repair"
 
+[dependencies.ffs-xattr]
+path = "../crates/ffs-xattr"
+
 [dependencies.ffs-types]
 path = "../crates/ffs-types"
 
@@ -130,6 +133,11 @@ doc = false
 [[bin]]
 name = "fuzz_btrfs_tree_log"
 path = "fuzz_targets/fuzz_btrfs_tree_log.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_xattr_parsing"
+path = "fuzz_targets/fuzz_xattr_parsing.rs"
 doc = false
 
 [[bin]]
