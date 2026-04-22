@@ -5896,7 +5896,7 @@ mod tests {
         root_ref
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn write_test_btrfs_regular_file_tree(
         image: &mut [u8],
         leaf_logical: u64,

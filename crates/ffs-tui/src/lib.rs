@@ -471,7 +471,7 @@ fn render_scrub_panel(snap: &DashboardSnapshot, area: Rect, frame: &mut Frame) {
     Paragraph::new(text).render(inner, frame);
 }
 
-fn build_system_health_text(snap: &DashboardSnapshot) -> Text {
+fn build_system_health_text(snap: &DashboardSnapshot) -> Text<'_> {
     let (level_name, level_num) = degradation_level_label(snap.degradation_level);
     let level_span = Span::styled(
         format!("{level_name} (L{level_num})"),

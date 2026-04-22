@@ -3,6 +3,13 @@
 //! These tests spawn actual `cargo run -p ffs-cli` processes against real
 //! filesystem images created via mkfs.ext4/mkfs.btrfs. No mocks are used.
 
+#![allow(
+    clippy::uninlined_format_args,
+    clippy::nonminimal_bool,
+    clippy::cast_possible_truncation,
+    clippy::if_not_else
+)]
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
