@@ -222,6 +222,13 @@ fn serialize_inode(inode: &Ext4Inode, inode_size: usize) -> Vec<u8> {
     buf
 }
 
+/// Doc-hidden hook for fuzz targets that need deterministic inode serialization.
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_serialize_inode(inode: &Ext4Inode, inode_size: usize) -> Vec<u8> {
+    serialize_inode(inode, inode_size)
+}
+
 /// Compute CRC32C checksum and store it in the raw inode buffer.
 fn compute_and_set_checksum(raw: &mut [u8], csum_seed: u32, ino: u32) {
     let is = raw.len();
@@ -323,7 +330,7 @@ pub fn create_inode(
     extent_bytes[1] = (EXT4_EXTENT_MAGIC >> 8) as u8;
     // entries = 0.
     extent_bytes[4] = 4; // max_entries = 4.
-    // depth = 0 (already zero).
+                         // depth = 0 (already zero).
 
     let extra_time = encode_extra_timestamp(now_secs, now_nsec);
 
@@ -458,8 +465,8 @@ pub fn delete_inode(
 #[must_use]
 pub fn encode_extra_timestamp(secs: u64, nsec: u32) -> u32 {
     let epoch = ((secs >> 32) & 0x3) as u32; // upper 2 bits of seconds
-    // Clamp nsec to valid range to prevent bit-shift overflow.
-    // Max valid: 999_999_999 << 2 = 3_999_999_996, fits in u32.
+                                             // Clamp nsec to valid range to prevent bit-shift overflow.
+                                             // Max valid: 999_999_999 << 2 = 3_999_999_996, fits in u32.
     let clamped_nsec = nsec.min(999_999_999);
     let nsec_bits = clamped_nsec << 2; // nanoseconds shifted to bits 2-31
     epoch | nsec_bits

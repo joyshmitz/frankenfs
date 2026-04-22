@@ -21,6 +21,9 @@ path = "../crates/ffs-error"
 [dependencies.ffs-fuse]
 path = "../crates/ffs-fuse"
 
+[dependencies.ffs-inode]
+path = "../crates/ffs-inode"
+
 [dependencies.ffs-ondisk]
 path = "../crates/ffs-ondisk"
 
@@ -209,4 +212,9 @@ doc = false
 [[bin]]
 name = "fuzz_ext4_image_reader"
 path = "fuzz_targets/fuzz_ext4_image_reader.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_inode_roundtrip"
+path = "fuzz_targets/fuzz_inode_roundtrip.rs"
 doc = false
