@@ -121,6 +121,11 @@ path = "fuzz_targets/fuzz_repair_symbols.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_repair_codec_roundtrip"
+path = "fuzz_targets/fuzz_repair_codec_roundtrip.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_lrc_repair"
 path = "fuzz_targets/fuzz_lrc_repair.rs"
 doc = false
