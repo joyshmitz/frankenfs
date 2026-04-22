@@ -118,6 +118,11 @@ path = "fuzz_targets/fuzz_repair_symbols.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_lrc_repair"
+path = "fuzz_targets/fuzz_lrc_repair.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_jbd2_replay"
 path = "fuzz_targets/fuzz_jbd2_replay.rs"
 doc = false
