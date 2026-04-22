@@ -44,6 +44,9 @@ path = "../crates/ffs-types"
 [workspace]
 members = ["."]
 
+[patch.crates-io]
+fuser = { path = "../vendor/fuser" }
+
 [[bin]]
 name = "fuzz_ext4_metadata"
 path = "fuzz_targets/fuzz_ext4_metadata.rs"

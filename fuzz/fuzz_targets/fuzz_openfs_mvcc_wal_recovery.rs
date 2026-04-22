@@ -7,7 +7,7 @@ use ffs_error::{FfsError, Result};
 use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal::{self, WalCommit, WalHeader, WalWrite, HEADER_SIZE as WAL_HEADER_SIZE};
 use ffs_mvcc::wal_replay::{ReplayOutcome as WalReplayOutcome, TailPolicy};
-use ffs_ondisk::{EXT4_ORPHAN_FS, EXT4_VALID_FS};
+use ffs_ondisk::EXT4_VALID_FS;
 use ffs_types::{
     crc32c, BlockNumber, ByteOffset, CommitSeq, TxnId, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
 };
@@ -18,9 +18,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 const MAX_INPUT_BYTES: usize = 256;
 const IMAGE_SIZE: usize = 128 * 1024;
 const EXT4_BLOCK_SIZE_LOG: u32 = 2;
-const EXT4_STATE_OFFSET: usize = EXT4_SUPERBLOCK_OFFSET + 0x3A;
-const EXT4_JOURNAL_INUM_OFFSET: usize = EXT4_SUPERBLOCK_OFFSET + 0xE0;
-const EXT4_LAST_ORPHAN_OFFSET: usize = EXT4_SUPERBLOCK_OFFSET + 0xE8;
 const TRACKED_BLOCKS: [u64; 5] = [1, 2, 3, 10, 20];
 
 #[derive(Clone, Copy)]
@@ -110,15 +107,6 @@ impl<'a> ByteCursor<'a> {
 
     fn next_u16(&mut self) -> u16 {
         u16::from_le_bytes([self.next_u8(), self.next_u8()])
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        u32::from_le_bytes([
-            self.next_u8(),
-            self.next_u8(),
-            self.next_u8(),
-            self.next_u8(),
-        ])
     }
 
     fn next_index(&mut self, len: usize) -> usize {
@@ -408,7 +396,7 @@ fn store_digest(fs: &OpenFs) -> (usize, usize, u32) {
             digest_bytes.extend_from_slice(&block.to_le_bytes());
             let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
             digest_bytes.extend_from_slice(&len.to_le_bytes());
-            digest_bytes.extend_from_slice(data);
+            digest_bytes.extend_from_slice(&data);
         }
     }
 
