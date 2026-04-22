@@ -155,6 +155,8 @@ parent, increments the destination parent, and preserves the moved inode.
 Mounted-path btrfs hard-link refusal coverage now also freezes exact `EPERM`
 for directory sources, `ENOTDIR` for non-directory parents, and `EEXIST` for
 occupied destinations, with no dirent or source-`st_nlink` drift.
+Mounted-path btrfs unlink coverage now also freezes exact `ENOENT` for missing
+targets, with no visible workspace-entry or witness-file drift.
 Mounted-path btrfs rename refusal coverage now also freezes exact `ENOTDIR`
 for rename attempts whose destination parent is a regular file, with no source
 or parent-file drift.
