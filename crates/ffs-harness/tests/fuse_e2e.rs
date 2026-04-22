@@ -7274,6 +7274,74 @@ fn btrfs_fuse_symlink_create_and_follow() {
 }
 
 #[test]
+fn btrfs_fuse_symlink_refusal_contracts() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_symlink_refusal_contracts";
+        let target = mnt.join("sym_target.txt");
+        fs::write(&target, b"symlink target content\n").expect("write btrfs symlink target");
+
+        let occupied_destination = mnt.join("occupied_symlink_destination.txt");
+        fs::write(&occupied_destination, b"occupied destination payload\n")
+            .expect("write occupied btrfs symlink destination");
+        let root_entries_before = snapshot_directory_entries(mnt);
+        let occupied_before = snapshot_file_state(&occupied_destination);
+
+        let exists_err = std::os::unix::fs::symlink("sym_target.txt", &occupied_destination)
+            .expect_err("symlink onto existing destination should fail");
+        assert_eq!(
+            exists_err.raw_os_error(),
+            Some(libc::EEXIST),
+            "symlink onto existing destination should surface exact EEXIST: {exists_err}"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "occupied-destination symlink refusal must not change visible root entries"
+        );
+        assert_file_state_unchanged(
+            &occupied_destination,
+            &occupied_before,
+            "rejected occupied btrfs symlink destination",
+        );
+
+        let non_directory_parent = mnt.join("symlink_parent_file.txt");
+        fs::write(&non_directory_parent, b"not a directory\n")
+            .expect("write btrfs symlink non-directory parent");
+        let root_entries_before = snapshot_directory_entries(mnt);
+        let parent_before = snapshot_file_state(&non_directory_parent);
+        let nested_target = non_directory_parent.join("child_link.txt");
+
+        let parent_err = std::os::unix::fs::symlink("sym_target.txt", &nested_target)
+            .expect_err("symlink into non-directory parent should fail");
+        assert_eq!(
+            parent_err.raw_os_error(),
+            Some(libc::ENOTDIR),
+            "symlink into non-directory parent should surface exact ENOTDIR: {parent_err}"
+        );
+        assert!(
+            fs::symlink_metadata(&nested_target).is_err(),
+            "non-directory-parent symlink refusal must not create the nested destination"
+        );
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            root_entries_before,
+            "non-directory-parent symlink refusal must not change visible root entries"
+        );
+        assert_file_state_unchanged(
+            &non_directory_parent,
+            &parent_before,
+            "rejected btrfs symlink non-directory parent",
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("exists=EEXIST_parent=ENOTDIR_no_drift"),
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_setattr_truncate() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("trunc.txt");

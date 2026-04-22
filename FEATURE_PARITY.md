@@ -99,6 +99,9 @@ root-entry or parent-file drift.
 Mounted-path btrfs namespace-refusal coverage now also freezes exact `ENOTDIR`
 for create and mkdir attempts beneath a regular-file parent, with no visible
 workspace-entry or parent-file drift.
+Mounted-path btrfs symlink refusal coverage now also freezes exact `EEXIST` for
+occupied destinations and exact `ENOTDIR` for non-directory parents, with no
+visible workspace-entry or parent-file drift.
 Mounted-path ext4 read-only `fallocate` coverage now also freezes exact `EROFS`
 for representative preallocate and punch-hole mutation attempts, with no
 file-byte or apparent-size drift.
