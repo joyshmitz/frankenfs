@@ -806,6 +806,7 @@ pub struct fuse_init_out {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 #[derive(Debug, FromBytes, KnownLayout, Immutable)]
 pub struct cuse_init_in {
     pub major: u32,
@@ -815,6 +816,7 @@ pub struct cuse_init_in {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 #[derive(Debug, KnownLayout, Immutable)]
 pub struct cuse_init_out {
     pub major: u32,
@@ -860,6 +862,7 @@ pub struct fuse_ioctl_in {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 #[derive(Debug, KnownLayout, Immutable)]
 pub struct fuse_ioctl_iovec {
     pub base: u64,
@@ -988,6 +991,7 @@ pub struct fuse_notify_store_out {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 #[derive(Debug, KnownLayout, Immutable)]
 pub struct fuse_notify_retrieve_out {
     pub notify_unique: u64,
@@ -998,6 +1002,7 @@ pub struct fuse_notify_retrieve_out {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 #[derive(Debug, FromBytes, KnownLayout, Immutable)]
 pub struct fuse_notify_retrieve_in {
     // matches the size of fuse_write_in
