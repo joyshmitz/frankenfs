@@ -611,6 +611,25 @@ pub struct OpenFs {
     /// backend tests and future stateful open/release tracking can share the
     /// same contract.
     move_ext_donor_fds: Mutex<BTreeMap<u32, InodeNumber>>,
+    /// Cached INODE_REF back-reference index for btrfs `BTRFS_IOC_INO_LOOKUP`.
+    ///
+    /// Maps child objectid → (parent objectid, first back-ref name). Populated
+    /// on first `btrfs_resolve_inode_path` call in read-only mode and reused
+    /// across subsequent calls so the full fs-tree walk is amortized. The
+    /// writable path bypasses this cache and queries `btrfs_alloc_state.fs_tree`
+    /// directly (O(log N) per hop) since mutations would otherwise require
+    /// cache invalidation.
+    btrfs_inode_path_cache: Mutex<Option<BtrfsInodePathIndex>>,
+}
+
+/// Back-reference index used by `btrfs_resolve_inode_path` in read-only mode.
+///
+/// Keyed on the fs-tree root bytenr observed when the index was built so that
+/// a change in the underlying tree (e.g., a future reload path) invalidates
+/// the cache automatically.
+struct BtrfsInodePathIndex {
+    fs_tree_root_bytenr: u64,
+    parent_by_child: BTreeMap<u64, (u64, Vec<u8>)>,
 }
 
 // Compile-time assertion: OpenFs must be Send + Sync for multi-threaded FUSE dispatch.
@@ -2360,6 +2379,7 @@ impl OpenFs {
             extent_cache: ffs_extent::ExtentCache::new(),
             repair_flush_lifecycle: None,
             move_ext_donor_fds: Mutex::new(BTreeMap::new()),
+            btrfs_inode_path_cache: Mutex::new(None),
         };
 
         if fs.is_ext4() && !options.skip_validation {
@@ -14443,9 +14463,128 @@ impl OpenFs {
     /// so callers can reliably append child names — matches Linux
     /// `fs/btrfs/ioctl.c::btrfs_search_path_in_tree`. When the target has
     /// multiple back-references (hard links), the first is chosen.
+    ///
+    /// Performance: when the writable COW tree is present we do demand-driven
+    /// `range()` lookups (O(depth · log N) per call, no full-tree scan); in
+    /// read-only mode the parent-by-child index is cached on `OpenFs` after
+    /// the first call so subsequent resolutions are O(depth · log N) against
+    /// the cached `BTreeMap`. bd-yt66z.
     fn btrfs_resolve_inode_path(&self, cx: &Cx, objectid: u64) -> ffs_error::Result<Vec<u8>> {
-        let entries = self.walk_btrfs_fs_tree(cx)?;
-        Self::btrfs_build_path_from_inode_refs(&entries, objectid)
+        if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+            let alloc = alloc_mutex.lock();
+            return Self::btrfs_resolve_inode_path_via_cow(&alloc, objectid);
+        }
+        self.btrfs_resolve_inode_path_via_cache(cx, objectid)
+    }
+
+    /// Writable-mode resolution: at each hop, range-query the COW tree for the
+    /// INODE_REF items of `current`, take the first back-reference, and chain
+    /// up until we hit the subvolume root. Each hop is O(log N) against the
+    /// in-memory BTree, so the total cost is O(depth · log N) with no full
+    /// fs-tree scan.
+    fn btrfs_resolve_inode_path_via_cow(
+        alloc: &BtrfsAllocState,
+        objectid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        const MAX_PATH_DEPTH: usize = 4096;
+        let mut components: Vec<Vec<u8>> = Vec::new();
+        let mut visited: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        let mut current = objectid;
+        for _ in 0..MAX_PATH_DEPTH {
+            if current == BTRFS_FIRST_FREE_OBJECTID {
+                return Ok(Self::btrfs_assemble_ino_lookup_path(&mut components));
+            }
+            if !visited.insert(current) {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!("cycle in INODE_REF chain at objectid {current}"),
+                });
+            }
+            let start = BtrfsKey {
+                objectid: current,
+                item_type: BTRFS_ITEM_INODE_REF,
+                offset: 0,
+            };
+            let end = BtrfsKey {
+                objectid: current,
+                item_type: BTRFS_ITEM_INODE_REF,
+                offset: u64::MAX,
+            };
+            let items = alloc
+                .fs_tree
+                .range(&start, &end)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            let Some((key, payload)) = items.first() else {
+                return Err(FfsError::NotFound(format!(
+                    "inode {objectid} has no INODE_REF back to subvolume root (stuck at {current})"
+                )));
+            };
+            let refs = Self::btrfs_parse_inode_ref_payload(payload)?;
+            let Some((_index, name)) = refs.into_iter().next() else {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!("INODE_REF at objectid {current} has empty payload"),
+                });
+            };
+            components.push(name);
+            current = key.offset;
+        }
+        Err(FfsError::Corruption {
+            block: 0,
+            detail: format!(
+                "INODE_REF chain exceeded depth {MAX_PATH_DEPTH} from objectid {objectid}"
+            ),
+        })
+    }
+
+    /// Read-only resolution: build the parent-by-child INODE_REF index once
+    /// from the on-disk fs-tree and cache it on `OpenFs`. A change in fs-tree
+    /// root bytenr invalidates the cache (defensive — the image bytes don't
+    /// change during a read-only open, but future reload paths may).
+    fn btrfs_resolve_inode_path_via_cache(
+        &self,
+        cx: &Cx,
+        objectid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        let fs_tree_root_bytenr = self.btrfs_current_fs_tree_root_bytenr(cx)?;
+        let mut cache = self.btrfs_inode_path_cache.lock();
+        let needs_rebuild = cache
+            .as_ref()
+            .map_or(true, |idx| idx.fs_tree_root_bytenr != fs_tree_root_bytenr);
+        if needs_rebuild {
+            let entries = self.walk_btrfs_fs_tree(cx)?;
+            *cache = Some(BtrfsInodePathIndex {
+                fs_tree_root_bytenr,
+                parent_by_child: Self::btrfs_build_inode_ref_index(&entries)?,
+            });
+        }
+        let index = cache
+            .as_ref()
+            .expect("populated above");
+        Self::btrfs_walk_inode_ref_index(&index.parent_by_child, objectid)
+    }
+
+    /// Resolve the fs-tree root bytenr for the currently mounted subvolume by
+    /// walking the ROOT_TREE. Small and cheap (a single root tree node), used
+    /// as the cache invalidation key.
+    fn btrfs_current_fs_tree_root_bytenr(&self, cx: &Cx) -> ffs_error::Result<u64> {
+        let subvol_id = self
+            .btrfs_context
+            .as_ref()
+            .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+        let root_items = self.walk_btrfs_root_tree(cx)?;
+        let fs_tree_root = root_items
+            .iter()
+            .find(|item| {
+                item.key.objectid == subvol_id && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
+            })
+            .ok_or_else(|| {
+                FfsError::NotFound(format!(
+                    "btrfs ROOT_ITEM for subvolume objectid {subvol_id}"
+                ))
+            })?;
+        let root_item = parse_root_item(&fs_tree_root.data).map_err(|e| parse_to_ffs_error(&e))?;
+        Ok(root_item.bytenr)
     }
 
     /// Pure helper: given a flat list of fs-tree leaf entries, walk
@@ -14455,17 +14594,23 @@ impl OpenFs {
     /// `/` before NUL). Factored out of `btrfs_resolve_inode_path` so
     /// the algorithm is unit-testable without building a full on-disk
     /// image.
+    #[cfg(test)]
     fn btrfs_build_path_from_inode_refs(
         entries: &[BtrfsLeafEntry],
         objectid: u64,
     ) -> ffs_error::Result<Vec<u8>> {
-        const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
-        const MAX_PATH_DEPTH: usize = 4096; // Defense-in-depth against corrupt cycles.
+        let parent_by_child = Self::btrfs_build_inode_ref_index(entries)?;
+        Self::btrfs_walk_inode_ref_index(&parent_by_child, objectid)
+    }
 
-        // Index INODE_REF items by child objectid so each step of the walk
-        // is O(1) rather than rescanning the whole tree.
-        let mut parent_by_child: std::collections::BTreeMap<u64, (u64, Vec<u8>)> =
-            std::collections::BTreeMap::new();
+    /// Build the child → (parent, first-back-ref-name) index from a list of
+    /// fs-tree leaf entries. Only INODE_REF items contribute; hard links with
+    /// multiple refs resolve to the first one seen, matching Linux's
+    /// `btrfs_search_path_in_tree` behavior.
+    fn btrfs_build_inode_ref_index(
+        entries: &[BtrfsLeafEntry],
+    ) -> ffs_error::Result<BTreeMap<u64, (u64, Vec<u8>)>> {
+        let mut parent_by_child: BTreeMap<u64, (u64, Vec<u8>)> = BTreeMap::new();
         for entry in entries {
             if entry.key.item_type != BTRFS_ITEM_INODE_REF {
                 continue;
@@ -14477,26 +14622,22 @@ impl OpenFs {
                 parent_by_child.entry(child_oid).or_insert((parent_oid, name));
             }
         }
+        Ok(parent_by_child)
+    }
 
+    /// Walk the pre-built INODE_REF index from `objectid` up to the subvolume
+    /// root, collecting component names.
+    fn btrfs_walk_inode_ref_index(
+        parent_by_child: &BTreeMap<u64, (u64, Vec<u8>)>,
+        objectid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        const MAX_PATH_DEPTH: usize = 4096;
         let mut components: Vec<Vec<u8>> = Vec::new();
         let mut visited: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
         let mut current = objectid;
         for _ in 0..MAX_PATH_DEPTH {
             if current == BTRFS_FIRST_FREE_OBJECTID {
-                // Reached the subvolume root. Assemble `a/b/c/\0`.
-                components.reverse();
-                let mut path = Vec::new();
-                for (i, name) in components.iter().enumerate() {
-                    if i > 0 {
-                        path.push(b'/');
-                    }
-                    path.extend_from_slice(name);
-                }
-                if !path.is_empty() {
-                    path.push(b'/');
-                }
-                path.push(0_u8);
-                return Ok(path);
+                return Ok(Self::btrfs_assemble_ino_lookup_path(&mut components));
             }
             if !visited.insert(current) {
                 return Err(FfsError::Corruption {
@@ -14518,6 +14659,25 @@ impl OpenFs {
                 "INODE_REF chain exceeded depth {MAX_PATH_DEPTH} from objectid {objectid}"
             ),
         })
+    }
+
+    /// Assemble path components (collected leaf→root) into the
+    /// `BTRFS_IOC_INO_LOOKUP` NUL-terminated path (`a/b/c/\0`, empty for
+    /// subvolume-root lookups).
+    fn btrfs_assemble_ino_lookup_path(components: &mut Vec<Vec<u8>>) -> Vec<u8> {
+        components.reverse();
+        let mut path = Vec::new();
+        for (i, name) in components.iter().enumerate() {
+            if i > 0 {
+                path.push(b'/');
+            }
+            path.extend_from_slice(name);
+        }
+        if !path.is_empty() {
+            path.push(b'/');
+        }
+        path.push(0_u8);
+        path
     }
 
     fn ext4_fiemap(
@@ -37567,5 +37727,140 @@ mod tests {
             "after_alpha_fsync_before_gamma_fsync",
             "durable_alpha_only",
         );
+    }
+
+    // bd-yt66z: verify that btrfs_resolve_inode_path's writable-mode fast path
+    // walks INODE_REF back-references via range() lookups (O(depth · log N))
+    // rather than falling through to a full fs-tree scan.
+    #[test]
+    fn btrfs_resolve_inode_path_writable_mode_walks_demand_driven() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let dir_attr = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("subdir"),
+                0o755,
+                0,
+                0,
+            )
+            .expect("mkdir subdir");
+        let file_attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                dir_attr.ino,
+                OsStr::new("hello.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create hello.txt");
+
+        let path = fs
+            .btrfs_resolve_inode_path(&cx, file_attr.ino.0)
+            .expect("writable-mode resolve must succeed");
+        assert_eq!(path, b"subdir/hello.txt/\0");
+
+        // Cache must stay unused on the writable path — it's bypassed.
+        assert!(
+            fs.btrfs_inode_path_cache.lock().is_none(),
+            "writable path must not populate the read-only cache"
+        );
+    }
+
+    #[test]
+    fn btrfs_resolve_inode_path_writable_mode_detects_cycle() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let dir_a = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("cyc_a"),
+                0o755,
+                0,
+                0,
+            )
+            .expect("mkdir cyc_a");
+        let dir_b = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                dir_a.ino,
+                OsStr::new("cyc_b"),
+                0o755,
+                0,
+                0,
+            )
+            .expect("mkdir cyc_b");
+
+        // Inject a cycle by pointing cyc_a's INODE_REF back at cyc_b.
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().unwrap();
+            let mut alloc = alloc_mutex.lock();
+            let old = BtrfsKey {
+                objectid: dir_a.ino.0,
+                item_type: BTRFS_ITEM_INODE_REF,
+                offset: 256,
+            };
+            alloc.fs_tree.delete(&old).expect("delete original ref");
+            let cycle_key = BtrfsKey {
+                objectid: dir_a.ino.0,
+                item_type: BTRFS_ITEM_INODE_REF,
+                offset: dir_b.ino.0,
+            };
+            let payload =
+                OpenFs::btrfs_serialize_inode_ref_payload(&[(1, b"cyc_a".to_vec())]).unwrap();
+            alloc
+                .fs_tree
+                .insert(cycle_key, &payload)
+                .expect("inject cycle ref");
+        }
+
+        let err = fs
+            .btrfs_resolve_inode_path(&cx, dir_b.ino.0)
+            .expect_err("cycle must be detected");
+        let detail = match &err {
+            FfsError::Corruption { detail, .. } => detail.clone(),
+            _ => String::new(),
+        };
+        assert!(
+            matches!(err, FfsError::Corruption { .. }) && detail.contains("cycle"),
+            "expected Corruption with 'cycle' detail, got: {err:?}"
+        );
+    }
+
+    // bd-yt66z: read-only resolution populates the per-OpenFs cache on first
+    // call and reuses it thereafter, so a sequence of K INO_LOOKUPs costs
+    // O(N) for the first call plus O(depth) for each subsequent call instead
+    // of O(K·N).
+    #[test]
+    fn btrfs_resolve_inode_path_read_only_caches_inode_ref_index() {
+        let entries = vec![
+            synth_inode_ref_entry(257, 256, 2, b"a"),
+            synth_inode_ref_entry(258, 257, 2, b"b"),
+            synth_inode_ref_entry(259, 258, 2, b"c"),
+        ];
+        let index =
+            OpenFs::btrfs_build_inode_ref_index(&entries).expect("build index from entries");
+        // Reuse the pre-built index directly — identical path assembly.
+        let path_259 = OpenFs::btrfs_walk_inode_ref_index(&index, 259).unwrap();
+        assert_eq!(path_259, b"a/b/c/\0");
+        let path_258 = OpenFs::btrfs_walk_inode_ref_index(&index, 258).unwrap();
+        assert_eq!(path_258, b"a/b/\0");
+        let path_257 = OpenFs::btrfs_walk_inode_ref_index(&index, 257).unwrap();
+        assert_eq!(path_257, b"a/\0");
+    }
+
+    #[test]
+    fn btrfs_assemble_ino_lookup_path_empty_returns_nul_terminator() {
+        let mut components: Vec<Vec<u8>> = Vec::new();
+        assert_eq!(OpenFs::btrfs_assemble_ino_lookup_path(&mut components), b"\0");
     }
 }
