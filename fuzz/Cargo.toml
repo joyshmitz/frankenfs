@@ -36,6 +36,9 @@ path = "../crates/ffs-btrfs"
 [dependencies.ffs-core]
 path = "../crates/ffs-core"
 
+[dependencies.ffs-dir]
+path = "../crates/ffs-dir"
+
 [dependencies.ffs-mvcc]
 path = "../crates/ffs-mvcc"
 
@@ -225,6 +228,11 @@ doc = false
 [[bin]]
 name = "fuzz_alloc_bitmap"
 path = "fuzz_targets/fuzz_alloc_bitmap.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_dir_operations"
+path = "fuzz_targets/fuzz_dir_operations.rs"
 doc = false
 
 [[bin]]
