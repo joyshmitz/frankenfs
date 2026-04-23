@@ -1,0 +1,5 @@
+# cargo-fuzz discovered corpus entries (hash-named). Only seed_* files are
+# committed as reproducible starting points; everything else is regenerated
+# by libfuzzer runs and should not bloat git history.
+corpus/*/[0-9a-f]*
+!corpus/*/seed_*

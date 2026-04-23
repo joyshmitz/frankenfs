@@ -515,17 +515,24 @@ dependencies = [
 name = "ffs-fuzz"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "asupersync",
+ "crc32c",
+ "ffs-alloc",
  "ffs-block",
  "ffs-btrfs",
  "ffs-core",
+ "ffs-dir",
  "ffs-error",
+ "ffs-extent",
  "ffs-fuse",
+ "ffs-inode",
  "ffs-journal",
  "ffs-mvcc",
  "ffs-ondisk",
  "ffs-repair",
  "ffs-types",
+ "ffs-xattr",
  "libfuzzer-sys",
 ]
 
