@@ -686,7 +686,7 @@ struct FuseInner {
     backpressure: Option<BackpressureGate>,
     access_predictor: AccessPredictor,
     readahead: ReadaheadManager,
-    inode_locks: FuseInodeLocks,
+    inode_locks: Arc<FuseInodeLocks>,
 }
 
 impl std::fmt::Debug for FuseInner {
@@ -706,12 +706,12 @@ struct FuseInodeLocks {
 }
 
 impl FuseInodeLocks {
-    fn acquire(&self, inodes: &[InodeNumber]) -> FuseInodeGuards {
+    fn acquire(self: &Arc<Self>, inodes: &[InodeNumber]) -> FuseInodeGuards {
         let mut ordered = inodes.to_vec();
         ordered.sort_unstable_by_key(|ino| ino.0);
         ordered.dedup();
 
-        let locks = {
+        let entries: Vec<(InodeNumber, Arc<FuseInodeLock>)> = {
             let mut table = match self.table.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => {
@@ -722,17 +722,29 @@ impl FuseInodeLocks {
             ordered
                 .into_iter()
                 .map(|ino| {
-                    Arc::clone(
+                    let lock = Arc::clone(
                         table
                             .entry(ino)
                             .or_insert_with(|| Arc::new(FuseInodeLock::default())),
-                    )
+                    );
+                    (ino, lock)
                 })
-                .collect::<Vec<_>>()
+                .collect()
         };
 
         FuseInodeGuards {
-            _guards: locks.into_iter().map(|lock| lock.acquire()).collect(),
+            _guards: entries
+                .into_iter()
+                .map(|(ino, lock)| lock.acquire(ino, Arc::clone(self)))
+                .collect(),
+        }
+    }
+
+    #[cfg(test)]
+    fn table_len(&self) -> usize {
+        match self.table.lock() {
+            Ok(guard) => guard.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
         }
     }
 }
@@ -744,7 +756,7 @@ struct FuseInodeLock {
 }
 
 impl FuseInodeLock {
-    fn acquire(self: &Arc<Self>) -> FuseInodeGuard {
+    fn acquire(self: &Arc<Self>, ino: InodeNumber, locks: Arc<FuseInodeLocks>) -> FuseInodeGuard {
         let mut held = match self.held.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -765,26 +777,55 @@ impl FuseInodeLock {
         drop(held);
         FuseInodeGuard {
             lock: Arc::clone(self),
+            ino,
+            locks,
         }
     }
 }
 
 struct FuseInodeGuard {
     lock: Arc<FuseInodeLock>,
+    ino: InodeNumber,
+    locks: Arc<FuseInodeLocks>,
 }
 
 impl Drop for FuseInodeGuard {
     fn drop(&mut self) {
-        let mut held = match self.lock.held.lock() {
+        // Hold the table mutex across the held-flag release + eviction check so
+        // no concurrent acquire() can observe an empty entry and clone a new
+        // Arc between our strong_count read and the table mutation.
+        let mut table = match self.locks.table.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                warn!("FuseInodeLock held flag poisoned during drop, recovering");
+                warn!("FuseInodeLocks table poisoned during guard drop, recovering");
                 poisoned.into_inner()
             }
         };
-        *held = false;
-        drop(held);
-        self.lock.ready.notify_one();
+
+        {
+            let mut held = match self.lock.held.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    warn!("FuseInodeLock held flag poisoned during drop, recovering");
+                    poisoned.into_inner()
+                }
+            };
+            *held = false;
+            drop(held);
+            self.lock.ready.notify_one();
+        }
+
+        // strong_count == 2 means the table's Arc and this guard's Arc are the
+        // only references; no other guard or pending acquire holds a clone, so
+        // removing the entry is safe. Any value > 2 means a sibling guard (or a
+        // waiter that already cloned the Arc before taking the condvar) still
+        // needs it — leave the entry in place.
+        if Arc::strong_count(&self.lock) == 2
+            && let Some(existing) = table.get(&self.ino)
+            && Arc::ptr_eq(existing, &self.lock)
+        {
+            table.remove(&self.ino);
+        }
     }
 }
 
@@ -1035,7 +1076,7 @@ impl FrankenFuse {
                 backpressure,
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
-                inode_locks: FuseInodeLocks::default(),
+                inode_locks: Arc::new(FuseInodeLocks::default()),
             }),
         }
     }
@@ -7546,7 +7587,7 @@ mod tests {
             backpressure: None,
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
-            inode_locks: FuseInodeLocks::default(),
+            inode_locks: Arc::new(FuseInodeLocks::default()),
         });
         let barrier = Arc::new(std::sync::Barrier::new(10));
 
@@ -8541,7 +8582,7 @@ CUSTOM("congestion_threshold=3")"#;
             backpressure: None,
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(8),
-            inode_locks: FuseInodeLocks::default(),
+            inode_locks: Arc::new(FuseInodeLocks::default()),
         };
         let dbg = format!("{inner:?}");
         assert_eq!(dbg, FUSE_INNER_DEBUG_GOLDEN);
@@ -8779,6 +8820,134 @@ CUSTOM("congestion_threshold=3")"#;
         assert!(DegradationLevel::Warning < DegradationLevel::Degraded);
         assert!(DegradationLevel::Degraded < DegradationLevel::Critical);
         assert!(DegradationLevel::Critical < DegradationLevel::Emergency);
+    }
+
+    // ── FuseInodeLocks eviction tests (bd-elah2) ──────────────────────────
+
+    #[test]
+    fn fuse_inode_locks_evict_entry_on_last_guard_drop() {
+        let locks = Arc::new(FuseInodeLocks::default());
+        {
+            let _guards = locks.acquire(&[InodeNumber(42)]);
+            assert_eq!(locks.table_len(), 1, "entry present while guard live");
+        }
+        assert_eq!(
+            locks.table_len(),
+            0,
+            "entry must be evicted once the last guard drops"
+        );
+    }
+
+    #[test]
+    fn fuse_inode_locks_bounded_under_sequential_churn() {
+        let locks = Arc::new(FuseInodeLocks::default());
+        for ino in 0..100_000u64 {
+            let _guards = locks.acquire(&[InodeNumber(ino)]);
+            // guard drops at end of scope — table should return to empty
+        }
+        assert_eq!(
+            locks.table_len(),
+            0,
+            "sequential acquire/drop of 100K inodes must not accumulate"
+        );
+    }
+
+    #[test]
+    fn fuse_inode_locks_retain_entry_while_second_guard_blocked() {
+        let locks = Arc::new(FuseInodeLocks::default());
+        let ino = InodeNumber(7);
+
+        // Hold guard A, then kick off waiter B in a thread. B will block on
+        // the held flag because A owns it. While B is blocked the table entry
+        // must stay — evicting it here would break the mutual-exclusion
+        // contract for B.
+        let guard_a = locks.acquire(&[ino]);
+        assert_eq!(locks.table_len(), 1);
+
+        let locks_b = Arc::clone(&locks);
+        let waiter_ready = Arc::new(std::sync::Barrier::new(2));
+        let waiter_ready_clone = Arc::clone(&waiter_ready);
+        let handle = std::thread::spawn(move || {
+            waiter_ready_clone.wait();
+            let _guard_b = locks_b.acquire(&[ino]);
+        });
+        waiter_ready.wait();
+
+        // Give the waiter time to clone its Arc and enter the condvar wait.
+        // Spinning the table_len check keeps this deterministic without a
+        // fixed sleep: once B has entered acquire(), the strong_count on the
+        // per-inode lock is >= 3 even before B wins the held flag.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let entries: Vec<(InodeNumber, Arc<FuseInodeLock>)> = {
+                let table = locks.table.lock().unwrap();
+                table.iter().map(|(k, v)| (*k, Arc::clone(v))).collect()
+            };
+            assert_eq!(entries.len(), 1);
+            let count = Arc::strong_count(&entries[0].1);
+            // Drop our snapshot clone before comparing so the helper clone
+            // does not itself skew the count upward.
+            drop(entries);
+            if count >= 3 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waiter thread never entered acquire()"
+            );
+            std::thread::yield_now();
+        }
+
+        drop(guard_a);
+        handle.join().unwrap();
+
+        // After both guards have fully dropped, the entry must be gone.
+        assert_eq!(
+            locks.table_len(),
+            0,
+            "entry must be evicted after both guards drop"
+        );
+    }
+
+    #[test]
+    fn fuse_inode_locks_preserve_total_order_under_contention() {
+        // Mutual-exclusion regression: with eviction enabled we must still
+        // serialize concurrent acquires of the same inode set.
+        let locks = Arc::new(FuseInodeLocks::default());
+        let counter = Arc::new(Mutex::new(0u32));
+        let observed_max = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+
+        std::thread::scope(|s| {
+            for _ in 0..16 {
+                let locks = Arc::clone(&locks);
+                let counter = Arc::clone(&counter);
+                let observed_max = Arc::clone(&observed_max);
+                let barrier = Arc::clone(&barrier);
+                s.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..128 {
+                        let _g = locks.acquire(&[InodeNumber(1), InodeNumber(2)]);
+                        let mut slot = counter.lock().unwrap();
+                        *slot += 1;
+                        observed_max.fetch_max(*slot, std::sync::atomic::Ordering::Relaxed);
+                        assert_eq!(*slot, 1, "two holders of the same inode set");
+                        *slot -= 1;
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            observed_max.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "critical section must be single-occupant"
+        );
+        assert_eq!(
+            locks.table_len(),
+            0,
+            "all guards dropped, table must be empty"
+        );
     }
 
     // ── Proptest property-based tests ─────────────────────────────────────
