@@ -8680,6 +8680,62 @@ fn btrfs_fuse_hard_link() {
 }
 
 #[test]
+fn btrfs_fuse_hard_link_unlink_updates_nlink_accounting() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_hard_link_unlink_nlink_accounting";
+        let original = mnt.join("linkme.txt");
+        let alias = mnt.join("linkme_alias.txt");
+        fs::write(&original, b"hard link unlink content\n").expect("write original");
+        fs::hard_link(&original, &alias).expect("create btrfs hard link alias");
+
+        let original_before = snapshot_file_state(&original);
+        let entries_before = snapshot_directory_entries(mnt);
+        let original_meta_before = fs::metadata(&original).expect("stat original before unlink");
+        let alias_meta_before = fs::metadata(&alias).expect("stat alias before unlink");
+        assert_eq!(
+            original_meta_before.ino(),
+            alias_meta_before.ino(),
+            "hard-link alias should resolve to the same inode before unlink"
+        );
+        assert_eq!(
+            original_meta_before.nlink(),
+            2,
+            "hard-link creation should raise the source link count to two"
+        );
+
+        fs::remove_file(&alias).expect("unlink hard-link alias");
+
+        assert!(
+            fs::symlink_metadata(&alias).is_err(),
+            "alias should be removed after unlink"
+        );
+        assert_file_state_unchanged(&original, &original_before, "hard-link unlink survivor");
+
+        let mut expected_entries = entries_before;
+        expected_entries.remove("linkme_alias.txt");
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            expected_entries,
+            "unlinking the alias should remove only that directory entry"
+        );
+
+        let original_meta_after = fs::metadata(&original).expect("stat original after unlink");
+        assert_eq!(
+            original_meta_after.ino(),
+            original_meta_before.ino(),
+            "surviving name should keep the original inode binding"
+        );
+        assert_eq!(
+            original_meta_after.nlink(),
+            1,
+            "unlinking the alias should restore the source link count to one"
+        );
+
+        emit_scenario_result(scenario_id, "PASS", Some("alias_removed_nlink=1"));
+    });
+}
+
+#[test]
 fn btrfs_fuse_hard_link_to_symlink_preserves_symlink_type() {
     with_btrfs_rw_mount(|mnt| {
         let scenario_id = "btrfs_rw_hard_link_to_symlink_preserves_type";

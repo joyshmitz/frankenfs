@@ -167,6 +167,9 @@ overwrites, with no root-entry, source-child, or file-byte drift.
 Mounted-path btrfs cross-parent directory rename coverage now also freezes
 parent `st_nlink` accounting: moving a child directory decrements the source
 parent, increments the destination parent, and preserves the moved inode.
+Mounted-path btrfs hard-link unlink coverage now also freezes `st_nlink`
+accounting: removing one hard-link alias deletes only that directory entry,
+preserves the surviving inode/data, and restores the survivor link count to 1.
 Mounted-path btrfs hard-link refusal coverage now also freezes exact `EPERM`
 for directory sources, `ENOTDIR` for non-directory parents, and `EEXIST` for
 occupied destinations, with no dirent or source-`st_nlink` drift.
