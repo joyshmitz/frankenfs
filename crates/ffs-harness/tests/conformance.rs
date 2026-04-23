@@ -978,30 +978,10 @@ fn ext4_fscrypt_legacy_policy_transport_discrepancy_conforms() {
         FSCRYPT_POLICY_V1_SIZE,
         "direct dispatch should return a v1 policy payload"
     );
-    assert_eq!(
-        policy[0],
-        golden["direct_dispatch"]["policy_version"]
-            .as_u64()
-            .expect("golden direct policy_version") as u8
-    );
-    assert_eq!(
-        policy[1],
-        golden["direct_dispatch"]["contents_mode"]
-            .as_u64()
-            .expect("golden direct contents_mode") as u8
-    );
-    assert_eq!(
-        policy[2],
-        golden["direct_dispatch"]["filenames_mode"]
-            .as_u64()
-            .expect("golden direct filenames_mode") as u8
-    );
-    assert_eq!(
-        policy[3],
-        golden["direct_dispatch"]["flags"]
-            .as_u64()
-            .expect("golden direct flags") as u8
-    );
+    assert_eq!(policy[0], golden_u8(&golden, "direct_dispatch", "policy_version"));
+    assert_eq!(policy[1], golden_u8(&golden, "direct_dispatch", "contents_mode"));
+    assert_eq!(policy[2], golden_u8(&golden, "direct_dispatch", "filenames_mode"));
+    assert_eq!(policy[3], golden_u8(&golden, "direct_dispatch", "flags"));
     assert_eq!(
         hex::encode(&policy[4..12]),
         golden["direct_dispatch"]["master_key_descriptor_hex"]
@@ -1165,6 +1145,14 @@ fn load_fscrypt_transport_golden() -> Value {
     let text = std::fs::read_to_string(&golden_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", golden_path.display()));
     serde_json::from_str(&text).expect("decode fscrypt transport golden")
+}
+
+fn golden_u8(golden: &Value, section: &str, field: &str) -> u8 {
+    let value = golden[section][field]
+        .as_u64()
+        .unwrap_or_else(|| panic!("golden {section}.{field} should be u64"));
+    u8::try_from(value)
+        .unwrap_or_else(|_| panic!("golden {section}.{field}={value} does not fit in u8"))
 }
 
 fn build_fscrypt_context_v1(
