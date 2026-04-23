@@ -15,6 +15,9 @@ libfuzzer-sys = "0.4"
 [dependencies.ffs-block]
 path = "../crates/ffs-block"
 
+[dependencies.ffs-alloc]
+path = "../crates/ffs-alloc"
+
 [dependencies.ffs-error]
 path = "../crates/ffs-error"
 
@@ -217,4 +220,9 @@ doc = false
 [[bin]]
 name = "fuzz_inode_roundtrip"
 path = "fuzz_targets/fuzz_inode_roundtrip.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_alloc_bitmap"
+path = "fuzz_targets/fuzz_alloc_bitmap.rs"
 doc = false
