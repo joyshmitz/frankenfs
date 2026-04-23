@@ -4,6 +4,7 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     // Fuzz btrfs superblock parsing.
     let _ = ffs_ondisk::BtrfsSuperblock::parse_superblock_region(data);
+    let _ = ffs_ondisk::verify_btrfs_superblock_checksum(data);
 
     // Full image parse.
     if data.len() >= 69632 {
@@ -22,4 +23,5 @@ fuzz_target!(|data: &[u8]| {
 
     // Header parsing.
     let _ = ffs_ondisk::BtrfsHeader::parse_from_block(data);
+    let _ = ffs_ondisk::verify_btrfs_tree_block_checksum(data, ffs_types::BTRFS_CSUM_TYPE_CRC32C);
 });
