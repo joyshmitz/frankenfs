@@ -619,7 +619,7 @@ pub struct OpenFs {
     /// writable path bypasses this cache and queries `btrfs_alloc_state.fs_tree`
     /// directly (O(log N) per hop) since mutations would otherwise require
     /// cache invalidation.
-    btrfs_inode_path_cache: Mutex<Option<BtrfsInodePathIndex>>,
+    btrfs_inode_path_cache: Mutex<Option<Arc<BtrfsInodePathIndex>>>,
 }
 
 /// Back-reference index used by `btrfs_resolve_inode_path` in read-only mode.
@@ -14547,20 +14547,23 @@ impl OpenFs {
         objectid: u64,
     ) -> ffs_error::Result<Vec<u8>> {
         let fs_tree_root_bytenr = self.btrfs_current_fs_tree_root_bytenr(cx)?;
-        let mut cache = self.btrfs_inode_path_cache.lock();
-        let needs_rebuild = cache
-            .as_ref()
-            .map_or(true, |idx| idx.fs_tree_root_bytenr != fs_tree_root_bytenr);
-        if needs_rebuild {
-            let entries = self.walk_btrfs_fs_tree(cx)?;
-            *cache = Some(BtrfsInodePathIndex {
-                fs_tree_root_bytenr,
-                parent_by_child: Self::btrfs_build_inode_ref_index(&entries)?,
-            });
-        }
-        let index = cache
-            .as_ref()
-            .expect("populated above");
+        // Scope the Mutex guard so the walk below runs without holding the
+        // lock; an Arc clone is cheap and lets concurrent INO_LOOKUP callers
+        // proceed in parallel once the index has been populated.
+        let index = {
+            let mut cache = self.btrfs_inode_path_cache.lock();
+            if cache
+                .as_ref()
+                .is_none_or(|idx| idx.fs_tree_root_bytenr != fs_tree_root_bytenr)
+            {
+                let entries = self.walk_btrfs_fs_tree(cx)?;
+                *cache = Some(Arc::new(BtrfsInodePathIndex {
+                    fs_tree_root_bytenr,
+                    parent_by_child: Self::btrfs_build_inode_ref_index(&entries)?,
+                }));
+            }
+            Arc::clone(cache.as_ref().expect("populated above"))
+        };
         Self::btrfs_walk_inode_ref_index(&index.parent_by_child, objectid)
     }
 
@@ -14619,7 +14622,9 @@ impl OpenFs {
             let child_oid = entry.key.objectid;
             let refs = Self::btrfs_parse_inode_ref_payload(&entry.data)?;
             if let Some((_index, name)) = refs.into_iter().next() {
-                parent_by_child.entry(child_oid).or_insert((parent_oid, name));
+                parent_by_child
+                    .entry(child_oid)
+                    .or_insert((parent_oid, name));
             }
         }
         Ok(parent_by_child)
@@ -14664,7 +14669,7 @@ impl OpenFs {
     /// Assemble path components (collected leaf→root) into the
     /// `BTRFS_IOC_INO_LOOKUP` NUL-terminated path (`a/b/c/\0`, empty for
     /// subvolume-root lookups).
-    fn btrfs_assemble_ino_lookup_path(components: &mut Vec<Vec<u8>>) -> Vec<u8> {
+    fn btrfs_assemble_ino_lookup_path(components: &mut [Vec<u8>]) -> Vec<u8> {
         components.reverse();
         let mut path = Vec::new();
         for (i, name) in components.iter().enumerate() {
@@ -23737,7 +23742,10 @@ mod tests {
             .expect_err("missing back-ref must fail");
         match err {
             FfsError::NotFound(msg) => {
-                assert!(msg.contains("999"), "error must reference the missing inode: {msg}");
+                assert!(
+                    msg.contains("999"),
+                    "error must reference the missing inode: {msg}"
+                );
             }
             other => panic!("expected NotFound, got {other:?}"),
         }
@@ -23754,7 +23762,10 @@ mod tests {
             .expect_err("cycle must be rejected");
         match err {
             FfsError::Corruption { detail, .. } => {
-                assert!(detail.contains("cycle"), "error must mention cycle: {detail}");
+                assert!(
+                    detail.contains("cycle"),
+                    "error must mention cycle: {detail}"
+                );
             }
             other => panic!("expected Corruption, got {other:?}"),
         }
@@ -37861,6 +37872,9 @@ mod tests {
     #[test]
     fn btrfs_assemble_ino_lookup_path_empty_returns_nul_terminator() {
         let mut components: Vec<Vec<u8>> = Vec::new();
-        assert_eq!(OpenFs::btrfs_assemble_ino_lookup_path(&mut components), b"\0");
+        assert_eq!(
+            OpenFs::btrfs_assemble_ino_lookup_path(&mut components),
+            b"\0"
+        );
     }
 }
