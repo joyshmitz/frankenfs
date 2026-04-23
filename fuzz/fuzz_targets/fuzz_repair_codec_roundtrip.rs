@@ -274,7 +274,10 @@ fuzz_target!(|data: &[u8]| {
         "repair codec decode path must be deterministic for identical inputs"
     );
 
-    if !repair_mutated && corrupt_indices.len() <= repair_count {
+    if !repair_mutated
+        && corrupt_indices.len() <= repair_count
+        && corrupt_indices.len() < source_block_count
+    {
         let Ok((recovered, complete)) = decode_first else {
             return;
         };

@@ -17,11 +17,11 @@
 //! available blocks + repair symbols ──► InactivationDecoder ──► recovered blocks + proof
 //! ```
 
-use asupersync::Cx;
 use asupersync::raptorq::decoder::{
     DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
 };
 use asupersync::raptorq::systematic::{EmittedSymbol, SystematicEncoder};
+use asupersync::Cx;
 use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
@@ -169,6 +169,12 @@ pub fn decode_group(
 
     // Add available (non-corrupt) source blocks.
     let corrupt_set: std::collections::HashSet<u32> = corrupt_indices.iter().copied().collect();
+    if corrupt_set.len() >= source_block_count as usize && source_block_count > 0 {
+        return Err(FfsError::RepairFailed(format!(
+            "decode_group: group {} has no intact source blocks; refusing full reconstruction from repair symbols alone",
+            group.0
+        )));
+    }
     for i in 0..source_block_count {
         if corrupt_set.contains(&i) {
             continue;
