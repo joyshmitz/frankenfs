@@ -55,6 +55,9 @@ path = "../crates/ffs-xattr"
 [dependencies.ffs-types]
 path = "../crates/ffs-types"
 
+[dependencies.ffs-extent]
+path = "../crates/ffs-extent"
+
 [workspace]
 members = ["."]
 
@@ -244,4 +247,9 @@ doc = false
 [[bin]]
 name = "fuzz_cli_btrfs_parsers"
 path = "fuzz_targets/fuzz_cli_btrfs_parsers.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_extent_cache_concurrent"
+path = "fuzz_targets/fuzz_extent_cache_concurrent.rs"
 doc = false
