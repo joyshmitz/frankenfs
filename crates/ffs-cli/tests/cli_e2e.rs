@@ -779,3 +779,99 @@ fn cli_mount_managed_unmount_timeout_rejected_in_standard_mode() {
     );
     emit_scenario_result("cli_mount_standard_rejects_managed_timeout", "PASS", None);
 }
+
+#[test]
+fn cli_inspect_unreadable_image_reports_permission_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = tmpdir.path().join("locked.img");
+    fs::write(&image, vec![0u8; 4096]).expect("write empty image");
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o000))
+        .expect("chmod 000 on image");
+
+    // Root bypasses POSIX mode 0o000, so skip rather than silently pass.
+    if fs::read(&image).is_ok() {
+        let _ = fs::set_permissions(&image, fs::Permissions::from_mode(0o600));
+        eprintln!("SKIP: cannot exercise EACCES — current process can read mode-0 files");
+        emit_scenario_result(
+            "cli_inspect_unreadable_image_permission_error",
+            "SKIP",
+            Some("process_bypasses_mode_000"),
+        );
+        return;
+    }
+
+    let output = run_ffs_cli(&["inspect", image.to_str().unwrap()]);
+
+    // Restore perms so tempdir cleanup can run even if the assertions below fire.
+    let _ = fs::set_permissions(&image, fs::Permissions::from_mode(0o600));
+
+    assert!(
+        !output.status.success(),
+        "`ffs inspect` on mode-0 image must not succeed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.trim().is_empty(),
+        "`ffs inspect` on mode-0 image must emit a diagnostic, got stderr=<empty>"
+    );
+    let hints_permission = stderr.contains("Permission denied")
+        || stderr.contains("permission denied")
+        || stderr.contains("EACCES")
+        || stderr.contains("os error 13");
+    assert!(
+        hints_permission,
+        "diagnostic should mention permission/EACCES, got: {stderr}"
+    );
+    emit_scenario_result(
+        "cli_inspect_unreadable_image_permission_error",
+        "PASS",
+        Some("stderr_hints_permission"),
+    );
+}
+
+#[test]
+fn cli_inspect_directory_as_image_reports_error() {
+    // Operator-visible contract: pointing `ffs inspect` at a directory must
+    // fail with a non-empty diagnostic, not panic or hang reading a device.
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let dir_path = tmpdir.path().join("not_an_image");
+    fs::create_dir(&dir_path).expect("create directory to stand in for image");
+
+    let output = run_ffs_cli(&["inspect", dir_path.to_str().unwrap()]);
+
+    assert!(
+        !output.status.success(),
+        "`ffs inspect` on a directory must not succeed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.trim().is_empty(),
+        "`ffs inspect` on a directory must emit a diagnostic, got stderr=<empty>"
+    );
+    emit_scenario_result("cli_inspect_directory_as_image_error", "PASS", None);
+}
+
+#[test]
+fn cli_inspect_empty_file_reports_error() {
+    // Zero-byte images exercise the short-read / EOF permission-adjacent
+    // path: `ffs inspect` must report an error, not panic and not claim a
+    // format was detected.
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = tmpdir.path().join("empty.img");
+    fs::write(&image, b"").expect("write empty image");
+
+    let output = run_ffs_cli(&["inspect", image.to_str().unwrap()]);
+
+    assert!(
+        !output.status.success(),
+        "`ffs inspect` on an empty file must not succeed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.trim().is_empty(),
+        "`ffs inspect` on an empty file must emit a diagnostic, got stderr=<empty>"
+    );
+    emit_scenario_result("cli_inspect_empty_file_error", "PASS", None);
+}
