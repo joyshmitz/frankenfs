@@ -4414,6 +4414,32 @@ mod tests {
         serde_json::from_str(line).expect("decode json log line")
     }
 
+    fn log_contract_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let mutex = LOCK.get_or_init(|| std::sync::Mutex::new(()));
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn install_json_subscriber(
+        buffer: &SharedLogBuffer,
+        max_level: tracing::Level,
+    ) -> tracing::dispatcher::DefaultGuard {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_max_level(max_level)
+            .with_writer(buffer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        tracing::callsite::rebuild_interest_cache();
+        guard
+    }
+
     impl FsOps for IoctlRecordingFs {
         fn getattr(
             &self,
@@ -5912,6 +5938,7 @@ mod tests {
 
     #[test]
     fn dispatch_ioctl_move_ext_success_logs_contract_fields() {
+        let _guard = log_contract_guard();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
             read_only: false,
@@ -5929,17 +5956,7 @@ mod tests {
         let request = FrankenFuse::encode_move_ext_response(donor_fd, 11, 22, 33, 0);
 
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(buffer.clone())
-            .finish();
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let _default = tracing::dispatcher::set_default(&dispatch);
-        tracing::callsite::rebuild_interest_cache();
+        let _default = install_json_subscriber(&buffer, tracing::Level::INFO);
 
         let response = dispatch_ioctl_for_testing(
             &fuse,
@@ -5973,6 +5990,7 @@ mod tests {
 
     #[test]
     fn dispatch_ioctl_move_ext_rejection_logs_contract_fields() {
+        let _guard = log_contract_guard();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
             read_only: false,
@@ -5990,17 +6008,7 @@ mod tests {
         let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
 
         let buffer = SharedLogBuffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_max_level(tracing::Level::WARN)
-            .with_writer(buffer.clone())
-            .finish();
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let _default = tracing::dispatcher::set_default(&dispatch);
-        tracing::callsite::rebuild_interest_cache();
+        let _default = install_json_subscriber(&buffer, tracing::Level::WARN);
 
         let response = dispatch_ioctl_for_testing(
             &fuse,
