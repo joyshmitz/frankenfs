@@ -5897,7 +5897,58 @@ mod tests {
         root_ref
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    struct BtrfsRegularFileLeafPayloads {
+        root_inode: Vec<u8>,
+        dir_index: Vec<u8>,
+        file_inode: Vec<u8>,
+        extent: Vec<u8>,
+    }
+
+    fn build_test_btrfs_regular_file_leaf_payloads(
+        file_objectid: u64,
+        file_name: &str,
+        file_contents: &[u8],
+        data_logical: u64,
+    ) -> BtrfsRegularFileLeafPayloads {
+        let root_inode = make_test_btrfs_inode_item(0o040_755, 4096, 2).to_bytes();
+        let file_size = u64::try_from(file_contents.len()).expect("file payload length should fit");
+        let file_inode = make_test_btrfs_inode_item(0o100_644, file_size, 1).to_bytes();
+        let dir_index = encode_btrfs_dir_index_entry(
+            file_name.as_bytes(),
+            file_objectid,
+            ffs_btrfs::BTRFS_FT_REG_FILE,
+        );
+        let extent = encode_btrfs_regular_extent(data_logical, file_size).to_vec();
+        BtrfsRegularFileLeafPayloads {
+            root_inode,
+            dir_index,
+            file_inode,
+            extent,
+        }
+    }
+
+    fn make_test_btrfs_inode_item(mode: u32, size: u64, nlink: u32) -> BtrfsInodeItem {
+        BtrfsInodeItem {
+            generation: 1,
+            size,
+            nbytes: size,
+            nlink,
+            uid: 1000,
+            gid: 1000,
+            mode,
+            rdev: 0,
+            atime_sec: 10,
+            atime_nsec: 0,
+            ctime_sec: 10,
+            ctime_nsec: 0,
+            mtime_sec: 10,
+            mtime_nsec: 0,
+            otime_sec: 10,
+            otime_nsec: 0,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn write_test_btrfs_regular_file_tree(
         image: &mut [u8],
         leaf_logical: u64,
@@ -5916,51 +5967,12 @@ mod tests {
         let leaf_offset = usize::try_from(leaf_logical).expect("leaf logical should fit");
         write_btrfs_leaf_header(image, leaf_offset, leaf_logical, tree_objectid, 4);
 
-        let root_inode = BtrfsInodeItem {
-            generation: 1,
-            size: 4096,
-            nbytes: 4096,
-            nlink: 2,
-            uid: 1000,
-            gid: 1000,
-            mode: 0o040_755,
-            rdev: 0,
-            atime_sec: 10,
-            atime_nsec: 0,
-            ctime_sec: 10,
-            ctime_nsec: 0,
-            mtime_sec: 10,
-            mtime_nsec: 0,
-            otime_sec: 10,
-            otime_nsec: 0,
-        }
-        .to_bytes();
-        let file_size = u64::try_from(file_contents.len()).expect("file payload length should fit");
-        let file_inode = BtrfsInodeItem {
-            generation: 1,
-            size: file_size,
-            nbytes: file_size,
-            nlink: 1,
-            uid: 1000,
-            gid: 1000,
-            mode: 0o100_644,
-            rdev: 0,
-            atime_sec: 10,
-            atime_nsec: 0,
-            ctime_sec: 10,
-            ctime_nsec: 0,
-            mtime_sec: 10,
-            mtime_nsec: 0,
-            otime_sec: 10,
-            otime_nsec: 0,
-        }
-        .to_bytes();
-        let dir_index = encode_btrfs_dir_index_entry(
-            file_name.as_bytes(),
+        let payloads = build_test_btrfs_regular_file_leaf_payloads(
             file_objectid,
-            ffs_btrfs::BTRFS_FT_REG_FILE,
+            file_name,
+            file_contents,
+            data_logical,
         );
-        let extent = encode_btrfs_regular_extent(data_logical, file_size);
 
         write_btrfs_leaf_item(
             image,
@@ -5970,7 +5982,7 @@ mod tests {
             BTRFS_ITEM_INODE_ITEM,
             0,
             ROOT_INODE_DATA_OFFSET,
-            u32::try_from(root_inode.len()).expect("root inode size should fit"),
+            u32::try_from(payloads.root_inode.len()).expect("root inode size should fit"),
         );
         write_btrfs_leaf_item(
             image,
@@ -5980,7 +5992,7 @@ mod tests {
             ffs_btrfs::BTRFS_ITEM_DIR_INDEX,
             2,
             DIR_INDEX_DATA_OFFSET,
-            u32::try_from(dir_index.len()).expect("dir index size should fit"),
+            u32::try_from(payloads.dir_index.len()).expect("dir index size should fit"),
         );
         write_btrfs_leaf_item(
             image,
@@ -5990,7 +6002,7 @@ mod tests {
             BTRFS_ITEM_INODE_ITEM,
             0,
             FILE_INODE_DATA_OFFSET,
-            u32::try_from(file_inode.len()).expect("file inode size should fit"),
+            u32::try_from(payloads.file_inode.len()).expect("file inode size should fit"),
         );
         write_btrfs_leaf_item(
             image,
@@ -6000,26 +6012,23 @@ mod tests {
             ffs_btrfs::BTRFS_ITEM_EXTENT_DATA,
             0,
             EXTENT_DATA_OFFSET,
-            u32::try_from(extent.len()).expect("extent size should fit"),
+            u32::try_from(payloads.extent.len()).expect("extent size should fit"),
         );
 
-        let root_inode_start =
-            leaf_offset + usize::try_from(ROOT_INODE_DATA_OFFSET).expect("root inode offset fits");
-        image[root_inode_start..root_inode_start + root_inode.len()].copy_from_slice(&root_inode);
-        let dir_index_start =
-            leaf_offset + usize::try_from(DIR_INDEX_DATA_OFFSET).expect("dir index offset fits");
-        image[dir_index_start..dir_index_start + dir_index.len()].copy_from_slice(&dir_index);
-        let file_inode_start =
-            leaf_offset + usize::try_from(FILE_INODE_DATA_OFFSET).expect("file inode offset fits");
-        image[file_inode_start..file_inode_start + file_inode.len()].copy_from_slice(&file_inode);
-        let extent_start =
-            leaf_offset + usize::try_from(EXTENT_DATA_OFFSET).expect("extent offset fits");
-        image[extent_start..extent_start + extent.len()].copy_from_slice(&extent);
+        copy_into_leaf(image, leaf_offset, ROOT_INODE_DATA_OFFSET, &payloads.root_inode);
+        copy_into_leaf(image, leaf_offset, DIR_INDEX_DATA_OFFSET, &payloads.dir_index);
+        copy_into_leaf(image, leaf_offset, FILE_INODE_DATA_OFFSET, &payloads.file_inode);
+        copy_into_leaf(image, leaf_offset, EXTENT_DATA_OFFSET, &payloads.extent);
         stamp_btrfs_test_tree_block_crc32c(image, leaf_offset);
 
         let file_data_start = usize::try_from(data_logical).expect("file data logical fits");
         image[file_data_start..file_data_start + file_contents.len()]
             .copy_from_slice(file_contents);
+    }
+
+    fn copy_into_leaf(image: &mut [u8], leaf_offset: usize, data_offset: u32, payload: &[u8]) {
+        let start = leaf_offset + usize::try_from(data_offset).expect("leaf data offset fits");
+        image[start..start + payload.len()].copy_from_slice(payload);
     }
 
     #[allow(clippy::too_many_lines)]
