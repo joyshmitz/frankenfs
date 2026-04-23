@@ -39,6 +39,13 @@ const TAIL_SIZE: usize = 4;
 /// Max entries in root node (60 bytes of i_block: (60-12)/12 = 4).
 const ROOT_MAX_ENTRIES: u16 = 4;
 
+/// Maximum extent-tree depth allowed by the ext4 on-disk format.
+/// Matches `fs/ext4/ext4_extents.h: EXT4_MAX_EXTENT_DEPTH = 5` and the
+/// grow-root guard at `grow_tree_root`. Any on-disk header claiming a
+/// deeper tree is rejected as corruption before the traversal functions
+/// recurse — bounds the stack use under malicious/corrupt images.
+const EXT4_MAX_EXTENT_DEPTH: u16 = 5;
+
 /// Bit 15 in `ee_len` indicates unwritten extent.
 const EXT_INIT_MAX_LEN: u16 = 1_u16 << 15;
 
@@ -1076,6 +1083,21 @@ fn parse_header(data: &[u8]) -> Result<(Ext4ExtentHeader, usize)> {
 }
 
 fn validate_header(header: &Ext4ExtentHeader, max_allowed: u16) -> Result<()> {
+    if header.depth > EXT4_MAX_EXTENT_DEPTH {
+        error!(
+            invariant = "header.depth<=EXT4_MAX_EXTENT_DEPTH",
+            depth = header.depth,
+            max_depth = EXT4_MAX_EXTENT_DEPTH,
+            "extent_invariant_violation"
+        );
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!(
+                "extent header depth {} exceeds ext4 limit {}",
+                header.depth, EXT4_MAX_EXTENT_DEPTH
+            ),
+        });
+    }
     if header.magic != EXT4_EXTENT_MAGIC {
         error!(
             invariant = "header.magic",
@@ -3372,6 +3394,42 @@ Hole { hole_len: 90 }
         };
         let err = validate_header(&header, 10).unwrap_err();
         assert!(matches!(err, FfsError::Corruption { .. }));
+    }
+
+    #[test]
+    fn validate_header_depth_exceeds_ext4_limit_is_corruption() {
+        // On-disk headers claiming depth > 5 would drive unbounded recursion
+        // through walk/search/insert/delete subtree calls. Reject upfront.
+        let header = Ext4ExtentHeader {
+            magic: EXT4_EXTENT_MAGIC,
+            entries: 0,
+            max_entries: 4,
+            depth: 6,
+            generation: 0,
+        };
+        let err = validate_header(&header, 4).unwrap_err();
+        let detail = match err {
+            FfsError::Corruption { detail, .. } => detail,
+            other => panic!("expected Corruption, got {other:?}"),
+        };
+        assert!(
+            detail.contains("depth") && detail.contains("limit"),
+            "error must mention depth + limit: {detail}"
+        );
+
+        let maxed = Ext4ExtentHeader {
+            depth: u16::MAX,
+            ..header
+        };
+        let err = validate_header(&maxed, 4).unwrap_err();
+        assert!(matches!(err, FfsError::Corruption { .. }));
+
+        // The spec-limit depth of 5 must still validate.
+        let ok = Ext4ExtentHeader {
+            depth: EXT4_MAX_EXTENT_DEPTH,
+            ..header
+        };
+        validate_header(&ok, 4).expect("depth 5 must remain valid");
     }
 
     #[test]
