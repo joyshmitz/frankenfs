@@ -16,7 +16,7 @@ use asupersync::Cx;
 use ffs_core::{
     BtrfsMountSelection, Ext4JournalReplayMode, FsOps, OpenFs, OpenOptions, RequestScope,
 };
-use ffs_fuse::{MountOptions, mount_background};
+use ffs_fuse::{mount_background, MountOptions};
 use ffs_harness::load_sparse_fixture;
 use ffs_types::InodeNumber;
 use serde_json::Value;
@@ -8588,6 +8588,70 @@ fn btrfs_fuse_rename_same_name_is_noop() {
         );
 
         emit_scenario_result(scenario_id, "PASS", Some("visible_noop"));
+    });
+}
+
+#[test]
+fn btrfs_fuse_rename_over_same_inode_hardlink_is_noop() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_rename_over_same_inode_hardlink_noop";
+        let original = mnt.join("original.txt");
+        let alias = mnt.join("alias.txt");
+        fs::write(&original, b"same inode rename btrfs\n").expect("write original");
+        fs::hard_link(&original, &alias).expect("create alias hard link");
+
+        let entries_before = snapshot_directory_entries(mnt);
+        let alias_before = snapshot_file_state(&alias);
+        let original_ino_before = fs::metadata(&original).expect("stat original").ino();
+        let alias_meta_before = fs::metadata(&alias).expect("stat alias");
+        assert_eq!(
+            alias_meta_before.ino(),
+            original_ino_before,
+            "hard link should point at the same inode before rename"
+        );
+        assert_eq!(
+            alias_meta_before.nlink(),
+            2,
+            "same-inode rename precondition should have two names"
+        );
+
+        fs::rename(&original, &alias).expect("rename over same-inode hard link");
+
+        assert_eq!(
+            snapshot_directory_entries(mnt),
+            entries_before,
+            "same-inode rename should be a visible no-op"
+        );
+        assert!(
+            fs::symlink_metadata(&original).is_ok(),
+            "source name should still resolve after same-inode rename"
+        );
+        assert_file_state_unchanged(&alias, &alias_before, "same-inode rename alias");
+        assert_file_state_unchanged(&original, &alias_before, "same-inode rename source");
+
+        let alias_meta_after = fs::metadata(&alias).expect("stat alias after rename");
+        assert_eq!(
+            alias_meta_after.ino(),
+            original_ino_before,
+            "destination should keep the original inode"
+        );
+        assert_eq!(
+            alias_meta_after.nlink(),
+            2,
+            "same-inode rename should preserve the shared link count"
+        );
+        let original_meta_after = fs::metadata(&original).expect("stat source after rename");
+        assert_eq!(
+            original_meta_after.ino(),
+            original_ino_before,
+            "source should still resolve to the original inode"
+        );
+        assert_eq!(
+            original_meta_after.nlink(),
+            2,
+            "source should keep the shared link count after same-inode rename"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("visible_noop_nlink=2"));
     });
 }
 
