@@ -3165,6 +3165,81 @@ fn fuse_readlink_on_non_symlink_reports_einval() {
 }
 
 #[test]
+fn fuse_symlink_target_path_max_boundary_and_enametoolong_contract() {
+    with_rw_mount(|mnt| {
+        assert_symlink_target_path_max_contract(mnt, "ext4_rw_symlink_target_path_max");
+    });
+}
+
+fn assert_symlink_target_path_max_contract(mnt: &Path, scenario_id: &str) {
+    const LINUX_PATH_MAX: usize = 4096;
+    let entries_before = snapshot_directory_entries(mnt);
+
+    let path_max_link = mnt.join("sym_path_max.lnk");
+    let path_max_target = "a".repeat(LINUX_PATH_MAX);
+    std::os::unix::fs::symlink(&path_max_target, &path_max_link)
+        .expect("symlink with PATH_MAX target should succeed on mounted path");
+    assert!(
+        fs::symlink_metadata(&path_max_link)
+            .expect("stat PATH_MAX symlink")
+            .file_type()
+            .is_symlink(),
+        "PATH_MAX-sized symlink must materialize as a symlink on the mounted path"
+    );
+    let readback = fs::read_link(&path_max_link).expect("readlink PATH_MAX symlink");
+    assert_eq!(
+        readback.as_os_str().as_encoded_bytes().len(),
+        LINUX_PATH_MAX,
+        "readlink of PATH_MAX symlink must return full target length"
+    );
+    assert_eq!(
+        readback.as_os_str().as_encoded_bytes(),
+        path_max_target.as_bytes(),
+        "readlink of PATH_MAX symlink must return original target bytes"
+    );
+
+    let too_long_link = mnt.join("sym_too_long.lnk");
+    let too_long_target = "b".repeat(LINUX_PATH_MAX + 1);
+    let too_long_err = std::os::unix::fs::symlink(&too_long_target, &too_long_link)
+        .expect_err("symlink with target > PATH_MAX must be rejected");
+    assert_eq!(
+        too_long_err.raw_os_error(),
+        Some(libc::ENAMETOOLONG),
+        "over-PATH_MAX symlink target must surface exact ENAMETOOLONG: {too_long_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&too_long_link).is_err(),
+        "rejected symlink must not leave a directory entry behind"
+    );
+
+    let empty_link = mnt.join("sym_empty.lnk");
+    let empty_err = std::os::unix::fs::symlink("", &empty_link)
+        .expect_err("symlink with empty target must be rejected");
+    assert_eq!(
+        empty_err.raw_os_error(),
+        Some(libc::ENAMETOOLONG),
+        "empty symlink target must surface exact ENAMETOOLONG: {empty_err}"
+    );
+    assert!(
+        fs::symlink_metadata(&empty_link).is_err(),
+        "rejected empty-target symlink must not leave a directory entry behind"
+    );
+
+    let mut entries_after = entries_before;
+    entries_after.insert("sym_path_max.lnk".to_string());
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        entries_after,
+        "only the accepted PATH_MAX symlink should appear in root entries"
+    );
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("path_max=ok_over_path_max=ENAMETOOLONG_empty=ENAMETOOLONG_no_drift"),
+    );
+}
+
+#[test]
 fn fuse_setattr_truncate() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
@@ -8989,6 +9064,13 @@ fn btrfs_fuse_readlink_on_non_symlink_reports_einval() {
         );
 
         emit_scenario_result(scenario_id, "PASS", Some("file+dir_errno=EINVAL_no_drift"));
+    });
+}
+
+#[test]
+fn btrfs_fuse_symlink_target_path_max_boundary_and_enametoolong_contract() {
+    with_btrfs_rw_mount(|mnt| {
+        assert_symlink_target_path_max_contract(mnt, "btrfs_rw_symlink_target_path_max");
     });
 }
 
