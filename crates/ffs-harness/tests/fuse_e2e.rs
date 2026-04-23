@@ -2492,11 +2492,13 @@ fn fuse_mkdir_and_nested_create() {
 #[test]
 fn fuse_mkdir_existing_directory_fails() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_mkdir_existing_directory_eexist";
         let dir = mnt.join("already_there");
         fs::create_dir(&dir).expect("initial mkdir should succeed");
 
         let err = fs::create_dir(&dir).expect_err("mkdir existing should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        emit_scenario_result(scenario_id, "PASS", Some("errno=EEXIST"));
     });
 }
 
@@ -2580,21 +2582,25 @@ fn fuse_unlink_removes_file() {
 #[test]
 fn fuse_rmdir_missing_directory_fails() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_rmdir_missing_directory_enoent";
         let missing = mnt.join("no_such_dir");
         let err = fs::remove_dir(&missing).expect_err("rmdir missing should fail");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        emit_scenario_result(scenario_id, "PASS", Some("errno=ENOENT"));
     });
 }
 
 #[test]
 fn fuse_rmdir_removes_empty_directory() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_rmdir_empty_directory_ok";
         let dir = mnt.join("empty_dir");
         fs::create_dir(&dir).expect("mkdir empty_dir");
         assert!(dir.exists());
 
         fs::remove_dir(&dir).expect("rmdir empty_dir via FUSE");
         assert!(!dir.exists(), "empty_dir should be gone after rmdir");
+        emit_scenario_result(scenario_id, "PASS", Some("entry_absent_after_rmdir"));
     });
 }
 
@@ -2706,6 +2712,7 @@ fn fuse_mkdir_rmdir_parent_nlink_accounting() {
 #[test]
 fn fuse_rmdir_non_empty_fails() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_rmdir_non_empty_enotempty";
         let dir = mnt.join("non_empty_dir");
         fs::create_dir(&dir).expect("mkdir non_empty_dir");
         fs::write(dir.join("child.txt"), b"child").expect("create child in non_empty_dir");
@@ -2716,6 +2723,7 @@ fn fuse_rmdir_non_empty_fails() {
             dir.exists(),
             "directory should still exist after failed rmdir"
         );
+        emit_scenario_result(scenario_id, "PASS", Some("errno=ENOTEMPTY_dir_preserved"));
     });
 }
 
@@ -6015,6 +6023,7 @@ fn statfs_snapshot(path: &Path) -> StatFsSnapshot {
 #[test]
 fn fuse_write_large_file() {
     with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_write_large_multi_block_roundtrip";
         let path = mnt.join("large.bin");
         // Write 64 KiB of patterned data (crosses multiple blocks).
         let data = patterned_bytes(65_536, 251, 0);
@@ -6023,6 +6032,7 @@ fn fuse_write_large_file() {
         let readback = fs::read(&path).expect("read large file");
         assert_eq!(readback.len(), 65536);
         assert_eq!(readback, data, "large file content should match");
+        emit_scenario_result(scenario_id, "PASS", Some("64k_patterned_roundtrip"));
     });
 }
 
@@ -6071,6 +6081,11 @@ fn fuse_spec_i3_write_and_persist_after_remount() {
     let persisted = fs::read_to_string(mount_b.join("persist_i3.txt"))
         .expect("read persisted file after remount");
     assert_eq!(persisted, "persisted across remount\n");
+    emit_scenario_result(
+        "ext4_spec_i3_write_persists_across_remount",
+        "PASS",
+        Some("payload_preserved"),
+    );
 }
 
 #[test]
@@ -6136,6 +6151,11 @@ fn fuse_spec_i5_delete_reclaims_free_counts() {
             before.files_free,
             after_delete.files_free,
             inode_slack
+        );
+        emit_scenario_result(
+            "ext4_spec_i5_delete_reclaims_free_counts",
+            "PASS",
+            Some("blocks_and_inodes_reclaimed_within_slack"),
         );
     });
 }
