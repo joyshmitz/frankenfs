@@ -2,6 +2,7 @@
 
 mod cmd_evidence;
 mod cmd_repair;
+mod repair_btrfs_parsers;
 
 use cmd_repair::{
     DEFAULT_REPAIR_OVERHEAD_RATIO, Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_FSCK,
