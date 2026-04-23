@@ -6847,8 +6847,18 @@ fn assert_rename_missing_source_reports_enoent(mnt: &Path, scenario_id: &str) {
     emit_scenario_result(scenario_id, "PASS", Some("errno=ENOENT_no_drift"));
 }
 
-#[allow(clippy::too_many_lines)]
 fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: &str) {
+    assert_rename_file_over_directory_rejected_with_eisdir(mnt);
+    assert_rename_directory_over_file_rejected_with_enotdir(mnt);
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("file_over_dir=EISDIR_dir_over_file=ENOTDIR_no_drift"),
+    );
+}
+
+fn assert_rename_file_over_directory_rejected_with_eisdir(mnt: &Path) {
     let file_source = mnt.join("rename_file_over_dir_src.txt");
     let directory_target = mnt.join("rename_file_over_dir_dst");
     fs::write(&file_source, b"rename file source\n").expect("write rename file source");
@@ -6856,17 +6866,17 @@ fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: 
     let directory_child = directory_target.join("child.txt");
     fs::write(&directory_child, b"rename dir child\n").expect("write rename directory child");
 
-    let file_over_dir_entries_before = snapshot_directory_entries(mnt);
+    let root_entries_before = snapshot_directory_entries(mnt);
     let file_source_before = snapshot_file_state(&file_source);
     let directory_child_before = snapshot_file_state(&directory_child);
     let directory_entries_before = snapshot_directory_entries(&directory_target);
 
-    let file_over_dir_err = fs::rename(&file_source, &directory_target)
+    let err = fs::rename(&file_source, &directory_target)
         .expect_err("rename file over directory should fail");
     assert_eq!(
-        file_over_dir_err.raw_os_error(),
+        err.raw_os_error(),
         Some(libc::EISDIR),
-        "rename file over directory should surface exact EISDIR: {file_over_dir_err}"
+        "rename file over directory should surface exact EISDIR: {err}"
     );
     assert!(
         fs::symlink_metadata(&file_source).is_ok(),
@@ -6880,7 +6890,7 @@ fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: 
     );
     assert_eq!(
         snapshot_directory_entries(mnt),
-        file_over_dir_entries_before,
+        root_entries_before,
         "rename file over directory must not change visible root entries"
     );
     assert_eq!(
@@ -6898,7 +6908,9 @@ fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: 
         &directory_child_before,
         "rename file over directory child",
     );
+}
 
+fn assert_rename_directory_over_file_rejected_with_enotdir(mnt: &Path) {
     let directory_source = mnt.join("rename_dir_over_file_src");
     let file_target = mnt.join("rename_dir_over_file_dst.txt");
     fs::create_dir(&directory_source).expect("create rename directory source");
@@ -6907,17 +6919,17 @@ fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: 
         .expect("write rename directory source child");
     fs::write(&file_target, b"rename file target\n").expect("write rename file target");
 
-    let dir_over_file_entries_before = snapshot_directory_entries(mnt);
+    let root_entries_before = snapshot_directory_entries(mnt);
     let source_entries_before = snapshot_directory_entries(&directory_source);
     let source_child_before = snapshot_file_state(&source_child);
     let file_target_before = snapshot_file_state(&file_target);
 
-    let dir_over_file_err = fs::rename(&directory_source, &file_target)
+    let err = fs::rename(&directory_source, &file_target)
         .expect_err("rename directory over file should fail");
     assert_eq!(
-        dir_over_file_err.raw_os_error(),
+        err.raw_os_error(),
         Some(libc::ENOTDIR),
-        "rename directory over file should surface exact ENOTDIR: {dir_over_file_err}"
+        "rename directory over file should surface exact ENOTDIR: {err}"
     );
     assert!(
         fs::metadata(&directory_source)
@@ -6937,7 +6949,7 @@ fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: 
     );
     assert_eq!(
         snapshot_directory_entries(mnt),
-        dir_over_file_entries_before,
+        root_entries_before,
         "rename directory over file must not change visible root entries"
     );
     assert_eq!(
@@ -6954,12 +6966,6 @@ fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: 
         &file_target,
         &file_target_before,
         "rename directory over file target",
-    );
-
-    emit_scenario_result(
-        scenario_id,
-        "PASS",
-        Some("file_over_dir=EISDIR_dir_over_file=ENOTDIR_no_drift"),
     );
 }
 
