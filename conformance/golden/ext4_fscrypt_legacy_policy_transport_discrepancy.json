@@ -1,0 +1,22 @@
+{
+  "scenario_id": "ext4_fscrypt_legacy_policy_transport_discrepancy",
+  "description": "Legacy ext4 fscrypt policy v1 ioctl succeeds through direct FrankenFuse dispatch, while mounted-path restricted FUSE currently surfaces EIO for the _IOW transport shape.",
+  "filesystem": "ext4",
+  "command_hex": "0x400c6615",
+  "path": "policy.txt",
+  "direct_dispatch": {
+    "expected": "success",
+    "request_shape": "legacy_iow_in_len_12_out_size_0",
+    "policy_version": 0,
+    "contents_mode": 1,
+    "filenames_mode": 4,
+    "flags": 0,
+    "master_key_descriptor_hex": "6d6b646573633432"
+  },
+  "mounted_path": {
+    "expected": "transport_eio",
+    "errno": 5,
+    "message": "[Errno 5] Input/output error",
+    "trace_contains": "in_len=12 out_size=0"
+  }
+}

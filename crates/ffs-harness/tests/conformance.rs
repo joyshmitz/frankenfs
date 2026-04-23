@@ -9,6 +9,7 @@ use ffs_btrfs::{
     walk_device_tree,
 };
 use ffs_core::{Ext4JournalReplayMode, FileType, OpenFs, OpenOptions, RequestScope};
+use ffs_fuse::{FrankenFuse, MountOptions, mount_background};
 use ffs_harness::{
     GoldenReference, ParityReport,
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
@@ -40,6 +41,13 @@ use std::{
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
     },
 };
+
+const FS_IOC_GET_ENCRYPTION_POLICY_CMD: u32 = 0x400C_6615;
+const FSCRYPT_POLICY_V1_SIZE: usize = 12;
+const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
+const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
+const EXT4_ENCRYPT_INODE_FL: u32 = 0x0000_0800;
+const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -936,6 +944,393 @@ fn ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes() {
         .expect("device lookup should parse encrypted entry")
         .expect("encrypted entry should be found");
     assert_eq!(raw_lookup.name, raw_name);
+}
+
+#[test]
+fn ext4_fscrypt_legacy_policy_transport_discrepancy_conforms() {
+    let golden = load_fscrypt_transport_golden();
+    let image = build_ext4_fscrypt_policy_image();
+    let tmp = tempfile::TempDir::new().expect("tmpdir for fscrypt transport conformance");
+    let image_path = tmp.path().join("fscrypt-policy-v1.ext4");
+    std::fs::write(&image_path, &image).expect("write fscrypt transport image");
+
+    let cx = Cx::for_testing();
+    let open_opts = OpenOptions {
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    let fs = OpenFs::open_with_options(&cx, &image_path, &open_opts)
+        .expect("open ext4 fscrypt transport image");
+    let fuse = FrankenFuse::new(Box::new(fs));
+    let direct_request = [0_u8; FSCRYPT_POLICY_V1_SIZE];
+    let policy = fuse
+        .dispatch_ioctl_for_fuzzing(
+            std::process::id(),
+            11,
+            0,
+            FS_IOC_GET_ENCRYPTION_POLICY_CMD,
+            &direct_request,
+            0,
+        )
+        .expect("direct legacy policy ioctl should succeed");
+    assert_eq!(
+        policy.len(),
+        FSCRYPT_POLICY_V1_SIZE,
+        "direct dispatch should return a v1 policy payload"
+    );
+    assert_eq!(
+        policy[0],
+        golden["direct_dispatch"]["policy_version"]
+            .as_u64()
+            .expect("golden direct policy_version") as u8
+    );
+    assert_eq!(
+        policy[1],
+        golden["direct_dispatch"]["contents_mode"]
+            .as_u64()
+            .expect("golden direct contents_mode") as u8
+    );
+    assert_eq!(
+        policy[2],
+        golden["direct_dispatch"]["filenames_mode"]
+            .as_u64()
+            .expect("golden direct filenames_mode") as u8
+    );
+    assert_eq!(
+        policy[3],
+        golden["direct_dispatch"]["flags"]
+            .as_u64()
+            .expect("golden direct flags") as u8
+    );
+    assert_eq!(
+        hex::encode(&policy[4..12]),
+        golden["direct_dispatch"]["master_key_descriptor_hex"]
+            .as_str()
+            .expect("golden direct master_key_descriptor_hex")
+    );
+
+    if !fuse_available() {
+        eprintln!("Skipping mounted-path fscrypt transport probe: FUSE prerequisites not met.");
+        return;
+    }
+
+    let mnt = tmp.path().join("mnt");
+    std::fs::create_dir_all(&mnt).expect("create conformance mountpoint");
+    let ioctl_trace_path = tmp.path().join("ioctl-ext4-fscrypt-legacy.log");
+    let mount_opts = MountOptions {
+        read_only: true,
+        auto_unmount: false,
+        ioctl_trace_path: Some(ioctl_trace_path.clone()),
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_with_options(&image_path, &mnt, &mount_opts) else {
+        eprintln!("Skipping mounted-path fscrypt transport probe: FUSE mount failed.");
+        return;
+    };
+
+    let report = ext4_get_encryption_policy_ioctl(
+        &mnt.join(golden["path"].as_str().expect("golden policy path")),
+    );
+    let ioctl_trace = read_ioctl_trace(&ioctl_trace_path);
+    assert!(
+        trace_contains_cmd(
+            &ioctl_trace,
+            u32::from_str_radix(
+                golden["command_hex"]
+                    .as_str()
+                    .expect("golden command_hex")
+                    .trim_start_matches("0x"),
+                16,
+            )
+            .expect("parse golden command_hex"),
+        ),
+        "mounted-path ioctl should reach ffs-fuse::ioctl: {ioctl_trace}"
+    );
+    assert!(
+        ioctl_trace.contains(
+            golden["mounted_path"]["trace_contains"]
+                .as_str()
+                .expect("golden mounted trace shape"),
+        ),
+        "mounted-path ioctl trace should preserve the legacy request shape: {ioctl_trace}"
+    );
+    assert_eq!(
+        report["errno"].as_i64(),
+        Some(
+            golden["mounted_path"]["errno"]
+                .as_i64()
+                .expect("golden mounted errno")
+        ),
+        "mounted-path legacy fscrypt policy ioctl should surface the documented transport errno: {report}"
+    );
+    assert_eq!(
+        report["message"].as_str(),
+        Some(
+            golden["mounted_path"]["message"]
+                .as_str()
+                .expect("golden mounted message")
+        ),
+        "mounted-path legacy fscrypt policy ioctl should surface the documented transport message: {report}"
+    );
+}
+
+fn command_available(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn fuse_available() -> bool {
+    Path::new("/dev/fuse").exists()
+        && command_available("python3")
+        && command_available("mkfs.ext4")
+        && command_available("debugfs")
+}
+
+fn try_mount_ffs_with_options(
+    image: &Path,
+    mountpoint: &Path,
+    mount_opts: &MountOptions,
+) -> Option<fuser::BackgroundSession> {
+    let cx = Cx::for_testing();
+    let opts = OpenOptions {
+        skip_validation: false,
+        ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
+        ..OpenOptions::default()
+    };
+    let fs = OpenFs::open_with_options(&cx, image, &opts).expect("open ext4 image");
+    match mount_background(Box::new(fs), mountpoint, mount_opts) {
+        Ok(session) => {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Some(session)
+        }
+        Err(err) => {
+            eprintln!("FUSE mount failed (skipping conformance mount probe): {err}");
+            None
+        }
+    }
+}
+
+fn ext4_get_encryption_policy_ioctl(path: &Path) -> Value {
+    let script = r"
+import fcntl, json, sys
+
+FS_IOC_GET_ENCRYPTION_POLICY = 0x400C6615
+POLICY_SIZE = 12
+
+with open(sys.argv[1], 'rb', buffering=0) as fh:
+    buffer = bytearray(POLICY_SIZE)
+    try:
+        fcntl.ioctl(fh.fileno(), FS_IOC_GET_ENCRYPTION_POLICY, buffer, True)
+        print(json.dumps({
+            'policy_version': buffer[0],
+            'contents_mode': buffer[1],
+            'filenames_mode': buffer[2],
+            'flags': buffer[3],
+            'master_key_descriptor_hex': buffer[4:12].hex(),
+            'policy_hex': buffer.hex(),
+        }))
+    except OSError as exc:
+        print(json.dumps({
+            'errno': exc.errno,
+            'message': str(exc),
+        }))
+        sys.exit(0)
+    ";
+
+    let output = std::process::Command::new("python3")
+        .args(["-c", script, path.to_str().expect("path utf8")])
+        .output()
+        .expect("python3 get encryption policy ioctl");
+    assert!(
+        output.status.success(),
+        "python3 get encryption policy ioctl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("decode encryption policy ioctl JSON")
+}
+
+fn read_ioctl_trace(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+fn trace_contains_cmd(trace: &str, cmd: u32) -> bool {
+    trace.contains(&format!("cmd=0x{cmd:08x}"))
+}
+
+fn load_fscrypt_transport_golden() -> Value {
+    let golden_path = workspace_root()
+        .join("conformance/golden/ext4_fscrypt_legacy_policy_transport_discrepancy.json");
+    let text = std::fs::read_to_string(&golden_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", golden_path.display()));
+    serde_json::from_str(&text).expect("decode fscrypt transport golden")
+}
+
+fn build_fscrypt_context_v1(
+    contents_mode: u8,
+    filenames_mode: u8,
+    flags: u8,
+    descriptor: [u8; 8],
+    nonce: [u8; 16],
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(FSCRYPT_CONTEXT_V1_SIZE);
+    context.push(FSCRYPT_POLICY_V1_VERSION);
+    context.push(contents_mode);
+    context.push(filenames_mode);
+    context.push(flags);
+    context.extend_from_slice(&descriptor);
+    context.extend_from_slice(&nonce);
+    context
+}
+
+fn build_test_inline_ibody(ibody_len: usize, entries: &[ffs_ondisk::Ext4Xattr]) -> Vec<u8> {
+    let mut out = vec![0_u8; ibody_len];
+    if entries.is_empty() {
+        return out;
+    }
+
+    out[0..4].copy_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+    let region_capacity = ibody_len
+        .checked_sub(4)
+        .expect("inline xattr region must include 4-byte header");
+    let mut region = vec![0_u8; region_capacity];
+    let mut next_entry = 0_usize;
+    let mut value_tail = region_capacity;
+
+    for entry in entries {
+        let entry_len = (16 + entry.name.len() + 3) & !3;
+        let value_start = value_tail
+            .checked_sub(entry.value.len())
+            .expect("inline xattr value should fit")
+            & !3;
+        let entry_end_with_term = next_entry
+            .checked_add(entry_len + 4)
+            .expect("inline xattr entry offset should not overflow");
+        assert!(
+            entry_end_with_term <= value_start,
+            "inline xattr entry table should not overlap values"
+        );
+
+        region[value_start..value_start + entry.value.len()].copy_from_slice(&entry.value);
+        value_tail = value_start;
+
+        region[next_entry] =
+            u8::try_from(entry.name.len()).expect("inline xattr name should fit in u8");
+        region[next_entry + 1] = entry.name_index;
+        region[next_entry + 2..next_entry + 4].copy_from_slice(
+            &u16::try_from(value_start)
+                .expect("inline xattr value offset should fit in u16")
+                .to_le_bytes(),
+        );
+        region[next_entry + 8..next_entry + 12].copy_from_slice(
+            &u32::try_from(entry.value.len())
+                .expect("inline xattr value length should fit in u32")
+                .to_le_bytes(),
+        );
+        region[next_entry + 16..next_entry + 16 + entry.name.len()].copy_from_slice(&entry.name);
+        next_entry += entry_len;
+    }
+
+    out[4..].copy_from_slice(&region);
+    out
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn build_ext4_fscrypt_policy_image() -> Vec<u8> {
+    let block_size: u32 = 4096;
+    let image_size: u32 = 256 * 1024;
+    let mut image = vec![0_u8; image_size as usize];
+    let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+
+    image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&ffs_types::EXT4_SUPER_MAGIC.to_le_bytes());
+    image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&2_u32.to_le_bytes());
+    let blocks_count = image_size / block_size;
+    image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off..sb_off + 0x04].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x14..sb_off + 0x18].copy_from_slice(&0_u32.to_le_bytes());
+    image[sb_off + 0x20..sb_off + 0x24].copy_from_slice(&blocks_count.to_le_bytes());
+    image[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&128_u32.to_le_bytes());
+    image[sb_off + 0x58..sb_off + 0x5A].copy_from_slice(&256_u16.to_le_bytes());
+    image[sb_off + 0x4C..sb_off + 0x50].copy_from_slice(&1_u32.to_le_bytes());
+    let incompat = (ffs_ondisk::Ext4IncompatFeatures::FILETYPE.0
+        | ffs_ondisk::Ext4IncompatFeatures::EXTENTS.0
+        | ffs_ondisk::Ext4IncompatFeatures::ENCRYPT.0)
+        .to_le_bytes();
+    image[sb_off + 0x60..sb_off + 0x64].copy_from_slice(&incompat);
+    image[sb_off + 0x54..sb_off + 0x58].copy_from_slice(&11_u32.to_le_bytes());
+
+    let gd_off: usize = 4096;
+    image[gd_off..gd_off + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[gd_off + 4..gd_off + 8].copy_from_slice(&3_u32.to_le_bytes());
+    image[gd_off + 8..gd_off + 12].copy_from_slice(&4_u32.to_le_bytes());
+
+    let root_ino = 4 * 4096 + 256;
+    image[root_ino..root_ino + 2].copy_from_slice(&0o040_755_u16.to_le_bytes());
+    image[root_ino + 4..root_ino + 8].copy_from_slice(&4096_u32.to_le_bytes());
+    image[root_ino + 0x1A..root_ino + 0x1C].copy_from_slice(&3_u16.to_le_bytes());
+    image[root_ino + 0x20..root_ino + 0x24]
+        .copy_from_slice(&ffs_types::EXT4_EXTENTS_FL.to_le_bytes());
+    image[root_ino + 0x80..root_ino + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+
+    let root_extent = root_ino + 0x28;
+    image[root_extent..root_extent + 2].copy_from_slice(&0xF30A_u16.to_le_bytes());
+    image[root_extent + 2..root_extent + 4].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 4..root_extent + 6].copy_from_slice(&4_u16.to_le_bytes());
+    image[root_extent + 6..root_extent + 8].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 12..root_extent + 16].copy_from_slice(&0_u32.to_le_bytes());
+    image[root_extent + 16..root_extent + 18].copy_from_slice(&1_u16.to_le_bytes());
+    image[root_extent + 18..root_extent + 20].copy_from_slice(&0_u16.to_le_bytes());
+    image[root_extent + 20..root_extent + 24].copy_from_slice(&10_u32.to_le_bytes());
+
+    let file_ino = 4 * 4096 + 10 * 256;
+    image[file_ino..file_ino + 2].copy_from_slice(&0o100_644_u16.to_le_bytes());
+    image[file_ino + 4..file_ino + 8].copy_from_slice(&0_u32.to_le_bytes());
+    image[file_ino + 0x1A..file_ino + 0x1C].copy_from_slice(&1_u16.to_le_bytes());
+    image[file_ino + 0x80..file_ino + 0x82].copy_from_slice(&32_u16.to_le_bytes());
+    image[file_ino + 0x20..file_ino + 0x24].copy_from_slice(&EXT4_ENCRYPT_INODE_FL.to_le_bytes());
+
+    let context = build_fscrypt_context_v1(1, 4, 0, *b"mkdesc42", *b"0123456789abcdef");
+    let ibody = build_test_inline_ibody(
+        256 - (128 + 32),
+        &[ffs_ondisk::Ext4Xattr {
+            name_index: ffs_types::EXT4_XATTR_INDEX_ENCRYPTION,
+            name: EXT4_ENCRYPTION_XATTR_NAME.to_vec(),
+            value: context,
+        }],
+    );
+    let xattr_off = file_ino + 128 + 32;
+    image[xattr_off..xattr_off + ibody.len()].copy_from_slice(&ibody);
+
+    let dir_block = 10 * 4096;
+    image[dir_block..dir_block + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dir_block + 4..dir_block + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dir_block + 6] = 1;
+    image[dir_block + 7] = 2;
+    image[dir_block + 8] = b'.';
+
+    let dotdot = dir_block + 12;
+    image[dotdot..dotdot + 4].copy_from_slice(&2_u32.to_le_bytes());
+    image[dotdot + 4..dotdot + 6].copy_from_slice(&12_u16.to_le_bytes());
+    image[dotdot + 6] = 2;
+    image[dotdot + 7] = 2;
+    image[dotdot + 8] = b'.';
+    image[dotdot + 9] = b'.';
+
+    let file_entry = dotdot + 12;
+    let file_name = b"policy.txt";
+    image[file_entry..file_entry + 4].copy_from_slice(&11_u32.to_le_bytes());
+    image[file_entry + 4..file_entry + 6].copy_from_slice(&(4096_u16 - 24).to_le_bytes());
+    image[file_entry + 6] = u8::try_from(file_name.len()).expect("policy name should fit u8");
+    image[file_entry + 7] = 1;
+    image[file_entry + 8..file_entry + 8 + file_name.len()].copy_from_slice(file_name);
+
+    let inode_bitmap = 3 * 4096;
+    for bit in [1_usize, 10_usize] {
+        image[inode_bitmap + bit / 8] |= 1 << (bit % 8);
+    }
+
+    image
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -3767,6 +4162,7 @@ fn full_conformance_gate_pass() {
     ext4_dir_block_tail_bad_header_fixture_rejected();
     ext4_dir_block_casefold_lookup_conforms();
     ext4_fscrypt_nokey_readdir_and_lookup_preserve_raw_bytes();
+    ext4_fscrypt_legacy_policy_transport_discrepancy_conforms();
     btrfs_tree_block_checksum_tamper_detection_conforms();
     ext4_orphan_recovery_conforms();
     ext4_path_resolution_conforms();
@@ -3875,6 +4271,13 @@ fn validate_golden_jsons(workspace: &Path) {
             "golden {name} label should be non-empty"
         );
     }
+
+    let fscrypt_transport_name = "ext4_fscrypt_legacy_policy_transport_discrepancy.json";
+    let text = std::fs::read_to_string(golden_dir.join(fscrypt_transport_name))
+        .unwrap_or_else(|e| panic!("golden {fscrypt_transport_name} unreadable: {e}"));
+    let golden: Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("golden {fscrypt_transport_name} invalid: {e}"));
+    validate_fscrypt_transport_discrepancy_golden(fscrypt_transport_name, &golden);
 }
 
 fn parse_checksum_inventory(path: &Path) -> HashMap<String, String> {
@@ -4038,6 +4441,82 @@ fn validate_fast_commit_fixture_golden(file_name: &str, golden: &Value) {
             _ => panic!("golden {file_name} operation[{idx}] has unknown kind {kind}"),
         }
     }
+}
+
+fn validate_fscrypt_transport_discrepancy_golden(file_name: &str, golden: &Value) {
+    assert_eq!(
+        golden.get("scenario_id").and_then(Value::as_str),
+        Some("ext4_fscrypt_legacy_policy_transport_discrepancy"),
+        "golden {file_name} scenario_id should match the fscrypt transport contract"
+    );
+    assert_eq!(
+        golden.get("filesystem").and_then(Value::as_str),
+        Some("ext4"),
+        "golden {file_name} filesystem should be ext4"
+    );
+    assert_eq!(
+        golden.get("command_hex").and_then(Value::as_str),
+        Some("0x400c6615"),
+        "golden {file_name} command_hex should freeze the legacy ioctl number"
+    );
+    assert_eq!(
+        golden.get("path").and_then(Value::as_str),
+        Some("policy.txt"),
+        "golden {file_name} path should freeze the mounted-path target"
+    );
+
+    let direct = golden
+        .get("direct_dispatch")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("golden {file_name} missing direct_dispatch object"));
+    assert_eq!(
+        direct.get("expected").and_then(Value::as_str),
+        Some("success"),
+        "golden {file_name} direct_dispatch.expected should be success"
+    );
+    assert_eq!(
+        direct.get("request_shape").and_then(Value::as_str),
+        Some("legacy_iow_in_len_12_out_size_0"),
+        "golden {file_name} should freeze the legacy _IOW request shape"
+    );
+    for field in ["policy_version", "contents_mode", "filenames_mode", "flags"] {
+        assert!(
+            direct.get(field).and_then(Value::as_u64).is_some(),
+            "golden {file_name} direct_dispatch.{field} should be numeric"
+        );
+    }
+    assert_eq!(
+        direct
+            .get("master_key_descriptor_hex")
+            .and_then(Value::as_str),
+        Some("6d6b646573633432"),
+        "golden {file_name} should freeze the v1 master-key descriptor"
+    );
+
+    let mounted = golden
+        .get("mounted_path")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("golden {file_name} missing mounted_path object"));
+    assert_eq!(
+        mounted.get("expected").and_then(Value::as_str),
+        Some("transport_eio"),
+        "golden {file_name} mounted_path.expected should document the transport-layer EIO"
+    );
+    assert_eq!(
+        mounted.get("errno").and_then(Value::as_i64),
+        Some(i64::from(libc::EIO)),
+        "golden {file_name} mounted_path.errno should freeze the transport-layer EIO"
+    );
+    assert_eq!(
+        mounted.get("message").and_then(Value::as_str),
+        Some("[Errno 5] Input/output error"),
+        "golden {file_name} mounted_path.message should freeze the Python ioctl surface"
+    );
+    assert_eq!(
+        mounted.get("trace_contains").and_then(Value::as_str),
+        Some("in_len=12 out_size=0"),
+        "golden {file_name} mounted_path.trace_contains should freeze the restricted-FUSE request shape"
+    );
 }
 
 fn validate_legacy_fixture_goldens(workspace: &Path) {
