@@ -14434,6 +14434,92 @@ impl OpenFs {
 // ── FsOps for OpenFs (device-based ext4 adapter) ──────────────────────────
 
 impl OpenFs {
+    /// Walk `INODE_REF` back-references from `objectid` up to the subvolume
+    /// root (`BTRFS_FIRST_FREE_OBJECTID = 256`) and assemble the path used
+    /// by `BTRFS_IOC_INO_LOOKUP`.
+    ///
+    /// Returns the NUL-terminated relative path from the subvolume root,
+    /// with components separated by `/` and a trailing `/` before the NUL
+    /// so callers can reliably append child names — matches Linux
+    /// `fs/btrfs/ioctl.c::btrfs_search_path_in_tree`. When the target has
+    /// multiple back-references (hard links), the first is chosen.
+    fn btrfs_resolve_inode_path(&self, cx: &Cx, objectid: u64) -> ffs_error::Result<Vec<u8>> {
+        let entries = self.walk_btrfs_fs_tree(cx)?;
+        Self::btrfs_build_path_from_inode_refs(&entries, objectid)
+    }
+
+    /// Pure helper: given a flat list of fs-tree leaf entries, walk
+    /// `INODE_REF` back-references from `objectid` up to the subvolume
+    /// root (`BTRFS_FIRST_FREE_OBJECTID = 256`) and assemble the
+    /// `BTRFS_IOC_INO_LOOKUP` path (`/`-separated components, trailing
+    /// `/` before NUL). Factored out of `btrfs_resolve_inode_path` so
+    /// the algorithm is unit-testable without building a full on-disk
+    /// image.
+    fn btrfs_build_path_from_inode_refs(
+        entries: &[BtrfsLeafEntry],
+        objectid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
+        const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
+        const MAX_PATH_DEPTH: usize = 4096; // Defense-in-depth against corrupt cycles.
+
+        // Index INODE_REF items by child objectid so each step of the walk
+        // is O(1) rather than rescanning the whole tree.
+        let mut parent_by_child: std::collections::BTreeMap<u64, (u64, Vec<u8>)> =
+            std::collections::BTreeMap::new();
+        for entry in entries {
+            if entry.key.item_type != BTRFS_ITEM_INODE_REF {
+                continue;
+            }
+            let parent_oid = entry.key.offset;
+            let child_oid = entry.key.objectid;
+            let refs = Self::btrfs_parse_inode_ref_payload(&entry.data)?;
+            if let Some((_index, name)) = refs.into_iter().next() {
+                parent_by_child.entry(child_oid).or_insert((parent_oid, name));
+            }
+        }
+
+        let mut components: Vec<Vec<u8>> = Vec::new();
+        let mut visited: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        let mut current = objectid;
+        for _ in 0..MAX_PATH_DEPTH {
+            if current == BTRFS_FIRST_FREE_OBJECTID {
+                // Reached the subvolume root. Assemble `a/b/c/\0`.
+                components.reverse();
+                let mut path = Vec::new();
+                for (i, name) in components.iter().enumerate() {
+                    if i > 0 {
+                        path.push(b'/');
+                    }
+                    path.extend_from_slice(name);
+                }
+                if !path.is_empty() {
+                    path.push(b'/');
+                }
+                path.push(0_u8);
+                return Ok(path);
+            }
+            if !visited.insert(current) {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!("cycle in INODE_REF chain at objectid {current}"),
+                });
+            }
+            let Some((parent_oid, name)) = parent_by_child.get(&current) else {
+                return Err(FfsError::NotFound(format!(
+                    "inode {objectid} has no INODE_REF back to subvolume root (stuck at {current})"
+                )));
+            };
+            components.push(name.clone());
+            current = *parent_oid;
+        }
+        Err(FfsError::Corruption {
+            block: 0,
+            detail: format!(
+                "INODE_REF chain exceeded depth {MAX_PATH_DEPTH} from objectid {objectid}"
+            ),
+        })
+    }
+
     fn ext4_fiemap(
         &self,
         cx: &Cx,
@@ -16050,7 +16136,7 @@ impl FsOps for OpenFs {
 
     fn btrfs_ino_lookup(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _scope: &mut RequestScope,
         treeid: u64,
         objectid: u64,
@@ -16060,24 +16146,30 @@ impl FsOps for OpenFs {
                 "BTRFS_IOC_INO_LOOKUP is not supported on ext4 filesystems".to_owned(),
             )),
             FsFlavor::Btrfs(sb) => {
-                // For now, only support the root inode case (objectid == 256).
-                // The kernel uses this to discover the subvolume tree ID.
                 const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
-                if objectid == BTRFS_FIRST_FREE_OBJECTID {
-                    // Return the resolved treeid and an empty path.
-                    // If treeid is 0, use the mounted subvolume's tree.
-                    let resolved_treeid = if treeid == 0 {
-                        sb.root_dir_objectid
-                    } else {
-                        treeid
-                    };
-                    Ok((resolved_treeid, vec![0_u8])) // NUL-terminated empty path
+                // If treeid is 0, use the mounted subvolume's tree.
+                let resolved_treeid = if treeid == 0 {
+                    sb.root_dir_objectid
                 } else {
-                    // Full back-reference walking not implemented yet.
-                    Err(FfsError::Io(std::io::Error::from_raw_os_error(
-                        libc::ENOENT,
-                    )))
+                    treeid
+                };
+                if objectid == BTRFS_FIRST_FREE_OBJECTID {
+                    // Subvolume root: NUL-terminated empty path.
+                    return Ok((resolved_treeid, vec![0_u8]));
                 }
+                // Non-root inode: walk INODE_REF back-references from the
+                // target up to the subvolume root, prepending each name
+                // component. Cross-subvolume resolution (ROOT_REF) is not
+                // supported in V1; requests with a non-mounted tree id
+                // return UnsupportedFeature rather than silent ENOENT.
+                if resolved_treeid != sb.root_dir_objectid {
+                    return Err(FfsError::UnsupportedFeature(format!(
+                        "cross-subvolume btrfs_ino_lookup not implemented (requested tree {resolved_treeid}, mounted tree {})",
+                        sb.root_dir_objectid
+                    )));
+                }
+                let path = self.btrfs_resolve_inode_path(cx, objectid)?;
+                Ok((resolved_treeid, path))
             }
         }
     }
@@ -23424,6 +23516,106 @@ mod tests {
         image[fs_leaf..fs_leaf + 4].copy_from_slice(&csum_fs.to_le_bytes());
 
         image
+    }
+
+    fn synth_inode_ref_entry(
+        child_oid: u64,
+        parent_oid: u64,
+        index: u64,
+        name: &[u8],
+    ) -> BtrfsLeafEntry {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&index.to_le_bytes());
+        let name_len = u16::try_from(name.len()).expect("name fits u16");
+        payload.extend_from_slice(&name_len.to_le_bytes());
+        payload.extend_from_slice(name);
+        BtrfsLeafEntry {
+            key: BtrfsKey {
+                objectid: child_oid,
+                item_type: BTRFS_ITEM_INODE_REF,
+                offset: parent_oid,
+            },
+            data: payload,
+        }
+    }
+
+    #[test]
+    fn btrfs_build_path_from_inode_refs_returns_empty_for_subvolume_root() {
+        let entries = Vec::new();
+        let path = OpenFs::btrfs_build_path_from_inode_refs(&entries, 256)
+            .expect("root objectid should resolve to empty path");
+        assert_eq!(path, b"\0");
+    }
+
+    #[test]
+    fn btrfs_build_path_from_inode_refs_single_hop_from_root() {
+        // /subdir  (objectid 257, parent 256)
+        let entries = vec![synth_inode_ref_entry(257, 256, 2, b"subdir")];
+        let path = OpenFs::btrfs_build_path_from_inode_refs(&entries, 257)
+            .expect("single-hop path should resolve");
+        assert_eq!(path, b"subdir/\0");
+    }
+
+    #[test]
+    fn btrfs_build_path_from_inode_refs_multi_hop_joins_with_slashes() {
+        // /a/b/c  (256 -> 257 "a" -> 258 "b" -> 259 "c")
+        let entries = vec![
+            synth_inode_ref_entry(257, 256, 2, b"a"),
+            synth_inode_ref_entry(258, 257, 2, b"b"),
+            synth_inode_ref_entry(259, 258, 2, b"c"),
+        ];
+        let path = OpenFs::btrfs_build_path_from_inode_refs(&entries, 259)
+            .expect("multi-hop path should resolve");
+        assert_eq!(path, b"a/b/c/\0");
+    }
+
+    #[test]
+    fn btrfs_build_path_from_inode_refs_missing_backref_is_not_found() {
+        // Objectid 999 has no INODE_REF anywhere.
+        let entries = vec![synth_inode_ref_entry(257, 256, 2, b"a")];
+        let err = OpenFs::btrfs_build_path_from_inode_refs(&entries, 999)
+            .expect_err("missing back-ref must fail");
+        match err {
+            FfsError::NotFound(msg) => {
+                assert!(msg.contains("999"), "error must reference the missing inode: {msg}");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn btrfs_build_path_from_inode_refs_detects_cycles() {
+        // Corrupt: 257 -> 258 -> 257 cycle, neither reaches root.
+        let entries = vec![
+            synth_inode_ref_entry(257, 258, 2, b"a"),
+            synth_inode_ref_entry(258, 257, 2, b"b"),
+        ];
+        let err = OpenFs::btrfs_build_path_from_inode_refs(&entries, 257)
+            .expect_err("cycle must be rejected");
+        match err {
+            FfsError::Corruption { detail, .. } => {
+                assert!(detail.contains("cycle"), "error must mention cycle: {detail}");
+            }
+            other => panic!("expected Corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn btrfs_build_path_from_inode_refs_prefers_first_backref_for_hard_links() {
+        // Hard-linked file: objectid 300 has two INODE_REFs (two parents).
+        // Walker must pick a deterministic first (lowest parent objectid by BTreeMap insert order).
+        let entries = vec![
+            synth_inode_ref_entry(257, 256, 2, b"dir_a"),
+            synth_inode_ref_entry(258, 256, 2, b"dir_b"),
+            synth_inode_ref_entry(300, 257, 3, b"linkname"),
+            synth_inode_ref_entry(300, 258, 4, b"linkname_alias"),
+        ];
+        let path = OpenFs::btrfs_build_path_from_inode_refs(&entries, 300)
+            .expect("hard-linked inode must resolve to one of its paths");
+        // BTreeMap iterates entries sorted by (objectid, item_type, offset); since we insert
+        // with `or_insert`, the first seen back-ref wins. For objectid 300, that's the one
+        // whose key (300, 12, 257) comes first in the tree walk → "dir_a/linkname/\0".
+        assert_eq!(path, b"dir_a/linkname/\0");
     }
 
     #[test]
