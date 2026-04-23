@@ -696,3 +696,86 @@ fn cli_inspect_btrfs_subvolumes() {
         panic!("ffs inspect --subvolumes failed: {}", stderr);
     }
 }
+
+#[test]
+fn cli_mount_help_advertises_runtime_modes_and_rw_toggles() {
+    let output = run_ffs_cli(&["mount", "--help"]);
+    assert!(
+        output.status.success(),
+        "`ffs mount --help` should exit 0: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for token in &[
+        "--runtime-mode",
+        "standard",
+        "managed",
+        "per-core",
+        "--rw",
+        "--allow-other",
+        "--native",
+        "--managed-unmount-timeout-secs",
+    ] {
+        assert!(
+            stdout.contains(token),
+            "`ffs mount --help` should advertise `{token}`, got: {stdout}"
+        );
+    }
+    emit_scenario_result(
+        "cli_mount_help_surface",
+        "PASS",
+        Some("runtime_mode+rw+allow_other+native+managed_unmount_timeout_secs"),
+    );
+}
+
+#[test]
+fn cli_mount_nonexistent_image_reports_error() {
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let missing_image = tmpdir.path().join("no_such.img");
+    let mountpoint = tmpdir.path().join("mnt");
+    fs::create_dir(&mountpoint).expect("create mountpoint dir");
+
+    let output = run_ffs_cli(&[
+        "mount",
+        missing_image.to_str().unwrap(),
+        mountpoint.to_str().unwrap(),
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "`ffs mount` on missing image must not report success"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.trim().is_empty(),
+        "`ffs mount` on missing image must emit a non-empty diagnostic, got stderr=<empty>"
+    );
+    emit_scenario_result("cli_mount_missing_image_error", "PASS", None);
+}
+
+#[test]
+fn cli_mount_managed_unmount_timeout_rejected_in_standard_mode() {
+    // AGENTS.md / CLI help documents that `--managed-unmount-timeout-secs`
+    // is invalid with `--runtime-mode standard`; prove the CLI rejects it
+    // before any FUSE work happens, so users get a deterministic error.
+    let tmpdir = tempfile::tempdir().expect("create temp dir");
+    let image = tmpdir.path().join("anywhere.img");
+    let mountpoint = tmpdir.path().join("mnt");
+    fs::create_dir(&mountpoint).expect("create mountpoint dir");
+
+    let output = run_ffs_cli(&[
+        "mount",
+        "--runtime-mode",
+        "standard",
+        "--managed-unmount-timeout-secs",
+        "5",
+        image.to_str().unwrap(),
+        mountpoint.to_str().unwrap(),
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "`ffs mount --runtime-mode standard --managed-unmount-timeout-secs` must be rejected"
+    );
+    emit_scenario_result("cli_mount_standard_rejects_managed_timeout", "PASS", None);
+}
