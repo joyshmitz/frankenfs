@@ -301,6 +301,14 @@ fn normalize(result: Result<FsFlavor, DetectionError>) -> OutcomeClass {
     }
 }
 
+fn normalize_ref(result: &Result<FsFlavor, DetectionError>) -> OutcomeClass {
+    match result {
+        Ok(FsFlavor::Ext4(_)) => OutcomeClass::Ext4,
+        Ok(FsFlavor::Btrfs(_)) => OutcomeClass::Btrfs,
+        Err(_) => OutcomeClass::Unsupported,
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_BYTES {
         return;
@@ -312,7 +320,12 @@ fuzz_target!(|data: &[u8]| {
 
     let first = normalize(detect_filesystem(&image));
     let second = normalize(detect_filesystem(&image));
-    let wrapped = normalize(FrankenFsEngine::inspect_image(&image));
+    let wrapped_result = FrankenFsEngine::inspect_image(&image);
+    let wrapped = normalize_ref(&wrapped_result);
+    let ext4_first = FrankenFsEngine::parse_ext4(&image);
+    let ext4_second = FrankenFsEngine::parse_ext4(&image);
+    let btrfs_first = FrankenFsEngine::parse_btrfs(&image);
+    let btrfs_second = FrankenFsEngine::parse_btrfs(&image);
 
     assert_eq!(
         first, second,
@@ -322,4 +335,34 @@ fuzz_target!(|data: &[u8]| {
         first, wrapped,
         "FrankenFsEngine::inspect_image must match detect_filesystem on identical inputs"
     );
+    assert_eq!(
+        ext4_first, ext4_second,
+        "FrankenFsEngine::parse_ext4 must be deterministic for identical inputs"
+    );
+    assert_eq!(
+        btrfs_first, btrfs_second,
+        "FrankenFsEngine::parse_btrfs must be deterministic for identical inputs"
+    );
+
+    match wrapped_result {
+        Ok(FsFlavor::Ext4(superblock)) => {
+            assert_eq!(
+                ext4_first.as_ref(),
+                Ok(&superblock),
+                "inspect_image ext4 classifications must carry the same superblock as parse_ext4"
+            );
+        }
+        Ok(FsFlavor::Btrfs(superblock)) => {
+            assert!(
+                ext4_first.is_err(),
+                "btrfs classifications must only happen after ext4 parsing rejects the image"
+            );
+            assert_eq!(
+                btrfs_first.as_ref(),
+                Ok(&superblock),
+                "inspect_image btrfs classifications must carry the same superblock as parse_btrfs"
+            );
+        }
+        Err(_) => {}
+    }
 });
