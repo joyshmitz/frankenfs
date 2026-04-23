@@ -226,3 +226,8 @@ doc = false
 name = "fuzz_alloc_bitmap"
 path = "fuzz_targets/fuzz_alloc_bitmap.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_por_authenticator"
+path = "fuzz_targets/fuzz_por_authenticator.rs"
+doc = false
