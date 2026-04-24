@@ -1821,30 +1821,6 @@ impl InMemoryCowBtrfsTree {
         }
     }
 
-    fn collect_all_items(&self) -> Result<Vec<BtrfsTreeItem>, BtrfsMutationError> {
-        let mut out = Vec::new();
-        self.collect_from(self.root, &mut out)?;
-        Ok(out)
-    }
-
-    fn collect_from(
-        &self,
-        node_id: u64,
-        out: &mut Vec<BtrfsTreeItem>,
-    ) -> Result<(), BtrfsMutationError> {
-        match self.node_ref(node_id)? {
-            BtrfsCowNode::Leaf { items } => {
-                out.extend(items.iter().cloned());
-            }
-            BtrfsCowNode::Internal { children, .. } => {
-                for child in children {
-                    self.collect_from(*child, out)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn height_of(&self, node_id: u64) -> Result<usize, BtrfsMutationError> {
         match self.node_ref(node_id)? {
             BtrfsCowNode::Leaf { .. } => Ok(1),
@@ -2038,15 +2014,56 @@ impl BtrfsBTree for InMemoryCowBtrfsTree {
         if key_cmp(start, end) == Ordering::Greater {
             return Err(BtrfsMutationError::InvalidRange);
         }
-        Ok(self
-            .collect_all_items()?
-            .into_iter()
-            .filter(|item| {
-                key_cmp(&item.key, start) != Ordering::Less
-                    && key_cmp(&item.key, end) != Ordering::Greater
-            })
-            .map(|item| (item.key, item.data))
-            .collect())
+        let mut out = Vec::new();
+        self.collect_range_from(self.root, start, end, &mut out)?;
+        Ok(out)
+    }
+}
+
+impl InMemoryCowBtrfsTree {
+    /// B-tree-aware range descent. Only visits internal children whose
+    /// `[keys[i-1], keys[i])` span intersects `[start, end]`, and uses
+    /// `partition_point` on sorted leaves so the result is O(log N + k)
+    /// per call instead of a full-tree materialisation followed by
+    /// filter. bd-yt66z's `btrfs_resolve_inode_path_via_cow`
+    /// fast path depends on this for its O(depth · log N) complexity.
+    fn collect_range_from(
+        &self,
+        node_id: u64,
+        start: &BtrfsKey,
+        end: &BtrfsKey,
+        out: &mut Vec<(BtrfsKey, Vec<u8>)>,
+    ) -> Result<(), BtrfsMutationError> {
+        match self.node_ref(node_id)? {
+            BtrfsCowNode::Leaf { items } => {
+                let lo = items.partition_point(|item| key_cmp(&item.key, start).is_lt());
+                for item in &items[lo..] {
+                    if key_cmp(&item.key, end).is_gt() {
+                        break;
+                    }
+                    out.push((item.key, item.data.clone()));
+                }
+            }
+            BtrfsCowNode::Internal { keys, children } => {
+                // children[i] holds keys in [keys[i-1], keys[i]); edges are
+                // sentinels (-inf, +inf). Skip children whose upper bound
+                // `keys[i]` is <= start (all their keys are < start), and
+                // stop once a child's lower bound `keys[i-1]` is > end
+                // (all remaining children are strictly past the query).
+                for (i, child) in children.iter().enumerate() {
+                    if let Some(high) = keys.get(i)
+                        && key_cmp(high, start) != Ordering::Greater
+                    {
+                        continue;
+                    }
+                    if i > 0 && key_cmp(&keys[i - 1], end).is_gt() {
+                        break;
+                    }
+                    self.collect_range_from(*child, start, end, out)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -4264,6 +4281,63 @@ mod tests {
             .map(|(key, _)| key.objectid)
             .collect::<Vec<_>>();
         assert_eq!(keys, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn range_descends_multi_level_tree_without_full_materialisation() {
+        // With max_items=3, inserting 40 keys forces several internal levels.
+        // The range scan must descend B-tree-aware (skipping children whose
+        // separator span is outside [start, end]) instead of materialising
+        // the entire tree. The semantic check is that range() returns
+        // exactly the keys in the window; the complexity improvement is
+        // validated separately by the bd-yt66z resolve-path tests.
+        let mut tree = InMemoryCowBtrfsTree::new(3).expect("tree");
+        for objectid in 0_u64..40 {
+            tree.insert(test_key(objectid), &test_payload(objectid))
+                .expect("insert");
+        }
+
+        // Window in the middle of the tree — must span multiple leaves and
+        // skip both left and right subtrees.
+        let entries = tree
+            .range(&test_key(12), &test_key(27))
+            .expect("range query");
+        let keys = entries
+            .iter()
+            .map(|(key, _)| key.objectid)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, (12_u64..=27).collect::<Vec<_>>());
+
+        // Window below the smallest key — must return empty without error.
+        let empty = tree
+            .range(
+                &BtrfsKey {
+                    objectid: 0,
+                    item_type: 0,
+                    offset: 0,
+                },
+                &BtrfsKey {
+                    objectid: 0,
+                    item_type: 0,
+                    offset: u64::MAX,
+                },
+            )
+            .expect("range below tree");
+        assert!(
+            empty.is_empty(),
+            "range below tree span must be empty, got {empty:?}"
+        );
+
+        // Window above the largest key — also empty.
+        let empty = tree
+            .range(&test_key(100), &test_key(200))
+            .expect("range above tree");
+        assert!(empty.is_empty());
+
+        // Exact-single-key range returns just that key.
+        let one = tree.range(&test_key(17), &test_key(17)).expect("point");
+        let one_keys = one.iter().map(|(key, _)| key.objectid).collect::<Vec<_>>();
+        assert_eq!(one_keys, vec![17_u64]);
     }
 
     #[test]
