@@ -942,13 +942,12 @@ pub fn cached_map_logical_to_physical(
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[expect(clippy::match_wildcard_for_single_variants)]
 mod tests {
     use super::*;
     use ffs_block::BlockBuf;
     use ffs_types::GroupNumber;
+    use parking_lot::Mutex;
     use std::collections::HashMap;
-    use std::sync::Mutex;
 
     struct MemBlockDevice {
         block_size: u32,
@@ -966,7 +965,7 @@ mod tests {
 
     impl BlockDevice for MemBlockDevice {
         fn read_block(&self, _cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
-            let blocks = self.blocks.lock().unwrap();
+            let blocks = self.blocks.lock();
             blocks.get(&block.0).map_or_else(
                 || Ok(BlockBuf::new(vec![0u8; self.block_size as usize])),
                 |data| Ok(BlockBuf::new(data.clone())),
@@ -974,7 +973,7 @@ mod tests {
         }
 
         fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
-            self.blocks.lock().unwrap().insert(block.0, data.to_vec());
+            self.blocks.lock().insert(block.0, data.to_vec());
             Ok(())
         }
 
