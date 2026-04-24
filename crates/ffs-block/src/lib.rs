@@ -1876,8 +1876,33 @@ impl ArcState {
         staged
     }
 
+    fn is_current_flush_candidate(&self, candidate: &FlushCandidate) -> bool {
+        self.dirty.entry(candidate.block).is_some_and(|entry| {
+            entry.seq == candidate.seq
+                && entry.txn_id == candidate.txn_id
+                && entry.commit_seq == Some(candidate.commit_seq)
+                && entry.is_flushable()
+        })
+    }
+
     fn take_pending_flush(&mut self) -> Vec<FlushCandidate> {
-        std::mem::take(&mut self.pending_flush)
+        let pending = std::mem::take(&mut self.pending_flush);
+        let pending_count = pending.len();
+        let mut current = Vec::with_capacity(pending_count);
+        for candidate in pending {
+            if self.is_current_flush_candidate(&candidate) {
+                current.push(candidate);
+            } else {
+                warn!(
+                    event = "stale_pending_flush_dropped",
+                    block = candidate.block.0,
+                    txn_id = candidate.txn_id.0,
+                    commit_seq = candidate.commit_seq.0,
+                    dirty_seq = candidate.seq
+                );
+            }
+        }
+        current
     }
 
     fn take_dirty_and_pending_flushes(&mut self) -> Vec<FlushCandidate> {
@@ -2882,17 +2907,41 @@ impl<D: BlockDevice> ArcCache<D> {
     }
 
     fn restore_pending_flush_candidates(&self, flushes: Vec<FlushCandidate>) {
-        let mut guard = self.state.lock();
-        for candidate in &flushes {
-            guard.mark_dirty(
-                candidate.block,
-                candidate.data.len(),
-                candidate.txn_id,
-                Some(candidate.commit_seq),
-                DirtyState::Committed,
+        let attempted = flushes.len();
+        let mut stale = Vec::new();
+        let restored = {
+            let mut guard = self.state.lock();
+            let mut restored = 0_usize;
+            for candidate in flushes {
+                if guard.is_current_flush_candidate(&candidate) {
+                    guard.pending_flush.push(candidate);
+                    restored = restored.saturating_add(1);
+                } else {
+                    stale.push((
+                        candidate.block.0,
+                        candidate.txn_id.0,
+                        candidate.commit_seq.0,
+                        candidate.seq,
+                    ));
+                }
+            }
+            drop(guard);
+            restored
+        };
+        for (block, txn_id, commit_seq, dirty_seq) in stale {
+            warn!(
+                event = "stale_pending_flush_not_restored",
+                block, txn_id, commit_seq, dirty_seq
             );
         }
-        guard.pending_flush.extend(flushes);
+        if restored < attempted {
+            debug!(
+                event = "pending_flush_restore_filtered",
+                attempted,
+                restored,
+                dropped = attempted.saturating_sub(restored)
+            );
+        }
     }
 
     fn flush_pending_evictions(&self, cx: &Cx, pending_flush: Vec<FlushCandidate>) -> Result<()> {
@@ -4730,6 +4779,38 @@ mod tests {
 
         cache.sync(&cx).expect("sync again");
         assert_eq!(cache.inner().write_count(), 1);
+    }
+
+    #[test]
+    fn arc_cache_failed_flush_retry_does_not_resurrect_stale_payload() {
+        let cx = Cx::for_testing();
+        let mem = MemoryByteDevice::new(4096 * 2);
+        let dev = ByteBlockDevice::new(mem, 4096).expect("device");
+        let faulted = FaultInjector::new(dev, 0xA11CE);
+        faulted.fail_on_write(BlockNumber(0), FaultMode::OneShot);
+        let cache =
+            ArcCache::new_with_policy(faulted, 2, ArcWritePolicy::WriteBack).expect("cache");
+
+        cache
+            .write_block(&cx, BlockNumber(0), &[0x11; 4096])
+            .expect("initial write");
+        cache
+            .flush_dirty(&cx)
+            .expect_err("one-shot injected write fault should fail first flush");
+        assert_eq!(cache.dirty_count(), 1);
+
+        cache
+            .write_block(&cx, BlockNumber(0), &[0x22; 4096])
+            .expect("overwrite after failed flush");
+        cache.sync(&cx).expect("sync latest payload");
+
+        assert_eq!(cache.dirty_count(), 0);
+        let persisted = cache
+            .inner()
+            .inner
+            .read_block(&cx, BlockNumber(0))
+            .expect("read backing device");
+        assert_eq!(persisted.as_slice(), &[0x22; 4096]);
     }
 
     #[test]
@@ -6884,6 +6965,44 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
             .expect("T2's dirty entry was incorrectly cleared by T1's flush completion!");
         assert_eq!(entry_final.seq, 1);
         assert_eq!(dt.dirty_count(), 1);
+    }
+
+    #[test]
+    fn pending_flush_candidate_is_dropped_after_new_dirty_sequence() {
+        let mut state = ArcState::new(2);
+        let block = BlockNumber(1);
+        let old_payload = BlockBuf::new(vec![0x11; 4096]);
+        let new_payload = BlockBuf::new(vec![0x22; 4096]);
+
+        state.on_miss_or_ghost_hit(block);
+        state.resident.insert(block, old_payload);
+        state.mark_dirty(
+            block,
+            4096,
+            TxnId(1),
+            Some(CommitSeq(1)),
+            DirtyState::Committed,
+        );
+
+        let stale_retry = state.take_dirty_and_pending_flushes();
+        assert_eq!(stale_retry.len(), 1);
+        assert_eq!(stale_retry[0].commit_seq, CommitSeq(1));
+
+        state.resident.insert(block, new_payload);
+        state.mark_dirty(
+            block,
+            4096,
+            TxnId(2),
+            Some(CommitSeq(2)),
+            DirtyState::Committed,
+        );
+        state.pending_flush.extend(stale_retry);
+
+        let retry = state.take_dirty_and_pending_flushes();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].txn_id, TxnId(2));
+        assert_eq!(retry[0].commit_seq, CommitSeq(2));
+        assert_eq!(retry[0].data.as_slice(), &[0x22; 4096]);
     }
 
     #[test]
