@@ -1164,6 +1164,16 @@ impl FrankenFuse {
         .map_err(|error| error.to_errno())
     }
 
+    /// Execute getattr without a live kernel mount.
+    #[doc(hidden)]
+    pub fn getattr_for_fuzzing(&self, ino: u64) -> std::result::Result<InodeAttr, c_int> {
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
+            self.inner.ops.getattr(cx, scope, InodeNumber(ino))
+        })
+        .map_err(|error| error.to_errno())
+    }
+
     /// Execute readdir and force the same raw-byte name conversion the live
     /// FUSE path performs before replying.
     #[doc(hidden)]
@@ -1236,6 +1246,32 @@ impl FrankenFuse {
         .map_err(|error| error.to_errno())
     }
 
+    /// Execute setattr without a live kernel mount.
+    #[doc(hidden)]
+    pub fn setattr_for_fuzzing(
+        &self,
+        ino: u64,
+        attrs: SetAttrRequest,
+    ) -> std::result::Result<InodeAttr, c_int> {
+        if self.inner.read_only {
+            return Err(libc::EROFS);
+        }
+        if self.should_shed(RequestOp::Setattr) {
+            return Err(libc::EBUSY);
+        }
+
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Setattr, |cx, scope| {
+            let attr = self
+                .inner
+                .ops
+                .setattr(cx, scope, InodeNumber(ino), &attrs)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(attr)
+        })
+        .map_err(|error| error.to_errno())
+    }
+
     /// Execute mkdir with raw path-component bytes without a live kernel mount.
     #[doc(hidden)]
     pub fn mkdir_for_fuzzing(
@@ -1254,6 +1290,36 @@ impl FrankenFuse {
         let name = owned_name.as_os_str();
 
         self.dispatch_mkdir(parent, name, mode, uid, gid)
+            .map_err(|error| match error {
+                MutationDispatchError::Errno(errno) => errno,
+                MutationDispatchError::Operation { error, .. } => error.to_errno(),
+            })
+    }
+
+    /// Execute mknod for regular-file nodes without a live kernel mount.
+    ///
+    /// FrankenFS does not yet expose special-node creation through `FsOps`, so
+    /// this freezes the regular-file MKNOD contract and rejects device, FIFO,
+    /// and socket nodes with `EOPNOTSUPP`.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn mknod_for_fuzzing(
+        &self,
+        parent: u64,
+        name_bytes: &[u8],
+        mode: u32,
+        rdev: u32,
+        uid: u32,
+        gid: u32,
+    ) -> std::result::Result<InodeAttr, c_int> {
+        #[cfg(not(unix))]
+        let owned_name = OsString::from(String::from_utf8_lossy(name_bytes).into_owned());
+        #[cfg(unix)]
+        let name = OsStr::from_bytes(name_bytes);
+        #[cfg(not(unix))]
+        let name = owned_name.as_os_str();
+
+        self.dispatch_mknod(parent, name, mode, rdev, uid, gid)
             .map_err(|error| match error {
                 MutationDispatchError::Errno(errno) => errno,
                 MutationDispatchError::Operation { error, .. } => error.to_errno(),
@@ -2276,6 +2342,44 @@ impl FrankenFuse {
         })
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    fn dispatch_mknod(
+        &self,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        rdev: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Result<InodeAttr, MutationDispatchError> {
+        self.enforce_mutation_guards(RequestOp::Create, parent)?;
+        if rdev != 0 || mode & (libc::S_IFMT as u32) != libc::S_IFREG as u32 {
+            return Err(MutationDispatchError::Errno(libc::EOPNOTSUPP));
+        }
+
+        let cx = Self::cx_for_request();
+        {
+            let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
+            self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
+                let attr = self.inner.ops.create(
+                    cx,
+                    scope,
+                    InodeNumber(parent),
+                    name,
+                    (mode & 0o7777) as u16,
+                    uid,
+                    gid,
+                )?;
+                self.inner.ops.commit_request_scope(scope)?;
+                Ok(attr)
+            })
+        }
+        .map_err(|error| MutationDispatchError::Operation {
+            error,
+            offset: None,
+        })
+    }
+
     fn dispatch_rename(
         &self,
         parent: u64,
@@ -2927,6 +3031,34 @@ impl Filesystem for FrankenFuse {
                         operation: "setattr",
                         ino,
                         offset: None,
+                    },
+                    reply,
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation)] // FUSE mode u32 → ext4 u16
+    fn mknod(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        match self.dispatch_mknod(parent, name, mode, rdev, req.uid(), req.gid()) {
+            Ok(attr) => reply.entry(&ATTR_TTL, &to_file_attr(&attr), attr.generation),
+            Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
+            Err(MutationDispatchError::Operation { error, offset }) => {
+                Self::reply_error_entry(
+                    &FuseErrorContext {
+                        error: &error,
+                        operation: "mknod",
+                        ino: parent,
+                        offset,
                     },
                     reply,
                 );
@@ -6774,6 +6906,20 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum MutationCall {
+        Getattr {
+            ino: InodeNumber,
+        },
+        Lookup {
+            parent: InodeNumber,
+            name: String,
+        },
+        Create {
+            parent: InodeNumber,
+            name: String,
+            mode: u16,
+            uid: u32,
+            gid: u32,
+        },
         Write {
             ino: InodeNumber,
             offset: u64,
@@ -6795,6 +6941,15 @@ mod tests {
             name: String,
             new_parent: InodeNumber,
             new_name: String,
+        },
+        Setattr {
+            ino: InodeNumber,
+            mode: Option<u16>,
+            uid: Option<u32>,
+            gid: Option<u32>,
+            size: Option<u64>,
+            atime: Option<SystemTime>,
+            mtime: Option<SystemTime>,
         },
         Setxattr {
             ino: InodeNumber,
@@ -6819,19 +6974,30 @@ mod tests {
             &self,
             _cx: &Cx,
             _scope: &mut RequestScope,
-            _ino: InodeNumber,
+            ino: InodeNumber,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Getattr { ino });
+            Ok(test_inode_attr(ino.0, FfsFileType::RegularFile, 0o644))
         }
 
         fn lookup(
             &self,
             _cx: &Cx,
             _scope: &mut RequestScope,
-            _parent: InodeNumber,
-            _name: &OsStr,
+            parent: InodeNumber,
+            name: &OsStr,
         ) -> ffs_error::Result<InodeAttr> {
-            Err(FfsError::NotFound("stub".into()))
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Lookup {
+                    parent,
+                    name: name.to_string_lossy().into_owned(),
+                });
+            Ok(test_inode_attr(202, FfsFileType::RegularFile, 0o640))
         }
 
         fn readdir(
@@ -6885,6 +7051,29 @@ mod tests {
                     gid,
                 });
             Ok(test_inode_attr(101, FfsFileType::Directory, mode))
+        }
+
+        fn create(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            parent: InodeNumber,
+            name: &OsStr,
+            mode: u16,
+            uid: u32,
+            gid: u32,
+        ) -> ffs_error::Result<InodeAttr> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Create {
+                    parent,
+                    name: name.to_string_lossy().into_owned(),
+                    mode,
+                    uid,
+                    gid,
+                });
+            Ok(test_inode_attr(303, FfsFileType::RegularFile, mode))
         }
 
         fn rmdir(
@@ -6964,6 +7153,185 @@ mod tests {
                 });
             Ok(())
         }
+
+        fn setattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            attrs: &SetAttrRequest,
+        ) -> ffs_error::Result<InodeAttr> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Setattr {
+                    ino,
+                    mode: attrs.mode,
+                    uid: attrs.uid,
+                    gid: attrs.gid,
+                    size: attrs.size,
+                    atime: attrs.atime,
+                    mtime: attrs.mtime,
+                });
+            let mut attr = test_inode_attr(ino.0, FfsFileType::RegularFile, 0o644);
+            if let Some(mode) = attrs.mode {
+                attr.perm = mode;
+            }
+            if let Some(uid) = attrs.uid {
+                attr.uid = uid;
+            }
+            if let Some(gid) = attrs.gid {
+                attr.gid = gid;
+            }
+            if let Some(size) = attrs.size {
+                attr.size = size;
+            }
+            if let Some(atime) = attrs.atime {
+                attr.atime = atime;
+            }
+            if let Some(mtime) = attrs.mtime {
+                attr.mtime = mtime;
+            }
+            Ok(attr)
+        }
+    }
+
+    #[test]
+    fn conformance_fuse_lookup_metadata_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::new(Arc::clone(&calls))));
+
+        let attr = fuse
+            .lookup_for_fuzzing(2, b"alpha.txt")
+            .expect("lookup round trip");
+
+        assert_eq!(attr.ino, InodeNumber(202));
+        assert_eq!(attr.kind, FfsFileType::RegularFile);
+        assert_eq!(attr.perm, 0o640);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Lookup {
+                parent: InodeNumber(2),
+                name: "alpha.txt".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_getattr_metadata_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::new(Arc::clone(&calls))));
+
+        let attr = fuse.getattr_for_fuzzing(42).expect("getattr round trip");
+
+        assert_eq!(attr.ino, InodeNumber(42));
+        assert_eq!(attr.kind, FfsFileType::RegularFile);
+        assert_eq!(attr.perm, 0o644);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Getattr {
+                ino: InodeNumber(42),
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_setattr_metadata_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+        let atime = SystemTime::UNIX_EPOCH + Duration::from_secs(11);
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(22);
+        let attrs = SetAttrRequest {
+            mode: Some(0o600),
+            uid: Some(501),
+            gid: Some(20),
+            size: Some(4096),
+            atime: Some(atime),
+            mtime: Some(mtime),
+        };
+
+        let attr = fuse
+            .setattr_for_fuzzing(55, attrs)
+            .expect("setattr round trip");
+
+        assert_eq!(attr.ino, InodeNumber(55));
+        assert_eq!(attr.perm, 0o600);
+        assert_eq!(attr.uid, 501);
+        assert_eq!(attr.gid, 20);
+        assert_eq!(attr.size, 4096);
+        assert_eq!(attr.atime, atime);
+        assert_eq!(attr.mtime, mtime);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Setattr {
+                ino: InodeNumber(55),
+                mode: Some(0o600),
+                uid: Some(501),
+                gid: Some(20),
+                size: Some(4096),
+                atime: Some(atime),
+                mtime: Some(mtime),
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_mknod_regular_file_metadata_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+        let mode = libc::S_IFREG as u32 | 0o640;
+
+        let attr = fuse
+            .mknod_for_fuzzing(7, b"node.txt", mode, 0, 1001, 1002)
+            .expect("mknod round trip");
+
+        assert_eq!(attr.ino, InodeNumber(303));
+        assert_eq!(attr.kind, FfsFileType::RegularFile);
+        assert_eq!(attr.perm, 0o640);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Create {
+                parent: InodeNumber(7),
+                name: "node.txt".to_owned(),
+                mode: 0o640,
+                uid: 1001,
+                gid: 1002,
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_mknod_special_node_rejects_explicitly() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        let err = fuse
+            .mknod_for_fuzzing(7, b"fifo", libc::S_IFIFO as u32 | 0o600, 0, 1001, 1002)
+            .expect_err("special-node MKNOD is out of scope");
+
+        assert_eq!(err, libc::EOPNOTSUPP);
+        assert!(calls.lock().expect("lock calls").is_empty());
     }
 
     fn record_max_active(max_active: &AtomicUsize, current: usize) {
