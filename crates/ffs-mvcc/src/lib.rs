@@ -1841,6 +1841,15 @@ impl MvccStore {
         txn: &Transaction,
         block: BlockNumber,
     ) -> Result<Vec<u8>, CommitError> {
+        self.resolved_write_bytes_with_policy(txn, block, self.effective_policy())
+    }
+
+    fn resolved_write_bytes_with_policy(
+        &self,
+        txn: &Transaction,
+        block: BlockNumber,
+        effective: ConflictPolicy,
+    ) -> Result<Vec<u8>, CommitError> {
         let staged = txn
             .staged_write(block)
             .ok_or_else(|| CommitError::DurabilityFailure {
@@ -1849,6 +1858,13 @@ impl MvccStore {
         let observed = self.latest_commit_seq(block);
         if observed <= txn.snapshot.high {
             return Ok(staged.to_vec());
+        }
+        if effective == ConflictPolicy::Strict {
+            return Err(CommitError::Conflict {
+                block,
+                snapshot: txn.snapshot.high,
+                observed,
+            });
         }
 
         let proof = txn.merge_proof(block).cloned().unwrap_or_default();
@@ -1899,7 +1915,10 @@ impl MvccStore {
             });
         }
 
-        if self.resolved_write_bytes(txn, block).is_ok() {
+        if self
+            .resolved_write_bytes_with_policy(txn, block, effective)
+            .is_ok()
+        {
             let bytes_len = txn.staged_write(block).map_or(0, <[u8]>::len);
             info!(
                 target: "ffs::mvcc::merge",
@@ -2067,6 +2086,10 @@ impl MvccStore {
         &mut self,
         txn: Transaction,
     ) -> Result<(CommitSeq, Vec<BlockNumber>), (CommitError, Transaction)> {
+        let resolved_writes = match self.resolved_writes_for_commit(&txn) {
+            Ok(writes) => writes,
+            Err(error) => return Err((error, txn)),
+        };
         let commit_seq = match self.next_commit_seq() {
             Ok(seq) => seq,
             Err(error) => return Err((error, txn)),
@@ -2074,35 +2097,16 @@ impl MvccStore {
         let chain_cap = self.compression_policy.max_chain_length;
         let Transaction {
             id: txn_id,
-            snapshot,
-            writes,
-            merge_proofs,
+            snapshot: _,
+            writes: _,
+            merge_proofs: _,
             reads: _,
             cow_writes,
             cow_orphans,
         } = txn;
         let dedup_enabled = self.compression_policy.dedup_identical;
 
-        for (block, bytes) in writes {
-            let version_bytes = if self.latest_commit_seq(block) > snapshot.high {
-                let proof = merge_proofs.get(&block).cloned().unwrap_or_default();
-                let base = self
-                    .version_bytes_at(block, snapshot.high)
-                    .unwrap_or_default();
-                let latest = self
-                    .version_bytes_at(block, self.latest_commit_seq(block))
-                    .unwrap_or_default();
-                proof
-                    .merge_bytes(&base, &latest, &bytes)
-                    .unwrap_or_else(|| {
-                        tracing::error!(
-                            "preflight_fcw missed an unmergeable conflict on block {block:?}"
-                        );
-                        bytes.clone()
-                    })
-            } else {
-                bytes
-            };
+        for (block, version_bytes) in resolved_writes {
             let version_data = if dedup_enabled {
                 self.maybe_dedup(block, &version_bytes)
             } else {
@@ -2153,6 +2157,11 @@ impl MvccStore {
             Err(e) => return Err((e, txn)),
         };
 
+        let resolved_writes = match self.resolved_writes_for_commit(&txn) {
+            Ok(writes) => writes,
+            Err(error) => return Err((error, txn)),
+        };
+        let write_keys: BTreeSet<BlockNumber> = txn.write_set().keys().copied().collect();
         let commit_seq = match self.next_commit_seq() {
             Ok(seq) => seq,
             Err(error) => return Err((error, txn)),
@@ -2161,35 +2170,15 @@ impl MvccStore {
         let Transaction {
             id: txn_id,
             snapshot,
-            writes,
-            merge_proofs,
+            writes: _,
+            merge_proofs: _,
             reads,
             cow_writes,
             cow_orphans,
         } = txn;
         let dedup_enabled = self.compression_policy.dedup_identical;
 
-        let write_keys: BTreeSet<BlockNumber> = writes.keys().copied().collect();
-        for (block, bytes) in writes {
-            let version_bytes = if self.latest_commit_seq(block) > snapshot.high {
-                let proof = merge_proofs.get(&block).cloned().unwrap_or_default();
-                let base = self
-                    .version_bytes_at(block, snapshot.high)
-                    .unwrap_or_default();
-                let latest = self
-                    .version_bytes_at(block, self.latest_commit_seq(block))
-                    .unwrap_or_default();
-                proof
-                    .merge_bytes(&base, &latest, &bytes)
-                    .unwrap_or_else(|| {
-                        tracing::error!(
-                            "preflight_fcw missed an unmergeable conflict on block {block:?}"
-                        );
-                        bytes.clone()
-                    })
-            } else {
-                bytes
-            };
+        for (block, version_bytes) in resolved_writes {
             let version_data = if dedup_enabled {
                 self.maybe_dedup(block, &version_bytes)
             } else {
@@ -3721,6 +3710,30 @@ mod tests {
             .resolved_writes_for_commit(&second)
             .expect("append-only proof should resolve");
         assert_eq!(resolved, vec![(block, vec![0, 1, 2])]);
+    }
+
+    #[test]
+    fn resolved_writes_for_commit_honors_strict_policy() {
+        let mut store = MvccStore::new();
+        store.set_conflict_policy(ConflictPolicy::Strict);
+        let block = BlockNumber(7);
+        seed_block(&mut store, block, &[0]);
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+
+        first.stage_write_with_proof(block, vec![0, 1], append_only_proof(1));
+        second.stage_write_with_proof(block, vec![0, 2], append_only_proof(1));
+
+        store.commit(first).expect("first append commit");
+
+        let err = store
+            .resolved_writes_for_commit(&second)
+            .expect_err("strict policy must reject mergeable same-block conflicts");
+        assert!(
+            matches!(err, CommitError::Conflict { block: b, .. } if b == block),
+            "expected strict FCW conflict, got {err:?}"
+        );
     }
 
     #[test]
@@ -7386,6 +7399,44 @@ mod tests {
         let snap = store.current_snapshot();
         let data = store.read_visible(block, snap).expect("must be visible");
         assert_eq!(data[0], 0xCC);
+    }
+
+    #[test]
+    fn prechecked_commit_revalidates_conflict_and_preserves_latest_bytes() {
+        let mut store = MvccStore::new();
+        store.set_conflict_policy(ConflictPolicy::SafeMerge);
+        let block = BlockNumber(0);
+        seed_block(&mut store, block, &[0x00; 4]);
+
+        let mut stale = store.begin();
+        stale.stage_write(block, vec![0xAA; 4]);
+
+        store
+            .preflight_commit_fcw(&stale)
+            .expect("preflight passes before a competing writer appears");
+
+        let mut winner = store.begin();
+        winner.stage_write(block, vec![0xBB; 4]);
+        store.commit(winner).expect("winner commits first");
+
+        let err = store
+            .commit_fcw_prechecked(stale)
+            .expect_err("prechecked commit must revalidate stale conflicts");
+        assert!(
+            matches!(err, CommitError::Conflict { block: b, .. } if b == block),
+            "expected FCW conflict, got {err:?}"
+        );
+
+        let snap = store.current_snapshot();
+        let data = store
+            .read_visible(block, snap)
+            .expect("winner remains visible");
+        assert_eq!(data.as_ref(), &[0xBB; 4]);
+        assert_eq!(
+            store.latest_commit_seq(block),
+            CommitSeq(2),
+            "failed prechecked commit must not allocate a commit sequence"
+        );
     }
 
     #[test]
