@@ -1296,6 +1296,48 @@ impl FrankenFuse {
             })
     }
 
+    /// Execute rmdir with raw path-component bytes without a live kernel mount.
+    #[doc(hidden)]
+    pub fn rmdir_for_fuzzing(
+        &self,
+        parent: u64,
+        name_bytes: &[u8],
+    ) -> std::result::Result<(), c_int> {
+        #[cfg(not(unix))]
+        let owned_name = OsString::from(String::from_utf8_lossy(name_bytes).into_owned());
+        #[cfg(unix)]
+        let name = OsStr::from_bytes(name_bytes);
+        #[cfg(not(unix))]
+        let name = owned_name.as_os_str();
+
+        self.dispatch_rmdir(parent, name)
+            .map_err(|error| match error {
+                MutationDispatchError::Errno(errno) => errno,
+                MutationDispatchError::Operation { error, .. } => error.to_errno(),
+            })
+    }
+
+    /// Execute unlink with raw path-component bytes without a live kernel mount.
+    #[doc(hidden)]
+    pub fn unlink_for_fuzzing(
+        &self,
+        parent: u64,
+        name_bytes: &[u8],
+    ) -> std::result::Result<(), c_int> {
+        #[cfg(not(unix))]
+        let owned_name = OsString::from(String::from_utf8_lossy(name_bytes).into_owned());
+        #[cfg(unix)]
+        let name = OsStr::from_bytes(name_bytes);
+        #[cfg(not(unix))]
+        let name = owned_name.as_os_str();
+
+        self.dispatch_unlink(parent, name)
+            .map_err(|error| match error {
+                MutationDispatchError::Errno(errno) => errno,
+                MutationDispatchError::Operation { error, .. } => error.to_errno(),
+            })
+    }
+
     /// Execute mknod for regular-file nodes without a live kernel mount.
     ///
     /// FrankenFS does not yet expose special-node creation through `FsOps`, so
@@ -2332,6 +2374,25 @@ impl FrankenFuse {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
             self.with_request_scope(&cx, RequestOp::Rmdir, |cx, scope| {
                 self.inner.ops.rmdir(cx, scope, InodeNumber(parent), name)?;
+                self.inner.ops.commit_request_scope(scope)?;
+                Ok(())
+            })
+        }
+        .map_err(|error| MutationDispatchError::Operation {
+            error,
+            offset: None,
+        })
+    }
+
+    fn dispatch_unlink(&self, parent: u64, name: &OsStr) -> Result<(), MutationDispatchError> {
+        self.enforce_mutation_guards(RequestOp::Unlink, parent)?;
+        let cx = Self::cx_for_request();
+        {
+            let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
+            self.with_request_scope(&cx, RequestOp::Unlink, |cx, scope| {
+                self.inner
+                    .ops
+                    .unlink(cx, scope, InodeNumber(parent), name)?;
                 self.inner.ops.commit_request_scope(scope)?;
                 Ok(())
             })
@@ -6920,6 +6981,13 @@ mod tests {
             uid: u32,
             gid: u32,
         },
+        Readdir {
+            ino: InodeNumber,
+            offset: u64,
+        },
+        Readlink {
+            ino: InodeNumber,
+        },
         Write {
             ino: InodeNumber,
             offset: u64,
@@ -6936,11 +7004,22 @@ mod tests {
             parent: InodeNumber,
             name: String,
         },
+        Unlink {
+            parent: InodeNumber,
+            name: String,
+        },
         Rename {
             parent: InodeNumber,
             name: String,
             new_parent: InodeNumber,
             new_name: String,
+        },
+        Symlink {
+            parent: InodeNumber,
+            name: String,
+            target: String,
+            uid: u32,
+            gid: u32,
         },
         Setattr {
             ino: InodeNumber,
@@ -7004,10 +7083,19 @@ mod tests {
             &self,
             _cx: &Cx,
             _scope: &mut RequestScope,
-            _ino: InodeNumber,
-            _offset: u64,
+            ino: InodeNumber,
+            offset: u64,
         ) -> ffs_error::Result<Vec<FfsDirEntry>> {
-            Ok(vec![])
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Readdir { ino, offset });
+            Ok(vec![FfsDirEntry {
+                ino: InodeNumber(404),
+                offset: offset + 1,
+                kind: FfsFileType::RegularFile,
+                name: b"entry.txt".to_vec(),
+            }])
         }
 
         fn read(
@@ -7025,9 +7113,13 @@ mod tests {
             &self,
             _cx: &Cx,
             _scope: &mut RequestScope,
-            _ino: InodeNumber,
+            ino: InodeNumber,
         ) -> ffs_error::Result<Vec<u8>> {
-            Ok(vec![])
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Readlink { ino });
+            Ok(b"target/path".to_vec())
         }
 
         fn mkdir(
@@ -7093,6 +7185,23 @@ mod tests {
             Ok(())
         }
 
+        fn unlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            parent: InodeNumber,
+            name: &OsStr,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Unlink {
+                    parent,
+                    name: name.to_string_lossy().into_owned(),
+                });
+            Ok(())
+        }
+
         fn rename(
             &self,
             _cx: &Cx,
@@ -7112,6 +7221,29 @@ mod tests {
                     new_name: new_name.to_string_lossy().into_owned(),
                 });
             Ok(())
+        }
+
+        fn symlink(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            parent: InodeNumber,
+            name: &OsStr,
+            target: &Path,
+            uid: u32,
+            gid: u32,
+        ) -> ffs_error::Result<InodeAttr> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Symlink {
+                    parent,
+                    name: name.to_string_lossy().into_owned(),
+                    target: target.display().to_string(),
+                    uid,
+                    gid,
+                });
+            Ok(test_inode_attr(505, FfsFileType::Symlink, 0o777))
         }
 
         fn write(
@@ -7332,6 +7464,182 @@ mod tests {
 
         assert_eq!(err, libc::EOPNOTSUPP);
         assert!(calls.lock().expect("lock calls").is_empty());
+    }
+
+    #[test]
+    fn conformance_fuse_readdir_directory_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::new(Arc::clone(&calls))));
+
+        let entries = fuse.readdir_for_fuzzing(2, 7).expect("readdir round trip");
+
+        assert_eq!(
+            entries,
+            vec![FfsDirEntry {
+                ino: InodeNumber(404),
+                offset: 8,
+                kind: FfsFileType::RegularFile,
+                name: b"entry.txt".to_vec(),
+            }]
+        );
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Readdir {
+                ino: InodeNumber(2),
+                offset: 7,
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_readlink_directory_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::new(Arc::clone(&calls))));
+
+        let target = fuse.readlink_for_fuzzing(12).expect("readlink round trip");
+
+        assert_eq!(target, b"target/path".to_vec());
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Readlink {
+                ino: InodeNumber(12),
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_mkdir_directory_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        let attr = fuse
+            .mkdir_for_fuzzing(2, b"logs", 0o750, 1001, 1002)
+            .expect("mkdir round trip");
+
+        assert_eq!(attr.ino, InodeNumber(101));
+        assert_eq!(attr.kind, FfsFileType::Directory);
+        assert_eq!(attr.perm, 0o750);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Mkdir {
+                parent: InodeNumber(2),
+                name: "logs".to_owned(),
+                mode: 0o750,
+                uid: 1001,
+                gid: 1002,
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_rmdir_directory_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        fuse.rmdir_for_fuzzing(2, b"old").expect("rmdir round trip");
+
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Rmdir {
+                parent: InodeNumber(2),
+                name: "old".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_unlink_directory_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        fuse.unlink_for_fuzzing(2, b"stale.txt")
+            .expect("unlink round trip");
+
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Unlink {
+                parent: InodeNumber(2),
+                name: "stale.txt".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_rename_directory_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        fuse.rename_for_fuzzing(2, b"old.txt", 3, b"new.txt")
+            .expect("rename round trip");
+
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Rename {
+                parent: InodeNumber(2),
+                name: "old.txt".to_owned(),
+                new_parent: InodeNumber(3),
+                new_name: "new.txt".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_symlink_directory_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        let attr = fuse
+            .symlink_for_fuzzing(2, b"link", b"target/path", 1001, 1002)
+            .expect("symlink round trip");
+
+        assert_eq!(attr.ino, InodeNumber(505));
+        assert_eq!(attr.kind, FfsFileType::Symlink);
+        assert_eq!(attr.perm, 0o777);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[MutationCall::Symlink {
+                parent: InodeNumber(2),
+                name: "link".to_owned(),
+                target: "target/path".to_owned(),
+                uid: 1001,
+                gid: 1002,
+            }]
+        );
     }
 
     fn record_max_active(max_active: &AtomicUsize, current: usize) {
