@@ -109,6 +109,33 @@ pub struct BtrfsRootRef {
     pub name: Vec<u8>,
 }
 
+/// One decoded btrfs INODE_REF entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtrfsInodeRef {
+    /// Directory index for the name within the parent inode.
+    pub index: u64,
+    /// Directory entry name for this child in the parent directory.
+    pub name: Vec<u8>,
+}
+
+impl BtrfsInodeRef {
+    /// Serialize to the on-disk INODE_REF entry layout.
+    ///
+    /// Layout: index(8) + name_len(2) + name bytes.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let name_len = self.name.len();
+        let mut buf = Vec::with_capacity(10 + name_len);
+        buf.extend_from_slice(&self.index.to_le_bytes());
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            buf.extend_from_slice(&(name_len as u16).to_le_bytes());
+        }
+        buf.extend_from_slice(&self.name);
+        buf
+    }
+}
+
 /// Descriptor for an enumerated btrfs subvolume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsSubvolume {
@@ -542,6 +569,46 @@ pub fn parse_root_ref(data: &[u8]) -> Result<BtrfsRootRef, ParseError> {
         sequence,
         name: data[18..name_end].to_vec(),
     })
+}
+
+/// Parse one or more INODE_REF entries from a raw btrfs payload.
+pub fn parse_inode_refs(data: &[u8]) -> Result<Vec<BtrfsInodeRef>, ParseError> {
+    const HEADER: usize = 10;
+    let mut out = Vec::new();
+    let mut cur = 0_usize;
+    while cur < data.len() {
+        if cur + HEADER > data.len() {
+            return Err(ParseError::InsufficientData {
+                needed: HEADER,
+                offset: cur,
+                actual: data.len() - cur,
+            });
+        }
+
+        let index = read_u64(data, cur, "inode_ref.index")?;
+        let name_len = usize::from(read_u16(data, cur + 8, "inode_ref.name_len")?);
+        let name_start = cur + HEADER;
+        let name_end = name_start
+            .checked_add(name_len)
+            .ok_or(ParseError::InvalidField {
+                field: "inode_ref.name_len",
+                reason: "overflow",
+            })?;
+        if name_end > data.len() {
+            return Err(ParseError::InsufficientData {
+                needed: name_end,
+                offset: cur,
+                actual: data.len(),
+            });
+        }
+
+        out.push(BtrfsInodeRef {
+            index,
+            name: data[name_start..name_end].to_vec(),
+        });
+        cur = name_end;
+    }
+    Ok(out)
 }
 
 /// Enumerate subvolumes from root tree leaf entries.
@@ -3622,6 +3689,7 @@ mod tests {
     use super::*;
     use ffs_ondisk::{BtrfsStripe, BtrfsSuperblock};
     use std::collections::{BTreeMap, HashMap};
+    use std::fmt::Write as _;
     use std::sync::{Arc, Mutex};
 
     const NODESIZE: u32 = 4096;
@@ -3639,6 +3707,14 @@ mod tests {
 
     fn test_payload(objectid: u64) -> [u8; 1] {
         [u8::try_from(objectid).expect("test objectid should fit in u8")]
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut out, "{byte:02x}").expect("write to String");
+        }
+        out
     }
 
     /// Build a btrfs header in a block buffer.
@@ -6116,6 +6192,132 @@ mod tests {
     }
 
     // ── Serialization round-trip tests ────────────────────────────────────
+
+    const REPRESENTATIVE_BTRFS_ITEM_GOLDEN: &str = concat!(
+        "INODE_REF\n",
+        "  key=objectid:258,type:12,offset:256\n",
+        "  decoded=index:7,name:alpha.txt\n",
+        "  payload_hex=07000000000000000900616c7068612e747874\n",
+        "EXTENT_DATA\n",
+        "  key=objectid:258,type:108,offset:0\n",
+        "  decoded=regular,generation:3,ram_bytes:4096,disk_bytenr:1048576,disk_num_bytes:4096,extent_offset:512,num_bytes:3584\n",
+        "  payload_hex=030000000000000000100000000000000000000001000010000000000000100000000000000002000000000000000e000000000000\n",
+        "DIR_ITEM\n",
+        "  key=objectid:256,type:84,offset:2214237132\n",
+        "  decoded=child_objectid:258,child_key_type:1,child_key_offset:0,file_type:1,name:file.txt\n",
+        "  payload_hex=02010000000000000100000000000000000000000000000000000008000166696c652e747874\n",
+    );
+
+    fn representative_btrfs_item_golden_actual() -> String {
+        let inode_ref_key = BtrfsKey {
+            objectid: 258,
+            item_type: BTRFS_ITEM_INODE_REF,
+            offset: 256,
+        };
+        let inode_ref = BtrfsInodeRef {
+            index: 7,
+            name: b"alpha.txt".to_vec(),
+        };
+        let inode_ref_payload = inode_ref.to_bytes();
+        let parsed_inode_refs = parse_inode_refs(&inode_ref_payload).expect("parse inode_ref");
+        assert_eq!(parsed_inode_refs, vec![inode_ref.clone()]);
+
+        let extent_key = BtrfsKey {
+            objectid: 258,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let extent = BtrfsExtentData::Regular {
+            generation: 3,
+            ram_bytes: 4096,
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: 0,
+            disk_bytenr: 0x10_0000,
+            disk_num_bytes: 4096,
+            extent_offset: 512,
+            num_bytes: 3584,
+        };
+        let extent_payload = extent.to_bytes();
+        let parsed_extent = parse_extent_data(&extent_payload).expect("parse extent_data");
+        assert_eq!(parsed_extent, extent);
+
+        let dir_item_key = BtrfsKey {
+            objectid: 256,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: 2_214_237_132,
+        };
+        let dir_item = BtrfsDirItem {
+            child_objectid: 258,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: BTRFS_FT_REG_FILE,
+            name: b"file.txt".to_vec(),
+        };
+        let dir_item_payload = dir_item.to_bytes();
+        let parsed_dir_items = parse_dir_items(&dir_item_payload).expect("parse dir_item");
+        assert_eq!(parsed_dir_items, vec![dir_item.clone()]);
+
+        format!(
+            concat!(
+                "INODE_REF\n",
+                "  key=objectid:{},type:{},offset:{}\n",
+                "  decoded=index:{},name:{}\n",
+                "  payload_hex={}\n",
+                "EXTENT_DATA\n",
+                "  key=objectid:{},type:{},offset:{}\n",
+                "  decoded=regular,generation:{},ram_bytes:{},disk_bytenr:{},disk_num_bytes:{},extent_offset:{},num_bytes:{}\n",
+                "  payload_hex={}\n",
+                "DIR_ITEM\n",
+                "  key=objectid:{},type:{},offset:{}\n",
+                "  decoded=child_objectid:{},child_key_type:{},child_key_offset:{},file_type:{},name:{}\n",
+                "  payload_hex={}\n",
+            ),
+            inode_ref_key.objectid,
+            inode_ref_key.item_type,
+            inode_ref_key.offset,
+            inode_ref.index,
+            String::from_utf8_lossy(&inode_ref.name),
+            hex_lower(&inode_ref_payload),
+            extent_key.objectid,
+            extent_key.item_type,
+            extent_key.offset,
+            3,
+            4096,
+            0x10_0000_u64,
+            4096,
+            512,
+            3584,
+            hex_lower(&extent_payload),
+            dir_item_key.objectid,
+            dir_item_key.item_type,
+            dir_item_key.offset,
+            dir_item.child_objectid,
+            dir_item.child_key_type,
+            dir_item.child_key_offset,
+            dir_item.file_type,
+            String::from_utf8_lossy(&dir_item.name),
+            hex_lower(&dir_item_payload)
+        )
+    }
+
+    #[test]
+    fn representative_btrfs_item_payloads_exact_golden_contract() {
+        assert_eq!(
+            representative_btrfs_item_golden_actual(),
+            REPRESENTATIVE_BTRFS_ITEM_GOLDEN
+        );
+    }
+
+    #[test]
+    fn inode_ref_round_trip() {
+        let original = BtrfsInodeRef {
+            index: 42,
+            name: b"hardlink-target".to_vec(),
+        };
+        let bytes = original.to_bytes();
+        let parsed = parse_inode_refs(&bytes).expect("round-trip parse");
+        assert_eq!(parsed, vec![original]);
+    }
 
     #[test]
     fn inode_item_round_trip() {
