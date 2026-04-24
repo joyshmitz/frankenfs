@@ -195,6 +195,7 @@ pub enum RequestOp {
     Fsync,
     Fsyncdir,
     Open,
+    Release,
     Opendir,
     Read,
     Readdir,
@@ -343,6 +344,21 @@ pub struct SetAttrRequest {
     pub atime: Option<SystemTime>,
     /// New modification time.
     pub mtime: Option<SystemTime>,
+}
+
+/// Request to release a backend-managed open file handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseRequest {
+    /// Inode whose open file handle is being released.
+    pub ino: InodeNumber,
+    /// Backend file handle returned from `open`.
+    pub fh: u64,
+    /// Open flags supplied by the kernel.
+    pub flags: i32,
+    /// Optional lock owner supplied by the kernel.
+    pub lock_owner: Option<u64>,
+    /// Whether release should flush pending state.
+    pub flush: bool,
 }
 
 /// How `setxattr` should treat pre-existing attributes.
@@ -495,6 +511,20 @@ pub trait FsOps: Send + Sync {
         offset: u64,
         size: u32,
     ) -> ffs_error::Result<Vec<u8>>;
+
+    /// Open a file and optionally return backend-managed handle state.
+    ///
+    /// Stateless implementations should return `(0, 0)`, matching the FUSE
+    /// open reply's default file handle and open flags.
+    fn open(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _flags: i32,
+    ) -> ffs_error::Result<(u64, u32)> {
+        Ok((0, 0))
+    }
 
     /// Read the target of a symbolic link.
     ///
@@ -997,6 +1027,18 @@ pub trait FsOps: Send + Sync {
         _ino: InodeNumber,
         _fh: u64,
         _lock_owner: u64,
+    ) -> ffs_error::Result<()> {
+        Ok(())
+    }
+
+    /// Release the last reference to an open file handle.
+    ///
+    /// Stateless implementations may return `Ok(())`.
+    fn release(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _request: ReleaseRequest,
     ) -> ffs_error::Result<()> {
         Ok(())
     }

@@ -30216,6 +30216,7 @@ mod tests {
             RequestOp::Listxattr,
             RequestOp::Flush,
             RequestOp::Open,
+            RequestOp::Release,
             RequestOp::Opendir,
             RequestOp::Read,
             RequestOp::Readdir,
@@ -30347,6 +30348,7 @@ mod tests {
         assert!(!RequestOp::Readlink.is_write());
         assert!(!RequestOp::Flush.is_write());
         assert!(!RequestOp::Open.is_write());
+        assert!(!RequestOp::Release.is_write());
         assert!(!RequestOp::Opendir.is_write());
         assert!(!RequestOp::Getxattr.is_write());
         assert!(!RequestOp::Listxattr.is_write());
@@ -36344,6 +36346,7 @@ mod tests {
             RequestOp::Listxattr,
             RequestOp::Flush,
             RequestOp::Open,
+            RequestOp::Release,
             RequestOp::Opendir,
             RequestOp::Read,
             RequestOp::Readdir,
@@ -36552,6 +36555,7 @@ mod tests {
                     Just(RequestOp::Listxattr),
                     Just(RequestOp::Flush),
                     Just(RequestOp::Open),
+                    Just(RequestOp::Release),
                     Just(RequestOp::Opendir),
                     Just(RequestOp::Read),
                     Just(RequestOp::Readdir),

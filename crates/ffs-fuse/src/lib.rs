@@ -12,8 +12,8 @@ pub mod per_core;
 use asupersync::Cx;
 use ffs_core::{
     BackpressureDecision, BackpressureGate, DirEntry as FfsDirEntry, FiemapExtent,
-    FileType as FfsFileType, FsOps, InodeAttr, RequestOp, RequestScope, SeekWhence, SetAttrRequest,
-    XattrSetMode,
+    FileType as FfsFileType, FsOps, InodeAttr, ReleaseRequest, RequestOp, RequestScope, SeekWhence,
+    SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -1140,6 +1140,120 @@ impl FrankenFuse {
             IoctlResult::Data(data) => Ok(data),
             IoctlResult::Error(errno) => Err(errno),
         }
+    }
+
+    /// Execute open without a live kernel mount.
+    #[doc(hidden)]
+    pub fn open_for_fuzzing(&self, ino: u64, flags: i32) -> std::result::Result<(u64, u32), c_int> {
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Open, |cx, scope| {
+            self.inner.ops.open(cx, scope, InodeNumber(ino), flags)
+        })
+        .map_err(|error| error.to_errno())
+    }
+
+    /// Execute read without a live kernel mount.
+    #[doc(hidden)]
+    pub fn read_for_fuzzing(
+        &self,
+        ino: u64,
+        offset: i64,
+        size: u32,
+    ) -> std::result::Result<Vec<u8>, c_int> {
+        let byte_offset = u64::try_from(offset).map_err(|_| libc::EINVAL)?;
+        let cx = Self::cx_for_request();
+        let data = self
+            .read_with_readahead(&cx, InodeNumber(ino), byte_offset, size)
+            .map_err(|error| error.to_errno())?;
+        self.inner
+            .metrics
+            .record_bytes_read(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        Ok(data)
+    }
+
+    /// Execute write without a live kernel mount.
+    #[doc(hidden)]
+    pub fn write_for_fuzzing(
+        &self,
+        ino: u64,
+        offset: i64,
+        data: &[u8],
+    ) -> std::result::Result<u32, c_int> {
+        self.dispatch_write(ino, offset, data)
+            .map_err(|error| match error {
+                MutationDispatchError::Errno(errno) => errno,
+                MutationDispatchError::Operation { error, .. } => error.to_errno(),
+            })
+    }
+
+    /// Execute flush without a live kernel mount.
+    #[doc(hidden)]
+    pub fn flush_for_fuzzing(
+        &self,
+        ino: u64,
+        fh: u64,
+        lock_owner: u64,
+    ) -> std::result::Result<(), c_int> {
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Flush, |cx, scope| {
+            self.inner
+                .ops
+                .flush(cx, scope, InodeNumber(ino), fh, lock_owner)
+        })
+        .map_err(|error| error.to_errno())
+    }
+
+    /// Execute fsync without a live kernel mount.
+    #[doc(hidden)]
+    pub fn fsync_for_fuzzing(
+        &self,
+        ino: u64,
+        fh: u64,
+        datasync: bool,
+    ) -> std::result::Result<(), c_int> {
+        if self.inner.read_only {
+            return Err(libc::EROFS);
+        }
+        if self.should_shed(RequestOp::Fsync) {
+            return Err(libc::EBUSY);
+        }
+
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Fsync, |cx, scope| {
+            self.inner
+                .ops
+                .fsync(cx, scope, InodeNumber(ino), fh, datasync)?;
+            self.inner.ops.commit_request_scope(scope)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_errno())
+    }
+
+    /// Execute release without a live kernel mount.
+    #[doc(hidden)]
+    pub fn release_for_fuzzing(
+        &self,
+        ino: u64,
+        fh: u64,
+        flags: i32,
+        lock_owner: Option<u64>,
+        flush: bool,
+    ) -> std::result::Result<(), c_int> {
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Release, |cx, scope| {
+            self.inner.ops.release(
+                cx,
+                scope,
+                ReleaseRequest {
+                    ino: InodeNumber(ino),
+                    fh,
+                    flags,
+                    lock_owner,
+                    flush,
+                },
+            )
+        })
+        .map_err(|error| error.to_errno())
     }
 
     /// Execute lookup with raw path-component bytes and return the backend
@@ -2691,11 +2805,12 @@ impl Filesystem for FrankenFuse {
         }
     }
 
-    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
         let cx = Self::cx_for_request();
-        match self.with_request_scope(&cx, RequestOp::Open, |_cx, _scope| Ok(())) {
-            // Stateless open: we don't track file handles.
-            Ok(()) => reply.opened(0, 0),
+        match self.with_request_scope(&cx, RequestOp::Open, |cx, scope| {
+            self.inner.ops.open(cx, scope, InodeNumber(ino), flags)
+        }) {
+            Ok((fh, open_flags)) => reply.opened(fh, open_flags),
             Err(e) => {
                 let ctx = FuseErrorContext {
                     error: &e,
@@ -3460,6 +3575,45 @@ impl Filesystem for FrankenFuse {
                     &FuseErrorContext {
                         error: &e,
                         operation: "flush",
+                        ino,
+                        offset: None,
+                    },
+                    reply,
+                );
+            }
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        flags: i32,
+        lock_owner: Option<u64>,
+        flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        let cx = Self::cx_for_request();
+        match self.with_request_scope(&cx, RequestOp::Release, |cx, scope| {
+            self.inner.ops.release(
+                cx,
+                scope,
+                ReleaseRequest {
+                    ino: InodeNumber(ino),
+                    fh,
+                    flags,
+                    lock_owner,
+                    flush,
+                },
+            )
+        }) {
+            Ok(()) => reply.ok(),
+            Err(e) => {
+                Self::reply_error_empty(
+                    &FuseErrorContext {
+                        error: &e,
+                        operation: "release",
                         ino,
                         offset: None,
                     },
@@ -6967,12 +7121,23 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum MutationCall {
+        Begin {
+            op: RequestOp,
+        },
+        Commit,
+        End {
+            op: RequestOp,
+        },
         Getattr {
             ino: InodeNumber,
         },
         Lookup {
             parent: InodeNumber,
             name: String,
+        },
+        Open {
+            ino: InodeNumber,
+            flags: i32,
         },
         Create {
             parent: InodeNumber,
@@ -6987,6 +7152,11 @@ mod tests {
         },
         Readlink {
             ino: InodeNumber,
+        },
+        Read {
+            ino: InodeNumber,
+            offset: u64,
+            size: u32,
         },
         Write {
             ino: InodeNumber,
@@ -7021,6 +7191,23 @@ mod tests {
             uid: u32,
             gid: u32,
         },
+        Flush {
+            ino: InodeNumber,
+            fh: u64,
+            lock_owner: u64,
+        },
+        Fsync {
+            ino: InodeNumber,
+            fh: u64,
+            datasync: bool,
+        },
+        Release {
+            ino: InodeNumber,
+            fh: u64,
+            flags: i32,
+            lock_owner: Option<u64>,
+            flush: bool,
+        },
         Setattr {
             ino: InodeNumber,
             mode: Option<u16>,
@@ -7040,11 +7227,22 @@ mod tests {
 
     struct MutationRecordingFs {
         calls: Arc<Mutex<Vec<MutationCall>>>,
+        record_scopes: bool,
     }
 
     impl MutationRecordingFs {
         fn new(calls: Arc<Mutex<Vec<MutationCall>>>) -> Self {
-            Self { calls }
+            Self {
+                calls,
+                record_scopes: false,
+            }
+        }
+
+        fn with_scope_recording(calls: Arc<Mutex<Vec<MutationCall>>>) -> Self {
+            Self {
+                calls,
+                record_scopes: true,
+            }
         }
     }
 
@@ -7079,6 +7277,20 @@ mod tests {
             Ok(test_inode_attr(202, FfsFileType::RegularFile, 0o640))
         }
 
+        fn open(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            flags: i32,
+        ) -> ffs_error::Result<(u64, u32)> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Open { ino, flags });
+            Ok((9001, 0x2))
+        }
+
         fn readdir(
             &self,
             _cx: &Cx,
@@ -7102,11 +7314,15 @@ mod tests {
             &self,
             _cx: &Cx,
             _scope: &mut RequestScope,
-            _ino: InodeNumber,
-            _offset: u64,
-            _size: u32,
+            ino: InodeNumber,
+            offset: u64,
+            size: u32,
         ) -> ffs_error::Result<Vec<u8>> {
-            Ok(vec![])
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Read { ino, offset, size });
+            Ok(b"read-data".to_vec())
         }
 
         fn readlink(
@@ -7265,6 +7481,59 @@ mod tests {
             Ok(u32::try_from(data.len()).unwrap_or(u32::MAX))
         }
 
+        fn flush(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            fh: u64,
+            lock_owner: u64,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Flush {
+                    ino,
+                    fh,
+                    lock_owner,
+                });
+            Ok(())
+        }
+
+        fn fsync(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            fh: u64,
+            datasync: bool,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Fsync { ino, fh, datasync });
+            Ok(())
+        }
+
+        fn release(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            request: ReleaseRequest,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Release {
+                    ino: request.ino,
+                    fh: request.fh,
+                    flags: request.flags,
+                    lock_owner: request.lock_owner,
+                    flush: request.flush,
+                });
+            Ok(())
+        }
+
         fn setxattr(
             &self,
             _cx: &Cx,
@@ -7325,6 +7594,44 @@ mod tests {
                 attr.mtime = mtime;
             }
             Ok(attr)
+        }
+
+        fn begin_request_scope(&self, _cx: &Cx, op: RequestOp) -> ffs_error::Result<RequestScope> {
+            if self.record_scopes {
+                self.calls
+                    .lock()
+                    .expect("lock mutation calls")
+                    .push(MutationCall::Begin { op });
+            }
+            Ok(RequestScope::empty())
+        }
+
+        fn end_request_scope(
+            &self,
+            _cx: &Cx,
+            op: RequestOp,
+            _scope: RequestScope,
+        ) -> ffs_error::Result<()> {
+            if self.record_scopes {
+                self.calls
+                    .lock()
+                    .expect("lock mutation calls")
+                    .push(MutationCall::End { op });
+            }
+            Ok(())
+        }
+
+        fn commit_request_scope(
+            &self,
+            _scope: &mut RequestScope,
+        ) -> ffs_error::Result<ffs_types::CommitSeq> {
+            if self.record_scopes {
+                self.calls
+                    .lock()
+                    .expect("lock mutation calls")
+                    .push(MutationCall::Commit);
+            }
+            Ok(ffs_types::CommitSeq(0))
         }
     }
 
@@ -7639,6 +7946,191 @@ mod tests {
                 uid: 1001,
                 gid: 1002,
             }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_open_file_lifecycle_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(
+            Arc::clone(&calls),
+        )));
+
+        let (fh, open_flags) = fuse.open_for_fuzzing(44, libc::O_RDONLY).expect("open");
+
+        assert_eq!(fh, 9001);
+        assert_eq!(open_flags, 0x2);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Open,
+                },
+                MutationCall::Open {
+                    ino: InodeNumber(44),
+                    flags: libc::O_RDONLY,
+                },
+                MutationCall::End {
+                    op: RequestOp::Open,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_read_file_lifecycle_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(
+            Arc::clone(&calls),
+        )));
+
+        let data = fuse.read_for_fuzzing(44, 8, 4).expect("read");
+
+        assert_eq!(data, b"read".to_vec());
+        assert_eq!(fuse.metrics().snapshot().bytes_read, 4);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Read,
+                },
+                MutationCall::Read {
+                    ino: InodeNumber(44),
+                    offset: 8,
+                    size: 4,
+                },
+                MutationCall::End {
+                    op: RequestOp::Read,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_write_file_lifecycle_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        let written = fuse.write_for_fuzzing(44, 16, b"payload").expect("write");
+
+        assert_eq!(written, 7);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(44),
+                    offset: 16,
+                    data: b"payload".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_flush_file_lifecycle_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(
+            Arc::clone(&calls),
+        )));
+
+        fuse.flush_for_fuzzing(44, 9001, 0xABCD).expect("flush");
+
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Flush,
+                },
+                MutationCall::Flush {
+                    ino: InodeNumber(44),
+                    fh: 9001,
+                    lock_owner: 0xABCD,
+                },
+                MutationCall::End {
+                    op: RequestOp::Flush,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_fsync_file_lifecycle_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        fuse.fsync_for_fuzzing(44, 9001, true).expect("fsync");
+
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Fsync,
+                },
+                MutationCall::Fsync {
+                    ino: InodeNumber(44),
+                    fh: 9001,
+                    datasync: true,
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Fsync,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_release_file_lifecycle_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(
+            Arc::clone(&calls),
+        )));
+
+        fuse.release_for_fuzzing(44, 9001, libc::O_RDWR, Some(0xABCD), true)
+            .expect("release");
+
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Release,
+                },
+                MutationCall::Release {
+                    ino: InodeNumber(44),
+                    fh: 9001,
+                    flags: libc::O_RDWR,
+                    lock_owner: Some(0xABCD),
+                    flush: true,
+                },
+                MutationCall::End {
+                    op: RequestOp::Release,
+                },
+            ]
         );
     }
 
