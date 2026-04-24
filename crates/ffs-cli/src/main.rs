@@ -10188,16 +10188,26 @@ mod tests {
 
     #[test]
     fn btrfs_super_mirror_offsets_follow_kernel_layout() {
-        // Test with a 1 GiB image - should include mirrors at 64 KiB, 64 MiB, and 256 MiB.
-        // (Note: BTRFS_SUPER_MIRROR_MAX is 3, so only first 3 mirrors are returned).
-        let image_len = 1024 * 1024 * 1024;
-        let offsets = btrfs_super_mirror_offsets(image_len);
+        let one_gib_image_len = 1024 * 1024 * 1024;
+        let offsets = btrfs_super_mirror_offsets(one_gib_image_len);
         assert_eq!(
             offsets,
             vec![
-                64 * 1024,         // Primary: 64 KiB
-                64 * 1024 * 1024,  // Mirror 1: 64 MiB
-                256 * 1024 * 1024, // Mirror 2: 256 MiB
+                64 * 1024,        // Primary: 64 KiB
+                64 * 1024 * 1024, // Mirror 1: 64 MiB
+            ]
+        );
+
+        let third_mirror_offset = 256_u64 * 1024 * 1024 * 1024;
+        let large_image_len =
+            third_mirror_offset + u64::try_from(super::BTRFS_SUPER_INFO_SIZE).unwrap();
+        let offsets = btrfs_super_mirror_offsets(large_image_len);
+        assert_eq!(
+            offsets,
+            vec![
+                64 * 1024,           // Primary: 64 KiB
+                64 * 1024 * 1024,    // Mirror 1: 64 MiB
+                third_mirror_offset, // Mirror 2: 256 GiB
             ]
         );
     }
@@ -10747,6 +10757,17 @@ mod tests {
         assert_eq!(spec.physical_start_block.0, 9);
         // block_count = 0x10000 / 4096 = 16
         assert_eq!(spec.physical_block_count, 16);
+    }
+
+    #[test]
+    fn btrfs_repair_group_spec_rejects_zero_block_size() {
+        let err = build_btrfs_repair_group_spec(3, 0x2000, 0x10000, 0, &[])
+            .expect_err("zero scrub block size should fail before block math");
+        let detail = format!("{err:#}");
+        assert_eq!(
+            detail,
+            "btrfs block group 3 scrub block size must be nonzero"
+        );
     }
 
     const BTRFS_REPAIR_GROUP_SPEC_UNMAPPED_RANGE_GOLDEN: &str =

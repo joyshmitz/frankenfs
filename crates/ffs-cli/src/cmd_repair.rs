@@ -136,7 +136,8 @@ const BTRFS_EXTENT_TREE_OBJECTID: u64 = 2;
 const BTRFS_ROOT_ITEM_TYPE: u8 = 132;
 const BTRFS_BLOCK_GROUP_ITEM_TYPE: u8 = 192;
 const BTRFS_SUPER_MIRROR_MAX: u32 = 3;
-const BTRFS_SUPER_MIRROR_BASE: u64 = 16 * 1024;
+const BTRFS_SUPER_MIRROR_SHIFT: u32 = 12;
+const BTRFS_FIRST_BACKUP_SUPER_OFFSET: u64 = 64 * 1024 * 1024;
 const BTRFS_SUPER_BYTENR_OFFSET: usize = 0x30;
 const BTRFS_SUPER_CSUM_OFFSET: usize = 0;
 const BTRFS_SUPER_CSUM_LEN: usize = 4;
@@ -652,10 +653,12 @@ pub fn btrfs_super_mirror_offsets(image_len: u64) -> Vec<u64> {
         let offset = if mirror == 0 {
             BTRFS_SUPER_INFO_OFFSET as u64
         } else {
-            // Btrfs mirrors for index n >= 1 are at 64 MiB, 256 MiB, 1 GiB, 4 GiB...
-            // These are powers of 4: 16 KiB << (12 + 2*(n-1)) = 16 KiB << (10 + 2n).
-            let shift = 10_u32.saturating_add(mirror.saturating_mul(2));
-            let Some(candidate) = BTRFS_SUPER_MIRROR_BASE.checked_shl(shift) else {
+            // Backup superblocks follow the kernel layout: 64 MiB, then each
+            // later mirror shifts by BTRFS_SUPER_MIRROR_SHIFT (256 GiB for mirror 2).
+            let Some(shift) = BTRFS_SUPER_MIRROR_SHIFT.checked_mul(mirror - 1) else {
+                continue;
+            };
+            let Some(candidate) = BTRFS_FIRST_BACKUP_SUPER_OFFSET.checked_shl(shift) else {
                 continue;
             };
             candidate
@@ -1027,6 +1030,9 @@ pub fn build_btrfs_repair_group_spec(
 ) -> Result<BtrfsRepairGroupSpec> {
     if logical_bytes == 0 {
         bail!("btrfs block group {group} has zero logical span");
+    }
+    if block_size == 0 {
+        bail!("btrfs block group {group} scrub block size must be nonzero");
     }
     let logical_end = logical_start
         .checked_add(logical_bytes.saturating_sub(1))
