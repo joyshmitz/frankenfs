@@ -247,40 +247,95 @@ impl RepairOwnership {
         expected_gen: u64,
         expected_lease_version: u64,
     ) -> std::io::Result<AcquireResult> {
-        let contents = std::fs::read_to_string(record_path)?;
-        let current: CoordinationRecord = serde_json::from_str(&contents)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let current = Self::read_record(record_path)?;
 
-        if current.host_id == self.host_id {
-            // We own it
-            Ok(AcquireResult::Acquired(OwnershipGuard {
+        if self.claim_matches(&current, expected_gen, expected_lease_version) {
+            return Ok(AcquireResult::Acquired(OwnershipGuard {
                 record_path: record_path.to_owned(),
                 record: current,
-            }))
+            }));
+        }
+
+        if self.should_rewrite_conflicting_claim(&current, expected_gen) {
+            self.write_claim(record_path, expected_gen, expected_lease_version)?;
+            let record = Self::read_record(record_path)?;
+            return Ok(self.acquisition_result_for_current_claim(
+                record_path,
+                record,
+                expected_gen,
+                expected_lease_version,
+            ));
+        }
+
+        Ok(self.conflict_lost(current))
+    }
+
+    fn read_record(record_path: &Path) -> std::io::Result<CoordinationRecord> {
+        let contents = std::fs::read_to_string(record_path)?;
+        serde_json::from_str(&contents)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    fn claim_matches(
+        &self,
+        record: &CoordinationRecord,
+        expected_gen: u64,
+        expected_lease_version: u64,
+    ) -> bool {
+        record.host_id == self.host_id
+            && record.repair_generation == expected_gen
+            && record.lease_version == expected_lease_version
+    }
+
+    fn should_rewrite_conflicting_claim(
+        &self,
+        current: &CoordinationRecord,
+        expected_gen: u64,
+    ) -> bool {
+        current.repair_generation < expected_gen
+            || (current.repair_generation == expected_gen
+                && self.host_id.as_str() < current.host_id.as_str())
+    }
+
+    fn acquisition_result_for_current_claim(
+        &self,
+        record_path: &Path,
+        record: CoordinationRecord,
+        expected_gen: u64,
+        expected_lease_version: u64,
+    ) -> AcquireResult {
+        if self.claim_matches(&record, expected_gen, expected_lease_version) {
+            AcquireResult::Acquired(OwnershipGuard {
+                record_path: record_path.to_owned(),
+                record,
+            })
         } else {
-            // Another host won the race — apply tiebreak
-            if self.host_id < current.host_id {
-                // We should win — re-write
-                self.write_claim(record_path, expected_gen, expected_lease_version)?;
-                let contents = std::fs::read_to_string(record_path)?;
-                let record: CoordinationRecord = serde_json::from_str(&contents)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                Ok(AcquireResult::Acquired(OwnershipGuard {
-                    record_path: record_path.to_owned(),
-                    record,
-                }))
-            } else {
-                // We lost
-                warn!(
-                    target: "ffs::repair::ownership",
-                    our_id = %self.host_id,
-                    winner_id = %current.host_id,
-                    "ownership_conflict_lost"
-                );
-                Ok(AcquireResult::ConflictLost {
-                    winner_host_id: current.host_id,
-                })
+            warn!(
+                target: "ffs::repair::ownership",
+                our_id = %self.host_id,
+                winner_id = %record.host_id,
+                expected_generation = expected_gen,
+                observed_generation = record.repair_generation,
+                expected_lease_version,
+                observed_lease_version = record.lease_version,
+                "ownership_claim_verification_lost"
+            );
+            AcquireResult::ConflictLost {
+                winner_host_id: record.host_id,
             }
+        }
+    }
+
+    fn conflict_lost(&self, current: CoordinationRecord) -> AcquireResult {
+        warn!(
+            target: "ffs::repair::ownership",
+            our_id = %self.host_id,
+            winner_id = %current.host_id,
+            winner_generation = current.repair_generation,
+            "ownership_conflict_lost"
+        );
+        AcquireResult::ConflictLost {
+            winner_host_id: current.host_id,
         }
     }
 
@@ -570,6 +625,53 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_decision_preserves_newer_generation() {
+        let mgr = RepairOwnership::new("aaaa".into(), "worker-a".into());
+        let current = record_fixture("zzzz", 12, 12);
+
+        assert!(
+            !mgr.should_rewrite_conflicting_claim(&current, 11),
+            "older expected generation must not overwrite a newer on-disk claim"
+        );
+    }
+
+    #[test]
+    fn rewrite_decision_prefers_generation_before_host_tiebreak() {
+        let mgr = RepairOwnership::new("zzzz".into(), "worker-z".into());
+        let current = record_fixture("aaaa", 10, 10);
+
+        assert!(
+            mgr.should_rewrite_conflicting_claim(&current, 11),
+            "newer generation wins even when our host id loses the lexical tiebreak"
+        );
+    }
+
+    #[test]
+    fn rewrite_decision_tiebreaks_equal_generation_by_host_id() {
+        let lower = RepairOwnership::new("aaaa".into(), "worker-a".into());
+        let higher = RepairOwnership::new("zzzz".into(), "worker-z".into());
+        let current = record_fixture("mmmm", 10, 10);
+
+        assert!(lower.should_rewrite_conflicting_claim(&current, 10));
+        assert!(!higher.should_rewrite_conflicting_claim(&current, 10));
+    }
+
+    #[test]
+    fn acquisition_result_rejects_same_host_stale_incarnation() {
+        let mgr = RepairOwnership::new("host-1".into(), "worker".into());
+        let record_path = PathBuf::from("/tmp/.image.img.ffs-repair-owner.json");
+        let stale = record_fixture("host-1", 42, 6);
+
+        let result = mgr.acquisition_result_for_current_claim(&record_path, stale, 42, 5);
+
+        match result {
+            AcquireResult::ConflictLost { winner_host_id } => assert_eq!(winner_host_id, "host-1"),
+            AcquireResult::Acquired(_) => panic!("stale same-host lease must not be accepted"),
+            AcquireResult::OwnedByOther { .. } => panic!("unexpected owned-by-other result"),
+        }
+    }
+
+    #[test]
     fn acquire_creates_record_on_disk() {
         let dir = tempdir();
         let image = dir.join("test.img");
@@ -761,6 +863,20 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(first.parent(), record_path.parent());
         assert_eq!(second.parent(), record_path.parent());
+    }
+
+    fn record_fixture(host_id: &str, repair_generation: u64, lease_version: u64) -> CoordinationRecord {
+        CoordinationRecord {
+            version: RECORD_VERSION,
+            host_id: host_id.into(),
+            hostname: "worker".into(),
+            pid: 1234,
+            claimed_at: format_iso8601(SystemTime::now()),
+            lease_ttl_secs: DEFAULT_LEASE_TTL_SECS,
+            lease_version,
+            repair_generation,
+            groups_owned: vec![],
+        }
     }
 
     fn tempdir() -> PathBuf {
