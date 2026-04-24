@@ -10240,7 +10240,8 @@ CUSTOM("congestion_threshold=3")"#;
         // Give the waiter time to clone its Arc and enter the condvar wait.
         // Spinning the table_len check keeps this deterministic without a
         // fixed sleep: once B has entered acquire(), the strong_count on the
-        // per-inode lock is >= 3 even before B wins the held flag.
+        // per-inode lock is >= 4 here: table + guard A + this diagnostic
+        // snapshot + waiter B.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let entries: Vec<(InodeNumber, Arc<FuseInodeLock>)> = {
@@ -10248,11 +10249,9 @@ CUSTOM("congestion_threshold=3")"#;
                 table.iter().map(|(k, v)| (*k, Arc::clone(v))).collect()
             };
             assert_eq!(entries.len(), 1);
-            let count = Arc::strong_count(&entries[0].1);
-            // Drop our snapshot clone before comparing so the helper clone
-            // does not itself skew the count upward.
+            let waiter_cloned_entry = Arc::strong_count(&entries[0].1) >= 4;
             drop(entries);
-            if count >= 3 {
+            if waiter_cloned_entry {
                 break;
             }
             assert!(
