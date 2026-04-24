@@ -2383,6 +2383,62 @@ fn fuse_create_and_read_file() {
 }
 
 #[test]
+fn fuse_conformance_file_lifecycle_open_read_write_flush_fsync_release_matrix() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_conformance_file_lifecycle_matrix";
+        let path = mnt.join("lifecycle_matrix.bin");
+        let payload = b"lifecycle matrix\n";
+        let payload_len = u64::try_from(payload.len()).expect("payload length should fit u64");
+
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open lifecycle matrix file for read/write");
+
+        file.write_all(payload).expect("write lifecycle payload");
+        file.flush().expect("flush lifecycle payload");
+        file.seek(SeekFrom::Start(0))
+            .expect("seek lifecycle file for same-handle read");
+
+        let mut same_handle_readback = vec![0_u8; payload.len()];
+        file.read_exact(&mut same_handle_readback)
+            .expect("read lifecycle payload from same handle");
+        assert_eq!(same_handle_readback.as_slice(), payload);
+
+        file.sync_all().expect("fsync lifecycle file");
+        assert_eq!(
+            file.metadata()
+                .expect("getattr lifecycle file from open handle")
+                .len(),
+            payload_len
+        );
+        drop(file);
+
+        let mut reopened = fs::File::open(&path).expect("reopen lifecycle matrix file");
+        let mut reopened_readback = Vec::new();
+        reopened
+            .read_to_end(&mut reopened_readback)
+            .expect("read lifecycle payload after release");
+        assert_eq!(reopened_readback.as_slice(), payload);
+        drop(reopened);
+
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("getattr lifecycle matrix path")
+                .len(),
+            payload_len
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("open+write+flush+read+fsync+release+reopen"),
+        );
+    });
+}
+
+#[test]
 fn fuse_write_overwrite_and_append() {
     with_rw_mount(|mnt| {
         let path = mnt.join("overwrite.txt");
@@ -2486,6 +2542,77 @@ fn fuse_mkdir_and_nested_create() {
 
         let content = fs::read_to_string(&nested).expect("read nested file");
         assert_eq!(content, "nested content\n");
+    });
+}
+
+#[test]
+fn fuse_conformance_namespace_lookup_readdir_symlink_rename_unlink_matrix() {
+    with_rw_mount(|mnt| {
+        let scenario_id = "ext4_rw_conformance_namespace_matrix";
+        let dir = mnt.join("namespace_matrix");
+        fs::create_dir(&dir).expect("mkdir namespace matrix directory");
+
+        let dir_meta = fs::metadata(&dir).expect("lookup/getattr namespace matrix directory");
+        assert!(dir_meta.is_dir());
+
+        let child = dir.join("child.txt");
+        let payload = b"namespace matrix payload\n";
+        let payload_len = u64::try_from(payload.len()).expect("payload length should fit u64");
+        fs::write(&child, payload).expect("create/write namespace matrix child");
+
+        let link = dir.join("child.link");
+        std::os::unix::fs::symlink("child.txt", &link).expect("symlink namespace matrix child");
+        assert_eq!(
+            fs::read_link(&link).expect("readlink namespace matrix child"),
+            PathBuf::from("child.txt")
+        );
+
+        let entries: HashSet<String> = fs::read_dir(&dir)
+            .expect("readdir namespace matrix directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.contains("child.txt"),
+            "readdir should include child.txt, got {entries:?}"
+        );
+        assert!(
+            entries.contains("child.link"),
+            "readdir should include child.link, got {entries:?}"
+        );
+
+        let renamed = dir.join("renamed.txt");
+        fs::rename(&child, &renamed).expect("rename namespace matrix child");
+        assert!(
+            fs::symlink_metadata(&child).is_err(),
+            "renamed source should no longer resolve"
+        );
+        assert_eq!(
+            fs::read(&renamed)
+                .expect("read renamed namespace matrix child")
+                .as_slice(),
+            payload
+        );
+        assert_eq!(
+            fs::metadata(&renamed)
+                .expect("lookup/getattr renamed namespace matrix child")
+                .len(),
+            payload_len
+        );
+
+        fs::remove_file(&link).expect("unlink namespace matrix symlink");
+        fs::remove_file(&renamed).expect("unlink namespace matrix file");
+        fs::remove_dir(&dir).expect("rmdir namespace matrix directory");
+        assert!(
+            fs::symlink_metadata(&dir).is_err(),
+            "rmdir should remove namespace matrix directory"
+        );
+
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("lookup+getattr+readdir+mkdir+symlink+readlink+rename+unlink+rmdir"),
+        );
     });
 }
 

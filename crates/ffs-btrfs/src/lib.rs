@@ -6193,20 +6193,8 @@ mod tests {
 
     // ── Serialization round-trip tests ────────────────────────────────────
 
-    const REPRESENTATIVE_BTRFS_ITEM_GOLDEN: &str = concat!(
-        "INODE_REF\n",
-        "  key=objectid:258,type:12,offset:256\n",
-        "  decoded=index:7,name:alpha.txt\n",
-        "  payload_hex=07000000000000000900616c7068612e747874\n",
-        "EXTENT_DATA\n",
-        "  key=objectid:258,type:108,offset:0\n",
-        "  decoded=regular,generation:3,ram_bytes:4096,disk_bytenr:1048576,disk_num_bytes:4096,extent_offset:512,num_bytes:3584\n",
-        "  payload_hex=030000000000000000100000000000000000000001000010000000000000100000000000000002000000000000000e000000000000\n",
-        "DIR_ITEM\n",
-        "  key=objectid:256,type:84,offset:2214237132\n",
-        "  decoded=child_objectid:258,child_key_type:1,child_key_offset:0,file_type:1,name:file.txt\n",
-        "  payload_hex=02010000000000000100000000000000000000000000000000000008000166696c652e747874\n",
-    );
+    const REPRESENTATIVE_BTRFS_ITEM_GOLDEN: &str =
+        include_str!("../../../conformance/golden/btrfs_item_payloads.txt");
 
     fn representative_btrfs_item_golden_actual() -> String {
         let inode_ref_key = BtrfsKey {
