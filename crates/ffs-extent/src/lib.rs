@@ -500,7 +500,7 @@ pub fn mark_written(
         )?;
 
         // Build replacement extents based on overlap type.
-        let replacements = split_for_mark_written(&ext, logical_start, range_end, ext_end, count);
+        let replacements = split_for_mark_written(&ext, logical_start, range_end, ext_end, count)?;
 
         for replacement in replacements {
             ffs_btree::insert(cx, dev, root_bytes, replacement, &mut tree_alloc)?;
@@ -520,7 +520,7 @@ fn split_for_mark_written<M, E>(
     mark_end: M,
     ext_end: E,
     mark_count: u32,
-) -> Vec<Ext4Extent>
+) -> Result<Vec<Ext4Extent>>
 where
     M: Into<u64>,
     E: Into<u64>,
@@ -553,9 +553,13 @@ where
             physical_start: ext.physical_start + u64::from(mark_start - ext.logical_block),
         });
         let right_len = (ext_end - mark_end) as u16;
+        let right_logical_block = u32::try_from(mark_end).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "mark_written: right-hand split start {mark_end} exceeds u32 block range"
+            ))
+        })?;
         out.push(Ext4Extent {
-            logical_block: u32::try_from(mark_end)
-                .expect("right-hand split start must fit logical block range"),
+            logical_block: right_logical_block,
             raw_len: right_len | UNWRITTEN_FLAG,
             physical_start: ext.physical_start + (mark_end - ext_start),
         });
@@ -582,15 +586,19 @@ where
             physical_start: ext.physical_start,
         });
         let unwritten_len = (ext_end - mark_end) as u16;
+        let right_logical_block = u32::try_from(mark_end).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "mark_written: right-hand split start {mark_end} exceeds u32 block range"
+            ))
+        })?;
         out.push(Ext4Extent {
-            logical_block: u32::try_from(mark_end)
-                .expect("right-hand split start must fit logical block range"),
+            logical_block: right_logical_block,
             raw_len: unwritten_len | UNWRITTEN_FLAG,
             physical_start: ext.physical_start + u64::from(written_len),
         });
     }
 
-    out
+    Ok(out)
 }
 
 fn cx_checkpoint(cx: &Cx) -> Result<()> {
@@ -831,8 +839,7 @@ impl ExtentCache {
             return;
         }
         let range_end = u64::from(logical_start).saturating_add(count);
-        let range_end_u32 = u32::try_from(range_end.min(u64::from(u32::MAX)))
-            .expect("range end is explicitly clamped to u32::MAX");
+        let range_end_u32 = u32::try_from(range_end).unwrap_or(u32::MAX);
         let mut inner = self.inner.write();
 
         // Collect keys to remove: entries in this namespace whose extent overlaps the range.
@@ -1059,6 +1066,18 @@ mod tests {
         }
     }
 
+    fn found_extent(
+        cx: &Cx,
+        dev: &dyn BlockDevice,
+        root: &[u8; 60],
+        logical_block: u32,
+    ) -> Result<Option<Ext4Extent>> {
+        match ffs_btree::search(cx, dev, root, logical_block)? {
+            SearchResult::Found { extent, .. } => Ok(Some(extent)),
+            SearchResult::Hole { .. } => Ok(None),
+        }
+    }
+
     // ── Map tests ────────────────────────────────────────────────────────
 
     #[test]
@@ -1154,11 +1173,14 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         root[6..8].copy_from_slice(&6_u16.to_le_bytes());
 
         let result = map_logical_to_physical(&cx, &dev, &root, 0, 1);
-        match result {
-            Err(FfsError::Corruption { detail, .. }) => {
+        match result.expect_err("expected Corruption for excessive root depth") {
+            FfsError::Corruption { detail, .. } => {
                 assert!(detail.contains("exceeds ext4 limit"));
             }
-            other => panic!("expected Corruption for excessive root depth, got {other:?}"),
+            other => assert!(
+                matches!(other, FfsError::Corruption { .. }),
+                "expected Corruption for excessive root depth"
+            ),
         }
     }
 
@@ -1176,11 +1198,14 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         root[20..24].copy_from_slice(&123_u32.to_le_bytes());
 
         let result = map_logical_to_physical(&cx, &dev, &root, 0, 1);
-        match result {
-            Err(FfsError::Corruption { detail, .. }) => {
+        match result.expect_err("expected Corruption for zero-length extent") {
+            FfsError::Corruption { detail, .. } => {
                 assert!(detail.contains("leaf extent with zero length"));
             }
-            other => panic!("expected Corruption for zero-length extent, got {other:?}"),
+            other => assert!(
+                matches!(other, FfsError::Corruption { .. }),
+                "expected Corruption for zero-length extent"
+            ),
         }
     }
 
@@ -1308,11 +1333,14 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             &AllocHint::default(),
             &pctx,
         );
-        match result {
-            Err(FfsError::Corruption { detail, .. }) => {
+        match result.expect_err("expected Corruption for invalid non-leaf root") {
+            FfsError::Corruption { detail, .. } => {
                 assert!(detail.contains("non-leaf extent root has zero entries"));
             }
-            other => panic!("expected Corruption for invalid non-leaf root, got {other:?}"),
+            other => assert!(
+                matches!(other, FfsError::Corruption { .. }),
+                "expected Corruption for invalid non-leaf root"
+            ),
         }
     }
 
@@ -1340,11 +1368,10 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         assert!(mapping.unwritten);
 
         // Verify via search that the extent is marked unwritten.
-        let result = ffs_btree::search(&cx, &dev, &root, 0).unwrap();
-        match result {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            SearchResult::Hole { .. } => panic!("expected found"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 0)
+            .unwrap()
+            .expect("expected allocated extent");
+        assert!(extent.is_unwritten());
     }
 
     // ── Truncate tests ──────────────────────────────────────────────────
@@ -1571,19 +1598,19 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         .unwrap();
 
         // Verify unwritten.
-        match ffs_btree::search(&cx, &dev, &root, 0).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected found"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 0)
+            .unwrap()
+            .expect("expected unwritten extent");
+        assert!(extent.is_unwritten());
 
         // Mark entire range as written.
         mark_written(&cx, &dev, &mut root, &geo, &mut groups, 0, 10, &pctx).unwrap();
 
         // Verify now written.
-        match ffs_btree::search(&cx, &dev, &root, 0).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(!extent.is_unwritten()),
-            _ => panic!("expected found"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 0)
+            .unwrap()
+            .expect("expected written extent");
+        assert!(!extent.is_unwritten());
     }
 
     #[test]
@@ -1610,14 +1637,12 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
 
         mark_written(&cx, &dev, &mut root, &geo, &mut groups, u32::MAX, 1, &pctx).unwrap();
 
-        match ffs_btree::search(&cx, &dev, &root, u32::MAX).unwrap() {
-            SearchResult::Found { extent, .. } => {
-                assert_eq!(extent.logical_block, u32::MAX);
-                assert_eq!(extent.actual_len(), 1);
-                assert!(!extent.is_unwritten());
-            }
-            other => panic!("expected final block extent to remain searchable, got {other:?}"),
-        }
+        let extent = found_extent(&cx, &dev, &root, u32::MAX)
+            .unwrap()
+            .expect("expected final block extent to remain searchable");
+        assert_eq!(extent.logical_block, u32::MAX);
+        assert_eq!(extent.actual_len(), 1);
+        assert!(!extent.is_unwritten());
     }
 
     #[test]
@@ -1660,22 +1685,22 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         mark_written(&cx, &dev, &mut root, &geo, &mut groups, 3, 4, &pctx).unwrap();
 
         // Block 0 should still be unwritten.
-        match ffs_btree::search(&cx, &dev, &root, 0).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected found at block 0"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 0)
+            .unwrap()
+            .expect("expected extent at block 0");
+        assert!(extent.is_unwritten());
 
         // Block 4 should be written.
-        match ffs_btree::search(&cx, &dev, &root, 4).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(!extent.is_unwritten()),
-            _ => panic!("expected found at block 4"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 4)
+            .unwrap()
+            .expect("expected extent at block 4");
+        assert!(!extent.is_unwritten());
 
         // Block 8 should still be unwritten.
-        match ffs_btree::search(&cx, &dev, &root, 8).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected found at block 8"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 8)
+            .unwrap()
+            .expect("expected extent at block 8");
+        assert!(extent.is_unwritten());
 
         // Should have 3 extents now: [0-2] unwritten, [3-6] written, [7-9] unwritten.
         let mut count = 0;
@@ -1832,7 +1857,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let out = split_for_mark_written(&ext, 0, 10_u64, 10_u64, 10);
+        let out = split_for_mark_written(&ext, 0, 10_u64, 10_u64, 10).unwrap();
         assert_eq!(out.len(), 1);
         assert!(!out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 10);
@@ -1846,7 +1871,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let out = split_for_mark_written(&ext, 5, 10_u64, 10_u64, 5);
+        let out = split_for_mark_written(&ext, 5, 10_u64, 10_u64, 5).unwrap();
         assert_eq!(out.len(), 2);
         assert!(out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 5);
@@ -1864,7 +1889,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let out = split_for_mark_written(&ext, 0, 5_u64, 10_u64, 5);
+        let out = split_for_mark_written(&ext, 0, 5_u64, 10_u64, 5).unwrap();
         assert_eq!(out.len(), 2);
         assert!(!out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 5);
@@ -1882,7 +1907,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let out = split_for_mark_written(&ext, 3, 7_u64, 10_u64, 4);
+        let out = split_for_mark_written(&ext, 3, 7_u64, 10_u64, 4).unwrap();
         assert_eq!(out.len(), 3);
         assert!(out[0].is_unwritten());
         assert_eq!(out[0].logical_block, 0);
@@ -1942,13 +1967,11 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         mark_written(&cx, &dev, &mut root, &geo, &mut groups, 0, 10, &pctx).unwrap();
 
         // Verify the extent is still there and still written.
-        match ffs_btree::search(&cx, &dev, &root, 0).unwrap() {
-            SearchResult::Found { extent, .. } => {
-                assert!(!extent.is_unwritten());
-                assert_eq!(extent.actual_len(), 10);
-            }
-            _ => panic!("expected found"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 0)
+            .unwrap()
+            .expect("expected written extent");
+        assert!(!extent.is_unwritten());
+        assert_eq!(extent.actual_len(), 10);
 
         // Should still be exactly 1 extent.
         let mut count = 0;
@@ -2015,10 +2038,10 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         assert!(after_free > initial_free);
 
         // Blocks 0-2 should still be mapped (unwritten).
-        match ffs_btree::search(&cx, &dev, &root, 0).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected unwritten extent at block 0"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 0)
+            .unwrap()
+            .expect("expected unwritten extent at block 0");
+        assert!(extent.is_unwritten());
 
         // Blocks 3-6 should be a hole.
         let mappings = map_logical_to_physical(&cx, &dev, &root, 3, 1).unwrap();
@@ -2182,51 +2205,47 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         .unwrap();
 
         // Both should be unwritten.
-        match ffs_btree::search(&cx, &dev, &root, 2).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected unwritten extent at block 2"),
-        }
-        match ffs_btree::search(&cx, &dev, &root, 7).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected unwritten extent at block 7"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 2)
+            .unwrap()
+            .expect("expected unwritten extent at block 2");
+        assert!(extent.is_unwritten());
+        let extent = found_extent(&cx, &dev, &root, 7)
+            .unwrap()
+            .expect("expected unwritten extent at block 7");
+        assert!(extent.is_unwritten());
 
         // Mark blocks 3-7 as written, spanning both extents.
         mark_written(&cx, &dev, &mut root, &geo, &mut groups, 3, 5, &pctx).unwrap();
 
         // Block 1 should still be unwritten (left residual of first extent).
-        match ffs_btree::search(&cx, &dev, &root, 1).unwrap() {
-            SearchResult::Found { extent, .. } => {
-                assert!(extent.is_unwritten(), "block 1 should remain unwritten");
-            }
-            _ => panic!("expected extent at block 1"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 1)
+            .unwrap()
+            .expect("expected extent at block 1");
+        assert!(extent.is_unwritten(), "block 1 should remain unwritten");
 
         // Block 4 should now be written (was in first extent, within mark range).
-        match ffs_btree::search(&cx, &dev, &root, 4).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(
-                !extent.is_unwritten(),
-                "block 4 should be written after mark_written"
-            ),
-            _ => panic!("expected extent at block 4"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 4)
+            .unwrap()
+            .expect("expected extent at block 4");
+        assert!(
+            !extent.is_unwritten(),
+            "block 4 should be written after mark_written"
+        );
 
         // Block 6 should now be written (was in second extent, within mark range).
-        match ffs_btree::search(&cx, &dev, &root, 6).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(
-                !extent.is_unwritten(),
-                "block 6 should be written after mark_written"
-            ),
-            _ => panic!("expected extent at block 6"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 6)
+            .unwrap()
+            .expect("expected extent at block 6");
+        assert!(
+            !extent.is_unwritten(),
+            "block 6 should be written after mark_written"
+        );
 
         // Block 9 should still be unwritten (right residual of second extent).
-        match ffs_btree::search(&cx, &dev, &root, 9).unwrap() {
-            SearchResult::Found { extent, .. } => {
-                assert!(extent.is_unwritten(), "block 9 should remain unwritten");
-            }
-            _ => panic!("expected extent at block 9"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 9)
+            .unwrap()
+            .expect("expected extent at block 9");
+        assert!(extent.is_unwritten(), "block 9 should remain unwritten");
     }
 
     #[test]
@@ -2259,13 +2278,13 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
 
         // All blocks should now be written.
         for block in [0, 3, 4, 7, 8, 11] {
-            match ffs_btree::search(&cx, &dev, &root, block).unwrap() {
-                SearchResult::Found { extent, .. } => assert!(
-                    !extent.is_unwritten(),
-                    "block {block} should be written after mark_written"
-                ),
-                _ => panic!("expected extent at block {block}"),
-            }
+            let extent = found_extent(&cx, &dev, &root, block)
+                .unwrap()
+                .expect("expected extent after mark_written");
+            assert!(
+                !extent.is_unwritten(),
+                "block {block} should be written after mark_written"
+            );
         }
     }
 
@@ -2310,28 +2329,28 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         mark_written(&cx, &dev, &mut root, &geo, &mut groups, 7, 7, &pctx).unwrap();
 
         // Blocks 0-6: unwritten (left residual of first extent).
-        match ffs_btree::search(&cx, &dev, &root, 3).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected unwritten at block 3"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 3)
+            .unwrap()
+            .expect("expected unwritten at block 3");
+        assert!(extent.is_unwritten());
 
         // Blocks 7-9: written (right part of first extent, within mark range).
-        match ffs_btree::search(&cx, &dev, &root, 8).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(!extent.is_unwritten()),
-            _ => panic!("expected written at block 8"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 8)
+            .unwrap()
+            .expect("expected written at block 8");
+        assert!(!extent.is_unwritten());
 
         // Blocks 10-13: written (left part of second extent, within mark range).
-        match ffs_btree::search(&cx, &dev, &root, 11).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(!extent.is_unwritten()),
-            _ => panic!("expected written at block 11"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 11)
+            .unwrap()
+            .expect("expected written at block 11");
+        assert!(!extent.is_unwritten());
 
         // Blocks 14-19: unwritten (right residual of second extent).
-        match ffs_btree::search(&cx, &dev, &root, 16).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected unwritten at block 16"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 16)
+            .unwrap()
+            .expect("expected unwritten at block 16");
+        assert!(extent.is_unwritten());
     }
 
     // ── Lifecycle / integration tests ───────────────────────────────────
@@ -2366,14 +2385,14 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         mark_written(&cx, &dev, &mut root, &geo, &mut groups, 0, 5, &pctx).unwrap();
 
         // Verify: blocks 0-4 written, blocks 5-9 still unwritten.
-        match ffs_btree::search(&cx, &dev, &root, 2).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(!extent.is_unwritten()),
-            _ => panic!("expected written extent at block 2"),
-        }
-        match ffs_btree::search(&cx, &dev, &root, 7).unwrap() {
-            SearchResult::Found { extent, .. } => assert!(extent.is_unwritten()),
-            _ => panic!("expected unwritten extent at block 7"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 2)
+            .unwrap()
+            .expect("expected written extent at block 2");
+        assert!(!extent.is_unwritten());
+        let extent = found_extent(&cx, &dev, &root, 7)
+            .unwrap()
+            .expect("expected unwritten extent at block 7");
+        assert!(extent.is_unwritten());
 
         // Step 3: truncate at block 5 — should remove the unwritten tail.
         let freed = truncate_extents(&cx, &dev, &mut root, &geo, &mut groups, 5, &pctx).unwrap();
@@ -2627,13 +2646,11 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         mark_written(&cx, &dev, &mut root, &geo, &mut groups, 5, 0, &pctx).unwrap();
 
         // Extent should still be unwritten and intact.
-        match ffs_btree::search(&cx, &dev, &root, 5).unwrap() {
-            SearchResult::Found { extent, .. } => {
-                assert!(extent.is_unwritten(), "extent should remain unwritten");
-                assert_eq!(extent.actual_len(), 10, "extent should remain full size");
-            }
-            _ => panic!("expected found"),
-        }
+        let extent = found_extent(&cx, &dev, &root, 5)
+            .unwrap()
+            .expect("expected extent after zero-count mark_written");
+        assert!(extent.is_unwritten(), "extent should remain unwritten");
+        assert_eq!(extent.actual_len(), 10, "extent should remain full size");
     }
 
     #[test]
@@ -2922,7 +2939,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let parts = split_for_mark_written(&ext, 3, 10_u64, 10_u64, 7);
+        let parts = split_for_mark_written(&ext, 3, 10_u64, 10_u64, 7).unwrap();
         assert_eq!(parts.len(), 2);
         // Prefix: unwritten [0..3)
         assert!(parts[0].is_unwritten());
@@ -2944,7 +2961,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let parts = split_for_mark_written(&ext, 0, 6_u64, 10_u64, 6);
+        let parts = split_for_mark_written(&ext, 0, 6_u64, 10_u64, 6).unwrap();
         assert_eq!(parts.len(), 2);
         // Prefix: written [0..6)
         assert!(!parts[0].is_unwritten());
@@ -2966,7 +2983,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x14 | UNWRITTEN_FLAG,
             physical_start: 200,
         };
-        let parts = split_for_mark_written(&ext, 5, 15_u64, 20_u64, 10);
+        let parts = split_for_mark_written(&ext, 5, 15_u64, 20_u64, 10).unwrap();
         assert_eq!(parts.len(), 3);
         // Left: unwritten [0..5)
         assert!(parts[0].is_unwritten());
@@ -3171,7 +3188,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 1 | UNWRITTEN_FLAG,
             physical_start: 500,
         };
-        let out = split_for_mark_written(&ext, 10, 11_u64, 11_u64, 1);
+        let out = split_for_mark_written(&ext, 10, 11_u64, 11_u64, 1).unwrap();
         assert_eq!(out.len(), 1);
         assert!(!out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 1);
@@ -3188,7 +3205,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 1 | UNWRITTEN_FLAG,
             physical_start: 500,
         };
-        let out = split_for_mark_written(&ext, 9, 11_u64, 11_u64, 2);
+        let out = split_for_mark_written(&ext, 9, 11_u64, 11_u64, 2).unwrap();
         assert_eq!(out.len(), 1);
         assert!(!out[0].is_unwritten());
     }
@@ -3202,7 +3219,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0014 | UNWRITTEN_FLAG,
             physical_start: 1000,
         };
-        let parts = split_for_mark_written(&ext, 5, 15_u64, 20_u64, 10);
+        let parts = split_for_mark_written(&ext, 5, 15_u64, 20_u64, 10).unwrap();
         assert_eq!(parts.len(), 3);
         let total_len: u16 = parts.iter().map(|p| p.actual_len()).sum();
         assert_eq!(total_len, 20);
@@ -3220,7 +3237,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 2 | UNWRITTEN_FLAG,
             physical_start: 300,
         };
-        let out = split_for_mark_written(&ext, 0, 1_u64, 2_u64, 1);
+        let out = split_for_mark_written(&ext, 0, 1_u64, 2_u64, 1).unwrap();
         assert_eq!(out.len(), 2);
         assert!(!out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 1);
@@ -3452,7 +3469,8 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 physical_start,
             };
 
-            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+            let parts =
+                split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count).unwrap();
             prop_assert!(!parts.is_empty(), "split should produce at least one extent");
 
             // Total actual_len of output should equal input actual_len.
@@ -3481,7 +3499,8 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 physical_start,
             };
 
-            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+            let parts =
+                split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count).unwrap();
 
             // First part starts at the original logical_block.
             prop_assert_eq!(parts[0].logical_block, logical_block);
@@ -3514,7 +3533,8 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 physical_start,
             };
 
-            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+            let parts =
+                split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count).unwrap();
 
             // First part starts at the same physical_start.
             prop_assert_eq!(parts[0].physical_start, physical_start);
@@ -3875,7 +3895,8 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 physical_start,
             };
 
-            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+            let parts =
+                split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count).unwrap();
             for (i, part) in parts.iter().enumerate() {
                 prop_assert!(
                     part.actual_len() > 0,
@@ -3906,7 +3927,8 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 physical_start,
             };
 
-            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+            let parts =
+                split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count).unwrap();
 
             for part in &parts {
                 let p_end = part.logical_block + u32::from(part.actual_len());
@@ -4241,7 +4263,8 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
                 physical_start,
             };
 
-            let parts = split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count);
+            let parts =
+                split_for_mark_written(&ext, mark_start, mark_end, ext_end, mark_count).unwrap();
             prop_assert!(
                 (1..=3).contains(&parts.len()),
                 "split produced {} extents (expected 1-3)",
