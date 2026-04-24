@@ -810,33 +810,51 @@ impl EvidenceRecord {
 /// data loss on crash.
 pub struct EvidenceLedger<W: Write> {
     writer: W,
+    poisoned: bool,
 }
 
 impl<W: Write> EvidenceLedger<W> {
     /// Create a new evidence ledger writing to the given sink.
     pub fn new(writer: W) -> Self {
-        Self { writer }
+        Self {
+            writer,
+            poisoned: false,
+        }
     }
 
     /// Append a record as a single JSONL line and flush.
     ///
     /// Serializes the record into an owned byte buffer (ending with `\n`)
-    /// before issuing any I/O, so a failed write is either a no-op or
-    /// completes atomically. `serde_json::to_writer` would otherwise emit
-    /// bytes incrementally, and a mid-serialization error would leave a
-    /// torn, newline-less line in the ledger — the next successful
-    /// `append` would concatenate onto it and `parse_evidence_ledger`
-    /// would drop both records.
+    /// before issuing any I/O, avoiding the torn output that
+    /// `serde_json::to_writer` can leave when serialization itself fails
+    /// midway through streaming. A generic [`Write`] can still accept a
+    /// partial prefix before reporting an I/O error; after any write or
+    /// flush failure, the ledger is poisoned so later records cannot be
+    /// concatenated onto a possibly incomplete JSONL line.
     ///
     /// # Errors
     ///
     /// Returns an I/O error if serialization or writing fails.
     pub fn append(&mut self, record: &EvidenceRecord) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "evidence ledger append attempted after a failed write",
+            ));
+        }
+
         let mut line = serde_json::to_vec(record)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
-        self.writer.write_all(&line)?;
-        self.writer.flush()
+        if let Err(err) = self.writer.write_all(&line) {
+            self.poisoned = true;
+            return Err(err);
+        }
+        if let Err(err) = self.writer.flush() {
+            self.poisoned = true;
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Consume the ledger, returning the underlying writer.
@@ -1601,10 +1619,10 @@ mod tests {
         assert!(!record.repair.as_ref().unwrap().verify_pass);
     }
 
-    /// A writer that fails after N bytes — used to reproduce the pre-fix
-    /// torn-write scenario where serde_json's incremental output would
-    /// leave a partial JSON prefix and then silently concatenate the
-    /// next record on top.
+    /// A writer that accepts at most N bytes before failing, including
+    /// partial writes. This reproduces the generic `Write` failure mode
+    /// where a sink returns `Ok(n)` for a prefix and then fails on the
+    /// next `write_all` retry.
     struct FaultyWriter {
         inner: Vec<u8>,
         bytes_before_failure: usize,
@@ -1626,13 +1644,18 @@ mod tests {
             if self.failed {
                 return Err(io::Error::other("writer already failed"));
             }
-            if self.inner.len().saturating_add(buf.len()) <= self.bytes_before_failure {
+            let remaining = self.bytes_before_failure.saturating_sub(self.inner.len());
+            if remaining == 0 {
+                self.failed = true;
+                return Err(io::Error::other("writer failed"));
+            }
+            if buf.len() <= remaining {
                 self.inner.extend_from_slice(buf);
                 Ok(buf.len())
             } else {
-                // Fail atomically: do not write a partial prefix.
+                self.inner.extend_from_slice(&buf[..remaining]);
                 self.failed = true;
-                Err(io::Error::other("writer failed"))
+                Ok(remaining)
             }
         }
 
@@ -1646,15 +1669,12 @@ mod tests {
     }
 
     #[test]
-    fn append_failed_write_does_not_poison_ledger_buffer() {
-        // Pre-fix: if `serde_json::to_writer` fails mid-JSON, the ledger
-        // buffer retained a partial `{..` prefix without a newline and
-        // the next successful append concatenated onto it, producing a
-        // malformed line that `parse_evidence_ledger` would drop.
-        //
-        // With the serialize-to-buffer fix, a write failure is an
-        // all-or-nothing operation: the buffer is either untouched (no
-        // line written) or contains a complete `{..}\n` record.
+    fn append_failed_partial_write_poisons_ledger_handle() {
+        // Serialize-to-buffer prevents serde's own incremental output
+        // from tearing a line. It cannot make arbitrary `Write` sinks
+        // atomic, so a failed I/O append must poison the handle and
+        // reject later appends instead of concatenating onto the partial
+        // prefix.
         let mut ledger = EvidenceLedger::new(FaultyWriter::new(4)); // fail before any full record fits
         let record =
             EvidenceRecord::corruption_detected(7, sample_corruption_detail()).with_timestamp(1);
@@ -1662,13 +1682,21 @@ mod tests {
         let err = ledger.append(&record).expect_err("small buffer must fail");
         assert_eq!(err.kind(), io::ErrorKind::Other);
 
-        // The inner buffer must either be empty or end on a newline —
-        // never contain a bare `{...}` fragment.
-        let bytes = ledger.into_inner().inner;
+        let bytes_after_failure = ledger.writer.inner.clone();
+        assert!(!bytes_after_failure.is_empty());
         assert!(
-            bytes.is_empty() || bytes.ends_with(b"\n"),
-            "ledger must not retain torn JSON; got {bytes:?}"
+            !bytes_after_failure.ends_with(b"\n"),
+            "test writer should leave a torn JSONL prefix; got {bytes_after_failure:?}"
         );
+
+        let err = ledger
+            .append(&record)
+            .expect_err("poisoned ledger must reject future appends");
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+
+        let bytes = ledger.into_inner().inner;
+        assert_eq!(bytes, bytes_after_failure);
+        assert!(parse_evidence_ledger(&bytes).is_empty());
     }
 
     #[test]
