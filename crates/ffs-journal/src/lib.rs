@@ -32,6 +32,19 @@ const JBD2_HEADER_SIZE: usize = 12;
 const JBD2_REVOKE_HEADER_SIZE: usize = 16; // journal header (12) + r_count (4)
 const JBD2_TAG_SIZE_32: usize = 8;
 const JBD2_TAG_SIZE_64: usize = 12;
+// Linux JBD2's journal_tag_bytes() adds the 2-byte checksum-v2 field on
+// top of the legacy 32/64-bit tag geometry. CsumV3 switches to a 16-byte
+// base tag with a 32-bit checksum. All formats append a 16-byte UUID when
+// JBD2_TAG_FLAG_SAME_UUID is clear.
+const JBD2_TAG_SIZE_CSUM_V2_32: usize = 10;
+const JBD2_TAG_SIZE_CSUM_V2_64: usize = 14;
+const JBD2_TAG_SIZE_CSUM_V3: usize = 16;
+const JBD2_TAG_UUID_SIZE: usize = 16;
+const JBD2_TAG_FLAGS_OFFSET_V1_V2: usize = 6;
+const JBD2_TAG_CHECKSUM_OFFSET_V1_V2: usize = 4;
+const JBD2_TAG_FLAGS_OFFSET_V3: usize = 4;
+const JBD2_TAG_HIGH_OFFSET_V3: usize = 8;
+const JBD2_TAG_CHECKSUM_OFFSET_V3: usize = 12;
 
 const JBD2_TAG_FLAG_ESCAPE: u32 = 0x0000_0001;
 const JBD2_TAG_FLAG_SAME_UUID: u32 = 0x0000_0002;
@@ -113,12 +126,25 @@ impl Jbd2Superblock {
     }
 
     #[must_use]
-    pub fn csum_seed(&self) -> u32 {
+    fn tag_format(&self) -> Jbd2TagFormat {
         if (self.feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V3) != 0 {
-            // JBD2 V3: seed is crc32c(!0, uuid)
+            Jbd2TagFormat::CsumV3
+        } else if (self.feature_incompat & JBD2_FEATURE_INCOMPAT_CSUM_V2) != 0 {
+            Jbd2TagFormat::CsumV2
+        } else {
+            Jbd2TagFormat::Legacy
+        }
+    }
+
+    #[must_use]
+    pub fn csum_seed(&self) -> u32 {
+        if (self.feature_incompat & (JBD2_FEATURE_INCOMPAT_CSUM_V2 | JBD2_FEATURE_INCOMPAT_CSUM_V3))
+            != 0
+        {
+            // JBD2 checksum-v2/v3: seed is crc32c(!0, uuid).
             !crc32c::crc32c_append(!0u32, &self.uuid)
         } else {
-            // Older JBD2 uses 0 as seed for checksums
+            // Older JBD2 checksum modes use 0 as seed.
             0
         }
     }
@@ -247,6 +273,7 @@ impl Jbd2Header {
 struct DescriptorTag {
     target: BlockNumber,
     flags: u32,
+    data_checksum: Option<u32>,
 }
 
 impl DescriptorTag {
@@ -258,11 +285,6 @@ impl DescriptorTag {
     #[must_use]
     fn is_escaped(self) -> bool {
         (self.flags & JBD2_TAG_FLAG_ESCAPE) != 0
-    }
-
-    #[must_use]
-    fn has_uuid(self) -> bool {
-        (self.flags & JBD2_TAG_FLAG_SAME_UUID) == 0
     }
 }
 
@@ -280,12 +302,53 @@ fn checksum_jbd2_tail_zeroed_block(block: &[u8], seed: u32) -> Option<u32> {
     Some(!checksum)
 }
 
+fn checksum_jbd2_data_block(block: &[u8], sequence: u32, seed: u32) -> u32 {
+    let sequence = sequence.to_be_bytes();
+    let checksum = crc32c::crc32c_append(!seed, &sequence);
+    !crc32c::crc32c_append(checksum, block)
+}
+
 fn stamp_jbd2_tail_checksum(block: &mut [u8], seed: u32) -> Result<()> {
     let checksum = checksum_jbd2_tail_zeroed_block(block, seed)
         .ok_or_else(|| FfsError::Format("JBD2 checksum block too small".to_owned()))?;
     let tail = block.len() - JBD2_CHECKSUM_TAIL_SIZE;
     block[tail..].copy_from_slice(&checksum.to_be_bytes());
     Ok(())
+}
+
+fn stamp_jbd2_tag_data_checksum(
+    tag: &mut [u8],
+    format: Jbd2TagFormat,
+    data_block: &[u8],
+    sequence: u32,
+    seed: u32,
+) -> Result<()> {
+    let checksum = checksum_jbd2_data_block(data_block, sequence, seed);
+    match format {
+        Jbd2TagFormat::Legacy => Ok(()),
+        Jbd2TagFormat::CsumV2 => {
+            if tag.len() < JBD2_TAG_CHECKSUM_OFFSET_V1_V2 + 2 {
+                return Err(FfsError::Format(
+                    "JBD2 tag too small for checksum".to_owned(),
+                ));
+            }
+            let checksum = u16::try_from(checksum & 0xFFFF)
+                .map_err(|_| FfsError::Format("JBD2 checksum truncation failed".to_owned()))?;
+            tag[JBD2_TAG_CHECKSUM_OFFSET_V1_V2..JBD2_TAG_CHECKSUM_OFFSET_V1_V2 + 2]
+                .copy_from_slice(&checksum.to_be_bytes());
+            Ok(())
+        }
+        Jbd2TagFormat::CsumV3 => {
+            if tag.len() < JBD2_TAG_CHECKSUM_OFFSET_V3 + JBD2_CHECKSUM_TAIL_SIZE {
+                return Err(FfsError::Format(
+                    "JBD2 tag too small for checksum".to_owned(),
+                ));
+            }
+            tag[JBD2_TAG_CHECKSUM_OFFSET_V3..JBD2_TAG_CHECKSUM_OFFSET_V3 + JBD2_CHECKSUM_TAIL_SIZE]
+                .copy_from_slice(&checksum.to_be_bytes());
+            Ok(())
+        }
+    }
 }
 
 fn stamp_jbd2_commit_checksum(block: &mut [u8], seed: u32) -> Result<()> {
@@ -347,6 +410,38 @@ fn verify_jbd2_block_checksum(block: &[u8], sb: &Jbd2Superblock) -> bool {
 struct StagedWrite {
     journal_idx: u64,
     escaped: bool,
+    data_checksum: Option<u32>,
+    sequence: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Jbd2TagFormat {
+    Legacy,
+    CsumV2,
+    CsumV3,
+}
+
+impl Jbd2TagFormat {
+    #[must_use]
+    fn tag_size(self, is_64bit: bool) -> usize {
+        match self {
+            Self::Legacy => {
+                if is_64bit {
+                    JBD2_TAG_SIZE_64
+                } else {
+                    JBD2_TAG_SIZE_32
+                }
+            }
+            Self::CsumV2 => {
+                if is_64bit {
+                    JBD2_TAG_SIZE_CSUM_V2_64
+                } else {
+                    JBD2_TAG_SIZE_CSUM_V2_32
+                }
+            }
+            Self::CsumV3 => JBD2_TAG_SIZE_CSUM_V3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -556,6 +651,9 @@ fn replay_jbd2_inner(
         let has_tail = journal_sb
             .as_ref()
             .is_some_and(Jbd2Superblock::has_checksum);
+        let tag_format = journal_sb
+            .as_ref()
+            .map_or(Jbd2TagFormat::Legacy, Jbd2Superblock::tag_format);
 
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
@@ -563,12 +661,20 @@ fn replay_jbd2_inner(
                     break;
                 }
                 stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
-                let Some(tag_count) =
-                    strict_descriptor_tag_count(raw.as_slice(), is_64bit, has_tail)
-                else {
+                let Some(tag_count) = strict_descriptor_tag_count_with_format(
+                    raw.as_slice(),
+                    is_64bit,
+                    has_tail,
+                    tag_format,
+                ) else {
                     break;
                 };
-                let tags = parse_descriptor_tags(raw.as_slice(), is_64bit, has_tail);
+                let tags = parse_descriptor_tags_with_format(
+                    raw.as_slice(),
+                    is_64bit,
+                    has_tail,
+                    tag_format,
+                );
                 debug_assert_eq!(tags.len(), tag_count);
                 stats.descriptor_tags = stats
                     .descriptor_tags
@@ -594,6 +700,8 @@ fn replay_jbd2_inner(
                         StagedWrite {
                             journal_idx: data_idx,
                             escaped: tag.is_escaped(),
+                            data_checksum: tag.data_checksum,
+                            sequence: header.sequence,
                         },
                     ));
                 }
@@ -692,11 +800,37 @@ fn replay_jbd2_inner(
         }
     }
 
-    stats.replayed_blocks = u64::try_from(final_writes.len()).unwrap_or(u64::MAX);
+    let checksum_seed = journal_sb.as_ref().map(Jbd2Superblock::csum_seed);
+    let replay_tag_format = journal_sb
+        .as_ref()
+        .map_or(Jbd2TagFormat::Legacy, Jbd2Superblock::tag_format);
 
+    let mut replayed_blocks = 0_u64;
     for (target, staged) in final_writes {
         let absolute = resolve_block(staged.journal_idx)?;
         let mut data = dev.read_block(cx, absolute)?.as_slice().to_vec();
+        if options.verify_checksums
+            && let Some(seed) = checksum_seed
+            && let Some(expected) = staged.data_checksum
+        {
+            let computed = checksum_jbd2_data_block(&data, staged.sequence, seed);
+            let matches = match replay_tag_format {
+                Jbd2TagFormat::CsumV2 => (computed & 0xFFFF) == expected,
+                Jbd2TagFormat::CsumV3 => computed == expected,
+                Jbd2TagFormat::Legacy => true,
+            };
+            if !matches {
+                tracing::warn!(
+                    target: "ffs::journal",
+                    target_block = target.0,
+                    journal_idx = staged.journal_idx,
+                    expected = expected,
+                    computed = computed,
+                    "jbd2_data_block_checksum_mismatch"
+                );
+                continue;
+            }
+        }
         if staged.escaped {
             if data.len() >= 4 {
                 data[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
@@ -707,7 +841,9 @@ fn replay_jbd2_inner(
             }
         }
         dev.write_block(cx, target, &data)?;
+        replayed_blocks = replayed_blocks.saturating_add(1);
     }
+    stats.replayed_blocks = replayed_blocks;
 
     stats.incomplete_transactions =
         u64::try_from(pending.len().saturating_sub(committed_sequences.len())).unwrap_or(u64::MAX);
@@ -870,6 +1006,7 @@ pub struct Jbd2Writer {
     next_seq: u32,
     /// Whether to use 64-bit block number format.
     is_64bit: bool,
+    tag_format: Jbd2TagFormat,
     /// Whether descriptor, revoke, and commit blocks need JBD2 checksums.
     has_checksum: bool,
     /// CRC32C seed used by the active JBD2 checksum feature set.
@@ -885,6 +1022,7 @@ impl Jbd2Writer {
             head: 0,
             next_seq: start_seq,
             is_64bit: false,
+            tag_format: Jbd2TagFormat::Legacy,
             has_checksum: false,
             csum_seed: 0,
         }
@@ -903,6 +1041,11 @@ impl Jbd2Writer {
             head: 0,
             next_seq: start_seq,
             is_64bit: false,
+            tag_format: if has_checksum {
+                Jbd2TagFormat::CsumV3
+            } else {
+                Jbd2TagFormat::Legacy
+            },
             has_checksum,
             csum_seed,
         }
@@ -927,6 +1070,7 @@ impl Jbd2Writer {
         let mut head = 0_u64;
         let mut max_seq = start_seq;
         let mut is_64bit = false;
+        let mut tag_format = Jbd2TagFormat::Legacy;
         let mut has_checksum = false;
         let mut csum_seed = 0_u32;
 
@@ -937,6 +1081,7 @@ impl Jbd2Writer {
             if head == 0 {
                 if let Some(sb) = Jbd2Superblock::parse(raw.as_slice()) {
                     is_64bit = sb.is_64bit();
+                    tag_format = sb.tag_format();
                     has_checksum = sb.has_checksum();
                     csum_seed = sb.csum_seed();
                     head = head.saturating_add(1);
@@ -960,6 +1105,7 @@ impl Jbd2Writer {
             head,
             next_seq: max_seq,
             is_64bit,
+            tag_format,
             has_checksum,
             csum_seed,
         })
@@ -1011,28 +1157,19 @@ impl Jbd2Writer {
         is_64bit: bool,
         has_checksum: bool,
     ) -> u64 {
-        let bs = block_size as usize;
-        let tags_per_desc = max_tags_per_descriptor_with_checksum(bs, is_64bit, has_checksum);
-        let entries_per_revoke = max_revoke_entries_with_checksum(bs, is_64bit, has_checksum);
-
-        let mut total = 0_u64;
-        if writes > 0 {
-            if tags_per_desc == 0 {
-                return u64::MAX;
-            }
-            let desc_blocks = writes.div_ceil(tags_per_desc) as u64;
-            total = total
-                .saturating_add(desc_blocks)
-                .saturating_add(writes as u64);
-        }
-        if revokes > 0 {
-            if entries_per_revoke == 0 {
-                return u64::MAX;
-            }
-            total = total.saturating_add(revokes.div_ceil(entries_per_revoke) as u64);
-        }
-        // Commit block.
-        total.saturating_add(1)
+        let tag_format = if has_checksum {
+            Jbd2TagFormat::CsumV3
+        } else {
+            Jbd2TagFormat::Legacy
+        };
+        blocks_needed_for_format(
+            block_size,
+            writes,
+            revokes,
+            is_64bit,
+            has_checksum,
+            tag_format,
+        )
     }
 
     /// Commit a transaction to the journal region.
@@ -1062,8 +1199,12 @@ impl Jbd2Writer {
                 "block size too small for JBD2 commit checksum".to_owned(),
             ));
         }
-        let tags_per_desc =
-            max_tags_per_descriptor_with_checksum(bs, self.is_64bit, self.has_checksum);
+        let tags_per_desc = max_tags_per_descriptor_for_format(
+            bs,
+            self.is_64bit,
+            self.has_checksum,
+            self.tag_format,
+        );
         if txn.write_count > 0 && tags_per_desc == 0 {
             return Err(FfsError::Format(
                 "block size too small for JBD2 descriptor tags".to_owned(),
@@ -1090,12 +1231,13 @@ impl Jbd2Writer {
             )));
         }
 
-        let needed = Self::blocks_needed_with_checksum(
+        let needed = blocks_needed_for_format(
             dev.block_size(),
             txn.write_count,
             txn.revoke_count,
             self.is_64bit,
             self.has_checksum,
+            self.tag_format,
         );
         if needed > self.free_blocks() {
             return Err(FfsError::NoSpace);
@@ -1107,19 +1249,28 @@ impl Jbd2Writer {
 
         // --- Phase 1: descriptor + data blocks ---
         let tag_size = if self.is_64bit {
-            JBD2_TAG_SIZE_64
+            self.tag_format.tag_size(true)
         } else {
-            JBD2_TAG_SIZE_32
+            self.tag_format.tag_size(false)
         };
         let mut item_idx = 0;
         while item_idx < txn.body_items.len() {
             match &txn.body_items[item_idx] {
                 Jbd2TxnBodyItem::Write(..) => {
-                    let mut chunk: Vec<(BlockNumber, &[u8])> = Vec::new();
+                    let mut chunk: Vec<(BlockNumber, &[u8], Vec<u8>)> = Vec::new();
                     while item_idx < txn.body_items.len() && chunk.len() < tags_per_desc {
                         match &txn.body_items[item_idx] {
                             Jbd2TxnBodyItem::Write(target, payload) => {
-                                chunk.push((*target, payload.as_slice()));
+                                let mut padded = vec![0_u8; bs];
+                                let copy_len = payload.len().min(bs);
+                                padded[..copy_len].copy_from_slice(&payload[..copy_len]);
+
+                                let magic_be = JBD2_MAGIC.to_be_bytes();
+                                if padded.len() >= 4 && padded[0..4] == magic_be {
+                                    padded[0..4].copy_from_slice(&[0u8; 4]);
+                                }
+
+                                chunk.push((*target, payload.as_slice(), padded));
                                 item_idx += 1;
                             }
                             Jbd2TxnBodyItem::Revoke(_) => break,
@@ -1130,7 +1281,7 @@ impl Jbd2Writer {
                     encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, seq);
 
                     let mut off = JBD2_HEADER_SIZE;
-                    for (i, (target, payload)) in chunk.iter().enumerate() {
+                    for (i, (target, payload, padded)) in chunk.iter().enumerate() {
                         let is_last_in_desc = i == chunk.len() - 1;
                         let mut flags = if is_last_in_desc {
                             JBD2_TAG_FLAG_LAST
@@ -1145,21 +1296,66 @@ impl Jbd2Writer {
 
                         flags |= JBD2_TAG_FLAG_SAME_UUID;
 
-                        if self.is_64bit {
-                            let target_low = (target.0 & 0xFFFF_FFFF) as u32;
-                            let target_high = (target.0 >> 32) as u32;
-                            desc[off..off + 4].copy_from_slice(&target_low.to_be_bytes());
-                            desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
-                            desc[off + 8..off + 12].copy_from_slice(&target_high.to_be_bytes());
-                        } else {
-                            let target_u32 = u32::try_from(target.0).map_err(|_| {
-                                FfsError::Format(format!(
-                                    "target block {} exceeds u32 range",
-                                    target.0
-                                ))
-                            })?;
-                            desc[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
-                            desc[off + 4..off + 8].copy_from_slice(&flags.to_be_bytes());
+                        match self.tag_format {
+                            Jbd2TagFormat::CsumV3 => {
+                                let target_low = (target.0 & 0xFFFF_FFFF) as u32;
+                                let target_high = (target.0 >> 32) as u32;
+                                desc[off..off + 4].copy_from_slice(&target_low.to_be_bytes());
+                                desc[off + JBD2_TAG_FLAGS_OFFSET_V3
+                                    ..off + JBD2_TAG_FLAGS_OFFSET_V3 + 4]
+                                    .copy_from_slice(&flags.to_be_bytes());
+                                desc[off + JBD2_TAG_HIGH_OFFSET_V3
+                                    ..off + JBD2_TAG_HIGH_OFFSET_V3 + 4]
+                                    .copy_from_slice(&target_high.to_be_bytes());
+                                stamp_jbd2_tag_data_checksum(
+                                    &mut desc[off..off + tag_size],
+                                    self.tag_format,
+                                    padded,
+                                    seq,
+                                    self.csum_seed,
+                                )?;
+                            }
+                            Jbd2TagFormat::Legacy | Jbd2TagFormat::CsumV2 if self.is_64bit => {
+                                let target_low = (target.0 & 0xFFFF_FFFF) as u32;
+                                let target_high = (target.0 >> 32) as u32;
+                                desc[off..off + 4].copy_from_slice(&target_low.to_be_bytes());
+                                let flags_u16 = u16::try_from(flags).map_err(|_| {
+                                    FfsError::Format("JBD2 tag flags exceed u16".to_owned())
+                                })?;
+                                desc[off + JBD2_TAG_FLAGS_OFFSET_V1_V2
+                                    ..off + JBD2_TAG_FLAGS_OFFSET_V1_V2 + 2]
+                                    .copy_from_slice(&flags_u16.to_be_bytes());
+                                desc[off + 8..off + 12].copy_from_slice(&target_high.to_be_bytes());
+                                stamp_jbd2_tag_data_checksum(
+                                    &mut desc[off..off + tag_size],
+                                    self.tag_format,
+                                    padded,
+                                    seq,
+                                    self.csum_seed,
+                                )?;
+                            }
+                            Jbd2TagFormat::Legacy | Jbd2TagFormat::CsumV2 => {
+                                let target_u32 = u32::try_from(target.0).map_err(|_| {
+                                    FfsError::Format(format!(
+                                        "target block {} exceeds u32 range",
+                                        target.0
+                                    ))
+                                })?;
+                                desc[off..off + 4].copy_from_slice(&target_u32.to_be_bytes());
+                                let flags_u16 = u16::try_from(flags).map_err(|_| {
+                                    FfsError::Format("JBD2 tag flags exceed u16".to_owned())
+                                })?;
+                                desc[off + JBD2_TAG_FLAGS_OFFSET_V1_V2
+                                    ..off + JBD2_TAG_FLAGS_OFFSET_V1_V2 + 2]
+                                    .copy_from_slice(&flags_u16.to_be_bytes());
+                                stamp_jbd2_tag_data_checksum(
+                                    &mut desc[off..off + tag_size],
+                                    self.tag_format,
+                                    padded,
+                                    seq,
+                                    self.csum_seed,
+                                )?;
+                            }
                         }
                         off += tag_size;
                     }
@@ -1172,18 +1368,9 @@ impl Jbd2Writer {
                     dev.write_block(cx, desc_block, &desc)?;
                     stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
 
-                    for (_, payload) in &chunk {
+                    for (_, _, padded) in &chunk {
                         let data_block = self.alloc_block(&mut staged_head)?;
-                        let mut padded = vec![0_u8; bs];
-                        let copy_len = payload.len().min(bs);
-                        padded[..copy_len].copy_from_slice(&payload[..copy_len]);
-
-                        let magic_be = JBD2_MAGIC.to_be_bytes();
-                        if padded.len() >= 4 && padded[0..4] == magic_be {
-                            padded[0..4].copy_from_slice(&[0u8; 4]);
-                        }
-
-                        dev.write_block(cx, data_block, &padded)?;
+                        dev.write_block(cx, data_block, padded)?;
                         stats.data_blocks = stats.data_blocks.saturating_add(1);
                     }
                 }
@@ -1280,16 +1467,44 @@ fn encode_jbd2_header(buf: &mut [u8], block_type: u32, sequence: u32) {
     buf[8..12].copy_from_slice(&sequence.to_be_bytes());
 }
 
-fn max_tags_per_descriptor_with_checksum(
+fn blocks_needed_for_format(
+    block_size: u32,
+    writes: usize,
+    revokes: usize,
+    is_64bit: bool,
+    has_checksum: bool,
+    tag_format: Jbd2TagFormat,
+) -> u64 {
+    let bs = block_size as usize;
+    let tags_per_desc = max_tags_per_descriptor_for_format(bs, is_64bit, has_checksum, tag_format);
+    let entries_per_revoke = max_revoke_entries_with_checksum(bs, is_64bit, has_checksum);
+
+    let mut total = 0_u64;
+    if writes > 0 {
+        if tags_per_desc == 0 {
+            return u64::MAX;
+        }
+        let desc_blocks = writes.div_ceil(tags_per_desc) as u64;
+        total = total
+            .saturating_add(desc_blocks)
+            .saturating_add(writes as u64);
+    }
+    if revokes > 0 {
+        if entries_per_revoke == 0 {
+            return u64::MAX;
+        }
+        total = total.saturating_add(revokes.div_ceil(entries_per_revoke) as u64);
+    }
+    total.saturating_add(1)
+}
+
+fn max_tags_per_descriptor_for_format(
     block_size: usize,
     is_64bit: bool,
     has_checksum: bool,
+    tag_format: Jbd2TagFormat,
 ) -> usize {
-    let tag_size = if is_64bit {
-        JBD2_TAG_SIZE_64
-    } else {
-        JBD2_TAG_SIZE_32
-    };
+    let tag_size = tag_format.tag_size(is_64bit);
     let tail_size = usize::from(has_checksum) * JBD2_CHECKSUM_TAIL_SIZE;
     (block_size.saturating_sub(JBD2_HEADER_SIZE + tail_size)) / tag_size
 }
@@ -1633,14 +1848,16 @@ mod fc_tests {
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            FcOperation::AddRange(r) => {
-                assert_eq!(r.ino, 42);
-                assert_eq!(r.logical_block, 100);
-                assert_eq!(r.len, 10);
-                assert_eq!(r.physical_block, 5000);
-            }
-            other => panic!("expected AddRange, got {other:?}"),
+        assert!(
+            matches!(result.operations[0], FcOperation::AddRange(_)),
+            "expected AddRange, got {:?}",
+            result.operations[0]
+        );
+        if let FcOperation::AddRange(r) = &result.operations[0] {
+            assert_eq!(r.ino, 42);
+            assert_eq!(r.logical_block, 100);
+            assert_eq!(r.len, 10);
+            assert_eq!(r.physical_block, 5000);
         }
     }
 
@@ -1693,13 +1910,15 @@ mod fc_tests {
 
         let result = replay_fast_commit(&data).unwrap();
         assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            FcOperation::DelRange(r) => {
-                assert_eq!(r.ino, 99);
-                assert_eq!(r.logical_block, 50);
-                assert_eq!(r.len, 20);
-            }
-            other => panic!("expected DelRange, got {other:?}"),
+        assert!(
+            matches!(result.operations[0], FcOperation::DelRange(_)),
+            "expected DelRange, got {:?}",
+            result.operations[0]
+        );
+        if let FcOperation::DelRange(r) = &result.operations[0] {
+            assert_eq!(r.ino, 99);
+            assert_eq!(r.logical_block, 50);
+            assert_eq!(r.len, 20);
         }
     }
 
@@ -2073,44 +2292,61 @@ fn resolve_segment_block(
     )))
 }
 
+#[cfg(test)]
 fn parse_descriptor_tags(block: &[u8], is_64bit: bool, has_tail: bool) -> Vec<DescriptorTag> {
+    parse_descriptor_tags_with_format(block, is_64bit, has_tail, Jbd2TagFormat::Legacy)
+}
+
+fn parse_descriptor_tags_with_format(
+    block: &[u8],
+    is_64bit: bool,
+    has_tail: bool,
+    tag_format: Jbd2TagFormat,
+) -> Vec<DescriptorTag> {
     let mut tags = Vec::new();
     let mut offset = JBD2_HEADER_SIZE;
-    let tag_size = if is_64bit {
-        JBD2_TAG_SIZE_64
-    } else {
-        JBD2_TAG_SIZE_32
-    };
+    let base_tag_size = tag_format.tag_size(is_64bit);
     let limit = if has_tail {
         block.len().saturating_sub(4)
     } else {
         block.len()
     };
 
-    while offset.saturating_add(tag_size) <= limit {
+    while offset.saturating_add(base_tag_size) <= limit {
         let Some(target_low) = read_be_u32(block, offset) else {
             break;
         };
-        let Some(flags) = read_be_u32(block, offset.saturating_add(4)) else {
+        let Some((flags, data_checksum)) =
+            read_descriptor_tag_flags_and_checksum(block, offset, tag_format)
+        else {
             break;
         };
+        let Some(tag_size) = descriptor_tag_record_size(base_tag_size, flags) else {
+            break;
+        };
+        if offset.saturating_add(tag_size) > limit {
+            break;
+        }
 
         let mut target = u64::from(target_low);
-        if is_64bit {
-            if let Some(target_high) = read_be_u32(block, offset.saturating_add(8)) {
-                target |= u64::from(target_high) << 32;
-            }
+        let high_offset = match tag_format {
+            Jbd2TagFormat::CsumV3 => Some(JBD2_TAG_HIGH_OFFSET_V3),
+            Jbd2TagFormat::Legacy | Jbd2TagFormat::CsumV2 if is_64bit => Some(8),
+            Jbd2TagFormat::Legacy | Jbd2TagFormat::CsumV2 => None,
+        };
+        if let Some(high_offset) = high_offset
+            && let Some(target_high) = read_be_u32(block, offset.saturating_add(high_offset))
+        {
+            target |= u64::from(target_high) << 32;
         }
 
         let tag = DescriptorTag {
             target: BlockNumber(target),
             flags,
+            data_checksum,
         };
         tags.push(tag);
         offset = offset.saturating_add(tag_size);
-        if tag.has_uuid() {
-            offset = offset.saturating_add(16);
-        }
 
         if tag.is_last() {
             break;
@@ -2120,12 +2356,13 @@ fn parse_descriptor_tags(block: &[u8], is_64bit: bool, has_tail: bool) -> Vec<De
     tags
 }
 
-fn strict_descriptor_tag_count(block: &[u8], is_64bit: bool, has_tail: bool) -> Option<usize> {
-    let tag_size = if is_64bit {
-        JBD2_TAG_SIZE_64
-    } else {
-        JBD2_TAG_SIZE_32
-    };
+fn strict_descriptor_tag_count_with_format(
+    block: &[u8],
+    is_64bit: bool,
+    has_tail: bool,
+    tag_format: Jbd2TagFormat,
+) -> Option<usize> {
+    let base_tag_size = tag_format.tag_size(is_64bit);
 
     let mut offset = JBD2_HEADER_SIZE;
     let mut count = 0_usize;
@@ -2135,19 +2372,60 @@ fn strict_descriptor_tag_count(block: &[u8], is_64bit: bool, has_tail: bool) -> 
         block.len()
     };
 
-    while offset.checked_add(tag_size)? <= limit {
-        let flags = read_be_u32(block, offset.checked_add(4)?)?;
+    while offset.checked_add(base_tag_size)? <= limit {
+        let (flags, _) = read_descriptor_tag_flags_and_checksum(block, offset, tag_format)?;
+        let tag_size = descriptor_tag_record_size(base_tag_size, flags)?;
+        if offset.checked_add(tag_size)? > limit {
+            return None;
+        }
         count = count.checked_add(1)?;
         if (flags & JBD2_TAG_FLAG_LAST) != 0 {
             return Some(count);
         }
         offset = offset.checked_add(tag_size)?;
-        if (flags & JBD2_TAG_FLAG_SAME_UUID) == 0 {
-            offset = offset.checked_add(16)?;
-        }
     }
 
     None
+}
+
+fn descriptor_tag_record_size(base_tag_size: usize, flags: u32) -> Option<usize> {
+    if (flags & JBD2_TAG_FLAG_SAME_UUID) == 0 {
+        base_tag_size.checked_add(JBD2_TAG_UUID_SIZE)
+    } else {
+        Some(base_tag_size)
+    }
+}
+
+fn read_descriptor_tag_flags_and_checksum(
+    block: &[u8],
+    offset: usize,
+    tag_format: Jbd2TagFormat,
+) -> Option<(u32, Option<u32>)> {
+    match tag_format {
+        Jbd2TagFormat::Legacy => {
+            let flags = u32::from(read_be_u16(
+                block,
+                offset.checked_add(JBD2_TAG_FLAGS_OFFSET_V1_V2)?,
+            )?);
+            Some((flags, None))
+        }
+        Jbd2TagFormat::CsumV2 => {
+            let checksum = u32::from(read_be_u16(
+                block,
+                offset.checked_add(JBD2_TAG_CHECKSUM_OFFSET_V1_V2)?,
+            )?);
+            let flags = u32::from(read_be_u16(
+                block,
+                offset.checked_add(JBD2_TAG_FLAGS_OFFSET_V1_V2)?,
+            )?);
+            Some((flags, Some(checksum)))
+        }
+        Jbd2TagFormat::CsumV3 => {
+            let flags = read_be_u32(block, offset.checked_add(JBD2_TAG_FLAGS_OFFSET_V3)?)?;
+            let checksum = read_be_u32(block, offset.checked_add(JBD2_TAG_CHECKSUM_OFFSET_V3)?)?;
+            Some((flags, Some(checksum)))
+        }
+    }
 }
 
 fn scan_committed_tail_transaction(
@@ -2161,12 +2439,14 @@ fn scan_committed_tail_transaction(
     let mut sequence = None;
     let mut saw_body = false;
     let mut has_tail = false;
+    let mut tag_format = Jbd2TagFormat::Legacy;
 
     // Try to find if checksums are enabled to determine tail presence.
     if let Ok(first_abs) = resolve_region_block(region, 0) {
         if let Ok(first_raw) = dev.read_block(cx, first_abs) {
             if let Some(sb) = Jbd2Superblock::parse(first_raw.as_slice()) {
                 has_tail = sb.has_checksum();
+                tag_format = sb.tag_format();
             }
         }
     }
@@ -2189,9 +2469,12 @@ fn scan_committed_tail_transaction(
         match header.block_type {
             JBD2_BLOCKTYPE_DESCRIPTOR => {
                 saw_body = true;
-                let Some(tag_count) =
-                    strict_descriptor_tag_count(raw.as_slice(), is_64bit, has_tail)
-                else {
+                let Some(tag_count) = strict_descriptor_tag_count_with_format(
+                    raw.as_slice(),
+                    is_64bit,
+                    has_tail,
+                    tag_format,
+                ) else {
                     return Ok(None);
                 };
                 let advance = 1_u64
@@ -2301,6 +2584,14 @@ fn read_be_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     let slice = bytes.get(offset..end)?;
     let arr: [u8; 4] = slice.try_into().ok()?;
     Some(u32::from_be_bytes(arr))
+}
+
+#[must_use]
+fn read_be_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    let slice = bytes.get(offset..end)?;
+    let arr: [u8; 2] = slice.try_into().ok()?;
+    Some(u16::from_be_bytes(arr))
 }
 
 #[must_use]
@@ -2693,6 +2984,21 @@ mod tests {
         }
     }
 
+    fn checksum_incompat_v2_superblock(uuid: [u8; 16]) -> Jbd2Superblock {
+        Jbd2Superblock {
+            block_size: 512,
+            max_len: 0,
+            first_log_block: 0,
+            start_sequence: 0,
+            start_block: 0,
+            num_fc_blocks: 0,
+            feature_compat: 0,
+            feature_incompat: JBD2_FEATURE_INCOMPAT_CSUM_V2,
+            feature_ro_compat: 0,
+            uuid,
+        }
+    }
+
     fn async_commit_superblock() -> Jbd2Superblock {
         Jbd2Superblock {
             block_size: 512,
@@ -2900,6 +3206,25 @@ mod tests {
         let mut commit = commit_block(512, 8);
         stamp_commit_checksum(&mut commit, &good_sb);
 
+        assert!(verify_jbd2_block_checksum(&commit, &good_sb));
+        assert!(!verify_jbd2_block_checksum(&commit, &bad_sb));
+
+        commit[8] ^= 0x01;
+        assert!(!verify_jbd2_block_checksum(&commit, &good_sb));
+    }
+
+    #[test]
+    fn verify_jbd2_commit_checksum_v2_uses_uuid_seed() {
+        let good_uuid = *b"ffs-jbd2-v2-seed";
+        let bad_uuid = *b"ffs-jbd2-v2-alt!";
+        let good_sb = checksum_incompat_v2_superblock(good_uuid);
+        let bad_sb = checksum_incompat_v2_superblock(bad_uuid);
+        let mut commit = commit_block(512, 8);
+        stamp_commit_checksum(&mut commit, &good_sb);
+
+        assert_ne!(good_sb.csum_seed(), 0);
+        assert_ne!(bad_sb.csum_seed(), 0);
+        assert_ne!(good_sb.csum_seed(), bad_sb.csum_seed());
         assert!(verify_jbd2_block_checksum(&commit, &good_sb));
         assert!(!verify_jbd2_block_checksum(&commit, &bad_sb));
 
@@ -3498,6 +3823,100 @@ mod tests {
     }
 
     #[test]
+    fn jbd2_writer_csum_v3_descriptor_uses_16_byte_tags_with_data_checksum() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+        let uuid = *b"ffs-jbd2-writer!";
+        let seed = checksum_v3_superblock(uuid).csum_seed();
+        dev.raw_write(
+            BlockNumber(100),
+            jbd2_superblock_block(512, 1, 1, 0, JBD2_FEATURE_INCOMPAT_CSUM_V3, uuid),
+        );
+
+        let mut writer = Jbd2Writer::open(&cx, &dev, region, 1).expect("open checksummed journal");
+        let mut txn = writer.begin_transaction();
+        txn.add_write(BlockNumber(5), vec![0xCD; 512]);
+        writer.commit_transaction(&cx, &dev, &txn).expect("commit");
+
+        let descriptor = dev
+            .read_block(&cx, BlockNumber(101))
+            .expect("read descriptor");
+        let descriptor = descriptor.as_slice();
+        assert_eq!(read_be_u32(descriptor, 12), Some(5));
+        assert_eq!(
+            read_be_u32(descriptor, 16),
+            Some(JBD2_TAG_FLAG_LAST | JBD2_TAG_FLAG_SAME_UUID)
+        );
+        assert_eq!(read_be_u32(descriptor, 20), Some(0));
+
+        let data = dev.read_block(&cx, BlockNumber(102)).expect("read data");
+        let expected = checksum_jbd2_data_block(data.as_slice(), 1, seed);
+        assert_eq!(read_be_u32(descriptor, 24), Some(expected));
+        assert_eq!(
+            parse_descriptor_tags_with_format(descriptor, false, true, Jbd2TagFormat::CsumV3).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn replay_jbd2_csum_v3_data_checksum_mismatch_skips_write() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+        let uuid = *b"ffs-jbd2-writer!";
+        let sb = checksum_v3_superblock(uuid);
+        dev.raw_write(
+            BlockNumber(100),
+            jbd2_superblock_block(512, 1, 1, 0, JBD2_FEATURE_INCOMPAT_CSUM_V3, uuid),
+        );
+
+        let mut descriptor = vec![0_u8; 512];
+        encode_jbd2_header(&mut descriptor, JBD2_BLOCKTYPE_DESCRIPTOR, 1);
+        descriptor[12..16].copy_from_slice(&5_u32.to_be_bytes());
+        descriptor[16..20]
+            .copy_from_slice(&(JBD2_TAG_FLAG_LAST | JBD2_TAG_FLAG_SAME_UUID).to_be_bytes());
+        let clean_data = vec![0xCD; 512];
+        stamp_jbd2_tag_data_checksum(
+            &mut descriptor[12..28],
+            Jbd2TagFormat::CsumV3,
+            &clean_data,
+            1,
+            sb.csum_seed(),
+        )
+        .expect("stamp tag checksum");
+        stamp_jbd2_tail_checksum(&mut descriptor, sb.csum_seed()).expect("stamp descriptor");
+        dev.raw_write(BlockNumber(101), descriptor);
+        dev.raw_write(BlockNumber(102), vec![0xEF; 512]);
+
+        let mut commit = commit_block(512, 1);
+        stamp_commit_checksum(&mut commit, &sb);
+        dev.raw_write(BlockNumber(103), commit);
+
+        let outcome = replay_jbd2_with_options(
+            &cx,
+            &dev,
+            region,
+            ReplayOptions {
+                verify_checksums: true,
+            },
+        )
+        .expect("replay should tolerate and skip bad data block");
+        assert_eq!(outcome.committed_sequences, vec![1]);
+        assert_eq!(outcome.stats.replayed_blocks, 0);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
+    }
+
+    #[test]
     fn jbd2_writer_multi_write_replays_all() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(512, 256);
@@ -3892,6 +4311,75 @@ mod tests {
         assert_eq!(Jbd2Writer::blocks_needed(512, 62, 0, false), 64); // 1 desc + 62 data + commit.
         // 63 writes: needs two descriptors.
         assert_eq!(Jbd2Writer::blocks_needed(512, 63, 0, false), 66); // 2 desc + 63 data + commit.
+    }
+
+    #[test]
+    fn jbd2_writer_blocks_needed_with_checksum_uses_csum_v3_tags() {
+        // CsumV3 descriptor tags are 16 bytes, with a checksum tail:
+        // (512 - 12 header - 4 tail) / 16 = 31 tags per descriptor.
+        assert_eq!(
+            Jbd2Writer::blocks_needed_with_checksum(512, 31, 0, false, true),
+            33
+        ); // 1 desc + 31 data + commit.
+        assert_eq!(
+            Jbd2Writer::blocks_needed_with_checksum(512, 32, 0, false, true),
+            35
+        ); // 2 desc + 32 data + commit.
+    }
+
+    #[test]
+    fn jbd2_csum_v2_descriptor_tag_geometry_matches_kernel_tag_bytes() {
+        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(false), 10);
+        assert_eq!(Jbd2TagFormat::CsumV2.tag_size(true), 14);
+        assert_eq!(
+            max_tags_per_descriptor_for_format(512, false, true, Jbd2TagFormat::CsumV2),
+            49
+        ); // (512 - 12 header - 4 tail) / 10.
+        assert_eq!(
+            max_tags_per_descriptor_for_format(512, true, true, Jbd2TagFormat::CsumV2),
+            35
+        ); // (512 - 12 header - 4 tail) / 14.
+    }
+
+    #[test]
+    fn jbd2_legacy_descriptor_parser_skips_explicit_uuid_between_tags() {
+        let mut desc = vec![0_u8; 512];
+        encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, 7);
+
+        desc[12..16].copy_from_slice(&5_u32.to_be_bytes());
+        desc[20..36].copy_from_slice(b"explicit-uuid-01");
+
+        desc[36..40].copy_from_slice(&6_u32.to_be_bytes());
+        let flags = u16::try_from(JBD2_TAG_FLAG_LAST | JBD2_TAG_FLAG_SAME_UUID)
+            .expect("test flags fit u16");
+        desc[42..44].copy_from_slice(&flags.to_be_bytes());
+
+        let tags = parse_descriptor_tags_with_format(&desc, false, false, Jbd2TagFormat::Legacy);
+        assert_eq!(
+            strict_descriptor_tag_count_with_format(&desc, false, false, Jbd2TagFormat::Legacy),
+            Some(2)
+        );
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].target, BlockNumber(5));
+        assert_eq!(tags[1].target, BlockNumber(6));
+        assert!(tags[1].is_last());
+    }
+
+    #[test]
+    fn jbd2_csum_v3_descriptor_parser_rejects_truncated_explicit_uuid() {
+        let mut desc = vec![0_u8; JBD2_HEADER_SIZE + JBD2_TAG_SIZE_CSUM_V3 + 8];
+        encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, 7);
+        desc[12..16].copy_from_slice(&5_u32.to_be_bytes());
+        desc[16..20].copy_from_slice(&JBD2_TAG_FLAG_LAST.to_be_bytes());
+
+        assert_eq!(
+            strict_descriptor_tag_count_with_format(&desc, false, false, Jbd2TagFormat::CsumV3),
+            None
+        );
+        assert!(
+            parse_descriptor_tags_with_format(&desc, false, false, Jbd2TagFormat::CsumV3)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -5873,12 +6361,14 @@ mod tests {
         let tag_not_last = DescriptorTag {
             target: BlockNumber(0),
             flags: 0,
+            data_checksum: None,
         };
         assert!(!tag_not_last.is_last());
 
         let tag_last = DescriptorTag {
             target: BlockNumber(0),
             flags: JBD2_TAG_FLAG_LAST,
+            data_checksum: None,
         };
         assert!(tag_last.is_last());
 
@@ -5886,6 +6376,7 @@ mod tests {
         let tag_combined = DescriptorTag {
             target: BlockNumber(0),
             flags: JBD2_TAG_FLAG_LAST | 0x0001,
+            data_checksum: None,
         };
         assert!(tag_combined.is_last());
     }

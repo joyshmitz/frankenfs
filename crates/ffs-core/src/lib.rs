@@ -11,8 +11,8 @@ pub use degradation::{
 };
 pub use vfs::{
     DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat,
-    InodeAttr, QuotaEntry, QuotaInfo, QuotaType, RequestOp, RequestScope, SeekWhence,
-    SetAttrRequest, XattrSetMode,
+    InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope,
+    SeekWhence, SetAttrRequest, XattrSetMode,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -15639,20 +15639,29 @@ impl FsOps for OpenFs {
 
     fn statfs(
         &self,
-        _cx: &Cx,
-        _scope: &mut RequestScope,
+        cx: &Cx,
+        scope: &mut RequestScope,
         _ino: InodeNumber,
     ) -> ffs_error::Result<FsStat> {
         match &self.flavor {
             FsFlavor::Ext4(sb) => {
-                let blocks_free = sb.free_blocks_count;
+                let geo = FsGeometry::from_superblock(sb);
+                let mut blocks_free = 0_u64;
+                let mut files_free = 0_u64;
+                for group_idx in 0..geo.group_count {
+                    let gd = self.read_group_desc_with_scope(cx, scope, GroupNumber(group_idx))?;
+                    blocks_free = blocks_free.saturating_add(u64::from(gd.free_blocks_count));
+                    files_free = files_free.saturating_add(u64::from(gd.free_inodes_count));
+                }
+                blocks_free = blocks_free.min(sb.blocks_count);
+                files_free = files_free.min(u64::from(sb.inodes_count));
                 let blocks_available = blocks_free.saturating_sub(sb.reserved_blocks_count);
                 Ok(FsStat {
                     blocks: sb.blocks_count,
                     blocks_free,
                     blocks_available,
                     files: u64::from(sb.inodes_count),
-                    files_free: u64::from(sb.free_inodes_count),
+                    files_free,
                     block_size: sb.block_size,
                     name_max: 255,
                     fragment_size: sb.block_size,
@@ -18604,6 +18613,24 @@ mod tests {
     }
 
     #[test]
+    fn open_fs_good_internal_journal_checksum_replays_by_default() {
+        let image = build_ext4_image_with_internal_journal_checksums(false);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let replay = fs
+            .ext4_journal_replay()
+            .expect("journal replay outcome should be present");
+
+        assert_eq!(replay.committed_sequences, vec![1]);
+        assert_eq!(replay.stats.replayed_blocks, 1);
+
+        let target = fs.read_block_vec(&cx, BlockNumber(15)).unwrap();
+        assert_eq!(&target[..16], b"JBD2-CSUM-REPLAY");
+    }
+
+    #[test]
     fn open_fs_nojournal_checksum_replays_internal_journal_with_bad_checksum() {
         let image = build_ext4_image_with_internal_journal_checksums(true);
         let dev = TestDevice::from_vec(image);
@@ -19796,6 +19823,23 @@ mod tests {
             .copy_from_slice(&checksum.to_be_bytes());
     }
 
+    fn checksum_jbd2_data_block_for_test(block: &[u8], sequence: u32, seed: u32) -> u32 {
+        let sequence = sequence.to_be_bytes();
+        let checksum = ffs_types::crc32c_append(!seed, &sequence);
+        !ffs_types::crc32c_append(checksum, block)
+    }
+
+    fn stamp_test_jbd2_csum3_tag_checksum(
+        descriptor_block: &mut [u8],
+        tag_offset: usize,
+        data_block: &[u8],
+        sequence: u32,
+        seed: u32,
+    ) {
+        let checksum = checksum_jbd2_data_block_for_test(data_block, sequence, seed);
+        descriptor_block[tag_offset + 12..tag_offset + 16].copy_from_slice(&checksum.to_be_bytes());
+    }
+
     fn jbd2_v3_seed(uuid: [u8; 16]) -> u32 {
         !ffs_types::crc32c_append(!0u32, &uuid)
     }
@@ -19995,13 +20039,18 @@ mod tests {
         write_jbd2_header(&mut image[j_desc..j_desc + 4096], 1, 1);
         image[j_desc + 12..j_desc + 16].copy_from_slice(&15_u32.to_be_bytes());
         image[j_desc + 16..j_desc + 20].copy_from_slice(&0x0000_0008_u32.to_be_bytes());
-        stamp_test_jbd2_descriptor_checksum(&mut image[j_desc..j_desc + 4096], seed);
-        if corrupt_descriptor_checksum {
-            image[j_desc + 4096 - 1] ^= 0x5A;
-        }
 
         let j_data = 22 * 4096;
         image[j_data..j_data + 16].copy_from_slice(b"JBD2-CSUM-REPLAY");
+
+        let (descriptor_prefix, data_suffix) = image.split_at_mut(j_data);
+        let descriptor = &mut descriptor_prefix[j_desc..j_desc + 4096];
+        let data = &data_suffix[..4096];
+        stamp_test_jbd2_csum3_tag_checksum(descriptor, 12, data, 1, seed);
+        stamp_test_jbd2_descriptor_checksum(descriptor, seed);
+        if corrupt_descriptor_checksum {
+            descriptor[4096 - 1] ^= 0x5A;
+        }
 
         let j_commit = 23 * 4096;
         write_jbd2_header(&mut image[j_commit..j_commit + 4096], 2, 1);
@@ -21941,8 +21990,13 @@ mod tests {
     }
 
     #[test]
-    fn open_fs_fsops_statfs_ext4_uses_superblock_counts() {
-        let image = build_ext4_image_with_dir();
+    fn open_fs_fsops_statfs_ext4_aggregates_group_descriptor_counts() {
+        let mut image = build_ext4_image_with_dir();
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        image[sb_off + 0x08..sb_off + 0x0C].copy_from_slice(&3_u32.to_le_bytes());
+        image[sb_off + 0x0C..sb_off + 0x10].copy_from_slice(&63_u32.to_le_bytes());
+        image[sb_off + 0x10..sb_off + 0x14].copy_from_slice(&127_u32.to_le_bytes());
+        set_group_desc_free_counts(&mut image, 42, 17);
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
@@ -21955,14 +22009,10 @@ mod tests {
         assert_eq!(stats.block_size, sb.block_size);
         assert_eq!(stats.fragment_size, sb.block_size);
         assert_eq!(stats.blocks, sb.blocks_count);
-        assert_eq!(stats.blocks_free, sb.free_blocks_count);
-        assert_eq!(
-            stats.blocks_available,
-            sb.free_blocks_count
-                .saturating_sub(sb.reserved_blocks_count)
-        );
+        assert_eq!(stats.blocks_free, 42);
+        assert_eq!(stats.blocks_available, 39);
         assert_eq!(stats.files, u64::from(sb.inodes_count));
-        assert_eq!(stats.files_free, u64::from(sb.free_inodes_count));
+        assert_eq!(stats.files_free, 17);
         assert_eq!(stats.name_max, 255);
     }
 
@@ -28784,6 +28834,7 @@ mod tests {
         };
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
+        let before = fs.statfs(&cx, root).expect("statfs before");
 
         // Create a file and write data
         let attr = fs
@@ -28791,15 +28842,24 @@ mod tests {
             .expect("create");
         fs.write(&cx, attr.ino, 0, &[0xCC; 8192]).expect("write");
 
-        // statfs should still return internally consistent values after mutations.
-        // Note: ext4 statfs reads from the on-disk superblock snapshot, not the
-        // live allocator state, so free counts may not decrease immediately.
-        let stat = fs.statfs(&cx, root).expect("statfs after");
-        assert!(stat.blocks > 0, "should have blocks");
-        assert!(stat.blocks_free <= stat.blocks, "free <= total");
-        assert!(stat.blocks_available <= stat.blocks_free, "avail <= free");
-        assert!(stat.files > 0, "should have inodes");
-        assert!(stat.files_free <= stat.files, "free inodes <= total");
+        let after = fs.statfs(&cx, root).expect("statfs after");
+        assert!(after.blocks > 0, "should have blocks");
+        assert!(after.blocks_free <= after.blocks, "free <= total");
+        assert!(after.blocks_available <= after.blocks_free, "avail <= free");
+        assert!(after.files > 0, "should have inodes");
+        assert!(after.files_free <= after.files, "free inodes <= total");
+        assert!(
+            after.blocks_free < before.blocks_free,
+            "ext4 statfs should reflect allocated data blocks: before={}, after={}",
+            before.blocks_free,
+            after.blocks_free
+        );
+        assert!(
+            after.files_free < before.files_free,
+            "ext4 statfs should reflect allocated inode: before={}, after={}",
+            before.files_free,
+            after.files_free
+        );
     }
 
     #[test]
