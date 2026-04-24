@@ -820,13 +820,22 @@ impl<W: Write> EvidenceLedger<W> {
 
     /// Append a record as a single JSONL line and flush.
     ///
+    /// Serializes the record into an owned byte buffer (ending with `\n`)
+    /// before issuing any I/O, so a failed write is either a no-op or
+    /// completes atomically. `serde_json::to_writer` would otherwise emit
+    /// bytes incrementally, and a mid-serialization error would leave a
+    /// torn, newline-less line in the ledger — the next successful
+    /// `append` would concatenate onto it and `parse_evidence_ledger`
+    /// would drop both records.
+    ///
     /// # Errors
     ///
     /// Returns an I/O error if serialization or writing fails.
     pub fn append(&mut self, record: &EvidenceRecord) -> io::Result<()> {
-        serde_json::to_writer(&mut self.writer, record)
+        let mut line = serde_json::to_vec(record)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        self.writer.write_all(b"\n")?;
+        line.push(b'\n');
+        self.writer.write_all(&line)?;
         self.writer.flush()
     }
 
@@ -1590,5 +1599,104 @@ mod tests {
         let record = EvidenceRecord::from_recovery(&ev);
         assert_eq!(record.event_type, EvidenceEventType::RepairFailed);
         assert!(!record.repair.as_ref().unwrap().verify_pass);
+    }
+
+    /// A writer that fails after N bytes — used to reproduce the pre-fix
+    /// torn-write scenario where serde_json's incremental output would
+    /// leave a partial JSON prefix and then silently concatenate the
+    /// next record on top.
+    struct FaultyWriter {
+        inner: Vec<u8>,
+        bytes_before_failure: usize,
+        failed: bool,
+    }
+
+    impl FaultyWriter {
+        fn new(bytes_before_failure: usize) -> Self {
+            Self {
+                inner: Vec::new(),
+                bytes_before_failure,
+                failed: false,
+            }
+        }
+    }
+
+    impl io::Write for FaultyWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.failed {
+                return Err(io::Error::other("writer already failed"));
+            }
+            if self.inner.len().saturating_add(buf.len()) <= self.bytes_before_failure {
+                self.inner.extend_from_slice(buf);
+                Ok(buf.len())
+            } else {
+                // Fail atomically: do not write a partial prefix.
+                self.failed = true;
+                Err(io::Error::other("writer failed"))
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.failed {
+                Err(io::Error::other("writer already failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn append_failed_write_does_not_poison_ledger_buffer() {
+        // Pre-fix: if `serde_json::to_writer` fails mid-JSON, the ledger
+        // buffer retained a partial `{..` prefix without a newline and
+        // the next successful append concatenated onto it, producing a
+        // malformed line that `parse_evidence_ledger` would drop.
+        //
+        // With the serialize-to-buffer fix, a write failure is an
+        // all-or-nothing operation: the buffer is either untouched (no
+        // line written) or contains a complete `{..}\n` record.
+        let mut ledger = EvidenceLedger::new(FaultyWriter::new(4)); // fail before any full record fits
+        let record =
+            EvidenceRecord::corruption_detected(7, sample_corruption_detail()).with_timestamp(1);
+
+        let err = ledger.append(&record).expect_err("small buffer must fail");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+
+        // The inner buffer must either be empty or end on a newline —
+        // never contain a bare `{...}` fragment.
+        let bytes = ledger.into_inner().inner;
+        assert!(
+            bytes.is_empty() || bytes.ends_with(b"\n"),
+            "ledger must not retain torn JSON; got {bytes:?}"
+        );
+    }
+
+    #[test]
+    fn append_round_trip_via_ledger_parses_back() {
+        // Full happy-path regression covering the in-memory ledger path
+        // that downstream consumers rely on for JSONL parsing.
+        let mut ledger = EvidenceLedger::new(Vec::new());
+        let records = [
+            EvidenceRecord::corruption_detected(1, sample_corruption_detail()).with_timestamp(10),
+            EvidenceRecord::repair_succeeded(1, sample_repair_detail()).with_timestamp(20),
+            EvidenceRecord::scrub_cycle_complete(
+                2,
+                ScrubCycleDetail {
+                    blocks_scanned: 256,
+                    blocks_corrupt: 0,
+                    blocks_io_error: 0,
+                    findings_count: 0,
+                },
+            )
+            .with_timestamp(30),
+        ];
+        for record in &records {
+            ledger.append(record).expect("append");
+        }
+        let parsed = parse_evidence_ledger(&ledger.into_inner());
+        assert_eq!(parsed.len(), records.len());
+        assert_eq!(parsed[0].timestamp_ns, 10);
+        assert_eq!(parsed[1].event_type, EvidenceEventType::RepairSucceeded);
+        assert_eq!(parsed[2].scrub_cycle.as_ref().unwrap().blocks_scanned, 256);
     }
 }
