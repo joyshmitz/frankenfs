@@ -267,16 +267,39 @@ impl DescriptorTag {
 }
 
 const JBD2_COMMIT_CHKSUM_OFFSET: usize = 16;
+const JBD2_CHECKSUM_TAIL_SIZE: usize = 4;
 
 fn checksum_jbd2_tail_zeroed_block(block: &[u8], seed: u32) -> Option<u32> {
-    if block.len() < 4 {
+    if block.len() < JBD2_CHECKSUM_TAIL_SIZE {
         return None;
     }
 
-    let tail = block.len() - 4;
+    let tail = block.len() - JBD2_CHECKSUM_TAIL_SIZE;
     let checksum = crc32c::crc32c_append(!seed, &block[..tail]);
-    let checksum = crc32c::crc32c_append(checksum, &[0_u8; 4]);
+    let checksum = crc32c::crc32c_append(checksum, &[0_u8; JBD2_CHECKSUM_TAIL_SIZE]);
     Some(!checksum)
+}
+
+fn stamp_jbd2_tail_checksum(block: &mut [u8], seed: u32) -> Result<()> {
+    let checksum = checksum_jbd2_tail_zeroed_block(block, seed)
+        .ok_or_else(|| FfsError::Format("JBD2 checksum block too small".to_owned()))?;
+    let tail = block.len() - JBD2_CHECKSUM_TAIL_SIZE;
+    block[tail..].copy_from_slice(&checksum.to_be_bytes());
+    Ok(())
+}
+
+fn stamp_jbd2_commit_checksum(block: &mut [u8], seed: u32) -> Result<()> {
+    if block.len() < JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE {
+        return Err(FfsError::Format(
+            "JBD2 commit block too small for checksum".to_owned(),
+        ));
+    }
+    block[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE]
+        .copy_from_slice(&0_u32.to_be_bytes());
+    let checksum = !crc32c::crc32c_append(!seed, block);
+    block[JBD2_COMMIT_CHKSUM_OFFSET..JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE]
+        .copy_from_slice(&checksum.to_be_bytes());
+    Ok(())
 }
 
 fn verify_jbd2_block_checksum(block: &[u8], sb: &Jbd2Superblock) -> bool {
@@ -292,10 +315,10 @@ fn verify_jbd2_block_checksum(block: &[u8], sb: &Jbd2Superblock) -> bool {
         JBD2_BLOCKTYPE_DESCRIPTOR | JBD2_BLOCKTYPE_REVOKE => {
             // Checksum is in the 4-byte tail at the end of the block.
             let bs = block.len();
-            if bs < 4 {
+            if bs < JBD2_CHECKSUM_TAIL_SIZE {
                 return false;
             }
-            let stored = read_be_u32(block, bs - 4).unwrap_or(0);
+            let stored = read_be_u32(block, bs - JBD2_CHECKSUM_TAIL_SIZE).unwrap_or(0);
             let seed = sb.csum_seed();
             // Linux JBD2 zeroes the 4-byte tail field and hashes the full block.
             let computed = checksum_jbd2_tail_zeroed_block(block, seed).unwrap_or(0);
@@ -847,6 +870,10 @@ pub struct Jbd2Writer {
     next_seq: u32,
     /// Whether to use 64-bit block number format.
     is_64bit: bool,
+    /// Whether descriptor, revoke, and commit blocks need JBD2 checksums.
+    has_checksum: bool,
+    /// CRC32C seed used by the active JBD2 checksum feature set.
+    csum_seed: u32,
 }
 
 impl Jbd2Writer {
@@ -858,6 +885,26 @@ impl Jbd2Writer {
             head: 0,
             next_seq: start_seq,
             is_64bit: false,
+            has_checksum: false,
+            csum_seed: 0,
+        }
+    }
+
+    /// Create a writer with explicit checksum settings.
+    #[must_use]
+    pub fn with_checksum_config(
+        region: JournalRegion,
+        start_seq: u32,
+        has_checksum: bool,
+        csum_seed: u32,
+    ) -> Self {
+        Self {
+            region,
+            head: 0,
+            next_seq: start_seq,
+            is_64bit: false,
+            has_checksum,
+            csum_seed,
         }
     }
 
@@ -880,6 +927,8 @@ impl Jbd2Writer {
         let mut head = 0_u64;
         let mut max_seq = start_seq;
         let mut is_64bit = false;
+        let mut has_checksum = false;
+        let mut csum_seed = 0_u32;
 
         while head < region.blocks {
             let block = resolve_region_block(region, head)?;
@@ -888,6 +937,8 @@ impl Jbd2Writer {
             if head == 0 {
                 if let Some(sb) = Jbd2Superblock::parse(raw.as_slice()) {
                     is_64bit = sb.is_64bit();
+                    has_checksum = sb.has_checksum();
+                    csum_seed = sb.csum_seed();
                     head = head.saturating_add(1);
                     continue;
                 }
@@ -909,6 +960,8 @@ impl Jbd2Writer {
             head,
             next_seq: max_seq,
             is_64bit,
+            has_checksum,
+            csum_seed,
         })
     }
 
@@ -946,9 +999,21 @@ impl Jbd2Writer {
     /// and `revokes` revoke entries will consume.
     #[must_use]
     pub fn blocks_needed(block_size: u32, writes: usize, revokes: usize, is_64bit: bool) -> u64 {
+        Self::blocks_needed_with_checksum(block_size, writes, revokes, is_64bit, false)
+    }
+
+    /// Compute consumed journal blocks, accounting for checksum tail fields.
+    #[must_use]
+    pub fn blocks_needed_with_checksum(
+        block_size: u32,
+        writes: usize,
+        revokes: usize,
+        is_64bit: bool,
+        has_checksum: bool,
+    ) -> u64 {
         let bs = block_size as usize;
-        let tags_per_desc = max_tags_per_descriptor(bs, is_64bit);
-        let entries_per_revoke = max_revoke_entries(bs, is_64bit);
+        let tags_per_desc = max_tags_per_descriptor_with_checksum(bs, is_64bit, has_checksum);
+        let entries_per_revoke = max_revoke_entries_with_checksum(bs, is_64bit, has_checksum);
 
         let mut total = 0_u64;
         if writes > 0 {
@@ -992,13 +1057,20 @@ impl Jbd2Writer {
                 "block size too small for JBD2 headers".to_owned(),
             ));
         }
-        let tags_per_desc = max_tags_per_descriptor(bs, self.is_64bit);
+        if self.has_checksum && bs < JBD2_COMMIT_CHKSUM_OFFSET + JBD2_CHECKSUM_TAIL_SIZE {
+            return Err(FfsError::Format(
+                "block size too small for JBD2 commit checksum".to_owned(),
+            ));
+        }
+        let tags_per_desc =
+            max_tags_per_descriptor_with_checksum(bs, self.is_64bit, self.has_checksum);
         if txn.write_count > 0 && tags_per_desc == 0 {
             return Err(FfsError::Format(
                 "block size too small for JBD2 descriptor tags".to_owned(),
             ));
         }
-        let entries_per_revoke = max_revoke_entries(bs, self.is_64bit);
+        let entries_per_revoke =
+            max_revoke_entries_with_checksum(bs, self.is_64bit, self.has_checksum);
         if txn.revoke_count > 0 && entries_per_revoke == 0 {
             return Err(FfsError::Format(
                 "block size too small for JBD2 revoke entries".to_owned(),
@@ -1018,11 +1090,12 @@ impl Jbd2Writer {
             )));
         }
 
-        let needed = Self::blocks_needed(
+        let needed = Self::blocks_needed_with_checksum(
             dev.block_size(),
             txn.write_count,
             txn.revoke_count,
             self.is_64bit,
+            self.has_checksum,
         );
         if needed > self.free_blocks() {
             return Err(FfsError::NoSpace);
@@ -1091,6 +1164,10 @@ impl Jbd2Writer {
                         off += tag_size;
                     }
 
+                    if self.has_checksum {
+                        stamp_jbd2_tail_checksum(&mut desc, self.csum_seed)?;
+                    }
+
                     let desc_block = self.alloc_block(&mut staged_head)?;
                     dev.write_block(cx, desc_block, &desc)?;
                     stats.descriptor_blocks = stats.descriptor_blocks.saturating_add(1);
@@ -1149,6 +1226,10 @@ impl Jbd2Writer {
                         off += entry_size;
                     }
 
+                    if self.has_checksum {
+                        stamp_jbd2_tail_checksum(&mut revoke, self.csum_seed)?;
+                    }
+
                     let rev_block = self.alloc_block(&mut staged_head)?;
                     dev.write_block(cx, rev_block, &revoke)?;
                     stats.revoke_blocks = stats.revoke_blocks.saturating_add(1);
@@ -1159,6 +1240,9 @@ impl Jbd2Writer {
         // --- Final phase: commit block ---
         let mut commit = vec![0_u8; bs];
         encode_jbd2_header(&mut commit, JBD2_BLOCKTYPE_COMMIT, seq);
+        if self.has_checksum {
+            stamp_jbd2_commit_checksum(&mut commit, self.csum_seed)?;
+        }
 
         let commit_blk = self.alloc_block(&mut staged_head)?;
         dev.write_block(cx, commit_blk, &commit)?;
@@ -1196,20 +1280,35 @@ fn encode_jbd2_header(buf: &mut [u8], block_type: u32, sequence: u32) {
     buf[8..12].copy_from_slice(&sequence.to_be_bytes());
 }
 
-#[must_use]
-fn max_tags_per_descriptor(block_size: usize, is_64bit: bool) -> usize {
+fn max_tags_per_descriptor_with_checksum(
+    block_size: usize,
+    is_64bit: bool,
+    has_checksum: bool,
+) -> usize {
     let tag_size = if is_64bit {
         JBD2_TAG_SIZE_64
     } else {
         JBD2_TAG_SIZE_32
     };
-    (block_size.saturating_sub(JBD2_HEADER_SIZE)) / tag_size
+    let tail_size = usize::from(has_checksum) * JBD2_CHECKSUM_TAIL_SIZE;
+    (block_size.saturating_sub(JBD2_HEADER_SIZE + tail_size)) / tag_size
 }
 
 #[must_use]
+#[cfg(test)]
 fn max_revoke_entries(block_size: usize, is_64bit: bool) -> usize {
+    max_revoke_entries_with_checksum(block_size, is_64bit, false)
+}
+
+#[must_use]
+fn max_revoke_entries_with_checksum(
+    block_size: usize,
+    is_64bit: bool,
+    has_checksum: bool,
+) -> usize {
     let entry_size = if is_64bit { 8 } else { 4 };
-    (block_size.saturating_sub(JBD2_REVOKE_HEADER_SIZE)) / entry_size
+    let tail_size = usize::from(has_checksum) * JBD2_CHECKSUM_TAIL_SIZE;
+    (block_size.saturating_sub(JBD2_REVOKE_HEADER_SIZE + tail_size)) / entry_size
 }
 
 /// A single recovered native COW write operation.
@@ -2507,6 +2606,27 @@ mod tests {
         h
     }
 
+    fn jbd2_superblock_block(
+        block_size: usize,
+        start_sequence: u32,
+        start_block: u32,
+        feature_compat: u32,
+        feature_incompat: u32,
+        uuid: [u8; 16],
+    ) -> Vec<u8> {
+        let mut out = vec![0_u8; block_size];
+        let block_size_u32 = u32::try_from(block_size).expect("test block size fits in u32");
+        out[0..JBD2_HEADER_SIZE].copy_from_slice(&jbd2_header(JBD2_BLOCKTYPE_SUPERBLOCK_V2, 0));
+        out[12..16].copy_from_slice(&block_size_u32.to_be_bytes());
+        out[16..20].copy_from_slice(&block_size_u32.to_be_bytes());
+        out[24..28].copy_from_slice(&start_sequence.to_be_bytes());
+        out[28..32].copy_from_slice(&start_block.to_be_bytes());
+        out[36..40].copy_from_slice(&feature_compat.to_be_bytes());
+        out[40..44].copy_from_slice(&feature_incompat.to_be_bytes());
+        out[48..64].copy_from_slice(&uuid);
+        out
+    }
+
     fn descriptor_block(block_size: usize, seq: u32, tags: &[(u32, u32)]) -> Vec<u8> {
         let mut out = vec![0_u8; block_size];
         out[0..JBD2_HEADER_SIZE].copy_from_slice(&jbd2_header(JBD2_BLOCKTYPE_DESCRIPTOR, seq));
@@ -3334,6 +3454,47 @@ mod tests {
 
         let target = dev.read_block(&cx, BlockNumber(5)).expect("read target");
         assert_eq!(target.as_slice(), &[0xAB; 512]);
+    }
+
+    #[test]
+    fn jbd2_writer_checksummed_journal_replays_with_verification() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 256);
+        let region = JournalRegion {
+            start: BlockNumber(100),
+            blocks: 32,
+        };
+        let uuid = *b"ffs-jbd2-writer!";
+        dev.raw_write(
+            BlockNumber(100),
+            jbd2_superblock_block(512, 1, 1, 0, JBD2_FEATURE_INCOMPAT_CSUM_V3, uuid),
+        );
+
+        let mut writer = Jbd2Writer::open(&cx, &dev, region, 1).expect("open checksummed journal");
+        assert_eq!(writer.head(), 1);
+        let mut txn = writer.begin_transaction();
+        txn.add_write(BlockNumber(5), vec![0xCD; 512]);
+        let (seq, stats) = writer.commit_transaction(&cx, &dev, &txn).expect("commit");
+
+        assert_eq!(seq, 1);
+        assert_eq!(stats.descriptor_blocks, 1);
+        assert_eq!(stats.data_blocks, 1);
+        assert_eq!(stats.commit_blocks, 1);
+
+        let outcome = replay_jbd2_with_options(
+            &cx,
+            &dev,
+            region,
+            ReplayOptions {
+                verify_checksums: true,
+            },
+        )
+        .expect("checksummed writer output replays");
+        assert_eq!(outcome.committed_sequences, vec![1]);
+        assert_eq!(outcome.stats.replayed_blocks, 1);
+
+        let target = dev.read_block(&cx, BlockNumber(5)).expect("read target");
+        assert_eq!(target.as_slice(), &[0xCD; 512]);
     }
 
     #[test]
