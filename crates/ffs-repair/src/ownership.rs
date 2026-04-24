@@ -59,7 +59,7 @@ impl CoordinationRecord {
             return true;
         };
         let ttl = Duration::from_secs(self.lease_ttl_secs);
-        claimed.checked_add(ttl).is_some_and(|expiry| now >= expiry)
+        claimed.checked_add(ttl).is_none_or(|expiry| now >= expiry)
     }
 
     /// Renew the lease by updating `claimed_at` to the current time.
@@ -149,7 +149,7 @@ impl RepairOwnership {
     /// Attempt to acquire ownership of the image for repair.
     ///
     /// Returns `Acquired` if ownership was successfully claimed,
-    /// `OwnedByOther` if another host holds a valid lease, or
+    /// `OwnedByOther` if another process/host holds a valid lease, or
     /// `ConflictLost` if we lost a tiebreak.
     pub fn try_acquire(&self, image_path: &Path) -> std::io::Result<AcquireResult> {
         let record_path = Self::record_path_for(image_path);
@@ -161,8 +161,8 @@ impl RepairOwnership {
                 let existing: CoordinationRecord = serde_json::from_str(&contents)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-                if !existing.is_expired(now) && existing.host_id != self.host_id {
-                    // Another host owns it and lease is valid
+                if !existing.is_expired(now) && !self.is_current_process_claim(&existing) {
+                    // Another process or host owns it and the lease is valid.
                     let claimed =
                         parse_iso8601(&existing.claimed_at).unwrap_or(SystemTime::UNIX_EPOCH);
                     let expiry = claimed + Duration::from_secs(existing.lease_ttl_secs);
@@ -214,7 +214,7 @@ impl RepairOwnership {
             version: RECORD_VERSION,
             host_id: self.host_id.clone(),
             hostname: self.hostname.clone(),
-            pid: std::process::id(),
+            pid: Self::current_pid(),
             claimed_at: format_iso8601(SystemTime::now()),
             lease_ttl_secs: self.lease_ttl.as_secs(),
             lease_version,
@@ -239,8 +239,8 @@ impl RepairOwnership {
         Ok(())
     }
 
-    /// Re-read the record to verify we own it. If another host wrote
-    /// concurrently, apply deterministic tiebreak (lower UUID wins).
+    /// Re-read the record to verify we own it. If another claimant wrote
+    /// concurrently, prefer the higher generation, then lower host UUID.
     fn verify_or_tiebreak(
         &self,
         record_path: &Path,
@@ -283,8 +283,17 @@ impl RepairOwnership {
         expected_lease_version: u64,
     ) -> bool {
         record.host_id == self.host_id
+            && record.pid == Self::current_pid()
             && record.repair_generation == expected_gen
             && record.lease_version == expected_lease_version
+    }
+
+    fn is_current_process_claim(&self, record: &CoordinationRecord) -> bool {
+        record.host_id == self.host_id && record.pid == Self::current_pid()
+    }
+
+    fn current_pid() -> u32 {
+        std::process::id()
     }
 
     fn should_rewrite_conflicting_claim(
@@ -314,6 +323,8 @@ impl RepairOwnership {
                 target: "ffs::repair::ownership",
                 our_id = %self.host_id,
                 winner_id = %record.host_id,
+                expected_pid = Self::current_pid(),
+                observed_pid = record.pid,
                 expected_generation = expected_gen,
                 observed_generation = record.repair_generation,
                 expected_lease_version,
@@ -344,16 +355,18 @@ impl RepairOwnership {
         let contents = std::fs::read_to_string(&guard.record_path)?;
         let current: CoordinationRecord = serde_json::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if current.host_id != guard.record.host_id
-            || current.lease_version != guard.record.lease_version
-        {
+        if !Self::same_lease_incarnation(&current, &guard.record) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
-                    "cannot renew stale lease: expected {}@v{}, found {}@v{}",
+                    "cannot renew stale lease: expected {} pid {} gen {} lease v{}, found {} pid {} gen {} lease v{}",
                     guard.record.host_id,
+                    guard.record.pid,
+                    guard.record.repair_generation,
                     guard.record.lease_version,
                     current.host_id,
+                    current.pid,
+                    current.repair_generation,
                     current.lease_version
                 ),
             ));
@@ -383,16 +396,18 @@ impl RepairOwnership {
         };
         let current: CoordinationRecord = serde_json::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if current.host_id != guard.record.host_id
-            || current.lease_version != guard.record.lease_version
-        {
+        if !Self::same_lease_incarnation(&current, &guard.record) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
-                    "cannot release stale lease: expected {}@v{}, found {}@v{}",
+                    "cannot release stale lease: expected {} pid {} gen {} lease v{}, found {} pid {} gen {} lease v{}",
                     guard.record.host_id,
+                    guard.record.pid,
+                    guard.record.repair_generation,
                     guard.record.lease_version,
                     current.host_id,
+                    current.pid,
+                    current.repair_generation,
                     current.lease_version
                 ),
             ));
@@ -422,11 +437,18 @@ impl RepairOwnership {
                 let record: CoordinationRecord = serde_json::from_str(&contents)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 let now = SystemTime::now();
-                Ok(record.host_id == self.host_id && !record.is_expired(now))
+                Ok(self.is_current_process_claim(&record) && !record.is_expired(now))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    fn same_lease_incarnation(current: &CoordinationRecord, expected: &CoordinationRecord) -> bool {
+        current.host_id == expected.host_id
+            && current.pid == expected.pid
+            && current.repair_generation == expected.repair_generation
+            && current.lease_version == expected.lease_version
     }
 }
 
@@ -565,6 +587,22 @@ mod tests {
     }
 
     #[test]
+    fn coordination_record_overflowing_ttl_treated_as_expired() {
+        let record = CoordinationRecord {
+            version: 1,
+            host_id: "host-a".into(),
+            hostname: "worker-01".into(),
+            pid: 1000,
+            claimed_at: "9999-12-31T23:59:59Z".into(),
+            lease_ttl_secs: u64::MAX,
+            lease_version: 1,
+            repair_generation: 1,
+            groups_owned: vec![],
+        };
+        assert!(record.is_expired(SystemTime::now()));
+    }
+
+    #[test]
     fn coordination_record_renew() {
         let mut record = CoordinationRecord {
             version: 1,
@@ -664,11 +702,10 @@ mod tests {
 
         let result = mgr.acquisition_result_for_current_claim(&record_path, stale, 42, 5);
 
-        match result {
-            AcquireResult::ConflictLost { winner_host_id } => assert_eq!(winner_host_id, "host-1"),
-            AcquireResult::Acquired(_) => panic!("stale same-host lease must not be accepted"),
-            AcquireResult::OwnedByOther { .. } => panic!("unexpected owned-by-other result"),
-        }
+        assert!(
+            matches!(result, AcquireResult::ConflictLost { ref winner_host_id } if winner_host_id == "host-1"),
+            "stale same-host lease must be rejected: {result:?}"
+        );
     }
 
     #[test]
@@ -709,6 +746,26 @@ mod tests {
     }
 
     #[test]
+    fn acquire_rejects_live_lease_from_same_host_different_pid() {
+        let dir = tempdir();
+        let image = dir.join("test.img");
+        std::fs::write(&image, b"fake image").unwrap();
+
+        let mut record = record_fixture("host-1", 7, 3);
+        record.pid = different_pid();
+        let record_path = RepairOwnership::record_path_for(&image);
+        std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+        let mgr = RepairOwnership::new("host-1".into(), "same-host-new-process".into());
+        let result = mgr.try_acquire(&image).expect("acquire");
+
+        assert!(
+            matches!(result, AcquireResult::OwnedByOther { ref owner_host_id, .. } if owner_host_id == "host-1"),
+            "expected same-host process conflict, got {result:?}"
+        );
+    }
+
+    #[test]
     fn acquire_succeeds_after_lease_expiry() {
         let dir = tempdir();
         let image = dir.join("test.img");
@@ -732,14 +789,10 @@ mod tests {
         // New host should be able to claim
         let mgr = RepairOwnership::new("new-host".into(), "alive".into());
         let result = mgr.try_acquire(&image).expect("acquire");
-        match &result {
-            AcquireResult::Acquired(guard) => {
-                assert_eq!(guard.record().host_id, "new-host");
-                assert_eq!(guard.record().lease_version, 5);
-                assert_eq!(guard.record().repair_generation, 6); // incremented
-            }
-            other => panic!("expected Acquired, got: {other:?}"),
-        }
+        let guard = acquired_guard(result).expect("expected acquired");
+        assert_eq!(guard.record().host_id, "new-host");
+        assert_eq!(guard.record().lease_version, 5);
+        assert_eq!(guard.record().repair_generation, 6); // incremented
     }
 
     #[test]
@@ -750,9 +803,7 @@ mod tests {
 
         let mgr = RepairOwnership::new("host-1".into(), "test".into());
         let result = mgr.try_acquire(&image).expect("acquire");
-        let AcquireResult::Acquired(guard) = result else {
-            panic!("expected acquired");
-        };
+        let guard = acquired_guard(result).expect("expected acquired");
 
         let record_path = RepairOwnership::record_path_for(&image);
         assert!(record_path.exists());
@@ -773,9 +824,7 @@ mod tests {
         let mgr =
             RepairOwnership::new("host-1".into(), "test".into()).with_ttl(Duration::from_secs(10));
         let result = mgr.try_acquire(&image).expect("acquire");
-        let AcquireResult::Acquired(mut guard) = result else {
-            panic!("expected acquired");
-        };
+        let mut guard = acquired_guard(result).expect("expected acquired");
 
         let old_time = guard.record().claimed_at.clone();
         // Sleep > 1s to ensure timestamp changes (ISO 8601 has 1s resolution)
@@ -797,9 +846,7 @@ mod tests {
         let mgr_a =
             RepairOwnership::new("host-a".into(), "test-a".into()).with_ttl(Duration::from_secs(1));
         let result = mgr_a.try_acquire(&image).expect("acquire");
-        let AcquireResult::Acquired(mut guard) = result else {
-            panic!("expected acquired");
-        };
+        let mut guard = acquired_guard(result).expect("expected acquired");
 
         std::thread::sleep(Duration::from_millis(1100));
         let mgr_b = RepairOwnership::new("host-b".into(), "test-b".into());
@@ -837,9 +884,7 @@ mod tests {
         let mgr_a =
             RepairOwnership::new("host-a".into(), "test-a".into()).with_ttl(Duration::from_secs(1));
         let result = mgr_a.try_acquire(&image).expect("acquire");
-        let AcquireResult::Acquired(guard) = result else {
-            panic!("expected acquired");
-        };
+        let guard = acquired_guard(result).expect("expected acquired");
 
         std::thread::sleep(Duration::from_millis(1100));
         let mgr_b = RepairOwnership::new("host-b".into(), "test-b".into());
@@ -856,6 +901,34 @@ mod tests {
     }
 
     #[test]
+    fn release_rejects_same_host_same_lease_different_pid() {
+        let dir = tempdir();
+        let image = dir.join("test.img");
+        std::fs::write(&image, b"fake image").unwrap();
+        let record_path = RepairOwnership::record_path_for(&image);
+
+        let guard_record = record_fixture("host-1", 9, 4);
+        let mut on_disk = guard_record.clone();
+        on_disk.pid = different_pid();
+        std::fs::write(
+            &record_path,
+            serde_json::to_string_pretty(&on_disk).unwrap(),
+        )
+        .unwrap();
+
+        let guard = OwnershipGuard {
+            record_path: record_path.clone(),
+            record: guard_record,
+        };
+        let err = RepairOwnership::release(guard).expect_err("release must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+
+        let contents = std::fs::read_to_string(record_path).expect("record remains");
+        let current: CoordinationRecord = serde_json::from_str(&contents).expect("parse");
+        assert_eq!(current.pid, on_disk.pid);
+    }
+
+    #[test]
     fn temp_record_path_is_unique_per_write_attempt() {
         let record_path = PathBuf::from("/tmp/.image.img.ffs-repair-owner.json");
         let first = temp_record_path(&record_path);
@@ -865,17 +938,33 @@ mod tests {
         assert_eq!(second.parent(), record_path.parent());
     }
 
-    fn record_fixture(host_id: &str, repair_generation: u64, lease_version: u64) -> CoordinationRecord {
+    fn record_fixture(
+        host_id: &str,
+        repair_generation: u64,
+        lease_version: u64,
+    ) -> CoordinationRecord {
         CoordinationRecord {
             version: RECORD_VERSION,
             host_id: host_id.into(),
             hostname: "worker".into(),
-            pid: 1234,
+            pid: std::process::id(),
             claimed_at: format_iso8601(SystemTime::now()),
             lease_ttl_secs: DEFAULT_LEASE_TTL_SECS,
             lease_version,
             repair_generation,
             groups_owned: vec![],
+        }
+    }
+
+    fn different_pid() -> u32 {
+        let pid = std::process::id();
+        if pid == u32::MAX { pid - 1 } else { pid + 1 }
+    }
+
+    fn acquired_guard(result: AcquireResult) -> Option<OwnershipGuard> {
+        match result {
+            AcquireResult::Acquired(guard) => Some(guard),
+            AcquireResult::OwnedByOther { .. } | AcquireResult::ConflictLost { .. } => None,
         }
     }
 

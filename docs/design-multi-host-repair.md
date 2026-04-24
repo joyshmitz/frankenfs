@@ -39,6 +39,7 @@ Record format:
   "pid": 12345,
   "claimed_at": "2026-03-14T02:00:00Z",
   "lease_ttl_secs": 300,
+  "lease_version": 9,
   "repair_generation": 42,
   "groups_owned": [0, 1, 2, 3]
 }
@@ -50,9 +51,15 @@ Record format:
    - Host writes its own record with a new `claimed_at`
    - Ownership acquired
 3. If record is present and NOT expired:
-   - Another host owns the image — back off
+   - Another process/host owns the image — back off
 4. During repair, host periodically **renews** lease (updates `claimed_at`)
 5. On completion or crash, lease expires naturally
+
+A live claim incarnation is identified by `(host_id, pid,
+repair_generation, lease_version)`. A same-host process with a different
+`pid` is treated as a different claimant until the existing lease expires;
+this prevents two local repair processes from renewing or releasing each
+other's claim.
 
 ### 2.2 Conflict Detection
 
@@ -60,8 +67,8 @@ If two hosts race to claim an expired lease:
 
 1. Both read the expired record
 2. Both write their own record
-3. On next read, each host verifies its own `host_id` is in the record
-4. If mismatch: **deterministic tiebreak** — lower `host_id` (lexicographic UUID comparison) wins
+3. On next read, each process verifies its own claim incarnation is in the record
+4. If mismatch: higher `repair_generation` wins; if generations match, deterministic tiebreak applies — lower `host_id` (lexicographic UUID comparison) wins
 5. Losing host releases and retries after a backoff period
 
 This is **optimistic concurrency**: conflicts are detected after the fact,
@@ -168,7 +175,7 @@ verify ownership after write. Loser backs off. Worst case: both hosts
 do redundant work for one scrub cycle. Symbol writes are idempotent
 (same seed → same symbols), so no corruption.
 
-**Invariant:** At most one host writes repair symbols to any given
+**Invariant:** At most one process/host writes repair symbols to any given
 group at a time, enforced by the coordination record + post-write
 verification.
 
@@ -211,6 +218,7 @@ pub struct CoordinationRecord {
     pub pid: u32,
     pub claimed_at: String,  // ISO 8601
     pub lease_ttl_secs: u64,
+    pub lease_version: u64,
     pub repair_generation: u64,
     pub groups_owned: Vec<u32>,
 }
