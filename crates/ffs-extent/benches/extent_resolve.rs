@@ -9,11 +9,11 @@
 
 use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::Result as FfsResult;
 use ffs_types::BlockNumber;
 use parking_lot::Mutex;
+use std::hint::black_box;
 
 // ── Constants ───────────────────────────────────────────────────────────────
 

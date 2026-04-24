@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 pub fn parse_btrfs_root_item_bytenr(data: &[u8]) -> Result<u64> {
     if data.len() < 184 {

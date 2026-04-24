@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use ffs_harness::load_sparse_fixture;
 use ffs_ondisk::{
     Ext4GroupDesc, Ext4Inode, parse_dir_block, parse_extent_tree, parse_sys_chunk_array,
 };
+use std::hint::black_box;
 use std::path::Path;
 
 fn fixture_path(name: &str) -> std::path::PathBuf {

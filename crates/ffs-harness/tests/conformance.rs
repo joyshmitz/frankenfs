@@ -978,9 +978,18 @@ fn ext4_fscrypt_legacy_policy_transport_discrepancy_conforms() {
         FSCRYPT_POLICY_V1_SIZE,
         "direct dispatch should return a v1 policy payload"
     );
-    assert_eq!(policy[0], golden_u8(&golden, "direct_dispatch", "policy_version"));
-    assert_eq!(policy[1], golden_u8(&golden, "direct_dispatch", "contents_mode"));
-    assert_eq!(policy[2], golden_u8(&golden, "direct_dispatch", "filenames_mode"));
+    assert_eq!(
+        policy[0],
+        golden_u8(&golden, "direct_dispatch", "policy_version")
+    );
+    assert_eq!(
+        policy[1],
+        golden_u8(&golden, "direct_dispatch", "contents_mode")
+    );
+    assert_eq!(
+        policy[2],
+        golden_u8(&golden, "direct_dispatch", "filenames_mode")
+    );
     assert_eq!(policy[3], golden_u8(&golden, "direct_dispatch", "flags"));
     assert_eq!(
         hex::encode(&policy[4..12]),

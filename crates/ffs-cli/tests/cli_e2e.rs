@@ -787,8 +787,7 @@ fn cli_inspect_unreadable_image_reports_permission_error() {
     let tmpdir = tempfile::tempdir().expect("create temp dir");
     let image = tmpdir.path().join("locked.img");
     fs::write(&image, vec![0u8; 4096]).expect("write empty image");
-    fs::set_permissions(&image, fs::Permissions::from_mode(0o000))
-        .expect("chmod 000 on image");
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o000)).expect("chmod 000 on image");
 
     // Root bypasses POSIX mode 0o000, so skip rather than silently pass.
     if fs::read(&image).is_ok() {

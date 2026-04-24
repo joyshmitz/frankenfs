@@ -6015,9 +6015,24 @@ mod tests {
             u32::try_from(payloads.extent.len()).expect("extent size should fit"),
         );
 
-        copy_into_leaf(image, leaf_offset, ROOT_INODE_DATA_OFFSET, &payloads.root_inode);
-        copy_into_leaf(image, leaf_offset, DIR_INDEX_DATA_OFFSET, &payloads.dir_index);
-        copy_into_leaf(image, leaf_offset, FILE_INODE_DATA_OFFSET, &payloads.file_inode);
+        copy_into_leaf(
+            image,
+            leaf_offset,
+            ROOT_INODE_DATA_OFFSET,
+            &payloads.root_inode,
+        );
+        copy_into_leaf(
+            image,
+            leaf_offset,
+            DIR_INDEX_DATA_OFFSET,
+            &payloads.dir_index,
+        );
+        copy_into_leaf(
+            image,
+            leaf_offset,
+            FILE_INODE_DATA_OFFSET,
+            &payloads.file_inode,
+        );
         copy_into_leaf(image, leaf_offset, EXTENT_DATA_OFFSET, &payloads.extent);
         stamp_btrfs_test_tree_block_crc32c(image, leaf_offset);
 

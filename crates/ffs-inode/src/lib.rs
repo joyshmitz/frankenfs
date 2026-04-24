@@ -330,7 +330,7 @@ pub fn create_inode(
     extent_bytes[1] = (EXT4_EXTENT_MAGIC >> 8) as u8;
     // entries = 0.
     extent_bytes[4] = 4; // max_entries = 4.
-                         // depth = 0 (already zero).
+    // depth = 0 (already zero).
 
     let extra_time = encode_extra_timestamp(now_secs, now_nsec);
 
@@ -465,8 +465,8 @@ pub fn delete_inode(
 #[must_use]
 pub fn encode_extra_timestamp(secs: u64, nsec: u32) -> u32 {
     let epoch = ((secs >> 32) & 0x3) as u32; // upper 2 bits of seconds
-                                             // Clamp nsec to valid range to prevent bit-shift overflow.
-                                             // Max valid: 999_999_999 << 2 = 3_999_999_996, fits in u32.
+    // Clamp nsec to valid range to prevent bit-shift overflow.
+    // Max valid: 999_999_999 << 2 = 3_999_999_996, fits in u32.
     let clamped_nsec = nsec.min(999_999_999);
     let nsec_bits = clamped_nsec << 2; // nanoseconds shifted to bits 2-31
     epoch | nsec_bits

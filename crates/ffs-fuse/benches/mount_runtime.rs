@@ -7,9 +7,9 @@
 //! metrics recording. These operate without actual FUSE mounts.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use ffs_fuse::AtomicMetrics;
 use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher};
+use std::hint::black_box;
 use std::sync::atomic::Ordering;
 
 fn bench_per_core_route_inode(c: &mut Criterion) {

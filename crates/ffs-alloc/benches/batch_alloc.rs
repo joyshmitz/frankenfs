@@ -8,7 +8,6 @@
 
 use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use ffs_alloc::{
     AllocHint, FsGeometry, GroupStats, PersistCtx, alloc_blocks_batch_persist, alloc_blocks_persist,
 };
@@ -16,6 +15,7 @@ use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::Result as FfsResult;
 use ffs_types::{BlockNumber, GroupNumber};
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::sync::Mutex;
 
 /// In-memory block device for benchmarks.
