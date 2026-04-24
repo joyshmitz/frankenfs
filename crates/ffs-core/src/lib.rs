@@ -68,6 +68,7 @@ use tracing::{debug, error, info, trace, warn};
 // Degradation/pressure types are in degradation.rs, re-exported above.
 // VFS types and FsOps trait are in vfs.rs, re-exported above.
 const LINUX_PATH_MAX: u64 = 4096;
+const LINUX_SYMLINK_TARGET_MAX: usize = 4095;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
@@ -15953,7 +15954,7 @@ impl FsOps for OpenFs {
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
         let target_len = target.as_os_str().as_encoded_bytes().len();
-        if target_len == 0 || u64::try_from(target_len).unwrap_or(u64::MAX) > LINUX_PATH_MAX {
+        if target_len == 0 || target_len > LINUX_SYMLINK_TARGET_MAX {
             return Err(FfsError::NameTooLong);
         }
         match &self.flavor {
@@ -25566,8 +25567,8 @@ mod tests {
         let cx = Cx::for_testing();
         let root = InodeNumber(2);
 
-        // Target of exactly 4097 bytes exceeds LINUX_PATH_MAX (4096).
-        let too_long = "x".repeat(4097);
+        // Linux PATH_MAX includes the trailing NUL, so a 4096-byte target is too long.
+        let too_long = "x".repeat(usize::try_from(LINUX_PATH_MAX).unwrap());
         let err = fs
             .symlink(
                 &cx,
@@ -25593,8 +25594,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENAMETOOLONG);
 
-        // Target of exactly 4096 bytes is accepted (at PATH_MAX boundary).
-        let at_limit = "y".repeat(4096);
+        // Target of exactly PATH_MAX-1 bytes is accepted.
+        let at_limit = "y".repeat(LINUX_SYMLINK_TARGET_MAX);
         let attr = fs
             .symlink(
                 &cx,
@@ -25604,7 +25605,7 @@ mod tests {
                 1000,
                 1000,
             )
-            .expect("symlink at PATH_MAX should succeed");
+            .expect("symlink at PATH_MAX-1 should succeed");
         assert_eq!(attr.kind, FileType::Symlink);
     }
 
@@ -31523,8 +31524,8 @@ mod tests {
             .expect_err("symlink exceeding PATH_MAX should fail");
         assert_eq!(err.to_errno(), libc::ENAMETOOLONG);
 
-        // Target at exactly PATH_MAX boundary is accepted.
-        let max_target = "y".repeat(path_max);
+        // Target at exactly PATH_MAX-1 boundary is accepted.
+        let max_target = "y".repeat(path_max - 1);
         let attr = ops
             .symlink(
                 &cx,
@@ -31535,11 +31536,11 @@ mod tests {
                 0,
                 0,
             )
-            .expect("symlink at PATH_MAX should succeed");
+            .expect("symlink at PATH_MAX-1 should succeed");
         let target = ops
             .readlink(&cx, &mut RequestScope::empty(), attr.ino)
             .expect("readlink max symlink");
-        assert_eq!(target.len(), path_max);
+        assert_eq!(target.len(), path_max - 1);
     }
 
     #[test]

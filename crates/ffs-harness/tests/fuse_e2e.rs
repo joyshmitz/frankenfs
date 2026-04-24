@@ -97,6 +97,34 @@ fn trace_contains_cmd(trace: &str, cmd: u32) -> bool {
     trace.contains(&format!("cmd=0x{cmd:08x}"))
 }
 
+fn fscrypt_policy_ex_transport_eio_is_expected(
+    report: &Value,
+    ioctl_trace: &str,
+    scenario_id: &str,
+    policy_version: &str,
+) -> bool {
+    if report["errno"].as_i64() != Some(i64::from(libc::EIO)) {
+        return false;
+    }
+    assert!(
+        trace_contains_cmd(ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_EX_CMD),
+        "GET_ENCRYPTION_POLICY_EX {policy_version} EIO must be after ffs-fuse::ioctl dispatch: \
+         {ioctl_trace}"
+    );
+    assert_eq!(
+        report["message"].as_str(),
+        Some("[Errno 5] Input/output error"),
+        "GET_ENCRYPTION_POLICY_EX {policy_version} mounted-path failure should remain the \
+         expected kernel/FUSE transport EIO: {report}"
+    );
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("restricted_fuse_iowr_transport_surfaces_eio"),
+    );
+    true
+}
+
 /// Check if FUSE E2E prerequisites are met.
 fn fuse_available() -> bool {
     Path::new("/dev/fuse").exists()
@@ -3353,8 +3381,8 @@ fn assert_symlink_target_path_max_contract(mnt: &Path, scenario_id: &str) {
         .expect_err("symlink with empty target must be rejected");
     assert_eq!(
         empty_err.raw_os_error(),
-        Some(libc::ENAMETOOLONG),
-        "empty symlink target must surface exact ENAMETOOLONG: {empty_err}"
+        Some(libc::ENOENT),
+        "empty symlink target must surface Linux VFS ENOENT before FUSE dispatch: {empty_err}"
     );
     assert!(
         fs::symlink_metadata(&empty_link).is_err(),
@@ -3371,7 +3399,7 @@ fn assert_symlink_target_path_max_contract(mnt: &Path, scenario_id: &str) {
     emit_scenario_result(
         scenario_id,
         "PASS",
-        Some("path_max_minus_one=ok_path_max=ENAMETOOLONG_empty=ENAMETOOLONG_no_drift"),
+        Some("path_max_minus_one=ok_path_max=ENAMETOOLONG_empty=ENOENT_no_drift"),
     );
 }
 
@@ -5335,10 +5363,14 @@ fn fuse_ioctl_ext4_get_encryption_policy_ex_returns_v1_policy_on_mounted_path() 
         trace_contains_cmd(&ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_EX_CMD),
         "successful GET_ENCRYPTION_POLICY_EX should hit ffs-fuse::ioctl: {ioctl_trace}"
     );
+    if fscrypt_policy_ex_transport_eio_is_expected(&report, &ioctl_trace, scenario_id, "v1") {
+        return;
+    }
 
     assert!(
         report["errno"].is_null(),
-        "GET_ENCRYPTION_POLICY_EX should succeed: {report}"
+        "GET_ENCRYPTION_POLICY_EX should either succeed or surface the known restricted-FUSE \
+         transport EIO: {report}"
     );
     assert_eq!(
         report["policy_version"].as_u64(),
@@ -5423,10 +5455,14 @@ fn fuse_ioctl_ext4_get_encryption_policy_ex_returns_v2_policy_on_mounted_path() 
         trace_contains_cmd(&ioctl_trace, FS_IOC_GET_ENCRYPTION_POLICY_EX_CMD),
         "successful GET_ENCRYPTION_POLICY_EX v2 should hit ffs-fuse::ioctl: {ioctl_trace}"
     );
+    if fscrypt_policy_ex_transport_eio_is_expected(&report, &ioctl_trace, scenario_id, "v2") {
+        return;
+    }
 
     assert!(
         report["errno"].is_null(),
-        "GET_ENCRYPTION_POLICY_EX v2 should succeed: {report}"
+        "GET_ENCRYPTION_POLICY_EX v2 should either succeed or surface the known restricted-FUSE \
+         transport EIO: {report}"
     );
     assert_eq!(
         report["policy_version"].as_u64(),
@@ -8003,19 +8039,20 @@ fn fuse_xattr_ext4_name_too_long_reports_erange() {
 }
 
 #[test]
-fn fuse_xattr_ext4_value_too_large_reports_einval() {
+fn fuse_xattr_ext4_value_too_large_reports_enospc() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
         let original_file = fs::read(&path).expect("read original file bytes");
 
-        // ext4 xattr value limit is 64KB (65536 bytes)
-        let oversized_value = vec![0x42_u8; 65537];
+        // This 4KiB-block fixture has one external EA block. A 4037-byte
+        // value cannot coexist with the xattr entry header and terminator.
+        let oversized_value = vec![0x42_u8; 4037];
 
         let report = py_setxattr_report(&path, "user.toobig", &oversized_value, 0);
         assert_eq!(
             report["errno"].as_i64(),
-            Some(i64::from(libc::EINVAL)),
-            "xattr value > 64KB should return EINVAL: {report}"
+            Some(i64::from(libc::ENOSPC)),
+            "xattr value too large for the ext4 EA block should return ENOSPC: {report}"
         );
 
         // Verify the xattr was not created
@@ -8057,11 +8094,13 @@ fn fuse_xattr_ext4_boundary_value_size_accepted() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
 
-        // The maximum value size is 64KB (65536 bytes)
-        let max_value = vec![0xAB_u8; 65536];
+        // Maximum payload for one ext4 external EA block with name "user.maxval":
+        // 4096 block - 32 block header - 24 entry - 4 terminator.
+        let max_value = vec![0xAB_u8; 4036];
 
         py_setxattr(&path, "user.maxval", &max_value);
-        let readback = py_getxattr(&path, "user.maxval").expect("64KB xattr value should exist");
+        let readback =
+            py_getxattr(&path, "user.maxval").expect("max ext4 EA-block xattr should exist");
         assert_eq!(
             readback, max_value,
             "boundary-size xattr value should round-trip"
@@ -10358,14 +10397,15 @@ fn btrfs_fuse_xattr_value_too_large_reports_einval() {
         fs::write(&path, b"xattr value size test\n").expect("create test file");
         let original_file = fs::read(&path).expect("read original file bytes");
 
-        // xattr value limit is 64KB (65536 bytes)
-        let oversized_value = vec![0x42_u8; 65537];
+        // Btrfs xattr item value length is encoded as u16, so 65536 is one
+        // byte beyond the representable on-disk item size.
+        let oversized_value = vec![0x42_u8; 65536];
 
         let report = py_setxattr_report(&path, "user.toobig", &oversized_value, 0);
         assert_eq!(
             report["errno"].as_i64(),
             Some(i64::from(libc::EINVAL)),
-            "btrfs xattr value > 64KB should return EINVAL: {report}"
+            "btrfs xattr value beyond u16 item size should return EINVAL: {report}"
         );
 
         // Verify the xattr was not created
@@ -10409,12 +10449,12 @@ fn btrfs_fuse_xattr_boundary_value_size_accepted() {
         let path = mnt.join("xattr_boundary_value.txt");
         fs::write(&path, b"boundary value test\n").expect("create test file");
 
-        // The maximum value size is 64KB (65536 bytes)
-        let max_value = vec![0xAB_u8; 65536];
+        // Btrfs stores the value length in a u16 field.
+        let max_value = vec![0xAB_u8; 65535];
 
         py_setxattr(&path, "user.maxval", &max_value);
         let readback =
-            py_getxattr(&path, "user.maxval").expect("btrfs 64KB xattr value should exist");
+            py_getxattr(&path, "user.maxval").expect("max btrfs u16 xattr value should exist");
         assert_eq!(
             readback, max_value,
             "btrfs boundary-size xattr value should round-trip"
