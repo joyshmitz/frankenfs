@@ -954,12 +954,17 @@ fn ext4_fscrypt_legacy_policy_transport_discrepancy_conforms() {
     let image_path = tmp.path().join("fscrypt-policy-v1.ext4");
     std::fs::write(&image_path, &image).expect("write fscrypt transport image");
 
+    assert_direct_fscrypt_legacy_policy(&golden, &image_path);
+    assert_mounted_fscrypt_legacy_policy(&golden, tmp.path(), &image_path);
+}
+
+fn assert_direct_fscrypt_legacy_policy(golden: &Value, image_path: &Path) {
     let cx = Cx::for_testing();
     let open_opts = OpenOptions {
         ext4_journal_replay_mode: Ext4JournalReplayMode::SimulateOverlay,
         ..OpenOptions::default()
     };
-    let fs = OpenFs::open_with_options(&cx, &image_path, &open_opts)
+    let fs = OpenFs::open_with_options(&cx, image_path, &open_opts)
         .expect("open ext4 fscrypt transport image");
     let fuse = FrankenFuse::new(Box::new(fs));
     let direct_request = [0_u8; FSCRYPT_POLICY_V1_SIZE];
@@ -980,39 +985,41 @@ fn ext4_fscrypt_legacy_policy_transport_discrepancy_conforms() {
     );
     assert_eq!(
         policy[0],
-        golden_u8(&golden, "direct_dispatch", "policy_version")
+        golden_u8(golden, "direct_dispatch", "policy_version")
     );
     assert_eq!(
         policy[1],
-        golden_u8(&golden, "direct_dispatch", "contents_mode")
+        golden_u8(golden, "direct_dispatch", "contents_mode")
     );
     assert_eq!(
         policy[2],
-        golden_u8(&golden, "direct_dispatch", "filenames_mode")
+        golden_u8(golden, "direct_dispatch", "filenames_mode")
     );
-    assert_eq!(policy[3], golden_u8(&golden, "direct_dispatch", "flags"));
+    assert_eq!(policy[3], golden_u8(golden, "direct_dispatch", "flags"));
     assert_eq!(
         hex::encode(&policy[4..12]),
         golden["direct_dispatch"]["master_key_descriptor_hex"]
             .as_str()
             .expect("golden direct master_key_descriptor_hex")
     );
+}
 
+fn assert_mounted_fscrypt_legacy_policy(golden: &Value, tmp_path: &Path, image_path: &Path) {
     if !fuse_available() {
         eprintln!("Skipping mounted-path fscrypt transport probe: FUSE prerequisites not met.");
         return;
     }
 
-    let mnt = tmp.path().join("mnt");
+    let mnt = tmp_path.join("mnt");
     std::fs::create_dir_all(&mnt).expect("create conformance mountpoint");
-    let ioctl_trace_path = tmp.path().join("ioctl-ext4-fscrypt-legacy.log");
+    let ioctl_trace_path = tmp_path.join("ioctl-ext4-fscrypt-legacy.log");
     let mount_opts = MountOptions {
         read_only: true,
         auto_unmount: false,
         ioctl_trace_path: Some(ioctl_trace_path.clone()),
         ..MountOptions::default()
     };
-    let Some(_session) = try_mount_ffs_with_options(&image_path, &mnt, &mount_opts) else {
+    let Some(_session) = try_mount_ffs_with_options(image_path, &mnt, &mount_opts) else {
         eprintln!("Skipping mounted-path fscrypt transport probe: FUSE mount failed.");
         return;
     };

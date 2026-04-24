@@ -53,7 +53,8 @@ fn btrfs_multi_device_raid5_read_conforms() {
 
     // In RAID5, data is striped.
     // Stripe 0: dev1:0x100_000, dev2:0x200_000, dev3:0x300_000 (P)
-    // Stripe 1: dev1:0x110_000 (P), dev2:0x210_000, dev3:0x310_000
+    // Row 1 starts at the next full RAID5 row: dev1:0x110_000 (P),
+    // dev2:0x210_000, dev3:0x310_000.
 
     let d1 = Arc::clone(&data1);
     devices.add_device(
@@ -76,7 +77,7 @@ fn btrfs_multi_device_raid5_read_conforms() {
         2,
         Box::new(move |physical, len| {
             assert_eq!(len, 4);
-            if physical == 0x210_000 {
+            if physical == 0x200_000 {
                 Ok((*d2).clone())
             } else {
                 Err(ParseError::InvalidField {
@@ -105,8 +106,7 @@ fn btrfs_multi_device_raid5_read_conforms() {
         .expect("read RAID5 data1");
     assert_eq!(res1, vec![0x11_u8; 4]);
 
-    // Read from logical 0x50_000 + stripe_len (stripe 1, data 2)
-    // Stripe 1 for logical 0x60_000 should map to dev2:0x210_000
+    // Read row 0, data stripe 1. Row 0 has parity on dev3, so this maps to dev2:0x200_000.
     let res2 = devices
         .read_logical(&chunks, logical + stripe_len, 4)
         .expect("read RAID5 data2");

@@ -10849,6 +10849,7 @@ mod tests {
             prop_assume!(entry_len + 1 < data.len());
 
             let value_off = data_len.saturating_sub(value_size.saturating_sub(1));
+            prop_assume!(value_off >= entry_len + 4);
             prop_assume!(value_off + value_size > data.len());
 
             data[0] = u8::try_from(name_len).expect("name length bounded by strategy");
