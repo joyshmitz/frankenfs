@@ -186,6 +186,11 @@ source paths, with no visible workspace-entry or witness-file drift.
 Mounted-path ext4 symlink/refusal coverage now also freezes exact `EINVAL` for
 `readlink` on both regular-file and directory non-symlink paths, with no
 directory-entry or file-byte drift.
+FUSE/statfs parity now also freezes the ext4 group-descriptor accounting
+contract: total geometry still comes from the superblock, while free block and
+inode counts are aggregated from live group descriptors so write-side allocation
+changes are visible to `statfs` without relying on stale open-time superblock
+counters.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

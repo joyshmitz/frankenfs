@@ -3722,6 +3722,11 @@ All blocks start with 12-byte header: `{ h_magic: 0xC03B3998, h_blocktype, h_seq
 
 16 bytes per tag. If `!SAME_UUID`: 16-byte UUID follows.
 
+For non-`CSUM_V3` descriptor tags, the base layout is `{ t_blocknr: u32,
+t_checksum: u16, t_flags: u16 }` plus `t_blocknr_high: u32` when the journal
+advertises 64-bit block numbers. The same `!SAME_UUID` rule applies: a 16-byte
+UUID follows the base tag and must be accounted for before the next tag.
+
 #### 11.6.4 Replay Algorithm
 
 1. **SCAN:** From `s_start`, seq=`s_sequence`. Match magic+seq. Parse DESCRIPTOR/COMMIT/REVOKE. Stop on mismatch.
@@ -4218,16 +4223,17 @@ inode-only; kernel handles actual I/O in memory.
 
 ### 13.1 statfs
 
-Returns filesystem statistics from superblock and aggregated group descriptors.
+Returns filesystem statistics from superblock geometry and aggregated group
+descriptors.
 
 | `statvfs` Field | Source |
 |----------------|--------|
 | `f_bsize` | `1024 << s_log_block_size` |
 | `f_blocks` | `s_blocks_count_lo/hi` |
-| `f_bfree` | `s_free_blocks_count_lo/hi` |
+| `f_bfree` | Sum of `bg_free_blocks_count` across all groups |
 | `f_bavail` | `f_bfree - s_r_blocks_count` (minus reserved-for-root) |
 | `f_files` | `s_inodes_count` |
-| `f_ffree` | `s_free_inodes_count` |
+| `f_ffree` | Sum of `bg_free_inodes_count` across all groups |
 | `f_namemax` | 255 |
 
 MVCC note: free counts read under a snapshot may be slightly stale; POSIX
