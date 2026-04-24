@@ -30,6 +30,8 @@ use parking_lot::RwLock;
 const UNWRITTEN_FLAG: u16 = 1_u16 << 15;
 /// ext4 kernel limit for extent tree depth.
 const MAX_EXTENT_TREE_DEPTH: u16 = 5;
+/// One-past-the-end of ext4's 32-bit logical block address space.
+const LOGICAL_BLOCK_SPACE: u64 = 1_u64 << 32;
 
 // ── Extent mapping ──────────────────────────────────────────────────────────
 
@@ -60,7 +62,7 @@ pub fn map_logical_to_physical(
 
     let mut mappings = Vec::new();
     let mut pos = u64::from(logical_start);
-    let end = u64::from(logical_start) + count;
+    let end = checked_logical_range_end("map_logical_to_physical", logical_start, count)?;
 
     while pos < end {
         cx_checkpoint(cx)?;
@@ -460,16 +462,14 @@ pub fn mark_written(
     cx_checkpoint(cx)?;
     validate_root_header("mark_written", root_bytes)?;
 
-    let range_end = logical_start.saturating_add(count);
+    let range_end = checked_logical_range_end("mark_written", logical_start, u64::from(count))?;
 
     // Collect unwritten extents overlapping the range.
     let mut unwritten_extents = Vec::new();
     ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
         if ext.is_unwritten() {
-            let ext_end = ext
-                .logical_block
-                .saturating_add(u32::from(ext.actual_len()));
-            if ext.logical_block < range_end && ext_end > logical_start {
+            let ext_end = u64::from(ext.logical_block) + u64::from(ext.actual_len());
+            if u64::from(ext.logical_block) < range_end && ext_end > u64::from(logical_start) {
                 unwritten_extents.push(*ext);
             }
         }
@@ -478,7 +478,7 @@ pub fn mark_written(
 
     for ext in unwritten_extents {
         let ext_len = u32::from(ext.actual_len());
-        let ext_end = ext.logical_block.saturating_add(ext_len);
+        let ext_end = u64::from(ext.logical_block) + u64::from(ext_len);
 
         let mut tree_alloc = GroupBlockAllocator {
             cx,
@@ -514,25 +514,33 @@ pub fn mark_written(
 
 /// Build replacement extents when marking a portion of an unwritten extent as written.
 #[expect(clippy::cast_possible_truncation)]
-fn split_for_mark_written(
+fn split_for_mark_written<M, E>(
     ext: &Ext4Extent,
     mark_start: u32,
-    mark_end: u32,
-    ext_end: u32,
+    mark_end: M,
+    ext_end: E,
     mark_count: u32,
-) -> Vec<Ext4Extent> {
+) -> Vec<Ext4Extent>
+where
+    M: Into<u64>,
+    E: Into<u64>,
+{
+    let mark_start_u64 = u64::from(mark_start);
+    let mark_end = mark_end.into();
+    let ext_start = u64::from(ext.logical_block);
+    let ext_end = ext_end.into();
     let mut out = Vec::with_capacity(3);
 
-    if ext.logical_block >= mark_start && ext_end <= mark_end {
+    if ext_start >= mark_start_u64 && ext_end <= mark_end {
         // Fully within: just clear unwritten flag.
         out.push(Ext4Extent {
             logical_block: ext.logical_block,
             raw_len: ext.actual_len(),
             physical_start: ext.physical_start,
         });
-    } else if ext.logical_block < mark_start && ext_end > mark_end {
+    } else if ext_start < mark_start_u64 && ext_end > mark_end {
         // Spans entire range: left-unwritten, middle-written, right-unwritten.
-        let left_len = (mark_start - ext.logical_block) as u16;
+        let left_len = (mark_start_u64 - ext_start) as u16;
         out.push(Ext4Extent {
             logical_block: ext.logical_block,
             raw_len: left_len | UNWRITTEN_FLAG,
@@ -546,19 +554,20 @@ fn split_for_mark_written(
         });
         let right_len = (ext_end - mark_end) as u16;
         out.push(Ext4Extent {
-            logical_block: mark_end,
+            logical_block: u32::try_from(mark_end)
+                .expect("right-hand split start must fit logical block range"),
             raw_len: right_len | UNWRITTEN_FLAG,
-            physical_start: ext.physical_start + u64::from(mark_end - ext.logical_block),
+            physical_start: ext.physical_start + (mark_end - ext_start),
         });
-    } else if ext.logical_block < mark_start {
+    } else if ext_start < mark_start_u64 {
         // Starts before: unwritten prefix + written suffix.
-        let prefix_len = (mark_start - ext.logical_block) as u16;
+        let prefix_len = (mark_start_u64 - ext_start) as u16;
         out.push(Ext4Extent {
             logical_block: ext.logical_block,
             raw_len: prefix_len | UNWRITTEN_FLAG,
             physical_start: ext.physical_start,
         });
-        let suffix_len = (ext_end - mark_start) as u16;
+        let suffix_len = (ext_end - mark_start_u64) as u16;
         out.push(Ext4Extent {
             logical_block: mark_start,
             raw_len: suffix_len,
@@ -566,7 +575,7 @@ fn split_for_mark_written(
         });
     } else {
         // Starts within range, extends beyond: written prefix + unwritten suffix.
-        let written_len = (mark_end - ext.logical_block) as u16;
+        let written_len = (mark_end - ext_start) as u16;
         out.push(Ext4Extent {
             logical_block: ext.logical_block,
             raw_len: written_len,
@@ -574,7 +583,8 @@ fn split_for_mark_written(
         });
         let unwritten_len = (ext_end - mark_end) as u16;
         out.push(Ext4Extent {
-            logical_block: mark_end,
+            logical_block: u32::try_from(mark_end)
+                .expect("right-hand split start must fit logical block range"),
             raw_len: unwritten_len | UNWRITTEN_FLAG,
             physical_start: ext.physical_start + u64::from(written_len),
         });
@@ -585,6 +595,21 @@ fn split_for_mark_written(
 
 fn cx_checkpoint(cx: &Cx) -> Result<()> {
     cx.checkpoint().map_err(|_| FfsError::Cancelled)
+}
+
+fn checked_logical_range_end(op: &str, logical_start: u32, count: u64) -> Result<u64> {
+    let start = u64::from(logical_start);
+    let Some(end) = start.checked_add(count) else {
+        return Err(FfsError::InvalidGeometry(format!(
+            "{op}: logical range {logical_start}+{count} overflows u64"
+        )));
+    };
+    if end > LOGICAL_BLOCK_SPACE {
+        return Err(FfsError::InvalidGeometry(format!(
+            "{op}: logical range [{logical_start}, {end}) exceeds ext4 32-bit block space"
+        )));
+    }
+    Ok(end)
 }
 
 fn validate_root_header(op: &str, root_bytes: &[u8; 60]) -> Result<()> {
@@ -741,8 +766,8 @@ impl ExtentCache {
             return None;
         };
 
-        let extent_end = mapping.logical_start.saturating_add(mapping.count);
-        if logical_block < extent_end && entry_gen == current_gen {
+        let extent_end = u64::from(mapping.logical_start) + u64::from(mapping.count);
+        if u64::from(logical_block) < extent_end && entry_gen == current_gen {
             inner.hits += 1;
             let clock = inner.hits + inner.misses;
             if let Some(e) = inner.entries.get_mut(&key) {
@@ -1159,6 +1184,29 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         }
     }
 
+    #[test]
+    fn map_accepts_final_logical_block() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let root = empty_root();
+
+        let mappings = map_logical_to_physical(&cx, &dev, &root, u32::MAX, 1).unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].logical_start, u32::MAX);
+        assert_eq!(mappings[0].count, 1);
+        assert_eq!(mappings[0].physical_start, 0);
+    }
+
+    #[test]
+    fn map_rejects_range_past_logical_block_space() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let root = empty_root();
+
+        let result = map_logical_to_physical(&cx, &dev, &root, u32::MAX, 2);
+        assert!(matches!(result, Err(FfsError::InvalidGeometry(_))));
+    }
+
     // ── Allocate tests ──────────────────────────────────────────────────
 
     #[test]
@@ -1539,6 +1587,53 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
     }
 
     #[test]
+    fn mark_written_covers_final_logical_block() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_unwritten_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            u32::MAX,
+            1,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+
+        mark_written(&cx, &dev, &mut root, &geo, &mut groups, u32::MAX, 1, &pctx).unwrap();
+
+        match ffs_btree::search(&cx, &dev, &root, u32::MAX).unwrap() {
+            SearchResult::Found { extent, .. } => {
+                assert_eq!(extent.logical_block, u32::MAX);
+                assert_eq!(extent.actual_len(), 1);
+                assert!(!extent.is_unwritten());
+            }
+            other => panic!("expected final block extent to remain searchable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mark_written_rejects_range_past_logical_block_space() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let result = mark_written(&cx, &dev, &mut root, &geo, &mut groups, u32::MAX, 2, &pctx);
+        assert!(matches!(result, Err(FfsError::InvalidGeometry(_))));
+    }
+
+    #[test]
     fn mark_written_partial_splits_extent() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
@@ -1737,7 +1832,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let out = split_for_mark_written(&ext, 0, 10, 10, 10);
+        let out = split_for_mark_written(&ext, 0, 10_u64, 10_u64, 10);
         assert_eq!(out.len(), 1);
         assert!(!out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 10);
@@ -1751,7 +1846,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let out = split_for_mark_written(&ext, 5, 10, 10, 5);
+        let out = split_for_mark_written(&ext, 5, 10_u64, 10_u64, 5);
         assert_eq!(out.len(), 2);
         assert!(out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 5);
@@ -1769,7 +1864,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let out = split_for_mark_written(&ext, 0, 5, 10, 5);
+        let out = split_for_mark_written(&ext, 0, 5_u64, 10_u64, 5);
         assert_eq!(out.len(), 2);
         assert!(!out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 5);
@@ -1787,7 +1882,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let out = split_for_mark_written(&ext, 3, 7, 10, 4);
+        let out = split_for_mark_written(&ext, 3, 7_u64, 10_u64, 4);
         assert_eq!(out.len(), 3);
         assert!(out[0].is_unwritten());
         assert_eq!(out[0].logical_block, 0);
@@ -2827,7 +2922,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let parts = split_for_mark_written(&ext, 3, 10, 10, 7);
+        let parts = split_for_mark_written(&ext, 3, 10_u64, 10_u64, 7);
         assert_eq!(parts.len(), 2);
         // Prefix: unwritten [0..3)
         assert!(parts[0].is_unwritten());
@@ -2849,7 +2944,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0A | UNWRITTEN_FLAG,
             physical_start: 100,
         };
-        let parts = split_for_mark_written(&ext, 0, 6, 10, 6);
+        let parts = split_for_mark_written(&ext, 0, 6_u64, 10_u64, 6);
         assert_eq!(parts.len(), 2);
         // Prefix: written [0..6)
         assert!(!parts[0].is_unwritten());
@@ -2871,7 +2966,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x14 | UNWRITTEN_FLAG,
             physical_start: 200,
         };
-        let parts = split_for_mark_written(&ext, 5, 15, 20, 10);
+        let parts = split_for_mark_written(&ext, 5, 15_u64, 20_u64, 10);
         assert_eq!(parts.len(), 3);
         // Left: unwritten [0..5)
         assert!(parts[0].is_unwritten());
@@ -3076,7 +3171,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 1 | UNWRITTEN_FLAG,
             physical_start: 500,
         };
-        let out = split_for_mark_written(&ext, 10, 11, 11, 1);
+        let out = split_for_mark_written(&ext, 10, 11_u64, 11_u64, 1);
         assert_eq!(out.len(), 1);
         assert!(!out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 1);
@@ -3093,7 +3188,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 1 | UNWRITTEN_FLAG,
             physical_start: 500,
         };
-        let out = split_for_mark_written(&ext, 9, 11, 11, 2);
+        let out = split_for_mark_written(&ext, 9, 11_u64, 11_u64, 2);
         assert_eq!(out.len(), 1);
         assert!(!out[0].is_unwritten());
     }
@@ -3107,7 +3202,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 0x0014 | UNWRITTEN_FLAG,
             physical_start: 1000,
         };
-        let parts = split_for_mark_written(&ext, 5, 15, 20, 10);
+        let parts = split_for_mark_written(&ext, 5, 15_u64, 20_u64, 10);
         assert_eq!(parts.len(), 3);
         let total_len: u16 = parts.iter().map(|p| p.actual_len()).sum();
         assert_eq!(total_len, 20);
@@ -3125,7 +3220,7 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             raw_len: 2 | UNWRITTEN_FLAG,
             physical_start: 300,
         };
-        let out = split_for_mark_written(&ext, 0, 1, 2, 1);
+        let out = split_for_mark_written(&ext, 0, 1_u64, 2_u64, 1);
         assert_eq!(out.len(), 2);
         assert!(!out[0].is_unwritten());
         assert_eq!(out[0].actual_len(), 1);
@@ -4194,6 +4289,25 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         let stats = cache.stats();
         assert_eq!(stats.hits, 2);
         assert_eq!(stats.misses, 1);
+    }
+
+    #[test]
+    fn cache_hit_at_final_logical_block() {
+        let cache = ExtentCache::new();
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: u32::MAX,
+                physical_start: 9000,
+                count: 1,
+                unwritten: false,
+            },
+        );
+
+        let hit = cache.lookup(0, u32::MAX).unwrap();
+        assert_eq!(hit.logical_start, u32::MAX);
+        assert_eq!(hit.physical_start, 9000);
+        assert_eq!(hit.count, 1);
     }
 
     #[test]
