@@ -16,7 +16,7 @@ const EXT4_IOC_GETFLAGS: u32 = 0x8008_6601;
 const EXT4_IOC_GETVERSION: u32 = 0x8008_6603;
 const EXT4_IOC_SETVERSION: u32 = 0x4008_6604;
 const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
-const FS_IOC_GET_ENCRYPTION_POLICY_EX: u32 = 0xC016_6616;
+const FS_IOC_GET_ENCRYPTION_POLICY_EX: u32 = 0xC009_6616;
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 const FS_IOC_GETFSLABEL: u32 = 0x8100_9431;
@@ -495,7 +495,13 @@ fn get_encryption_policy_ex_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u3
         _ => (FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V2_SIZE) as u32,
     };
     let in_len = usize::try_from(capacity).unwrap_or(0);
-    (cursor.fill_bytes(in_len), capacity)
+    let mut request = cursor.fill_bytes(in_len);
+    if request.len() >= FSCRYPT_POLICY_EX_HEADER_SIZE {
+        let policy_capacity = request.len() - FSCRYPT_POLICY_EX_HEADER_SIZE;
+        request[..FSCRYPT_POLICY_EX_HEADER_SIZE]
+            .copy_from_slice(&(policy_capacity as u64).to_ne_bytes());
+    }
+    (request, capacity)
 }
 
 fn move_ext_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {

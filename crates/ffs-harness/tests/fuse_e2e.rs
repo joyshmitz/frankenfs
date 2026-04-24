@@ -26,7 +26,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -39,7 +39,7 @@ const FIEMAP_REQUEST_FLAG_XATTR: u32 = 0x0002;
 const FIEMAP_EXTENT_LAST_FLAG: u32 = 0x0001;
 const FIEMAP_EXTENT_UNWRITTEN_FLAG: u32 = 0x0800;
 const FS_IOC_GET_ENCRYPTION_POLICY_CMD: u32 = 0x400C_6615;
-const FS_IOC_GET_ENCRYPTION_POLICY_EX_CMD: u32 = 0xC016_6616;
+const FS_IOC_GET_ENCRYPTION_POLICY_EX_CMD: u32 = 0xC009_6616;
 const FS_IOC_GETFSLABEL_CMD: u32 = 0x8100_9431;
 const FS_IOC_SETFSLABEL_CMD: u32 = 0x4100_9432;
 const EXT4_IOC_GETFLAGS_CMD: u32 = 0x8008_6601;
@@ -1614,7 +1614,7 @@ fn ext4_get_encryption_policy_ex_ioctl(path: &Path) -> Value {
     let script = r"
 import fcntl, json, struct, sys
 
-FS_IOC_GET_ENCRYPTION_POLICY_EX = 0xC0166616
+FS_IOC_GET_ENCRYPTION_POLICY_EX = 0xC0096616
 FSCRYPT_POLICY_V1_SIZE = 12
 FSCRYPT_POLICY_V2_SIZE = 24
 HEADER_SIZE = 8
@@ -3181,39 +3181,40 @@ fn fuse_symlink_target_path_max_boundary_and_enametoolong_contract() {
 
 fn assert_symlink_target_path_max_contract(mnt: &Path, scenario_id: &str) {
     const LINUX_PATH_MAX: usize = 4096;
+    const MAX_SYMLINK_TARGET_LEN: usize = LINUX_PATH_MAX - 1;
     let entries_before = snapshot_directory_entries(mnt);
 
     let path_max_link = mnt.join("sym_path_max.lnk");
-    let path_max_target = "a".repeat(LINUX_PATH_MAX);
+    let path_max_target = "a".repeat(MAX_SYMLINK_TARGET_LEN);
     std::os::unix::fs::symlink(&path_max_target, &path_max_link)
-        .expect("symlink with PATH_MAX target should succeed on mounted path");
+        .expect("symlink with PATH_MAX-1 target should succeed on mounted path");
     assert!(
         fs::symlink_metadata(&path_max_link)
-            .expect("stat PATH_MAX symlink")
+            .expect("stat PATH_MAX-1 symlink")
             .file_type()
             .is_symlink(),
-        "PATH_MAX-sized symlink must materialize as a symlink on the mounted path"
+        "PATH_MAX-1 symlink must materialize as a symlink on the mounted path"
     );
-    let readback = fs::read_link(&path_max_link).expect("readlink PATH_MAX symlink");
+    let readback = fs::read_link(&path_max_link).expect("readlink PATH_MAX-1 symlink");
     assert_eq!(
         readback.as_os_str().as_encoded_bytes().len(),
-        LINUX_PATH_MAX,
-        "readlink of PATH_MAX symlink must return full target length"
+        MAX_SYMLINK_TARGET_LEN,
+        "readlink of PATH_MAX-1 symlink must return full target length"
     );
     assert_eq!(
         readback.as_os_str().as_encoded_bytes(),
         path_max_target.as_bytes(),
-        "readlink of PATH_MAX symlink must return original target bytes"
+        "readlink of PATH_MAX-1 symlink must return original target bytes"
     );
 
     let too_long_link = mnt.join("sym_too_long.lnk");
-    let too_long_target = "b".repeat(LINUX_PATH_MAX + 1);
+    let too_long_target = "b".repeat(LINUX_PATH_MAX);
     let too_long_err = std::os::unix::fs::symlink(&too_long_target, &too_long_link)
-        .expect_err("symlink with target > PATH_MAX must be rejected");
+        .expect_err("symlink with target >= PATH_MAX must be rejected");
     assert_eq!(
         too_long_err.raw_os_error(),
         Some(libc::ENAMETOOLONG),
-        "over-PATH_MAX symlink target must surface exact ENAMETOOLONG: {too_long_err}"
+        "PATH_MAX symlink target must surface exact ENAMETOOLONG: {too_long_err}"
     );
     assert!(
         fs::symlink_metadata(&too_long_link).is_err(),
@@ -3238,12 +3239,12 @@ fn assert_symlink_target_path_max_contract(mnt: &Path, scenario_id: &str) {
     assert_eq!(
         snapshot_directory_entries(mnt),
         entries_after,
-        "only the accepted PATH_MAX symlink should appear in root entries"
+        "only the accepted PATH_MAX-1 symlink should appear in root entries"
     );
     emit_scenario_result(
         scenario_id,
         "PASS",
-        Some("path_max=ok_over_path_max=ENAMETOOLONG_empty=ENAMETOOLONG_no_drift"),
+        Some("path_max_minus_one=ok_path_max=ENAMETOOLONG_empty=ENAMETOOLONG_no_drift"),
     );
 }
 
@@ -6558,21 +6559,19 @@ fn fuse_fsync_after_multiple_writes() {
 
 /// Helper: set an extended attribute on a file using Python's `os.setxattr`.
 fn py_setxattr(path: &Path, name: &str, value: &[u8]) {
-    let hex_val = value.iter().fold(String::new(), |mut acc, b| {
-        use std::fmt::Write;
-        let _ = write!(acc, "{b:02x}");
-        acc
-    });
-    let script = format!(
-        "import os; os.setxattr({path:?}, {name:?}, bytes.fromhex({hex_val:?}))",
-        path = path.to_str().unwrap(),
-        name = name,
-        hex_val = hex_val,
-    );
-    let out = Command::new("python3")
-        .args(["-c", &script])
-        .output()
+    let script = "import os, sys\nos.setxattr(sys.argv[1], sys.argv[2], sys.stdin.buffer.read())";
+    let mut child = Command::new("python3")
+        .args(["-c", script, path.to_str().unwrap(), name])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("python3 setxattr");
+    {
+        let mut stdin = child.stdin.take().expect("setxattr stdin");
+        stdin.write_all(value).expect("write setxattr stdin");
+    }
+    let out = child.wait_with_output().expect("python3 setxattr");
     assert!(
         out.status.success(),
         "setxattr failed: {}",
@@ -6581,22 +6580,20 @@ fn py_setxattr(path: &Path, name: &str, value: &[u8]) {
 }
 
 fn py_setxattr_report(path: &Path, name: &str, value: &[u8], flags: i32) -> Value {
-    let hex_val = value.iter().fold(String::new(), |mut acc, b| {
-        use std::fmt::Write;
-        let _ = write!(acc, "{b:02x}");
-        acc
-    });
-    let script = format!(
-        "import json, os\ntry:\n os.setxattr({path:?}, {name:?}, bytes.fromhex({hex_val:?}), {flags})\n print(json.dumps({{'ok': True}}))\nexcept OSError as e:\n print(json.dumps({{'errno': e.errno, 'message': str(e)}}))",
-        path = path.to_str().unwrap(),
-        name = name,
-        hex_val = hex_val,
-        flags = flags,
-    );
-    let out = Command::new("python3")
-        .args(["-c", &script])
-        .output()
+    let flags_arg = flags.to_string();
+    let script = "import json, os, sys\ntry:\n os.setxattr(sys.argv[1], sys.argv[2], sys.stdin.buffer.read(), int(sys.argv[3]))\n print(json.dumps({'ok': True}))\nexcept OSError as e:\n print(json.dumps({'errno': e.errno, 'message': str(e)}))";
+    let mut child = Command::new("python3")
+        .args(["-c", script, path.to_str().unwrap(), name, &flags_arg])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("python3 setxattr JSON");
+    {
+        let mut stdin = child.stdin.take().expect("setxattr JSON stdin");
+        stdin.write_all(value).expect("write setxattr JSON stdin");
+    }
+    let out = child.wait_with_output().expect("python3 setxattr JSON");
     assert!(
         out.status.success(),
         "python3 setxattr JSON helper failed: {}",
@@ -7853,21 +7850,20 @@ fn fuse_xattr_ext4_posix_acl_default_missing_on_regular_file_reports_enodata() {
 }
 
 #[test]
-fn fuse_xattr_ext4_name_too_long_reports_enametoolong() {
+fn fuse_xattr_ext4_name_too_long_reports_erange() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
         let original_file = fs::read(&path).expect("read original file bytes");
 
-        // ext4 xattr name suffix is limited to 255 bytes (u8::MAX)
-        // The full name includes the "user." prefix (5 bytes), so a suffix of 256 bytes exceeds.
-        let long_suffix = "a".repeat(256);
+        // Linux XATTR_NAME_MAX is the full name length, including "user.".
+        let long_suffix = "a".repeat(255 - "user.".len() + 1);
         let long_name = format!("user.{long_suffix}");
 
         let report = py_setxattr_report(&path, &long_name, b"value", 0);
         assert_eq!(
             report["errno"].as_i64(),
-            Some(i64::from(libc::ENAMETOOLONG)),
-            "xattr name > 255-byte suffix should return ENAMETOOLONG: {report}"
+            Some(i64::from(libc::ERANGE)),
+            "xattr full name > XATTR_NAME_MAX should return ERANGE: {report}"
         );
 
         // Verify no side effects
@@ -7915,12 +7911,13 @@ fn fuse_xattr_ext4_boundary_name_length_accepted() {
     with_rw_mount(|mnt| {
         let path = mnt.join("hello.txt");
 
-        // The maximum suffix length is 255 bytes (u8::MAX)
-        let max_suffix = "z".repeat(255);
+        // Linux XATTR_NAME_MAX is 255 bytes for the full name, including "user.".
+        let max_suffix = "z".repeat(255 - "user.".len());
         let max_name = format!("user.{max_suffix}");
 
         py_setxattr(&path, &max_name, b"boundary");
-        let readback = py_getxattr(&path, &max_name).expect("255-byte suffix xattr should exist");
+        let readback =
+            py_getxattr(&path, &max_name).expect("255-byte full-name xattr should exist");
         assert_eq!(
             readback, b"boundary",
             "boundary-length xattr should round-trip"
@@ -10201,21 +10198,21 @@ fn btrfs_fuse_xattr_posix_acl_default_missing_on_regular_file_reports_enodata() 
 }
 
 #[test]
-fn btrfs_fuse_xattr_name_too_long_reports_enametoolong() {
+fn btrfs_fuse_xattr_name_too_long_reports_erange() {
     with_btrfs_rw_mount(|mnt| {
         let path = mnt.join("xattr_name_test.txt");
         fs::write(&path, b"xattr name length test\n").expect("create test file");
         let original_file = fs::read(&path).expect("read original file bytes");
 
-        // xattr name suffix is limited to 255 bytes (u8::MAX)
-        let long_suffix = "a".repeat(256);
+        // Linux XATTR_NAME_MAX is the full name length, including "user.".
+        let long_suffix = "a".repeat(255 - "user.".len() + 1);
         let long_name = format!("user.{long_suffix}");
 
         let report = py_setxattr_report(&path, &long_name, b"value", 0);
         assert_eq!(
             report["errno"].as_i64(),
-            Some(i64::from(libc::ENAMETOOLONG)),
-            "btrfs xattr name > 255-byte suffix should return ENAMETOOLONG: {report}"
+            Some(i64::from(libc::ERANGE)),
+            "btrfs xattr full name > XATTR_NAME_MAX should return ERANGE: {report}"
         );
 
         // Verify no side effects
@@ -10265,13 +10262,13 @@ fn btrfs_fuse_xattr_boundary_name_length_accepted() {
         let path = mnt.join("xattr_boundary_name.txt");
         fs::write(&path, b"boundary name test\n").expect("create test file");
 
-        // The maximum suffix length is 255 bytes (u8::MAX)
-        let max_suffix = "z".repeat(255);
+        // Linux XATTR_NAME_MAX is 255 bytes for the full name, including "user.".
+        let max_suffix = "z".repeat(255 - "user.".len());
         let max_name = format!("user.{max_suffix}");
 
         py_setxattr(&path, &max_name, b"boundary");
         let readback =
-            py_getxattr(&path, &max_name).expect("btrfs 255-byte suffix xattr should exist");
+            py_getxattr(&path, &max_name).expect("btrfs 255-byte full-name xattr should exist");
         assert_eq!(
             readback, b"boundary",
             "btrfs boundary-length xattr should round-trip"

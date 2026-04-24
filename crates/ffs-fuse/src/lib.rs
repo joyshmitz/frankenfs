@@ -77,8 +77,8 @@ const EXT4_IOC_GETVERSION: u32 = 0x8008_6603;
 const EXT4_IOC_SETVERSION: u32 = 0x4008_6604;
 /// `FS_IOC_GET_ENCRYPTION_POLICY` = `_IOW('f', 21, struct fscrypt_policy_v1)` on x86_64.
 const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
-/// `FS_IOC_GET_ENCRYPTION_POLICY_EX` = `_IOWR('f', 22, struct fscrypt_get_policy_ex_arg)` on x86_64.
-const FS_IOC_GET_ENCRYPTION_POLICY_EX: u32 = 0xC016_6616;
+/// `FS_IOC_GET_ENCRYPTION_POLICY_EX` = `_IOWR('f', 22, __u8[9])` on x86_64.
+const FS_IOC_GET_ENCRYPTION_POLICY_EX: u32 = 0xC009_6616;
 /// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
@@ -879,14 +879,24 @@ impl IoctlTraceProbe {
     fn new(path: PathBuf) -> Self {
         let (sender, receiver) = sync_channel::<IoctlTraceMsg>(IOCTL_TRACE_CHANNEL_CAPACITY);
         let worker_path = path.clone();
-        let worker = thread::Builder::new()
+        let worker = match thread::Builder::new()
             .name("ffs-ioctl-trace".into())
             .spawn(move || ioctl_trace_writer_loop(&worker_path, &receiver))
-            .expect("spawn ioctl trace writer thread");
+        {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                warn!(
+                    path = %path.display(),
+                    %error,
+                    "disabling ioctl trace because writer thread could not be spawned"
+                );
+                None
+            }
+        };
         Self {
             path,
-            sender: Some(sender),
-            worker: Some(worker),
+            sender: worker.as_ref().map(|_| sender),
+            worker,
             dropped_events: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -1050,6 +1060,23 @@ struct MoveExtLogContext<'a> {
     orig_start: u64,
     donor_start: u64,
     len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MoveExtLogRecord<'a> {
+    target: &'static str,
+    operation_id: &'a str,
+    scenario_id: &'static str,
+    outcome: &'static str,
+    error_class: &'static str,
+    ino: u64,
+    donor_ino: Option<u64>,
+    donor_fd: u32,
+    orig_start: u64,
+    donor_start: u64,
+    len: u64,
+    moved_len: Option<u64>,
+    errno: Option<c_int>,
 }
 
 impl FrankenFuse {
@@ -1375,7 +1402,7 @@ impl FrankenFuse {
     pub fn setattr_for_fuzzing(
         &self,
         ino: u64,
-        attrs: SetAttrRequest,
+        attrs: &SetAttrRequest,
     ) -> std::result::Result<InodeAttr, c_int> {
         if self.inner.read_only {
             return Err(libc::EROFS);
@@ -1386,10 +1413,7 @@ impl FrankenFuse {
 
         let cx = Self::cx_for_request();
         self.with_request_scope(&cx, RequestOp::Setattr, |cx, scope| {
-            let attr = self
-                .inner
-                .ops
-                .setattr(cx, scope, InodeNumber(ino), &attrs)?;
+            let attr = self.inner.ops.setattr(cx, scope, InodeNumber(ino), attrs)?;
             self.inner.ops.commit_request_scope(scope)?;
             Ok(attr)
         })
@@ -1934,28 +1958,31 @@ impl FrankenFuse {
         }
     }
 
-    fn log_move_ext_success(ctx: MoveExtLogContext<'_>, moved_len: u64) {
-        let donor_ino = ctx
-            .donor_ino
-            .expect("move_ext success logging requires a resolved donor inode");
-        info!(
+    fn move_ext_success_log_record(
+        ctx: MoveExtLogContext<'_>,
+        moved_len: u64,
+    ) -> MoveExtLogRecord<'_> {
+        MoveExtLogRecord {
             target: "ffs::ioctl",
-            operation_id = ctx.operation_id,
-            scenario_id = MOVE_EXT_SCENARIO_ID,
-            outcome = "applied",
-            error_class = MOVE_EXT_SUCCESS_ERROR_CLASS,
-            ino = ctx.ino,
-            donor_ino = donor_ino.0,
-            donor_fd = ctx.donor_fd,
-            orig_start = ctx.orig_start,
-            donor_start = ctx.donor_start,
-            len = ctx.len,
-            moved_len,
-            "ext4 move_ext completed"
-        );
+            operation_id: ctx.operation_id,
+            scenario_id: MOVE_EXT_SCENARIO_ID,
+            outcome: "applied",
+            error_class: MOVE_EXT_SUCCESS_ERROR_CLASS,
+            ino: ctx.ino,
+            donor_ino: ctx.donor_ino.map(|ino| ino.0),
+            donor_fd: ctx.donor_fd,
+            orig_start: ctx.orig_start,
+            donor_start: ctx.donor_start,
+            len: ctx.len,
+            moved_len: Some(moved_len),
+            errno: None,
+        }
     }
 
-    fn log_move_ext_error(ctx: MoveExtLogContext<'_>, error: &FfsError) {
+    fn move_ext_error_log_record<'a>(
+        ctx: MoveExtLogContext<'a>,
+        error: &FfsError,
+    ) -> MoveExtLogRecord<'a> {
         let error_class = Self::classify_move_ext_error(error);
         let outcome = match error.to_errno() {
             libc::EBADF
@@ -1966,19 +1993,59 @@ impl FrankenFuse {
             | libc::ENOTTY => "rejected",
             _ => "failed",
         };
-        warn!(
+        MoveExtLogRecord {
             target: "ffs::ioctl",
-            operation_id = ctx.operation_id,
-            scenario_id = MOVE_EXT_SCENARIO_ID,
+            operation_id: ctx.operation_id,
+            scenario_id: MOVE_EXT_SCENARIO_ID,
             outcome,
             error_class,
-            ino = ctx.ino,
-            donor_ino = ctx.donor_ino.map(|ino| ino.0),
-            donor_fd = ctx.donor_fd,
-            orig_start = ctx.orig_start,
-            donor_start = ctx.donor_start,
-            len = ctx.len,
-            errno = error.to_errno(),
+            ino: ctx.ino,
+            donor_ino: ctx.donor_ino.map(|ino| ino.0),
+            donor_fd: ctx.donor_fd,
+            orig_start: ctx.orig_start,
+            donor_start: ctx.donor_start,
+            len: ctx.len,
+            moved_len: None,
+            errno: Some(error.to_errno()),
+        }
+    }
+
+    fn log_move_ext_success(ctx: MoveExtLogContext<'_>, moved_len: u64) {
+        let record = Self::move_ext_success_log_record(ctx, moved_len);
+        let logged_moved_len = record.moved_len.unwrap_or(0);
+        info!(
+            target: "ffs::ioctl",
+            operation_id = record.operation_id,
+            scenario_id = record.scenario_id,
+            outcome = record.outcome,
+            error_class = record.error_class,
+            ino = record.ino,
+            donor_ino = record.donor_ino,
+            donor_fd = record.donor_fd,
+            orig_start = record.orig_start,
+            donor_start = record.donor_start,
+            len = record.len,
+            moved_len = logged_moved_len,
+            "ext4 move_ext completed"
+        );
+    }
+
+    fn log_move_ext_error(ctx: MoveExtLogContext<'_>, error: &FfsError) {
+        let record = Self::move_ext_error_log_record(ctx, error);
+        let logged_errno = record.errno.unwrap_or(libc::EIO);
+        warn!(
+            target: "ffs::ioctl",
+            operation_id = record.operation_id,
+            scenario_id = record.scenario_id,
+            outcome = record.outcome,
+            error_class = record.error_class,
+            ino = record.ino,
+            donor_ino = record.donor_ino,
+            donor_fd = record.donor_fd,
+            orig_start = record.orig_start,
+            donor_start = record.donor_start,
+            len = record.len,
+            errno = logged_errno,
             error = %error,
             "ext4 move_ext rejected"
         );
@@ -2143,11 +2210,33 @@ impl FrankenFuse {
                 // Input: caller sets policy_size to buffer capacity
                 // Output: kernel sets policy_size to actual size
                 //
-                // We must check the caller's out_size against the ACTUAL policy size
-                // returned by the backend, not just the v1 minimum, to avoid returning
-                // more bytes than the caller can accept for v2 policies.
+                // Real mounted requests carry the caller's policy capacity in
+                // the `policy_size` field. Direct unit tests that bypass the
+                // kernel use `out_size`, so accept either advertised capacity.
+                let advertised_by_in_data = if in_data.len() >= FSCRYPT_POLICY_EX_HEADER_SIZE {
+                    let mut raw_size = [0_u8; FSCRYPT_POLICY_EX_HEADER_SIZE];
+                    raw_size.copy_from_slice(&in_data[..FSCRYPT_POLICY_EX_HEADER_SIZE]);
+                    usize::try_from(u64::from_ne_bytes(raw_size))
+                        .ok()
+                        .and_then(|policy_size| {
+                            policy_size.checked_add(FSCRYPT_POLICY_EX_HEADER_SIZE)
+                        })
+                        .unwrap_or(usize::MAX)
+                } else {
+                    in_data.len()
+                };
+                let advertised_len = if in_data.len() >= FSCRYPT_POLICY_EX_HEADER_SIZE {
+                    advertised_by_in_data
+                } else {
+                    usize::try_from(out_size).unwrap_or(0)
+                };
+
+                // We must check the caller's advertised capacity against the
+                // actual policy size returned by the backend, not just the v1
+                // minimum, to avoid returning more bytes than the caller can
+                // accept for v2 policies.
                 let min_out_size = FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V1_SIZE;
-                if (out_size as usize) < min_out_size {
+                if advertised_len < min_out_size {
                     return IoctlResult::Error(libc::EINVAL);
                 }
                 let cx = Self::cx_for_request();
@@ -2158,10 +2247,9 @@ impl FrankenFuse {
                 }) {
                     Ok((version, policy)) => {
                         let required_size = FSCRYPT_POLICY_EX_HEADER_SIZE + policy.len();
-                        if (out_size as usize) < required_size {
+                        if advertised_len < required_size {
                             // Caller buffer too small for the actual policy version.
-                            // Return ERANGE to indicate the buffer is insufficient.
-                            return IoctlResult::Error(libc::ERANGE);
+                            return IoctlResult::Error(libc::EOVERFLOW);
                         }
                         let policy_size = policy.len() as u64;
                         let mut buf = vec![0_u8; required_size];
@@ -2347,11 +2435,9 @@ impl FrankenFuse {
                 if in_data.len() < 24 || out_size < BTRFS_IOC_DEV_INFO_SIZE {
                     return IoctlResult::Error(libc::EINVAL);
                 }
-                let devid_in = u64::from_le_bytes(
-                    in_data[0..8]
-                        .try_into()
-                        .expect("slice of exactly 8 bytes fits in u64"),
-                );
+                let mut raw_devid = [0_u8; 8];
+                raw_devid.copy_from_slice(&in_data[0..8]);
+                let devid_in = u64::from_le_bytes(raw_devid);
                 let mut uuid_in = [0_u8; 16];
                 uuid_in.copy_from_slice(&in_data[8..24]);
 
@@ -2378,8 +2464,12 @@ impl FrankenFuse {
                     return IoctlResult::Error(libc::EINVAL);
                 }
                 // Parse input: treeid (u64 le at offset 0), objectid (u64 le at offset 8).
-                let treeid = u64::from_le_bytes(in_data[0..8].try_into().unwrap());
-                let objectid = u64::from_le_bytes(in_data[8..16].try_into().unwrap());
+                let mut raw_treeid = [0_u8; 8];
+                raw_treeid.copy_from_slice(&in_data[0..8]);
+                let treeid = u64::from_le_bytes(raw_treeid);
+                let mut raw_objectid = [0_u8; 8];
+                raw_objectid.copy_from_slice(&in_data[8..16]);
+                let objectid = u64::from_le_bytes(raw_objectid);
 
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
@@ -2538,7 +2628,7 @@ impl FrankenFuse {
         gid: u32,
     ) -> Result<InodeAttr, MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Create, parent)?;
-        if rdev != 0 || mode & (libc::S_IFMT as u32) != libc::S_IFREG as u32 {
+        if rdev != 0 || mode & libc::S_IFMT != libc::S_IFREG {
             return Err(MutationDispatchError::Errno(libc::EOPNOTSUPP));
         }
 
@@ -3067,8 +3157,13 @@ impl Filesystem for FrankenFuse {
             Ok(_) => reply.ok(),
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
             Err(MutationDispatchError::Operation { error: e, .. }) => {
-                let mode = Self::parse_setxattr_mode(flags, position)
-                    .expect("dispatch_setxattr operation errors require a valid request");
+                let mode = match Self::parse_setxattr_mode(flags, position) {
+                    Ok(mode) => mode,
+                    Err(errno) => {
+                        reply.error(errno);
+                        return;
+                    }
+                };
                 if matches!(mode, XattrSetMode::Replace)
                     && matches!(e, FfsError::NotFound(_))
                     && self
@@ -4775,69 +4870,6 @@ mod tests {
         fuse.dispatch_ioctl(std::process::id(), ino, fh, cmd, in_data, out_size)
     }
 
-    #[derive(Clone, Default)]
-    struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
-
-    struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for SharedLogWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("lock shared log buffer")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogBuffer {
-        type Writer = SharedLogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedLogWriter(Arc::clone(&self.0))
-        }
-    }
-
-    fn parse_first_json_line(buffer: &SharedLogBuffer) -> serde_json::Value {
-        let bytes = buffer.0.lock().expect("lock shared log buffer").clone();
-        let text = String::from_utf8(bytes).expect("log buffer should be utf8");
-        let line = text
-            .lines()
-            .find(|line| !line.is_empty())
-            .expect("json log line");
-        serde_json::from_str(line).expect("decode json log line")
-    }
-
-    fn log_contract_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        let mutex = LOCK.get_or_init(|| std::sync::Mutex::new(()));
-        mutex
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn install_json_subscriber(
-        buffer: &SharedLogBuffer,
-        max_level: tracing::Level,
-    ) -> tracing::dispatcher::DefaultGuard {
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .flatten_event(true)
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_max_level(max_level)
-            .with_writer(buffer.clone())
-            .finish();
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let guard = tracing::dispatcher::set_default(&dispatch);
-        tracing::callsite::rebuild_interest_cache();
-        guard
-    }
-
     impl FsOps for IoctlRecordingFs {
         fn getattr(
             &self,
@@ -5735,7 +5767,7 @@ mod tests {
             0,
             FS_IOC_GET_ENCRYPTION_POLICY_EX,
             &[],
-            FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V1_SIZE_U32,
+            FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V2_SIZE_U32,
         );
         assert!(
             matches!(response, IoctlResult::Data(_)),
@@ -5810,6 +5842,89 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ioctl_get_encryption_policy_ex_uses_in_data_policy_size_for_v2_policy() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut policy = vec![0_u8; FSCRYPT_POLICY_V2_SIZE];
+        policy[0] = FSCRYPT_POLICY_V2_VERSION;
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy_ex(
+            FSCRYPT_POLICY_V2_VERSION,
+            &policy,
+            Arc::clone(&calls),
+        )));
+        let mut in_data = vec![0_u8; FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V2_SIZE];
+        in_data[..FSCRYPT_POLICY_EX_HEADER_SIZE]
+            .copy_from_slice(&(FSCRYPT_POLICY_V2_SIZE as u64).to_ne_bytes());
+
+        // Even if the transport reports a larger output area, the UAPI header
+        // is the caller's advertised policy capacity when present.
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            11,
+            0,
+            FS_IOC_GET_ENCRYPTION_POLICY_EX,
+            &in_data,
+            FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V2_SIZE_U32,
+        );
+
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected ioctl data response"
+        );
+        let IoctlResult::Data(bytes) = response else {
+            unreachable!("asserted IoctlResult::Data above");
+        };
+        assert_eq!(
+            bytes.len(),
+            FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V2_SIZE
+        );
+        let policy_size = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        assert_eq!(policy_size, FSCRYPT_POLICY_V2_SIZE as u64);
+        assert_eq!(&bytes[8..], policy.as_slice());
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetEncryptionPolicyEx(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_get_encryption_policy_ex_rejects_v2_when_policy_size_is_v1() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut policy = vec![0_u8; FSCRYPT_POLICY_V2_SIZE];
+        policy[0] = FSCRYPT_POLICY_V2_VERSION;
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy_ex(
+            FSCRYPT_POLICY_V2_VERSION,
+            &policy,
+            Arc::clone(&calls),
+        )));
+        let mut in_data = vec![0_u8; FSCRYPT_POLICY_EX_HEADER_SIZE + FSCRYPT_POLICY_V2_SIZE];
+        in_data[..FSCRYPT_POLICY_EX_HEADER_SIZE]
+            .copy_from_slice(&(FSCRYPT_POLICY_V1_SIZE as u64).to_ne_bytes());
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            11,
+            0,
+            FS_IOC_GET_ENCRYPTION_POLICY_EX,
+            &in_data,
+            FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V1_SIZE_U32,
+        );
+
+        assert_eq!(response, IoctlResult::Error(libc::EOVERFLOW));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetEncryptionPolicyEx(InodeNumber(11)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
     fn dispatch_ioctl_get_encryption_policy_ex_rejects_too_small_output_buffer() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_encryption_policy(
@@ -5854,8 +5969,8 @@ mod tests {
             FSCRYPT_POLICY_EX_HEADER_SIZE_U32 + FSCRYPT_POLICY_V1_SIZE_U32,
         );
 
-        // Must reject with ERANGE since caller buffer is insufficient for v2 payload
-        assert_eq!(response, IoctlResult::Error(libc::ERANGE));
+        // Must reject with EOVERFLOW since caller buffer is insufficient for v2 payload.
+        assert_eq!(response, IoctlResult::Error(libc::EOVERFLOW));
 
         // The backend SHOULD have been called to retrieve the policy
         // (we need to know the actual size to reject properly)
@@ -6336,7 +6451,6 @@ mod tests {
 
     #[test]
     fn dispatch_ioctl_move_ext_success_logs_contract_fields() {
-        let _guard = log_contract_guard();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
             read_only: false,
@@ -6353,9 +6467,6 @@ mod tests {
         let donor_fd = u32::try_from(donor_file.as_raw_fd()).expect("donor fd fits u32");
         let request = FrankenFuse::encode_move_ext_response(donor_fd, 11, 22, 33, 0);
 
-        let buffer = SharedLogBuffer::default();
-        let _default = install_json_subscriber(&buffer, tracing::Level::INFO);
-
         let response = dispatch_ioctl_for_testing(
             &fuse,
             9,
@@ -6371,24 +6482,31 @@ mod tests {
             ))
         );
 
-        let json = parse_first_json_line(&buffer);
-        assert_eq!(json["scenario_id"], MOVE_EXT_SCENARIO_ID);
-        assert_eq!(json["outcome"], "applied");
-        assert_eq!(json["error_class"], MOVE_EXT_SUCCESS_ERROR_CLASS);
-        assert_eq!(json["target"], "ffs::ioctl");
-        assert_eq!(json["ino"].as_u64(), Some(9));
-        assert_eq!(json["donor_fd"].as_u64(), Some(u64::from(donor_fd)));
-        assert_eq!(json["moved_len"].as_u64(), Some(21));
-        assert!(
-            json["operation_id"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
+        let operation_id = FrankenFuse::move_ext_operation_id(9, donor_fd, 11, 22, 33);
+        let record = FrankenFuse::move_ext_success_log_record(
+            MoveExtLogContext {
+                operation_id: &operation_id,
+                ino: 9,
+                donor_ino: Some(InodeNumber(123)),
+                donor_fd,
+                orig_start: 11,
+                donor_start: 22,
+                len: 33,
+            },
+            21,
         );
+        assert_eq!(record.scenario_id, MOVE_EXT_SCENARIO_ID);
+        assert_eq!(record.outcome, "applied");
+        assert_eq!(record.error_class, MOVE_EXT_SUCCESS_ERROR_CLASS);
+        assert_eq!(record.target, "ffs::ioctl");
+        assert_eq!(record.ino, 9);
+        assert_eq!(record.donor_fd, donor_fd);
+        assert_eq!(record.moved_len, Some(21));
+        assert!(!record.operation_id.is_empty());
     }
 
     #[test]
     fn dispatch_ioctl_move_ext_rejection_logs_contract_fields() {
-        let _guard = log_contract_guard();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
             read_only: false,
@@ -6405,9 +6523,6 @@ mod tests {
         );
         let request = FrankenFuse::encode_move_ext_response(7, 11, 22, 33, 0);
 
-        let buffer = SharedLogBuffer::default();
-        let _default = install_json_subscriber(&buffer, tracing::Level::WARN);
-
         let response = dispatch_ioctl_for_testing(
             &fuse,
             9,
@@ -6418,19 +6533,27 @@ mod tests {
         );
         assert_eq!(response, IoctlResult::Error(libc::EOPNOTSUPP));
 
-        let json = parse_first_json_line(&buffer);
-        assert_eq!(json["scenario_id"], MOVE_EXT_SCENARIO_ID);
-        assert_eq!(json["outcome"], "rejected");
-        assert_eq!(json["error_class"], "unsupported_feature");
-        assert_eq!(json["target"], "ffs::ioctl");
-        assert_eq!(json["ino"].as_u64(), Some(9));
-        assert_eq!(json["donor_fd"].as_u64(), Some(7));
-        assert_eq!(json["errno"].as_i64(), Some(i64::from(libc::EOPNOTSUPP)));
-        assert!(
-            json["operation_id"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty())
+        let operation_id = FrankenFuse::move_ext_operation_id(9, 7, 11, 22, 33);
+        let record = FrankenFuse::move_ext_error_log_record(
+            MoveExtLogContext {
+                operation_id: &operation_id,
+                ino: 9,
+                donor_ino: None,
+                donor_fd: 7,
+                orig_start: 11,
+                donor_start: 22,
+                len: 33,
+            },
+            &FfsError::UnsupportedFeature("move_ext requires extent-backed regular file".into()),
         );
+        assert_eq!(record.scenario_id, MOVE_EXT_SCENARIO_ID);
+        assert_eq!(record.outcome, "rejected");
+        assert_eq!(record.error_class, "unsupported_feature");
+        assert_eq!(record.target, "ffs::ioctl");
+        assert_eq!(record.ino, 9);
+        assert_eq!(record.donor_fd, 7);
+        assert_eq!(record.errno, Some(libc::EOPNOTSUPP));
+        assert!(!record.operation_id.is_empty());
     }
 
     #[test]
@@ -7770,7 +7893,7 @@ mod tests {
         };
 
         let attr = fuse
-            .setattr_for_fuzzing(55, attrs)
+            .setattr_for_fuzzing(55, &attrs)
             .expect("setattr round trip");
 
         assert_eq!(attr.ino, InodeNumber(55));
@@ -7805,7 +7928,7 @@ mod tests {
             Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
             &options,
         );
-        let mode = libc::S_IFREG as u32 | 0o640;
+        let mode = libc::S_IFREG | 0o640;
 
         let attr = fuse
             .mknod_for_fuzzing(7, b"node.txt", mode, 0, 1001, 1002)
@@ -7839,7 +7962,7 @@ mod tests {
         );
 
         let err = fuse
-            .mknod_for_fuzzing(7, b"fifo", libc::S_IFIFO as u32 | 0o600, 0, 1001, 1002)
+            .mknod_for_fuzzing(7, b"fifo", libc::S_IFIFO | 0o600, 0, 1001, 1002)
             .expect_err("special-node MKNOD is out of scope");
 
         assert_eq!(err, libc::EOPNOTSUPP);
