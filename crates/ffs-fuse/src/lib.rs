@@ -12,8 +12,8 @@ pub mod per_core;
 use asupersync::Cx;
 use ffs_core::{
     BackpressureDecision, BackpressureGate, DirEntry as FfsDirEntry, FiemapExtent,
-    FileType as FfsFileType, FsOps, InodeAttr, ReleaseRequest, RequestOp, RequestScope, SeekWhence,
-    SetAttrRequest, XattrSetMode,
+    FileType as FfsFileType, FsOps, FsStat, InodeAttr, ReleaseRequest, RequestOp, RequestScope,
+    SeekWhence, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -1284,6 +1284,16 @@ impl FrankenFuse {
         let cx = Self::cx_for_request();
         self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
             self.inner.ops.getattr(cx, scope, InodeNumber(ino))
+        })
+        .map_err(|error| error.to_errno())
+    }
+
+    /// Execute statfs without a live kernel mount.
+    #[doc(hidden)]
+    pub fn statfs_for_fuzzing(&self, ino: u64) -> std::result::Result<FsStat, c_int> {
+        let cx = Self::cx_for_request();
+        self.with_request_scope(&cx, RequestOp::Statfs, |cx, scope| {
+            self.inner.ops.statfs(cx, scope, InodeNumber(ino))
         })
         .map_err(|error| error.to_errno())
     }
@@ -7131,6 +7141,9 @@ mod tests {
         Getattr {
             ino: InodeNumber,
         },
+        Statfs {
+            ino: InodeNumber,
+        },
         Lookup {
             parent: InodeNumber,
             name: String,
@@ -7275,6 +7288,28 @@ mod tests {
                     name: name.to_string_lossy().into_owned(),
                 });
             Ok(test_inode_attr(202, FfsFileType::RegularFile, 0o640))
+        }
+
+        fn statfs(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<FsStat> {
+            self.calls
+                .lock()
+                .expect("lock mutation calls")
+                .push(MutationCall::Statfs { ino });
+            Ok(FsStat {
+                blocks: 4096,
+                blocks_free: 1024,
+                blocks_available: 768,
+                files: 512,
+                files_free: 256,
+                block_size: 4096,
+                name_max: 255,
+                fragment_size: 1024,
+            })
         }
 
         fn open(
@@ -7671,6 +7706,44 @@ mod tests {
             &[MutationCall::Getattr {
                 ino: InodeNumber(42),
             }]
+        );
+    }
+
+    #[test]
+    fn conformance_fuse_statfs_filesystem_stats_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(
+            Arc::clone(&calls),
+        )));
+
+        let stats = fuse.statfs_for_fuzzing(1).expect("statfs round trip");
+
+        assert_eq!(
+            stats,
+            FsStat {
+                blocks: 4096,
+                blocks_free: 1024,
+                blocks_available: 768,
+                files: 512,
+                files_free: 256,
+                block_size: 4096,
+                name_max: 255,
+                fragment_size: 1024,
+            }
+        );
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Statfs,
+                },
+                MutationCall::Statfs {
+                    ino: InodeNumber(1),
+                },
+                MutationCall::End {
+                    op: RequestOp::Statfs,
+                },
+            ]
         );
     }
 
