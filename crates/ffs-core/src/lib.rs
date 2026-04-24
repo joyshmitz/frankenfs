@@ -68,7 +68,7 @@ use tracing::{debug, error, info, trace, warn};
 // Degradation/pressure types are in degradation.rs, re-exported above.
 // VFS types and FsOps trait are in vfs.rs, re-exported above.
 const LINUX_PATH_MAX: u64 = 4096;
-const LINUX_SYMLINK_TARGET_MAX: usize = 4095;
+const LINUX_SYMLINK_TARGET_MAX: u64 = LINUX_PATH_MAX - 1;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
@@ -12613,7 +12613,7 @@ impl OpenFs {
         // Store symlink target as an inline extent.
         let extent = BtrfsExtentData::Inline {
             generation: alloc.generation,
-            ram_bytes: target_bytes.len() as u64,
+            ram_bytes: target_len,
             compression: 0,
             data: target_bytes.to_vec(),
         };
@@ -15954,7 +15954,9 @@ impl FsOps for OpenFs {
         gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
         let target_len = target.as_os_str().as_encoded_bytes().len();
-        if target_len == 0 || target_len > LINUX_SYMLINK_TARGET_MAX {
+        if target_len == 0
+            || u64::try_from(target_len).unwrap_or(u64::MAX) > LINUX_SYMLINK_TARGET_MAX
+        {
             return Err(FfsError::NameTooLong);
         }
         match &self.flavor {
@@ -25595,7 +25597,7 @@ mod tests {
         assert_eq!(err.to_errno(), libc::ENAMETOOLONG);
 
         // Target of exactly PATH_MAX-1 bytes is accepted.
-        let at_limit = "y".repeat(LINUX_SYMLINK_TARGET_MAX);
+        let at_limit = "y".repeat(usize::try_from(LINUX_SYMLINK_TARGET_MAX).unwrap());
         let attr = fs
             .symlink(
                 &cx,
