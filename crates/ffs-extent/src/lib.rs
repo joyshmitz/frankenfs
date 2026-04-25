@@ -439,6 +439,100 @@ pub fn punch_hole(
     Ok(total_freed)
 }
 
+/// Collapse the logical range `[logical_start, logical_start + count)`.
+///
+/// Frees and removes all extents inside the range, then shifts every
+/// extent past the cut left by `count` blocks so the file shrinks by
+/// exactly that span with no hole left behind. Mirrors
+/// `fs/ext4/extents.c::ext4_collapse_range`. Both `logical_start` and
+/// `count` must be block-aligned in the caller — this helper operates
+/// in units of logical blocks. Returns the number of physical blocks
+/// freed in the inner range (does not change file size — the caller
+/// must subtract `count * block_size` from `inode.size`).
+#[allow(clippy::too_many_arguments)]
+pub fn collapse_range(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &mut [u8; 60],
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    logical_start: u32,
+    count: u32,
+    pctx: &ffs_alloc::PersistCtx,
+) -> Result<u64> {
+    if count == 0 {
+        return Ok(0);
+    }
+    cx_checkpoint(cx)?;
+    validate_root_header("collapse_range", root_bytes)?;
+
+    // Phase 1: free + delete extents in [start, start+count). punch_hole
+    // also splits any extent that straddles the cut so the right-hand
+    // remainder is parked on a clean boundary at start+count, ready to
+    // be shifted in phase 3.
+    let freed = punch_hole(
+        cx,
+        dev,
+        root_bytes,
+        geo,
+        groups,
+        logical_start,
+        u64::from(count),
+        pctx,
+    )?;
+
+    // Phase 2: snapshot the tail before mutating the tree. We cannot
+    // delete during walk() because the visitor only sees a read-only
+    // view of each extent.
+    let cut = u64::from(logical_start) + u64::from(count);
+    let mut tail: Vec<Ext4Extent> = Vec::new();
+    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
+        if u64::from(ext.logical_block) >= cut {
+            tail.push(*ext);
+        }
+        Ok(())
+    })?;
+
+    // Phase 3: delete-then-reinsert each tail extent at its shifted
+    // logical_block. Physical blocks are kept — only the logical
+    // mapping moves. count fits in u32 by precondition; the subtraction
+    // is overflow-safe because we filtered for ext.logical_block >= cut
+    // and cut >= count.
+    let mut tree_alloc = GroupBlockAllocator {
+        cx,
+        dev,
+        geo,
+        groups,
+        hint: AllocHint::default(),
+        pctx,
+    };
+    for ext in &tail {
+        ffs_btree::delete_range(
+            cx,
+            dev,
+            root_bytes,
+            ext.logical_block,
+            u64::from(ext.actual_len()),
+            &mut tree_alloc,
+        )?;
+    }
+    for ext in tail {
+        let new_logical = ext.logical_block.saturating_sub(count);
+        ffs_btree::insert(
+            cx,
+            dev,
+            root_bytes,
+            Ext4Extent {
+                logical_block: new_logical,
+                ..ext
+            },
+            &mut tree_alloc,
+        )?;
+    }
+
+    Ok(freed)
+}
+
 // ── Unwritten extent handling ───────────────────────────────────────────────
 
 /// Mark extents in the range `[logical_start, logical_start + count)` as written.
