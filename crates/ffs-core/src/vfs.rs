@@ -326,6 +326,49 @@ impl RequestScope {
     }
 }
 
+/// Inode state surfaced by the `FS_IOC_FSGETXATTR` / `FS_IOC_FSSETXATTR`
+/// ioctls — a Rust mirror of `struct fsxattr` from `<linux/fs.h>`.
+///
+/// The on-the-wire encoding is 28 bytes little-endian:
+/// `xflags | extsize | nextents | projid | cowextsize | 8 bytes pad`.
+/// xflags bits are documented in `uapi/linux/fs.h::FS_XFLAG_*` and are
+/// the chattr/lsattr-visible projection of the underlying filesystem
+/// inode flags. Backends populate the fields they support and zero
+/// the rest; ext4 sets `xflags`, `nextents`, and `projid` and leaves
+/// `extsize` + `cowextsize` at zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsxattrInfo {
+    /// chattr-style flags mapped from filesystem-specific `i_flags`.
+    pub xflags: u32,
+    /// XFS-specific extent size hint (0 for ext4).
+    pub extsize: u32,
+    /// Live count of extents allocated to the inode (0 for inline-data
+    /// or non-extent-tree inodes).
+    pub nextents: u32,
+    /// Project ID for project-based quota accounting.
+    pub projid: u32,
+    /// XFS-specific CoW extent size hint (0 for ext4).
+    pub cowextsize: u32,
+}
+
+/// xflags bits per `<uapi/linux/fs.h>`. Only the subset that ext4
+/// `i_flags` can map onto is used by the FrankenFS backend; the rest
+/// are XFS- or DAX-specific and stay zero on a getxattr return.
+pub mod xflags {
+    pub const FS_XFLAG_IMMUTABLE: u32 = 0x0000_0008;
+    pub const FS_XFLAG_APPEND: u32 = 0x0000_0010;
+    pub const FS_XFLAG_SYNC: u32 = 0x0000_0020;
+    pub const FS_XFLAG_NOATIME: u32 = 0x0000_0040;
+    pub const FS_XFLAG_NODUMP: u32 = 0x0000_0080;
+    pub const FS_XFLAG_PROJINHERIT: u32 = 0x0000_0200;
+    pub const FS_XFLAG_NODEFRAG: u32 = 0x0000_2000;
+    pub const FS_XFLAG_DAX: u32 = 0x0000_8000;
+    /// Set when at least one inode-level xflag is in effect; ext4
+    /// surfaces this whenever the mapped flag set is non-empty so
+    /// userspace can tell "no chattrs" from "queried successfully".
+    pub const FS_XFLAG_HASATTR: u32 = 0x8000_0000;
+}
+
 /// Request to modify inode attributes via `setattr`.
 ///
 /// Each field is `Option` — only present fields are applied. Missing fields
@@ -826,6 +869,26 @@ pub trait FsOps: Send + Sync {
     ) -> ffs_error::Result<u64> {
         Err(FfsError::UnsupportedFeature(
             "lseek SEEK_HOLE/SEEK_DATA is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Read the inode-level state surfaced by `FS_IOC_FSGETXATTR`
+    /// (28-byte `struct fsxattr` from `<linux/fs.h>`).
+    ///
+    /// The default implementation returns
+    /// [`FfsError::UnsupportedFeature`]; backends that expose chattr-style
+    /// flags + project IDs override this. ext4 maps `i_flags` ->
+    /// `fsx_xflags` per uapi/linux/fs.h; `fsx_projid` from `i_projid`;
+    /// `fsx_nextents` from the live extent count; `fsx_extsize` and
+    /// `fsx_cowextsize` are 0 (ext4 does not implement them).
+    fn get_inode_fsxattr(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<FsxattrInfo> {
+        Err(FfsError::UnsupportedFeature(
+            "get_inode_fsxattr is not supported by this backend".to_owned(),
         ))
     }
 

@@ -13,8 +13,8 @@ pub use degradation::{
 };
 pub use vfs::{
     DirEntry, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNWRITTEN, FiemapExtent, FileType, FsOps, FsStat,
-    InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp, RequestScope,
-    SeekWhence, SetAttrRequest, XattrSetMode,
+    FsxattrInfo, InodeAttr, QuotaEntry, QuotaInfo, QuotaType, ReleaseRequest, RequestOp,
+    RequestScope, SeekWhence, SetAttrRequest, XattrSetMode, xflags,
 };
 // Re-export repair lifecycle for convenient wiring.
 pub use ffs_block::RepairFlushLifecycle;
@@ -8247,6 +8247,39 @@ fn inode_to_attr(sb: &Ext4Superblock, ino: InodeNumber, inode: &Ext4Inode) -> In
 }
 
 /// Map ext4 inode mode to VFS `FileType`.
+/// Project ext4 `i_flags` onto the `fsxattr.fsx_xflags` namespace per
+/// `<uapi/linux/fs.h>` and `fs/ext4/ioctl.c::ext4_iflags_to_xflags`.
+fn ext4_flags_to_xflags(flags: u32) -> u32 {
+    let mut x = 0_u32;
+    if flags & ffs_types::EXT4_IMMUTABLE_FL != 0 {
+        x |= xflags::FS_XFLAG_IMMUTABLE;
+    }
+    if flags & ffs_types::EXT4_APPEND_FL != 0 {
+        x |= xflags::FS_XFLAG_APPEND;
+    }
+    if flags & ffs_types::EXT4_SYNC_FL != 0 {
+        x |= xflags::FS_XFLAG_SYNC;
+    }
+    if flags & ffs_types::EXT4_NOATIME_FL != 0 {
+        x |= xflags::FS_XFLAG_NOATIME;
+    }
+    if flags & ffs_types::EXT4_NODUMP_FL != 0 {
+        x |= xflags::FS_XFLAG_NODUMP;
+    }
+    if flags & ffs_types::EXT4_PROJINHERIT_FL != 0 {
+        x |= xflags::FS_XFLAG_PROJINHERIT;
+    }
+    // FS_XFLAG_NODEFRAG / FS_XFLAG_DAX have no matching `EXT4_*_FL`
+    // constant exported from `ffs-types` (the upstream values overlap
+    // with snapshot bits that this project has reassigned), so they
+    // stay zero — userspace reads "this FS does not expose those
+    // chattrs" rather than a bogus non-zero value.
+    if x != 0 {
+        x |= xflags::FS_XFLAG_HASATTR;
+    }
+    x
+}
+
 fn inode_file_type(inode: &Ext4Inode) -> FileType {
     if inode.is_regular() {
         FileType::RegularFile
@@ -16745,6 +16778,39 @@ impl FsOps for OpenFs {
             }
             FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
                 "get_inode_flags is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
+    fn get_inode_fsxattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<FsxattrInfo> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let canonical = Self::ext4_canonical_inode(ino);
+                let inode = self.read_inode_with_scope(cx, scope, canonical)?;
+                let xflags = ext4_flags_to_xflags(inode.flags);
+                // Inline-data + non-extent-tree inodes report 0 extents
+                // (matches ext4's nextents accounting in fs/ext4/ioctl.c).
+                let nextents = if (inode.flags & ffs_types::EXT4_EXTENTS_FL) != 0 {
+                    self.collect_extents(cx, &inode)
+                        .map_or(0, |exts| u32::try_from(exts.len()).unwrap_or(u32::MAX))
+                } else {
+                    0
+                };
+                Ok(FsxattrInfo {
+                    xflags,
+                    extsize: 0,
+                    nextents,
+                    projid: inode.projid,
+                    cowextsize: 0,
+                })
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "get_inode_fsxattr is not supported for btrfs".to_owned(),
             )),
         }
     }
@@ -27421,6 +27487,100 @@ mod tests {
         assert_eq!(
             fetched.crtime, original_crtime,
             "crtime must survive a setattr(mtime) round trip through disk"
+        );
+    }
+
+    // ── bd-6wzug: FS_IOC_FSGETXATTR (struct fsxattr) ──────────────────────
+    //
+    // ext4 surfaces the chattr/lsattr-visible flag projection plus
+    // project ID + extent count via FS_IOC_FSGETXATTR. OpenFs maps
+    // i_flags onto the FS_XFLAG_* bits per uapi/linux/fs.h and counts
+    // the live extents from the on-disk extent tree. Pre-fix
+    // dispatch_ioctl returned ENOTTY for this opcode so xfs_io fsxattr
+    // and chattr -p over the FUSE mount could not query inode state.
+
+    #[test]
+    fn ext4_get_inode_fsxattr_default_inode_returns_zero_xflags() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsx_default.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        let mut scope = RequestScope::empty();
+        let info = <OpenFs as FsOps>::get_inode_fsxattr(&fs, &cx, &mut scope, attr.ino)
+            .expect("fsxattr default");
+        // A freshly-created file has no chattrs set, so xflags is 0
+        // (FS_XFLAG_HASATTR is set only when at least one mapped flag
+        // is in effect).
+        assert_eq!(info.xflags, 0, "default inode has no chattr xflags");
+        assert_eq!(info.extsize, 0, "ext4 does not expose extsize hint");
+        assert_eq!(info.cowextsize, 0, "ext4 does not expose cowextsize");
+        assert_eq!(info.projid, 0, "default project ID is 0");
+    }
+
+    #[test]
+    fn ext4_get_inode_fsxattr_maps_immutable_and_append_flags_to_xflags() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsx_chattr.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        // Set immutable + append + sync via the ext4 i_flags surface.
+        let new_flags =
+            ffs_types::EXT4_IMMUTABLE_FL | ffs_types::EXT4_APPEND_FL | ffs_types::EXT4_SYNC_FL;
+        let mut scope = RequestScope::empty();
+        <OpenFs as FsOps>::set_inode_flags(&fs, &cx, &mut scope, attr.ino, new_flags)
+            .expect("set_inode_flags");
+
+        let info = <OpenFs as FsOps>::get_inode_fsxattr(&fs, &cx, &mut scope, attr.ino)
+            .expect("fsxattr after chattr");
+        assert!(
+            info.xflags & xflags::FS_XFLAG_IMMUTABLE != 0,
+            "IMMUTABLE must map to FS_XFLAG_IMMUTABLE: {:#x}",
+            info.xflags
+        );
+        assert!(info.xflags & xflags::FS_XFLAG_APPEND != 0);
+        assert!(info.xflags & xflags::FS_XFLAG_SYNC != 0);
+        assert!(
+            info.xflags & xflags::FS_XFLAG_HASATTR != 0,
+            "HASATTR must be set when any chattr is in effect"
+        );
+    }
+
+    #[test]
+    fn ext4_get_inode_fsxattr_nextents_reflects_extent_tree_size() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsx_nextents.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        // Empty file: zero extents.
+        let mut scope = RequestScope::empty();
+        let info = <OpenFs as FsOps>::get_inode_fsxattr(&fs, &cx, &mut scope, attr.ino)
+            .expect("fsxattr empty");
+        assert_eq!(info.nextents, 0, "empty file has no extents");
+
+        // Write through the file; nextents must climb to >=1.
+        fs.write(&cx, attr.ino, 0, &vec![0xAB_u8; 4096])
+            .expect("write");
+        let info = <OpenFs as FsOps>::get_inode_fsxattr(&fs, &cx, &mut scope, attr.ino)
+            .expect("fsxattr after write");
+        assert!(
+            info.nextents >= 1,
+            "nextents must be at least 1 after writing data, got {}",
+            info.nextents
         );
     }
 

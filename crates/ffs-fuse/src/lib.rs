@@ -12,8 +12,8 @@ pub mod per_core;
 use asupersync::Cx;
 use ffs_core::{
     BackpressureDecision, BackpressureGate, DirEntry as FfsDirEntry, FiemapExtent,
-    FileType as FfsFileType, FsOps, FsStat, InodeAttr, ReleaseRequest, RequestOp, RequestScope,
-    SeekWhence, SetAttrRequest, XattrSetMode,
+    FileType as FfsFileType, FsOps, FsStat, FsxattrInfo, InodeAttr, ReleaseRequest, RequestOp,
+    RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -81,6 +81,11 @@ const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
 const FS_IOC_GET_ENCRYPTION_POLICY_EX: u32 = 0xC009_6616;
 /// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
+/// `FS_IOC_FSGETXATTR` = `_IOR('X', 31, struct fsxattr)` on x86_64.
+/// `struct fsxattr` is 28 bytes: u32 xflags + u32 extsize + u32 nextents
+/// + u32 projid + u32 cowextsize + 8-byte pad.
+const FS_IOC_FSGETXATTR: u32 = 0x801C_5821;
+const FS_IOC_FSGETXATTR_SIZE: u32 = 28;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
@@ -1830,6 +1835,24 @@ impl FrankenFuse {
         max_extents_by_count.min(max_extents_by_size)
     }
 
+    /// Serialise an [`FsxattrInfo`] into the 28-byte `struct fsxattr`
+    /// payload returned by `FS_IOC_FSGETXATTR`. Layout per
+    /// `<uapi/linux/fs.h>`: `xflags | extsize | nextents | projid |
+    /// cowextsize | 8 bytes pad`. Little-endian throughout — the Linux
+    /// FUSE driver does no byte-swapping on ioctl payloads, so the FS
+    /// daemon must match host byte order.
+    fn encode_fsxattr_response(fsx: &FsxattrInfo) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(FS_IOC_FSGETXATTR_SIZE as usize);
+        buf.extend_from_slice(&fsx.xflags.to_le_bytes());
+        buf.extend_from_slice(&fsx.extsize.to_le_bytes());
+        buf.extend_from_slice(&fsx.nextents.to_le_bytes());
+        buf.extend_from_slice(&fsx.projid.to_le_bytes());
+        buf.extend_from_slice(&fsx.cowextsize.to_le_bytes());
+        buf.extend_from_slice(&[0_u8; 8]); // fsx_pad[8]
+        debug_assert_eq!(buf.len(), FS_IOC_FSGETXATTR_SIZE as usize);
+        buf
+    }
+
     fn encode_fiemap_response(
         fm_start: u64,
         fm_length: u64,
@@ -2155,6 +2178,18 @@ impl FrankenFuse {
                         .get_inode_generation(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(generation) => IoctlResult::Data(generation.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FS_IOC_FSGETXATTR => {
+                if out_size < FS_IOC_FSGETXATTR_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_inode_fsxattr(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok(fsx) => IoctlResult::Data(Self::encode_fsxattr_response(&fsx)),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -4644,6 +4679,7 @@ mod tests {
         MoveExt(InodeNumber, u32, u64, u64, u64),
         RegisterMoveExtDonor(u32, InodeNumber),
         SetFlags(InodeNumber, u32),
+        GetFsxattr(InodeNumber),
         Commit,
         End(RequestOp),
         UnregisterMoveExtDonor(u32),
@@ -4992,6 +5028,27 @@ mod tests {
             Ok(self.flags)
         }
 
+        fn get_inode_fsxattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<FsxattrInfo> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetFsxattr(ino));
+            // Synthesize a deterministic shape so the encoder test can
+            // pin the on-the-wire byte layout.
+            Ok(FsxattrInfo {
+                xflags: 0x0000_8048, // IMMUTABLE (0x08) | NOATIME (0x40) | DAX (0x8000) bits
+                extsize: 0,
+                nextents: 5,
+                projid: 0xCAFE_BABE,
+                cowextsize: 0,
+            })
+        }
+
         fn get_inode_generation(
             &self,
             _cx: &Cx,
@@ -5245,6 +5302,59 @@ mod tests {
                 .push(IoctlCall::Commit);
             Ok(CommitSeq(1))
         }
+    }
+
+    #[test]
+    fn dispatch_ioctl_fsgetxattr_encodes_28_byte_struct_in_le() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0x1234_5678,
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 17, 0, FS_IOC_FSGETXATTR, &[], 28);
+        let IoctlResult::Data(bytes) = response else {
+            panic!("expected IoctlResult::Data, got {response:?}");
+        };
+        assert_eq!(bytes.len(), 28, "fsxattr struct is exactly 28 bytes");
+
+        // Field-by-field LE decode mirroring uapi/linux/fs.h.
+        let xflags = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let extsize = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let nextents = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let projid = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let cowextsize = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        let pad = &bytes[20..28];
+        assert_eq!(xflags, 0x0000_8048);
+        assert_eq!(extsize, 0);
+        assert_eq!(nextents, 5);
+        assert_eq!(projid, 0xCAFE_BABE);
+        assert_eq!(cowextsize, 0);
+        assert_eq!(pad, &[0_u8; 8], "fsx_pad[8] must be zero-filled");
+
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetFsxattr(InodeNumber(17)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fsgetxattr_rejects_too_small_output_buffer() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0x1234_5678,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+
+        // 27 bytes < FS_IOC_FSGETXATTR_SIZE (28).
+        let response = dispatch_ioctl_for_testing(&fuse, 17, 0, FS_IOC_FSGETXATTR, &[], 27);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EINVAL)),
+            "short out_size must surface EINVAL, got {response:?}"
+        );
     }
 
     #[test]
