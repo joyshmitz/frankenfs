@@ -6036,6 +6036,48 @@ impl OpenFs {
         Ok(dev.read_block(cx, block)?.as_slice().to_vec())
     }
 
+    fn write_block_with_scope(
+        cx: &Cx,
+        scope: &mut RequestScope,
+        block_dev: &dyn BlockDevice,
+        block: BlockNumber,
+        data: &[u8],
+    ) -> Result<(), FfsError> {
+        scope.tx.as_mut().map_or_else(
+            || block_dev.write_block(cx, block, data),
+            |tx| {
+                let tx_dev = TransactionBlockAdapter {
+                    base: block_dev,
+                    tx: Mutex::new(tx),
+                };
+                tx_dev.write_block(cx, block, data)
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_inode_with_scope(
+        cx: &Cx,
+        scope: &mut RequestScope,
+        block_dev: &dyn BlockDevice,
+        geo: &FsGeometry,
+        groups: &[GroupStats],
+        ino: InodeNumber,
+        inode: &Ext4Inode,
+        csum_seed: u32,
+    ) -> Result<(), FfsError> {
+        scope.tx.as_mut().map_or_else(
+            || ffs_inode::write_inode(cx, block_dev, geo, groups, ino, inode, csum_seed),
+            |tx| {
+                let tx_dev = TransactionBlockAdapter {
+                    base: block_dev,
+                    tx: Mutex::new(tx),
+                };
+                ffs_inode::write_inode(cx, &tx_dev, geo, groups, ino, inode, csum_seed)
+            },
+        )
+    }
+
     /// Resolve a logical file block to a physical block number via the inode's
     /// extent tree, reading index blocks from the device as needed.
     ///
@@ -8280,6 +8322,62 @@ fn ext4_flags_to_xflags(flags: u32) -> u32 {
     x
 }
 
+/// Inverse of [`ext4_flags_to_xflags`]: project the userspace `fsx_xflags`
+/// payload onto the ext4 `i_flags` namespace, preserving any
+/// non-user-settable bits in `current_flags`. Returns `EOPNOTSUPP` for
+/// xflags bits that ext4 does not recognise (e.g. FS_XFLAG_REALTIME,
+/// FS_XFLAG_NODEFRAG, FS_XFLAG_DAX — none of which the backing
+/// `ffs-types` constants currently model on this project) and for
+/// FS_XFLAG_HASATTR which is kernel-set / read-only.
+fn xflags_to_ext4_flags(xflags: u32, current_flags: u32) -> ffs_error::Result<u32> {
+    const SUPPORTED: u32 = xflags::FS_XFLAG_IMMUTABLE
+        | xflags::FS_XFLAG_APPEND
+        | xflags::FS_XFLAG_SYNC
+        | xflags::FS_XFLAG_NOATIME
+        | xflags::FS_XFLAG_NODUMP
+        | xflags::FS_XFLAG_PROJINHERIT;
+    // The user-settable subset that this xflags->ext4 projection owns.
+    // Anything outside this mask in `current_flags` is preserved.
+    const EXT4_USER_FROM_XFLAGS: u32 = ffs_types::EXT4_IMMUTABLE_FL
+        | ffs_types::EXT4_APPEND_FL
+        | ffs_types::EXT4_SYNC_FL
+        | ffs_types::EXT4_NOATIME_FL
+        | ffs_types::EXT4_NODUMP_FL
+        | ffs_types::EXT4_PROJINHERIT_FL;
+    if xflags & xflags::FS_XFLAG_HASATTR != 0 {
+        return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+            libc::EINVAL,
+        )));
+    }
+    let unsupported = xflags & !(SUPPORTED | xflags::FS_XFLAG_HASATTR);
+    if unsupported != 0 {
+        return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+            libc::EOPNOTSUPP,
+        )));
+    }
+
+    let mut ext4 = current_flags & !EXT4_USER_FROM_XFLAGS;
+    if xflags & xflags::FS_XFLAG_IMMUTABLE != 0 {
+        ext4 |= ffs_types::EXT4_IMMUTABLE_FL;
+    }
+    if xflags & xflags::FS_XFLAG_APPEND != 0 {
+        ext4 |= ffs_types::EXT4_APPEND_FL;
+    }
+    if xflags & xflags::FS_XFLAG_SYNC != 0 {
+        ext4 |= ffs_types::EXT4_SYNC_FL;
+    }
+    if xflags & xflags::FS_XFLAG_NOATIME != 0 {
+        ext4 |= ffs_types::EXT4_NOATIME_FL;
+    }
+    if xflags & xflags::FS_XFLAG_NODUMP != 0 {
+        ext4 |= ffs_types::EXT4_NODUMP_FL;
+    }
+    if xflags & xflags::FS_XFLAG_PROJINHERIT != 0 {
+        ext4 |= ffs_types::EXT4_PROJINHERIT_FL;
+    }
+    Ok(ext4)
+}
+
 fn inode_file_type(inode: &Ext4Inode) -> FileType {
     if inode.is_regular() {
         FileType::RegularFile
@@ -8713,11 +8811,15 @@ impl OpenFs {
             ffs_types::S_IFIFO => (ffs_ondisk::Ext4FileType::Fifo, false),
             ffs_types::S_IFSOCK => (ffs_ondisk::Ext4FileType::Sock, false),
             _ => {
-                return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::EINVAL,
+                )));
             }
         };
         if !accepts_rdev && rdev != 0 {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
         }
 
         let alloc_mutex = self.require_alloc_state()?;
@@ -8787,7 +8889,9 @@ impl OpenFs {
         new_inode.blocks = 0;
         new_inode.size = 0;
 
-        if let Err(err) = ffs_inode::write_inode(cx, &block_dev, geo, groups, ino, &new_inode, csum_seed) {
+        if let Err(err) =
+            ffs_inode::write_inode(cx, &block_dev, geo, groups, ino, &new_inode, csum_seed)
+        {
             // Roll back the inode allocation on write failure.
             let mut rollback = new_inode.clone();
             let _ = ffs_inode::delete_inode(
@@ -10044,12 +10148,9 @@ impl OpenFs {
             let logical_count =
                 u32::try_from(length / block_size).map_err(|_| FfsError::NoSpace)?;
             if logical_count > 0 {
-                let new_size = inode
-                    .size
-                    .checked_add(length)
-                    .ok_or_else(|| FfsError::Format(
-                        "insert_range: file size + length overflow".into(),
-                    ))?;
+                let new_size = inode.size.checked_add(length).ok_or_else(|| {
+                    FfsError::Format("insert_range: file size + length overflow".into())
+                })?;
                 {
                     let Ext4AllocState {
                         geo,
@@ -10795,6 +10896,14 @@ impl OpenFs {
         };
         if !new_parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
+        }
+        if child_inode.is_dir()
+            && parent != new_parent
+            && self.ext4_directory_is_descendant_of(cx, new_parent, child_ino)?
+        {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
         }
 
         self.ext4_preflight_dir_entry_insert(cx, &new_parent_inode, new_name, ft)?;
@@ -14924,12 +15033,91 @@ impl OpenFs {
 // ── FsOps for OpenFs (device-based ext4 adapter) ──────────────────────────
 
 impl OpenFs {
+    fn ext4_directory_is_descendant_of(
+        &self,
+        cx: &Cx,
+        candidate: InodeNumber,
+        ancestor: InodeNumber,
+    ) -> ffs_error::Result<bool> {
+        const MAX_DIR_ANCESTORS: usize = 4096;
+
+        let mut current = Self::ext4_canonical_inode(candidate);
+        let ancestor = Self::ext4_canonical_inode(ancestor);
+        let mut visited = Vec::new();
+        for _ in 0..MAX_DIR_ANCESTORS {
+            if current == ancestor {
+                return Ok(true);
+            }
+            if current == InodeNumber(2) {
+                return Ok(false);
+            }
+            if visited.contains(&current) {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!("cycle in ext4 '..' chain at inode {}", current.0),
+                });
+            }
+            visited.push(current);
+
+            let inode = self.read_inode(cx, current)?;
+            if !inode.is_dir() {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!("inode {} in '..' chain is not a directory", current.0),
+                });
+            }
+            let dotdot =
+                self.lookup_name(cx, &inode, b"..")?
+                    .ok_or_else(|| FfsError::Corruption {
+                        block: 0,
+                        detail: format!(
+                            "directory {} missing '..' while checking ancestry",
+                            current.0
+                        ),
+                    })?;
+            current = InodeNumber(u64::from(dotdot.inode));
+        }
+
+        Err(FfsError::Corruption {
+            block: 0,
+            detail: "ext4 '..' chain exceeded maximum depth".to_owned(),
+        })
+    }
+
+    fn ext4_prepare_dotdot_update(
+        &self,
+        cx: &Cx,
+        dir_inode: &Ext4Inode,
+        new_parent: InodeNumber,
+        reserved_tail: usize,
+    ) -> ffs_error::Result<(BlockNumber, Vec<u8>)> {
+        let child_extents = self.collect_extents(cx, dir_inode)?;
+        let first_ext = child_extents
+            .iter()
+            .find(|ext| ext.logical_block == 0 && !ext.is_unwritten())
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "directory inode missing logical block zero for '..' update".to_owned(),
+            })?;
+        let dot_dot_block = BlockNumber(first_ext.physical_start);
+        let mut data = self.read_block_vec(cx, dot_dot_block)?;
+        let parent_ino_u32 = u32::try_from(new_parent.0)
+            .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+        if !ffs_dir::swap_inode_in_entry(&mut data, b"..", parent_ino_u32, reserved_tail)? {
+            return Err(FfsError::Corruption {
+                block: dot_dot_block.0,
+                detail: "directory missing '..' entry before cross-parent rename".to_owned(),
+            });
+        }
+        Ok((dot_dot_block, data))
+    }
+
     /// Atomic dual-entry swap for `renameat2(RENAME_EXCHANGE)`.
     ///
     /// Both source and destination must exist; missing either side
     /// returns ENOENT. Same-parent and cross-parent swaps are both
-    /// supported. Crash atomicity across the two writes is provided
-    /// by the journal layer; under the FUSE dispatcher's parent guards
+    /// supported. Directory block and inode mutations are staged in one
+    /// MVCC request transaction; under the FUSE dispatcher's parent guards
     /// concurrent observers see either the pre-swap or post-swap shape
     /// of both entries, never a half-applied mix. btrfs handling is
     /// deferred (the COW dir-item layout differs from ext4 enough that
@@ -14938,13 +15126,56 @@ impl OpenFs {
     pub(crate) fn ext4_rename2_exchange(
         &self,
         cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        new_parent: InodeNumber,
+        new_name: &OsStr,
+    ) -> ffs_error::Result<()> {
+        if scope.tx.is_some() {
+            return self
+                .ext4_rename2_exchange_staged(cx, scope, parent, name, new_parent, new_name);
+        }
+
+        let mut store = self.mvcc_store.write();
+        let txn = store.begin();
+        let snapshot = txn.snapshot();
+        drop(store);
+
+        let mut local_scope = RequestScope {
+            snapshot: Some(snapshot),
+            tx: Some(txn),
+        };
+        match self.ext4_rename2_exchange_staged(
+            cx,
+            &mut local_scope,
+            parent,
+            name,
+            new_parent,
+            new_name,
+        ) {
+            Ok(()) => {
+                self.commit_request_scope(&mut local_scope)?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    fn ext4_rename2_exchange_staged(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
         parent: InodeNumber,
         name: &OsStr,
         new_parent: InodeNumber,
         new_name: &OsStr,
     ) -> ffs_error::Result<()> {
         let FsFlavor::Ext4(_) = &self.flavor else {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
         };
         let parent = Self::ext4_canonical_inode(parent);
         let new_parent = Self::ext4_canonical_inode(new_parent);
@@ -14968,14 +15199,14 @@ impl OpenFs {
             .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
         let csum_seed = sb.csum_seed();
 
-        let parent_inode = self.read_inode(cx, parent)?;
+        let parent_inode = self.read_inode_with_scope(cx, scope, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
         }
         let new_parent_inode = if parent == new_parent {
             parent_inode.clone()
         } else {
-            let np = self.read_inode(cx, new_parent)?;
+            let np = self.read_inode_with_scope(cx, scope, new_parent)?;
             if !np.is_dir() {
                 return Err(FfsError::NotDirectory);
             }
@@ -14985,10 +15216,10 @@ impl OpenFs {
         // Both entries must exist; either missing -> ENOENT per the
         // renameat2(2) man page contract for RENAME_EXCHANGE.
         let src_entry = self
-            .lookup_name(cx, &parent_inode, name_bytes)?
+            .lookup_name_with_scope(cx, scope, &parent_inode, name_bytes)?
             .ok_or_else(|| FfsError::NotFound(String::from_utf8_lossy(name_bytes).into_owned()))?;
         let dst_entry = self
-            .lookup_name(cx, &new_parent_inode, new_name_bytes)?
+            .lookup_name_with_scope(cx, scope, &new_parent_inode, new_name_bytes)?
             .ok_or_else(|| {
                 FfsError::NotFound(String::from_utf8_lossy(new_name_bytes).into_owned())
             })?;
@@ -14996,22 +15227,81 @@ impl OpenFs {
             .map_err(|_| FfsError::Format("source inode exceeds u32".into()))?;
         let dst_ino = u32::try_from(u64::from(dst_entry.inode))
             .map_err(|_| FfsError::Format("destination inode exceeds u32".into()))?;
+        let src_inode = self.read_inode_with_scope(cx, scope, InodeNumber(u64::from(src_ino)))?;
+        let dst_inode = self.read_inode_with_scope(cx, scope, InodeNumber(u64::from(dst_ino)))?;
+        let cross_parent = parent != new_parent;
+        let src_is_dir = src_inode.is_dir();
+        let dst_is_dir = dst_inode.is_dir();
+        let src_file_type = inode_dir_entry_file_type(&src_inode);
+        let dst_file_type = inode_dir_entry_file_type(&dst_inode);
+        let src_would_move_under_self = cross_parent
+            && src_is_dir
+            && self.ext4_directory_is_descendant_of(
+                cx,
+                new_parent,
+                InodeNumber(u64::from(src_ino)),
+            )?;
+        let dst_would_move_under_self = cross_parent
+            && dst_is_dir
+            && self.ext4_directory_is_descendant_of(cx, parent, InodeNumber(u64::from(dst_ino)))?;
+        if src_would_move_under_self || dst_would_move_under_self {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
+        }
 
-        // Walk each parent's data blocks, swap the inode field on the
-        // matching entry. ext4_dir_reserved_tail is zero unless
-        // METADATA_CSUM is enabled; the swap-in-place primitive does
-        // not move entries so the existing checksum bytes after the
-        // entries remain authoritative for the new layout.
+        // Walk each parent's data blocks, retarget the matching entry.
+        // The operation does not move entries, so rec_len/name layout
+        // remains stable while inode and file_type stay consistent.
         let reserved_tail = self.ext4_dir_reserved_tail();
-        let _alloc = alloc_mutex.lock();
+        let src_dotdot_update = if cross_parent && src_is_dir {
+            Some(self.ext4_prepare_dotdot_update(cx, &src_inode, new_parent, reserved_tail)?)
+        } else {
+            None
+        };
+        let dst_dotdot_update = if cross_parent && dst_is_dir {
+            Some(self.ext4_prepare_dotdot_update(cx, &dst_inode, parent, reserved_tail)?)
+        } else {
+            None
+        };
+        let (parent_link_delta, new_parent_link_delta) = if cross_parent {
+            match (src_is_dir, dst_is_dir) {
+                (true, false) => (-1, 1),
+                (false, true) => (1, -1),
+                _ => (0, 0),
+            }
+        } else {
+            (0, 0)
+        };
+        if parent_link_delta != 0 {
+            Self::ext4_checked_links_count_delta(
+                parent_inode.links_count,
+                parent,
+                parent_link_delta,
+            )?;
+        }
+        if new_parent_link_delta != 0 {
+            Self::ext4_checked_links_count_delta(
+                new_parent_inode.links_count,
+                new_parent,
+                new_parent_link_delta,
+            )?;
+        }
+        let alloc = alloc_mutex.lock();
 
         let parent_extents = self.collect_extents(cx, &parent_inode)?;
         let mut src_swapped = false;
         'src: for ext in &parent_extents {
             for block in Self::extent_phys_blocks(ext) {
-                let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::swap_inode_in_entry(&mut data, name_bytes, dst_ino, reserved_tail)? {
-                    block_dev.write_block(cx, block, &data)?;
+                let mut data = self.read_block_with_scope(cx, scope, block)?;
+                if ffs_dir::retarget_entry(
+                    &mut data,
+                    name_bytes,
+                    dst_ino,
+                    dst_file_type,
+                    reserved_tail,
+                )? {
+                    Self::write_block_with_scope(cx, scope, &block_dev, block, &data)?;
                     src_swapped = true;
                     break 'src;
                 }
@@ -15035,10 +15325,15 @@ impl OpenFs {
         let mut dst_swapped = false;
         'dst: for ext in &new_parent_extents {
             for block in Self::extent_phys_blocks(ext) {
-                let mut data = self.read_block_vec(cx, block)?;
-                if ffs_dir::swap_inode_in_entry(&mut data, new_name_bytes, src_ino, reserved_tail)?
-                {
-                    block_dev.write_block(cx, block, &data)?;
+                let mut data = self.read_block_with_scope(cx, scope, block)?;
+                if ffs_dir::retarget_entry(
+                    &mut data,
+                    new_name_bytes,
+                    src_ino,
+                    src_file_type,
+                    reserved_tail,
+                )? {
+                    Self::write_block_with_scope(cx, scope, &block_dev, block, &data)?;
                     dst_swapped = true;
                     break 'dst;
                 }
@@ -15049,10 +15344,15 @@ impl OpenFs {
             // pointing at dst_ino.
             'undo: for ext in &parent_extents {
                 for block in Self::extent_phys_blocks(ext) {
-                    let mut data = self.read_block_vec(cx, block)?;
-                    if ffs_dir::swap_inode_in_entry(&mut data, name_bytes, src_ino, reserved_tail)?
-                    {
-                        block_dev.write_block(cx, block, &data)?;
+                    let mut data = self.read_block_with_scope(cx, scope, block)?;
+                    if ffs_dir::retarget_entry(
+                        &mut data,
+                        name_bytes,
+                        src_ino,
+                        src_file_type,
+                        reserved_tail,
+                    )? {
+                        Self::write_block_with_scope(cx, scope, &block_dev, block, &data)?;
                         break 'undo;
                     }
                 }
@@ -15066,18 +15366,55 @@ impl OpenFs {
             });
         }
 
-        // Touch ctime on both swapped inodes per renameat2(2) man page —
-        // mtime, atime, nlink, mode all stay; only ctime advances.
-        let block_dev = self.block_device_adapter();
-        let alloc_again = alloc_mutex.lock();
-        for ino in [InodeNumber(u64::from(src_ino)), InodeNumber(u64::from(dst_ino))] {
-            let mut inode = self.read_inode(cx, ino)?;
+        if let Some((block, data)) = src_dotdot_update.as_ref() {
+            Self::write_block_with_scope(cx, scope, &block_dev, *block, data)?;
+        }
+        if let Some((block, data)) = dst_dotdot_update.as_ref() {
+            Self::write_block_with_scope(cx, scope, &block_dev, *block, data)?;
+        }
+
+        // Touch parent directory metadata; cross-parent directory/file swaps
+        // also transfer one ".." backlink from one parent to the other.
+        {
+            let mut touch_parent = |ino: InodeNumber, link_delta: i32| -> ffs_error::Result<()> {
+                let mut inode = self.read_inode_with_scope(cx, scope, ino)?;
+                if link_delta != 0 {
+                    inode.links_count =
+                        Self::ext4_checked_links_count_delta(inode.links_count, ino, link_delta)?;
+                }
+                ffs_inode::touch_mtime_ctime(&mut inode, tstamp_secs, tstamp_nanos);
+                Self::write_inode_with_scope(
+                    cx,
+                    scope,
+                    &block_dev,
+                    &alloc.geo,
+                    &alloc.groups,
+                    ino,
+                    &inode,
+                    csum_seed,
+                )
+            };
+            if parent == new_parent {
+                touch_parent(parent, 0)?;
+            } else {
+                touch_parent(parent, parent_link_delta)?;
+                touch_parent(new_parent, new_parent_link_delta)?;
+            }
+        }
+
+        // Touch ctime on both swapped inodes per renameat2(2) man page.
+        for ino in [
+            InodeNumber(u64::from(src_ino)),
+            InodeNumber(u64::from(dst_ino)),
+        ] {
+            let mut inode = self.read_inode_with_scope(cx, scope, ino)?;
             ffs_inode::touch_ctime(&mut inode, tstamp_secs, tstamp_nanos);
-            ffs_inode::write_inode(
+            Self::write_inode_with_scope(
                 cx,
+                scope,
                 &block_dev,
-                &alloc_again.geo,
-                &alloc_again.groups,
+                &alloc.geo,
+                &alloc.groups,
                 ino,
                 &inode,
                 csum_seed,
@@ -16590,23 +16927,27 @@ impl FsOps for OpenFs {
         const RENAME_NOREPLACE: u32 = libc::RENAME_NOREPLACE;
         const RENAME_EXCHANGE: u32 = libc::RENAME_EXCHANGE;
         const RENAME_WHITEOUT: u32 = libc::RENAME_WHITEOUT;
-        const SUPPORTED: u32 = RENAME_NOREPLACE;
+        const SUPPORTED: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
         const KNOWN: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
         if flags & !KNOWN != 0 {
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
         }
         if flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0 {
             // EINVAL per renameat2(2): NOREPLACE + EXCHANGE is contradictory.
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
         }
         if flags & !SUPPORTED != 0 {
-            // RENAME_EXCHANGE + RENAME_WHITEOUT need atomic dual-entry
-            // mutation across two parent directory blocks (and, for
-            // WHITEOUT, a fresh char-device inode from the unused-inode
-            // pool). Tracked as follow-ups in the bead description for
-            // bd-bivg2 — return EINVAL until they land so the kernel
-            // surfaces a real error rather than degrading to overwrite.
-            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+            // RENAME_WHITEOUT still needs a fresh char-device inode from
+            // the unused-inode pool. Return EINVAL until it lands so the
+            // kernel surfaces a real error rather than degrading to
+            // overwrite.
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
         }
 
         if flags & RENAME_NOREPLACE != 0 {
@@ -16626,7 +16967,7 @@ impl FsOps for OpenFs {
         }
 
         if flags & RENAME_EXCHANGE != 0 {
-            return self.ext4_rename2_exchange(cx, parent, name, new_parent, new_name);
+            return self.ext4_rename2_exchange(cx, scope, parent, name, new_parent, new_name);
         }
 
         <Self as FsOps>::rename(self, cx, scope, parent, name, new_parent, new_name)
@@ -16811,6 +17152,65 @@ impl FsOps for OpenFs {
             }
             FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
                 "get_inode_fsxattr is not supported for btrfs".to_owned(),
+            )),
+        }
+    }
+
+    fn set_inode_fsxattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        fsx: FsxattrInfo,
+    ) -> ffs_error::Result<()> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                // ext4 does not implement extsize / cowextsize hints,
+                // so any non-zero value is a programmer / userspace
+                // misuse — surface EINVAL up-front before we mutate
+                // anything (matches fs/ext4/ioctl.c::ext4_fileattr_set).
+                if fsx.extsize != 0 || fsx.cowextsize != 0 {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EINVAL,
+                    )));
+                }
+                let canonical = Self::ext4_canonical_inode(ino);
+                let current = self.read_inode_with_scope(cx, scope, canonical)?;
+                let new_flags = xflags_to_ext4_flags(fsx.xflags, current.flags)?;
+
+                // Reuse the existing user-flag pipeline so the
+                // EXT4_USER_SETTABLE_FLAGS gate, EXT4_COMPR_FL feature
+                // check, and journal-aware write path all stay in one
+                // place. set_inode_flags only touches the user-settable
+                // subset, so PROJINHERIT etc. round-trip cleanly.
+                <Self as FsOps>::set_inode_flags(self, cx, scope, ino, new_flags)?;
+
+                // Project-ID is a separate field — apply it directly
+                // unless it matches what's already on disk.
+                if fsx.projid != current.projid {
+                    let mut updated = self.read_inode_with_scope(cx, scope, canonical)?;
+                    updated.projid = fsx.projid;
+                    let alloc_mutex = self.require_alloc_state()?;
+                    let block_dev = self.block_device_adapter();
+                    let sb = self
+                        .ext4_superblock()
+                        .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+                    let csum_seed = sb.csum_seed();
+                    let alloc = alloc_mutex.lock();
+                    ffs_inode::write_inode(
+                        cx,
+                        &block_dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        canonical,
+                        &updated,
+                        csum_seed,
+                    )?;
+                }
+                Ok(())
+            }
+            FsFlavor::Btrfs(_) => Err(FfsError::UnsupportedFeature(
+                "set_inode_fsxattr is not supported for btrfs".to_owned(),
             )),
         }
     }
@@ -24620,15 +25020,10 @@ mod tests {
         let entries = vec![synth_inode_ref_entry(257, 256, 2, b"a")];
         let err = OpenFs::btrfs_build_path_from_inode_refs(&entries, 999)
             .expect_err("missing back-ref must fail");
-        match err {
-            FfsError::NotFound(msg) => {
-                assert!(
-                    msg.contains("999"),
-                    "error must reference the missing inode: {msg}"
-                );
-            }
-            other => panic!("expected NotFound, got {other:?}"),
-        }
+        assert!(
+            matches!(&err, FfsError::NotFound(msg) if msg.contains("999")),
+            "expected NotFound mentioning missing inode 999, got {err:?}"
+        );
     }
 
     #[test]
@@ -24640,15 +25035,10 @@ mod tests {
         ];
         let err = OpenFs::btrfs_build_path_from_inode_refs(&entries, 257)
             .expect_err("cycle must be rejected");
-        match err {
-            FfsError::Corruption { detail, .. } => {
-                assert!(
-                    detail.contains("cycle"),
-                    "error must mention cycle: {detail}"
-                );
-            }
-            other => panic!("expected Corruption, got {other:?}"),
-        }
+        assert!(
+            matches!(&err, FfsError::Corruption { detail, .. } if detail.contains("cycle")),
+            "expected Corruption mentioning cycle, got {err:?}"
+        );
     }
 
     #[test]
@@ -27405,19 +27795,19 @@ mod tests {
         // At create time, ctime and crtime are stamped from the same now()
         // call (see ext4_create / ffs_inode::create_inode), so they must
         // agree to single-second resolution.
-        let ctime_secs = attr
+        let change_epoch_secs = attr
             .ctime
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let crtime_secs = attr
+        let birth_epoch_secs = attr
             .crtime
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         assert_eq!(
-            ctime_secs, crtime_secs,
-            "ctime ({ctime_secs}) and crtime ({crtime_secs}) must be stamped together at create"
+            change_epoch_secs, birth_epoch_secs,
+            "ctime ({change_epoch_secs}) and crtime ({birth_epoch_secs}) must be stamped together at create"
         );
     }
 
@@ -27581,6 +27971,175 @@ mod tests {
             info.nextents >= 1,
             "nextents must be at least 1 after writing data, got {}",
             info.nextents
+        );
+    }
+
+    // ── bd-c88jg: FS_IOC_FSSETXATTR (write side) ──────────────────────────
+    //
+    // Mirror of bd-6wzug (read side). Userspace passes a 28-byte
+    // struct fsxattr; the FS sets project ID + chattr-style xflags
+    // from it. Validates extsize=cowextsize=0 (ext4 doesn't implement
+    // them) and rejects HASATTR (kernel-set / read-only) and any
+    // unknown FS_XFLAG_* bits.
+
+    #[test]
+    fn ext4_set_inode_fsxattr_round_trips_xflags_and_projid() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsx_set.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        let mut scope = RequestScope::empty();
+        let want = FsxattrInfo {
+            xflags: xflags::FS_XFLAG_IMMUTABLE
+                | xflags::FS_XFLAG_APPEND
+                | xflags::FS_XFLAG_NOATIME,
+            extsize: 0,
+            nextents: 0,
+            projid: 0xCAFE_BABE,
+            cowextsize: 0,
+        };
+        <OpenFs as FsOps>::set_inode_fsxattr(&fs, &cx, &mut scope, attr.ino, want)
+            .expect("set_inode_fsxattr must succeed");
+
+        let got =
+            <OpenFs as FsOps>::get_inode_fsxattr(&fs, &cx, &mut scope, attr.ino).expect("get back");
+        // Get adds HASATTR sentinel, so mask it off before comparing.
+        let got_user = got.xflags & !xflags::FS_XFLAG_HASATTR;
+        assert_eq!(
+            got_user, want.xflags,
+            "xflags must round-trip; got {:#x}, want {:#x}",
+            got_user, want.xflags
+        );
+        assert!(
+            got.xflags & xflags::FS_XFLAG_HASATTR != 0,
+            "HASATTR must be set after any chattr is in effect"
+        );
+        assert_eq!(got.projid, want.projid, "projid must round-trip");
+    }
+
+    #[test]
+    fn ext4_set_inode_fsxattr_rejects_nonzero_extsize() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsx_extsize.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        let mut scope = RequestScope::empty();
+        let bad = FsxattrInfo {
+            xflags: 0,
+            extsize: 4096,
+            nextents: 0,
+            projid: 0,
+            cowextsize: 0,
+        };
+        let err = <OpenFs as FsOps>::set_inode_fsxattr(&fs, &cx, &mut scope, attr.ino, bad)
+            .expect_err("non-zero extsize must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let bad = FsxattrInfo {
+            xflags: 0,
+            extsize: 0,
+            nextents: 0,
+            projid: 0,
+            cowextsize: 4096,
+        };
+        let err = <OpenFs as FsOps>::set_inode_fsxattr(&fs, &cx, &mut scope, attr.ino, bad)
+            .expect_err("non-zero cowextsize must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn ext4_set_inode_fsxattr_rejects_hasattr_sentinel() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsx_hasattr.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        let mut scope = RequestScope::empty();
+        let bad = FsxattrInfo {
+            xflags: xflags::FS_XFLAG_IMMUTABLE | xflags::FS_XFLAG_HASATTR,
+            extsize: 0,
+            nextents: 0,
+            projid: 0,
+            cowextsize: 0,
+        };
+        let err = <OpenFs as FsOps>::set_inode_fsxattr(&fs, &cx, &mut scope, attr.ino, bad)
+            .expect_err("HASATTR is kernel-set / read-only");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn ext4_set_inode_fsxattr_rejects_unknown_xflags_with_eopnotsupp() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsx_unknown.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        let mut scope = RequestScope::empty();
+        // 0x0000_0001 is FS_XFLAG_REALTIME — XFS-only, ext4 has no
+        // mapping. Must surface EOPNOTSUPP per the bead contract.
+        let bad = FsxattrInfo {
+            xflags: 0x0000_0001,
+            extsize: 0,
+            nextents: 0,
+            projid: 0,
+            cowextsize: 0,
+        };
+        let err = <OpenFs as FsOps>::set_inode_fsxattr(&fs, &cx, &mut scope, attr.ino, bad)
+            .expect_err("unknown xflags must fail");
+        assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
+    }
+
+    #[test]
+    fn ext4_set_inode_fsxattr_clears_previously_set_xflags() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("fsx_clear.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        let mut scope = RequestScope::empty();
+        // Set IMMUTABLE first.
+        let on = FsxattrInfo {
+            xflags: xflags::FS_XFLAG_IMMUTABLE,
+            extsize: 0,
+            nextents: 0,
+            projid: 0,
+            cowextsize: 0,
+        };
+        <OpenFs as FsOps>::set_inode_fsxattr(&fs, &cx, &mut scope, attr.ino, on).expect("on");
+        let after_on =
+            <OpenFs as FsOps>::get_inode_fsxattr(&fs, &cx, &mut scope, attr.ino).expect("get on");
+        assert!(after_on.xflags & xflags::FS_XFLAG_IMMUTABLE != 0);
+
+        // Now clear all chattrs.
+        let off = FsxattrInfo::default();
+        <OpenFs as FsOps>::set_inode_fsxattr(&fs, &cx, &mut scope, attr.ino, off).expect("off");
+        let after_off =
+            <OpenFs as FsOps>::get_inode_fsxattr(&fs, &cx, &mut scope, attr.ino).expect("get off");
+        assert_eq!(
+            after_off.xflags, 0,
+            "xflags must be empty after clearing (no HASATTR either)"
         );
     }
 
@@ -27975,8 +28534,8 @@ mod tests {
     // though the kernel asked for them. `OpenFs::rename2` now honours
     // RENAME_NOREPLACE atomically (the FUSE layer holds parent +
     // new_parent guards across the lookup + rename) and continues to
-    // return EINVAL for RENAME_EXCHANGE / RENAME_WHITEOUT pending the
-    // dual-entry / whiteout-inode work tracked separately.
+    // return EINVAL for RENAME_WHITEOUT pending the whiteout-inode work
+    // tracked separately.
 
     #[test]
     fn ext4_rename2_classic_flag_zero_overwrites_target() {
@@ -28040,7 +28599,7 @@ mod tests {
             OsStr::new("nr_block_src.txt"),
             root,
             OsStr::new("nr_block_dst.txt"),
-            libc::RENAME_NOREPLACE as u32,
+            libc::RENAME_NOREPLACE,
         )
         .expect_err("RENAME_NOREPLACE over existing target must fail");
         assert_eq!(
@@ -28083,7 +28642,7 @@ mod tests {
             OsStr::new("nr_ok_src.txt"),
             root,
             OsStr::new("nr_ok_dst.txt"),
-            libc::RENAME_NOREPLACE as u32,
+            libc::RENAME_NOREPLACE,
         )
         .expect("RENAME_NOREPLACE with free dst must succeed");
 
@@ -28120,10 +28679,8 @@ mod tests {
 
         // Write distinct payloads so a successful swap is observable
         // through the user-visible name -> inode mapping.
-        fs.write(&cx, x_ino, 0, b"X-original")
-            .expect("write to x");
-        fs.write(&cx, y_ino, 0, b"Y-original")
-            .expect("write to y");
+        fs.write(&cx, x_ino, 0, b"X-original").expect("write to x");
+        fs.write(&cx, y_ino, 0, b"Y-original").expect("write to y");
 
         let mut scope = RequestScope::empty();
         <OpenFs as FsOps>::rename2(
@@ -28153,6 +28710,61 @@ mod tests {
         let by_y = fs.read(&cx, after_y.ino, 0, 64).expect("read by ex_y");
         assert!(by_x.starts_with(b"Y-original"));
         assert!(by_y.starts_with(b"X-original"));
+    }
+
+    #[test]
+    fn ext4_rename2_exchange_same_parent_request_scope_preserves_both_staged_edits() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let x = fs
+            .create(&cx, root, OsStr::new("ex_tx_x.txt"), 0o644, 0, 0)
+            .expect("create x");
+        let y = fs
+            .create(&cx, root, OsStr::new("ex_tx_y.txt"), 0o644, 0, 0)
+            .expect("create y");
+        assert_ne!(x.ino, y.ino);
+
+        let mut scope = fs
+            .begin_request_scope(&cx, RequestOp::Rename)
+            .expect("begin rename scope");
+        <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            root,
+            OsStr::new("ex_tx_x.txt"),
+            root,
+            OsStr::new("ex_tx_y.txt"),
+            libc::RENAME_EXCHANGE,
+        )
+        .expect("request-scoped RENAME_EXCHANGE must stage both entry updates");
+
+        let staged_x =
+            <OpenFs as FsOps>::lookup(&fs, &cx, &mut scope, root, OsStr::new("ex_tx_x.txt"))
+                .expect("staged x lookup");
+        let staged_y =
+            <OpenFs as FsOps>::lookup(&fs, &cx, &mut scope, root, OsStr::new("ex_tx_y.txt"))
+                .expect("staged y lookup");
+        assert_eq!(staged_x.ino, y.ino, "staged x must point at old y");
+        assert_eq!(staged_y.ino, x.ino, "staged y must point at old x");
+
+        fs.commit_request_scope(&mut scope)
+            .expect("commit rename scope");
+        fs.end_request_scope(&cx, RequestOp::Rename, scope)
+            .expect("end rename scope");
+
+        let after_x = fs
+            .lookup(&cx, root, OsStr::new("ex_tx_x.txt"))
+            .expect("lookup committed x");
+        let after_y = fs
+            .lookup(&cx, root, OsStr::new("ex_tx_y.txt"))
+            .expect("lookup committed y");
+        assert_eq!(after_x.ino, y.ino, "committed x must point at old y");
+        assert_eq!(after_y.ino, x.ino, "committed y must point at old x");
     }
 
     #[test]
@@ -28199,6 +28811,210 @@ mod tests {
             now_in_b.ino, x.ino,
             "B/y must now resolve to the inode that used to be A/x"
         );
+    }
+
+    #[test]
+    fn ext4_rename2_exchange_directory_with_file_across_parents_updates_dotdot_and_nlinks() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let dir_a = fs
+            .mkdir(&cx, root, OsStr::new("ex_df_dir_a"), 0o755, 0, 0)
+            .expect("mkdir A");
+        let dir_b = fs
+            .mkdir(&cx, root, OsStr::new("ex_df_dir_b"), 0o755, 0, 0)
+            .expect("mkdir B");
+        let moved_dir = fs
+            .mkdir(&cx, dir_a.ino, OsStr::new("moved_dir"), 0o755, 0, 0)
+            .expect("mkdir moved_dir");
+        let plain_file = fs
+            .create(&cx, dir_b.ino, OsStr::new("plain_file"), 0o644, 0, 0)
+            .expect("create plain_file");
+
+        let source_parent_before = fs.getattr(&cx, dir_a.ino).expect("getattr A before");
+        let target_parent_before = fs.getattr(&cx, dir_b.ino).expect("getattr B before");
+        assert_eq!(source_parent_before.nlink, 3, "A owns one child directory");
+        assert_eq!(target_parent_before.nlink, 2, "B owns no child directories");
+
+        let mut scope = RequestScope::empty();
+        <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            dir_a.ino,
+            OsStr::new("moved_dir"),
+            dir_b.ino,
+            OsStr::new("plain_file"),
+            libc::RENAME_EXCHANGE,
+        )
+        .expect("cross-parent dir/file exchange must succeed");
+
+        let now_in_a = fs
+            .lookup(&cx, dir_a.ino, OsStr::new("moved_dir"))
+            .expect("A/moved_dir");
+        let now_in_b = fs
+            .lookup(&cx, dir_b.ino, OsStr::new("plain_file"))
+            .expect("B/plain_file");
+        assert_eq!(now_in_a.ino, plain_file.ino);
+        assert_eq!(now_in_b.ino, moved_dir.ino);
+
+        let entries_a = fs.readdir(&cx, dir_a.ino, 0).expect("readdir A");
+        let moved_name = entries_a
+            .iter()
+            .find(|entry| entry.name == b"moved_dir")
+            .expect("A/moved_dir remains listed");
+        assert_eq!(
+            moved_name.kind,
+            FileType::RegularFile,
+            "entry d_type follows the file inode after exchange"
+        );
+        let entries_b = fs.readdir(&cx, dir_b.ino, 0).expect("readdir B");
+        let plain_name = entries_b
+            .iter()
+            .find(|entry| entry.name == b"plain_file")
+            .expect("B/plain_file remains listed");
+        assert_eq!(
+            plain_name.kind,
+            FileType::Directory,
+            "entry d_type follows the directory inode after exchange"
+        );
+
+        let moved_entries = fs.readdir(&cx, moved_dir.ino, 0).expect("readdir moved");
+        let dotdot = moved_entries
+            .iter()
+            .find(|entry| entry.name == b"..")
+            .expect("moved directory has '..'");
+        assert_eq!(
+            dotdot.ino, dir_b.ino,
+            "moved directory '..' follows new parent"
+        );
+
+        let source_parent_after = fs.getattr(&cx, dir_a.ino).expect("getattr A after");
+        let target_parent_after = fs.getattr(&cx, dir_b.ino).expect("getattr B after");
+        assert_eq!(
+            source_parent_after.nlink, 2,
+            "A lost its child-directory backlink"
+        );
+        assert_eq!(
+            target_parent_after.nlink, 3,
+            "B gained the child-directory backlink"
+        );
+    }
+
+    #[test]
+    fn ext4_rename2_exchange_two_directories_across_parents_updates_both_dotdot() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let dir_a = fs
+            .mkdir(&cx, root, OsStr::new("ex_dd_dir_a"), 0o755, 0, 0)
+            .expect("mkdir A");
+        let dir_b = fs
+            .mkdir(&cx, root, OsStr::new("ex_dd_dir_b"), 0o755, 0, 0)
+            .expect("mkdir B");
+        let left = fs
+            .mkdir(&cx, dir_a.ino, OsStr::new("left"), 0o755, 0, 0)
+            .expect("mkdir left");
+        let right = fs
+            .mkdir(&cx, dir_b.ino, OsStr::new("right"), 0o755, 0, 0)
+            .expect("mkdir right");
+
+        let left_parent_before = fs.getattr(&cx, dir_a.ino).expect("getattr A before");
+        let right_parent_before = fs.getattr(&cx, dir_b.ino).expect("getattr B before");
+        assert_eq!(left_parent_before.nlink, 3);
+        assert_eq!(right_parent_before.nlink, 3);
+
+        let mut scope = RequestScope::empty();
+        <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            dir_a.ino,
+            OsStr::new("left"),
+            dir_b.ino,
+            OsStr::new("right"),
+            libc::RENAME_EXCHANGE,
+        )
+        .expect("cross-parent dir/dir exchange must succeed");
+
+        let now_in_a = fs
+            .lookup(&cx, dir_a.ino, OsStr::new("left"))
+            .expect("A/left");
+        let now_in_b = fs
+            .lookup(&cx, dir_b.ino, OsStr::new("right"))
+            .expect("B/right");
+        assert_eq!(now_in_a.ino, right.ino);
+        assert_eq!(now_in_b.ino, left.ino);
+
+        let left_entries = fs.readdir(&cx, left.ino, 0).expect("readdir left");
+        let left_dotdot = left_entries
+            .iter()
+            .find(|entry| entry.name == b"..")
+            .expect("left has '..'");
+        assert_eq!(left_dotdot.ino, dir_b.ino);
+
+        let right_entries = fs.readdir(&cx, right.ino, 0).expect("readdir right");
+        let right_dotdot = right_entries
+            .iter()
+            .find(|entry| entry.name == b"..")
+            .expect("right has '..'");
+        assert_eq!(right_dotdot.ino, dir_a.ino);
+
+        let left_parent_after = fs.getattr(&cx, dir_a.ino).expect("getattr A after");
+        let right_parent_after = fs.getattr(&cx, dir_b.ino).expect("getattr B after");
+        assert_eq!(
+            left_parent_after.nlink, 3,
+            "dir/dir exchange keeps A link count"
+        );
+        assert_eq!(
+            right_parent_after.nlink, 3,
+            "dir/dir exchange keeps B link count"
+        );
+    }
+
+    #[test]
+    fn ext4_rename2_exchange_directory_with_own_child_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("ex_cycle_dir"), 0o755, 0, 0)
+            .expect("mkdir dir");
+        let child = fs
+            .mkdir(&cx, dir.ino, OsStr::new("child"), 0o755, 0, 0)
+            .expect("mkdir child");
+
+        let mut scope = RequestScope::empty();
+        let err = <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            root,
+            OsStr::new("ex_cycle_dir"),
+            dir.ino,
+            OsStr::new("child"),
+            libc::RENAME_EXCHANGE,
+        )
+        .expect_err("exchange must not move a directory under itself");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let dir_after = fs
+            .lookup(&cx, root, OsStr::new("ex_cycle_dir"))
+            .expect("original dir remains at root");
+        let child_after = fs
+            .lookup(&cx, dir.ino, OsStr::new("child"))
+            .expect("child remains under dir");
+        assert_eq!(dir_after.ino, dir.ino);
+        assert_eq!(child_after.ino, child.ino);
     }
 
     #[test]
@@ -28302,7 +29118,7 @@ mod tests {
             .expect("create b");
 
         let mut scope = RequestScope::empty();
-        let combined = (libc::RENAME_NOREPLACE | libc::RENAME_EXCHANGE) as u32;
+        let combined = libc::RENAME_NOREPLACE | libc::RENAME_EXCHANGE;
         let err = <OpenFs as FsOps>::rename2(
             &fs,
             &cx,
@@ -29970,6 +30786,42 @@ mod tests {
     }
 
     #[test]
+    fn write_rename_directory_into_own_child_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("cycle_dir"), 0o755, 0, 0)
+            .expect("mkdir dir");
+        let child = fs
+            .mkdir(&cx, dir.ino, OsStr::new("child"), 0o755, 0, 0)
+            .expect("mkdir child");
+
+        let err = fs
+            .rename(
+                &cx,
+                root,
+                OsStr::new("cycle_dir"),
+                child.ino,
+                OsStr::new("moved"),
+            )
+            .expect_err("rename must not move a directory under itself");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let dir_after = fs
+            .lookup(&cx, root, OsStr::new("cycle_dir"))
+            .expect("directory remains at root");
+        let child_after = fs
+            .lookup(&cx, dir.ino, OsStr::new("child"))
+            .expect("child remains under directory");
+        assert_eq!(dir_after.ino, dir.ino);
+        assert_eq!(child_after.ino, child.ino);
+    }
+
+    #[test]
     fn write_rename_directory_across_parents_rejects_missing_dotdot() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -30533,12 +31385,15 @@ mod tests {
 
         // Layout: 3 file-aligned 4 KiB chunks A B C.
         let block = 4096_u64;
-        let chunk_a = vec![0xAA_u8; block as usize];
-        let chunk_b = vec![0xBB_u8; block as usize];
-        let chunk_c = vec![0xCC_u8; block as usize];
+        let block_len = usize::try_from(block).expect("test block size fits usize");
+        let block_read_len = u32::try_from(block).expect("test block size fits u32");
+        let chunk_a = vec![0xAA_u8; block_len];
+        let chunk_b = vec![0xBB_u8; block_len];
+        let chunk_c = vec![0xCC_u8; block_len];
         fs.write(&cx, attr.ino, 0, &chunk_a).expect("write A");
         fs.write(&cx, attr.ino, block, &chunk_b).expect("write B");
-        fs.write(&cx, attr.ino, 2 * block, &chunk_c).expect("write C");
+        fs.write(&cx, attr.ino, 2 * block, &chunk_c)
+            .expect("write C");
 
         // Insert a 4 KiB hole at offset == block (between A and B).
         // Tail (B, C) shifts right by 4 KiB; file grows by 4 KiB.
@@ -30555,23 +31410,29 @@ mod tests {
 
         // A is unchanged at offset 0; the hole at [block, 2*block) reads
         // as zeros; B is now at 2*block, C at 3*block.
-        let read_a = fs.read(&cx, attr.ino, 0, block as u32).expect("read A");
+        let read_a = fs.read(&cx, attr.ino, 0, block_read_len).expect("read A");
         let read_hole = fs
-            .read(&cx, attr.ino, block, block as u32)
+            .read(&cx, attr.ino, block, block_read_len)
             .expect("read hole");
-        let read_b_now = fs
-            .read(&cx, attr.ino, 2 * block, block as u32)
+        let post_insert_b_bytes = fs
+            .read(&cx, attr.ino, 2 * block, block_read_len)
             .expect("read former-B");
-        let read_c_now = fs
-            .read(&cx, attr.ino, 3 * block, block as u32)
+        let final_chunk_after_insert = fs
+            .read(&cx, attr.ino, 3 * block, block_read_len)
             .expect("read former-C");
         assert_eq!(read_a, chunk_a);
         assert!(
             read_hole.iter().all(|&b| b == 0),
             "inserted hole must read as zeros"
         );
-        assert_eq!(read_b_now, chunk_b, "B shifted right into hole's position");
-        assert_eq!(read_c_now, chunk_c, "C shifted right behind B");
+        assert_eq!(
+            post_insert_b_bytes, chunk_b,
+            "B shifted right into hole's position"
+        );
+        assert_eq!(
+            final_chunk_after_insert, chunk_c,
+            "C shifted right behind B"
+        );
     }
 
     #[test]
@@ -30663,14 +31524,18 @@ mod tests {
 
         // Layout: 4 file-aligned 4 KiB chunks A B C D.
         let block = 4096_u64;
-        let chunk_a = vec![0xAA_u8; block as usize];
-        let chunk_b = vec![0xBB_u8; block as usize];
-        let chunk_c = vec![0xCC_u8; block as usize];
-        let chunk_d = vec![0xDD_u8; block as usize];
+        let block_len = usize::try_from(block).expect("test block size fits usize");
+        let block_read_len = u32::try_from(block).expect("test block size fits u32");
+        let chunk_a = vec![0xAA_u8; block_len];
+        let chunk_b = vec![0xBB_u8; block_len];
+        let chunk_c = vec![0xCC_u8; block_len];
+        let chunk_d = vec![0xDD_u8; block_len];
         fs.write(&cx, attr.ino, 0, &chunk_a).expect("write A");
         fs.write(&cx, attr.ino, block, &chunk_b).expect("write B");
-        fs.write(&cx, attr.ino, 2 * block, &chunk_c).expect("write C");
-        fs.write(&cx, attr.ino, 3 * block, &chunk_d).expect("write D");
+        fs.write(&cx, attr.ino, 2 * block, &chunk_c)
+            .expect("write C");
+        fs.write(&cx, attr.ino, 3 * block, &chunk_d)
+            .expect("write D");
 
         let before = fs.getattr(&cx, attr.ino).expect("getattr before");
         assert_eq!(before.size, 4 * block, "file is 16 KiB before collapse");
@@ -30688,12 +31553,12 @@ mod tests {
         );
 
         // Read back every chunk and verify the tail moved.
-        let read_a = fs.read(&cx, attr.ino, 0, block as u32).expect("read A");
+        let read_a = fs.read(&cx, attr.ino, 0, block_read_len).expect("read A");
         let read_c_now_at_b = fs
-            .read(&cx, attr.ino, block, block as u32)
+            .read(&cx, attr.ino, block, block_read_len)
             .expect("read former-C");
         let read_d_now_at_c = fs
-            .read(&cx, attr.ino, 2 * block, block as u32)
+            .read(&cx, attr.ino, 2 * block, block_read_len)
             .expect("read former-D");
         assert_eq!(read_a, chunk_a, "A unchanged");
         assert_eq!(read_c_now_at_b, chunk_c, "C shifted left into B's slot");

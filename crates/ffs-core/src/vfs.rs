@@ -14,6 +14,21 @@ use std::time::SystemTime;
 
 // ── VFS semantics layer ─────────────────────────────────────────────────────
 
+const COPY_FILE_RANGE_CHUNK_BYTES: u32 = 1024 * 1024;
+
+fn ranges_overlap(a_start: u64, a_len: u64, b_start: u64, b_len: u64) -> bool {
+    if a_len == 0 || b_len == 0 {
+        return false;
+    }
+    let Some(a_end) = a_start.checked_add(a_len) else {
+        return true;
+    };
+    let Some(b_end) = b_start.checked_add(b_len) else {
+        return true;
+    };
+    a_start < b_end && b_start < a_end
+}
+
 /// Filesystem-agnostic file type for VFS operations.
 ///
 /// This is the semantics-level file type used by [`FsOps`] methods. It unifies
@@ -737,7 +752,9 @@ pub trait FsOps: Send + Sync {
         _uid: u32,
         _gid: u32,
     ) -> ffs_error::Result<InodeAttr> {
-        Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENOTSUP)))
+        Err(FfsError::Io(std::io::Error::from_raw_os_error(
+            libc::ENOTSUP,
+        )))
     }
 
     /// Rename with `renameat2(2)` flags (FUSE_RENAME2 opcode).
@@ -783,6 +800,69 @@ pub trait FsOps: Send + Sync {
         _data: &[u8],
     ) -> ffs_error::Result<u32> {
         Err(FfsError::ReadOnly)
+    }
+
+    /// Copy bytes between two regular files.
+    ///
+    /// The default implementation preserves Linux `copy_file_range(2)` safety
+    /// semantics and streams through the existing read/write contract in large
+    /// chunks. Format-specific implementations can override this with an
+    /// extent-aware clone path.
+    #[allow(clippy::too_many_arguments)]
+    fn copy_file_range(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino_in: InodeNumber,
+        offset_in: u64,
+        ino_out: InodeNumber,
+        offset_out: u64,
+        len: u64,
+    ) -> ffs_error::Result<u64> {
+        if len == 0 {
+            return Ok(0);
+        }
+        if offset_in.checked_add(len).is_none() || offset_out.checked_add(len).is_none() {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
+        }
+        if ino_in == ino_out && ranges_overlap(offset_in, len, offset_out, len) {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
+        }
+
+        let mut copied = 0_u64;
+        while copied < len {
+            let remaining = len - copied;
+            let request_len =
+                COPY_FILE_RANGE_CHUNK_BYTES.min(u32::try_from(remaining).unwrap_or(u32::MAX));
+            let src_offset = offset_in + copied;
+            let dst_offset = offset_out + copied;
+            let mut data = self.read(cx, scope, ino_in, src_offset, request_len)?;
+            let request_len = usize::try_from(request_len).unwrap_or(usize::MAX);
+            if data.len() > request_len {
+                data.truncate(request_len);
+            }
+            if data.is_empty() {
+                break;
+            }
+
+            let written = self.write(cx, scope, ino_out, dst_offset, &data)?;
+            let written = usize::try_from(written)
+                .unwrap_or(usize::MAX)
+                .min(data.len());
+            if written == 0 {
+                break;
+            }
+            copied = copied.saturating_add(u64::try_from(written).unwrap_or(u64::MAX));
+            if written < data.len() {
+                break;
+            }
+        }
+
+        Ok(copied)
     }
 
     /// Create a hard link to `ino` in `new_parent` under `new_name`.
@@ -889,6 +969,26 @@ pub trait FsOps: Send + Sync {
     ) -> ffs_error::Result<FsxattrInfo> {
         Err(FfsError::UnsupportedFeature(
             "get_inode_fsxattr is not supported by this backend".to_owned(),
+        ))
+    }
+
+    /// Apply userspace-supplied [`FsxattrInfo`] (the `FS_IOC_FSSETXATTR`
+    /// payload) to the inode.
+    ///
+    /// Backends translate `xflags` back into their native flag set,
+    /// stash `projid`, and reject unsupported fields with `EINVAL` /
+    /// `EOPNOTSUPP`. The default implementation returns
+    /// [`FfsError::UnsupportedFeature`] so backends that opt in must
+    /// override it explicitly.
+    fn set_inode_fsxattr(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _info: FsxattrInfo,
+    ) -> ffs_error::Result<()> {
+        Err(FfsError::UnsupportedFeature(
+            "set_inode_fsxattr is not supported by this backend".to_owned(),
         ))
     }
 

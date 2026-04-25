@@ -20,7 +20,7 @@ use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
 use fuser::{
     FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr, ReplyCreate, ReplyData,
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyLseek, ReplyOpen, ReplyStatfs,
-    ReplyWrite, ReplyXattr, Request, TimeOrNow,
+    ReplyStatx, ReplyWrite, ReplyXattr, Request, TimeOrNow, consts as fuse_consts,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -86,6 +86,12 @@ const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 /// + u32 projid + u32 cowextsize + 8-byte pad.
 const FS_IOC_FSGETXATTR: u32 = 0x801C_5821;
 const FS_IOC_FSGETXATTR_SIZE: u32 = 28;
+/// `FS_IOC_FSSETXATTR` = `_IOW('X', 32, struct fsxattr)` on x86_64.
+/// Same 28-byte payload as the GET side; userspace passes the new
+/// projid + xflags, ext4 rejects non-zero extsize/cowextsize and
+/// any unknown xflags bit (see `xflags_to_ext4_flags`).
+const FS_IOC_FSSETXATTR: u32 = 0x401C_5820;
+const FS_IOC_FSSETXATTR_SIZE: usize = 28;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
@@ -1218,6 +1224,24 @@ impl FrankenFuse {
             })
     }
 
+    /// Execute copy-file-range without a live kernel mount.
+    #[doc(hidden)]
+    pub fn copy_file_range_for_fuzzing(
+        &self,
+        ino_in: u64,
+        offset_in: i64,
+        ino_out: u64,
+        offset_out: i64,
+        len: u64,
+        flags: u32,
+    ) -> std::result::Result<u32, c_int> {
+        self.dispatch_copy_file_range(ino_in, offset_in, ino_out, offset_out, len, flags)
+            .map_err(|error| match error {
+                MutationDispatchError::Errno(errno) => errno,
+                MutationDispatchError::Operation { error, .. } => error.to_errno(),
+            })
+    }
+
     /// Execute flush without a live kernel mount.
     #[doc(hidden)]
     pub fn flush_for_fuzzing(
@@ -1838,16 +1862,40 @@ impl FrankenFuse {
     /// Serialise an [`FsxattrInfo`] into the 28-byte `struct fsxattr`
     /// payload returned by `FS_IOC_FSGETXATTR`. Layout per
     /// `<uapi/linux/fs.h>`: `xflags | extsize | nextents | projid |
-    /// cowextsize | 8 bytes pad`. Little-endian throughout — the Linux
-    /// FUSE driver does no byte-swapping on ioctl payloads, so the FS
-    /// daemon must match host byte order.
+    /// cowextsize | 8 bytes pad`. The Linux FUSE driver does no byte-swapping
+    /// on ioctl payloads, so the FS daemon must match host byte order.
+    /// Parse the 28-byte `struct fsxattr` payload that userspace passes
+    /// through `FS_IOC_FSSETXATTR`. Returns `EINVAL` if the buffer is
+    /// the wrong length — callers must surface that errno verbatim per
+    /// the Linux ioctl contract.
+    fn parse_fsxattr_request(buf: &[u8]) -> Result<FsxattrInfo, i32> {
+        if buf.len() < FS_IOC_FSSETXATTR_SIZE {
+            return Err(libc::EINVAL);
+        }
+        let xflags = u32::from_le_bytes(buf[0..4].try_into().map_err(|_| libc::EINVAL)?);
+        let extsize = u32::from_le_bytes(buf[4..8].try_into().map_err(|_| libc::EINVAL)?);
+        // fsx_nextents (bytes 8..12) is read-only on the SET path and
+        // must be ignored — kernel zeroes it on its own copy.
+        let proj = u32::from_le_bytes(buf[12..16].try_into().map_err(|_| libc::EINVAL)?);
+        let cowextsize = u32::from_le_bytes(buf[16..20].try_into().map_err(|_| libc::EINVAL)?);
+        // fsx_pad[8] (bytes 20..28) is reserved; tolerate non-zero
+        // padding to match the kernel which silently zeroes it.
+        Ok(FsxattrInfo {
+            xflags,
+            extsize,
+            nextents: 0,
+            projid: proj,
+            cowextsize,
+        })
+    }
+
     fn encode_fsxattr_response(fsx: &FsxattrInfo) -> Vec<u8> {
         let mut buf = Vec::with_capacity(FS_IOC_FSGETXATTR_SIZE as usize);
-        buf.extend_from_slice(&fsx.xflags.to_le_bytes());
-        buf.extend_from_slice(&fsx.extsize.to_le_bytes());
-        buf.extend_from_slice(&fsx.nextents.to_le_bytes());
-        buf.extend_from_slice(&fsx.projid.to_le_bytes());
-        buf.extend_from_slice(&fsx.cowextsize.to_le_bytes());
+        buf.extend_from_slice(&fsx.xflags.to_ne_bytes());
+        buf.extend_from_slice(&fsx.extsize.to_ne_bytes());
+        buf.extend_from_slice(&fsx.nextents.to_ne_bytes());
+        buf.extend_from_slice(&fsx.projid.to_ne_bytes());
+        buf.extend_from_slice(&fsx.cowextsize.to_ne_bytes());
         buf.extend_from_slice(&[0_u8; 8]); // fsx_pad[8]
         debug_assert_eq!(buf.len(), FS_IOC_FSGETXATTR_SIZE as usize);
         buf
@@ -2187,9 +2235,31 @@ impl FrankenFuse {
                 }
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.get_inode_fsxattr(cx, scope, InodeNumber(ino))
+                    self.inner
+                        .ops
+                        .get_inode_fsxattr(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(fsx) => IoctlResult::Data(Self::encode_fsxattr_response(&fsx)),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FS_IOC_FSSETXATTR => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                let fsx = match Self::parse_fsxattr_request(in_data) {
+                    Ok(fsx) => fsx,
+                    Err(errno) => return IoctlResult::Error(errno),
+                };
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner
+                        .ops
+                        .set_inode_fsxattr(cx, scope, InodeNumber(ino), fsx)?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(())
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -2795,6 +2865,52 @@ impl FrankenFuse {
         Ok(written)
     }
 
+    fn dispatch_copy_file_range(
+        &self,
+        ino_in: u64,
+        offset_in: i64,
+        ino_out: u64,
+        offset_out: i64,
+        len: u64,
+        flags: u32,
+    ) -> Result<u32, MutationDispatchError> {
+        self.enforce_mutation_guards(RequestOp::Write, ino_out)?;
+        if flags != 0 {
+            return Err(MutationDispatchError::Errno(libc::EINVAL));
+        }
+        let src_offset =
+            u64::try_from(offset_in).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
+        let dst_offset =
+            u64::try_from(offset_out).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
+        let copy_len = len.min(u64::from(u32::MAX));
+        let cx = Self::cx_for_request();
+        let copied = {
+            let _inode_guards =
+                self.acquire_mutation_inode_guards(&[InodeNumber(ino_in), InodeNumber(ino_out)]);
+            self.with_request_scope(&cx, RequestOp::Write, |cx, scope| {
+                let copied = self.inner.ops.copy_file_range(
+                    cx,
+                    scope,
+                    InodeNumber(ino_in),
+                    src_offset,
+                    InodeNumber(ino_out),
+                    dst_offset,
+                    copy_len,
+                )?;
+                self.inner.ops.commit_request_scope(scope)?;
+                Ok(copied)
+            })
+        }
+        .map_err(|error| MutationDispatchError::Operation {
+            error,
+            offset: Some(dst_offset),
+        })?;
+        if copied > 0 {
+            self.inner.readahead.invalidate_inode(InodeNumber(ino_out));
+        }
+        Ok(u32::try_from(copied).unwrap_or(u32::MAX))
+    }
+
     fn dispatch_setxattr(
         &self,
         ino: u64,
@@ -2900,7 +3016,29 @@ enum IoctlResult {
 }
 
 impl Filesystem for FrankenFuse {
-    fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), c_int> {
+    fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), c_int> {
+        let splice_caps = fuse_consts::FUSE_SPLICE_READ
+            | fuse_consts::FUSE_SPLICE_WRITE
+            | fuse_consts::FUSE_SPLICE_MOVE;
+        match config.add_capabilities(splice_caps) {
+            Ok(()) => debug!("FUSE splice read/write/move capabilities enabled"),
+            Err(missing) => debug!(
+                missing,
+                "kernel declined one or more FUSE splice capabilities"
+            ),
+        }
+
+        match config.set_max_stack_depth(1) {
+            Ok(_) => match config.add_capabilities(fuse_consts::FUSE_PASSTHROUGH) {
+                Ok(()) => debug!("FUSE passthrough capability enabled"),
+                Err(missing) => debug!(missing, "kernel declined FUSE passthrough capability"),
+            },
+            Err(max_supported) => debug!(
+                max_supported,
+                "kernel declined FUSE passthrough stack depth"
+            ),
+        }
+
         Ok(())
     }
 
@@ -2933,6 +3071,32 @@ impl Filesystem for FrankenFuse {
                     },
                     reply,
                 );
+            }
+        }
+    }
+
+    fn statx(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: Option<u64>,
+        _flags: u32,
+        _mask: u32,
+        reply: ReplyStatx,
+    ) {
+        let cx = Self::cx_for_request();
+        match self.with_request_scope(&cx, RequestOp::Getattr, |cx, scope| {
+            self.inner.ops.getattr(cx, scope, InodeNumber(ino))
+        }) {
+            Ok(attr) => reply.statx(&ATTR_TTL, &to_file_attr(&attr)),
+            Err(e) => {
+                let ctx = FuseErrorContext {
+                    error: &e,
+                    operation: "statx",
+                    ino,
+                    offset: None,
+                };
+                reply.error(ctx.log_and_errno());
             }
         }
     }
@@ -3514,8 +3678,8 @@ impl Filesystem for FrankenFuse {
         flags: u32,
         reply: ReplyEmpty,
     ) {
-        // RENAME_NOREPLACE is honoured atomically (see OpenFs::rename2).
-        // RENAME_EXCHANGE / RENAME_WHITEOUT still return EINVAL inside
+        // RENAME_NOREPLACE and RENAME_EXCHANGE are honoured atomically
+        // (see OpenFs::rename2). RENAME_WHITEOUT still returns EINVAL inside
         // FsOps::rename2; we no longer pre-reject every non-zero flag.
         match self.dispatch_rename(parent, name, newparent, newname, flags) {
             Ok(()) => reply.ok(),
@@ -3600,6 +3764,40 @@ impl Filesystem for FrankenFuse {
                         error: &error,
                         operation: "write",
                         ino,
+                        offset,
+                    },
+                    reply,
+                );
+            }
+        }
+    }
+
+    fn copy_file_range(
+        &mut self,
+        _req: &Request<'_>,
+        ino_in: u64,
+        _fh_in: u64,
+        offset_in: i64,
+        ino_out: u64,
+        _fh_out: u64,
+        offset_out: i64,
+        len: u64,
+        flags: u32,
+        reply: ReplyWrite,
+    ) {
+        trace!(
+            ino_in,
+            offset_in, ino_out, offset_out, len, flags, "FUSE copy_file_range"
+        );
+        match self.dispatch_copy_file_range(ino_in, offset_in, ino_out, offset_out, len, flags) {
+            Ok(written) => reply.written(written),
+            Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
+            Err(MutationDispatchError::Operation { error, offset }) => {
+                Self::reply_error_write(
+                    &FuseErrorContext {
+                        error: &error,
+                        operation: "copy_file_range",
+                        ino: ino_out,
                         offset,
                     },
                     reply,
@@ -4680,6 +4878,7 @@ mod tests {
         RegisterMoveExtDonor(u32, InodeNumber),
         SetFlags(InodeNumber, u32),
         GetFsxattr(InodeNumber),
+        SetFsxattr(InodeNumber, FsxattrInfo),
         Commit,
         End(RequestOp),
         UnregisterMoveExtDonor(u32),
@@ -5049,6 +5248,20 @@ mod tests {
             })
         }
 
+        fn set_inode_fsxattr(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+            info: FsxattrInfo,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::SetFsxattr(ino, info));
+            Ok(())
+        }
+
         fn get_inode_generation(
             &self,
             _cx: &Cx,
@@ -5305,7 +5518,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_ioctl_fsgetxattr_encodes_28_byte_struct_in_le() {
+    fn dispatch_ioctl_fsgetxattr_encodes_28_byte_struct_in_native_endian() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
             0x1234_5678,
@@ -5313,17 +5526,21 @@ mod tests {
         )));
 
         let response = dispatch_ioctl_for_testing(&fuse, 17, 0, FS_IOC_FSGETXATTR, &[], 28);
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected IoctlResult::Data, got {response:?}"
+        );
         let IoctlResult::Data(bytes) = response else {
-            panic!("expected IoctlResult::Data, got {response:?}");
+            return;
         };
         assert_eq!(bytes.len(), 28, "fsxattr struct is exactly 28 bytes");
 
-        // Field-by-field LE decode mirroring uapi/linux/fs.h.
-        let xflags = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-        let extsize = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        let nextents = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        let projid = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-        let cowextsize = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        // Field-by-field native-endian decode mirroring uapi/linux/fs.h.
+        let xflags = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+        let extsize = u32::from_ne_bytes(bytes[4..8].try_into().unwrap());
+        let nextents = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
+        let projid = u32::from_ne_bytes(bytes[12..16].try_into().unwrap());
+        let cowextsize = u32::from_ne_bytes(bytes[16..20].try_into().unwrap());
         let pad = &bytes[20..28];
         assert_eq!(xflags, 0x0000_8048);
         assert_eq!(extsize, 0);
@@ -5339,6 +5556,89 @@ mod tests {
                 IoctlCall::GetFsxattr(InodeNumber(17)),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fssetxattr_decodes_28_byte_payload_and_routes_to_fsops() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0x1234_5678, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+
+        // Build the 28-byte struct: xflags=IMMUTABLE|NOATIME|HASATTR
+        // (kernel sometimes ships HASATTR back through SET — our
+        // backend will reject it, but the dispatcher must still parse
+        // the buffer cleanly), projid=0x1234_5678.
+        let mut buf = Vec::with_capacity(28);
+        buf.extend_from_slice(&0x0000_0048_u32.to_le_bytes()); // xflags
+        buf.extend_from_slice(&0_u32.to_le_bytes()); // extsize
+        buf.extend_from_slice(&0_u32.to_le_bytes()); // nextents (kernel zero)
+        buf.extend_from_slice(&0x1234_5678_u32.to_le_bytes()); // projid
+        buf.extend_from_slice(&0_u32.to_le_bytes()); // cowextsize
+        buf.extend_from_slice(&[0_u8; 8]); // pad
+
+        let response = dispatch_ioctl_for_testing(&fuse, 19, 0, FS_IOC_FSSETXATTR, &buf, 0);
+        assert!(
+            matches!(response, IoctlResult::Data(ref data) if data.is_empty()),
+            "set ioctl returns empty data on success, got {response:?}"
+        );
+
+        let trace = calls.lock().expect("lock ioctl calls").clone();
+        let set_call = trace
+            .iter()
+            .find(|c| matches!(c, IoctlCall::SetFsxattr(InodeNumber(19), _)))
+            .expect("must record SetFsxattr trace");
+        let IoctlCall::SetFsxattr(_, info) = set_call else {
+            unreachable!()
+        };
+        assert_eq!(info.xflags, 0x0000_0048);
+        assert_eq!(info.projid, 0x1234_5678);
+        assert_eq!(
+            info.nextents, 0,
+            "parser must zero fsx_nextents on the SET path (kernel-set field)"
+        );
+        // Commit must follow on the write path so the MVCC scope is durable.
+        assert!(
+            trace.iter().any(|c| matches!(c, IoctlCall::Commit)),
+            "FS_IOC_FSSETXATTR must commit the request scope, trace: {trace:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fssetxattr_short_buffer_returns_einval() {
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(
+                0,
+                Arc::new(Mutex::new(Vec::new())),
+            )),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FS_IOC_FSSETXATTR, &[0_u8; 27], 0);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EINVAL)),
+            "27-byte buffer must surface EINVAL, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fssetxattr_read_only_mount_returns_erofs() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+        let buf = vec![0_u8; 28];
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FS_IOC_FSSETXATTR, &buf, 0);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EROFS)),
+            "read-only mount must reject FS_IOC_FSSETXATTR with EROFS, got {response:?}"
         );
     }
 
@@ -5687,8 +5987,12 @@ mod tests {
 
         let response =
             dispatch_ioctl_for_testing(&fuse, 1, 0, BTRFS_IOC_FS_INFO, &[], BTRFS_IOC_FS_INFO_SIZE);
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected IoctlResult::Data, got {response:?}"
+        );
         let IoctlResult::Data(bytes) = response else {
-            panic!("expected IoctlResult::Data, got {response:?}");
+            return;
         };
         assert_eq!(
             bytes.len(),
@@ -5792,8 +6096,12 @@ mod tests {
             &btrfs_dev_info_in(devid_in, &uuid_in),
             BTRFS_IOC_DEV_INFO_SIZE,
         );
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected IoctlResult::Data, got {response:?}"
+        );
         let IoctlResult::Data(bytes) = response else {
-            panic!("expected IoctlResult::Data, got {response:?}");
+            return;
         };
         assert_eq!(
             bytes.len(),
@@ -8388,6 +8696,49 @@ mod tests {
     }
 
     #[test]
+    fn conformance_fuse_copy_file_range_lifecycle_round_trip() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        let copied = fuse
+            .copy_file_range_for_fuzzing(44, 8, 45, 32, 4, 0)
+            .expect("copy_file_range");
+
+        assert_eq!(copied, 4);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Read {
+                    ino: InodeNumber(44),
+                    offset: 8,
+                    size: 4,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(45),
+                    offset: 32,
+                    data: b"read".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn conformance_fuse_flush_file_lifecycle_round_trip() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(
@@ -8801,12 +9152,61 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_copy_file_range_rejects_invalid_flags_before_backend() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        assert!(matches!(
+            fuse.dispatch_copy_file_range(1, 0, 2, 0, 4096, 1),
+            Err(MutationDispatchError::Errno(errno)) if errno == libc::EINVAL
+        ));
+        assert!(
+            calls.lock().expect("lock calls").is_empty(),
+            "backend must not be called for invalid copy_file_range flags"
+        );
+    }
+
+    #[test]
+    fn dispatch_copy_file_range_rejects_overlapping_same_inode_ranges() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        assert!(matches!(
+            fuse.dispatch_copy_file_range(1, 0, 1, 2, 4096, 0),
+            Err(MutationDispatchError::Operation { error, .. })
+                if error.to_errno() == libc::EINVAL
+        ));
+        assert!(
+            calls.lock().expect("lock calls").is_empty(),
+            "overlapping same-inode copy must not touch the backend"
+        );
+    }
+
+    #[test]
     fn dispatch_mutations_return_erofs_when_read_only() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::new(Arc::clone(&calls))));
 
         assert!(matches!(
             fuse.dispatch_write(1, 0, b"x"),
+            Err(MutationDispatchError::Errno(libc::EROFS))
+        ));
+        assert!(matches!(
+            fuse.dispatch_copy_file_range(1, 0, 2, 0, 1, 0),
             Err(MutationDispatchError::Errno(libc::EROFS))
         ));
         assert!(matches!(
@@ -8970,6 +9370,43 @@ mod tests {
         };
         let fuse = FrankenFuse::with_options(Box::new(StubFs), &opts);
         assert_eq!(fuse.thread_count(), 6);
+    }
+
+    #[test]
+    fn vendored_fuser_exposes_abi_7_40_protocol_surface() {
+        assert_eq!(fuse_consts::FOPEN_PASSTHROUGH, 1_u32 << 7);
+        assert_eq!(fuse_consts::FUSE_SPLICE_WRITE, 1_u64 << 7);
+        assert_eq!(fuse_consts::FUSE_SPLICE_MOVE, 1_u64 << 8);
+        assert_eq!(fuse_consts::FUSE_SPLICE_READ, 1_u64 << 9);
+        assert_eq!(fuse_consts::FUSE_PASSTHROUGH, 1_u64 << 37);
+        assert_eq!(fuse_consts::FUSE_WRITE_KILL_SUIDGID, 1_u32 << 2);
+        assert_eq!(
+            fuse_consts::FUSE_WRITE_KILL_PRIV,
+            fuse_consts::FUSE_WRITE_KILL_SUIDGID
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(fuse_consts::RWF_HIPRI, 0x0000_0001);
+            assert_eq!(fuse_consts::RWF_DSYNC, 0x0000_0002);
+            assert_eq!(fuse_consts::RWF_SYNC, 0x0000_0004);
+            assert_eq!(fuse_consts::RWF_NOWAIT, 0x0000_0008);
+            assert_eq!(fuse_consts::RWF_APPEND, 0x0000_0010);
+            assert_eq!(fuse_consts::RWF_NOAPPEND, 0x0000_0020);
+            assert_eq!(fuse_consts::RWF_ATOMIC, 0x0000_0040);
+            assert_eq!(fuse_consts::RWF_DONTCACHE, 0x0000_0080);
+            assert_eq!(
+                fuse_consts::RWF_SUPPORTED,
+                fuse_consts::RWF_HIPRI
+                    | fuse_consts::RWF_DSYNC
+                    | fuse_consts::RWF_SYNC
+                    | fuse_consts::RWF_NOWAIT
+                    | fuse_consts::RWF_APPEND
+                    | fuse_consts::RWF_NOAPPEND
+                    | fuse_consts::RWF_ATOMIC
+                    | fuse_consts::RWF_DONTCACHE
+            );
+        }
     }
 
     #[test]
