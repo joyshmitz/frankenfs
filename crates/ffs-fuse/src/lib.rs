@@ -968,6 +968,21 @@ impl WriteIntent {
     }
 
     #[cfg(target_os = "linux")]
+    const fn unsupported_errno(self) -> Option<i32> {
+        let unsupported = self.write_flags & (fuse_consts::RWF_ATOMIC | fuse_consts::RWF_DONTCACHE);
+        if unsupported == 0 {
+            None
+        } else {
+            Some(libc::EOPNOTSUPP)
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    const fn unsupported_errno(self) -> Option<i32> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
     const fn sync_mode(self) -> Option<WriteSyncMode> {
         if self.flags & libc::O_SYNC == libc::O_SYNC {
             Some(WriteSyncMode::Full)
@@ -3179,6 +3194,9 @@ impl FrankenFuse {
         intent: WriteIntent,
     ) -> Result<u32, MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Write, ino)?;
+        if let Some(errno) = intent.unsupported_errno() {
+            return Err(MutationDispatchError::Errno(errno));
+        }
         let byte_offset =
             u64::try_from(offset).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
         let mut operation_offset = byte_offset;
@@ -9846,6 +9864,70 @@ mod tests {
         assert!(
             wrote_at_requested_offset,
             "RWF_NOAPPEND should preserve the caller-provided offset"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_rwf_atomic_rejects_before_mutation() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        let err = fuse
+            .dispatch_write_with_intent(
+                42,
+                0,
+                b"atomic",
+                WriteIntent::from_fuse(0, fuse_consts::RWF_ATOMIC, 0),
+            )
+            .expect_err("unsupported RWF_ATOMIC write should fail");
+
+        assert!(matches!(
+            err,
+            MutationDispatchError::Errno(libc::EOPNOTSUPP)
+        ));
+        assert!(
+            calls.lock().expect("lock calls").is_empty(),
+            "unsupported RWF_ATOMIC must not reach FsOps::write"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_rwf_dontcache_rejects_before_mutation() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+
+        let err = fuse
+            .dispatch_write_with_intent(
+                42,
+                0,
+                b"dontcache",
+                WriteIntent::from_fuse(0, fuse_consts::RWF_DONTCACHE, 0),
+            )
+            .expect_err("unsupported RWF_DONTCACHE write should fail");
+
+        assert!(matches!(
+            err,
+            MutationDispatchError::Errno(libc::EOPNOTSUPP)
+        ));
+        assert!(
+            calls.lock().expect("lock calls").is_empty(),
+            "unsupported RWF_DONTCACHE must not reach FsOps::write"
         );
     }
 
