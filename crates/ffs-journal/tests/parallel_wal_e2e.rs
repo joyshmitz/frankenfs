@@ -161,6 +161,7 @@ fn fsync_count_is_per_epoch_not_per_transaction() {
     }));
     let notifier = Arc::new(DurabilityNotifier::new());
     let writer = TrackingWriter::new();
+    let sync_counter = writer.sync_counter();
     let coord = GroupCommitCoordinator::new(
         Arc::clone(&epoch_mgr),
         Arc::clone(&notifier),
@@ -191,8 +192,9 @@ fn fsync_count_is_per_epoch_not_per_transaction() {
     }
 
     // fsync count should equal number of epochs flushed, not number of transactions.
-    let sync_count = coord.notifier().durable_epoch();
-    assert_eq!(sync_count, max_epoch);
+    let sync_count = sync_counter.load(Ordering::Acquire);
+    assert_eq!(u64::try_from(sync_count), Ok(max_epoch));
+    assert_eq!(coord.notifier().durable_epoch(), max_epoch);
     assert!(
         max_epoch < total_txns,
         "epochs ({max_epoch}) should be << transactions ({total_txns})"
