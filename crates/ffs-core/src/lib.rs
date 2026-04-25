@@ -18,7 +18,10 @@ pub use vfs::{
 pub use ffs_block::RepairFlushLifecycle;
 
 use asupersync::{Cx, RaptorQConfig};
-use ffs_alloc::{AllocHint, FsGeometry, GroupStats, PersistCtx, bitmap_count_free, bitmap_get};
+use ffs_alloc::{
+    AllocHint, FsGeometry, GroupStats, PersistCtx, bitmap_count_free, bitmap_get,
+    bitmap_largest_free_run,
+};
 use ffs_block::{
     BlockBuf, BlockDevice, ByteDevice, FileByteDevice, read_btrfs_superblock_region,
     read_ext4_superblock_region,
@@ -5864,6 +5867,64 @@ impl OpenFs {
 
         let bitmap = self.read_block_bitmap(cx, group)?;
         Ok(bitmap_count_free(&bitmap, blocks_in_group))
+    }
+
+    /// Length of the longest contiguous run of free blocks anywhere in the
+    /// filesystem (bd-oqphq fragmentation-aware available count).
+    ///
+    /// Surfaces the fragmentation-aware available number for `statvfs(3)`
+    /// callers, the fallocate planning path, and the free-space-FIEMAP work
+    /// tracked in bd-oqphq's acceptance. The result is the maximum across
+    /// all groups; ext4 block bitmaps live one-per-group, so a "run" never
+    /// straddles a group boundary in the on-disk format and per-group max
+    /// is the natural unit.
+    ///
+    /// `f_bfree` from `statfs` tells callers "how much is free"; this
+    /// answers "what is the largest single allocation I can satisfy without
+    /// having to split". For very fragmented filesystems the latter can be
+    /// orders of magnitude smaller than the former.
+    ///
+    /// btrfs is currently a stub: btrfs uses extent-tree allocation, not a
+    /// per-group bitmap, so the answer is "free space in the largest free
+    /// extent" — derived from `extent_alloc.total_used()` and the
+    /// superblock total. Returns the total free byte count divided by
+    /// sector size as a conservative upper bound.
+    ///
+    /// # Errors
+    ///
+    /// Propagates I/O errors from reading group bitmaps.
+    pub fn largest_contiguous_free_run(&self, cx: &Cx) -> Result<u64, FfsError> {
+        match &self.flavor {
+            FsFlavor::Ext4(sb) => {
+                let geo = FsGeometry::from_superblock(sb);
+                let mut best = 0_u64;
+                for group_idx in 0..geo.group_count {
+                    let group = GroupNumber(group_idx);
+                    let blocks_in_group = geo.blocks_in_group(group);
+                    let bitmap = self.read_block_bitmap(cx, group)?;
+                    let run = u64::from(bitmap_largest_free_run(&bitmap, blocks_in_group));
+                    if run > best {
+                        best = run;
+                    }
+                }
+                Ok(best)
+            }
+            FsFlavor::Btrfs(sb) => {
+                // btrfs has no per-group bitmap. Use the live alloc state's
+                // total free bytes as a conservative upper bound on the
+                // longest contiguous run; precise tracking would require
+                // walking the extent tree's free-space map.
+                let unit = u64::from(sb.sectorsize.max(1));
+                let used_bytes = self
+                    .btrfs_alloc_state
+                    .as_ref()
+                    .map_or(sb.bytes_used, |alloc_mutex| {
+                        alloc_mutex.lock().extent_alloc.total_used()
+                    });
+                let free_bytes = sb.total_bytes.saturating_sub(used_bytes);
+                Ok(free_bytes / unit)
+            }
+        }
     }
 
     /// Count free inodes in a specific group by reading and analyzing the bitmap.
@@ -20677,6 +20738,85 @@ mod tests {
                     | FfsError::Format(_)
             ),
             "unexpected error variant: {err:?}"
+        );
+    }
+
+    // ── largest_contiguous_free_run (bd-oqphq) ──────────────────────────
+
+    #[test]
+    fn largest_contiguous_free_run_returns_at_most_total_free() {
+        // Sanity invariant: longest contiguous free run on an ext4 image
+        // never exceeds the total free-block count for that image. (The two
+        // are equal iff the free space is one continuous run, which is the
+        // case for a freshly-mkfs'd image where only metadata blocks at the
+        // head are allocated.)
+        let image = build_ext4_image_with_inode();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let total_free = fs
+            .count_free_blocks_in_group(&cx, GroupNumber(0))
+            .expect("count free");
+        let longest = fs
+            .largest_contiguous_free_run(&cx)
+            .expect("largest contiguous run");
+        assert!(
+            longest <= u64::from(total_free),
+            "longest run {longest} must not exceed total free {total_free}"
+        );
+        // For this single-group test image the free space starts as one
+        // contiguous tail, so the longest run equals the total free count.
+        assert_eq!(
+            longest,
+            u64::from(total_free),
+            "freshly-built test image: longest run should equal total free"
+        );
+    }
+
+    #[test]
+    fn largest_contiguous_free_run_drops_after_punching_alloc_in_middle() {
+        // Allocate one block in the middle of the bitmap and confirm the
+        // longest run shortens accordingly.
+        let image = build_ext4_image_with_inode();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let before = fs.largest_contiguous_free_run(&cx).expect("longest before");
+
+        // Mark a single block in the middle of the free range as allocated
+        // by patching the on-disk bitmap directly.
+        let gd = fs.read_group_desc(&cx, GroupNumber(0)).expect("read gd");
+        let mut bitmap = fs
+            .read_block_bitmap(&cx, GroupNumber(0))
+            .expect("read bitmap");
+        // Find the first free bit and the next-after-many-free bit.
+        let blocks_in_group = FsGeometry::from_superblock(fs.ext4_superblock().unwrap())
+            .blocks_in_group(GroupNumber(0));
+        let mut first_free = None;
+        for idx in 0..blocks_in_group {
+            if !bitmap_get(&bitmap, idx) {
+                first_free = Some(idx);
+                break;
+            }
+        }
+        let first_free = first_free.expect("must have at least one free block");
+        // Pick a bit halfway through the remaining free run to split it.
+        let split_at = first_free + (blocks_in_group - first_free) / 2;
+        ffs_alloc::bitmap_set(&mut bitmap, split_at);
+        // Write the modified bitmap back and re-read via read_block_bitmap.
+        fs.dev
+            .write_all_at(&cx, ByteOffset(gd.block_bitmap * 4096), &bitmap)
+            .expect("write back patched bitmap");
+
+        let after = fs
+            .largest_contiguous_free_run(&cx)
+            .expect("longest after split");
+        assert!(
+            after < before,
+            "splitting the free range must shorten the longest run: \
+             before={before}, after={after}"
         );
     }
 

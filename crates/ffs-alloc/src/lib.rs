@@ -121,6 +121,78 @@ pub fn bitmap_find_contiguous(bitmap: &[u8], count: u32, n: u32, start: u32) -> 
     bitmap_find_contiguous_linear(bitmap, pass2_end, n, 0)
 }
 
+/// Return the length of the longest run of consecutive free (zero) bits in
+/// the first `count` bits of `bitmap`.
+///
+/// Used by `OpenFs::largest_contiguous_free_run` to surface fragmentation-
+/// aware available-space numbers for `statvfs(3)` callers and the
+/// fallocate/free-space-FIEMAP fast paths.
+///
+/// Whole-byte 0x00 bytes contribute 8 each via a fast skip; 0xFF bytes
+/// terminate the current run. Partial-byte boundaries (non-zero non-FF
+/// bytes, plus the trailing remainder when `count % 8 != 0`) fall back to
+/// per-bit inspection.
+#[must_use]
+pub fn bitmap_largest_free_run(bitmap: &[u8], count: u32) -> u32 {
+    if count == 0 {
+        return 0;
+    }
+    let full_bytes = (count / 8) as usize;
+    let remainder = count % 8;
+
+    let mut best = 0_u32;
+    let mut run = 0_u32;
+
+    for byte_idx in 0..full_bytes {
+        // Mirror `bitmap_count_free`: bytes past the end of the slice
+        // contribute zero to the free count and break any in-flight run.
+        // This is the conservative answer when the bitmap was truncated.
+        let Some(&byte) = bitmap.get(byte_idx) else {
+            run = 0;
+            continue;
+        };
+        if byte == 0 {
+            run = run.saturating_add(8);
+            if run > best {
+                best = run;
+            }
+            continue;
+        }
+        if byte == 0xFF {
+            run = 0;
+            continue;
+        }
+        for bit in 0..8 {
+            if (byte >> bit) & 1 == 0 {
+                run = run.saturating_add(1);
+                if run > best {
+                    best = run;
+                }
+            } else {
+                run = 0;
+            }
+        }
+    }
+
+    if remainder > 0 {
+        if let Some(&byte) = bitmap.get(full_bytes) {
+            for bit in 0..remainder {
+                if (byte >> bit) & 1 == 0 {
+                    run = run.saturating_add(1);
+                    if run > best {
+                        best = run;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+        }
+        // No bitmap byte for the remainder → cannot extend; leave `best` unchanged.
+    }
+
+    best
+}
+
 /// Linear scan for `n` contiguous free bits in `[start, count)`.
 fn bitmap_find_contiguous_linear(bitmap: &[u8], count: u32, n: u32, start: u32) -> Option<u32> {
     let mut run_start = start;
@@ -4310,5 +4382,121 @@ InodeAlloc { ino: InodeNumber(17), group: GroupNumber(1) }
         let batch_free: u32 = groups_batch.iter().map(|g| g.free_blocks).sum();
         let single_free: u32 = groups_single.iter().map(|g| g.free_blocks).sum();
         assert_eq!(batch_free, single_free);
+    }
+
+    // ── largest_free_run (bd-oqphq) ─────────────────────────────────────
+
+    #[test]
+    fn largest_free_run_empty_bitmap_returns_zero() {
+        assert_eq!(bitmap_largest_free_run(&[], 0), 0);
+        assert_eq!(bitmap_largest_free_run(&[0u8; 0], 8), 0);
+    }
+
+    #[test]
+    fn largest_free_run_all_zeros_returns_count() {
+        let bitmap = [0u8; 16];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 128), 128);
+        // Partial count smaller than bitmap.
+        assert_eq!(bitmap_largest_free_run(&bitmap, 100), 100);
+    }
+
+    #[test]
+    fn largest_free_run_all_ones_returns_zero() {
+        let bitmap = [0xFFu8; 16];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 128), 0);
+    }
+
+    #[test]
+    fn largest_free_run_single_run_in_middle() {
+        // 16 bytes, all 0xFF except bytes 4..8 = 0 → 32 free bits.
+        let mut bitmap = [0xFFu8; 16];
+        for byte in &mut bitmap[4..8] {
+            *byte = 0;
+        }
+        assert_eq!(bitmap_largest_free_run(&bitmap, 128), 32);
+    }
+
+    #[test]
+    fn largest_free_run_picks_max_of_multiple_runs() {
+        // Three runs: 8 free (byte 0), 24 free (bytes 4..7), 16 free (bytes 12..14).
+        let mut bitmap = [0xFFu8; 16];
+        bitmap[0] = 0; // 8-bit run
+        bitmap[4] = 0;
+        bitmap[5] = 0;
+        bitmap[6] = 0; // 24-bit run
+        bitmap[12] = 0;
+        bitmap[13] = 0; // 16-bit run
+        assert_eq!(bitmap_largest_free_run(&bitmap, 128), 24);
+    }
+
+    #[test]
+    fn largest_free_run_handles_partial_byte_boundaries() {
+        // bytes: 0xF0 0xFF 0x0F → bits 0..4 free, 4..12 used, 12..16 free.
+        // Within count=16: longest run is 4.
+        let bitmap = [0xF0u8, 0xFF, 0x0F];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 16), 4);
+    }
+
+    #[test]
+    fn largest_free_run_spans_byte_boundary() {
+        // bytes: 0xC0 0x03 = bits 0..6 free, 6..10 used, 10..16 free.
+        // Wait — bit numbering is LSB-first per bitmap_get. 0xC0 = 0b11000000:
+        // bits 0..5 = 0 (free), bits 6..7 = 1 (used).
+        // 0x03 = 0b00000011: bits 0..1 = 1 (used), bits 2..7 = 0 (free).
+        // So free run at bits 10..16 = 6, free run at bits 0..5 = 6.
+        // No span across the boundary because bits 6..9 are used.
+        let bitmap = [0xC0u8, 0x03];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 16), 6);
+
+        // Now an actual span: 0x80 0x01 = bits 0..6 free, bit 7 used, bit 8 used,
+        // bits 9..15 free. Largest = 7 (the right run).
+        let bitmap = [0x80u8, 0x01];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 16), 7);
+
+        // Span spanning byte boundary: 0x00 0x00 0xFF = 16 free bits, then used.
+        let bitmap = [0x00u8, 0x00, 0xFF];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 24), 16);
+    }
+
+    #[test]
+    fn largest_free_run_count_smaller_than_byte_remainder() {
+        // 1 byte with bits 0..3 free, bits 4..7 used. count=8 → run=4.
+        let bitmap = [0xF0u8];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 8), 4);
+
+        // count=4 (only inspect first nibble; all free) → run=4.
+        let bitmap = [0xF0u8];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 4), 4);
+
+        // count=3 → run=3 (cap at count).
+        let bitmap = [0x00u8];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 3), 3);
+    }
+
+    #[test]
+    fn largest_free_run_full_zero_byte_extends_existing_run() {
+        // bytes: 0x80 (bits 0..6 free, bit 7 used) — wait actually 0x80 = 0b10000000:
+        // bit 7 = 1, bits 0..6 = 0. So bits 0..6 free → run=7, then bit 7 used breaks.
+        // Then 0x00 0x00: 16 free. Then 0xFF: terminates.
+        // Total largest = 16.
+        let bitmap = [0x80u8, 0x00, 0x00, 0xFF];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 32), 16);
+
+        // Now bridge a partial byte into a 0x00 byte: 0x00 0x00 0x80 = 8 free, then 8 free,
+        // then bits 0..6 free (continuation). Run = 8 + 8 + 7 = 23.
+        let bitmap = [0x00u8, 0x00, 0x80];
+        assert_eq!(bitmap_largest_free_run(&bitmap, 24), 23);
+    }
+
+    #[test]
+    fn largest_free_run_matches_count_free_when_all_runs_equal() {
+        // If the whole bitmap is one big free run, the largest run equals
+        // bitmap_count_free.
+        let bitmap = [0u8; 32];
+        let count = 256_u32;
+        assert_eq!(
+            bitmap_largest_free_run(&bitmap, count),
+            bitmap_count_free(&bitmap, count)
+        );
     }
 }
