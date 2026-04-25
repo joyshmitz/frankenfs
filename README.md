@@ -1015,7 +1015,7 @@ Domain                        Implemented  Total  Coverage
 ext4 metadata parsing         27           27     100.0%
 btrfs metadata parsing        27           27     100.0%
 MVCC/COW core                 14           14     100.0%
-FUSE surface                  18           18     100.0%
+FUSE surface                  19           19     100.0%
 self-healing durability        10           10     100.0%
 ```
 
@@ -1321,9 +1321,9 @@ FrankenFS is in **early development**. The tracked V1 parity matrix is complete 
 | ext4 metadata parsing | 100.0% (27/27) |
 | btrfs metadata parsing | 100.0% (27/27) |
 | MVCC/COW core | 100.0% (14/14) |
-| FUSE surface | 100.0% (18/18) |
+| FUSE surface | 100.0% (19/19) |
 | self-healing durability policy | 100.0% (10/10) |
-| **Overall** | **100.0% (96/96)** |
+| **Overall** | **100.0% (97/97)** |
 
 Rows in the btrfs experimental RW contract can still say `partially supported` or `unsupported` without reducing tracked parity coverage when the expected V1 behavior is a deterministic partial-success or explicit rejection path that is implemented and tested.
 

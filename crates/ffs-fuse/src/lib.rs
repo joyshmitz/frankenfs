@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -775,6 +775,41 @@ impl FuseInodeLocks {
         }
     }
 
+    fn try_acquire(self: &Arc<Self>, inodes: &[InodeNumber]) -> Option<FuseInodeGuards> {
+        let mut ordered = inodes.to_vec();
+        ordered.sort_unstable_by_key(|ino| ino.0);
+        ordered.dedup();
+
+        let entries: Vec<(InodeNumber, Arc<FuseInodeLock>)> = {
+            let mut table = match self.table.try_lock() {
+                Ok(guard) => guard,
+                Err(TryLockError::Poisoned(poisoned)) => {
+                    warn!("FuseInodeLocks table poisoned during try_acquire, recovering");
+                    poisoned.into_inner()
+                }
+                Err(TryLockError::WouldBlock) => return None,
+            };
+            ordered
+                .into_iter()
+                .map(|ino| {
+                    let lock = Arc::clone(
+                        table
+                            .entry(ino)
+                            .or_insert_with(|| Arc::new(FuseInodeLock::default())),
+                    );
+                    (ino, lock)
+                })
+                .collect()
+        };
+
+        let mut guards = Vec::with_capacity(entries.len());
+        for (ino, lock) in entries {
+            guards.push(lock.try_acquire(ino, Arc::clone(self))?);
+        }
+
+        Some(FuseInodeGuards { _guards: guards })
+    }
+
     #[cfg(test)]
     fn table_len(&self) -> usize {
         match self.table.lock() {
@@ -815,6 +850,31 @@ impl FuseInodeLock {
             ino,
             locks,
         }
+    }
+
+    fn try_acquire(
+        self: &Arc<Self>,
+        ino: InodeNumber,
+        locks: Arc<FuseInodeLocks>,
+    ) -> Option<FuseInodeGuard> {
+        let mut held = match self.held.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => {
+                warn!("FuseInodeLock held flag poisoned during try_acquire, recovering");
+                poisoned.into_inner()
+            }
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        if *held {
+            return None;
+        }
+        *held = true;
+        drop(held);
+        Some(FuseInodeGuard {
+            lock: Arc::clone(self),
+            ino,
+            locks,
+        })
     }
 }
 
@@ -866,6 +926,61 @@ impl Drop for FuseInodeGuard {
 
 struct FuseInodeGuards {
     _guards: Vec<FuseInodeGuard>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WriteIntent {
+    fh: u64,
+    write_flags: u32,
+    flags: i32,
+}
+
+impl WriteIntent {
+    const fn from_fuse(fh: u64, write_flags: u32, flags: i32) -> Self {
+        Self {
+            fh,
+            write_flags,
+            flags,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    const fn nowait(self) -> bool {
+        self.write_flags & fuse_consts::RWF_NOWAIT != 0
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    const fn nowait(self) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    const fn sync_mode(self) -> Option<WriteSyncMode> {
+        if self.flags & libc::O_SYNC == libc::O_SYNC {
+            Some(WriteSyncMode::Full)
+        } else if self.flags & libc::O_DSYNC == libc::O_DSYNC {
+            Some(WriteSyncMode::Data)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    const fn sync_mode(self) -> Option<WriteSyncMode> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteSyncMode {
+    Data,
+    Full,
+}
+
+impl WriteSyncMode {
+    const fn datasync(self) -> bool {
+        matches!(self, Self::Data)
+    }
 }
 
 /// Bounded queue capacity for the ioctl trace writer.  Sized so a busy
@@ -1712,6 +1827,10 @@ impl FrankenFuse {
 
     fn acquire_mutation_inode_guards(&self, inodes: &[InodeNumber]) -> FuseInodeGuards {
         self.inner.inode_locks.acquire(inodes)
+    }
+
+    fn try_acquire_mutation_inode_guards(&self, inodes: &[InodeNumber]) -> Option<FuseInodeGuards> {
+        self.inner.inode_locks.try_acquire(inodes)
     }
 
     /// Create a `Cx` for a FUSE request.
@@ -3036,18 +3155,43 @@ impl FrankenFuse {
         offset: i64,
         data: &[u8],
     ) -> Result<u32, MutationDispatchError> {
+        self.dispatch_write_with_intent(ino, offset, data, WriteIntent::default())
+    }
+
+    fn dispatch_write_with_intent(
+        &self,
+        ino: u64,
+        offset: i64,
+        data: &[u8],
+        intent: WriteIntent,
+    ) -> Result<u32, MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Write, ino)?;
         let byte_offset =
             u64::try_from(offset).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
         let cx = Self::cx_for_request();
         let (written, _commit_seq) = {
-            let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(ino)]);
+            let _inode_guards = if intent.nowait() {
+                self.try_acquire_mutation_inode_guards(&[InodeNumber(ino)])
+                    .ok_or(MutationDispatchError::Errno(libc::EAGAIN))?
+            } else {
+                self.acquire_mutation_inode_guards(&[InodeNumber(ino)])
+            };
             self.with_request_scope(&cx, RequestOp::Write, |cx, scope| {
                 let bytes = self
                     .inner
                     .ops
                     .write(cx, scope, InodeNumber(ino), byte_offset, data)?;
                 let seq = self.inner.ops.commit_request_scope(scope)?;
+                self.inner.readahead.invalidate_inode(InodeNumber(ino));
+                if let Some(sync_mode) = intent.sync_mode() {
+                    self.inner.ops.fsync(
+                        cx,
+                        scope,
+                        InodeNumber(ino),
+                        intent.fh,
+                        sync_mode.datasync(),
+                    )?;
+                }
                 Ok((bytes, seq))
             })
         }
@@ -3055,7 +3199,6 @@ impl FrankenFuse {
             error,
             offset: Some(byte_offset),
         })?;
-        self.inner.readahead.invalidate_inode(InodeNumber(ino));
         // Update writeback barrier if enabled.
         Ok(written)
     }
@@ -3951,16 +4094,28 @@ impl Filesystem for FrankenFuse {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        _fh: u64,
+        fh: u64,
         offset: i64,
         data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
+        write_flags: u32,
+        flags: i32,
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        trace!(ino, offset, len = data.len(), "FUSE write");
-        match self.dispatch_write(ino, offset, data) {
+        trace!(
+            ino,
+            offset,
+            len = data.len(),
+            write_flags,
+            flags,
+            "FUSE write"
+        );
+        match self.dispatch_write_with_intent(
+            ino,
+            offset,
+            data,
+            WriteIntent::from_fuse(fh, write_flags, flags),
+        ) {
             Ok(written) => reply.written(written),
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
             Err(MutationDispatchError::Operation { error, offset }) => {
@@ -8211,6 +8366,7 @@ mod tests {
 
     struct MutationRecordingFs {
         calls: Arc<Mutex<Vec<MutationCall>>>,
+        fsync_errno: Option<i32>,
         record_scopes: bool,
     }
 
@@ -8218,6 +8374,7 @@ mod tests {
         fn new(calls: Arc<Mutex<Vec<MutationCall>>>) -> Self {
             Self {
                 calls,
+                fsync_errno: None,
                 record_scopes: false,
             }
         }
@@ -8225,6 +8382,15 @@ mod tests {
         fn with_scope_recording(calls: Arc<Mutex<Vec<MutationCall>>>) -> Self {
             Self {
                 calls,
+                fsync_errno: None,
+                record_scopes: true,
+            }
+        }
+
+        fn with_failing_fsync(calls: Arc<Mutex<Vec<MutationCall>>>, errno: i32) -> Self {
+            Self {
+                calls,
+                fsync_errno: Some(errno),
                 record_scopes: true,
             }
         }
@@ -8518,6 +8684,9 @@ mod tests {
                 .lock()
                 .expect("lock mutation calls")
                 .push(MutationCall::Fsync { ino, fh, datasync });
+            if let Some(errno) = self.fsync_errno {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(errno)));
+            }
             Ok(())
         }
 
@@ -9361,6 +9530,199 @@ mod tests {
                 data: b"abc".to_vec(),
             }]
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_dsync_flags_trigger_datasync_boundary() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        let written = fuse
+            .dispatch_write_with_intent(
+                42,
+                4096,
+                b"abc",
+                WriteIntent::from_fuse(9001, 0, libc::O_DSYNC),
+            )
+            .expect("dispatch DSync write");
+        assert_eq!(written, 3);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(42),
+                    offset: 4096,
+                    data: b"abc".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::Fsync {
+                    ino: InodeNumber(42),
+                    fh: 9001,
+                    datasync: true,
+                },
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_sync_flags_trigger_full_fsync_boundary() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        fuse.dispatch_write_with_intent(
+            42,
+            0,
+            b"sync",
+            WriteIntent::from_fuse(9002, 0, libc::O_SYNC),
+        )
+        .expect("dispatch sync write");
+        assert!(
+            calls
+                .lock()
+                .expect("lock calls")
+                .contains(&MutationCall::Fsync {
+                    ino: InodeNumber(42),
+                    fh: 9002,
+                    datasync: false,
+                }),
+            "O_SYNC must request a full fsync boundary"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_fuse_lockowner_flag_does_not_imply_dsync() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        fuse.dispatch_write_with_intent(
+            42,
+            0,
+            b"lockowner",
+            WriteIntent::from_fuse(9003, fuse_consts::FUSE_WRITE_LOCKOWNER, 0),
+        )
+        .expect("dispatch lockowner write");
+        assert!(
+            calls
+                .lock()
+                .expect("lock calls")
+                .iter()
+                .all(|call| !matches!(call, MutationCall::Fsync { .. })),
+            "FUSE_WRITE_LOCKOWNER shares the raw bit used by RWF_DSYNC, so only the FUSE flags field can drive sync intent"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_nowait_returns_eagain_when_inode_lock_is_held() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::new(Arc::clone(&calls))),
+            &options,
+        );
+        let _held = fuse.acquire_mutation_inode_guards(&[InodeNumber(42)]);
+
+        let started = Instant::now();
+        let err = fuse
+            .dispatch_write_with_intent(
+                42,
+                0,
+                b"nowait",
+                WriteIntent::from_fuse(0, fuse_consts::RWF_NOWAIT, 0),
+            )
+            .expect_err("NOWAIT write should not block behind held inode lock");
+
+        assert!(matches!(err, MutationDispatchError::Errno(libc::EAGAIN)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(10),
+            "NOWAIT path should fail fast instead of waiting for the inode mutation lock"
+        );
+        assert!(calls.lock().expect("lock calls").is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_sync_failure_still_invalidates_readahead_for_committed_inode()
+    -> Result<(), String> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_failing_fsync(
+                Arc::clone(&calls),
+                libc::EIO,
+            )),
+            &options,
+        );
+
+        let cached_ino = InodeNumber(42);
+        let other_ino = InodeNumber(77);
+        fuse.inner.readahead.insert(cached_ino, 100, vec![1, 2, 3]);
+        fuse.inner.readahead.insert(other_ino, 100, vec![9, 9, 9]);
+
+        let err = fuse
+            .dispatch_write_with_intent(
+                cached_ino.0,
+                0,
+                b"sync-fail",
+                WriteIntent::from_fuse(9004, 0, libc::O_DSYNC),
+            )
+            .expect_err("failing fsync should surface as a write operation error");
+        let MutationDispatchError::Operation { error, offset } = err else {
+            return Err(format!(
+                "expected operation error from fsync failure, got {err:?}"
+            ));
+        };
+        assert_eq!(error.to_errno(), libc::EIO);
+        assert_eq!(offset, Some(0));
+
+        assert_eq!(fuse.inner.readahead.take(cached_ino, 100, 3), None);
+        assert_eq!(
+            fuse.inner.readahead.take(other_ino, 100, 3),
+            Some(vec![9, 9, 9])
+        );
+        Ok(())
     }
 
     #[test]
