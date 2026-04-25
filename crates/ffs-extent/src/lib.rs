@@ -533,6 +533,138 @@ pub fn collapse_range(
     Ok(freed)
 }
 
+/// Insert a hole at the logical range `[logical_start, logical_start + count)`.
+///
+/// The mirror of [`collapse_range`]. Shifts every extent past the cut
+/// right by `count` blocks, leaving an unallocated sparse hole behind.
+/// No physical blocks are allocated — reads in the new hole return
+/// zeroes until the caller writes through it. Mirrors
+/// `fs/ext4/extents.c::ext4_insert_range`. Both `logical_start` and
+/// `count` must be block-aligned in the caller; this helper operates
+/// in units of logical blocks. Returns Ok(()) on success — the caller
+/// must add `count * block_size` to `inode.size`.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_range(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &mut [u8; 60],
+    geo: &FsGeometry,
+    groups: &mut [GroupStats],
+    logical_start: u32,
+    count: u32,
+    pctx: &ffs_alloc::PersistCtx,
+) -> Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+    cx_checkpoint(cx)?;
+    validate_root_header("insert_range", root_bytes)?;
+
+    // Phase 1: split any extent that straddles the cut. punch_hole on
+    // a zero-length window does nothing, so we instead emit a pair of
+    // (delete, reinsert-left, reinsert-right) operations explicitly.
+    let cut = u64::from(logical_start);
+    let mut tree_alloc = GroupBlockAllocator {
+        cx,
+        dev,
+        geo,
+        groups,
+        hint: AllocHint::default(),
+        pctx,
+    };
+
+    let mut straddler: Option<Ext4Extent> = None;
+    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
+        let ext_start = u64::from(ext.logical_block);
+        let ext_end = ext_start.saturating_add(u64::from(u32::from(ext.actual_len())));
+        if ext_start < cut && ext_end > cut {
+            straddler = Some(*ext);
+        }
+        Ok(())
+    })?;
+    if let Some(ext) = straddler {
+        let ext_start = u64::from(ext.logical_block);
+        let ext_len = u64::from(u32::from(ext.actual_len()));
+        let ext_end = ext_start + ext_len;
+        ffs_btree::delete_range(cx, dev, root_bytes, ext.logical_block, ext_len, &mut tree_alloc)?;
+
+        let left_len_u32 = u32::try_from(cut - ext_start).map_err(|_| {
+            ffs_error::FfsError::Format("insert_range: split width exceeds u32".into())
+        })?;
+        let right_len_u32 = u32::try_from(ext_end - cut).map_err(|_| {
+            ffs_error::FfsError::Format("insert_range: split tail exceeds u32".into())
+        })?;
+        let unwritten = ext.is_unwritten();
+        let make_raw_len = |len: u32, unwritten: bool| -> Result<u16> {
+            let len16 = u16::try_from(len).map_err(|_| {
+                ffs_error::FfsError::Format("insert_range: extent split exceeds u16".into())
+            })?;
+            Ok(if unwritten { len16 | (1 << 15) } else { len16 })
+        };
+        let left = Ext4Extent {
+            logical_block: ext.logical_block,
+            raw_len: make_raw_len(left_len_u32, unwritten)?,
+            physical_start: ext.physical_start,
+        };
+        let right = Ext4Extent {
+            logical_block: u32::try_from(cut).map_err(|_| {
+                ffs_error::FfsError::Format("insert_range: cut exceeds u32".into())
+            })?,
+            raw_len: make_raw_len(right_len_u32, unwritten)?,
+            physical_start: ext.physical_start.saturating_add(u64::from(left_len_u32)),
+        };
+        ffs_btree::insert(cx, dev, root_bytes, left, &mut tree_alloc)?;
+        ffs_btree::insert(cx, dev, root_bytes, right, &mut tree_alloc)?;
+    }
+
+    // Phase 2: snapshot every extent at or past the cut and shift them
+    // right by count. Walk in a separate pass after the straddle split
+    // so the snapshot reflects the post-split shape.
+    let mut tail: Vec<Ext4Extent> = Vec::new();
+    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
+        if u64::from(ext.logical_block) >= cut {
+            tail.push(*ext);
+        }
+        Ok(())
+    })?;
+
+    // Iterate right-to-left so an in-place shift cannot collide with an
+    // existing later extent that has not been moved yet.
+    tail.sort_by_key(|ext| std::cmp::Reverse(ext.logical_block));
+    for ext in &tail {
+        ffs_btree::delete_range(
+            cx,
+            dev,
+            root_bytes,
+            ext.logical_block,
+            u64::from(u32::from(ext.actual_len())),
+            &mut tree_alloc,
+        )?;
+    }
+    for ext in tail {
+        let new_logical = ext
+            .logical_block
+            .checked_add(count)
+            .ok_or_else(|| {
+                ffs_error::FfsError::Format(
+                    "insert_range: shifted logical_block overflows u32".into(),
+                )
+            })?;
+        ffs_btree::insert(
+            cx,
+            dev,
+            root_bytes,
+            Ext4Extent {
+                logical_block: new_logical,
+                ..ext
+            },
+            &mut tree_alloc,
+        )?;
+    }
+
+    Ok(())
+}
+
 // ── Unwritten extent handling ───────────────────────────────────────────────
 
 /// Mark extents in the range `[logical_start, logical_start + count)` as written.

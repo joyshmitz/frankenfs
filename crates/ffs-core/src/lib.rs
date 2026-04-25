@@ -9594,6 +9594,7 @@ impl OpenFs {
         const PUNCH_HOLE: i32 = 0x02;
         const COLLAPSE_RANGE: i32 = 0x08;
         const ZERO_RANGE: i32 = 0x10;
+        const INSERT_RANGE: i32 = 0x20;
         const EINVAL_ERRNO: i32 = 22;
         #[allow(clippy::cast_possible_truncation)] // 32767 always fits u32
         const MAX_EXTENT_COUNT: u32 = 32_767;
@@ -9620,7 +9621,9 @@ impl OpenFs {
         let punch_hole = (mode & PUNCH_HOLE) != 0;
         let collapse_range = (mode & COLLAPSE_RANGE) != 0;
         let zero_range = (mode & ZERO_RANGE) != 0;
-        let unsupported_bits = mode & !(KEEP_SIZE | PUNCH_HOLE | COLLAPSE_RANGE | ZERO_RANGE);
+        let insert_range = (mode & INSERT_RANGE) != 0;
+        let unsupported_bits =
+            mode & !(KEEP_SIZE | PUNCH_HOLE | COLLAPSE_RANGE | ZERO_RANGE | INSERT_RANGE);
         if unsupported_bits != 0 {
             return Err(FfsError::UnsupportedFeature(format!(
                 "ext4 fallocate unsupported mode bits: 0x{unsupported_bits:08x}"
@@ -9635,6 +9638,12 @@ impl OpenFs {
         // mode bits per fs/ext4/extents.c::ext4_collapse_range, and the
         // kernel rejects KEEP_SIZE in particular.
         if collapse_range && (mode & !COLLAPSE_RANGE) != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                EINVAL_ERRNO,
+            )));
+        }
+        // FALLOC_FL_INSERT_RANGE is also exclusive (inverse of collapse).
+        if insert_range && (mode & !INSERT_RANGE) != 0 {
             return Err(FfsError::Io(std::io::Error::from_raw_os_error(
                 EINVAL_ERRNO,
             )));
@@ -9814,6 +9823,55 @@ impl OpenFs {
                 self.extent_cache.invalidate_all();
                 inode.blocks = blocks_after_collapse;
                 inode.size = inode.size.saturating_sub(length);
+                Self::set_extent_root(&mut inode, &root_bytes);
+            }
+        } else if insert_range {
+            // FALLOC_FL_INSERT_RANGE: shift everything past offset right by
+            // length, leaving an unallocated hole [offset, offset+length).
+            // Both must be block-aligned; offset must lie inside the file
+            // (insert at EOF would just be a truncate-up).
+            if (offset % block_size) != 0 || (length % block_size) != 0 {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    EINVAL_ERRNO,
+                )));
+            }
+            if offset >= inode.size {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    EINVAL_ERRNO,
+                )));
+            }
+
+            let logical_start =
+                u32::try_from(offset / block_size).map_err(|_| FfsError::NoSpace)?;
+            let logical_count =
+                u32::try_from(length / block_size).map_err(|_| FfsError::NoSpace)?;
+            if logical_count > 0 {
+                let new_size = inode
+                    .size
+                    .checked_add(length)
+                    .ok_or_else(|| FfsError::Format(
+                        "insert_range: file size + length overflow".into(),
+                    ))?;
+                {
+                    let Ext4AllocState {
+                        geo,
+                        groups,
+                        persist_ctx,
+                    } = &mut *alloc;
+                    ffs_extent::insert_range(
+                        cx,
+                        &block_dev,
+                        &mut root_bytes,
+                        geo,
+                        groups,
+                        logical_start,
+                        logical_count,
+                        persist_ctx,
+                    )?;
+                }
+                self.extent_cache.invalidate_all();
+                // No new physical blocks allocated; inode.blocks unchanged.
+                inode.size = new_size;
                 Self::set_extent_root(&mut inode, &root_bytes);
             }
         } else if zero_range {
@@ -29453,15 +29511,140 @@ mod tests {
         let attr = fs
             .create(&cx, root, OsStr::new("falloc_bad_mode.bin"), 0o644, 0, 0)
             .expect("create");
-        // FALLOC_FL_INSERT_RANGE = 0x20 is not supported (yet — see
-        // bd-ezmts follow-up for the shift-right-and-insert-hole work).
+        // FALLOC_FL_UNSHARE_RANGE = 0x40 is not supported.
         let err = fs
-            .fallocate(&cx, attr.ino, 0, 4096, 0x20)
+            .fallocate(&cx, attr.ino, 0, 4096, 0x40)
             .expect_err("unsupported mode");
         assert!(
             matches!(err, FfsError::UnsupportedFeature(_)),
             "expected UnsupportedFeature, got {err:?}"
         );
+    }
+
+    // ── bd-9mdyg: FALLOC_FL_INSERT_RANGE (mirror of collapse_range) ────────
+
+    #[test]
+    fn write_fallocate_insert_range_shifts_tail_and_grows_file() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("insert_basic.bin"), 0o644, 0, 0)
+            .expect("create");
+
+        // Layout: 3 file-aligned 4 KiB chunks A B C.
+        let block = 4096_u64;
+        let chunk_a = vec![0xAA_u8; block as usize];
+        let chunk_b = vec![0xBB_u8; block as usize];
+        let chunk_c = vec![0xCC_u8; block as usize];
+        fs.write(&cx, attr.ino, 0, &chunk_a).expect("write A");
+        fs.write(&cx, attr.ino, block, &chunk_b).expect("write B");
+        fs.write(&cx, attr.ino, 2 * block, &chunk_c).expect("write C");
+
+        // Insert a 4 KiB hole at offset == block (between A and B).
+        // Tail (B, C) shifts right by 4 KiB; file grows by 4 KiB.
+        // FALLOC_FL_INSERT_RANGE = 0x20.
+        fs.fallocate(&cx, attr.ino, block, block, 0x20)
+            .expect("insert_range");
+
+        let after = fs.getattr(&cx, attr.ino).expect("getattr after");
+        assert_eq!(
+            after.size,
+            4 * block,
+            "file grows by exactly the inserted length"
+        );
+
+        // A is unchanged at offset 0; the hole at [block, 2*block) reads
+        // as zeros; B is now at 2*block, C at 3*block.
+        let read_a = fs.read(&cx, attr.ino, 0, block as u32).expect("read A");
+        let read_hole = fs
+            .read(&cx, attr.ino, block, block as u32)
+            .expect("read hole");
+        let read_b_now = fs
+            .read(&cx, attr.ino, 2 * block, block as u32)
+            .expect("read former-B");
+        let read_c_now = fs
+            .read(&cx, attr.ino, 3 * block, block as u32)
+            .expect("read former-C");
+        assert_eq!(read_a, chunk_a);
+        assert!(
+            read_hole.iter().all(|&b| b == 0),
+            "inserted hole must read as zeros"
+        );
+        assert_eq!(read_b_now, chunk_b, "B shifted right into hole's position");
+        assert_eq!(read_c_now, chunk_c, "C shifted right behind B");
+    }
+
+    #[test]
+    fn write_fallocate_insert_range_unaligned_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("insert_unaligned.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.fallocate(&cx, attr.ino, 0, 4096 * 4, 0)
+            .expect("preallocate");
+
+        let err = fs
+            .fallocate(&cx, attr.ino, 100, 4096, 0x20)
+            .expect_err("unaligned offset must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let err = fs
+            .fallocate(&cx, attr.ino, 4096, 200, 0x20)
+            .expect_err("unaligned length must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn write_fallocate_insert_range_at_or_past_eof_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("insert_at_eof.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.write(&cx, attr.ino, 0, &vec![0_u8; 8192])
+            .expect("write 8 KiB");
+
+        // offset == file_size: per ext4_insert_range the kernel rejects
+        // this — use ftruncate-up to grow the file at EOF instead.
+        let err = fs
+            .fallocate(&cx, attr.ino, 8192, 4096, 0x20)
+            .expect_err("insert at EOF must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        // Past EOF is also rejected.
+        let err = fs
+            .fallocate(&cx, attr.ino, 16384, 4096, 0x20)
+            .expect_err("insert past EOF must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn write_fallocate_insert_range_with_other_flags_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let attr = fs
+            .create(&cx, root, OsStr::new("insert_combo.bin"), 0o644, 0, 0)
+            .expect("create");
+        fs.fallocate(&cx, attr.ino, 0, 4096 * 4, 0)
+            .expect("preallocate");
+
+        let err = fs
+            .fallocate(&cx, attr.ino, 0, 4096, 0x20 | 0x01)
+            .expect_err("insert + keep_size must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
     }
 
     // ── bd-ezmts: FALLOC_FL_COLLAPSE_RANGE ─────────────────────────────────
