@@ -227,6 +227,37 @@ impl ReplyAttr {
 }
 
 ///
+/// Statx Reply
+///
+#[cfg(feature = "abi-7-40")]
+#[derive(Debug)]
+pub struct ReplyStatx {
+    reply: ReplyRaw,
+}
+
+#[cfg(feature = "abi-7-40")]
+impl Reply for ReplyStatx {
+    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyStatx {
+        ReplyStatx {
+            reply: Reply::new(unique, sender),
+        }
+    }
+}
+
+#[cfg(feature = "abi-7-40")]
+impl ReplyStatx {
+    /// Reply to a request with the given statx-compatible attributes.
+    pub fn statx(self, ttl: &Duration, attr: &FileAttr) {
+        self.reply.send_ll(&ll::Response::new_statx(ttl, attr));
+    }
+
+    /// Reply to a request with the given error code.
+    pub fn error(self, err: c_int) {
+        self.reply.error(err);
+    }
+}
+
+///
 /// XTimes Reply
 ///
 #[cfg(target_os = "macos")]

@@ -28038,7 +28038,8 @@ mod tests {
 
         // Write one block worth of data so fiemap returns one extent.
         let block_size = 4096_u64;
-        fs.write(&cx, attr.ino, 0, &vec![0xCD_u8; block_size as usize])
+        let block_size_usize = usize::try_from(block_size).expect("test block size fits usize");
+        fs.write(&cx, attr.ino, 0, &vec![0xCD_u8; block_size_usize])
             .expect("write 4KiB");
 
         let mut scope = RequestScope::empty();
@@ -28181,9 +28182,7 @@ mod tests {
 
         let mut scope = RequestScope::empty();
         let want = FsxattrInfo {
-            xflags: xflags::FS_XFLAG_IMMUTABLE
-                | xflags::FS_XFLAG_APPEND
-                | xflags::FS_XFLAG_NOATIME,
+            xflags: xflags::FS_XFLAG_IMMUTABLE | xflags::FS_XFLAG_APPEND | xflags::FS_XFLAG_NOATIME,
             extsize: 0,
             nextents: 0,
             projid: 0xCAFE_BABE,

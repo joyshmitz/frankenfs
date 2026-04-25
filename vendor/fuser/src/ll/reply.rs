@@ -105,6 +105,18 @@ impl<'a> Response<'a> {
         Self::from_struct(&r)
     }
 
+    #[cfg(feature = "abi-7-40")]
+    pub(crate) fn new_statx(ttl: &Duration, attr: &crate::FileAttr) -> Self {
+        let r = abi::fuse_statx_out {
+            attr_valid: ttl.as_secs(),
+            attr_valid_nsec: ttl.subsec_nanos(),
+            flags: 0,
+            spare: [0; 2],
+            stat: fuse_statx_from_attr(attr),
+        };
+        Self::from_struct(&r)
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn new_xtimes(bkuptime: SystemTime, crtime: SystemTime) -> Self {
         let (bkuptime_secs, bkuptime_nanos) = time_from_system_time(&bkuptime);
@@ -324,6 +336,58 @@ pub(crate) fn fuse_attr_from_attr(attr: &crate::FileAttr) -> abi::fuse_attr {
         flags: attr.flags,
         blksize: attr.blksize,
         padding: 0,
+    }
+}
+
+#[cfg(feature = "abi-7-40")]
+const STATX_BASIC_STATS: u32 = 0x07ff;
+#[cfg(feature = "abi-7-40")]
+const STATX_BTIME: u32 = 0x0800;
+
+#[cfg(feature = "abi-7-40")]
+fn statx_time_from_system_time(system_time: &SystemTime) -> abi::fuse_sx_time {
+    let (tv_sec, tv_nsec) = time_from_system_time(system_time);
+    abi::fuse_sx_time {
+        tv_sec,
+        tv_nsec,
+        __reserved: 0,
+    }
+}
+
+#[cfg(feature = "abi-7-40")]
+fn linux_device_major(dev: u32) -> u32 {
+    (dev >> 8) & 0x0fff
+}
+
+#[cfg(feature = "abi-7-40")]
+fn linux_device_minor(dev: u32) -> u32 {
+    (dev & 0x00ff) | ((dev >> 12) & 0x0fff_ff00)
+}
+
+#[cfg(feature = "abi-7-40")]
+pub(crate) fn fuse_statx_from_attr(attr: &crate::FileAttr) -> abi::fuse_statx {
+    abi::fuse_statx {
+        mask: STATX_BASIC_STATS | STATX_BTIME,
+        blksize: attr.blksize,
+        attributes: 0,
+        nlink: attr.nlink,
+        uid: attr.uid,
+        gid: attr.gid,
+        mode: mode_from_kind_and_perm(attr.kind, attr.perm) as u16,
+        __spare0: [0; 1],
+        ino: attr.ino,
+        size: attr.size,
+        blocks: attr.blocks,
+        attributes_mask: 0,
+        atime: statx_time_from_system_time(&attr.atime),
+        btime: statx_time_from_system_time(&attr.crtime),
+        ctime: statx_time_from_system_time(&attr.ctime),
+        mtime: statx_time_from_system_time(&attr.mtime),
+        rdev_major: linux_device_major(attr.rdev),
+        rdev_minor: linux_device_minor(attr.rdev),
+        dev_major: 0,
+        dev_minor: 0,
+        __spare2: [0; 14],
     }
 }
 
@@ -668,6 +732,36 @@ mod test {
             r.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec),
             expected
         );
+    }
+
+    #[cfg(feature = "abi-7-40")]
+    #[test]
+    fn statx_attr_includes_birth_time() {
+        let time = UNIX_EPOCH + Duration::new(0x1234, 0x5678);
+        let crtime = UNIX_EPOCH + Duration::new(0x5678, 0x1234);
+        let attr = crate::FileAttr {
+            ino: 0x11,
+            size: 0x22,
+            blocks: 0x33,
+            atime: time,
+            mtime: time,
+            ctime: time,
+            crtime,
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 0x55,
+            uid: 0x66,
+            gid: 0x77,
+            rdev: 0x88,
+            flags: 0x99,
+            blksize: 0xbb,
+        };
+
+        let statx = fuse_statx_from_attr(&attr);
+        assert_eq!(statx.mask, STATX_BASIC_STATS | STATX_BTIME);
+        assert_eq!(statx.btime.tv_sec, 0x5678);
+        assert_eq!(statx.btime.tv_nsec, 0x1234);
+        assert_eq!(statx.mode, 0o100644);
     }
 
     #[test]

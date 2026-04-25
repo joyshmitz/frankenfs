@@ -3,9 +3,9 @@
 //! A request represents information about a filesystem operation the kernel driver wants us to
 //! perform.
 
-use super::fuse_abi::{fuse_in_header, fuse_opcode, InvalidOpcodeError};
+use super::fuse_abi::{InvalidOpcodeError, fuse_in_header, fuse_opcode};
 
-use super::{fuse_abi as abi, Errno, Response};
+use super::{Errno, Response, fuse_abi as abi};
 #[cfg(feature = "serializable")]
 use serde::{Deserialize, Serialize};
 use std::{convert::TryFrom, fmt::Display, path::Path};
@@ -268,11 +268,11 @@ mod op {
     use crate::ll::Response;
 
     use super::{
-        super::{argument::ArgumentIterator, TimeOrNow},
+        super::{TimeOrNow, argument::ArgumentIterator},
         FilenameInDir, Request,
     };
     use super::{
-        abi::consts::*, abi::*, FileHandle, INodeNo, Lock, LockOwner, Operation, RequestId,
+        FileHandle, INodeNo, Lock, LockOwner, Operation, RequestId, abi::consts::*, abi::*,
     };
     use std::{
         convert::TryInto,
@@ -341,6 +341,35 @@ mod op {
             } else {
                 None
             }
+        }
+    }
+
+    /// Get extended file attributes through the Linux statx-compatible opcode.
+    #[cfg(feature = "abi-7-40")]
+    #[derive(Debug)]
+    pub struct Statx<'a> {
+        header: &'a fuse_in_header,
+        arg: &'a fuse_statx_in,
+    }
+    #[cfg(feature = "abi-7-40")]
+    impl_request!(Statx<'_>);
+
+    #[cfg(feature = "abi-7-40")]
+    impl Statx<'_> {
+        pub fn file_handle(&self) -> Option<FileHandle> {
+            if self.arg.getattr_flags & crate::FUSE_GETATTR_FH != 0 {
+                Some(FileHandle(self.arg.fh))
+            } else {
+                None
+            }
+        }
+
+        pub fn flags(&self) -> u32 {
+            self.arg.sx_flags
+        }
+
+        pub fn mask(&self) -> u32 {
+            self.arg.sx_mask
         }
     }
 
@@ -1823,6 +1852,11 @@ mod op {
                 header,
                 arg: data.fetch()?,
             }),
+            #[cfg(feature = "abi-7-40")]
+            fuse_opcode::FUSE_STATX => Operation::Statx(Statx {
+                header,
+                arg: data.fetch()?,
+            }),
 
             #[cfg(target_os = "macos")]
             fuse_opcode::FUSE_SETVOLNAME => Operation::SetVolName(SetVolName {
@@ -1906,6 +1940,8 @@ pub enum Operation<'a> {
     Lseek(Lseek<'a>),
     #[cfg(feature = "abi-7-28")]
     CopyFileRange(CopyFileRange<'a>),
+    #[cfg(feature = "abi-7-40")]
+    Statx(Statx<'a>),
 
     #[cfg(target_os = "macos")]
     SetVolName(SetVolName<'a>),
@@ -2092,6 +2128,14 @@ impl fmt::Display for Operation<'_> {
                 x.dest(),
                 x.len()
             ),
+            #[cfg(feature = "abi-7-40")]
+            Operation::Statx(x) => write!(
+                f,
+                "STATX fh {:?}, flags {:#x}, mask {:#x}",
+                x.file_handle(),
+                x.flags(),
+                x.mask()
+            ),
 
             #[cfg(target_os = "macos")]
             Operation::SetVolName(x) => write!(f, "SETVOLNAME name {:?}", x.name()),
@@ -2223,18 +2267,18 @@ mod tests {
 
     #[test]
     fn short_read_header() {
-        match AnyRequest::try_from(&INIT_REQUEST[..20]) {
-            Err(RequestError::ShortReadHeader(20)) => (),
-            _ => panic!("Unexpected request parsing result"),
-        }
+        assert!(matches!(
+            AnyRequest::try_from(&INIT_REQUEST[..20]),
+            Err(RequestError::ShortReadHeader(20))
+        ));
     }
 
     #[test]
     fn short_read() {
-        match AnyRequest::try_from(&INIT_REQUEST[..48]) {
-            Err(RequestError::ShortRead(48, 56)) => (),
-            _ => panic!("Unexpected request parsing result"),
-        }
+        assert!(matches!(
+            AnyRequest::try_from(&INIT_REQUEST[..48]),
+            Err(RequestError::ShortRead(48, 56))
+        ));
     }
 
     #[test]
@@ -2247,12 +2291,11 @@ mod tests {
         assert_eq!(req.uid(), 0xc001_d00d);
         assert_eq!(req.gid(), 0xc001_cafe);
         assert_eq!(req.pid(), 0xc0de_ba5e);
-        match req.operation().unwrap() {
-            Operation::Init(x) => {
-                assert_eq!(x.version(), Version(7, 8));
-                assert_eq!(x.max_readahead(), 4096);
-            }
-            _ => panic!("Unexpected request operation"),
+        let operation = req.operation().unwrap();
+        assert!(matches!(&operation, Operation::Init(_)));
+        if let Operation::Init(x) = operation {
+            assert_eq!(x.version(), Version(7, 8));
+            assert_eq!(x.max_readahead(), 4096);
         }
     }
 
@@ -2266,13 +2309,43 @@ mod tests {
         assert_eq!(req.uid(), 0xc001_d00d);
         assert_eq!(req.gid(), 0xc001_cafe);
         assert_eq!(req.pid(), 0xc0de_ba5e);
-        match req.operation().unwrap() {
-            Operation::MkNod(x) => {
-                assert_eq!(x.mode(), 0o644);
-                assert_eq!(x.umask(), 0o755);
-                assert_eq!(x.name(), OsStr::new("foo.txt"));
-            }
-            _ => panic!("Unexpected request operation"),
+        let operation = req.operation().unwrap();
+        assert!(matches!(&operation, Operation::MkNod(_)));
+        if let Operation::MkNod(x) = operation {
+            assert_eq!(x.mode(), 0o644);
+            assert_eq!(x.umask(), 0o755);
+            assert_eq!(x.name(), OsStr::new("foo.txt"));
+        }
+    }
+
+    #[cfg(feature = "abi-7-40")]
+    #[test]
+    fn statx() {
+        let mut bytes = AlignedData([0_u8; 64]);
+        bytes[0..4].copy_from_slice(&(64_u32).to_ne_bytes());
+        bytes[4..8].copy_from_slice(&(52_u32).to_ne_bytes());
+        bytes[8..16].copy_from_slice(&(0xdead_beef_baad_f00d_u64).to_ne_bytes());
+        bytes[16..24].copy_from_slice(&(0x1122_3344_5566_7788_u64).to_ne_bytes());
+        bytes[24..28].copy_from_slice(&(0xc001_d00d_u32).to_ne_bytes());
+        bytes[28..32].copy_from_slice(&(0xc001_cafe_u32).to_ne_bytes());
+        bytes[32..36].copy_from_slice(&(0xc0de_ba5e_u32).to_ne_bytes());
+
+        bytes[40..44].copy_from_slice(&crate::FUSE_GETATTR_FH.to_ne_bytes());
+        bytes[48..56].copy_from_slice(&(0x1234_5678_9abc_def0_u64).to_ne_bytes());
+        bytes[56..60].copy_from_slice(&(0x6000_u32).to_ne_bytes());
+        bytes[60..64].copy_from_slice(&(0x07ff_u32 | 0x0800_u32).to_ne_bytes());
+
+        let req = AnyRequest::try_from(&bytes[..]).unwrap();
+        assert_eq!(req.header.len, 64);
+        assert_eq!(req.header.opcode, 52);
+        assert_eq!(req.unique(), RequestId(0xdead_beef_baad_f00d));
+        assert_eq!(req.nodeid(), INodeNo(0x1122_3344_5566_7788));
+        let operation = req.operation().unwrap();
+        assert!(matches!(&operation, Operation::Statx(_)));
+        if let Operation::Statx(x) = operation {
+            assert_eq!(x.file_handle(), Some(FileHandle(0x1234_5678_9abc_def0)));
+            assert_eq!(x.flags(), 0x6000);
+            assert_eq!(x.mask(), 0x0fff);
         }
     }
 }

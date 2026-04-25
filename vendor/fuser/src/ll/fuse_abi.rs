@@ -95,6 +95,42 @@ pub struct fuse_attr {
     pub padding: u32,
 }
 
+#[cfg(feature = "abi-7-40")]
+#[repr(C)]
+#[derive(Debug, IntoBytes, Clone, Copy, KnownLayout, Immutable)]
+pub struct fuse_sx_time {
+    pub tv_sec: i64,
+    pub tv_nsec: u32,
+    pub __reserved: i32,
+}
+
+#[cfg(feature = "abi-7-40")]
+#[repr(C)]
+#[derive(Debug, IntoBytes, Clone, Copy, KnownLayout, Immutable)]
+pub struct fuse_statx {
+    pub mask: u32,
+    pub blksize: u32,
+    pub attributes: u64,
+    pub nlink: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
+    pub __spare0: [u16; 1],
+    pub ino: u64,
+    pub size: u64,
+    pub blocks: u64,
+    pub attributes_mask: u64,
+    pub atime: fuse_sx_time,
+    pub btime: fuse_sx_time,
+    pub ctime: fuse_sx_time,
+    pub mtime: fuse_sx_time,
+    pub rdev_major: u32,
+    pub rdev_minor: u32,
+    pub dev_major: u32,
+    pub dev_minor: u32,
+    pub __spare2: [u64; 14],
+}
+
 #[repr(C)]
 #[derive(Debug, IntoBytes, KnownLayout, Immutable)]
 pub struct fuse_kstatfs {
@@ -236,7 +272,38 @@ pub mod consts {
     pub const FUSE_WRITE_CACHE: u32 = 1 << 0; // delayed write from page cache, file handle is guessed
     pub const FUSE_WRITE_LOCKOWNER: u32 = 1 << 1; // lock_owner field is valid
     #[cfg(feature = "abi-7-31")]
-    pub const FUSE_WRITE_KILL_PRIV: u32 = 1 << 2; // kill suid and sgid bits
+    pub const FUSE_WRITE_KILL_SUIDGID: u32 = 1 << 2; // kill suid and sgid bits
+    #[cfg(feature = "abi-7-31")]
+    pub const FUSE_WRITE_KILL_PRIV: u32 = FUSE_WRITE_KILL_SUIDGID; // legacy name for FUSE_WRITE_KILL_SUIDGID
+
+    // Linux pwritev2/io_uring per-operation flags. The kernel UAPI defines these outside the
+    // FUSE protocol, but exposing them here lets FUSE backends decode Linux write-intent bits
+    // without duplicating raw constants.
+    #[cfg(target_os = "linux")]
+    pub const RWF_HIPRI: u32 = 0x0000_0001;
+    #[cfg(target_os = "linux")]
+    pub const RWF_DSYNC: u32 = 0x0000_0002;
+    #[cfg(target_os = "linux")]
+    pub const RWF_SYNC: u32 = 0x0000_0004;
+    #[cfg(target_os = "linux")]
+    pub const RWF_NOWAIT: u32 = 0x0000_0008;
+    #[cfg(target_os = "linux")]
+    pub const RWF_APPEND: u32 = 0x0000_0010;
+    #[cfg(target_os = "linux")]
+    pub const RWF_NOAPPEND: u32 = 0x0000_0020;
+    #[cfg(target_os = "linux")]
+    pub const RWF_ATOMIC: u32 = 0x0000_0040;
+    #[cfg(target_os = "linux")]
+    pub const RWF_DONTCACHE: u32 = 0x0000_0080;
+    #[cfg(target_os = "linux")]
+    pub const RWF_SUPPORTED: u32 = RWF_HIPRI
+        | RWF_DSYNC
+        | RWF_SYNC
+        | RWF_NOWAIT
+        | RWF_APPEND
+        | RWF_NOAPPEND
+        | RWF_ATOMIC
+        | RWF_DONTCACHE;
 
     // Read flags
     pub const FUSE_READ_LOCKOWNER: u32 = 1 << 1;
@@ -319,6 +386,8 @@ pub enum fuse_opcode {
     FUSE_LSEEK = 46,
     #[cfg(feature = "abi-7-28")]
     FUSE_COPY_FILE_RANGE = 47,
+    #[cfg(feature = "abi-7-40")]
+    FUSE_STATX = 52,
 
     #[cfg(target_os = "macos")]
     FUSE_SETVOLNAME = 61,
@@ -385,6 +454,8 @@ impl TryFrom<u32> for fuse_opcode {
             46 => Ok(fuse_opcode::FUSE_LSEEK),
             #[cfg(feature = "abi-7-28")]
             47 => Ok(fuse_opcode::FUSE_COPY_FILE_RANGE),
+            #[cfg(feature = "abi-7-40")]
+            52 => Ok(fuse_opcode::FUSE_STATX),
 
             #[cfg(target_os = "macos")]
             61 => Ok(fuse_opcode::FUSE_SETVOLNAME),
@@ -480,6 +551,28 @@ pub struct fuse_attr_out {
     pub attr_valid_nsec: u32,
     pub dummy: u32,
     pub attr: fuse_attr,
+}
+
+#[cfg(feature = "abi-7-40")]
+#[repr(C)]
+#[derive(Debug, FromBytes, KnownLayout, Immutable)]
+pub struct fuse_statx_in {
+    pub getattr_flags: u32,
+    pub reserved: u32,
+    pub fh: u64,
+    pub sx_flags: u32,
+    pub sx_mask: u32,
+}
+
+#[cfg(feature = "abi-7-40")]
+#[repr(C)]
+#[derive(Debug, IntoBytes, KnownLayout, Immutable)]
+pub struct fuse_statx_out {
+    pub attr_valid: u64,
+    pub attr_valid_nsec: u32,
+    pub flags: u32,
+    pub spare: [u64; 2],
+    pub stat: fuse_statx,
 }
 
 #[cfg(target_os = "macos")]

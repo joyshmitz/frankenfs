@@ -300,20 +300,11 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
     Ok(false)
 }
 
-/// Swap the inode number on the live entry whose name matches `name`.
-///
-/// Used by `renameat2(RENAME_EXCHANGE)` to atomically retarget a
-/// directory entry to a different inode without touching the
-/// surrounding entry layout (rec_len, name_len, file_type tag) — the
-/// only field that changes is the leading 4-byte inode field.
-///
-/// Returns `Ok(true)` on swap, `Ok(false)` if `name` is not present
-/// in this block. Tombstones (entries with `inode == 0`) are skipped
-/// so a deleted entry that happens to share the name is never matched.
-pub fn swap_inode_in_entry(
+fn update_live_entry_header(
     block: &mut [u8],
     name: &[u8],
     new_ino: u32,
+    new_file_type: Option<Ext4FileType>,
     reserved_tail: usize,
 ) -> Result<bool> {
     validate_name(name)?;
@@ -327,10 +318,12 @@ pub fn swap_inode_in_entry(
     let limit = block.len().saturating_sub(reserved_tail);
     while off + DIR_ENTRY_HEADER_LEN <= limit {
         let rec_len =
-            usize::from(read_u16_le(block, off + 4).ok_or_else(|| FfsError::Corruption {
-                block: 0,
-                detail: "unable to read directory entry rec_len".to_owned(),
-            })?);
+            usize::from(
+                read_u16_le(block, off + 4).ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: "unable to read directory entry rec_len".to_owned(),
+                })?,
+            );
         if rec_len < DIR_ENTRY_HEADER_LEN || (rec_len % 4) != 0 {
             return Err(FfsError::Corruption {
                 block: 0,
@@ -371,11 +364,46 @@ pub fn swap_inode_in_entry(
         }
         if cur_ino != 0 && &block[off + DIR_ENTRY_HEADER_LEN..name_end] == name {
             write_u32_le(block, off, new_ino)?;
+            if let Some(file_type) = new_file_type {
+                block[off + 7] = file_type as u8;
+            }
             return Ok(true);
         }
         off = end;
     }
     Ok(false)
+}
+
+/// Swap the inode number on the live entry whose name matches `name`.
+///
+/// This intentionally leaves the ext4 `file_type` tag unchanged. Use
+/// [`retarget_entry`] when the target inode's kind may differ.
+///
+/// Returns `Ok(true)` on swap, `Ok(false)` if `name` is not present
+/// in this block. Tombstones (entries with `inode == 0`) are skipped
+/// so a deleted entry that happens to share the name is never matched.
+pub fn swap_inode_in_entry(
+    block: &mut [u8],
+    name: &[u8],
+    new_ino: u32,
+    reserved_tail: usize,
+) -> Result<bool> {
+    update_live_entry_header(block, name, new_ino, None, reserved_tail)
+}
+
+/// Retarget a live directory entry to a different inode and file type.
+///
+/// `renameat2(RENAME_EXCHANGE)` needs this for mixed-type exchanges:
+/// swapping only inode numbers would leave stale d_type/file_type tags
+/// attached to the old names.
+pub fn retarget_entry(
+    block: &mut [u8],
+    name: &[u8],
+    new_ino: u32,
+    new_file_type: Ext4FileType,
+    reserved_tail: usize,
+) -> Result<bool> {
+    update_live_entry_header(block, name, new_ino, Some(new_file_type), reserved_tail)
 }
 
 /// Initialize an empty directory block with `.` and `..` entries.
@@ -844,6 +872,23 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].inode, 44);
         assert_eq!(entries[1].name, b"new".to_vec());
+    }
+
+    #[test]
+    fn retarget_entry_updates_inode_and_file_type_without_moving_slot() {
+        let mut block = vec![0u8; 1024];
+        write_entry(&mut block, 0, 33, 1024, Ext4FileType::RegFile, b"node").unwrap();
+
+        assert!(
+            retarget_entry(&mut block, b"node", 44, Ext4FileType::Dir, 0).expect("retarget entry")
+        );
+
+        let (entries, _) = parse_dir_block(&block, 1024).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].inode, 44);
+        assert_eq!(entries[0].rec_len, 1024);
+        assert_eq!(entries[0].name, b"node".to_vec());
+        assert_eq!(entries[0].file_type, Ext4FileType::Dir);
     }
 
     #[test]
@@ -1414,8 +1459,13 @@ mod tests {
                 Ok(_) => {
                     inserted.insert(name.into_bytes());
                 }
-                Err(FfsError::NoSpace) => break,
-                Err(err) => panic!("unexpected add_entry failure: {err:?}"),
+                Err(err) => {
+                    assert!(
+                        matches!(err, FfsError::NoSpace),
+                        "unexpected add_entry failure: {err:?}"
+                    );
+                    break;
+                }
             }
         }
 

@@ -271,7 +271,7 @@ fn fuse_mount_fusermount(
             return if stderr_string.contains("only allowed if 'user_allow_other' is set") {
                 Err(io::Error::new(ErrorKind::PermissionDenied, stderr_string))
             } else {
-                Err(io::Error::new(ErrorKind::Other, stderr_string))
+                Err(io::Error::other(stderr_string))
             };
         }
     };

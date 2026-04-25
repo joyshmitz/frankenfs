@@ -8,8 +8,6 @@
 use crate::ll::{Errno, Response, fuse_abi as abi};
 use log::{debug, error, warn};
 use std::convert::TryFrom;
-#[cfg(feature = "abi-7-28")]
-use std::convert::TryInto;
 use std::path::Path;
 
 use crate::Filesystem;
@@ -192,6 +190,17 @@ impl<'a> Request<'a> {
                     self,
                     self.request.nodeid().into(),
                     _attr.file_handle().map(|fh| fh.into()),
+                    self.reply(),
+                );
+            }
+            #[cfg(feature = "abi-7-40")]
+            ll::Operation::Statx(x) => {
+                se.filesystem.statx(
+                    self,
+                    self.request.nodeid().into(),
+                    x.file_handle().map(|fh| fh.into()),
+                    x.flags(),
+                    x.mask(),
                     self.reply(),
                 );
             }
@@ -572,7 +581,7 @@ impl<'a> Request<'a> {
                     o.file_handle.into(),
                     o.offset,
                     x.len(),
-                    x.flags().try_into().unwrap(),
+                    u32::try_from(x.flags()).unwrap_or(u32::MAX),
                     self.reply(),
                 );
             }

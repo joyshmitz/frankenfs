@@ -30,6 +30,8 @@ pub use notify::{Notifier, PollHandle};
 #[cfg(feature = "abi-7-40")]
 pub use passthrough::BackingId;
 pub use reply::ReplyPoll;
+#[cfg(feature = "abi-7-40")]
+pub use reply::ReplyStatx;
 #[cfg(target_os = "macos")]
 pub use reply::ReplyXTimes;
 pub use reply::ReplyXattr;
@@ -349,6 +351,23 @@ pub trait Filesystem {
     /// Get file attributes.
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, fh: Option<u64>, reply: ReplyAttr) {
         warn!("[Not Implemented] getattr(ino: {ino:#x?}, fh: {fh:#x?})");
+        reply.error(ENOSYS);
+    }
+
+    /// Get extended file attributes via the Linux statx-compatible FUSE opcode.
+    #[cfg(feature = "abi-7-40")]
+    fn statx(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: Option<u64>,
+        flags: u32,
+        mask: u32,
+        reply: ReplyStatx,
+    ) {
+        warn!(
+            "[Not Implemented] statx(ino: {ino:#x?}, fh: {fh:#x?}, flags: {flags:#x?}, mask: {mask:#x?})"
+        );
         reply.error(ENOSYS);
     }
 

@@ -1259,6 +1259,962 @@ fn with_rw_mount_sized(image_size_bytes: u64, f: impl FnOnce(&Path)) {
     f(&mnt);
 }
 
+const SYSCALL_CONFORMANCE_SCRIPT: &str = r#"
+import json
+import mmap
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+base = os.path.join(root, "syscall_matrix")
+records = []
+
+def stable_stat(path, follow=True):
+    st = os.stat(path) if follow else os.lstat(path)
+    mode = st.st_mode
+    if stat.S_ISDIR(mode):
+        kind = "dir"
+    elif stat.S_ISLNK(mode):
+        kind = "symlink"
+    elif stat.S_ISREG(mode):
+        kind = "file"
+    else:
+        kind = "other"
+    return {
+        "kind": kind,
+        "mode": stat.S_IMODE(mode),
+        "size": st.st_size,
+        "nlink": st.st_nlink,
+    }
+
+def read_text(path):
+    with open(path, "rb") as f:
+        return f.read().decode("ascii")
+
+def entries(path):
+    return sorted(os.listdir(path))
+
+def record(step, func):
+    try:
+        records.append({"step": step, "ok": True, "result": func()})
+    except OSError as exc:
+        records.append({
+            "step": step,
+            "ok": False,
+            "errno": exc.errno,
+            "result": None,
+        })
+
+def mkdir_base():
+    os.mkdir(base, 0o755)
+    return {"stat": stable_stat(base), "entries": entries(base)}
+
+def create_write_fsync_read():
+    path = os.path.join(base, "file.txt")
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
+    try:
+        os.write(fd, b"alpha")
+        os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        readback = os.read(fd, 16).decode("ascii")
+    finally:
+        os.close(fd)
+    return {"read": readback, "stat": stable_stat(path)}
+
+def chmod_truncate_stat():
+    path = os.path.join(base, "file.txt")
+    os.chmod(path, 0o600)
+    os.truncate(path, 3)
+    return {"read": read_text(path), "stat": stable_stat(path)}
+
+def hardlink_symlink():
+    path = os.path.join(base, "file.txt")
+    hard = os.path.join(base, "hard.txt")
+    sym = os.path.join(base, "sym.txt")
+    os.link(path, hard)
+    os.symlink("file.txt", sym)
+    return {
+        "entries": entries(base),
+        "file": stable_stat(path),
+        "hard_read": read_text(hard),
+        "sym": stable_stat(sym, follow=False),
+        "sym_target": os.readlink(sym),
+    }
+
+def rename_unlink():
+    hard = os.path.join(base, "hard.txt")
+    renamed = os.path.join(base, "renamed.txt")
+    sym = os.path.join(base, "sym.txt")
+    os.rename(hard, renamed)
+    os.unlink(sym)
+    return {
+        "entries": entries(base),
+        "file": stable_stat(os.path.join(base, "file.txt")),
+        "renamed_read": read_text(renamed),
+    }
+
+def nested_dir_rename():
+    sub = os.path.join(base, "sub")
+    moved = os.path.join(base, "moved")
+    child = os.path.join(sub, "child.txt")
+    os.mkdir(sub, 0o755)
+    with open(child, "wb") as f:
+        f.write(b"nested")
+    os.rename(sub, moved)
+    moved_child = os.path.join(moved, "child.txt")
+    return {
+        "entries": entries(base),
+        "moved_entries": entries(moved),
+        "child_read": read_text(moved_child),
+        "child_stat": stable_stat(moved_child),
+    }
+
+def mmap_write_flush():
+    path = os.path.join(base, "map.bin")
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_RDWR, 0o644)
+    try:
+        os.write(fd, b"00000000")
+        os.ftruncate(fd, 8)
+        mapping = mmap.mmap(fd, 8, access=mmap.ACCESS_WRITE)
+        try:
+            mapping[2:5] = b"MAP"
+            mapping.flush()
+        finally:
+            mapping.close()
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return {"read": read_text(path), "stat": stable_stat(path)}
+
+def fsync_directory():
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(base, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return {"entries": entries(base)}
+
+def cleanup():
+    os.unlink(os.path.join(base, "file.txt"))
+    os.unlink(os.path.join(base, "renamed.txt"))
+    os.unlink(os.path.join(base, "map.bin"))
+    os.unlink(os.path.join(base, "moved", "child.txt"))
+    os.rmdir(os.path.join(base, "moved"))
+    os.rmdir(base)
+    return {"base_exists": os.path.exists(base)}
+
+for step, func in [
+    ("mkdir_base", mkdir_base),
+    ("create_write_fsync_read", create_write_fsync_read),
+    ("chmod_truncate_stat", chmod_truncate_stat),
+    ("hardlink_symlink", hardlink_symlink),
+    ("rename_unlink", rename_unlink),
+    ("nested_dir_rename", nested_dir_rename),
+    ("mmap_write_flush", mmap_write_flush),
+    ("fsync_directory", fsync_directory),
+    ("cleanup", cleanup),
+]:
+    record(step, func)
+
+print(json.dumps(records, sort_keys=True))
+"#;
+
+fn run_syscall_conformance_probe(root: &Path) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(SYSCALL_CONFORMANCE_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 syscall conformance probe");
+    assert!(
+        output.status.success(),
+        "python3 syscall conformance probe failed for {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("syscall conformance probe JSON")
+}
+
+const INOTIFY_RENAME_SCRIPT: &str = r#"
+import ctypes
+import json
+import os
+import struct
+import sys
+import time
+
+IN_MOVED_FROM = 0x00000040
+IN_MOVED_TO = 0x00000080
+IN_CREATE = 0x00000100
+IN_DELETE = 0x00000200
+IN_Q_OVERFLOW = 0x00004000
+IN_IGNORED = 0x00008000
+WATCH_MASK = IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_Q_OVERFLOW | IN_IGNORED
+
+EVENT = struct.Struct("iIII")
+libc = ctypes.CDLL(None, use_errno=True)
+
+try:
+    inotify_init1 = libc.inotify_init1
+    inotify_add_watch = libc.inotify_add_watch
+except AttributeError:
+    print(json.dumps({"skipped": "libc_inotify_unavailable"}))
+    sys.exit(0)
+
+inotify_init1.argtypes = [ctypes.c_int]
+inotify_init1.restype = ctypes.c_int
+inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+inotify_add_watch.restype = ctypes.c_int
+libc.close.argtypes = [ctypes.c_int]
+libc.close.restype = ctypes.c_int
+
+def fail(message, **fields):
+    payload = {"error": message}
+    payload.update(fields)
+    raise AssertionError(json.dumps(payload, sort_keys=True))
+
+def open_inotify():
+    flags = getattr(os, "O_NONBLOCK", 0x800) | getattr(os, "O_CLOEXEC", 0x80000)
+    fd = inotify_init1(flags)
+    if fd < 0:
+        errno = ctypes.get_errno()
+        if errno in (38, 78):
+            print(json.dumps({"skipped": "kernel_inotify_unavailable", "errno": errno}))
+            sys.exit(0)
+        fail("inotify_init1_failed", errno=errno)
+    return fd
+
+def add_watch(fd, path):
+    wd = inotify_add_watch(fd, os.fsencode(path), WATCH_MASK)
+    if wd < 0:
+        fail("inotify_add_watch_failed", path=path, errno=ctypes.get_errno())
+    return wd
+
+def close_fd(fd):
+    if fd >= 0:
+        libc.close(fd)
+
+def decode_events(data):
+    events = []
+    offset = 0
+    while offset + EVENT.size <= len(data):
+        wd, mask, cookie, name_len = EVENT.unpack_from(data, offset)
+        offset += EVENT.size
+        raw_name = data[offset:offset + name_len]
+        offset += name_len
+        name = raw_name.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
+        events.append({"wd": wd, "mask": mask, "cookie": cookie, "name": name})
+    return events
+
+def collect_events(fds, expected_move_events, timeout_seconds=5.0, settle_seconds=0.20):
+    events = []
+    deadline = time.monotonic() + timeout_seconds
+    settled_since = None
+    while time.monotonic() < deadline:
+        made_progress = False
+        for fd in fds:
+            while True:
+                try:
+                    data = os.read(fd, 65536)
+                except BlockingIOError:
+                    break
+                if not data:
+                    break
+                made_progress = True
+                events.extend(decode_events(data))
+
+        move_events = [
+            event for event in events
+            if event["mask"] & (IN_MOVED_FROM | IN_MOVED_TO)
+        ]
+        if len(move_events) >= expected_move_events:
+            if settled_since is None:
+                settled_since = time.monotonic()
+            elif time.monotonic() - settled_since >= settle_seconds:
+                return events
+        else:
+            settled_since = None
+
+        if not made_progress:
+            time.sleep(0.01)
+
+    return events
+
+def reject_non_move_events(events, scenario):
+    creates = [event for event in events if event["mask"] & IN_CREATE]
+    deletes = [event for event in events if event["mask"] & IN_DELETE]
+    overflows = [event for event in events if event["mask"] & IN_Q_OVERFLOW]
+    ignored = [event for event in events if event["mask"] & IN_IGNORED]
+    if creates or deletes or overflows or ignored:
+        fail(
+            "unexpected_inotify_events",
+            scenario=scenario,
+            creates=creates,
+            deletes=deletes,
+            overflows=overflows,
+            ignored=ignored,
+            events=events,
+        )
+
+def assert_move_pairs(events, expected_pairs, scenario):
+    reject_non_move_events(events, scenario)
+    moved_from = [event for event in events if event["mask"] & IN_MOVED_FROM]
+    moved_to = [event for event in events if event["mask"] & IN_MOVED_TO]
+    if len(moved_from) != len(expected_pairs) or len(moved_to) != len(expected_pairs):
+        fail(
+            "wrong_move_event_count",
+            scenario=scenario,
+            expected=len(expected_pairs),
+            moved_from=len(moved_from),
+            moved_to=len(moved_to),
+            events=events,
+        )
+
+    by_cookie = {}
+    for event in moved_from:
+        if event["cookie"] == 0:
+            fail("zero_moved_from_cookie", scenario=scenario, event=event)
+        by_cookie.setdefault(event["cookie"], {"from": [], "to": []})["from"].append(event)
+    for event in moved_to:
+        if event["cookie"] == 0:
+            fail("zero_moved_to_cookie", scenario=scenario, event=event)
+        by_cookie.setdefault(event["cookie"], {"from": [], "to": []})["to"].append(event)
+
+    actual_pairs = []
+    for cookie, halves in by_cookie.items():
+        if len(halves["from"]) != 1 or len(halves["to"]) != 1:
+            fail("orphan_or_duplicate_move_cookie", scenario=scenario, cookie=cookie, halves=halves)
+        actual_pairs.append((halves["from"][0]["name"], halves["to"][0]["name"]))
+
+    actual_pairs = sorted(actual_pairs)
+    if actual_pairs != sorted(expected_pairs):
+        fail(
+            "move_pair_name_mismatch",
+            scenario=scenario,
+            expected=sorted(expected_pairs),
+            actual=actual_pairs,
+            events=events,
+        )
+    return moved_from, moved_to
+
+def same_parent(root):
+    base = os.path.join(root, "inotify_same_parent")
+    os.mkdir(base)
+    expected = []
+    for index in range(100):
+        source = f"rename_{index:03d}_src.txt"
+        target = f"rename_{index:03d}_dst.txt"
+        with open(os.path.join(base, source), "wb") as fh:
+            fh.write(f"rename payload {index}\n".encode("ascii"))
+        expected.append((source, target))
+
+    fd = open_inotify()
+    try:
+        add_watch(fd, base)
+        for source, target in expected:
+            os.rename(os.path.join(base, source), os.path.join(base, target))
+        events = collect_events([fd], expected_move_events=len(expected) * 2)
+    finally:
+        close_fd(fd)
+
+    moved_from, moved_to = assert_move_pairs(events, expected, "same_parent")
+    return {
+        "scenario": "same_parent",
+        "renames": len(expected),
+        "moved_from": len(moved_from),
+        "moved_to": len(moved_to),
+        "cookies": len({event["cookie"] for event in moved_from}),
+    }
+
+def cross_directory(root):
+    base = os.path.join(root, "inotify_cross_directory")
+    source_dir = os.path.join(base, "from")
+    target_dir = os.path.join(base, "to")
+    os.makedirs(source_dir)
+    os.mkdir(target_dir)
+    source_name = "move_me.txt"
+    with open(os.path.join(source_dir, source_name), "wb") as fh:
+        fh.write(b"cross-directory rename payload\n")
+
+    source_fd = open_inotify()
+    target_fd = open_inotify()
+    try:
+        source_wd = add_watch(source_fd, source_dir)
+        target_wd = add_watch(target_fd, target_dir)
+        os.rename(os.path.join(source_dir, source_name), os.path.join(target_dir, source_name))
+        events = collect_events([source_fd, target_fd], expected_move_events=2)
+    finally:
+        close_fd(source_fd)
+        close_fd(target_fd)
+
+    moved_from, moved_to = assert_move_pairs(events, [(source_name, source_name)], "cross_directory")
+    if moved_from[0]["wd"] != source_wd or moved_to[0]["wd"] != target_wd:
+        fail(
+            "cross_directory_watch_descriptor_mismatch",
+            source_wd=source_wd,
+            target_wd=target_wd,
+            moved_from=moved_from,
+            moved_to=moved_to,
+            events=events,
+        )
+    return {
+        "scenario": "cross_directory",
+        "moved_from": len(moved_from),
+        "moved_to": len(moved_to),
+        "cookie": moved_from[0]["cookie"],
+    }
+
+root = sys.argv[1]
+mode = sys.argv[2]
+if mode == "same-parent":
+    result = same_parent(root)
+elif mode == "cross-directory":
+    result = cross_directory(root)
+else:
+    fail("unknown_mode", mode=mode)
+
+print(json.dumps(result, sort_keys=True))
+"#;
+
+fn run_inotify_rename_probe(root: &Path, mode: &str) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(INOTIFY_RENAME_SCRIPT)
+        .arg(root)
+        .arg(mode)
+        .output()
+        .expect("run python3 inotify rename probe");
+    assert!(
+        output.status.success(),
+        "python3 inotify rename probe failed for {} mode {mode}: stdout={} stderr={}",
+        root.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("inotify rename probe JSON")
+}
+
+const SPLICE_PIPE_TO_FILE_SCRIPT: &str = r#"
+import hashlib
+import json
+import os
+import sys
+
+if not hasattr(os, "splice"):
+    print(json.dumps({"skipped": "python_os_splice_unavailable"}))
+    sys.exit(0)
+
+root = sys.argv[1]
+size = 16 * 1024 * 1024
+chunk = 1024 * 1024
+splice_chunk = 16 * 1024
+src = os.path.join(root, "splice_source.bin")
+dst = os.path.join(root, "splice_dest.bin")
+pattern = bytes(((i * 31 + 7) % 251) for i in range(65536))
+
+with open(src, "wb") as f:
+    remaining = size
+    while remaining:
+        n = min(remaining, len(pattern))
+        f.write(pattern[:n])
+        remaining -= n
+
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            data = f.read(chunk)
+            if not data:
+                break
+            h.update(data)
+    return h.hexdigest()
+
+rfd = os.open(src, os.O_RDONLY)
+wfd = os.open(dst, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
+pipe_r, pipe_w = os.pipe()
+try:
+    moved = 0
+    while moved < size:
+        n = os.splice(rfd, pipe_w, min(splice_chunk, size - moved))
+        if n == 0:
+            break
+        drained = 0
+        while drained < n:
+            written = os.splice(pipe_r, wfd, n - drained)
+            if written == 0:
+                raise RuntimeError("splice pipe drain returned zero")
+            drained += written
+        moved += n
+    os.fsync(wfd)
+finally:
+    os.close(pipe_r)
+    os.close(pipe_w)
+    os.close(rfd)
+    os.close(wfd)
+
+print(json.dumps({
+    "moved": moved,
+    "source_size": os.path.getsize(src),
+    "dest_size": os.path.getsize(dst),
+    "source_sha256": digest(src),
+    "dest_sha256": digest(dst),
+}, sort_keys=True))
+"#;
+
+fn run_splice_pipe_to_file_probe(root: &Path) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(SPLICE_PIPE_TO_FILE_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 splice probe");
+    assert!(
+        output.status.success(),
+        "python3 splice probe failed for {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("splice probe JSON")
+}
+
+const SENDFILE_32M_SCRIPT: &str = r#"
+import hashlib
+import json
+import os
+import sys
+
+if not hasattr(os, "sendfile"):
+    print(json.dumps({"skipped": "python_os_sendfile_unavailable"}))
+    sys.exit(0)
+
+root = sys.argv[1]
+size = 32 * 1024 * 1024
+chunk = 1024 * 1024
+src = os.path.join(root, "generic_249_sendfile_src.bin")
+dst = os.path.join(root, "generic_249_sendfile_dst.bin")
+pattern = bytes([0xA5, 0xA5, 0x5A, 0x5A]) * (64 * 1024)
+
+with open(src, "wb") as f:
+    remaining = size
+    while remaining:
+        n = min(remaining, len(pattern))
+        f.write(pattern[:n])
+        remaining -= n
+    f.flush()
+    os.fsync(f.fileno())
+
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            data = f.read(chunk)
+            if not data:
+                break
+            h.update(data)
+    return h.hexdigest()
+
+in_fd = os.open(src, os.O_RDONLY)
+out_fd = os.open(dst, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
+try:
+    sent = 0
+    while sent < size:
+        n = os.sendfile(out_fd, in_fd, sent, size - sent)
+        if n == 0:
+            break
+        sent += n
+    os.fsync(out_fd)
+finally:
+    os.close(in_fd)
+    os.close(out_fd)
+
+print(json.dumps({
+    "sent": sent,
+    "source_size": os.path.getsize(src),
+    "dest_size": os.path.getsize(dst),
+    "source_sha256": digest(src),
+    "dest_sha256": digest(dst),
+}, sort_keys=True))
+"#;
+
+fn run_sendfile_32m_probe(root: &Path) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(SENDFILE_32M_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 sendfile probe");
+    assert!(
+        output.status.success(),
+        "python3 sendfile probe failed for {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("sendfile probe JSON")
+}
+
+const SENDFILE_VS_NAIVE_1G_SCRIPT: &str = r#"
+import hashlib
+import json
+import os
+import sys
+import time
+
+if not hasattr(os, "sendfile"):
+    print(json.dumps({"skipped": "python_os_sendfile_unavailable"}))
+    sys.exit(0)
+
+root = sys.argv[1]
+size = 1024 * 1024 * 1024
+naive_chunk = 64 * 1024
+sendfile_chunk = 32 * 1024 * 1024
+src = os.path.join(root, "bench_1g_source.bin")
+sink = "/dev/null"
+sentinel_len = 4096
+sentinel_offsets = [0, size // 2, size - sentinel_len]
+sentinel = bytes(((i * 17 + 3) % 251) for i in range(sentinel_len))
+
+fd = os.open(src, os.O_CREAT | os.O_TRUNC | os.O_RDWR, 0o644)
+try:
+    os.ftruncate(fd, size)
+    for offset in sentinel_offsets:
+        os.pwrite(fd, sentinel, offset)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+
+def sample_digest(path):
+    h = hashlib.sha256()
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        for offset in sentinel_offsets:
+            h.update(os.pread(fd, sentinel_len, offset))
+    finally:
+        os.close(fd)
+    return h.hexdigest()
+
+def naive_copy():
+    copied = 0
+    start = time.perf_counter()
+    with open(src, "rb", buffering=0) as source, open(sink, "wb", buffering=0) as dest:
+        while True:
+            data = source.read(naive_chunk)
+            if not data:
+                break
+            dest.write(data)
+            copied += len(data)
+    return copied, time.perf_counter() - start
+
+def sendfile_copy():
+    in_fd = os.open(src, os.O_RDONLY)
+    out_fd = os.open(sink, os.O_WRONLY)
+    try:
+        sent = 0
+        start = time.perf_counter()
+        while sent < size:
+            n = os.sendfile(out_fd, in_fd, sent, min(sendfile_chunk, size - sent))
+            if n == 0:
+                break
+            sent += n
+        elapsed = time.perf_counter() - start
+    finally:
+        os.close(in_fd)
+        os.close(out_fd)
+    return sent, elapsed
+
+src_digest_before = sample_digest(src)
+naive_bytes, naive_seconds = naive_copy()
+sent, sendfile_seconds = sendfile_copy()
+src_digest_after = sample_digest(src)
+ratio = naive_seconds / sendfile_seconds if sendfile_seconds > 0 else 0.0
+
+print(json.dumps({
+    "size": size,
+    "naive_bytes": naive_bytes,
+    "sent": sent,
+    "naive_seconds": naive_seconds,
+    "sendfile_seconds": sendfile_seconds,
+    "naive_mib_s": (size / (1024 * 1024)) / naive_seconds,
+    "sendfile_mib_s": (size / (1024 * 1024)) / sendfile_seconds,
+    "ratio": ratio,
+    "source_sample_sha256_before": src_digest_before,
+    "source_sample_sha256_after": src_digest_after,
+}, sort_keys=True))
+"#;
+
+fn run_sendfile_vs_naive_1g_benchmark(root: &Path) -> Value {
+    let mut command = if command_available("timeout") {
+        let mut command = Command::new("timeout");
+        command.arg("600s").arg("python3");
+        command
+    } else {
+        Command::new("python3")
+    };
+    let output = command
+        .arg("-c")
+        .arg(SENDFILE_VS_NAIVE_1G_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 sendfile benchmark");
+    assert!(
+        output.status.success(),
+        "python3 sendfile benchmark failed for {}: status={} stdout={} stderr={}",
+        root.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("sendfile benchmark JSON")
+}
+
+const SPLICE_FILE_TO_PIPE_SCRIPT: &str = r#"
+import errno
+import json
+import mmap
+import os
+import sys
+import threading
+
+if not hasattr(os, "splice"):
+    print(json.dumps({"skipped": "python_os_splice_unavailable"}))
+    sys.exit(0)
+
+root = sys.argv[1]
+sector_size = 4096
+buffer_size = 150 * sector_size
+splice_chunk = 16 * 1024
+move_flag = getattr(os, "SPLICE_F_MOVE", 1)
+o_direct = getattr(os, "O_DIRECT", 0)
+
+def aligned_x_buffer():
+    buf = mmap.mmap(-1, buffer_size)
+    buf.write(b"x" * buffer_size)
+    buf.seek(0)
+    return buf
+
+def drain_exact(fd, total):
+    drained = 0
+    while drained < total:
+        data = os.read(fd, min(splice_chunk, total - drained))
+        if not data:
+            raise RuntimeError("unexpected EOF while draining splice pipe")
+        drained += len(data)
+
+def run_case(name, direct, concurrent):
+    path = os.path.join(root, f"generic_591_{name}.bin")
+    flags = os.O_CREAT | os.O_TRUNC | os.O_RDWR
+    if direct:
+        if o_direct == 0:
+            return {"case": name, "skipped": "python_os_odirect_unavailable"}
+        flags |= o_direct
+    try:
+        fd = os.open(path, flags, 0o666)
+    except OSError as exc:
+        if direct and exc.errno in (errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP):
+            return {"case": name, "skipped": "odirect_open_unavailable", "errno": exc.errno}
+        raise
+
+    pipe_r, pipe_w = os.pipe()
+    try:
+        if direct:
+            buf = aligned_x_buffer()
+            try:
+                written = os.write(fd, memoryview(buf))
+            except OSError as exc:
+                buf.close()
+                if exc.errno in (errno.EINVAL, errno.EOPNOTSUPP, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)):
+                    return {"case": name, "skipped": "odirect_write_unavailable", "errno": exc.errno}
+                raise
+            buf.close()
+        else:
+            written = os.write(fd, b"x" * buffer_size)
+        if written != buffer_size:
+            raise RuntimeError(f"short write: {written}")
+        os.lseek(fd, 0, os.SEEK_SET)
+
+        reader_error = []
+        if concurrent:
+            def reader():
+                try:
+                    drain_exact(pipe_r, buffer_size)
+                except BaseException as exc:
+                    reader_error.append(repr(exc))
+            thread = threading.Thread(target=reader)
+            thread.start()
+        else:
+            thread = None
+
+        moved = 0
+        while moved < buffer_size:
+            n = os.splice(fd, pipe_w, min(splice_chunk, buffer_size - moved), flags=move_flag)
+            if n == 0:
+                break
+            moved += n
+            if not concurrent:
+                drain_exact(pipe_r, n)
+
+        os.close(pipe_w)
+        pipe_w = -1
+        if thread is not None:
+            thread.join(timeout=10)
+            if thread.is_alive():
+                raise RuntimeError("concurrent splice reader did not finish")
+            if reader_error:
+                raise RuntimeError(reader_error[0])
+        return {"case": name, "moved": moved, "direct": direct, "concurrent": concurrent}
+    finally:
+        if pipe_w != -1:
+            os.close(pipe_w)
+        os.close(pipe_r)
+        os.close(fd)
+
+cases = [
+    run_case("direct_sequential", True, False),
+    run_case("direct_concurrent", True, True),
+    run_case("buffered_sequential", False, False),
+    run_case("buffered_concurrent", False, True),
+]
+print(json.dumps({"buffer_size": buffer_size, "cases": cases}, sort_keys=True))
+"#;
+
+fn run_splice_file_to_pipe_probe(root: &Path) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(SPLICE_FILE_TO_PIPE_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 splice file-to-pipe probe");
+    assert!(
+        output.status.success(),
+        "python3 splice file-to-pipe probe failed for {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("splice file-to-pipe probe JSON")
+}
+
+const READONLY_SPLICE_PIPE_MERGE_SCRIPT: &str = r#"
+import fcntl
+import json
+import os
+import sys
+
+if not hasattr(os, "splice"):
+    print(json.dumps({"skipped": "python_os_splice_unavailable"}))
+    sys.exit(0)
+
+root = sys.argv[1]
+path = os.path.join(root, "generic_680_readonly.bin")
+payload = b"AAAAAAAABBBBBBBB"
+with open(path, "wb") as f:
+    f.write(b"\xff" * 4096)
+    f.flush()
+    os.fsync(f.fileno())
+os.chmod(path, 0o644)
+
+fd = os.open(path, os.O_RDONLY)
+pipe_r, pipe_w = os.pipe()
+try:
+    try:
+        pipe_size = fcntl.fcntl(pipe_w, fcntl.F_GETPIPE_SZ)
+    except OSError:
+        pipe_size = 65536
+    block = b"\0" * 4096
+    remaining = pipe_size
+    while remaining:
+        n = os.write(pipe_w, block[:min(len(block), remaining)])
+        remaining -= n
+    remaining = pipe_size
+    while remaining:
+        data = os.read(pipe_r, min(len(block), remaining))
+        if not data:
+            raise RuntimeError("unexpected EOF while draining prepared pipe")
+        remaining -= len(data)
+
+    moved = os.splice(fd, pipe_w, 1, offset_src=0)
+    if moved != 1:
+        raise RuntimeError(f"short readonly splice: {moved}")
+    written = os.write(pipe_w, payload)
+finally:
+    os.close(pipe_r)
+    os.close(pipe_w)
+    os.close(fd)
+
+with open(path, "rb") as f:
+    data = f.read()
+
+print(json.dumps({
+    "moved": moved,
+    "pipe_write": written,
+    "unchanged": data == b"\xff" * 4096,
+    "prefix_hex": data[:32].hex(),
+}, sort_keys=True))
+"#;
+
+fn run_readonly_splice_pipe_merge_probe(root: &Path) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(READONLY_SPLICE_PIPE_MERGE_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 read-only splice pipe probe");
+    assert!(
+        output.status.success(),
+        "python3 read-only splice pipe probe failed for {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("read-only splice pipe probe JSON")
+}
+
+fn reference_conformance_tempdir() -> TempDir {
+    if Path::new("/dev/shm").is_dir() {
+        if let Ok(dir) = tempfile::Builder::new()
+            .prefix("ffs-reference-")
+            .tempdir_in("/dev/shm")
+        {
+            return dir;
+        }
+    }
+    TempDir::new().expect("reference tempdir")
+}
+
+#[test]
+fn fuse_conformance_syscall_sequence_matches_linux_reference() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let reference = reference_conformance_tempdir();
+    let image = create_test_image_with_size(tmp.path(), 16 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let reference_report = run_syscall_conformance_probe(reference.path());
+
+    let Some(_session) = try_mount_ffs_rw(&image, &mnt) else {
+        return;
+    };
+
+    let frankenfs_report = run_syscall_conformance_probe(&mnt);
+    let reference_pretty =
+        serde_json::to_string_pretty(&reference_report).expect("format reference report");
+    let frankenfs_pretty =
+        serde_json::to_string_pretty(&frankenfs_report).expect("format FrankenFS report");
+
+    assert_eq!(
+        frankenfs_report, reference_report,
+        "syscall-level conformance mismatch\nreference: {reference_pretty}\nfrankenfs: {frankenfs_pretty}"
+    );
+    emit_scenario_result(
+        "ext4_rw_syscall_level_differential_conformance",
+        "PASS",
+        Some("file_lifecycle+dir_ops+attrs+links+mmap+fsync"),
+    );
+}
+
 fn with_ext4_inline_data_mount(inode_fixture: &str, f: impl FnOnce(&Path)) {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -2921,6 +3877,64 @@ fn fuse_rename_across_directories() {
 
         let content = fs::read_to_string(&dst).expect("read moved file");
         assert_eq!(content, "Hello from FrankenFS E2E!\n");
+    });
+}
+
+#[test]
+fn fuse_inotify_same_parent_rename_pairs_have_matching_cookies() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    with_rw_mount_sized(16 * 1024 * 1024, |mnt| {
+        let scenario_id = "ext4_rw_inotify_same_parent_rename_cookie_pairs";
+        let report = run_inotify_rename_probe(mnt, "same-parent");
+        if let Some(reason) = report["skipped"].as_str() {
+            eprintln!("inotify same-parent probe unavailable, skipping: {reason}");
+            return;
+        }
+
+        assert_eq!(report["scenario"].as_str(), Some("same_parent"));
+        assert_eq!(report["renames"].as_u64(), Some(100));
+        assert_eq!(report["moved_from"].as_u64(), Some(100));
+        assert_eq!(report["moved_to"].as_u64(), Some(100));
+        assert_eq!(
+            report["cookies"].as_u64(),
+            Some(100),
+            "each same-parent rename should carry one unique non-zero cookie: {report}"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("100_matching_move_cookies"));
+    });
+}
+
+#[test]
+fn fuse_inotify_cross_directory_rename_uses_move_pair_not_delete_create() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    with_rw_mount_sized(16 * 1024 * 1024, |mnt| {
+        let scenario_id = "ext4_rw_inotify_cross_directory_rename_cookie_pair";
+        let report = run_inotify_rename_probe(mnt, "cross-directory");
+        if let Some(reason) = report["skipped"].as_str() {
+            eprintln!("inotify cross-directory probe unavailable, skipping: {reason}");
+            return;
+        }
+
+        assert_eq!(report["scenario"].as_str(), Some("cross_directory"));
+        assert_eq!(report["moved_from"].as_u64(), Some(1));
+        assert_eq!(report["moved_to"].as_u64(), Some(1));
+        assert!(
+            report["cookie"].as_u64().is_some_and(|cookie| cookie != 0),
+            "cross-directory rename should carry a non-zero inotify move cookie: {report}"
+        );
+        emit_scenario_result(
+            scenario_id,
+            "PASS",
+            Some("cross_dir_move_pair_no_delete_create"),
+        );
     });
 }
 
@@ -5967,9 +6981,11 @@ fn fuse_ioctl_ext4_mutation_ioctls_fast_fail_erofs_on_read_only_mount() {
                  before ffs-fuse::ioctl — acceptable per documented transport behaviour"
             );
         }
-        other => panic!(
+        other => assert_eq!(
+            other,
+            Some(i64::from(libc::EROFS)),
             "unexpected SETFLAGS errno on ro mount: {other:?} report={setflags_report} \
-             trace={setflags_trace}"
+             trace={setflags_trace}",
         ),
     }
 
@@ -5999,9 +7015,11 @@ fn fuse_ioctl_ext4_mutation_ioctls_fast_fail_erofs_on_read_only_mount() {
                  before ffs-fuse::ioctl — acceptable per documented transport behaviour"
             );
         }
-        other => panic!(
+        other => assert_eq!(
+            other,
+            Some(i64::from(libc::EROFS)),
             "unexpected MOVE_EXT errno on ro mount: {other:?} report={move_ext_report} \
-             trace={move_ext_trace}"
+             trace={move_ext_trace}",
         ),
     }
 
@@ -6196,6 +7214,157 @@ fn fuse_write_large_file() {
 }
 
 #[test]
+fn fuse_splice_pipe_to_file_16m_roundtrip() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    with_rw_mount_sized(64 * 1024 * 1024, |mnt| {
+        let scenario_id = "ext4_rw_splice_pipe_to_file_16m_roundtrip";
+        let report = run_splice_pipe_to_file_probe(mnt);
+        if let Some(reason) = report["skipped"].as_str() {
+            eprintln!("splice probe unavailable, skipping: {reason}");
+            return;
+        }
+
+        assert_eq!(report["moved"].as_u64(), Some(16 * 1024 * 1024));
+        assert_eq!(report["source_size"].as_u64(), Some(16 * 1024 * 1024));
+        assert_eq!(report["dest_size"].as_u64(), Some(16 * 1024 * 1024));
+        assert_eq!(
+            report["source_sha256"], report["dest_sha256"],
+            "splice destination must match source bytes: {report}"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("16m_sha256_match"));
+    });
+}
+
+#[test]
+fn fuse_xfstests_generic_249_sendfile_32m_roundtrip() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    with_rw_mount_sized(128 * 1024 * 1024, |mnt| {
+        let scenario_id = "ext4_rw_xfstests_generic_249_sendfile_32m";
+        let report = run_sendfile_32m_probe(mnt);
+        if let Some(reason) = report["skipped"].as_str() {
+            eprintln!("sendfile probe unavailable, skipping: {reason}");
+            return;
+        }
+
+        assert_eq!(report["sent"].as_u64(), Some(32 * 1024 * 1024));
+        assert_eq!(report["source_size"].as_u64(), Some(32 * 1024 * 1024));
+        assert_eq!(report["dest_size"].as_u64(), Some(32 * 1024 * 1024));
+        assert_eq!(
+            report["source_sha256"], report["dest_sha256"],
+            "sendfile destination must match source bytes: {report}"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("32m_sha256_match"));
+    });
+}
+
+#[test]
+#[ignore = "1 GiB mounted throughput benchmark; run explicitly for bd-qpoys acceptance"]
+fn fuse_sendfile_1g_is_at_least_2x_naive_read_write() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    with_rw_mount_sized(4 * 1024 * 1024 * 1024, |mnt| {
+        let scenario_id = "ext4_rw_sendfile_1g_vs_naive_read_write";
+        let report = run_sendfile_vs_naive_1g_benchmark(mnt);
+        if let Some(reason) = report["skipped"].as_str() {
+            eprintln!("sendfile benchmark unavailable, skipping: {reason}");
+            return;
+        }
+
+        assert_eq!(report["size"].as_u64(), Some(1024 * 1024 * 1024));
+        assert_eq!(report["naive_bytes"].as_u64(), Some(1024 * 1024 * 1024));
+        assert_eq!(report["sent"].as_u64(), Some(1024 * 1024 * 1024));
+        assert_eq!(
+            report["source_sample_sha256_before"], report["source_sample_sha256_after"],
+            "benchmark source must not drift while measuring throughput: {report}"
+        );
+        let ratio = report["ratio"].as_f64().expect("benchmark ratio");
+        assert!(
+            ratio >= 2.0,
+            "sendfile throughput ratio must be at least 2x naive read/write: {report}"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("sendfile_throughput_ratio_ge_2x"));
+    });
+}
+
+#[test]
+fn fuse_xfstests_generic_591_splice_file_to_pipe_modes() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    with_rw_mount_sized(16 * 1024 * 1024, |mnt| {
+        let scenario_id = "ext4_rw_xfstests_generic_591_splice_file_to_pipe";
+        let report = run_splice_file_to_pipe_probe(mnt);
+        if let Some(reason) = report["skipped"].as_str() {
+            eprintln!("splice file-to-pipe probe unavailable, skipping: {reason}");
+            return;
+        }
+
+        let buffer_size = report["buffer_size"]
+            .as_u64()
+            .expect("generic/591 buffer_size");
+        let cases = report["cases"].as_array().expect("generic/591 cases");
+        assert_eq!(cases.len(), 4, "generic/591 should report four modes");
+        let mut exercised = 0_u64;
+        for case in cases {
+            if case.get("skipped").is_some() {
+                continue;
+            }
+            exercised += 1;
+            assert_eq!(
+                case["moved"].as_u64(),
+                Some(buffer_size),
+                "generic/591 mode did not splice the full file: {case}"
+            );
+        }
+        assert!(
+            exercised >= 2,
+            "generic/591 should exercise at least buffered sequential and concurrent modes: \
+             {report}"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("splice_modes_exercised"));
+    });
+}
+
+#[test]
+fn fuse_xfstests_generic_680_readonly_splice_pipe_merge_isolation() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    with_rw_mount_sized(16 * 1024 * 1024, |mnt| {
+        let scenario_id = "ext4_rw_xfstests_generic_680_readonly_splice_pipe_merge";
+        let report = run_readonly_splice_pipe_merge_probe(mnt);
+        if let Some(reason) = report["skipped"].as_str() {
+            eprintln!("read-only splice pipe probe unavailable, skipping: {reason}");
+            return;
+        }
+
+        assert_eq!(report["moved"].as_u64(), Some(1));
+        assert_eq!(report["pipe_write"].as_u64(), Some(16));
+        assert_eq!(
+            report["unchanged"].as_bool(),
+            Some(true),
+            "read-only file content changed after splice pipe merge probe: {report}"
+        );
+        emit_scenario_result(scenario_id, "PASS", Some("readonly_file_unchanged"));
+    });
+}
+
+#[test]
 fn fuse_spec_i3_write_and_persist_after_remount() {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
@@ -6256,8 +7425,11 @@ fn fuse_spec_i5_delete_reclaims_free_counts() {
 
         for idx in 0..1_000_u32 {
             let path = batch_dir.join(format!("file_{idx:04}.txt"));
-            fs::write(path, format!("payload {idx}\n").as_bytes())
-                .unwrap_or_else(|e| panic!("write reclaim file {idx}: {e}"));
+            let write_result = fs::write(path, format!("payload {idx}\n").as_bytes());
+            assert!(
+                write_result.is_ok(),
+                "write reclaim file {idx}: {write_result:?}"
+            );
         }
 
         let after_create = statfs_snapshot(mnt);
@@ -6276,7 +7448,11 @@ fn fuse_spec_i5_delete_reclaims_free_counts() {
 
         for idx in 0..1_000_u32 {
             let path = batch_dir.join(format!("file_{idx:04}.txt"));
-            fs::remove_file(path).unwrap_or_else(|e| panic!("remove reclaim file {idx}: {e}"));
+            let remove_result = fs::remove_file(path);
+            assert!(
+                remove_result.is_ok(),
+                "remove reclaim file {idx}: {remove_result:?}"
+            );
         }
         fs::remove_dir(&batch_dir).expect("remove reclaim_batch");
 
@@ -6412,8 +7588,8 @@ fn fuse_readdir_large_directory() {
         let count = 100_usize;
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
-            fs::write(dir.join(&name), format!("content {i}").as_bytes())
-                .unwrap_or_else(|e| panic!("write {name}: {e}"));
+            let write_result = fs::write(dir.join(&name), format!("content {i}").as_bytes());
+            assert!(write_result.is_ok(), "write {name}: {write_result:?}");
         }
 
         // Read directory and collect all entries.
@@ -6462,8 +7638,8 @@ fn fuse_create_and_remove_across_dir_block_boundary() {
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
             let path = dir.join(&name);
-            fs::write(&path, format!("payload {i}\n").as_bytes())
-                .unwrap_or_else(|e| panic!("write {name}: {e}"));
+            let write_result = fs::write(&path, format!("payload {i}\n").as_bytes());
+            assert!(write_result.is_ok(), "write {name}: {write_result:?}");
         }
 
         // Verify all files are accessible.
@@ -6477,7 +7653,11 @@ fn fuse_create_and_remove_across_dir_block_boundary() {
         for i in 0..count {
             let name = format!("file_{i:04}.txt");
             let path = dir.join(&name);
-            fs::remove_file(&path).unwrap_or_else(|e| panic!("remove file_{i:04}.txt: {e}"));
+            let remove_result = fs::remove_file(&path);
+            assert!(
+                remove_result.is_ok(),
+                "remove file_{i:04}.txt: {remove_result:?}"
+            );
         }
 
         fs::remove_dir(&dir).expect("remove boundary_dir");
@@ -10569,20 +11749,23 @@ finally:
 
         // The ioctl may fail if the kernel doesn't forward it to FUSE.
         // We accept either PASS or a known transport-layer failure.
-        if stdout.contains("PASS") {
+        let ioctl_passed = stdout.contains("PASS");
+        let transport_skip = stdout.contains("errno=25") || stdout.contains("errno=22");
+        if ioctl_passed {
             // Success - FUSE forwarded the ioctl and we got a valid version.
             return;
         }
 
         // Check for known transport-layer rejections (ENOTTY, EINVAL from kernel).
-        if stdout.contains("errno=25") || stdout.contains("errno=22") {
+        if transport_skip {
             eprintln!(
                 "EXT4_IOC_GETVERSION not forwarded by kernel (transport-layer skip): {stdout}"
             );
             return;
         }
 
-        panic!(
+        assert!(
+            ioctl_passed || transport_skip,
             "EXT4_IOC_GETVERSION via mounted path failed unexpectedly: stdout={stdout}, stderr={stderr}"
         );
     });
@@ -11476,7 +12659,8 @@ fn fuse_deep_directory_tree() {
         let mut path = mnt.to_path_buf();
         for i in 0..5 {
             path = path.join(format!("level_{i}"));
-            fs::create_dir(&path).unwrap_or_else(|e| panic!("mkdir level_{i}: {e}"));
+            let mkdir_result = fs::create_dir(&path);
+            assert!(mkdir_result.is_ok(), "mkdir level_{i}: {mkdir_result:?}");
         }
 
         // Write a file at the deepest level.
@@ -11650,9 +12834,13 @@ fn btrfs_fuse_mount_subvolume_scopes_root_to_subvol() {
         ..MountOptions::default()
     };
 
-    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts)
-    else {
-        panic!("mounting subvolume 'data' should succeed");
+    let session = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts);
+    assert!(
+        session.is_some(),
+        "mounting subvolume 'data' should succeed"
+    );
+    let Some(_session) = session else {
+        return;
     };
 
     // The mounted root should be the subvolume, so subvol_marker.txt should be at root
@@ -11717,9 +12905,13 @@ fn btrfs_fuse_mount_snapshot_scopes_root_to_snapshot() {
         ..MountOptions::default()
     };
 
-    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts)
-    else {
-        panic!("mounting snapshot 'snap-data' should succeed");
+    let session = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts);
+    assert!(
+        session.is_some(),
+        "mounting snapshot 'snap-data' should succeed"
+    );
+    let Some(_session) = session else {
+        return;
     };
 
     // The snapshot should have both markers (snapshot of subvolume + its own marker)
@@ -11807,9 +12999,10 @@ fn btrfs_fuse_mount_default_root_shows_subvolumes_as_directories() {
         ..MountOptions::default()
     };
 
-    let Some(_session) = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts)
-    else {
-        panic!("mounting default root should succeed");
+    let session = try_mount_btrfs_with_open_options(&image, &mnt, &open_opts, &mount_opts);
+    assert!(session.is_some(), "mounting default root should succeed");
+    let Some(_session) = session else {
+        return;
     };
 
     // Default root should show subvolumes as directories

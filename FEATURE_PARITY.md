@@ -9,9 +9,9 @@
 | ext4 metadata parsing | 27 | 27 | 100.0% |
 | btrfs metadata parsing | 27 | 27 | 100.0% |
 | MVCC/COW core | 14 | 14 | 100.0% |
-| FUSE surface | 15 | 15 | 100.0% |
+| FUSE surface | 18 | 18 | 100.0% |
 | self-healing durability policy | 10 | 10 | 100.0% |
-| **Overall** | **93** | **93** | **100.0%** |
+| **Overall** | **96** | **96** | **100.0%** |
 
 > **Canonical source:** This Coverage Summary table in `FEATURE_PARITY.md` is the
 > single source of truth for implemented/total counts. `ParityReport::current()`
@@ -191,6 +191,19 @@ contract: total geometry still comes from the superblock, while free block and
 inode counts are aggregated from live group descriptors so write-side allocation
 changes are visible to `statfs` without relying on stale open-time superblock
 counters.
+FUSE splice/sendfile parity now also has an implemented large-transfer
+contract: the mount negotiates splice read/write/move capability bits, the
+vendored FUSE ABI exposes `FUSE_COPY_FILE_RANGE`, `FrankenFuse` routes
+`copy_file_range` through the MVCC-aware `FsOps` read/write contract with
+Linux-compatible validation for flags, negative offsets, and overlapping
+same-inode ranges, and mounted-path coverage writes 16 MiB through
+`splice(2)` pipe-to-file transfer and verifies byte-for-byte SHA-256 equality.
+Additional mounted-path probes mirror the local xfstests splice/sendfile cases
+that actually exercise this surface (`generic/249`, `generic/591`, and
+`generic/680`). The 1 GiB `sendfile(2)` throughput comparison is retained as an
+ignored benchmark gate for `bd-qpoys`; the current measured gate emits
+`SCENARIO_RESULT|scenario_id=ext4_rw_sendfile_1g_vs_naive_read_write|outcome=PASS`
+for the >=2x contract.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 
@@ -267,6 +280,8 @@ behavior of that operation, not whether the row is unimplemented.
 | FUSE read | FrankenFS spec §9 | ✅ | `FsOps::read` via `OpenFs` |
 | FUSE readlink | FrankenFS spec §9 | ✅ | `FsOps::readlink` via `OpenFs` |
 | FUSE mount runtime | FrankenFS spec §9 | ✅ | Production runtime lifecycle, signal handling, dispatch coverage, and CI-safe skip behavior are implemented; OQ4 (`bd-h6nz.6.4`) is resolved for V1.x with explicit `flush` (non-durable) vs `fsync`/`fsyncdir` (durability boundary) contract and writeback-cache-disabled policy. `crates/ffs-harness/tests/fuse_e2e.rs` now emits `SCENARIO_RESULT` coverage for ext4 (`ext4_rw_flush`, `ext4_rw_fdatasync`, `ext4_rw_fsync`, `ext4_rw_fsyncdir`, `ext4_rw_seek_data_hole`, `ext4_rw_seek_hole_fully_allocated`, `ext4_rw_seek_leading_hole`, `ext4_rw_seek_all_hole`) and btrfs (`btrfs_rw_flush`, `btrfs_rw_fdatasync`, `btrfs_rw_fsync`, `btrfs_rw_fsyncdir`, `btrfs_rw_seek_data_hole`, `btrfs_rw_seek_hole_fully_allocated`, `btrfs_rw_seek_leading_hole`, `btrfs_rw_seek_all_hole`) through real file flushes, file- and directory-FD sync calls, and mounted-path `SEEK_DATA`/`SEEK_HOLE` probes for punched-hole, fully allocated, leading-hole, and all-hole layouts with EOF `ENXIO` verification; btrfs read-only mounted-path `fsync`, `fdatasync`, and `fsyncdir` now also freeze exact `EROFS` with no data or dirent drift. |
+| FUSE ABI 7.40 protocol surface | FUSE kernel ABI 7.40 / libfuse 3.x | ✅ | Workspace builds the vendored `fuser` crate with `abi-7-40`, and `FrankenFuse::init` now negotiates `FUSE_SPLICE_READ`, `FUSE_SPLICE_WRITE`, `FUSE_SPLICE_MOVE`, and `FUSE_PASSTHROUGH` with stack depth 1 when the kernel advertises support. The vendored `fuser` protocol layer now exposes opcode 52 (`FUSE_STATX`), parses `fuse_statx_in`, replies with Linux statx-compatible `fuse_statx_out`, and preserves `FileAttr::crtime` as `STATX_BTIME`; `FrankenFuse::statx` routes that opcode through the existing `getattr` backend. The vendored ABI surface also exposes `FUSE_WRITE_KILL_SUIDGID`/legacy `FUSE_WRITE_KILL_PRIV` plus Linux `RWF_*` constants for the downstream io_uring/RWF behavior slice. Unit coverage freezes ABI constants, STATX request parsing, birth-time reply encoding, and mounted splice pipe-to-file transfer. Downstream behavioral beads still own RWF/io_uring write handling. |
+| FUSE inotify rename + dentry notification lifecycle | `fs/notify/fsnotify.c`, `fs/notify/inotify/inotify_user.c`, FUSE notify protocol | ✅ | `FrankenFuse` captures a `fuser::Notifier` during blocking, background, and managed mount setup, then issues `FUSE_NOTIFY_INVAL_ENTRY` for successfully committed `unlink`, `rmdir`, and both old/new directory entries after `rename`. Plain renames deliberately avoid `FUSE_NOTIFY_DELETE`, preserving the kernel/VFS `IN_MOVED_FROM` + `IN_MOVED_TO` cookie-pair contract instead of synthesizing delete/create observations. `crates/ffs-harness/tests/fuse_e2e.rs` now carries mounted-path inotify probes for 100 same-parent renames and a cross-directory rename; both assert non-zero matching cookies and reject `IN_CREATE`, `IN_DELETE`, `IN_Q_OVERFLOW`, and `IN_IGNORED` during plain rename bursts, with the standard CI soft-skip when the current host denies FUSE mounting. |
 | FUSE ioctl FIEMAP | `include/linux/fiemap.h` | ✅ | `FsOps::fiemap` queries ext4 extent tree via `collect_extents_with_scope` and btrfs extent data items via `btrfs_fiemap_extent_items`. FUSE `ioctl` handler parses `FS_IOC_FIEMAP` (0xC020660B), rejects unsupported request flags with `EBADR`, honors `FIEMAP_FLAG_SYNC` by fsyncing writable mounts before extent lookup, and marshals the fiemap header plus extent array. `crates/ffs-core` now has deterministic btrfs coverage for inline extents (`physical=0`, `FIEMAP_EXTENT_LAST`) and keep-size prealloc extents (`FIEMAP_EXTENT_UNWRITTEN`), while `crates/ffs-harness/tests/fuse_e2e.rs` verifies mounted-path FIEMAP reporting for ext4 regular files, ext4 `SYNC` and invalid-request-flag contracts, plus btrfs regular, inline, and keep-size prealloc files. Note: FUSE transport may not deliver this ioctl to userspace on all kernel versions. |
 | FUSE ioctl EXT4_IOC_GETFLAGS | `fs/ext4/ioctl.c` | ✅ | `FsOps::get_inode_flags` returns raw ext4 `i_flags` field. FUSE `ioctl` handler dispatches `EXT4_IOC_GETFLAGS` (0x80086601). Harness integration coverage in `crates/ffs-harness/tests/fuse_e2e.rs` now verifies mounted-path `GETFLAGS` on a writable ext4 file. |
 | FUSE ioctl EXT4_IOC_GETVERSION / EXT4_IOC_SETVERSION | `fs/ext4/ioctl.c` | ✅ | `FsOps::get_inode_generation` returns ext4 `i_generation`, and `FsOps::set_inode_generation` now updates that field in-place, persists it via `ffs_inode::write_inode`, and keeps the ext4-only contract explicit. `ffs-fuse` dispatches `EXT4_IOC_GETVERSION` (0x80086603) and `EXT4_IOC_SETVERSION` (0x40086604), enforces the 4-byte userspace payload contract, and commits `SETVERSION` through the normal write request scope. `crates/ffs-core` unit tests cover direct ext4 mutation plus reopen persistence, `crates/ffs-fuse` unit tests cover getter encoding and setter routing, and `crates/ffs-harness/tests/fuse_e2e.rs` now proves mounted-path `SETVERSION`/`GETVERSION` roundtrips when the current kernel/FUSE stack forwards the ioctl. The mounted-path test soft-skips with explicit scenario results when the kernel/VFS rejects `GETVERSION` or `SETVERSION` before userspace dispatch. |

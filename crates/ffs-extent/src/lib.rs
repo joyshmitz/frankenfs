@@ -586,7 +586,14 @@ pub fn insert_range(
         let ext_start = u64::from(ext.logical_block);
         let ext_len = u64::from(u32::from(ext.actual_len()));
         let ext_end = ext_start + ext_len;
-        ffs_btree::delete_range(cx, dev, root_bytes, ext.logical_block, ext_len, &mut tree_alloc)?;
+        ffs_btree::delete_range(
+            cx,
+            dev,
+            root_bytes,
+            ext.logical_block,
+            ext_len,
+            &mut tree_alloc,
+        )?;
 
         let left_len_u32 = u32::try_from(cut - ext_start).map_err(|_| {
             ffs_error::FfsError::Format("insert_range: split width exceeds u32".into())
@@ -607,9 +614,8 @@ pub fn insert_range(
             physical_start: ext.physical_start,
         };
         let right = Ext4Extent {
-            logical_block: u32::try_from(cut).map_err(|_| {
-                ffs_error::FfsError::Format("insert_range: cut exceeds u32".into())
-            })?,
+            logical_block: u32::try_from(cut)
+                .map_err(|_| ffs_error::FfsError::Format("insert_range: cut exceeds u32".into()))?,
             raw_len: make_raw_len(right_len_u32, unwritten)?,
             physical_start: ext.physical_start.saturating_add(u64::from(left_len_u32)),
         };
@@ -642,14 +648,9 @@ pub fn insert_range(
         )?;
     }
     for ext in tail {
-        let new_logical = ext
-            .logical_block
-            .checked_add(count)
-            .ok_or_else(|| {
-                ffs_error::FfsError::Format(
-                    "insert_range: shifted logical_block overflows u32".into(),
-                )
-            })?;
+        let new_logical = ext.logical_block.checked_add(count).ok_or_else(|| {
+            ffs_error::FfsError::Format("insert_range: shifted logical_block overflows u32".into())
+        })?;
         ffs_btree::insert(
             cx,
             dev,

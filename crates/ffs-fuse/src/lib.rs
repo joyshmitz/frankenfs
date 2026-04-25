@@ -49,6 +49,7 @@ const ATTR_TTL: Duration = Duration::from_secs(60);
 const MIN_SEQUENTIAL_READS_FOR_BATCH: u32 = 2;
 const COALESCED_FETCH_MULTIPLIER: u32 = 4;
 const MAX_COALESCED_READ_SIZE: u32 = 256 * 1024;
+const FUSE_MAX_READ_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_PENDING_READAHEAD_ENTRIES: usize = 64;
 const MAX_ACCESS_PREDICTOR_ENTRIES: usize = 4096;
 const BACKPRESSURE_THROTTLE_DELAY: Duration = Duration::from_millis(5);
@@ -715,6 +716,7 @@ struct FuseInner {
     thread_count: usize,
     read_only: bool,
     mountpoint: Option<PathBuf>,
+    kernel_notifier: Mutex<Option<fuser::Notifier>>,
     ioctl_trace: Option<IoctlTraceProbe>,
     backpressure: Option<BackpressureGate>,
     access_predictor: AccessPredictor,
@@ -1132,6 +1134,7 @@ impl FrankenFuse {
                 thread_count,
                 read_only: options.read_only,
                 mountpoint: mountpoint.map(Path::to_path_buf),
+                kernel_notifier: Mutex::new(None),
                 ioctl_trace: options.ioctl_trace_path.clone().map(IoctlTraceProbe::new),
                 backpressure,
                 access_predictor: AccessPredictor::default(),
@@ -1179,6 +1182,47 @@ impl FrankenFuse {
         self.inner.thread_count
     }
 
+    fn shared_handle(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn install_kernel_notifier(&self, notifier: fuser::Notifier) {
+        let mut guard = match self.inner.kernel_notifier.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("FUSE kernel notifier slot poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+        *guard = Some(notifier);
+    }
+
+    fn kernel_notifier(&self) -> Option<fuser::Notifier> {
+        match self.inner.kernel_notifier.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                warn!("FUSE kernel notifier slot poisoned, recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    fn notify_entry_invalidation(&self, parent: u64, name: &OsStr) {
+        let Some(notifier) = self.kernel_notifier() else {
+            return;
+        };
+        if let Err(error) = notifier.inval_entry(parent, name) {
+            debug!(
+                parent,
+                name = ?name,
+                error = %error,
+                "FUSE kernel entry invalidation failed"
+            );
+        }
+    }
+
     /// Execute the internal ioctl dispatcher without a live kernel mount.
     ///
     /// This is a narrow hook for fuzz/integration harnesses that need to drive
@@ -1209,6 +1253,7 @@ impl FrankenFuse {
         self.with_request_scope(&cx, RequestOp::Open, |cx, scope| {
             self.inner.ops.open(cx, scope, InodeNumber(ino), flags)
         })
+        .map(|(fh, open_flags)| (fh, Self::kernel_open_flags(flags, open_flags)))
         .map_err(|error| error.to_errno())
     }
 
@@ -2308,18 +2353,19 @@ impl FrankenFuse {
                         .map_or(4096, |s| s.block_size),
                 );
                 let cx = Self::cx_for_request();
-                let extents = match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                    self.inner.ops.fiemap(
-                        cx,
-                        scope,
-                        InodeNumber(ino),
-                        logical.saturating_mul(block_size),
-                        block_size,
-                    )
-                }) {
-                    Ok(exts) => exts,
-                    Err(error) => return IoctlResult::Error(error.to_errno()),
-                };
+                let extents =
+                    match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                        self.inner.ops.fiemap(
+                            cx,
+                            scope,
+                            InodeNumber(ino),
+                            logical.saturating_mul(block_size),
+                            block_size,
+                        )
+                    }) {
+                        Ok(exts) => exts,
+                        Err(error) => return IoctlResult::Error(error.to_errno()),
+                    };
                 // Hole / sparse range -> 0 per fs/ext4/inode.c::ext4_get_block.
                 let physical_block = extents
                     .into_iter()
@@ -2831,24 +2877,26 @@ impl FrankenFuse {
     fn dispatch_rmdir(&self, parent: u64, name: &OsStr) -> Result<(), MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Rmdir, parent)?;
         let cx = Self::cx_for_request();
-        {
+        let result = {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
             self.with_request_scope(&cx, RequestOp::Rmdir, |cx, scope| {
                 self.inner.ops.rmdir(cx, scope, InodeNumber(parent), name)?;
                 self.inner.ops.commit_request_scope(scope)?;
                 Ok(())
             })
-        }
-        .map_err(|error| MutationDispatchError::Operation {
+        };
+        result.map_err(|error| MutationDispatchError::Operation {
             error,
             offset: None,
-        })
+        })?;
+        self.notify_entry_invalidation(parent, name);
+        Ok(())
     }
 
     fn dispatch_unlink(&self, parent: u64, name: &OsStr) -> Result<(), MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Unlink, parent)?;
         let cx = Self::cx_for_request();
-        {
+        let result = {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
             self.with_request_scope(&cx, RequestOp::Unlink, |cx, scope| {
                 self.inner
@@ -2857,11 +2905,13 @@ impl FrankenFuse {
                 self.inner.ops.commit_request_scope(scope)?;
                 Ok(())
             })
-        }
-        .map_err(|error| MutationDispatchError::Operation {
+        };
+        result.map_err(|error| MutationDispatchError::Operation {
             error,
             offset: None,
-        })
+        })?;
+        self.notify_entry_invalidation(parent, name);
+        Ok(())
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -2954,7 +3004,7 @@ impl FrankenFuse {
     ) -> Result<(), MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Rename, parent)?;
         let cx = Self::cx_for_request();
-        {
+        let result = {
             let _inode_guards =
                 self.acquire_mutation_inode_guards(&[InodeNumber(parent), InodeNumber(newparent)]);
             self.with_request_scope(&cx, RequestOp::Rename, |cx, scope| {
@@ -2970,11 +3020,14 @@ impl FrankenFuse {
                 self.inner.ops.commit_request_scope(scope)?;
                 Ok(())
             })
-        }
-        .map_err(|error| MutationDispatchError::Operation {
+        };
+        result.map_err(|error| MutationDispatchError::Operation {
             error,
             offset: None,
-        })
+        })?;
+        self.notify_entry_invalidation(parent, name);
+        self.notify_entry_invalidation(newparent, newname);
+        Ok(())
     }
 
     fn dispatch_write(
@@ -3005,6 +3058,16 @@ impl FrankenFuse {
         self.inner.readahead.invalidate_inode(InodeNumber(ino));
         // Update writeback barrier if enabled.
         Ok(written)
+    }
+
+    fn kernel_open_flags(request_flags: i32, backend_open_flags: u32) -> u32 {
+        let direct_io_requested = request_flags & libc::O_DIRECT != 0;
+        let direct_io_forced = backend_open_flags & fuse_consts::FOPEN_DIRECT_IO != 0;
+        if direct_io_requested || direct_io_forced {
+            backend_open_flags
+        } else {
+            backend_open_flags | fuse_consts::FOPEN_KEEP_CACHE
+        }
     }
 
     fn dispatch_copy_file_range(
@@ -3295,7 +3358,7 @@ impl Filesystem for FrankenFuse {
         match self.with_request_scope(&cx, RequestOp::Open, |cx, scope| {
             self.inner.ops.open(cx, scope, InodeNumber(ino), flags)
         }) {
-            Ok((fh, open_flags)) => reply.opened(fh, open_flags),
+            Ok((fh, open_flags)) => reply.opened(fh, Self::kernel_open_flags(flags, open_flags)),
             Err(e) => {
                 let ctx = FuseErrorContext {
                     error: &e,
@@ -4276,6 +4339,7 @@ fn build_mount_options(options: &MountOptions) -> Vec<MountOption> {
         MountOption::Subtype("ffs".to_owned()),
         MountOption::DefaultPermissions,
         MountOption::NoAtime,
+        MountOption::CUSTOM(format!("max_read={FUSE_MAX_READ_BYTES}")),
     ];
 
     if options.read_only {
@@ -4334,7 +4398,9 @@ pub fn mount(
     validate_mountpoint(mountpoint)?;
     let fuse_opts = build_mount_options(options);
     let fs = FrankenFuse::with_inner(ops, options, Some(mountpoint), None);
-    fuser::mount2(fs, mountpoint, &fuse_opts)?;
+    let mut session = fuser::Session::new(fs.shared_handle(), mountpoint, &fuse_opts)?;
+    fs.install_kernel_notifier(session.notifier());
+    session.run()?;
     Ok(())
 }
 
@@ -4350,7 +4416,9 @@ pub fn mount_background(
     validate_mountpoint(mountpoint)?;
     let fuse_opts = build_mount_options(options);
     let fs = FrankenFuse::with_inner(ops, options, Some(mountpoint), None);
+    let notifier_owner = fs.shared_handle();
     let session = fuser::spawn_mount2(fs, mountpoint, &fuse_opts)?;
+    notifier_owner.install_kernel_notifier(session.notifier());
     Ok(session)
 }
 
@@ -4543,8 +4611,10 @@ pub fn mount_managed(
     let fuse_opts = build_mount_options(&config.options);
     let fs = FrankenFuse::with_inner(ops, &config.options, Some(mountpoint), None);
     let metrics_ref = Arc::clone(&fs.inner.metrics);
+    let notifier_owner = fs.shared_handle();
 
     let session = fuser::spawn_mount2(fs, mountpoint, &fuse_opts)?;
+    notifier_owner.install_kernel_notifier(session.notifier());
 
     info!(mountpoint = %mountpoint.display(), "FUSE mount active");
 
@@ -4684,8 +4754,13 @@ mod tests {
     fn build_mount_options_includes_ro_when_read_only() {
         let opts = MountOptions::default();
         let mount_opts = build_mount_options(&opts);
-        // Default includes FSName + Subtype + DefaultPermissions + NoAtime + RO + AutoUnmount = 6
-        assert!(mount_opts.len() >= 5);
+        assert!(
+            mount_opts
+                .iter()
+                .any(|option| matches!(option, MountOption::CUSTOM(v) if v == "max_read=16777216")),
+            "default mount options should negotiate the large read ceiling: {mount_opts:?}"
+        );
+        assert!(mount_opts.len() >= 6);
     }
 
     #[test]
@@ -5397,12 +5472,12 @@ mod tests {
             _cx: &Cx,
             _scope: &mut RequestScope,
             ino: InodeNumber,
-            info: FsxattrInfo,
+            fsxattr_info: FsxattrInfo,
         ) -> ffs_error::Result<()> {
             self.calls
                 .lock()
                 .expect("lock ioctl calls")
-                .push(IoctlCall::SetFsxattr(ino, info));
+                .push(IoctlCall::SetFsxattr(ino, fsxattr_info));
             Ok(())
         }
 
@@ -5779,8 +5854,12 @@ mod tests {
         req.extend_from_slice(&4096_u64.to_ne_bytes());
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FITRIM, &req, 24);
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected IoctlResult::Data, got {response:?}"
+        );
         let IoctlResult::Data(reply) = response else {
-            panic!("expected IoctlResult::Data, got {response:?}");
+            return;
         };
         assert_eq!(reply.len(), 24);
         let start = u64::from_ne_bytes(reply[0..8].try_into().unwrap());
@@ -5806,10 +5885,7 @@ mod tests {
     #[test]
     fn dispatch_ioctl_fitrim_short_input_returns_einval() {
         let fuse = FrankenFuse::with_options(
-            Box::new(IoctlRecordingFs::new(
-                0,
-                Arc::new(Mutex::new(Vec::new())),
-            )),
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
             &MountOptions {
                 read_only: false,
                 ..MountOptions::default()
@@ -5842,8 +5918,12 @@ mod tests {
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FS_IOC_GETFSUUID, &[], 17);
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected IoctlResult::Data, got {response:?}"
+        );
         let IoctlResult::Data(bytes) = response else {
-            panic!("expected IoctlResult::Data, got {response:?}");
+            return;
         };
         assert_eq!(bytes.len(), 17, "fsuuid2 struct is exactly 17 bytes");
         assert_eq!(bytes[0], 16, "fsuuid2.len must be 16 for ext4 + btrfs");
@@ -5926,10 +6006,7 @@ mod tests {
     #[test]
     fn dispatch_ioctl_fssetxattr_short_buffer_returns_einval() {
         let fuse = FrankenFuse::with_options(
-            Box::new(IoctlRecordingFs::new(
-                0,
-                Arc::new(Mutex::new(Vec::new())),
-            )),
+            Box::new(IoctlRecordingFs::new(0, Arc::new(Mutex::new(Vec::new())))),
             &MountOptions {
                 read_only: false,
                 ..MountOptions::default()
@@ -8945,6 +9022,19 @@ mod tests {
     }
 
     #[test]
+    fn open_reply_preserves_kernel_cache_for_buffered_io_only() {
+        assert_eq!(
+            FrankenFuse::kernel_open_flags(libc::O_RDONLY, 0),
+            fuse_consts::FOPEN_KEEP_CACHE
+        );
+        assert_eq!(FrankenFuse::kernel_open_flags(libc::O_DIRECT, 0), 0);
+        assert_eq!(
+            FrankenFuse::kernel_open_flags(libc::O_RDONLY, fuse_consts::FOPEN_DIRECT_IO),
+            fuse_consts::FOPEN_DIRECT_IO
+        );
+    }
+
+    #[test]
     fn conformance_fuse_read_file_lifecycle_round_trip() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(
@@ -9849,6 +9939,7 @@ mod tests {
             thread_count: 4,
             read_only: true,
             mountpoint: None,
+            kernel_notifier: Mutex::new(None),
             ioctl_trace: None,
             backpressure: None,
             access_predictor: AccessPredictor::default(),
@@ -10621,6 +10712,7 @@ mod tests {
 Subtype("ffs")
 DefaultPermissions
 NoAtime
+CUSTOM("max_read=16777216")
 AllowOther
 CUSTOM("max_background=4")
 CUSTOM("congestion_threshold=3")"#;
@@ -10844,6 +10936,7 @@ CUSTOM("congestion_threshold=3")"#;
             thread_count: 2,
             read_only: false,
             mountpoint: None,
+            kernel_notifier: Mutex::new(None),
             ioctl_trace: None,
             backpressure: None,
             access_predictor: AccessPredictor::default(),
