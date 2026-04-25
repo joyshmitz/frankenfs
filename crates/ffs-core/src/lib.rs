@@ -10047,13 +10047,13 @@ impl OpenFs {
         } else if collapse_range {
             // FALLOC_FL_COLLAPSE_RANGE: free [offset, offset+length) and
             // shift everything past it left by `length`. Both must be
-            // block-aligned and end must not exceed file size.
+            // block-aligned, and the range must not reach EOF.
             if (offset % block_size) != 0 || (length % block_size) != 0 {
                 return Err(FfsError::Io(std::io::Error::from_raw_os_error(
                     EINVAL_ERRNO,
                 )));
             }
-            if end > inode.size {
+            if end >= inode.size {
                 return Err(FfsError::Io(std::io::Error::from_raw_os_error(
                     EINVAL_ERRNO,
                 )));
@@ -31788,6 +31788,13 @@ mod tests {
             .expect("create");
         fs.write(&cx, attr.ino, 0, &vec![0_u8; 8192])
             .expect("write 8 KiB");
+
+        // Range reaching EOF must fail per fallocate(2); use truncate to
+        // remove a tail range instead.
+        let err = fs
+            .fallocate(&cx, attr.ino, 4096, 4096, 0x08)
+            .expect_err("collapse reaching EOF must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
 
         // Range extending past file size must fail per ext4_collapse_range.
         let err = fs

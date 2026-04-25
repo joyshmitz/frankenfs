@@ -48,6 +48,8 @@ const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const EXT4_ENCRYPT_INODE_FL: u32 = 0x0000_0800;
 const EXT4_ENCRYPTION_XATTR_NAME: &[u8] = b"c";
+const EXT4_FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08;
+const EXT4_FALLOC_FL_INSERT_RANGE: i32 = 0x20;
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2322,6 +2324,147 @@ fn ext4_fallocate_zero_range_zeroes_target_range() {
 }
 
 #[test]
+fn ext4_fallocate_collapse_range_shifts_tail_and_shrinks_file() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, _image_path) = open_writable_ext4_mkfs(64);
+    let root = InodeNumber(2);
+
+    let attr = fs
+        .create(&cx, root, OsStr::new("collapse_range.bin"), 0o644, 0, 0)
+        .expect("create ext4 collapse-range file");
+    let ino = attr.ino;
+
+    let block = 4096_u64;
+    let block_len = usize::try_from(block).expect("block size should fit usize");
+    let chunk_a = vec![0xAA; block_len];
+    let chunk_b = vec![0xBB; block_len];
+    let chunk_c = vec![0xCC; block_len];
+    let chunk_d = vec![0xDD; block_len];
+    fs.write(&cx, ino, 0, &chunk_a).expect("write chunk A");
+    fs.write(&cx, ino, block, &chunk_b).expect("write chunk B");
+    fs.write(&cx, ino, 2 * block, &chunk_c)
+        .expect("write chunk C");
+    fs.write(&cx, ino, 3 * block, &chunk_d)
+        .expect("write chunk D");
+
+    fs.fallocate(&cx, ino, block, block, EXT4_FALLOC_FL_COLLAPSE_RANGE)
+        .expect("collapse middle block");
+
+    let after = fs.getattr(&cx, ino).expect("getattr after collapse");
+    assert_eq!(after.size, 3 * block);
+
+    let mut expected = Vec::with_capacity(3 * block_len);
+    expected.extend_from_slice(&chunk_a);
+    expected.extend_from_slice(&chunk_c);
+    expected.extend_from_slice(&chunk_d);
+    let readback = fs
+        .read(
+            &cx,
+            ino,
+            0,
+            u32::try_from(expected.len()).expect("expected length should fit u32"),
+        )
+        .expect("read collapsed ext4 file");
+    assert_eq!(
+        readback, expected,
+        "COLLAPSE_RANGE should remove the selected block and shift the tail left"
+    );
+}
+
+#[test]
+fn ext4_fallocate_collapse_range_reaching_eof_rejects_without_mutation() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, _image_path) = open_writable_ext4_mkfs(64);
+    let root = InodeNumber(2);
+
+    let attr = fs
+        .create(&cx, root, OsStr::new("collapse_range_eof.bin"), 0o644, 0, 0)
+        .expect("create ext4 collapse-range EOF file");
+    let ino = attr.ino;
+
+    let block = 4096_u64;
+    let block_len = usize::try_from(block).expect("block size should fit usize");
+    let chunk_a = vec![0x11; block_len];
+    let chunk_b = vec![0x22; block_len];
+    let mut payload = Vec::with_capacity(2 * block_len);
+    payload.extend_from_slice(&chunk_a);
+    payload.extend_from_slice(&chunk_b);
+    fs.write(&cx, ino, 0, &payload)
+        .expect("seed collapse EOF file");
+
+    let err = fs
+        .fallocate(&cx, ino, block, block, EXT4_FALLOC_FL_COLLAPSE_RANGE)
+        .expect_err("collapse range reaching EOF should fail");
+    assert_eq!(err.to_errno(), libc::EINVAL);
+
+    let after = fs.getattr(&cx, ino).expect("getattr after failed collapse");
+    assert_eq!(
+        after.size,
+        u64::try_from(payload.len()).expect("payload length should fit u64"),
+        "failed COLLAPSE_RANGE must not change file size"
+    );
+    let readback = fs
+        .read(
+            &cx,
+            ino,
+            0,
+            u32::try_from(payload.len()).expect("payload length should fit u32"),
+        )
+        .expect("read after failed collapse");
+    assert_eq!(
+        readback, payload,
+        "failed COLLAPSE_RANGE must not mutate file data"
+    );
+}
+
+#[test]
+fn ext4_fallocate_insert_range_inserts_hole_and_grows_file() {
+    let cx = Cx::for_testing();
+    let (fs, _tmp, _image_path) = open_writable_ext4_mkfs(64);
+    let root = InodeNumber(2);
+
+    let attr = fs
+        .create(&cx, root, OsStr::new("insert_range.bin"), 0o644, 0, 0)
+        .expect("create ext4 insert-range file");
+    let ino = attr.ino;
+
+    let block = 4096_u64;
+    let block_len = usize::try_from(block).expect("block size should fit usize");
+    let chunk_a = vec![0xAA; block_len];
+    let chunk_b = vec![0xBB; block_len];
+    let chunk_c = vec![0xCC; block_len];
+    fs.write(&cx, ino, 0, &chunk_a).expect("write chunk A");
+    fs.write(&cx, ino, block, &chunk_b).expect("write chunk B");
+    fs.write(&cx, ino, 2 * block, &chunk_c)
+        .expect("write chunk C");
+
+    fs.fallocate(&cx, ino, block, block, EXT4_FALLOC_FL_INSERT_RANGE)
+        .expect("insert middle hole");
+
+    let after = fs.getattr(&cx, ino).expect("getattr after insert");
+    assert_eq!(after.size, 4 * block);
+
+    let mut expected = Vec::with_capacity(4 * block_len);
+    expected.extend_from_slice(&chunk_a);
+    let hole = vec![0; block_len];
+    expected.extend_from_slice(&hole);
+    expected.extend_from_slice(&chunk_b);
+    expected.extend_from_slice(&chunk_c);
+    let readback = fs
+        .read(
+            &cx,
+            ino,
+            0,
+            u32::try_from(expected.len()).expect("expected length should fit u32"),
+        )
+        .expect("read inserted ext4 file");
+    assert_eq!(
+        readback, expected,
+        "INSERT_RANGE should insert a zero-reading hole and shift the tail right"
+    );
+}
+
+#[test]
 fn ext4_generic_112_preallocation_contract_conforms() {
     let cx = Cx::for_testing();
     let (fs, _tmp, image_path) = open_writable_ext4_mkfs(64);
@@ -4171,6 +4314,9 @@ fn full_conformance_gate_pass() {
     ext4_orphan_recovery_conforms();
     ext4_path_resolution_conforms();
     ext4_fallocate_zero_range_zeroes_target_range();
+    ext4_fallocate_collapse_range_shifts_tail_and_shrinks_file();
+    ext4_fallocate_collapse_range_reaching_eof_rejects_without_mutation();
+    ext4_fallocate_insert_range_inserts_hole_and_grows_file();
     ext4_e2compr_write_readback_conforms_for_gzip_and_lzo();
     ext4_indirect_block_addressing_conforms();
     ext4_fast_commit_replay_openfs_evidence_conforms();
