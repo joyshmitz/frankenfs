@@ -26526,6 +26526,131 @@ mod tests {
         }
     }
 
+    // ── bd-ntb4l: crtime / STATX_BTIME plumbing through FsOps ─────────────
+    //
+    // Linux statx(STATX_BTIME) cannot reach FUSE userspace until the
+    // kernel-FUSE protocol exposes FUSE_STATX (proto 7.35, libfuse 3.x).
+    // The vendored `fuser` only ships the Linux-flavoured `fuse_attr` —
+    // which has no crtime field, so on Linux the crtime we hand to
+    // `to_file_attr` is dropped at the protocol boundary. macOS keeps it
+    // (see `fuse_attr_from_attr` cfg(target_os = "macos")).
+    //
+    // What we *can* and must guarantee today is that the FsOps-facing
+    // surface preserves crtime so that any in-process consumer (and a
+    // future statx wiring once fuser is upgraded) sees the on-disk birth
+    // time. These regressions lock that contract down end-to-end:
+    //
+    //   1. `create` returns an `InodeAttr` whose crtime equals the create
+    //      timestamp (in practice equal to ctime at create time).
+    //   2. `getattr` round-trips the same crtime back from disk.
+    //   3. `setattr(mtime)` updates mtime + ctime but leaves crtime
+    //      untouched — matching Linux ext4 + btrfs behaviour.
+
+    #[test]
+    fn ext4_create_returns_attrs_with_nonzero_crtime() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("birthtime.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        assert_ne!(
+            attr.crtime,
+            SystemTime::UNIX_EPOCH,
+            "crtime must be the create timestamp, not UNIX_EPOCH"
+        );
+        // At create time, ctime and crtime are stamped from the same now()
+        // call (see ext4_create / ffs_inode::create_inode), so they must
+        // agree to single-second resolution.
+        let ctime_secs = attr
+            .ctime
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let crtime_secs = attr
+            .crtime
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(
+            ctime_secs, crtime_secs,
+            "ctime ({ctime_secs}) and crtime ({crtime_secs}) must be stamped together at create"
+        );
+    }
+
+    #[test]
+    fn ext4_getattr_round_trips_crtime_from_disk() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let created = fs
+            .create(&cx, root, OsStr::new("rt_crtime.txt"), 0o644, 0, 0)
+            .expect("create");
+        let fetched = fs.getattr(&cx, created.ino).expect("getattr");
+
+        assert_eq!(
+            created.crtime, fetched.crtime,
+            "getattr must surface the same crtime that create returned"
+        );
+    }
+
+    #[test]
+    fn ext4_setattr_mtime_does_not_modify_crtime() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let created = fs
+            .create(&cx, root, OsStr::new("setattr_crtime.txt"), 0o644, 0, 0)
+            .expect("create");
+        let original_crtime = created.crtime;
+
+        // Pick an mtime that is provably different from the create
+        // timestamp so an accidental crtime overwrite would be visible.
+        let new_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let updated = fs
+            .setattr(
+                &cx,
+                created.ino,
+                &SetAttrRequest {
+                    mtime: Some(new_mtime),
+                    ..SetAttrRequest::default()
+                },
+            )
+            .expect("setattr");
+
+        assert_eq!(
+            updated.crtime, original_crtime,
+            "setattr(mtime) must not touch crtime (POSIX/ext4 contract)"
+        );
+        let updated_mtime_secs = updated
+            .mtime
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(
+            updated_mtime_secs, 1_900_000_000,
+            "mtime must reflect the setattr value"
+        );
+
+        // Re-read from disk to guard against in-memory-only correctness
+        // (i.e. confirm the crtime survives the full read/write cycle).
+        let fetched = fs.getattr(&cx, created.ino).expect("getattr after setattr");
+        assert_eq!(
+            fetched.crtime, original_crtime,
+            "crtime must survive a setattr(mtime) round trip through disk"
+        );
+    }
+
     #[test]
     fn write_rename_nonexistent_source_returns_enoent() {
         let Some(fs) = open_writable_ext4() else {
