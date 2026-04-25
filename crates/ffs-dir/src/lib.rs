@@ -300,6 +300,84 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
     Ok(false)
 }
 
+/// Swap the inode number on the live entry whose name matches `name`.
+///
+/// Used by `renameat2(RENAME_EXCHANGE)` to atomically retarget a
+/// directory entry to a different inode without touching the
+/// surrounding entry layout (rec_len, name_len, file_type tag) — the
+/// only field that changes is the leading 4-byte inode field.
+///
+/// Returns `Ok(true)` on swap, `Ok(false)` if `name` is not present
+/// in this block. Tombstones (entries with `inode == 0`) are skipped
+/// so a deleted entry that happens to share the name is never matched.
+pub fn swap_inode_in_entry(
+    block: &mut [u8],
+    name: &[u8],
+    new_ino: u32,
+    reserved_tail: usize,
+) -> Result<bool> {
+    validate_name(name)?;
+    if new_ino == 0 {
+        return Err(FfsError::Format(
+            "directory entry inode cannot be zero".to_owned(),
+        ));
+    }
+
+    let mut off = 0usize;
+    let limit = block.len().saturating_sub(reserved_tail);
+    while off + DIR_ENTRY_HEADER_LEN <= limit {
+        let rec_len =
+            usize::from(read_u16_le(block, off + 4).ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "unable to read directory entry rec_len".to_owned(),
+            })?);
+        if rec_len < DIR_ENTRY_HEADER_LEN || (rec_len % 4) != 0 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "invalid directory entry rec_len".to_owned(),
+            });
+        }
+        let end = off
+            .checked_add(rec_len)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "directory entry offset overflow".to_owned(),
+            })?;
+        if end > limit {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "directory entry exceeds usable block area".to_owned(),
+            });
+        }
+
+        let cur_ino = read_u32_le(block, off).ok_or_else(|| FfsError::Corruption {
+            block: 0,
+            detail: "unable to read directory entry inode".to_owned(),
+        })?;
+        let cur_name_len = usize::from(block[off + 6]);
+        let name_end = off
+            .checked_add(DIR_ENTRY_HEADER_LEN + cur_name_len)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "directory entry name offset overflow".to_owned(),
+            })?;
+        if name_end > end {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "directory entry name_len {cur_name_len} exceeds rec_len {rec_len} at offset {off}"
+                ),
+            });
+        }
+        if cur_ino != 0 && &block[off + DIR_ENTRY_HEADER_LEN..name_end] == name {
+            write_u32_le(block, off, new_ino)?;
+            return Ok(true);
+        }
+        off = end;
+    }
+    Ok(false)
+}
+
 /// Initialize an empty directory block with `.` and `..` entries.
 pub fn init_dir_block(
     block: &mut [u8],
