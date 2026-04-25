@@ -86,6 +86,13 @@ const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 /// + u32 projid + u32 cowextsize + 8-byte pad.
 const FS_IOC_FSGETXATTR: u32 = 0x801C_5821;
 const FS_IOC_FSGETXATTR_SIZE: u32 = 28;
+/// `FS_IOC_GETFSUUID` = `_IOR(0x15, 0, struct fsuuid2)` on x86_64
+/// (Linux 6.5+, see `<uapi/linux/fs.h>` `struct fsuuid2`). Reply is
+/// 17 bytes: `u8 len` + `u8 uuid[16]`. Encoded ioctl number per
+/// `_IOR((dir=2)<<30 | (size=17)<<16 | (type=0x15)<<8 | nr=0)` =
+/// `0x8011_1500`.
+const FS_IOC_GETFSUUID: u32 = 0x8011_1500;
+const FS_IOC_GETFSUUID_SIZE: u32 = 17;
 /// `FS_IOC_FSSETXATTR` = `_IOW('X', 32, struct fsxattr)` on x86_64.
 /// Same 28-byte payload as the GET side; userspace passes the new
 /// projid + xflags, ext4 rejects non-zero extsize/cowextsize and
@@ -1864,6 +1871,20 @@ impl FrankenFuse {
     /// `<uapi/linux/fs.h>`: `xflags | extsize | nextents | projid |
     /// cowextsize | 8 bytes pad`. The Linux FUSE driver does no byte-swapping
     /// on ioctl payloads, so the FS daemon must match host byte order.
+    /// Serialise the FS UUID into the 17-byte `struct fsuuid2`
+    /// payload returned by `FS_IOC_GETFSUUID`. Layout per
+    /// `<uapi/linux/fs.h>`: `u8 len` (always 16 for ext4 + btrfs) +
+    /// `u8 uuid[16]`. The kernel copies the struct verbatim into
+    /// userspace so byte order is host-native (the UUID itself is an
+    /// opaque 16-byte token).
+    fn encode_fsuuid_response(uuid: &[u8; 16]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(FS_IOC_GETFSUUID_SIZE as usize);
+        buf.push(16); // fsuuid2.len
+        buf.extend_from_slice(uuid);
+        debug_assert_eq!(buf.len(), FS_IOC_GETFSUUID_SIZE as usize);
+        buf
+    }
+
     /// Parse the 28-byte `struct fsxattr` payload that userspace passes
     /// through `FS_IOC_FSSETXATTR`. Returns `EINVAL` if the buffer is
     /// the wrong length — callers must surface that errno verbatim per
@@ -2226,6 +2247,15 @@ impl FrankenFuse {
                         .get_inode_generation(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(generation) => IoctlResult::Data(generation.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FS_IOC_GETFSUUID => {
+                if out_size < FS_IOC_GETFSUUID_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                match self.inner.ops.fs_uuid() {
+                    Ok(uuid) => IoctlResult::Data(Self::encode_fsuuid_response(&uuid)),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -4879,6 +4909,7 @@ mod tests {
         SetFlags(InodeNumber, u32),
         GetFsxattr(InodeNumber),
         SetFsxattr(InodeNumber, FsxattrInfo),
+        FsUuid,
         Commit,
         End(RequestOp),
         UnregisterMoveExtDonor(u32),
@@ -5262,6 +5293,19 @@ mod tests {
             Ok(())
         }
 
+        fn fs_uuid(&self) -> ffs_error::Result<[u8; 16]> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::FsUuid);
+            // Deterministic test fixture so the encoder regression can
+            // pin the on-the-wire byte layout.
+            Ok([
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+                0xFF, 0x00,
+            ])
+        }
+
         fn get_inode_generation(
             &self,
             _cx: &Cx,
@@ -5556,6 +5600,43 @@ mod tests {
                 IoctlCall::GetFsxattr(InodeNumber(17)),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getfsuuid_encodes_17_byte_struct() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FS_IOC_GETFSUUID, &[], 17);
+        let IoctlResult::Data(bytes) = response else {
+            panic!("expected IoctlResult::Data, got {response:?}");
+        };
+        assert_eq!(bytes.len(), 17, "fsuuid2 struct is exactly 17 bytes");
+        assert_eq!(bytes[0], 16, "fsuuid2.len must be 16 for ext4 + btrfs");
+        assert_eq!(
+            &bytes[1..17],
+            &[
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+                0xFF, 0x00,
+            ]
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[IoctlCall::FsUuid]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getfsuuid_short_buffer_returns_einval() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FS_IOC_GETFSUUID, &[], 16);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EINVAL)),
+            "out_size < 17 must surface EINVAL, got {response:?}"
         );
     }
 

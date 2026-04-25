@@ -972,6 +972,18 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Return the 16-byte filesystem UUID.
+    ///
+    /// Surfaces what `FS_IOC_GETFSUUID` (Linux 6.5+) returns. ext4
+    /// reads `s_uuid`; btrfs reads `s_fsid`. The default returns
+    /// [`FfsError::UnsupportedFeature`] for backends that do not
+    /// model an FS-level UUID.
+    fn fs_uuid(&self) -> ffs_error::Result<[u8; 16]> {
+        Err(FfsError::UnsupportedFeature(
+            "fs_uuid is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Apply userspace-supplied [`FsxattrInfo`] (the `FS_IOC_FSSETXATTR`
     /// payload) to the inode.
     ///

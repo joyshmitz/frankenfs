@@ -17156,6 +17156,15 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn fs_uuid(&self) -> ffs_error::Result<[u8; 16]> {
+        match &self.flavor {
+            FsFlavor::Ext4(sb) => Ok(sb.uuid),
+            // btrfs `fsid` is the 16-byte filesystem UUID; the kernel
+            // reports it as super_block::s_uuid for FS_IOC_GETFSUUID.
+            FsFlavor::Btrfs(sb) => Ok(sb.fsid),
+        }
+    }
+
     fn set_inode_fsxattr(
         &self,
         cx: &Cx,
@@ -27972,6 +27981,30 @@ mod tests {
             "nextents must be at least 1 after writing data, got {}",
             info.nextents
         );
+    }
+
+    // ── bd-9llzj: FS_IOC_GETFSUUID (struct fsuuid2) ───────────────────────
+    //
+    // Linux 6.5+ surfaces the FS UUID via FS_IOC_GETFSUUID so blkid /
+    // util-linux libuuid / systemd can identify a mount without
+    // reading the superblock directly. ext4 returns sb.s_uuid; btrfs
+    // returns sb.s_fsid. OpenFs::fs_uuid bridges both flavors.
+
+    #[test]
+    fn ext4_fs_uuid_returns_superblock_uuid() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let uuid_via_ops = <OpenFs as FsOps>::fs_uuid(&fs).expect("fs_uuid");
+        let uuid_via_sb = fs.ext4_superblock().expect("ext4 sb").uuid;
+        assert_eq!(
+            uuid_via_ops, uuid_via_sb,
+            "fs_uuid must surface the same bytes as ext4 superblock s_uuid"
+        );
+        // Sanity: the fixture image has a non-zero UUID (mkfs.ext4
+        // always assigns one). This rule-out-empty also catches a
+        // trivial bug where the accessor returns the default.
+        assert_ne!(uuid_via_ops, [0_u8; 16], "ext4 UUID must be non-zero");
     }
 
     // ── bd-c88jg: FS_IOC_FSSETXATTR (write side) ──────────────────────────
