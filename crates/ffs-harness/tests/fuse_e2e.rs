@@ -1437,27 +1437,29 @@ fn run_syscall_conformance_probe(root: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("syscall conformance probe JSON")
 }
 
-const PWRITEV2_RWF_DSYNC_SCRIPT: &str = r#"
+const PWRITEV2_RWF_SCRIPT: &str = r#"
 import json
 import os
 import sys
 
 root = sys.argv[1]
-path = os.path.join(root, "rwf_dsync_probe.bin")
-payload = b"rwf-dsync-through-fuse\n"
+flag_name = sys.argv[2]
+file_name = sys.argv[3]
+payload = bytes.fromhex(sys.argv[4])
+path = os.path.join(root, file_name)
 
 if not hasattr(os, "pwritev"):
     print(json.dumps({"skipped": "python_os_pwritev_unavailable"}))
     sys.exit(0)
 
-rwf_dsync = getattr(os, "RWF_DSYNC", None)
-if rwf_dsync is None:
-    print(json.dumps({"skipped": "python_os_rwf_dsync_unavailable"}))
+flag = getattr(os, flag_name, None)
+if flag is None:
+    print(json.dumps({"skipped": "python_os_" + flag_name.lower() + "_unavailable"}))
     sys.exit(0)
 
 fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
 try:
-    written = os.pwritev(fd, [payload], 0, rwf_dsync)
+    written = os.pwritev(fd, [payload], 0, flag)
 finally:
     os.close(fd)
 
@@ -1472,20 +1474,32 @@ print(json.dumps({
 }, sort_keys=True))
 "#;
 
-fn run_pwritev2_rwf_dsync_probe(root: &Path) -> Value {
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        std::fmt::Write::write_fmt(&mut out, format_args!("{byte:02x}"))
+            .expect("write payload hex");
+    }
+    out
+}
+
+fn run_pwritev2_rwf_probe(root: &Path, flag_name: &str, file_name: &str, payload: &[u8]) -> Value {
     let output = Command::new("python3")
         .arg("-c")
-        .arg(PWRITEV2_RWF_DSYNC_SCRIPT)
+        .arg(PWRITEV2_RWF_SCRIPT)
         .arg(root)
+        .arg(flag_name)
+        .arg(file_name)
+        .arg(bytes_to_hex(payload))
         .output()
-        .expect("run python3 pwritev2 RWF_DSYNC probe");
+        .expect("run python3 pwritev2 RWF probe");
     assert!(
         output.status.success(),
-        "python3 pwritev2 RWF_DSYNC probe failed for {}: {}",
+        "python3 pwritev2 {flag_name} probe failed for {}: {}",
         root.display(),
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("pwritev2 RWF_DSYNC probe JSON")
+    serde_json::from_slice(&output.stdout).expect("pwritev2 RWF probe JSON")
 }
 
 const INOTIFY_RENAME_SCRIPT: &str = r#"
@@ -3467,8 +3481,13 @@ fn fuse_conformance_file_lifecycle_open_read_write_flush_fsync_release_matrix() 
     });
 }
 
-#[test]
-fn ext4_fuse_pwritev2_rwf_dsync_persists_written_data_after_remount() {
+fn assert_pwritev2_rwf_persists_after_remount(
+    flag_name: &str,
+    file_name: &str,
+    payload: &[u8],
+    scenario_id: &str,
+    pass_detail: &str,
+) {
     if !fuse_available() {
         eprintln!("FUSE prerequisites not met, skipping");
         return;
@@ -3487,9 +3506,7 @@ fn ext4_fuse_pwritev2_rwf_dsync_persists_written_data_after_remount() {
         return;
     };
 
-    let scenario_id = "ext4_rw_pwritev2_rwf_dsync";
-    let payload = b"rwf-dsync-through-fuse\n";
-    let report = run_pwritev2_rwf_dsync_probe(&mnt);
+    let report = run_pwritev2_rwf_probe(&mnt, flag_name, file_name, payload);
     if let Some(skip_reason) = report["skipped"].as_str() {
         emit_scenario_result(scenario_id, "SKIP", Some(skip_reason));
         return;
@@ -3499,15 +3516,15 @@ fn ext4_fuse_pwritev2_rwf_dsync_persists_written_data_after_remount() {
     assert_eq!(
         report["written"].as_i64(),
         Some(expected_written),
-        "pwritev2 RWF_DSYNC should report the full payload length: {report}"
+        "pwritev2 {flag_name} should report the full payload length: {report}"
     );
     let payload_hex = report["payload_hex"]
         .as_str()
-        .expect("pwritev2 RWF_DSYNC probe should report payload_hex");
+        .expect("pwritev2 RWF probe should report payload_hex");
     assert_eq!(
         report["readback_hex"].as_str(),
         Some(payload_hex),
-        "pwritev2 RWF_DSYNC write should be immediately readable: {report}"
+        "pwritev2 {flag_name} write should be immediately readable: {report}"
     );
 
     drop(session);
@@ -3515,14 +3532,35 @@ fn ext4_fuse_pwritev2_rwf_dsync_persists_written_data_after_remount() {
     let Some(_remount) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
         return;
     };
-    let persisted =
-        fs::read(mnt.join("rwf_dsync_probe.bin")).expect("read RWF_DSYNC probe after remount");
+    let persisted = fs::read(mnt.join(file_name)).expect("read pwritev2 RWF probe after remount");
     assert_eq!(
         persisted.as_slice(),
         payload,
-        "RWF_DSYNC pwritev2 payload should survive remount"
+        "{flag_name} pwritev2 payload should survive remount"
     );
-    emit_scenario_result(scenario_id, "PASS", Some("pwritev2_rwf_dsync"));
+    emit_scenario_result(scenario_id, "PASS", Some(pass_detail));
+}
+
+#[test]
+fn ext4_fuse_pwritev2_rwf_dsync_persists_written_data_after_remount() {
+    assert_pwritev2_rwf_persists_after_remount(
+        "RWF_DSYNC",
+        "rwf_dsync_probe.bin",
+        b"rwf-dsync-through-fuse\n",
+        "ext4_rw_pwritev2_rwf_dsync",
+        "pwritev2_rwf_dsync",
+    );
+}
+
+#[test]
+fn ext4_fuse_pwritev2_rwf_sync_persists_written_data_after_remount() {
+    assert_pwritev2_rwf_persists_after_remount(
+        "RWF_SYNC",
+        "rwf_sync_probe.bin",
+        b"rwf-sync-through-fuse\n",
+        "ext4_rw_pwritev2_rwf_sync",
+        "pwritev2_rwf_sync",
+    );
 }
 
 #[test]
