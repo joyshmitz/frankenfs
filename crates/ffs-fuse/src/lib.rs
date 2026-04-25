@@ -86,6 +86,14 @@ const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 /// + u32 projid + u32 cowextsize + 8-byte pad.
 const FS_IOC_FSGETXATTR: u32 = 0x801C_5821;
 const FS_IOC_FSGETXATTR_SIZE: u32 = 28;
+/// `FIBMAP` = `_IO(0, 1)` = `0x0000_0001`. Legacy ioctl used by
+/// `filefrag -B`, e2fsck, and e2image. Userspace passes a u32 input
+/// holding the *logical* block index; the kernel rewrites the same
+/// 4-byte buffer with the *physical* block number on return (0 for
+/// a hole). FrankenFS routes this through `FsOps::fiemap` over a
+/// 1-block window — fiemap already does the extent-tree walk.
+const FIBMAP: u32 = 0x0000_0001;
+const FIBMAP_SIZE: u32 = 4;
 /// `FITRIM` = `_IOWR('X', 121, struct fstrim_range)` on x86_64.
 /// `struct fstrim_range` is 24 bytes (3 x u64): start + len + minlen.
 /// On success the kernel writes the bytes-discarded count back into
@@ -2280,6 +2288,56 @@ impl FrankenFuse {
                     Ok(generation) => IoctlResult::Data(generation.to_ne_bytes().to_vec()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
+            }
+            FIBMAP => {
+                if out_size < FIBMAP_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let logical = match Self::parse_u32_ioctl_arg(in_data) {
+                    Ok(value) => u64::from(value),
+                    Err(errno) => return IoctlResult::Error(errno),
+                };
+                let block_size = u64::from(
+                    self.inner
+                        .ops
+                        .statfs(
+                            &Self::cx_for_request(),
+                            &mut RequestScope::empty(),
+                            InodeNumber(ino),
+                        )
+                        .map_or(4096, |s| s.block_size),
+                );
+                let cx = Self::cx_for_request();
+                let extents = match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.fiemap(
+                        cx,
+                        scope,
+                        InodeNumber(ino),
+                        logical.saturating_mul(block_size),
+                        block_size,
+                    )
+                }) {
+                    Ok(exts) => exts,
+                    Err(error) => return IoctlResult::Error(error.to_errno()),
+                };
+                // Hole / sparse range -> 0 per fs/ext4/inode.c::ext4_get_block.
+                let physical_block = extents
+                    .into_iter()
+                    .find(|e| {
+                        // The first extent that actually covers the
+                        // queried logical block (fiemap may return an
+                        // extent that starts later if the query falls
+                        // in a hole).
+                        let req_byte = logical.saturating_mul(block_size);
+                        e.logical <= req_byte && req_byte < e.logical.saturating_add(e.length)
+                    })
+                    .map_or(0_u64, |e| {
+                        let req_byte = logical.saturating_mul(block_size);
+                        let offset_into = req_byte - e.logical;
+                        (e.physical + offset_into) / block_size
+                    });
+                let physical_u32 = u32::try_from(physical_block).unwrap_or(u32::MAX);
+                IoctlResult::Data(physical_u32.to_ne_bytes().to_vec())
             }
             FITRIM => {
                 if self.inner.read_only {
@@ -5673,6 +5731,33 @@ mod tests {
                 IoctlCall::GetFsxattr(InodeNumber(17)),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fibmap_short_input_returns_einval() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+        // 3 bytes < FIBMAP_SIZE (4).
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FIBMAP, &[0, 0, 0], 4);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EINVAL)),
+            "short input must surface EINVAL, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fibmap_short_output_returns_einval() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FIBMAP, &0_u32.to_ne_bytes(), 3);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EINVAL)),
+            "short out_size must surface EINVAL, got {response:?}"
         );
     }
 
