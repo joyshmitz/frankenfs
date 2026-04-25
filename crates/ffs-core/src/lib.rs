@@ -2,6 +2,8 @@
 
 /// Degradation, backpressure, and compute-budget management for graceful overload handling.
 pub mod degradation;
+/// NFS-style file handles for `name_to_handle_at(2)` / `open_by_handle_at(2)`.
+pub mod file_handle;
 /// VFS semantics layer: filesystem-agnostic types and the [`vfs::FsOps`] trait.
 pub mod vfs;
 
@@ -14306,6 +14308,38 @@ impl OpenFs {
         )
     }
 
+    /// Encode a `name_to_handle_at(2)`-style file handle for `ino`.
+    ///
+    /// Returns the [`file_handle::FILE_HANDLE_LEN`]-byte handle that pairs
+    /// the inode number with its current NFS generation cookie. A future
+    /// [`Self::open_by_handle`] call will reject the handle with `ESTALE`
+    /// if the inode has since been freed and reused (its generation will
+    /// have been bumped).
+    pub fn encode_file_handle(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<[u8; file_handle::FILE_HANDLE_LEN]> {
+        let attr = self.getattr(cx, ino)?;
+        let generation = u32::try_from(attr.generation).unwrap_or(u32::MAX);
+        Ok(file_handle::encode(attr.ino, generation))
+    }
+
+    /// Resolve a previously-issued file handle, returning the inode's
+    /// current attributes.
+    ///
+    /// Returns [`FfsError::Io`] with `EINVAL` if the buffer is the wrong
+    /// length, `ESTALE` if the inode's generation has moved on, or
+    /// propagates the underlying lookup error if the inode has been
+    /// freed entirely.
+    pub fn open_by_handle(&self, cx: &Cx, handle: &[u8]) -> ffs_error::Result<InodeAttr> {
+        let (ino, handle_gen) = file_handle::decode(handle).map_err(FfsError::from)?;
+        let attr = self.getattr(cx, ino)?;
+        let live_gen = u32::try_from(attr.generation).unwrap_or(u32::MAX);
+        file_handle::verify(ino, handle_gen, live_gen).map_err(FfsError::from)?;
+        Ok(attr)
+    }
+
     pub fn fallocate(
         &self,
         cx: &Cx,
@@ -26843,6 +26877,101 @@ mod tests {
             fetched.crtime, original_crtime,
             "crtime must survive a setattr(mtime) round trip through disk"
         );
+    }
+
+    // ── bd-uzmsl: NFS-style file handles via OpenFs ───────────────────────
+    //
+    // The kernel-FUSE protocol carries name_to_handle_at(2) /
+    // open_by_handle_at(2) over plain FUSE_LOOKUP — the kernel
+    // synthesises the handle bytes from inode-id + generation that the
+    // FsOps layer already returns. What FrankenFS owns is the
+    // generation-cookie semantics: a handle that survives unmount must
+    // surface ESTALE once the inode has been freed and a fresh one
+    // allocated in its slot. `OpenFs::encode_file_handle` /
+    // `open_by_handle` are the in-process surface; FUSE consumers wrap
+    // them behind the kernel handshake.
+
+    #[test]
+    fn ext4_encode_open_by_handle_round_trip_resolves_to_same_inode() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("fh_round_trip.txt"), 0o644, 0, 0)
+            .expect("create");
+        let handle = fs.encode_file_handle(&cx, attr.ino).expect("encode");
+        assert_eq!(handle.len(), file_handle::FILE_HANDLE_LEN);
+
+        let resolved = fs.open_by_handle(&cx, &handle).expect("open by handle");
+        assert_eq!(resolved.ino, attr.ino);
+        assert_eq!(resolved.generation, attr.generation);
+    }
+
+    #[test]
+    fn ext4_open_by_handle_rejects_stale_generation_with_estale() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // Hold a handle to a file, delete it, recreate something at the
+        // same inode slot (best-effort: generation always bumps on create
+        // even if the slot differs), then retry the handle.
+        let attr = fs
+            .create(&cx, root, OsStr::new("fh_stale.txt"), 0o644, 0, 0)
+            .expect("create");
+        let stale_handle = fs.encode_file_handle(&cx, attr.ino).expect("encode");
+
+        // Forge a handle whose generation is one ahead of the live one;
+        // a fresh allocation that lands on the same slot would have at
+        // least that bump.
+        let mut tampered = stale_handle;
+        let live_gen = u32::from_le_bytes(tampered[8..12].try_into().unwrap());
+        let bumped_gen = live_gen.wrapping_add(7);
+        tampered[8..12].copy_from_slice(&bumped_gen.to_le_bytes());
+
+        let err = fs
+            .open_by_handle(&cx, &tampered)
+            .expect_err("forged generation must be rejected");
+        assert_eq!(
+            err.to_errno(),
+            libc::ESTALE,
+            "stale generation must surface ESTALE"
+        );
+    }
+
+    #[test]
+    fn ext4_open_by_handle_rejects_wrong_length_with_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+
+        let err = fs
+            .open_by_handle(&cx, &[0_u8; 4])
+            .expect_err("short handle must be rejected");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn ext4_open_by_handle_unknown_inode_propagates_lookup_error() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+
+        let bogus = file_handle::encode(InodeNumber(0xDEAD_BEEF), 0);
+        let err = fs
+            .open_by_handle(&cx, &bogus)
+            .expect_err("unknown inode must surface a lookup error");
+        // We don't pin a specific errno — different ext4 layers can map
+        // a missing inode to ENOENT or NotFound — but it must NOT be a
+        // success and must NOT be a generation-matched ESTALE.
+        assert_ne!(err.to_errno(), libc::ESTALE);
     }
 
     // ── bd-bivg2: renameat2 RENAME_NOREPLACE plumbing ─────────────────────
