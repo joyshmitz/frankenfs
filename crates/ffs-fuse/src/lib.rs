@@ -9740,6 +9740,56 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn dispatch_write_fuse_cache_flag_rwf_hipri_hint_keeps_normal_write_contract() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        let written = fuse
+            .dispatch_write_with_intent(
+                42,
+                11,
+                b"hipri",
+                WriteIntent::from_fuse(9004, fuse_consts::RWF_HIPRI, 0),
+            )
+            .expect("dispatch RWF_HIPRI/FUSE_WRITE_CACHE write");
+
+        assert_eq!(written, 5);
+        assert_eq!(
+            fuse_consts::RWF_HIPRI,
+            fuse_consts::FUSE_WRITE_CACHE,
+            "RWF_HIPRI shares bit 0 with the FUSE cached-write hint"
+        );
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(42),
+                    offset: 11,
+                    data: b"hipri".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+            ],
+            "bit 0 must stay a harmless priority/cache hint, not sync, NOWAIT, append, or unsupported intent"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn dispatch_write_rwf_append_uses_current_file_size_as_offset() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
