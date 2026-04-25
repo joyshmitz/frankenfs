@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="frankenfs_illustration.webp" alt="FrankenFS - Memory-safe ext4 + btrfs in Rust">
+  <img src="docs/assets/frankenfs_illustration.webp" alt="FrankenFS - Memory-safe ext4 + btrfs in Rust">
 </div>
 
 <p align="center">

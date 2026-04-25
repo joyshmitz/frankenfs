@@ -110,7 +110,7 @@ else
     echo -e "${RED}Golden output verification FAILED.${NC}"
     echo ""
     echo "If changes are intentional, provide an isomorphism proof:"
-    echo "  1. Copy ISOMORPHISM_PROOF_TEMPLATE.md into your PR description"
+    echo "  1. Copy docs/templates/ISOMORPHISM_PROOF_TEMPLATE.md into your PR description"
     echo "  2. Fill out each field"
     echo "  3. Run: scripts/verify_golden.sh --update"
     echo "  4. Commit the updated checksums"
