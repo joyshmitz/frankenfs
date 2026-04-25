@@ -171,6 +171,7 @@ impl WalReplayEngine {
         let mut commits_replayed = 0_u64;
         let mut versions_replayed = 0_u64;
         let mut records_discarded = 0_u64;
+        let mut last_decoded_seq = 0_u64;
         let mut last_replayed_seq = skip_up_to_seq;
         let mut last_valid_offset = 0_usize;
         let mut outcome = ReplayOutcome::Clean;
@@ -192,47 +193,8 @@ impl WalReplayEngine {
                     };
                     offset += size;
 
-                    // Skip commits already covered by checkpoint.
-                    if commit.commit_seq.0 <= skip_up_to_seq {
-                        last_valid_offset = offset;
-                        continue;
-                    }
-
-                    // D1: Enforce strict monotonicity.
-                    if commit.commit_seq.0 <= last_replayed_seq {
-                        let record_offset_u64 = u64::try_from(record_offset).unwrap_or(u64::MAX);
-
-                        if self.tail_policy == TailPolicy::FailFast {
-                            warn!(
-                                operation_id,
-                                offset = record_offset,
-                                violating_seq = commit.commit_seq.0,
-                                expected_after = last_replayed_seq,
-                                "wal_replay_monotonicity_fail_fast"
-                            );
-                            return Err(FfsError::Format(format!(
-                                "WAL replay: monotonicity violation at offset {record_offset_u64} \
-                                 (seq {} <= {}); FailFast policy in effect",
-                                commit.commit_seq.0, last_replayed_seq
-                            )));
-                        }
-
-                        warn!(
-                            operation_id,
-                            offset = record_offset,
-                            violating_seq = commit.commit_seq.0,
-                            expected_after = last_replayed_seq,
-                            "wal_replay_monotonicity_violation"
-                        );
-                        records_discarded += 1;
-                        outcome = ReplayOutcome::MonotonicityViolation {
-                            violating_seq: commit.commit_seq.0,
-                            expected_after: last_replayed_seq,
-                        };
-                        break;
-                    }
-
-                    // D8: Reject sentinel values.
+                    // D8: Reject sentinel values before checkpoint skipping so
+                    // malformed covered prefixes cannot be reported clean.
                     if commit.commit_seq.0 == u64::MAX || commit.txn_id.0 == u64::MAX {
                         let record_offset_u64 = u64::try_from(record_offset).unwrap_or(u64::MAX);
 
@@ -263,6 +225,49 @@ impl WalReplayEngine {
                             first_corrupt_offset: record_offset_u64,
                         };
                         break;
+                    }
+
+                    // D1: Enforce strict monotonicity across every decoded
+                    // record. `skip_up_to_seq` suppresses apply only; it must
+                    // not hide malformed checkpoint-covered WAL prefixes.
+                    if commit.commit_seq.0 <= last_decoded_seq {
+                        let record_offset_u64 = u64::try_from(record_offset).unwrap_or(u64::MAX);
+
+                        if self.tail_policy == TailPolicy::FailFast {
+                            warn!(
+                                operation_id,
+                                offset = record_offset,
+                                violating_seq = commit.commit_seq.0,
+                                expected_after = last_decoded_seq,
+                                "wal_replay_monotonicity_fail_fast"
+                            );
+                            return Err(FfsError::Format(format!(
+                                "WAL replay: monotonicity violation at offset {record_offset_u64} \
+                                 (seq {} <= {}); FailFast policy in effect",
+                                commit.commit_seq.0, last_decoded_seq
+                            )));
+                        }
+
+                        warn!(
+                            operation_id,
+                            offset = record_offset,
+                            violating_seq = commit.commit_seq.0,
+                            expected_after = last_decoded_seq,
+                            "wal_replay_monotonicity_violation"
+                        );
+                        records_discarded += 1;
+                        outcome = ReplayOutcome::MonotonicityViolation {
+                            violating_seq: commit.commit_seq.0,
+                            expected_after: last_decoded_seq,
+                        };
+                        break;
+                    }
+                    last_decoded_seq = commit.commit_seq.0;
+
+                    // Skip commits already covered by checkpoint.
+                    if commit.commit_seq.0 <= skip_up_to_seq {
+                        last_valid_offset = offset;
+                        continue;
                     }
 
                     // Apply the commit.
@@ -442,13 +447,13 @@ mod tests {
     #[test]
     fn replay_empty_log() {
         let engine = WalReplayEngine::new(TailPolicy::TruncateToLastGood);
-        let report = engine
-            .replay(&[], 0, |_| panic!("should not apply"))
-            .expect("replay");
+        let mut applied = false;
+        let report = engine.replay(&[], 0, |_| applied = true).expect("replay");
 
         assert_eq!(report.outcome, ReplayOutcome::EmptyLog);
         assert_eq!(report.commits_replayed, 0);
         assert_eq!(report.records_discarded, 0);
+        assert!(!applied);
     }
 
     // ── Truncated tail ───────────────────────────────────────────────────
@@ -669,6 +674,75 @@ mod tests {
         assert_eq!(report.commits_replayed, 2); // only 3 and 4
         assert_eq!(applied, vec![3, 4]);
         assert_eq!(report.last_commit_seq, 4);
+    }
+
+    #[test]
+    fn replay_validates_monotonicity_inside_skipped_checkpoint_prefix() {
+        let commits = vec![
+            make_commit(1, 1, &[(1, &[1; 8])]),
+            make_commit(3, 3, &[(3, &[3; 8])]),
+            make_commit(2, 2, &[(2, &[2; 8])]),
+            make_commit(4, 4, &[(4, &[4; 8])]),
+        ];
+        let data = encode_commits(&commits);
+
+        let engine = WalReplayEngine::new(TailPolicy::TruncateToLastGood);
+        let mut applied = Vec::new();
+        let report = engine
+            .replay(&data, 3, |c| applied.push(c.commit_seq.0))
+            .expect("replay");
+
+        assert_eq!(
+            report.outcome,
+            ReplayOutcome::MonotonicityViolation {
+                violating_seq: 2,
+                expected_after: 3,
+            }
+        );
+        assert_eq!(report.commits_replayed, 0);
+        assert_eq!(report.records_discarded, 1);
+        assert!(applied.is_empty());
+    }
+
+    #[test]
+    fn replay_fail_fast_rejects_non_monotonic_skipped_prefix() {
+        let commits = vec![
+            make_commit(1, 1, &[(1, &[1; 8])]),
+            make_commit(2, 2, &[(2, &[2; 8])]),
+            make_commit(1, 3, &[(3, &[3; 8])]),
+        ];
+        let data = encode_commits(&commits);
+
+        let engine = WalReplayEngine::new(TailPolicy::FailFast);
+        let mut applied = false;
+        let err = engine.replay(&data, 2, |_| applied = true).unwrap_err();
+
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("monotonicity"), "error: {err_msg}");
+        assert!(err_msg.contains("FailFast"), "error: {err_msg}");
+        assert!(!applied);
+    }
+
+    #[test]
+    fn replay_rejects_sentinel_even_when_checkpoint_would_skip_it() {
+        let commits = vec![make_commit(u64::MAX, 1, &[(1, &[1; 8])])];
+        let data = encode_commits(&commits);
+
+        let engine = WalReplayEngine::new(TailPolicy::TruncateToLastGood);
+        let mut applied = false;
+        let report = engine
+            .replay(&data, u64::MAX, |_| applied = true)
+            .expect("replay");
+
+        assert!(matches!(
+            report.outcome,
+            ReplayOutcome::CorruptTail {
+                records_discarded: 1,
+                first_corrupt_offset: 0,
+            }
+        ));
+        assert_eq!(report.commits_replayed, 0);
+        assert!(!applied);
     }
 
     // ── Idempotent replay ────────────────────────────────────────────────
