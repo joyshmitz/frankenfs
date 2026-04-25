@@ -1540,7 +1540,7 @@ impl FrankenFuse {
         #[cfg(not(unix))]
         let new_name = owned_newname.as_os_str();
 
-        self.dispatch_rename(parent, name, newparent, new_name)
+        self.dispatch_rename(parent, name, newparent, new_name, 0)
             .map_err(|error| match error {
                 MutationDispatchError::Errno(errno) => errno,
                 MutationDispatchError::Operation { error, .. } => error.to_errno(),
@@ -2661,6 +2661,7 @@ impl FrankenFuse {
         name: &OsStr,
         newparent: u64,
         newname: &OsStr,
+        flags: u32,
     ) -> Result<(), MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Rename, parent)?;
         let cx = Self::cx_for_request();
@@ -2668,13 +2669,14 @@ impl FrankenFuse {
             let _inode_guards =
                 self.acquire_mutation_inode_guards(&[InodeNumber(parent), InodeNumber(newparent)]);
             self.with_request_scope(&cx, RequestOp::Rename, |cx, scope| {
-                self.inner.ops.rename(
+                self.inner.ops.rename2(
                     cx,
                     scope,
                     InodeNumber(parent),
                     name,
                     InodeNumber(newparent),
                     newname,
+                    flags,
                 )?;
                 self.inner.ops.commit_request_scope(scope)?;
                 Ok(())
@@ -3435,15 +3437,10 @@ impl Filesystem for FrankenFuse {
         flags: u32,
         reply: ReplyEmpty,
     ) {
-        if flags != 0 {
-            // RENAME_NOREPLACE, RENAME_EXCHANGE, etc. are not currently supported.
-            // Silently ignoring them would violate POSIX semantics (e.g., overwriting
-            // a file when NOREPLACE was explicitly requested).
-            reply.error(libc::EINVAL);
-            return;
-        }
-
-        match self.dispatch_rename(parent, name, newparent, newname) {
+        // RENAME_NOREPLACE is honoured atomically (see OpenFs::rename2).
+        // RENAME_EXCHANGE / RENAME_WHITEOUT still return EINVAL inside
+        // FsOps::rename2; we no longer pre-reject every non-zero flag.
+        match self.dispatch_rename(parent, name, newparent, newname, flags) {
             Ok(()) => reply.ok(),
             Err(MutationDispatchError::Errno(errno)) => reply.error(errno),
             Err(MutationDispatchError::Operation { error, offset }) => {
@@ -8553,7 +8550,7 @@ mod tests {
             &options,
         );
 
-        fuse.dispatch_rename(8, OsStr::new("old"), 9, OsStr::new("new"))
+        fuse.dispatch_rename(8, OsStr::new("old"), 9, OsStr::new("new"), 0)
             .expect("dispatch rename");
         assert_eq!(
             calls.lock().expect("lock calls").as_slice(),
@@ -8589,6 +8586,7 @@ mod tests {
                         OsStr::new(name),
                         new_parent,
                         OsStr::new(new_name),
+                        0,
                     )
                     .expect("dispatch rename");
                 });
@@ -8621,6 +8619,7 @@ mod tests {
                         OsStr::new(name),
                         new_parent,
                         OsStr::new(new_name),
+                        0,
                     )
                     .expect("dispatch rename");
                 });
@@ -8667,7 +8666,7 @@ mod tests {
             Err(MutationDispatchError::Errno(libc::EROFS))
         ));
         assert!(matches!(
-            fuse.dispatch_rename(1, OsStr::new("a"), 2, OsStr::new("b")),
+            fuse.dispatch_rename(1, OsStr::new("a"), 2, OsStr::new("b"), 0),
             Err(MutationDispatchError::Errno(libc::EROFS))
         ));
         assert!(calls.lock().expect("lock calls").is_empty());

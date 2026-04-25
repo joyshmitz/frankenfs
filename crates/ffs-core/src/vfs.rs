@@ -669,6 +669,39 @@ pub trait FsOps: Send + Sync {
         Err(FfsError::ReadOnly)
     }
 
+    /// Rename with `renameat2(2)` flags (FUSE_RENAME2 opcode).
+    ///
+    /// `flags` is the bitset defined by `<linux/fs.h>`:
+    /// - `0`  — classic rename (overwrite target if it exists).
+    /// - `RENAME_NOREPLACE` (1) — fail with `EEXIST` if the destination
+    ///   exists. The check + rename must be atomic under the parent
+    ///   directory locks held by the caller.
+    /// - `RENAME_EXCHANGE` (2) — atomically swap two existing entries.
+    /// - `RENAME_WHITEOUT` (4) — used by overlayfs; not currently supported.
+    ///
+    /// The default implementation delegates to [`Self::rename`] when
+    /// `flags == 0` and returns `EINVAL` for any non-zero flags so that
+    /// callers cannot silently get classic-rename semantics on an
+    /// implementation that does not honour the requested mode.
+    #[allow(clippy::too_many_arguments)]
+    fn rename2(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        new_parent: InodeNumber,
+        new_name: &OsStr,
+        flags: u32,
+    ) -> ffs_error::Result<()> {
+        if flags == 0 {
+            return self.rename(cx, scope, parent, name, new_parent, new_name);
+        }
+        Err(FfsError::Io(std::io::Error::from_raw_os_error(
+            libc::EINVAL,
+        )))
+    }
+
     /// Write data to file `ino` at byte `offset`. Returns bytes written.
     fn write(
         &self,

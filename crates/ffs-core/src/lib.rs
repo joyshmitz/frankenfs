@@ -15905,6 +15905,60 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn rename2(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        new_parent: InodeNumber,
+        new_name: &OsStr,
+        flags: u32,
+    ) -> ffs_error::Result<()> {
+        // Reject combinations that linux/fs.h forbids before doing any work.
+        // The kernel itself never sets more than one bit at a time but a
+        // malformed FUSE request could; mirror ext4's strict check.
+        const RENAME_NOREPLACE: u32 = libc::RENAME_NOREPLACE;
+        const RENAME_EXCHANGE: u32 = libc::RENAME_EXCHANGE;
+        const RENAME_WHITEOUT: u32 = libc::RENAME_WHITEOUT;
+        const SUPPORTED: u32 = RENAME_NOREPLACE;
+        const KNOWN: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT;
+        if flags & !KNOWN != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+        }
+        if flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0 {
+            // EINVAL per renameat2(2): NOREPLACE + EXCHANGE is contradictory.
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+        }
+        if flags & !SUPPORTED != 0 {
+            // RENAME_EXCHANGE + RENAME_WHITEOUT need atomic dual-entry
+            // mutation across two parent directory blocks (and, for
+            // WHITEOUT, a fresh char-device inode from the unused-inode
+            // pool). Tracked as follow-ups in the bead description for
+            // bd-bivg2 — return EINVAL until they land so the kernel
+            // surfaces a real error rather than degrading to overwrite.
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+        }
+
+        if flags & RENAME_NOREPLACE != 0 {
+            // The caller (FUSE dispatcher) holds parent + new_parent inode
+            // guards via FuseInodeLocks, so the lookup + rename below is
+            // one atomic critical section against concurrent
+            // create/mkdir/rename on the same parents.
+            match <Self as FsOps>::lookup(self, cx, scope, new_parent, new_name) {
+                Ok(_existing) => {
+                    return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                        libc::EEXIST,
+                    )));
+                }
+                Err(FfsError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        <Self as FsOps>::rename(self, cx, scope, parent, name, new_parent, new_name)
+    }
+
     fn write(
         &self,
         cx: &Cx,
@@ -26649,6 +26703,228 @@ mod tests {
             fetched.crtime, original_crtime,
             "crtime must survive a setattr(mtime) round trip through disk"
         );
+    }
+
+    // ── bd-bivg2: renameat2 RENAME_NOREPLACE plumbing ─────────────────────
+    //
+    // FUSE_RENAME2 (opcode 45) carries a `flags` bitset. Pre-fix, the
+    // dispatcher rejected every non-zero flag with EINVAL, so user code
+    // could not get RENAME_NOREPLACE semantics through the mount even
+    // though the kernel asked for them. `OpenFs::rename2` now honours
+    // RENAME_NOREPLACE atomically (the FUSE layer holds parent +
+    // new_parent guards across the lookup + rename) and continues to
+    // return EINVAL for RENAME_EXCHANGE / RENAME_WHITEOUT pending the
+    // dual-entry / whiteout-inode work tracked separately.
+
+    #[test]
+    fn ext4_rename2_classic_flag_zero_overwrites_target() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let _src = fs
+            .create(&cx, root, OsStr::new("nr_classic_src.txt"), 0o644, 0, 0)
+            .expect("create src");
+        let _dst = fs
+            .create(&cx, root, OsStr::new("nr_classic_dst.txt"), 0o644, 0, 0)
+            .expect("create dst");
+
+        let mut scope = RequestScope::empty();
+        <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            root,
+            OsStr::new("nr_classic_src.txt"),
+            root,
+            OsStr::new("nr_classic_dst.txt"),
+            0,
+        )
+        .expect("classic rename (flags=0) must overwrite dst");
+
+        // Source disappears, destination resolves to the renamed inode.
+        let err = fs
+            .lookup(&cx, root, OsStr::new("nr_classic_src.txt"))
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOENT);
+        fs.lookup(&cx, root, OsStr::new("nr_classic_dst.txt"))
+            .expect("dst still resolves after overwrite");
+    }
+
+    #[test]
+    fn ext4_rename2_noreplace_existing_target_returns_eexist() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let _src = fs
+            .create(&cx, root, OsStr::new("nr_block_src.txt"), 0o644, 0, 0)
+            .expect("create src");
+        let dst = fs
+            .create(&cx, root, OsStr::new("nr_block_dst.txt"), 0o644, 0, 0)
+            .expect("create dst");
+        let dst_ino = dst.ino;
+
+        let mut scope = RequestScope::empty();
+        let err = <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            root,
+            OsStr::new("nr_block_src.txt"),
+            root,
+            OsStr::new("nr_block_dst.txt"),
+            libc::RENAME_NOREPLACE as u32,
+        )
+        .expect_err("RENAME_NOREPLACE over existing target must fail");
+        assert_eq!(
+            err.to_errno(),
+            libc::EEXIST,
+            "RENAME_NOREPLACE must surface EEXIST"
+        );
+
+        // Both names must still resolve (no partial mutation).
+        fs.lookup(&cx, root, OsStr::new("nr_block_src.txt"))
+            .expect("src must survive failed RENAME_NOREPLACE");
+        let dst_after = fs
+            .lookup(&cx, root, OsStr::new("nr_block_dst.txt"))
+            .expect("dst must survive failed RENAME_NOREPLACE");
+        assert_eq!(
+            dst_after.ino, dst_ino,
+            "dst inode must be unchanged after EEXIST"
+        );
+    }
+
+    #[test]
+    fn ext4_rename2_noreplace_free_target_succeeds() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let src = fs
+            .create(&cx, root, OsStr::new("nr_ok_src.txt"), 0o644, 0, 0)
+            .expect("create src");
+        let src_ino = src.ino;
+
+        let mut scope = RequestScope::empty();
+        <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            root,
+            OsStr::new("nr_ok_src.txt"),
+            root,
+            OsStr::new("nr_ok_dst.txt"),
+            libc::RENAME_NOREPLACE as u32,
+        )
+        .expect("RENAME_NOREPLACE with free dst must succeed");
+
+        let err = fs
+            .lookup(&cx, root, OsStr::new("nr_ok_src.txt"))
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOENT);
+        let dst = fs
+            .lookup(&cx, root, OsStr::new("nr_ok_dst.txt"))
+            .expect("dst lookup");
+        assert_eq!(dst.ino, src_ino, "renamed inode preserved");
+    }
+
+    #[test]
+    fn ext4_rename2_exchange_returns_einval_until_implemented() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let _x = fs
+            .create(&cx, root, OsStr::new("ex_x.txt"), 0o644, 0, 0)
+            .expect("create x");
+        let _y = fs
+            .create(&cx, root, OsStr::new("ex_y.txt"), 0o644, 0, 0)
+            .expect("create y");
+
+        let mut scope = RequestScope::empty();
+        let err = <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            root,
+            OsStr::new("ex_x.txt"),
+            root,
+            OsStr::new("ex_y.txt"),
+            libc::RENAME_EXCHANGE as u32,
+        )
+        .expect_err("RENAME_EXCHANGE not yet supported");
+        assert_eq!(
+            err.to_errno(),
+            libc::EINVAL,
+            "RENAME_EXCHANGE must surface EINVAL until atomic dual-entry swap lands"
+        );
+    }
+
+    #[test]
+    fn ext4_rename2_noreplace_plus_exchange_is_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let _a = fs
+            .create(&cx, root, OsStr::new("conflict_a.txt"), 0o644, 0, 0)
+            .expect("create a");
+        let _b = fs
+            .create(&cx, root, OsStr::new("conflict_b.txt"), 0o644, 0, 0)
+            .expect("create b");
+
+        let mut scope = RequestScope::empty();
+        let combined = (libc::RENAME_NOREPLACE | libc::RENAME_EXCHANGE) as u32;
+        let err = <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            root,
+            OsStr::new("conflict_a.txt"),
+            root,
+            OsStr::new("conflict_b.txt"),
+            combined,
+        )
+        .expect_err("RENAME_NOREPLACE + RENAME_EXCHANGE is contradictory");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn ext4_rename2_unknown_flag_is_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let _f = fs
+            .create(&cx, root, OsStr::new("unkflag_src.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        let mut scope = RequestScope::empty();
+        let err = <OpenFs as FsOps>::rename2(
+            &fs,
+            &cx,
+            &mut scope,
+            root,
+            OsStr::new("unkflag_src.txt"),
+            root,
+            OsStr::new("unkflag_dst.txt"),
+            0x8000_0000_u32,
+        )
+        .expect_err("unknown rename flags must be rejected");
+        assert_eq!(err.to_errno(), libc::EINVAL);
     }
 
     #[test]
