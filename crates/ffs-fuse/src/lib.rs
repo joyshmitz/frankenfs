@@ -955,6 +955,19 @@ impl WriteIntent {
     }
 
     #[cfg(target_os = "linux")]
+    const fn append_to_eof(self) -> bool {
+        let explicit_append = self.write_flags & fuse_consts::RWF_APPEND != 0;
+        let suppress_open_append = self.write_flags & fuse_consts::RWF_NOAPPEND != 0;
+        let open_append = self.flags & libc::O_APPEND == libc::O_APPEND;
+        explicit_append || (open_append && !suppress_open_append)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    const fn append_to_eof(self) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
     const fn sync_mode(self) -> Option<WriteSyncMode> {
         if self.flags & libc::O_SYNC == libc::O_SYNC {
             Some(WriteSyncMode::Full)
@@ -3168,6 +3181,7 @@ impl FrankenFuse {
         self.enforce_mutation_guards(RequestOp::Write, ino)?;
         let byte_offset =
             u64::try_from(offset).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
+        let mut operation_offset = byte_offset;
         let cx = Self::cx_for_request();
         let (written, _commit_seq) = {
             let _inode_guards = if intent.nowait() {
@@ -3177,10 +3191,16 @@ impl FrankenFuse {
                 self.acquire_mutation_inode_guards(&[InodeNumber(ino)])
             };
             self.with_request_scope(&cx, RequestOp::Write, |cx, scope| {
-                let bytes = self
-                    .inner
-                    .ops
-                    .write(cx, scope, InodeNumber(ino), byte_offset, data)?;
+                let write_offset = if intent.append_to_eof() {
+                    self.inner.ops.getattr(cx, scope, InodeNumber(ino))?.size
+                } else {
+                    byte_offset
+                };
+                operation_offset = write_offset;
+                let bytes =
+                    self.inner
+                        .ops
+                        .write(cx, scope, InodeNumber(ino), write_offset, data)?;
                 let seq = self.inner.ops.commit_request_scope(scope)?;
                 self.inner.readahead.invalidate_inode(InodeNumber(ino));
                 if let Some(sync_mode) = intent.sync_mode() {
@@ -3197,7 +3217,7 @@ impl FrankenFuse {
         }
         .map_err(|error| MutationDispatchError::Operation {
             error,
-            offset: Some(byte_offset),
+            offset: Some(operation_offset),
         })?;
         // Update writeback barrier if enabled.
         Ok(written)
@@ -8403,6 +8423,7 @@ mod tests {
         calls: Arc<Mutex<Vec<MutationCall>>>,
         fsync_errno: Option<i32>,
         record_scopes: bool,
+        getattr_size: u64,
     }
 
     impl MutationRecordingFs {
@@ -8411,6 +8432,7 @@ mod tests {
                 calls,
                 fsync_errno: None,
                 record_scopes: false,
+                getattr_size: 0,
             }
         }
 
@@ -8419,6 +8441,19 @@ mod tests {
                 calls,
                 fsync_errno: None,
                 record_scopes: true,
+                getattr_size: 0,
+            }
+        }
+
+        fn with_scope_recording_and_getattr_size(
+            calls: Arc<Mutex<Vec<MutationCall>>>,
+            getattr_size: u64,
+        ) -> Self {
+            Self {
+                calls,
+                fsync_errno: None,
+                record_scopes: true,
+                getattr_size,
             }
         }
 
@@ -8427,6 +8462,7 @@ mod tests {
                 calls,
                 fsync_errno: Some(errno),
                 record_scopes: true,
+                getattr_size: 0,
             }
         }
     }
@@ -8442,7 +8478,9 @@ mod tests {
                 .lock()
                 .expect("lock mutation calls")
                 .push(MutationCall::Getattr { ino });
-            Ok(test_inode_attr(ino.0, FfsFileType::RegularFile, 0o644))
+            let mut attr = test_inode_attr(ino.0, FfsFileType::RegularFile, 0o644);
+            attr.size = self.getattr_size;
+            Ok(attr)
         }
 
         fn lookup(
@@ -9679,6 +9717,135 @@ mod tests {
                 .iter()
                 .all(|call| !matches!(call, MutationCall::Fsync { .. })),
             "FUSE_WRITE_LOCKOWNER shares the raw bit used by RWF_DSYNC, so only the FUSE flags field can drive sync intent"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_rwf_append_uses_current_file_size_as_offset() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording_and_getattr_size(
+                Arc::clone(&calls),
+                123,
+            )),
+            &options,
+        );
+
+        let written = fuse
+            .dispatch_write_with_intent(
+                42,
+                0,
+                b"append",
+                WriteIntent::from_fuse(0, fuse_consts::RWF_APPEND, 0),
+            )
+            .expect("dispatch append write");
+        assert_eq!(written, 6);
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Getattr {
+                    ino: InodeNumber(42),
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(42),
+                    offset: 123,
+                    data: b"append".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_o_append_uses_current_file_size_as_offset() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording_and_getattr_size(
+                Arc::clone(&calls),
+                321,
+            )),
+            &options,
+        );
+
+        fuse.dispatch_write_with_intent(
+            42,
+            9,
+            b"open-append",
+            WriteIntent::from_fuse(0, 0, libc::O_APPEND),
+        )
+        .expect("dispatch O_APPEND write");
+        assert!(
+            calls
+                .lock()
+                .expect("lock calls")
+                .contains(&MutationCall::Write {
+                    ino: InodeNumber(42),
+                    offset: 321,
+                    data: b"open-append".to_vec(),
+                }),
+            "O_APPEND should resolve the write offset to current EOF"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_rwf_noappend_suppresses_open_append_offset_rewrite() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording_and_getattr_size(
+                Arc::clone(&calls),
+                999,
+            )),
+            &options,
+        );
+
+        fuse.dispatch_write_with_intent(
+            42,
+            17,
+            b"noappend",
+            WriteIntent::from_fuse(0, fuse_consts::RWF_NOAPPEND, libc::O_APPEND),
+        )
+        .expect("dispatch NOAPPEND write");
+        let (did_getattr, wrote_at_requested_offset) = {
+            let observed = calls.lock().expect("lock calls");
+            (
+                observed
+                    .iter()
+                    .any(|call| matches!(call, MutationCall::Getattr { .. })),
+                observed.contains(&MutationCall::Write {
+                    ino: InodeNumber(42),
+                    offset: 17,
+                    data: b"noappend".to_vec(),
+                }),
+            )
+        };
+        assert!(
+            !did_getattr,
+            "RWF_NOAPPEND should avoid EOF lookup for O_APPEND file flags"
+        );
+        assert!(
+            wrote_at_requested_offset,
+            "RWF_NOAPPEND should preserve the caller-provided offset"
         );
     }
 
