@@ -215,6 +215,11 @@ path = "fuzz_targets/fuzz_path_encoding_mount.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_fuse_splice_mount"
+path = "fuzz_targets/fuzz_fuse_splice_mount.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_repair_evidence_ledger"
 path = "fuzz_targets/fuzz_repair_evidence_ledger.rs"
 doc = false

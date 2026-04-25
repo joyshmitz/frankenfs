@@ -203,7 +203,11 @@ that actually exercise this surface (`generic/249`, `generic/591`, and
 `generic/680`). The 1 GiB `sendfile(2)` throughput comparison is retained as an
 ignored benchmark gate for `bd-qpoys`; the current measured gate emits
 `SCENARIO_RESULT|scenario_id=ext4_rw_sendfile_1g_vs_naive_read_write|outcome=PASS`
-for the >=2x contract.
+for the >=2x contract. Coverage-guided parity stress now also includes
+`fuzz_fuse_splice_mount`, which exercises the no-live-mount FUSE read/write
+and `copy_file_range` dispatch paths used by splice/sendfile-style transfers
+while checking deterministic mount-option labels and the explicit
+writeback-cache-disabled policy.
 
 ### 2.1 btrfs Experimental RW Capability Contract (Machine-Checkable)
 

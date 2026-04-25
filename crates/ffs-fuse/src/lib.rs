@@ -4520,6 +4520,41 @@ fn build_mount_options(options: &MountOptions) -> Vec<MountOption> {
     opts
 }
 
+fn mount_option_label(option: &MountOption) -> String {
+    match option {
+        MountOption::FSName(value) => format!("fsname={value}"),
+        MountOption::Subtype(value) => format!("subtype={value}"),
+        MountOption::CUSTOM(value) => value.clone(),
+        MountOption::AllowOther => "allow_other".to_owned(),
+        MountOption::AllowRoot => "allow_root".to_owned(),
+        MountOption::AutoUnmount => "auto_unmount".to_owned(),
+        MountOption::DefaultPermissions => "default_permissions".to_owned(),
+        MountOption::Dev => "dev".to_owned(),
+        MountOption::NoDev => "nodev".to_owned(),
+        MountOption::Suid => "suid".to_owned(),
+        MountOption::NoSuid => "nosuid".to_owned(),
+        MountOption::RO => "ro".to_owned(),
+        MountOption::RW => "rw".to_owned(),
+        MountOption::Exec => "exec".to_owned(),
+        MountOption::NoExec => "noexec".to_owned(),
+        MountOption::Atime => "atime".to_owned(),
+        MountOption::NoAtime => "noatime".to_owned(),
+        MountOption::DirSync => "dirsync".to_owned(),
+        MountOption::Sync => "sync".to_owned(),
+        MountOption::Async => "async".to_owned(),
+    }
+}
+
+/// Return canonical mount-option labels without requiring a live mount.
+#[doc(hidden)]
+#[must_use]
+pub fn mount_option_labels_for_fuzzing(options: &MountOptions) -> Vec<String> {
+    build_mount_options(options)
+        .iter()
+        .map(mount_option_label)
+        .collect()
+}
+
 fn validate_mountpoint(mountpoint: &Path) -> Result<(), FuseError> {
     if mountpoint.as_os_str().is_empty() {
         return Err(FuseError::InvalidMountpoint(

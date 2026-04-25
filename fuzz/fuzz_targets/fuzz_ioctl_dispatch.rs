@@ -630,12 +630,9 @@ fn build_ioctl_request(kind: CommandKind, cursor: &mut ByteCursor<'_>) -> (u32, 
             (kind.cmd(), request, out_size)
         }
         CommandKind::Unknown => {
+            let cmd = cursor.next_u32();
             let request_len = usize::from(cursor.next_u8() % 64);
-            (
-                kind.cmd(),
-                cursor.fill_bytes(request_len),
-                cursor.next_u32(),
-            )
+            (cmd, cursor.fill_bytes(request_len), cursor.next_u32())
         }
     }
 }

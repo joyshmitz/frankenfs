@@ -35,6 +35,7 @@ profiles/
 
 # Codex build artifacts
 target-codex*/
+target_rch*/
 
 # Compiler crash reports
 rustc-ice-*.txt
