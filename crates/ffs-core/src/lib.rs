@@ -11057,11 +11057,19 @@ impl OpenFs {
         }
 
         let access = XattrWriteAccess {
-            // The FUSE mount uses `default_permissions`, so ownership checks are
-            // expected to have already happened in-kernel.
+            // The FUSE mount uses `default_permissions`, so ownership +
+            // capability checks are expected to have already happened
+            // in-kernel before the request reaches us. In particular,
+            // overlayfs-as-upper writes trusted.overlay.* (opaque,
+            // redirect, metacopy) and the kernel will only forward the
+            // setxattr if CAP_SYS_ADMIN was held on entry — so trust
+            // that pre-validation here. Plumbing the kernel's actual
+            // capability decision through fuse_in_header.{uid,gid} +
+            // libcap is tracked separately; until then a permissive
+            // posture is the only one that matches overlayfs semantics.
             is_owner: true,
-            has_cap_fowner: false,
-            has_cap_sys_admin: false,
+            has_cap_fowner: true,
+            has_cap_sys_admin: true,
         };
         let existing = ffs_xattr::get_xattr_for_access(
             &inode,
@@ -27027,6 +27035,147 @@ mod tests {
         assert_eq!(
             fetched.crtime, original_crtime,
             "crtime must survive a setattr(mtime) round trip through disk"
+        );
+    }
+
+    // ── bd-z01zm: overlayfs trusted.overlay.* xattr round-trip ────────────
+    //
+    // overlayfs(5) marks lower/upper layer state via xattrs in the
+    // trusted namespace: trusted.overlay.opaque ("y" -> ignore lower
+    // layer below this dir), trusted.overlay.redirect ("/abs/path" ->
+    // resolve through the redirect), trusted.overlay.metacopy (presence
+    // -> file data lives in the lower layer). FrankenFS-as-the-lower-FS
+    // does not interpret these — the kernel overlayfs module does — but
+    // it MUST round-trip them losslessly so the overlayfs upper layer
+    // can write + read them through the FUSE mount.
+    //
+    // ffs-xattr already routes the trusted.* prefix to
+    // EXT4_XATTR_INDEX_TRUSTED, so trusted.overlay.* lands as
+    // (index=4, name="overlay.opaque") on disk — matching ext4 + the
+    // kernel overlayfs encoder. These regressions lock that contract.
+    //
+    // mknod(2) for whiteout char devices (S_IFCHR, rdev = makedev(0,0))
+    // is the OTHER half of overlayfs upper-layer parity and is tracked
+    // in a follow-up bead — dispatch_mknod currently rejects every
+    // non-regular type with EOPNOTSUPP.
+
+    #[test]
+    fn ext4_trusted_overlay_opaque_xattr_round_trip() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("ovl_opaque_dir"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        fs.setxattr(
+            &cx,
+            dir.ino,
+            "trusted.overlay.opaque",
+            b"y",
+            XattrSetMode::Set,
+        )
+        .expect("setxattr trusted.overlay.opaque");
+
+        let value = fs
+            .getxattr(&cx, dir.ino, "trusted.overlay.opaque")
+            .expect("getxattr opaque");
+        assert_eq!(value.as_deref(), Some(b"y" as &[u8]));
+
+        let names = fs.listxattr(&cx, dir.ino).expect("listxattr");
+        assert!(
+            names.iter().any(|n| n == "trusted.overlay.opaque"),
+            "list must surface trusted.overlay.opaque with full namespace prefix, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn ext4_trusted_overlay_redirect_xattr_round_trip() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("ovl_redir_dir"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        let redirect_target = b"/path/inside/lower/layer";
+        fs.setxattr(
+            &cx,
+            dir.ino,
+            "trusted.overlay.redirect",
+            redirect_target,
+            XattrSetMode::Set,
+        )
+        .expect("setxattr trusted.overlay.redirect");
+
+        let value = fs
+            .getxattr(&cx, dir.ino, "trusted.overlay.redirect")
+            .expect("getxattr redirect");
+        assert_eq!(value.as_deref(), Some(&redirect_target[..]));
+    }
+
+    #[test]
+    fn ext4_trusted_overlay_metacopy_xattr_zero_byte_value_round_trip() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let f = fs
+            .create(&cx, root, OsStr::new("ovl_meta.txt"), 0o644, 0, 0)
+            .expect("create");
+
+        // overlayfs writes metacopy as a zero-byte value; verify we
+        // round-trip an empty value losslessly.
+        fs.setxattr(
+            &cx,
+            f.ino,
+            "trusted.overlay.metacopy",
+            b"",
+            XattrSetMode::Set,
+        )
+        .expect("setxattr trusted.overlay.metacopy");
+
+        let value = fs
+            .getxattr(&cx, f.ino, "trusted.overlay.metacopy")
+            .expect("getxattr metacopy");
+        assert_eq!(value.as_deref(), Some(b"" as &[u8]));
+    }
+
+    #[test]
+    fn ext4_trusted_overlay_xattr_remove_round_trip() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let dir = fs
+            .mkdir(&cx, root, OsStr::new("ovl_remove_dir"), 0o755, 0, 0)
+            .expect("mkdir");
+
+        fs.setxattr(
+            &cx,
+            dir.ino,
+            "trusted.overlay.opaque",
+            b"y",
+            XattrSetMode::Set,
+        )
+        .expect("set");
+        let removed = fs
+            .removexattr(&cx, dir.ino, "trusted.overlay.opaque")
+            .expect("removexattr");
+        assert!(removed, "removexattr must report a deletion");
+
+        let value = fs
+            .getxattr(&cx, dir.ino, "trusted.overlay.opaque")
+            .expect("getxattr after remove");
+        assert_eq!(
+            value, None,
+            "value must be gone after removexattr trusted.overlay.opaque"
         );
     }
 
