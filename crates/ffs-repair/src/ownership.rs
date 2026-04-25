@@ -488,19 +488,63 @@ fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
 
 fn parse_iso8601(s: &str) -> Result<SystemTime, ()> {
     // Parse "YYYY-MM-DDTHH:MM:SSZ" format
-    if s.len() < 20 || !s.ends_with('Z') {
+    let bytes = s.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
         return Err(());
     }
-    let year: u64 = s[0..4].parse().map_err(|_| ())?;
-    let month: u64 = s[5..7].parse().map_err(|_| ())?;
-    let day: u64 = s[8..10].parse().map_err(|_| ())?;
-    let hours: u64 = s[11..13].parse().map_err(|_| ())?;
-    let minutes: u64 = s[14..16].parse().map_err(|_| ())?;
-    let seconds: u64 = s[17..19].parse().map_err(|_| ())?;
+    let year = parse_ascii_digits(&bytes[0..4])?;
+    let month = parse_ascii_digits(&bytes[5..7])?;
+    let day = parse_ascii_digits(&bytes[8..10])?;
+    let hours = parse_ascii_digits(&bytes[11..13])?;
+    let minutes = parse_ascii_digits(&bytes[14..16])?;
+    let seconds = parse_ascii_digits(&bytes[17..19])?;
+
+    if year < 1970
+        || !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+        || hours > 23
+        || minutes > 59
+        || seconds > 59
+    {
+        return Err(());
+    }
 
     let days = ymd_to_days(year, month, day);
     let total_secs = days * 86400 + hours * 3600 + minutes * 60 + seconds;
     Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(total_secs))
+}
+
+fn parse_ascii_digits(bytes: &[u8]) -> Result<u64, ()> {
+    let mut value = 0_u64;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return Err(());
+        }
+        value = value * 10 + u64::from(byte - b'0');
+    }
+    Ok(value)
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: u64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 fn ymd_to_days(year: u64, month: u64, day: u64) -> u64 {
@@ -587,6 +631,22 @@ mod tests {
     }
 
     #[test]
+    fn coordination_record_invalid_calendar_timestamp_treated_as_expired() {
+        let record = CoordinationRecord {
+            version: 1,
+            host_id: "host-a".into(),
+            hostname: "worker-01".into(),
+            pid: 1000,
+            claimed_at: "0000-01-01T00:00:00Z".into(),
+            lease_ttl_secs: 300,
+            lease_version: 1,
+            repair_generation: 1,
+            groups_owned: vec![],
+        };
+        assert!(record.is_expired(SystemTime::now()));
+    }
+
+    #[test]
     fn coordination_record_overflowing_ttl_treated_as_expired() {
         let record = CoordinationRecord {
             version: 1,
@@ -648,6 +708,34 @@ mod tests {
             .or_else(|_| now.duration_since(parsed))
             .unwrap_or(Duration::ZERO);
         assert!(delta.as_secs() < 2, "round-trip drift: {delta:?}");
+    }
+
+    #[test]
+    fn iso8601_parser_rejects_invalid_components() {
+        for invalid in [
+            "1969-12-31T23:59:59Z",
+            "2026-00-01T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2026-01-32T00:00:00Z",
+            "2026-01-01T24:00:00Z",
+            "2026-01-01T00:60:00Z",
+            "2026-01-01T00:00:60Z",
+            "2026/01/01T00:00:00Z",
+            "2026-aa-01T00:00:00Z",
+        ] {
+            assert!(parse_iso8601(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn iso8601_parser_rejects_non_ascii_without_panicking() {
+        assert!(parse_iso8601("2026-é1-01T00:00:0Z").is_err());
+    }
+
+    #[test]
+    fn iso8601_parser_accepts_leap_day() {
+        assert!(parse_iso8601("2024-02-29T12:34:56Z").is_ok());
     }
 
     #[test]

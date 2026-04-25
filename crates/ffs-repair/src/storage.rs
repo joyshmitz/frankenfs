@@ -304,6 +304,7 @@ impl<'a> RepairGroupStorage<'a> {
 
         let mut out = Vec::new();
         let mut next_expected_esi: Option<u32> = None;
+        let mut empty_tail_started = false;
         for block_index in 0..desc.repair_block_count {
             let block_num = BlockNumber(desc.repair_start_block.0 + u64::from(block_index));
             let block = self.device.read_block(cx, block_num)?;
@@ -315,6 +316,14 @@ impl<'a> RepairGroupStorage<'a> {
                 symbol_size,
                 next_expected_esi,
             )?;
+            if block_symbols.is_empty() {
+                empty_tail_started = true;
+            } else if empty_tail_started {
+                return Err(FfsError::RepairFailed(format!(
+                    "non-empty repair symbols after empty tail at block {}",
+                    block_num.0
+                )));
+            }
             out.append(&mut block_symbols);
             next_expected_esi = next_esi;
         }
@@ -405,13 +414,13 @@ impl<'a> RepairGroupStorage<'a> {
             )));
         }
 
-        if let Some(expected) = next_expected_esi {
-            if header.symbol_count > 0 && header.first_esi != expected {
-                return Err(FfsError::RepairFailed(format!(
-                    "non-contiguous ESI at block {}: first_esi={} expected={}",
-                    block_num.0, header.first_esi, expected
-                )));
-            }
+        if let Some(expected) = next_expected_esi
+            && header.first_esi != expected
+        {
+            return Err(FfsError::RepairFailed(format!(
+                "non-contiguous ESI at block {}: first_esi={} expected={}",
+                block_num.0, header.first_esi, expected
+            )));
         }
 
         let mut out = Vec::with_capacity(usize::from(header.symbol_count));
@@ -960,16 +969,67 @@ mod tests {
         let err = storage
             .read_repair_symbols(&cx)
             .expect_err("corrupted symbol metadata must fail");
-        match err {
-            FfsError::RepairFailed(message) => {
-                assert!(
-                    message.contains("header parse failed")
-                        || message.contains("no fully-valid repair symbols"),
-                    "expected symbol-header validation failure, got: {message}"
-                );
-            }
-            other => panic!("expected RepairFailed, got {other:?}"),
-        }
+        let message = match err {
+            FfsError::RepairFailed(message) => message,
+            other => format!("expected RepairFailed, got {other:?}"),
+        };
+        assert!(
+            message.contains("header parse failed")
+                || message.contains("no fully-valid repair symbols"),
+            "expected symbol-header validation failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn storage_rejects_non_empty_symbol_block_after_empty_tail() {
+        let cx = Cx::for_testing();
+        let device = MemBlockDevice::new(128, 64);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(5), BlockNumber(0), 16, 0, 4).expect("layout");
+        let storage = RepairGroupStorage::new(&device, layout);
+
+        let bootstrap = make_desc(layout, 0, 32);
+        storage
+            .write_group_desc_ext(&cx, &bootstrap)
+            .expect("write bootstrap descriptor");
+
+        let symbols_g1 = make_symbols(9_000, 5, usize::from(bootstrap.symbol_size));
+        storage
+            .write_repair_symbols(&cx, &symbols_g1, 1)
+            .expect("write generation 1 symbol blocks");
+
+        let active = storage
+            .read_group_desc_ext(&cx)
+            .expect("read active descriptor");
+        let mut raw = device
+            .read_block(&cx, active.repair_start_block)
+            .expect("read first symbol block")
+            .as_slice()
+            .to_vec();
+        let bogus_empty_prefix = RepairBlockHeader {
+            first_esi: symbols_g1[3].0,
+            symbol_count: 0,
+            symbol_size: active.symbol_size,
+            block_group: layout.group,
+            repair_generation: active.repair_generation,
+            checksum: 0,
+        };
+        raw[..RepairBlockHeader::SIZE].copy_from_slice(&bogus_empty_prefix.to_bytes());
+        device
+            .write_block(&cx, active.repair_start_block, &raw)
+            .expect("write corrupted empty-prefix symbol block");
+
+        let err = storage
+            .read_repair_symbols(&cx)
+            .expect_err("empty prefix before later symbols must fail");
+        let message = match err {
+            FfsError::RepairFailed(message) => message,
+            other => format!("expected RepairFailed, got {other:?}"),
+        };
+        assert!(
+            message.contains("empty tail") || message.contains("fully-valid"),
+            "expected empty-tail validation failure, got: {message}"
+        );
     }
 
     #[test]
