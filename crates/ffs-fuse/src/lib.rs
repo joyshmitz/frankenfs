@@ -86,6 +86,13 @@ const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
 /// + u32 projid + u32 cowextsize + 8-byte pad.
 const FS_IOC_FSGETXATTR: u32 = 0x801C_5821;
 const FS_IOC_FSGETXATTR_SIZE: u32 = 28;
+/// `FITRIM` = `_IOWR('X', 121, struct fstrim_range)` on x86_64.
+/// `struct fstrim_range` is 24 bytes (3 x u64): start + len + minlen.
+/// On success the kernel writes the bytes-discarded count back into
+/// the `len` field of the user-supplied buffer; FrankenFS's userspace
+/// FUSE has no direct discard path so this round-trips len = 0.
+const FITRIM: u32 = 0xC018_5879;
+const FITRIM_SIZE: u32 = 24;
 /// `FS_IOC_GETFSUUID` = `_IOR(0x15, 0, struct fsuuid2)` on x86_64
 /// (Linux 6.5+, see `<uapi/linux/fs.h>` `struct fsuuid2`). Reply is
 /// 17 bytes: `u8 len` + `u8 uuid[16]`. Encoded ioctl number per
@@ -1871,6 +1878,30 @@ impl FrankenFuse {
     /// `<uapi/linux/fs.h>`: `xflags | extsize | nextents | projid |
     /// cowextsize | 8 bytes pad`. The Linux FUSE driver does no byte-swapping
     /// on ioctl payloads, so the FS daemon must match host byte order.
+    /// Parse the 24-byte `struct fstrim_range` from FITRIM input.
+    /// Layout: u64 start + u64 len + u64 minlen, host-native.
+    fn parse_fstrim_range(buf: &[u8]) -> Result<(u64, u64, u64), i32> {
+        if buf.len() < FITRIM_SIZE as usize {
+            return Err(libc::EINVAL);
+        }
+        let start = u64::from_ne_bytes(buf[0..8].try_into().map_err(|_| libc::EINVAL)?);
+        let len = u64::from_ne_bytes(buf[8..16].try_into().map_err(|_| libc::EINVAL)?);
+        let min_len = u64::from_ne_bytes(buf[16..24].try_into().map_err(|_| libc::EINVAL)?);
+        Ok((start, len, min_len))
+    }
+
+    /// Serialise the FITRIM response: the kernel writes the
+    /// bytes-discarded count back into `fstrim_range.len` while
+    /// leaving start + minlen unchanged.
+    fn encode_fstrim_response(start: u64, bytes_discarded: u64, min_len: u64) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(FITRIM_SIZE as usize);
+        buf.extend_from_slice(&start.to_ne_bytes());
+        buf.extend_from_slice(&bytes_discarded.to_ne_bytes());
+        buf.extend_from_slice(&min_len.to_ne_bytes());
+        debug_assert_eq!(buf.len(), FITRIM_SIZE as usize);
+        buf
+    }
+
     /// Serialise the FS UUID into the 17-byte `struct fsuuid2`
     /// payload returned by `FS_IOC_GETFSUUID`. Layout per
     /// `<uapi/linux/fs.h>`: `u8 len` (always 16 for ext4 + btrfs) +
@@ -2247,6 +2278,29 @@ impl FrankenFuse {
                         .get_inode_generation(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(generation) => IoctlResult::Data(generation.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FITRIM => {
+                if self.inner.read_only {
+                    return IoctlResult::Error(libc::EROFS);
+                }
+                if out_size < FITRIM_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let (start, len, min_len) = match Self::parse_fstrim_range(in_data) {
+                    Ok(parsed) => parsed,
+                    Err(errno) => return IoctlResult::Error(errno),
+                };
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlWrite, |cx, scope| {
+                    self.inner.ops.trim_range(cx, scope, start, len, min_len)
+                }) {
+                    Ok(bytes_discarded) => IoctlResult::Data(Self::encode_fstrim_response(
+                        start,
+                        bytes_discarded,
+                        min_len,
+                    )),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -4910,6 +4964,7 @@ mod tests {
         GetFsxattr(InodeNumber),
         SetFsxattr(InodeNumber, FsxattrInfo),
         FsUuid,
+        TrimRange(u64, u64, u64),
         Commit,
         End(RequestOp),
         UnregisterMoveExtDonor(u32),
@@ -5293,6 +5348,24 @@ mod tests {
             Ok(())
         }
 
+        fn trim_range(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            start: u64,
+            len: u64,
+            min_len: u64,
+        ) -> ffs_error::Result<u64> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::TrimRange(start, len, min_len));
+            // Pretend the device discarded a third of the requested
+            // range so the encoder regression can pin a non-zero
+            // bytes-discarded value.
+            Ok(len / 3)
+        }
+
         fn fs_uuid(&self) -> ffs_error::Result<[u8; 16]> {
             self.calls
                 .lock()
@@ -5600,6 +5673,81 @@ mod tests {
                 IoctlCall::GetFsxattr(InodeNumber(17)),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fitrim_round_trips_24_byte_struct_writing_back_bytes_discarded() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+
+        // start=4096, len=12_288, min_len=4096
+        let mut req = Vec::with_capacity(24);
+        req.extend_from_slice(&4096_u64.to_ne_bytes());
+        req.extend_from_slice(&12_288_u64.to_ne_bytes());
+        req.extend_from_slice(&4096_u64.to_ne_bytes());
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FITRIM, &req, 24);
+        let IoctlResult::Data(reply) = response else {
+            panic!("expected IoctlResult::Data, got {response:?}");
+        };
+        assert_eq!(reply.len(), 24);
+        let start = u64::from_ne_bytes(reply[0..8].try_into().unwrap());
+        let len = u64::from_ne_bytes(reply[8..16].try_into().unwrap());
+        let min_len = u64::from_ne_bytes(reply[16..24].try_into().unwrap());
+        assert_eq!(start, 4096, "FITRIM must echo start unchanged");
+        assert_eq!(
+            len,
+            12_288 / 3,
+            "FITRIM rewrites len with bytes_discarded (stub returns len/3)"
+        );
+        assert_eq!(min_len, 4096, "FITRIM must echo minlen unchanged");
+
+        let trace = calls.lock().expect("lock ioctl calls").clone();
+        assert!(
+            trace
+                .iter()
+                .any(|c| matches!(c, IoctlCall::TrimRange(4096, 12_288, 4096))),
+            "must record TrimRange call: {trace:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fitrim_short_input_returns_einval() {
+        let fuse = FrankenFuse::with_options(
+            Box::new(IoctlRecordingFs::new(
+                0,
+                Arc::new(Mutex::new(Vec::new())),
+            )),
+            &MountOptions {
+                read_only: false,
+                ..MountOptions::default()
+            },
+        );
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FITRIM, &[0_u8; 23], 24);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EINVAL)),
+            "23-byte input must surface EINVAL, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fitrim_read_only_mount_returns_erofs() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+        let req = vec![0_u8; 24];
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FITRIM, &req, 24);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EROFS)),
+            "read-only mount must reject FITRIM with EROFS, got {response:?}"
         );
     }
 

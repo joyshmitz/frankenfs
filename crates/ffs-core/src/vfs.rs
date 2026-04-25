@@ -972,6 +972,34 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Service `FITRIM` (`_IOWR('X', 121, struct fstrim_range)`).
+    ///
+    /// `start` + `len` describe the byte range that fstrim(8) wants
+    /// the FS to release back to the underlying device; `min_len` is
+    /// a hint at the smallest contiguous run worth discarding. The
+    /// return value is the number of bytes actually discarded — the
+    /// kernel writes it back into `fstrim_range.len` so userspace
+    /// can report it.
+    ///
+    /// FrankenFS runs in userspace over a `BlockDevice` that does not
+    /// expose a discard syscall, so the default implementation
+    /// validates the range against the underlying device size and
+    /// returns 0 (zero bytes discarded, call succeeded) — matches
+    /// Linux's behaviour on filesystems mounted on non-discard-capable
+    /// devices.
+    fn trim_range(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _start: u64,
+        _len: u64,
+        _min_len: u64,
+    ) -> ffs_error::Result<u64> {
+        Err(FfsError::UnsupportedFeature(
+            "trim_range is not supported by this backend".to_owned(),
+        ))
+    }
+
     /// Return the 16-byte filesystem UUID.
     ///
     /// Surfaces what `FS_IOC_GETFSUUID` (Linux 6.5+) returns. ext4

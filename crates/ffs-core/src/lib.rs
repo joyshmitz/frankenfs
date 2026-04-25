@@ -17165,6 +17165,37 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn trim_range(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        start: u64,
+        len: u64,
+        _min_len: u64,
+    ) -> ffs_error::Result<u64> {
+        // Validate the range fits inside the device's byte span.
+        // ext4_trim_fs and btrfs_trim_fs both reject out-of-bounds
+        // calls with EINVAL — match that behaviour rather than
+        // silently truncating the request.
+        let device_bytes = self.dev.len_bytes();
+        if start >= device_bytes {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
+        }
+        // Length saturates against the tail of the device; the kernel
+        // does the same so a user passing fstrim_range.len = u64::MAX
+        // (the documented "trim everything past start") works.
+        let _effective = len.min(device_bytes - start);
+
+        // FrankenFS sits over an opaque BlockDevice trait that has no
+        // discard syscall, so no physical bytes are released. Return 0
+        // — userspace fstrim(8) will report "0 bytes were trimmed"
+        // which is the correct outcome for a discard-incapable
+        // backing device.
+        Ok(0)
+    }
+
     fn set_inode_fsxattr(
         &self,
         cx: &Cx,
@@ -27981,6 +28012,58 @@ mod tests {
             "nextents must be at least 1 after writing data, got {}",
             info.nextents
         );
+    }
+
+    // ── bd-vwzei: FITRIM (fstrim(8) compat) ───────────────────────────────
+    //
+    // FITRIM lets fstrim(8) ask a mounted FS to discard freed blocks.
+    // FrankenFS sits over an opaque BlockDevice with no discard
+    // syscall, so ext4_trim_fs equivalent is a validate-and-return-0
+    // — matches Linux's behaviour on filesystems backed by devices
+    // without discard support. The bytes-discarded return value lets
+    // userspace report "0 bytes discarded" without an error.
+
+    #[test]
+    fn ext4_trim_range_within_device_returns_zero_discarded() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let mut scope = RequestScope::empty();
+        let bytes = <OpenFs as FsOps>::trim_range(&fs, &cx, &mut scope, 0, 16 * 1024 * 1024, 4096)
+            .expect("trim_range must succeed on a discard-incapable backing device");
+        assert_eq!(
+            bytes, 0,
+            "FrankenFS over a non-discard BlockDevice reports 0 bytes discarded"
+        );
+    }
+
+    #[test]
+    fn ext4_trim_range_start_past_device_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let mut scope = RequestScope::empty();
+        // A start at u64::MAX is unambiguously past EOF for any image.
+        let err = <OpenFs as FsOps>::trim_range(&fs, &cx, &mut scope, u64::MAX, 4096, 4096)
+            .expect_err("start past device must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn ext4_trim_range_max_len_saturates_against_tail() {
+        // Pass len = u64::MAX (the documented "trim everything past
+        // start" idiom that fstrim -o 0 -l 0 / fstrim --all use). Must
+        // not overflow internal arithmetic and must succeed.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let mut scope = RequestScope::empty();
+        let bytes = <OpenFs as FsOps>::trim_range(&fs, &cx, &mut scope, 0, u64::MAX, 0)
+            .expect("len = u64::MAX must saturate, not overflow");
+        assert_eq!(bytes, 0);
     }
 
     // ── bd-9llzj: FS_IOC_GETFSUUID (struct fsuuid2) ───────────────────────
