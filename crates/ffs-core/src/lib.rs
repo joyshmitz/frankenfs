@@ -8643,6 +8643,171 @@ impl OpenFs {
         Ok(attr)
     }
 
+    /// `mknod(2)` for non-regular file types (char/block device, fifo,
+    /// socket). Regular-file creation goes through [`Self::ext4_create`];
+    /// directories through [`Self::ext4_mkdir`]; symlinks through
+    /// [`Self::ext4_symlink`].
+    ///
+    /// `mode` carries the full S_IF* + permission bits. `rdev` is the
+    /// kernel-encoded device number from `makedev(2)`; ignored for
+    /// FIFO/socket (must be 0).
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::significant_drop_tightening
+    )]
+    fn ext4_mknod(
+        &self,
+        cx: &Cx,
+        _scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &[u8],
+        mode: u16,
+        rdev: u32,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        Self::validate_single_path_component(name)?;
+
+        let s_ifmt = mode & ffs_types::S_IFMT;
+        // Map the file-type bits to the on-disk dir-entry type. Anything
+        // outside the supported set returns EINVAL — `dispatch_mknod`
+        // already filters most of these but the FsOps surface is also
+        // callable in-process.
+        let (entry_type, accepts_rdev) = match s_ifmt {
+            ffs_types::S_IFCHR => (ffs_ondisk::Ext4FileType::Chrdev, true),
+            ffs_types::S_IFBLK => (ffs_ondisk::Ext4FileType::Blkdev, true),
+            ffs_types::S_IFIFO => (ffs_ondisk::Ext4FileType::Fifo, false),
+            ffs_types::S_IFSOCK => (ffs_ondisk::Ext4FileType::Sock, false),
+            _ => {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+            }
+        };
+        if !accepts_rdev && rdev != 0 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EINVAL)));
+        }
+
+        let alloc_mutex = self.require_alloc_state()?;
+        let block_dev = self.block_device_adapter();
+        let (tstamp_secs, tstamp_nanos) = Self::now_timestamp();
+
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let csum_seed = sb.csum_seed();
+
+        let parent_inode = self.read_inode(cx, parent)?;
+        if !parent_inode.is_dir() {
+            return Err(FfsError::NotDirectory);
+        }
+
+        if self.lookup_name(cx, &parent_inode, name)?.is_some() {
+            return Err(FfsError::Exists);
+        }
+
+        let mut alloc = alloc_mutex.lock();
+        let Ext4AllocState {
+            geo,
+            groups,
+            persist_ctx,
+        } = &mut *alloc;
+
+        let parent_group = GroupNumber(
+            u32::try_from(parent.0.saturating_sub(1) / u64::from(geo.inodes_per_group))
+                .map_err(|_| FfsError::Format("parent inode group index exceeds u32".into()))?,
+        );
+        let (ino, mut new_inode) = ffs_inode::create_inode(
+            cx,
+            &block_dev,
+            geo,
+            groups,
+            mode, // full mode including S_IF* bits — no S_IFREG OR
+            uid,
+            gid,
+            parent_group,
+            csum_seed,
+            tstamp_secs,
+            tstamp_nanos,
+            persist_ctx,
+        )?;
+
+        // Devices + FIFOs + sockets do not own data extents. Strip the
+        // EXT4_EXTENTS_FL flag the create_inode helper unconditionally
+        // sets and stash rdev in the i_block area for char/block.
+        // Old encoding (i_block[0]): 16-bit rdev with 8-bit major in
+        // bits[15:8] + 8-bit minor in bits[7:0]. Use it when rdev fits
+        // in 16 bits (matches Linux's ext4_encode_dev preference).
+        // Otherwise fall back to the new encoding in i_block[1] which
+        // packs 12-bit major + 20-bit minor.
+        new_inode.flags &= !ffs_types::EXT4_EXTENTS_FL;
+        let mut iblock = [0_u8; 60];
+        if accepts_rdev {
+            if u16::try_from(rdev).is_ok() {
+                iblock[0..4].copy_from_slice(&rdev.to_le_bytes());
+            } else {
+                // i_block[1] holds the new-format rdev; i_block[0] stays 0.
+                iblock[4..8].copy_from_slice(&rdev.to_le_bytes());
+            }
+        }
+        new_inode.extent_bytes = iblock.to_vec();
+        // FIFOs/sockets/devices have no allocated data blocks.
+        new_inode.blocks = 0;
+        new_inode.size = 0;
+
+        if let Err(err) = ffs_inode::write_inode(cx, &block_dev, geo, groups, ino, &new_inode, csum_seed) {
+            // Roll back the inode allocation on write failure.
+            let mut rollback = new_inode.clone();
+            let _ = ffs_inode::delete_inode(
+                cx,
+                &block_dev,
+                geo,
+                groups,
+                ino,
+                &mut rollback,
+                csum_seed,
+                tstamp_secs,
+                persist_ctx,
+            );
+            return Err(err);
+        }
+
+        let attr = inode_to_attr(sb, ino, &new_inode);
+
+        if let Err(err) = self.ext4_add_dir_entry(
+            cx,
+            &mut alloc,
+            parent,
+            &parent_inode,
+            name,
+            ino,
+            entry_type,
+            csum_seed,
+            tstamp_secs,
+            tstamp_nanos,
+        ) {
+            let mut rollback_inode = new_inode;
+            let Ext4AllocState {
+                geo,
+                groups,
+                persist_ctx,
+            } = &mut *alloc;
+            ffs_inode::delete_inode(
+                cx,
+                &block_dev,
+                geo,
+                groups,
+                ino,
+                &mut rollback_inode,
+                csum_seed,
+                tstamp_secs,
+                persist_ctx,
+            )?;
+            return Err(err);
+        }
+
+        Ok(attr)
+    }
+
     /// Create a directory inside an ext4 parent directory.
     #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     #[allow(clippy::too_many_arguments)]
@@ -14380,6 +14545,31 @@ impl OpenFs {
         )
     }
 
+    /// `mknod(2)` for char/block devices, FIFOs, and sockets.
+    ///
+    /// `mode` carries the full S_IF* + permission bits. `rdev` is the
+    /// `makedev(2)`-encoded device number, ignored for FIFO + socket.
+    /// Use [`Self::create`] for regular files and [`Self::mkdir`] for
+    /// directories.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mknod(
+        &self,
+        cx: &Cx,
+        parent: InodeNumber,
+        name: &OsStr,
+        mode: u16,
+        rdev: u32,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.handle_ext4_write_result(
+            "mknod",
+            self.with_latest_scope(|scope| {
+                <Self as FsOps>::mknod(self, cx, scope, parent, name, mode, rdev, uid, gid)
+            }),
+        )
+    }
+
     pub fn mkdir(
         &self,
         cx: &Cx,
@@ -16058,6 +16248,36 @@ impl FsOps for OpenFs {
             FsFlavor::Btrfs(_) => {
                 self.btrfs_create(cx, parent, name.as_encoded_bytes(), mode, uid, gid)
             }
+        }
+    }
+
+    fn mknod(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        mode: u16,
+        rdev: u32,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => self
+                .ext4_mknod(
+                    cx,
+                    scope,
+                    Self::ext4_canonical_inode(parent),
+                    name.as_encoded_bytes(),
+                    mode,
+                    rdev,
+                    uid,
+                    gid,
+                )
+                .map(Self::ext4_present_attr),
+            FsFlavor::Btrfs(_) => Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::ENOTSUP,
+            ))),
         }
     }
 
@@ -27036,6 +27256,153 @@ mod tests {
             fetched.crtime, original_crtime,
             "crtime must survive a setattr(mtime) round trip through disk"
         );
+    }
+
+    // ── bd-dc9y5: mknod for char/block devices, FIFOs, sockets ────────────
+    //
+    // dispatch_mknod previously rejected every non-regular file type
+    // with EOPNOTSUPP, so overlayfs-as-upper whiteouts (S_IFCHR with
+    // rdev = makedev(0,0)), POSIX FIFOs, Unix-domain socket files, and
+    // standard /dev-style device nodes could not be created through
+    // the mount. ext4_mknod now routes the full set: char/block use
+    // the encoded rdev in i_block, FIFO/socket use mode bits only.
+
+    #[test]
+    fn ext4_mknod_whiteout_char_device_round_trips_through_getattr() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // overlayfs whiteout: S_IFCHR with rdev = makedev(0, 0) = 0,
+        // mode 0o000 + O_WRONLY perms. The kernel uses 0o600 by
+        // convention; we test 0o600 explicitly because the bit pattern
+        // is what overlayfs encodes.
+        let mode = ffs_types::S_IFCHR | 0o600;
+        let attr = fs
+            .mknod(&cx, root, OsStr::new("whiteout"), mode, 0, 0, 0)
+            .expect("mknod whiteout");
+        assert_eq!(attr.kind, FileType::CharDevice, "whiteout is a char device");
+        assert_eq!(
+            attr.rdev, 0,
+            "overlayfs whiteout has rdev = 0 from makedev(0, 0)"
+        );
+
+        let fetched = fs.getattr(&cx, attr.ino).expect("getattr whiteout");
+        assert_eq!(fetched.kind, FileType::CharDevice);
+        assert_eq!(fetched.rdev, 0);
+        assert_eq!(fetched.size, 0);
+        assert_eq!(fetched.blocks, 0, "device inode has no data blocks");
+    }
+
+    #[test]
+    fn ext4_mknod_block_device_preserves_rdev_through_getattr() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // makedev(8, 1) for /dev/sda1 in old encoding fits in a u16:
+        // major 8 in bits[15:8], minor 1 in bits[7:0] -> 0x0801.
+        let rdev = (8_u32 << 8) | 1;
+        let mode = ffs_types::S_IFBLK | 0o660;
+        let attr = fs
+            .mknod(&cx, root, OsStr::new("sda1"), mode, rdev, 0, 6)
+            .expect("mknod block device");
+        assert_eq!(attr.kind, FileType::BlockDevice);
+        assert_eq!(attr.rdev, rdev, "block device rdev round-trips");
+
+        let fetched = fs.getattr(&cx, attr.ino).expect("getattr sda1");
+        assert_eq!(fetched.kind, FileType::BlockDevice);
+        assert_eq!(fetched.rdev, rdev);
+    }
+
+    #[test]
+    fn ext4_mknod_fifo_and_socket_succeed_with_zero_rdev() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let fifo = fs
+            .mknod(
+                &cx,
+                root,
+                OsStr::new("named.fifo"),
+                ffs_types::S_IFIFO | 0o644,
+                0,
+                0,
+                0,
+            )
+            .expect("mknod fifo");
+        assert_eq!(fifo.kind, FileType::Fifo);
+
+        let sock = fs
+            .mknod(
+                &cx,
+                root,
+                OsStr::new("control.sock"),
+                ffs_types::S_IFSOCK | 0o600,
+                0,
+                0,
+                0,
+            )
+            .expect("mknod socket");
+        assert_eq!(sock.kind, FileType::Socket);
+    }
+
+    #[test]
+    fn ext4_mknod_fifo_with_nonzero_rdev_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // FIFO + non-zero rdev: rdev is meaningless for FIFOs and the
+        // POSIX mknod(2) man page requires it to be 0 (or ignored).
+        // ext4_mknod rejects with EINVAL to surface the misuse.
+        let err = fs
+            .mknod(
+                &cx,
+                root,
+                OsStr::new("bad.fifo"),
+                ffs_types::S_IFIFO | 0o644,
+                0x0801,
+                0,
+                0,
+            )
+            .expect_err("FIFO + rdev != 0 must fail");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    #[test]
+    fn ext4_mknod_unsupported_file_type_returns_einval() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        // S_IFREG is handled by `create`, S_IFDIR by `mkdir`, S_IFLNK
+        // by `symlink`. Calling mknod with a regular-file mode is
+        // wrong-API-misuse: the file-type branch in ext4_mknod rejects
+        // it with EINVAL rather than silently routing to create.
+        let err = fs
+            .mknod(
+                &cx,
+                root,
+                OsStr::new("wrong_api.txt"),
+                ffs_types::S_IFREG | 0o644,
+                0,
+                0,
+                0,
+            )
+            .expect_err("mknod with S_IFREG must be rejected");
+        assert_eq!(err.to_errno(), libc::EINVAL);
     }
 
     // ── bd-z01zm: overlayfs trusted.overlay.* xattr round-trip ────────────

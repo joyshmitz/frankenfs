@@ -2628,20 +2628,62 @@ impl FrankenFuse {
         gid: u32,
     ) -> Result<InodeAttr, MutationDispatchError> {
         self.enforce_mutation_guards(RequestOp::Create, parent)?;
-        if rdev != 0 || mode & libc::S_IFMT != libc::S_IFREG {
+
+        let s_ifmt = mode & libc::S_IFMT;
+        // Regular files keep the legacy `create` fast path so we avoid
+        // mode-bit churn for the common case. Char/block devices,
+        // FIFOs, and Unix-domain sockets route through ops.mknod which
+        // sets up the device-type inode shape (no extents, rdev in
+        // i_block for char/block). overlayfs whiteouts land here as
+        // S_IFCHR + rdev = makedev(0,0) = 0.
+        if rdev == 0 && s_ifmt == libc::S_IFREG {
+            let cx = Self::cx_for_request();
+            return {
+                let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
+                self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
+                    let attr = self.inner.ops.create(
+                        cx,
+                        scope,
+                        InodeNumber(parent),
+                        name,
+                        (mode & 0o7777) as u16,
+                        uid,
+                        gid,
+                    )?;
+                    self.inner.ops.commit_request_scope(scope)?;
+                    Ok(attr)
+                })
+            }
+            .map_err(|error| MutationDispatchError::Operation {
+                error,
+                offset: None,
+            });
+        }
+        let supported_type = matches!(
+            s_ifmt,
+            libc::S_IFCHR | libc::S_IFBLK | libc::S_IFIFO | libc::S_IFSOCK
+        );
+        if !supported_type {
             return Err(MutationDispatchError::Errno(libc::EOPNOTSUPP));
         }
+
+        // Build the full ext4-flavoured 16-bit mode (file-type bits +
+        // permission bits). Truncation is bounded by S_IFMT being
+        // the high 4 bits of mode and 0o7777 capping the lower 12.
+        let full_mode = u16::try_from(s_ifmt | (mode & 0o7777))
+            .map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
 
         let cx = Self::cx_for_request();
         {
             let _inode_guards = self.acquire_mutation_inode_guards(&[InodeNumber(parent)]);
             self.with_request_scope(&cx, RequestOp::Create, |cx, scope| {
-                let attr = self.inner.ops.create(
+                let attr = self.inner.ops.mknod(
                     cx,
                     scope,
                     InodeNumber(parent),
                     name,
-                    (mode & 0o7777) as u16,
+                    full_mode,
+                    rdev,
                     uid,
                     gid,
                 )?;

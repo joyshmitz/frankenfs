@@ -669,6 +669,34 @@ pub trait FsOps: Send + Sync {
         Err(FfsError::ReadOnly)
     }
 
+    /// `mknod(2)` for non-regular file types.
+    ///
+    /// `mode` carries the full S_IF* + permission bits. `rdev` is the
+    /// `makedev(2)`-encoded device number, ignored for FIFO and socket.
+    /// Regular-file creation goes through [`Self::create`] and dirs
+    /// through [`Self::mkdir`]; this method handles char/block devices,
+    /// FIFOs, and sockets — the file types that overlayfs whiteouts,
+    /// POSIX named pipes, and Unix-domain socket files depend on.
+    ///
+    /// The default implementation returns `ENOTSUP` so backends that
+    /// only support regular files (e.g. tests, read-only mounts) are
+    /// not silently broken when callers expect device-creation
+    /// semantics.
+    #[allow(clippy::too_many_arguments)]
+    fn mknod(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _parent: InodeNumber,
+        _name: &OsStr,
+        _mode: u16,
+        _rdev: u32,
+        _uid: u32,
+        _gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::ENOTSUP)))
+    }
+
     /// Rename with `renameat2(2)` flags (FUSE_RENAME2 opcode).
     ///
     /// `flags` is the bitset defined by `<linux/fs.h>`:
