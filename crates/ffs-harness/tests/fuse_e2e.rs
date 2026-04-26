@@ -1509,6 +1509,16 @@ try:
     try:
         written = os.pwritev(fd, [payload], offset, flag)
     except OSError as exc:
+        if flag_name == "RWF_NOWAIT" and exc.errno == errno.EAGAIN:
+            with open(path, "rb") as fh:
+                readback = fh.read()
+            print(json.dumps({
+                "skipped": "rwf_nowait_eagain_without_mutation",
+                "errno": exc.errno,
+                "expected_hex": initial.hex(),
+                "readback_hex": readback.hex(),
+            }, sort_keys=True))
+            sys.exit(0)
         if exc.errno in unsupported_errnos:
             with open(path, "rb") as fh:
                 readback = fh.read()
@@ -3899,6 +3909,66 @@ fn ext4_fuse_pwritev2_rwf_hipri_preserves_normal_offset_write() {
         "ext4_rw_pwritev2_rwf_hipri_hint",
         "PASS",
         Some("rwf_hipri_normal_offset_write"),
+    );
+}
+
+#[test]
+fn ext4_fuse_pwritev2_rwf_nowait_preserves_uncontended_offset_write() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let report = run_pwritev2_rwf_hint_probe(
+        &mnt,
+        "RWF_NOWAIT",
+        "rwf_nowait_probe.bin",
+        b"abcdef",
+        b"NW",
+        2,
+    );
+    if let Some(skip_reason) = report["skipped"].as_str() {
+        assert_eq!(
+            report["readback_hex"].as_str(),
+            report["expected_hex"].as_str(),
+            "transport-level RWF_NOWAIT refusal must not mutate data: {report}"
+        );
+        emit_scenario_result(
+            "ext4_rw_pwritev2_rwf_nowait_uncontended",
+            "SKIP",
+            Some(skip_reason),
+        );
+        return;
+    }
+
+    assert_eq!(
+        report["written"].as_i64(),
+        Some(i64::try_from(b"NW".len()).expect("payload length fits i64")),
+        "RWF_NOWAIT should report the normal write length when uncontended: {report}"
+    );
+    assert_eq!(
+        report["readback_hex"].as_str(),
+        report["expected_hex"].as_str(),
+        "RWF_NOWAIT should preserve caller offset and normal write semantics when uncontended: {report}"
+    );
+
+    emit_scenario_result(
+        "ext4_rw_pwritev2_rwf_nowait_uncontended",
+        "PASS",
+        Some("rwf_nowait_uncontended_offset_write"),
     );
 }
 
@@ -10540,6 +10610,50 @@ fn btrfs_fuse_pwritev2_rwf_hipri_preserves_normal_offset_write() {
             "btrfs_rw_pwritev2_rwf_hipri_hint",
             "PASS",
             Some("rwf_hipri_normal_offset_write"),
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_pwritev2_rwf_nowait_preserves_uncontended_offset_write() {
+    with_btrfs_rw_mount(|mnt| {
+        let report = run_pwritev2_rwf_hint_probe(
+            mnt,
+            "RWF_NOWAIT",
+            "btrfs_rwf_nowait_probe.bin",
+            b"abcdef",
+            b"NW",
+            2,
+        );
+        if let Some(skip_reason) = report["skipped"].as_str() {
+            assert_eq!(
+                report["readback_hex"].as_str(),
+                report["expected_hex"].as_str(),
+                "transport-level btrfs RWF_NOWAIT refusal must not mutate data: {report}"
+            );
+            emit_scenario_result(
+                "btrfs_rw_pwritev2_rwf_nowait_uncontended",
+                "SKIP",
+                Some(skip_reason),
+            );
+            return;
+        }
+
+        assert_eq!(
+            report["written"].as_i64(),
+            Some(i64::try_from(b"NW".len()).expect("payload length fits i64")),
+            "btrfs RWF_NOWAIT should report the normal write length when uncontended: {report}"
+        );
+        assert_eq!(
+            report["readback_hex"].as_str(),
+            report["expected_hex"].as_str(),
+            "btrfs RWF_NOWAIT should preserve caller offset and normal write semantics when uncontended: {report}"
+        );
+
+        emit_scenario_result(
+            "btrfs_rw_pwritev2_rwf_nowait_uncontended",
+            "PASS",
+            Some("rwf_nowait_uncontended_offset_write"),
         );
     });
 }
