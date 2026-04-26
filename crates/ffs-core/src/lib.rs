@@ -17692,6 +17692,31 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn clear_extent_status_cache(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        // FrankenFS keeps extent-status state per-RequestScope rather
+        // than in a process-lifetime per-inode cache, so there is
+        // nothing for ext4_clear_inode_es to drop. Read the inode
+        // through the ext4 / btrfs canonical lookup so a bogus inode
+        // number surfaces as ENOENT/EINVAL the same way the kernel
+        // path would, then return Ok — matches the kernel's "best
+        // effort, never an error for a valid inode" contract.
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let _ = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                Ok(())
+            }
+            FsFlavor::Btrfs(_) => {
+                let _ = self.btrfs_read_inode_attr(cx, ino)?;
+                Ok(())
+            }
+        }
+    }
+
     fn get_inode_generation(
         &self,
         cx: &Cx,

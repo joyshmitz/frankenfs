@@ -123,6 +123,13 @@ const FS_IOC_FSSETXATTR_SIZE: usize = 28;
 /// size=0); the kernel returns 0 on success and never on a valid
 /// inode (block-mapped inodes are a no-op, not an error).
 const EXT4_IOC_PRECACHE_EXTENTS: u32 = 0x0000_6626;
+/// `EXT4_IOC_CLEAR_ES_CACHE` = `_IO('f', 40)` = `0x0000_6628`. Hint
+/// ioctl that asks ext4 to drop the in-memory extent status (`es`)
+/// cache for an inode so the next read repopulates it from the
+/// on-disk extent tree. e2fsprogs uses it to defeat caching after
+/// offline metadata edits via `debugfs`. No input or output payload
+/// (it's `_IO`, size=0).
+const EXT4_IOC_CLEAR_ES_CACHE: u32 = 0x0000_6628;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
@@ -2624,6 +2631,23 @@ impl FrankenFuse {
                 let cx = Self::cx_for_request();
                 match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
                     self.inner.ops.precache_extents(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_CLEAR_ES_CACHE => {
+                // _IO with no payload: same dispatch shape as
+                // EXT4_IOC_PRECACHE_EXTENTS. ext4_clear_inode_es is
+                // always a successful no-op for a valid inode in the
+                // kernel; we mirror that contract by routing through
+                // FsOps::clear_extent_status_cache and propagating only
+                // backend errors (e.g. ENOENT for a bogus inode).
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner
+                        .ops
+                        .clear_extent_status_cache(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -5360,6 +5384,7 @@ mod tests {
         SetFsxattr(InodeNumber, FsxattrInfo),
         FsUuid,
         PrecacheExtents(InodeNumber),
+        ClearEsCache(InodeNumber),
         TrimRange(u64, u64, u64),
         Commit,
         End(RequestOp),
@@ -5806,6 +5831,19 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::PrecacheExtents(ino));
+            Ok(())
+        }
+
+        fn clear_extent_status_cache(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::ClearEsCache(ino));
             Ok(())
         }
 
@@ -6346,6 +6384,54 @@ mod tests {
             &[
                 IoctlCall::Begin(RequestOp::IoctlRead),
                 IoctlCall::PrecacheExtents(InodeNumber(7)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_clear_es_cache_routes_to_fsops_with_empty_reply() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 91, 0, EXT4_IOC_CLEAR_ES_CACHE, &[], 0);
+        assert_eq!(
+            response,
+            IoctlResult::Data(Vec::new()),
+            "CLEAR_ES_CACHE returns success with no payload, got {response:?}"
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::ClearEsCache(InodeNumber(91)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_clear_es_cache_ignores_input_payload_and_out_size() {
+        // _IO has no payload; the dispatcher must accept any in_data
+        // length or out_size and never read either, matching the
+        // kernel's `_IO` contract.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            13,
+            0,
+            EXT4_IOC_CLEAR_ES_CACHE,
+            &[0xCA, 0xFE, 0xBA, 0xBE, 0x00],
+            128,
+        );
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::ClearEsCache(InodeNumber(13)),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
         );

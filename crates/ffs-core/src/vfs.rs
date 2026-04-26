@@ -1066,6 +1066,26 @@ pub trait FsOps: Send + Sync {
         Ok(())
     }
 
+    /// Drop the in-memory extent status cache for an inode.
+    ///
+    /// Surfaces what `EXT4_IOC_CLEAR_ES_CACHE` triggers in the kernel:
+    /// `fs/ext4/ioctl.c::ext4_clear_inode_es` removes every cached
+    /// `ext4_es_status` entry so the next read repopulates state from
+    /// the on-disk extent tree. e2fsprogs uses this to defeat caching
+    /// after offline metadata edits via `debugfs`. FrankenFS keeps
+    /// extent state per-`RequestScope` rather than in a long-lived
+    /// inode-level cache, so the default implementation is a successful
+    /// no-op — backends only need to override if they expose a
+    /// process-lifetime cache that needs explicit invalidation.
+    fn clear_extent_status_cache(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        Ok(())
+    }
+
     /// Get ext4 inode generation (`EXT4_IOC_GETVERSION`).
     ///
     /// Returns the raw `i_generation` field for the given inode.
