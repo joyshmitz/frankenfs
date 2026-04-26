@@ -10412,6 +10412,50 @@ fn btrfs_fuse_create_and_read_file() {
 }
 
 #[test]
+fn btrfs_fuse_pwritev2_rwf_hipri_preserves_normal_offset_write() {
+    with_btrfs_rw_mount(|mnt| {
+        let report = run_pwritev2_rwf_hint_probe(
+            mnt,
+            "RWF_HIPRI",
+            "btrfs_rwf_hipri_hint_probe.bin",
+            b"abcdef",
+            b"hipri",
+            1,
+        );
+        if let Some(skip_reason) = report["skipped"].as_str() {
+            assert_eq!(
+                report["readback_hex"].as_str(),
+                report["expected_hex"].as_str(),
+                "transport-level btrfs RWF_HIPRI refusal must not mutate data: {report}"
+            );
+            emit_scenario_result(
+                "btrfs_rw_pwritev2_rwf_hipri_hint",
+                "SKIP",
+                Some(skip_reason),
+            );
+            return;
+        }
+
+        assert_eq!(
+            report["written"].as_i64(),
+            Some(i64::try_from(b"hipri".len()).expect("payload length fits i64")),
+            "btrfs RWF_HIPRI should report the normal write length: {report}"
+        );
+        assert_eq!(
+            report["readback_hex"].as_str(),
+            report["expected_hex"].as_str(),
+            "btrfs RWF_HIPRI should preserve caller offset and normal write semantics: {report}"
+        );
+
+        emit_scenario_result(
+            "btrfs_rw_pwritev2_rwf_hipri_hint",
+            "PASS",
+            Some("rwf_hipri_normal_offset_write"),
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_write_to_directory_reports_eisdir() {
     with_btrfs_rw_mount(|mnt| {
         let scenario_id = "btrfs_rw_write_to_directory_errno_eisdir";
