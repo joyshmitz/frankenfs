@@ -303,7 +303,7 @@ impl<'a> RepairGroupStorage<'a> {
         let payload_capacity = block_size - RepairBlockHeader::SIZE;
 
         let mut out = Vec::new();
-        let mut next_expected_esi: Option<u32> = None;
+        let mut next_expected_esi = Some(u32::from(desc.source_block_count));
         let mut empty_tail_started = false;
         for block_index in 0..desc.repair_block_count {
             let block_num = BlockNumber(desc.repair_start_block.0 + u64::from(block_index));
@@ -512,10 +512,13 @@ impl<'a> RepairGroupStorage<'a> {
             )));
         }
 
-        Self::validate_symbol_input(symbols, symbol_size)?;
+        Self::validate_symbol_input(desc, symbols, symbol_size)?;
 
         let mut cursor = 0usize;
-        let mut next_esi = symbols.first().map_or(0, |(esi, _)| *esi);
+        let mut next_esi = match symbols.first() {
+            Some((esi, _)) => *esi,
+            None => u32::from(desc.source_block_count),
+        };
         for block_index in 0..desc.repair_block_count {
             let remaining = symbols.len().saturating_sub(cursor);
             let count = remaining.min(symbols_per_block);
@@ -552,7 +555,7 @@ impl<'a> RepairGroupStorage<'a> {
         block_size: usize,
         symbol_size: usize,
     ) -> Result<()> {
-        Self::validate_symbol_input(symbols, symbol_size)?;
+        Self::validate_symbol_input(desc, symbols, symbol_size)?;
         if symbol_size > block_size {
             return Err(FfsError::RepairFailed(format!(
                 "raw symbol_size {symbol_size} exceeds block_size {block_size}"
@@ -569,16 +572,6 @@ impl<'a> RepairGroupStorage<'a> {
                 desc.repair_block_count
             )));
         }
-
-        let expected_first_esi = u32::from(desc.source_block_count);
-        if let Some((first_esi, _)) = symbols.first() {
-            if *first_esi != expected_first_esi {
-                return Err(FfsError::RepairFailed(format!(
-                    "raw symbol stream must start at ESI {expected_first_esi} (got {first_esi})"
-                )));
-            }
-        }
-
         for block_index in 0..desc.repair_block_count {
             let mut block = vec![0_u8; block_size];
             let idx = usize::try_from(block_index).map_err(|_| {
@@ -595,7 +588,20 @@ impl<'a> RepairGroupStorage<'a> {
         Ok(())
     }
 
-    fn validate_symbol_input(symbols: &[(u32, Vec<u8>)], symbol_size: usize) -> Result<()> {
+    fn validate_symbol_input(
+        desc: &RepairGroupDescExt,
+        symbols: &[(u32, Vec<u8>)],
+        symbol_size: usize,
+    ) -> Result<()> {
+        let expected_first_esi = u32::from(desc.source_block_count);
+        if let Some((first_esi, _)) = symbols.first()
+            && *first_esi != expected_first_esi
+        {
+            return Err(FfsError::RepairFailed(format!(
+                "repair symbol stream must start at ESI {expected_first_esi} (got {first_esi})"
+            )));
+        }
+
         for (idx, (esi, data)) in symbols.iter().enumerate() {
             if data.len() != symbol_size {
                 return Err(FfsError::RepairFailed(format!(
@@ -827,7 +833,11 @@ mod tests {
             .write_group_desc_ext(&cx, &bootstrap)
             .expect("write bootstrap descriptor");
 
-        let symbols = make_symbols(1_000, 10, usize::from(bootstrap.symbol_size));
+        let symbols = make_symbols(
+            u32::from(bootstrap.source_block_count),
+            10,
+            usize::from(bootstrap.symbol_size),
+        );
         storage
             .write_repair_symbols(&cx, &symbols, 1)
             .expect("write repair symbols");
@@ -860,7 +870,11 @@ mod tests {
             .write_group_desc_ext(&cx, &bootstrap)
             .expect("write bootstrap descriptor");
 
-        let symbols_g1 = make_symbols(2_000, 6, usize::from(bootstrap.symbol_size));
+        let symbols_g1 = make_symbols(
+            u32::from(bootstrap.source_block_count),
+            6,
+            usize::from(bootstrap.symbol_size),
+        );
         storage
             .write_repair_symbols(&cx, &symbols_g1, 1)
             .expect("publish generation 1");
@@ -904,7 +918,11 @@ mod tests {
 
         let mut desc_g1 = bootstrap;
         desc_g1.repair_generation = 1;
-        let symbols_g1 = make_symbols(5_000, 4, usize::from(desc_g1.symbol_size));
+        let symbols_g1 = make_symbols(
+            u32::from(desc_g1.source_block_count),
+            4,
+            usize::from(desc_g1.symbol_size),
+        );
         storage
             .write_symbols_for_desc(&cx, &desc_g1, &symbols_g1)
             .expect("write generation 1 symbol blocks");
@@ -944,7 +962,11 @@ mod tests {
 
         let mut desc_g1 = bootstrap;
         desc_g1.repair_generation = 1;
-        let symbols_g1 = make_symbols(7_000, 4, usize::from(desc_g1.symbol_size));
+        let symbols_g1 = make_symbols(
+            u32::from(desc_g1.source_block_count),
+            4,
+            usize::from(desc_g1.symbol_size),
+        );
         storage
             .write_symbols_for_desc(&cx, &desc_g1, &symbols_g1)
             .expect("write generation 1 symbol blocks");
@@ -993,7 +1015,11 @@ mod tests {
             .write_group_desc_ext(&cx, &bootstrap)
             .expect("write bootstrap descriptor");
 
-        let symbols_g1 = make_symbols(9_000, 5, usize::from(bootstrap.symbol_size));
+        let symbols_g1 = make_symbols(
+            u32::from(bootstrap.source_block_count),
+            5,
+            usize::from(bootstrap.symbol_size),
+        );
         storage
             .write_repair_symbols(&cx, &symbols_g1, 1)
             .expect("write generation 1 symbol blocks");
@@ -1135,7 +1161,7 @@ mod tests {
             .write_group_desc_ext(&cx, &bootstrap)
             .expect("write bootstrap");
 
-        let symbols = make_symbols(1_000, 4, 32);
+        let symbols = make_symbols(u32::from(bootstrap.source_block_count), 4, 32);
         storage
             .write_repair_symbols(&cx, &symbols, 1)
             .expect("gen 1");
@@ -1160,12 +1186,12 @@ mod tests {
             .write_group_desc_ext(&cx, &bootstrap)
             .expect("write bootstrap");
 
-        let symbols_g1 = make_symbols(100, 6, 32);
+        let symbols_g1 = make_symbols(u32::from(bootstrap.source_block_count), 6, 32);
         storage
             .write_repair_symbols(&cx, &symbols_g1, 1)
             .expect("gen 1");
 
-        let symbols_g2 = make_symbols(200, 8, 32);
+        let symbols_g2 = make_symbols(u32::from(bootstrap.source_block_count), 8, 32);
         storage
             .write_repair_symbols(&cx, &symbols_g2, 2)
             .expect("gen 2");
@@ -1191,14 +1217,94 @@ mod tests {
             .expect("write bootstrap");
 
         // Symbols with wrong sizes (desc says 32-byte symbols).
+        let first_repair_esi = u32::from(bootstrap.source_block_count);
         let bad_symbols = vec![
-            (100, vec![0xAA; 32]),
-            (101, vec![0xBB; 16]), // wrong size
+            (first_repair_esi, vec![0xAA; 32]),
+            (first_repair_esi + 1, vec![0xBB; 16]), // wrong size
         ];
         let err = storage
             .write_repair_symbols(&cx, &bad_symbols, 1)
             .expect_err("mismatched symbol size");
         assert!(matches!(err, FfsError::RepairFailed(_)));
+    }
+
+    #[test]
+    fn storage_rejects_source_range_repair_esi() {
+        let cx = Cx::for_testing();
+        let device = MemBlockDevice::new(256, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 32, 0, 4).expect("layout");
+        let storage = RepairGroupStorage::new(&device, layout);
+
+        let bootstrap = make_desc(layout, 0, 32);
+        storage
+            .write_group_desc_ext(&cx, &bootstrap)
+            .expect("write bootstrap");
+
+        let bad_first_esi = u32::from(bootstrap.source_block_count) - 1;
+        let bad_symbols = make_symbols(bad_first_esi, 2, usize::from(bootstrap.symbol_size));
+        let err = storage
+            .write_repair_symbols(&cx, &bad_symbols, 1)
+            .expect_err("source-range repair ESI must be rejected");
+        let message = match err {
+            FfsError::RepairFailed(message) => message,
+            other => format!("expected RepairFailed, got {other:?}"),
+        };
+        assert!(
+            message.contains("repair symbol stream must start at ESI"),
+            "expected first repair ESI validation failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn storage_rejects_source_range_first_esi_on_read() {
+        let cx = Cx::for_testing();
+        let device = MemBlockDevice::new(256, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 32, 0, 4).expect("layout");
+        let storage = RepairGroupStorage::new(&device, layout);
+
+        let bootstrap = make_desc(layout, 0, 32);
+        storage
+            .write_group_desc_ext(&cx, &bootstrap)
+            .expect("write bootstrap");
+
+        let symbols = make_symbols(
+            u32::from(bootstrap.source_block_count),
+            4,
+            usize::from(bootstrap.symbol_size),
+        );
+        storage
+            .write_repair_symbols(&cx, &symbols, 1)
+            .expect("write generation 1 symbol blocks");
+
+        let active = storage.read_group_desc_ext(&cx).expect("active desc");
+        let first_symbol_block = active.repair_start_block;
+        let mut raw = device
+            .read_block(&cx, first_symbol_block)
+            .expect("read first symbol block")
+            .as_slice()
+            .to_vec();
+        let mut header =
+            RepairBlockHeader::parse(&raw[..RepairBlockHeader::SIZE]).expect("valid symbol header");
+        header.first_esi = u32::from(active.source_block_count) - 1;
+        raw[..RepairBlockHeader::SIZE].copy_from_slice(&header.to_bytes());
+        device
+            .write_block(&cx, first_symbol_block, &raw)
+            .expect("write corrupted first ESI");
+
+        let err = storage
+            .read_repair_symbols(&cx)
+            .expect_err("source-range first ESI must be rejected on read");
+        let message = match err {
+            FfsError::RepairFailed(message) => message,
+            other => format!("expected RepairFailed, got {other:?}"),
+        };
+        assert!(
+            message.contains("non-contiguous ESI")
+                || message.contains("no fully-valid repair symbols"),
+            "expected first ESI read validation failure, got: {message}"
+        );
     }
 
     #[test]
@@ -1214,8 +1320,12 @@ mod tests {
             .write_group_desc_ext(&cx, &bootstrap)
             .expect("write bootstrap");
 
-        // Gap in ESI sequence: 100, 102 (skipping 101).
-        let gap_symbols = vec![(100, vec![0xAA; 32]), (102, vec![0xBB; 32])];
+        // Gap in ESI sequence: K, K+2 (skipping K+1).
+        let first_repair_esi = u32::from(bootstrap.source_block_count);
+        let gap_symbols = vec![
+            (first_repair_esi, vec![0xAA; 32]),
+            (first_repair_esi + 2, vec![0xBB; 32]),
+        ];
         let err = storage
             .write_repair_symbols(&cx, &gap_symbols, 1)
             .expect_err("non-contiguous ESI");
