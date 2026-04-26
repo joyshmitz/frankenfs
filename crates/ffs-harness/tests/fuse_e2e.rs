@@ -11613,6 +11613,81 @@ finally:
 }
 
 #[test]
+fn btrfs_fuse_ioctl_dev_info_via_mounted_path() {
+    if !command_available("python3") {
+        eprintln!("python3 not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        let script = format!(
+            r#"
+import errno, os, fcntl, struct
+
+BTRFS_IOC_DEV_INFO = 0xd000941e
+BTRFS_DEV_INFO_SIZE = 4096
+BTRFS_DEV_INFO_PATH_OFFSET = 0x0c08
+
+fd = os.open({mnt:?}, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    wildcard = bytearray(BTRFS_DEV_INFO_SIZE)
+    fcntl.ioctl(fd, BTRFS_IOC_DEV_INFO, wildcard, True)
+
+    devid, = struct.unpack_from('<Q', wildcard, 0x00)
+    uuid = bytes(wildcard[0x08:0x18])
+    bytes_used, total_bytes = struct.unpack_from('<QQ', wildcard, 0x18)
+    path = bytes(wildcard[BTRFS_DEV_INFO_PATH_OFFSET:])
+
+    assert devid == 1, "single-device btrfs should report canonical devid 1, got %d" % devid
+    assert uuid != bytes(16), "device uuid/fsid should be populated"
+    assert bytes_used > 0, "bytes_used should be non-zero"
+    assert total_bytes >= bytes_used, "total_bytes should cover bytes_used"
+    assert path == bytes(len(path)), "FrankenFS image-backed DEV_INFO path should be empty"
+
+    exact = bytearray(BTRFS_DEV_INFO_SIZE)
+    struct.pack_into('<Q', exact, 0x00, 1)
+    exact[0x08:0x18] = uuid
+    fcntl.ioctl(fd, BTRFS_IOC_DEV_INFO, exact, True)
+    assert exact[:0x28] == wildcard[:0x28], "explicit devid+uuid lookup should return same device"
+
+    missing = bytearray(BTRFS_DEV_INFO_SIZE)
+    struct.pack_into('<Q', missing, 0x00, 2)
+    try:
+        fcntl.ioctl(fd, BTRFS_IOC_DEV_INFO, missing, True)
+    except OSError as exc:
+        assert exc.errno == errno.ENODEV, "unknown devid should return ENODEV, got %d" % exc.errno
+    else:
+        raise AssertionError("unknown devid unexpectedly succeeded")
+
+    print("devid=%d bytes_used=%d total_bytes=%d uuid=%s" % (devid, bytes_used, total_bytes, uuid.hex()))
+    print("PASS")
+finally:
+    os.close(fd)
+"#,
+            mnt = mnt.to_str().unwrap()
+        );
+
+        let out = Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run python3 DEV_INFO ioctl script");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("PASS"),
+            "BTRFS_IOC_DEV_INFO via mounted path failed: stdout={stdout}, stderr={stderr}"
+        );
+
+        emit_scenario_result(
+            "btrfs_ioctl_dev_info_mounted_path",
+            "PASS",
+            Some("wildcard_exact_and_missing_device_contract"),
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_xattr_posix_acl_list_and_get() {
     with_btrfs_rw_mount(|mnt| {
         let file_path = mnt.join("acl_test_file.txt");
