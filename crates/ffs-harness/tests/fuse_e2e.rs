@@ -1474,6 +1474,107 @@ print(json.dumps({
 }, sort_keys=True))
 "#;
 
+const PWRITEV2_RWF_APPEND_MODES_SCRIPT: &str = r#"
+import errno
+import json
+import os
+import sys
+
+root = sys.argv[1]
+
+if not hasattr(os, "pwritev"):
+    print(json.dumps({"skipped": "python_os_pwritev_unavailable"}))
+    sys.exit(0)
+
+unsupported_errnos = {errno.EOPNOTSUPP}
+if hasattr(errno, "ENOTSUP"):
+    unsupported_errnos.add(errno.ENOTSUP)
+
+RWF_APPEND = getattr(os, "RWF_APPEND", 0x10)
+RWF_NOAPPEND = getattr(os, "RWF_NOAPPEND", 0x20)
+
+def pwritev_or_skip(fd, payload, offset, flags, label):
+    try:
+        return os.pwritev(fd, [payload], offset, flags)
+    except OSError as exc:
+        if exc.errno in unsupported_errnos:
+            print(json.dumps({
+                "skipped": label + "_unsupported_by_kernel_or_fuse",
+                "errno": exc.errno,
+            }, sort_keys=True))
+            sys.exit(0)
+        raise
+
+append_path = os.path.join(root, "rwf_append_mode_probe.bin")
+append_initial = b"base"
+append_payload = b"+append"
+fd = os.open(append_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
+try:
+    os.write(fd, append_initial)
+    append_written = pwritev_or_skip(fd, append_payload, 0, RWF_APPEND, "rwf_append")
+finally:
+    os.close(fd)
+with open(append_path, "rb") as fh:
+    append_readback = fh.read()
+
+noappend_path = os.path.join(root, "rwf_noappend_mode_probe.bin")
+noappend_initial = b"abcdef"
+noappend_payload = b"XY"
+fd = os.open(noappend_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o644)
+try:
+    os.write(fd, noappend_initial)
+finally:
+    os.close(fd)
+fd = os.open(noappend_path, os.O_WRONLY | os.O_APPEND)
+try:
+    noappend_written = pwritev_or_skip(fd, noappend_payload, 1, RWF_NOAPPEND, "rwf_noappend")
+finally:
+    os.close(fd)
+with open(noappend_path, "rb") as fh:
+    noappend_readback = fh.read()
+
+conflict_path = os.path.join(root, "rwf_append_noappend_conflict_probe.bin")
+conflict_initial = b"conflict-base"
+with open(conflict_path, "wb") as fh:
+    fh.write(conflict_initial)
+fd = os.open(conflict_path, os.O_WRONLY)
+try:
+    try:
+        os.pwritev(fd, [b"!"], 0, RWF_APPEND | RWF_NOAPPEND)
+    except OSError as exc:
+        if exc.errno in unsupported_errnos:
+            print(json.dumps({
+                "skipped": "rwf_append_noappend_conflict_unsupported_by_kernel_or_fuse",
+                "errno": exc.errno,
+            }, sort_keys=True))
+            sys.exit(0)
+        conflict_errno = exc.errno
+    else:
+        conflict_errno = 0
+finally:
+    os.close(fd)
+with open(conflict_path, "rb") as fh:
+    conflict_readback = fh.read()
+
+print(json.dumps({
+    "append": {
+        "expected_hex": (append_initial + append_payload).hex(),
+        "readback_hex": append_readback.hex(),
+        "written": append_written,
+    },
+    "noappend": {
+        "expected_hex": b"aXYdef".hex(),
+        "readback_hex": noappend_readback.hex(),
+        "written": noappend_written,
+    },
+    "conflict": {
+        "expected_hex": conflict_initial.hex(),
+        "readback_hex": conflict_readback.hex(),
+        "errno": conflict_errno,
+    },
+}, sort_keys=True))
+"#;
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
@@ -1500,6 +1601,22 @@ fn run_pwritev2_rwf_probe(root: &Path, flag_name: &str, file_name: &str, payload
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("pwritev2 RWF probe JSON")
+}
+
+fn run_pwritev2_rwf_append_modes_probe(root: &Path) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(PWRITEV2_RWF_APPEND_MODES_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 pwritev2 RWF append-modes probe");
+    assert!(
+        output.status.success(),
+        "python3 pwritev2 RWF append-modes probe failed for {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("pwritev2 RWF append-modes probe JSON")
 }
 
 const INOTIFY_RENAME_SCRIPT: &str = r#"
@@ -3560,6 +3677,79 @@ fn ext4_fuse_pwritev2_rwf_sync_persists_written_data_after_remount() {
         b"rwf-sync-through-fuse\n",
         "ext4_rw_pwritev2_rwf_sync",
         "pwritev2_rwf_sync",
+    );
+}
+
+#[test]
+fn ext4_fuse_pwritev2_rwf_append_noappend_modes() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let report = run_pwritev2_rwf_append_modes_probe(&mnt);
+    if let Some(skip_reason) = report["skipped"].as_str() {
+        emit_scenario_result(
+            "ext4_rw_pwritev2_rwf_append_noappend_modes",
+            "SKIP",
+            Some(skip_reason),
+        );
+        return;
+    }
+
+    let append = &report["append"];
+    assert_eq!(
+        append["written"].as_i64(),
+        Some(i64::try_from(b"+append".len()).expect("payload length fits i64")),
+        "RWF_APPEND should report the appended payload length: {report}"
+    );
+    assert_eq!(
+        append["readback_hex"].as_str(),
+        append["expected_hex"].as_str(),
+        "RWF_APPEND should ignore caller offset and append at EOF: {report}"
+    );
+
+    let noappend = &report["noappend"];
+    assert_eq!(
+        noappend["written"].as_i64(),
+        Some(i64::try_from(b"XY".len()).expect("payload length fits i64")),
+        "RWF_NOAPPEND should report the overwrite payload length: {report}"
+    );
+    assert_eq!(
+        noappend["readback_hex"].as_str(),
+        noappend["expected_hex"].as_str(),
+        "RWF_NOAPPEND should suppress O_APPEND and preserve caller offset: {report}"
+    );
+
+    let conflict = &report["conflict"];
+    assert_eq!(
+        conflict["errno"].as_i64(),
+        Some(i64::from(libc::EINVAL)),
+        "RWF_APPEND|RWF_NOAPPEND should reject with EINVAL: {report}"
+    );
+    assert_eq!(
+        conflict["readback_hex"].as_str(),
+        conflict["expected_hex"].as_str(),
+        "RWF_APPEND|RWF_NOAPPEND must reject before data mutation: {report}"
+    );
+
+    emit_scenario_result(
+        "ext4_rw_pwritev2_rwf_append_noappend_modes",
+        "PASS",
+        Some("append_noappend_offset_and_conflict_contract"),
     );
 }
 
