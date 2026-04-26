@@ -3873,6 +3873,10 @@ fn create_impl(engine: &FrankenFsEngine, cx: &Cx, parent: InodeNumber,
   `RWF_NOAPPEND` suppresses an open-file `O_APPEND` offset rewrite, and the
   invalid `RWF_APPEND|RWF_NOAPPEND` combination returns `EINVAL` before EOF
   lookup or backend mutation.
+- Non-conflicting write-intent flags that require guarantees FrankenFS does not
+  provide in V1 (`RWF_ATOMIC` torn-write protection and `RWF_DONTCACHE`
+  cache-bypass/drop semantics) return `EOPNOTSUPP` before backend mutation and
+  leave existing file data unchanged.
 - Partial block writes: read-modify-write on full block.
 - RaptorQ: after commit, modified blocks' groups marked for stale repair
   symbols. Re-encoding is asynchronous.

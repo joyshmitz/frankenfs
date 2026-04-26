@@ -1575,6 +1575,64 @@ print(json.dumps({
 }, sort_keys=True))
 "#;
 
+const PWRITEV2_RWF_UNSUPPORTED_INTENTS_SCRIPT: &str = r#"
+import errno
+import json
+import os
+import sys
+
+root = sys.argv[1]
+
+if not hasattr(os, "pwritev"):
+    print(json.dumps({"skipped": "python_os_pwritev_unavailable"}))
+    sys.exit(0)
+
+RWF_ATOMIC = getattr(os, "RWF_ATOMIC", 0x40)
+RWF_DONTCACHE = getattr(os, "RWF_DONTCACHE", 0x80)
+
+def probe(label, flags, initial, payload):
+    path = os.path.join(root, label + "_unsupported_probe.bin")
+    with open(path, "wb") as fh:
+        fh.write(initial)
+
+    fd = os.open(path, os.O_WRONLY)
+    try:
+        try:
+            written = os.pwritev(fd, [payload], 0, flags)
+        except OSError as exc:
+            if exc.errno == errno.EINVAL:
+                print(json.dumps({
+                    "skipped": label + "_pre_dispatch_einval",
+                    "errno": exc.errno,
+                }, sort_keys=True))
+                sys.exit(0)
+            errno_value = exc.errno
+            written = None
+        else:
+            errno_value = 0
+    finally:
+        os.close(fd)
+
+    with open(path, "rb") as fh:
+        readback = fh.read()
+
+    return {
+        "errno": errno_value,
+        "expected_hex": initial.hex(),
+        "flag": flags,
+        "payload_hex": payload.hex(),
+        "readback_hex": readback.hex(),
+        "written": written,
+    }
+
+print(json.dumps({
+    "cases": {
+        "atomic": probe("rwf_atomic", RWF_ATOMIC, b"stable-atomic", b"mutated"),
+        "dontcache": probe("rwf_dontcache", RWF_DONTCACHE, b"stable-dontcache", b"mutated"),
+    },
+}, sort_keys=True))
+"#;
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
@@ -1617,6 +1675,22 @@ fn run_pwritev2_rwf_append_modes_probe(root: &Path) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("pwritev2 RWF append-modes probe JSON")
+}
+
+fn run_pwritev2_rwf_unsupported_intents_probe(root: &Path) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(PWRITEV2_RWF_UNSUPPORTED_INTENTS_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 pwritev2 RWF unsupported-intents probe");
+    assert!(
+        output.status.success(),
+        "python3 pwritev2 RWF unsupported-intents probe failed for {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("pwritev2 RWF unsupported-intents probe JSON")
 }
 
 const INOTIFY_RENAME_SCRIPT: &str = r#"
@@ -3750,6 +3824,61 @@ fn ext4_fuse_pwritev2_rwf_append_noappend_modes() {
         "ext4_rw_pwritev2_rwf_append_noappend_modes",
         "PASS",
         Some("append_noappend_offset_and_conflict_contract"),
+    );
+}
+
+#[test]
+fn ext4_fuse_pwritev2_rwf_unsupported_intents_reject_without_mutation() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let report = run_pwritev2_rwf_unsupported_intents_probe(&mnt);
+    if let Some(skip_reason) = report["skipped"].as_str() {
+        emit_scenario_result(
+            "ext4_rw_pwritev2_rwf_unsupported_intents",
+            "SKIP",
+            Some(skip_reason),
+        );
+        return;
+    }
+
+    for (case_key, flag_name) in [("atomic", "RWF_ATOMIC"), ("dontcache", "RWF_DONTCACHE")] {
+        let case = &report["cases"][case_key];
+        assert_eq!(
+            case["errno"].as_i64(),
+            Some(EOPNOTSUPP_ERRNO),
+            "{flag_name} should reject with EOPNOTSUPP: {report}"
+        );
+        assert!(
+            case["written"].is_null(),
+            "{flag_name} should not report a successful byte count: {report}"
+        );
+        assert_eq!(
+            case["readback_hex"].as_str(),
+            case["expected_hex"].as_str(),
+            "{flag_name} must reject before data mutation: {report}"
+        );
+    }
+
+    emit_scenario_result(
+        "ext4_rw_pwritev2_rwf_unsupported_intents",
+        "PASS",
+        Some("rwf_atomic_rwf_dontcache_eopnotsupp_no_mutation"),
     );
 }
 
