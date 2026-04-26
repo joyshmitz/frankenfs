@@ -1350,7 +1350,8 @@ def utime_access_openat_statvfs():
             "namemax_at_least_255": vfs.f_namemax >= 255,
         },
     }
-    if os.open in os.supports_dir_fd:
+    supports_dir_fd = getattr(os, "supports_dir_fd", set())
+    if os.open in supports_dir_fd:
         dir_fd = os.open(base, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             fd = os.open("file.txt", os.O_RDONLY, dir_fd=dir_fd)
@@ -2818,7 +2819,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
     emit_scenario_result(
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
-        Some("file_lifecycle+offset_io+openat+access+statfs+dir_ops+attrs+links+mmap+fsync"),
+        Some("file_lifecycle+offset_io+openat+access+statvfs+dir_ops+attrs+links+mmap+fsync"),
     );
 }
 
