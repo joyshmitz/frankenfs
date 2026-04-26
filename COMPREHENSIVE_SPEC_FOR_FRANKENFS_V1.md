@@ -4569,6 +4569,8 @@ Tracked V1 btrfs scope (explicit):
 - single- and multi-device chunk mapping for supported RAID/DUP read paths
 - transparent decompression (ZLIB/LZO/ZSTD)
 - subvolume mount, tree-log replay, and send-stream parsing
+- btrfs ioctl path lookup for `BTRFS_IOC_INO_LOOKUP`, including `treeid=0`
+  mounted-root resolution and explicit tree-id path resolution through ROOT_TREE
 - read-only mount surface parity plus the current experimental RW contract
 
 Still phased later (btrfs-specific):

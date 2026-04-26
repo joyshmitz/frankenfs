@@ -206,6 +206,12 @@ pub trait FfsOperations: Send + Sync {
 }
 ```
 
+Current `ffs-core::FsOps` also exposes filesystem-specific ioctl helper
+methods consumed by `ffs-fuse`. For btrfs, `BTRFS_IOC_INO_LOOKUP` stays at
+this boundary: `ffs-fuse` decodes the 4096-byte ioctl struct, while `ffs-core`
+resolves `treeid=0` to the mounted subvolume, locates explicit tree ids via
+the ROOT_TREE, and walks `INODE_REF` chains inside the selected fs tree.
+
 ### 3.4 Repair Traits
 
 ```rust

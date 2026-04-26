@@ -1155,9 +1155,10 @@ pub trait FsOps: Send + Sync {
     /// Look up an inode path for `BTRFS_IOC_INO_LOOKUP`.
     ///
     /// Given a `treeid` (subvolume tree objectid, or 0 for the mounted tree)
-    /// and an `objectid` (inode number), returns the path from the subvolume
-    /// root to that inode. For the subvolume root itself (objectid == 256),
-    /// returns an empty path and fills in the actual treeid.
+    /// and an `objectid` (inode number), returns the path from that
+    /// subvolume root to the inode. For the subvolume root itself
+    /// (objectid == 256), returns an empty path and fills in the actual
+    /// mounted treeid when callers pass 0.
     ///
     /// Returns `(treeid, path)` where `treeid` is the resolved tree objectid
     /// and `path` is the NUL-terminated path bytes (empty for root).

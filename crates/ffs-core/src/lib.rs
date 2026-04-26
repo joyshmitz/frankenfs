@@ -4642,12 +4642,27 @@ impl OpenFs {
         entry
     }
 
-    /// Resolve and walk the default filesystem tree (`FS_TREE`).
+    /// Resolve and walk the mounted filesystem tree.
     fn walk_btrfs_fs_tree(&self, cx: &Cx) -> Result<Vec<BtrfsLeafEntry>, FfsError> {
         let subvol_id = self
             .btrfs_context
             .as_ref()
             .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+        self.walk_btrfs_fs_tree_by_objectid(cx, subvol_id)
+    }
+
+    /// Resolve and walk a specific btrfs filesystem tree by root-tree objectid.
+    fn walk_btrfs_fs_tree_by_objectid(
+        &self,
+        cx: &Cx,
+        subvol_id: u64,
+    ) -> Result<Vec<BtrfsLeafEntry>, FfsError> {
+        let root_bytenr = self.btrfs_fs_tree_root_bytenr(cx, subvol_id)?;
+        self.walk_btrfs_tree(cx, root_bytenr)
+    }
+
+    /// Resolve a btrfs filesystem tree's root block by walking the ROOT_TREE.
+    fn btrfs_fs_tree_root_bytenr(&self, cx: &Cx, subvol_id: u64) -> ffs_error::Result<u64> {
         let root_items = self.walk_btrfs_root_tree(cx)?;
         let fs_tree_root = root_items
             .iter()
@@ -4661,7 +4676,7 @@ impl OpenFs {
             })?;
 
         let root_item = parse_root_item(&fs_tree_root.data).map_err(|e| parse_to_ffs_error(&e))?;
-        self.walk_btrfs_tree(cx, root_item.bytenr)
+        Ok(root_item.bytenr)
     }
 
     fn btrfs_timespec(sec: u64, nsec: u32) -> SystemTime {
@@ -15498,11 +15513,30 @@ impl OpenFs {
     /// the first call so subsequent resolutions are O(depth · log N) against
     /// the cached `BTreeMap`. bd-yt66z.
     fn btrfs_resolve_inode_path(&self, cx: &Cx, objectid: u64) -> ffs_error::Result<Vec<u8>> {
+        let subvol_id = self
+            .btrfs_context
+            .as_ref()
+            .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+        self.btrfs_resolve_inode_path_in_tree(cx, subvol_id, objectid)
+    }
+
+    fn btrfs_resolve_inode_path_in_tree(
+        &self,
+        cx: &Cx,
+        treeid: u64,
+        objectid: u64,
+    ) -> ffs_error::Result<Vec<u8>> {
         if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
-            let alloc = alloc_mutex.lock();
-            return Self::btrfs_resolve_inode_path_via_cow(&alloc, objectid);
+            let mounted_treeid = self
+                .btrfs_context
+                .as_ref()
+                .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
+            if treeid == mounted_treeid {
+                let alloc = alloc_mutex.lock();
+                return Self::btrfs_resolve_inode_path_via_cow(&alloc, objectid);
+            }
         }
-        self.btrfs_resolve_inode_path_via_cache(cx, objectid)
+        self.btrfs_resolve_inode_path_via_cache(cx, treeid, objectid)
     }
 
     /// Writable-mode resolution: at each hop, range-query the COW tree for the
@@ -15572,9 +15606,10 @@ impl OpenFs {
     fn btrfs_resolve_inode_path_via_cache(
         &self,
         cx: &Cx,
+        treeid: u64,
         objectid: u64,
     ) -> ffs_error::Result<Vec<u8>> {
-        let fs_tree_root_bytenr = self.btrfs_current_fs_tree_root_bytenr(cx)?;
+        let fs_tree_root_bytenr = self.btrfs_fs_tree_root_bytenr(cx, treeid)?;
         // Scope the Mutex guard so the walk below runs without holding the
         // lock; an Arc clone is cheap and lets concurrent INO_LOOKUP callers
         // proceed in parallel once the index has been populated.
@@ -15584,7 +15619,7 @@ impl OpenFs {
                 .as_ref()
                 .is_none_or(|idx| idx.fs_tree_root_bytenr != fs_tree_root_bytenr)
             {
-                let entries = self.walk_btrfs_fs_tree(cx)?;
+                let entries = self.walk_btrfs_fs_tree_by_objectid(cx, treeid)?;
                 *cache = Some(Arc::new(BtrfsInodePathIndex {
                     fs_tree_root_bytenr,
                     parent_by_child: Self::btrfs_build_inode_ref_index(&entries)?,
@@ -15593,29 +15628,6 @@ impl OpenFs {
             Arc::clone(cache.as_ref().expect("populated above"))
         };
         Self::btrfs_walk_inode_ref_index(&index.parent_by_child, objectid)
-    }
-
-    /// Resolve the fs-tree root bytenr for the currently mounted subvolume by
-    /// walking the ROOT_TREE. Small and cheap (a single root tree node), used
-    /// as the cache invalidation key.
-    fn btrfs_current_fs_tree_root_bytenr(&self, cx: &Cx) -> ffs_error::Result<u64> {
-        let subvol_id = self
-            .btrfs_context
-            .as_ref()
-            .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
-        let root_items = self.walk_btrfs_root_tree(cx)?;
-        let fs_tree_root = root_items
-            .iter()
-            .find(|item| {
-                item.key.objectid == subvol_id && item.key.item_type == BTRFS_ITEM_ROOT_ITEM
-            })
-            .ok_or_else(|| {
-                FfsError::NotFound(format!(
-                    "btrfs ROOT_ITEM for subvolume objectid {subvol_id}"
-                ))
-            })?;
-        let root_item = parse_root_item(&fs_tree_root.data).map_err(|e| parse_to_ffs_error(&e))?;
-        Ok(root_item.bytenr)
     }
 
     /// Pure helper: given a flat list of fs-tree leaf entries, walk
@@ -17573,30 +17585,27 @@ impl FsOps for OpenFs {
             FsFlavor::Ext4(_) => Err(FfsError::UnsupportedFeature(
                 "BTRFS_IOC_INO_LOOKUP is not supported on ext4 filesystems".to_owned(),
             )),
-            FsFlavor::Btrfs(sb) => {
-                const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
+            FsFlavor::Btrfs(_) => {
+                let mounted_treeid = self
+                    .btrfs_context
+                    .as_ref()
+                    .map_or(BTRFS_FS_TREE_OBJECTID, |ctx| ctx.subvol_objectid);
                 // If treeid is 0, use the mounted subvolume's tree.
-                let resolved_treeid = if treeid == 0 {
-                    sb.root_dir_objectid
-                } else {
-                    treeid
-                };
+                let resolved_treeid = if treeid == 0 { mounted_treeid } else { treeid };
                 if objectid == BTRFS_FIRST_FREE_OBJECTID {
                     // Subvolume root: NUL-terminated empty path.
                     return Ok((resolved_treeid, vec![0_u8]));
                 }
-                // Non-root inode: walk INODE_REF back-references from the
-                // target up to the subvolume root, prepending each name
-                // component. Cross-subvolume resolution (ROOT_REF) is not
-                // supported in V1; requests with a non-mounted tree id
-                // return UnsupportedFeature rather than silent ENOENT.
-                if resolved_treeid != sb.root_dir_objectid {
-                    return Err(FfsError::UnsupportedFeature(format!(
-                        "cross-subvolume btrfs_ino_lookup not implemented (requested tree {resolved_treeid}, mounted tree {})",
-                        sb.root_dir_objectid
-                    )));
-                }
-                let path = self.btrfs_resolve_inode_path(cx, objectid)?;
+                // Non-root inode: walk INODE_REF back-references inside the
+                // requested subvolume tree up to that tree's root, prepending
+                // each name component. This mirrors Linux's
+                // btrfs_ioctl_ino_lookup treeid contract while keeping the
+                // writable fast path scoped to the mounted tree.
+                let path = if resolved_treeid == mounted_treeid {
+                    self.btrfs_resolve_inode_path(cx, objectid)?
+                } else {
+                    self.btrfs_resolve_inode_path_in_tree(cx, resolved_treeid, objectid)?
+                };
                 Ok((resolved_treeid, path))
             }
         }
@@ -23939,6 +23948,90 @@ mod tests {
         image
     }
 
+    fn add_btrfs_ino_lookup_file_ref(image: &mut [u8], objectid: u64, name: &[u8]) {
+        let fs_leaf = 0x20_000_usize;
+        image[fs_leaf + 0x60..fs_leaf + 0x64].copy_from_slice(&2_u32.to_le_bytes());
+
+        let payload = OpenFs::btrfs_serialize_inode_ref_payload(&[(2, name.to_vec())]).unwrap();
+        let payload_offset: u32 = 3600;
+        write_btrfs_leaf_item(
+            image,
+            fs_leaf,
+            1,
+            objectid,
+            BTRFS_ITEM_INODE_REF,
+            BTRFS_FIRST_FREE_OBJECTID,
+            payload_offset,
+            u32::try_from(payload.len()).expect("inode-ref payload length fits u32"),
+        );
+        let payload_start =
+            fs_leaf + usize::try_from(payload_offset).expect("payload offset fits usize");
+        image[payload_start..payload_start + payload.len()].copy_from_slice(&payload);
+        stamp_btrfs_test_tree_block_crc32c(image, fs_leaf);
+    }
+
+    fn add_btrfs_cross_tree_ino_lookup_ref(
+        image: &mut [u8],
+        treeid: u64,
+        objectid: u64,
+        name: &[u8],
+    ) {
+        let root_leaf = 0x4_000_usize;
+        let subvol_tree_logical = 0x24_000_u64;
+
+        image[root_leaf + 0x60..root_leaf + 0x64].copy_from_slice(&2_u32.to_le_bytes());
+
+        let root_item_offset: u32 = 2700;
+        let root_item_size: u32 = 239;
+        write_btrfs_leaf_item(
+            image,
+            root_leaf,
+            1,
+            treeid,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            root_item_offset,
+            root_item_size,
+        );
+        let mut root_item =
+            vec![0_u8; usize::try_from(root_item_size).expect("root item size fits usize")];
+        root_item[168..176].copy_from_slice(&BTRFS_FIRST_FREE_OBJECTID.to_le_bytes());
+        root_item[176..184].copy_from_slice(&subvol_tree_logical.to_le_bytes());
+        let root_item_last = root_item.len() - 1;
+        root_item[root_item_last] = 0;
+        let root_item_start =
+            root_leaf + usize::try_from(root_item_offset).expect("root item offset fits usize");
+        image[root_item_start..root_item_start + root_item.len()].copy_from_slice(&root_item);
+
+        let subvol_leaf = usize::try_from(subvol_tree_logical)
+            .expect("subvolume tree logical address fits usize");
+        image[subvol_leaf + 0x30..subvol_leaf + 0x38]
+            .copy_from_slice(&subvol_tree_logical.to_le_bytes());
+        image[subvol_leaf + 0x50..subvol_leaf + 0x58].copy_from_slice(&1_u64.to_le_bytes());
+        image[subvol_leaf + 0x58..subvol_leaf + 0x60].copy_from_slice(&treeid.to_le_bytes());
+        image[subvol_leaf + 0x60..subvol_leaf + 0x64].copy_from_slice(&1_u32.to_le_bytes());
+        image[subvol_leaf + 0x64] = 0;
+
+        let payload = OpenFs::btrfs_serialize_inode_ref_payload(&[(2, name.to_vec())]).unwrap();
+        let payload_offset: u32 = 3600;
+        write_btrfs_leaf_item(
+            image,
+            subvol_leaf,
+            0,
+            objectid,
+            BTRFS_ITEM_INODE_REF,
+            BTRFS_FIRST_FREE_OBJECTID,
+            payload_offset,
+            u32::try_from(payload.len()).expect("inode-ref payload length fits u32"),
+        );
+        let payload_start =
+            subvol_leaf + usize::try_from(payload_offset).expect("payload offset fits usize");
+        image[payload_start..payload_start + payload.len()].copy_from_slice(&payload);
+
+        stamp_btrfs_test_tree_block_crc32c(image, root_leaf);
+        stamp_btrfs_test_tree_block_crc32c(image, subvol_leaf);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn write_btrfs_leaf_item(
         image: &mut [u8],
@@ -24476,6 +24569,71 @@ mod tests {
         let root_item = parse_root_item(&items[0].data).expect("parse synthetic root item");
         assert_eq!(root_item.root_dirid, 256);
         assert_eq!(root_item.bytenr, 0x20_000);
+    }
+
+    #[test]
+    fn btrfs_ino_lookup_zero_treeid_returns_mounted_tree_objectid() {
+        let image = build_btrfs_image();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let (treeid, path) = fs
+            .btrfs_ino_lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                0,
+                BTRFS_FIRST_FREE_OBJECTID,
+            )
+            .expect("subvolume-root INO_LOOKUP should succeed");
+
+        assert_eq!(treeid, BTRFS_FS_TREE_OBJECTID);
+        assert_eq!(path, b"\0");
+    }
+
+    #[test]
+    fn btrfs_ino_lookup_explicit_treeid_walks_requested_fs_tree() {
+        let mut image = build_btrfs_image();
+        add_btrfs_ino_lookup_file_ref(&mut image, 257, b"hello.txt");
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let (treeid, path) = fs
+            .btrfs_ino_lookup(&cx, &mut RequestScope::empty(), BTRFS_FS_TREE_OBJECTID, 257)
+            .expect("explicit FS_TREE INO_LOOKUP should succeed");
+
+        assert_eq!(treeid, BTRFS_FS_TREE_OBJECTID);
+        assert_eq!(path, b"hello.txt/\0");
+    }
+
+    #[test]
+    fn btrfs_ino_lookup_cross_treeid_walks_that_root_item() {
+        const SUBVOL_TREEID: u64 = 257;
+        const SUBVOL_FILE_OBJECTID: u64 = 300;
+
+        let mut image = build_btrfs_image();
+        add_btrfs_cross_tree_ino_lookup_ref(
+            &mut image,
+            SUBVOL_TREEID,
+            SUBVOL_FILE_OBJECTID,
+            b"other.txt",
+        );
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let (treeid, path) = fs
+            .btrfs_ino_lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                SUBVOL_TREEID,
+                SUBVOL_FILE_OBJECTID,
+            )
+            .expect("explicit subvolume INO_LOOKUP should walk the requested tree");
+
+        assert_eq!(treeid, SUBVOL_TREEID);
+        assert_eq!(path, b"other.txt/\0");
     }
 
     #[test]

@@ -1869,6 +1869,30 @@ Root objectid  Name               Purpose
 -8             DATA_RELOC_TREE    Data relocation tree
 ```
 
+### 11.6.1 `BTRFS_IOC_INO_LOOKUP` Path Lookup Contract
+
+Linux `fs/btrfs/ioctl.c` handles `BTRFS_IOC_INO_LOOKUP` with
+`struct btrfs_ioctl_ino_lookup_args`:
+
+```
+Field     Type    Meaning
+-----     ----    -------
+treeid    u64     Subvolume tree objectid, or 0 for the mounted root
+objectid  u64     Inode objectid to resolve
+name      bytes   NUL-terminated path buffer written by the filesystem
+```
+
+Behavioral contract:
+
+1. If `treeid == 0`, resolve it to the currently mounted btrfs root id and
+   write that resolved tree id back to the reply.
+2. If `objectid == BTRFS_FIRST_FREE_OBJECTID` (256), return the resolved
+   tree id with an empty NUL-terminated path.
+3. Otherwise, locate the requested tree's `ROOT_ITEM`, walk that fs tree, and
+   resolve `INODE_REF` back-references from `objectid` to the subvolume root.
+4. The returned path is relative to the selected subvolume root and is
+   NUL-terminated.
+
 ### 11.7 Search Algorithm
 
 `btrfs_search_slot()` (ctree.c) implements the core B-tree search:
