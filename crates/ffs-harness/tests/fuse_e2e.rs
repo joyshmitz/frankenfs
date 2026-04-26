@@ -1474,6 +1474,70 @@ print(json.dumps({
 }, sort_keys=True))
 "#;
 
+const PWRITEV2_RWF_HINT_SCRIPT: &str = r#"
+import errno
+import json
+import os
+import sys
+
+root = sys.argv[1]
+flag_name = sys.argv[2]
+file_name = sys.argv[3]
+initial = bytes.fromhex(sys.argv[4])
+payload = bytes.fromhex(sys.argv[5])
+offset = int(sys.argv[6])
+path = os.path.join(root, file_name)
+
+if not hasattr(os, "pwritev"):
+    print(json.dumps({"skipped": "python_os_pwritev_unavailable"}))
+    sys.exit(0)
+
+flag = getattr(os, flag_name, None)
+if flag is None:
+    print(json.dumps({"skipped": "python_os_" + flag_name.lower() + "_unavailable"}))
+    sys.exit(0)
+
+unsupported_errnos = {errno.EINVAL, errno.EOPNOTSUPP}
+if hasattr(errno, "ENOTSUP"):
+    unsupported_errnos.add(errno.ENOTSUP)
+
+with open(path, "wb") as fh:
+    fh.write(initial)
+
+fd = os.open(path, os.O_WRONLY)
+try:
+    try:
+        written = os.pwritev(fd, [payload], offset, flag)
+    except OSError as exc:
+        if exc.errno in unsupported_errnos:
+            with open(path, "rb") as fh:
+                readback = fh.read()
+            print(json.dumps({
+                "skipped": flag_name.lower() + "_not_forwarded_or_unsupported",
+                "errno": exc.errno,
+                "expected_hex": initial.hex(),
+                "readback_hex": readback.hex(),
+            }, sort_keys=True))
+            sys.exit(0)
+        raise
+finally:
+    os.close(fd)
+
+expected = initial[:offset] + payload + initial[offset + len(payload):]
+with open(path, "rb") as fh:
+    readback = fh.read()
+
+print(json.dumps({
+    "expected_hex": expected.hex(),
+    "flag": flag,
+    "offset": offset,
+    "path": path,
+    "payload_hex": payload.hex(),
+    "readback_hex": readback.hex(),
+    "written": written,
+}, sort_keys=True))
+"#;
+
 const PWRITEV2_RWF_APPEND_MODES_SCRIPT: &str = r#"
 import errno
 import json
@@ -1659,6 +1723,34 @@ fn run_pwritev2_rwf_probe(root: &Path, flag_name: &str, file_name: &str, payload
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("pwritev2 RWF probe JSON")
+}
+
+fn run_pwritev2_rwf_hint_probe(
+    root: &Path,
+    flag_name: &str,
+    file_name: &str,
+    initial: &[u8],
+    payload: &[u8],
+    offset: u64,
+) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(PWRITEV2_RWF_HINT_SCRIPT)
+        .arg(root)
+        .arg(flag_name)
+        .arg(file_name)
+        .arg(bytes_to_hex(initial))
+        .arg(bytes_to_hex(payload))
+        .arg(offset.to_string())
+        .output()
+        .expect("run python3 pwritev2 RWF hint probe");
+    assert!(
+        output.status.success(),
+        "python3 pwritev2 {flag_name} hint probe failed for {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("pwritev2 RWF hint probe JSON")
 }
 
 fn run_pwritev2_rwf_append_modes_probe(root: &Path) -> Value {
@@ -3751,6 +3843,62 @@ fn ext4_fuse_pwritev2_rwf_sync_persists_written_data_after_remount() {
         b"rwf-sync-through-fuse\n",
         "ext4_rw_pwritev2_rwf_sync",
         "pwritev2_rwf_sync",
+    );
+}
+
+#[test]
+fn ext4_fuse_pwritev2_rwf_hipri_preserves_normal_offset_write() {
+    if !fuse_available() {
+        eprintln!("FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_test_image_with_size(tmp.path(), 4 * 1024 * 1024);
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create mountpoint");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    let Some(_session) = try_mount_ffs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let report = run_pwritev2_rwf_hint_probe(
+        &mnt,
+        "RWF_HIPRI",
+        "rwf_hipri_hint_probe.bin",
+        b"abcdef",
+        b"hipri",
+        1,
+    );
+    if let Some(skip_reason) = report["skipped"].as_str() {
+        assert_eq!(
+            report["readback_hex"].as_str(),
+            report["expected_hex"].as_str(),
+            "transport-level RWF_HIPRI refusal must not mutate data: {report}"
+        );
+        emit_scenario_result("ext4_rw_pwritev2_rwf_hipri_hint", "SKIP", Some(skip_reason));
+        return;
+    }
+
+    assert_eq!(
+        report["written"].as_i64(),
+        Some(i64::try_from(b"hipri".len()).expect("payload length fits i64")),
+        "RWF_HIPRI should report the normal write length: {report}"
+    );
+    assert_eq!(
+        report["readback_hex"].as_str(),
+        report["expected_hex"].as_str(),
+        "RWF_HIPRI should preserve caller offset and normal write semantics: {report}"
+    );
+
+    emit_scenario_result(
+        "ext4_rw_pwritev2_rwf_hipri_hint",
+        "PASS",
+        Some("rwf_hipri_normal_offset_write"),
     );
 }
 
