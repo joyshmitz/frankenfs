@@ -196,8 +196,11 @@ contract: the mount negotiates splice read/write/move capability bits, the
 vendored FUSE ABI exposes `FUSE_COPY_FILE_RANGE`, `FrankenFuse` routes
 `copy_file_range` through the MVCC-aware `FsOps` read/write contract with
 Linux-compatible validation for flags, negative offsets, and overlapping
-same-inode ranges, and mounted-path coverage writes 16 MiB through
-`splice(2)` pipe-to-file transfer and verifies byte-for-byte SHA-256 equality.
+same-inode ranges; validated zero-length requests now return `0` without
+opening a backend request scope, committing, reading, writing, or invalidating
+readahead, matching the Linux no-op contract. Mounted-path coverage writes 16
+MiB through `splice(2)` pipe-to-file transfer and verifies byte-for-byte
+SHA-256 equality.
 Additional mounted-path probes mirror the local xfstests splice/sendfile cases
 that actually exercise this surface (`generic/249`, `generic/591`, and
 `generic/680`). The 1 GiB `sendfile(2)` throughput comparison is retained as an

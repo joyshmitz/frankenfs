@@ -3274,6 +3274,9 @@ impl FrankenFuse {
             u64::try_from(offset_in).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
         let dst_offset =
             u64::try_from(offset_out).map_err(|_| MutationDispatchError::Errno(libc::EINVAL))?;
+        if len == 0 {
+            return Ok(0);
+        }
         let copy_len = len.min(u64::from(u32::MAX));
         let cx = Self::cx_for_request();
         let copied = {
@@ -10362,6 +10365,31 @@ mod tests {
         assert!(
             calls.lock().expect("lock calls").is_empty(),
             "backend must not be called for invalid copy_file_range flags"
+        );
+    }
+
+    #[test]
+    fn dispatch_copy_file_range_zero_length_returns_without_backend_scope() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        assert_eq!(
+            fuse.dispatch_copy_file_range(1, 5, 2, 7, 0, 0)
+                .expect("zero-length copy_file_range should succeed"),
+            0
+        );
+        assert!(
+            calls.lock().expect("lock calls").is_empty(),
+            "zero-length copy_file_range must not open a request scope, commit, read, or write"
         );
     }
 

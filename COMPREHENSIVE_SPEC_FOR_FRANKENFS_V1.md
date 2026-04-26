@@ -3887,6 +3887,18 @@ fn create_impl(engine: &FrankenFsEngine, cx: &Cx, parent: InodeNumber,
   exponential backoff (up to 3 retries). `ENOSPC` on allocation failure.
   `EFBIG` if extent tree at max depth.
 
+#### 12.1.3a copy_file_range / splice-style transfers
+
+- `copy_file_range` accepts only `flags == 0`; unsupported flags return
+  `EINVAL` before backend mutation.
+- Negative source or destination offsets return `EINVAL`.
+- A zero-length request returns `0` after request validation without opening a
+  backend request scope, committing, reading, writing, or invalidating
+  readahead.
+- Same-inode overlapping ranges return `EINVAL`; non-overlapping ranges stream
+  through the MVCC-aware `read`/`write` contract unless a format-specific
+  implementation provides an equivalent extent-aware fast path.
+
 #### 12.1.4 release (close)
 
 - Called when last fd for a handle closes. Commits pending transactions,
