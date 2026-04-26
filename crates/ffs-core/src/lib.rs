@@ -12365,10 +12365,7 @@ impl OpenFs {
             .checked_sub(relative_start)
             .ok_or_else(|| FfsError::InvalidGeometry("segment length underflow".into()))?;
         if Self::btrfs_extent_is_prealloc(extent) {
-            segments.push(BtrfsExtentRewriteSegment::Prealloc {
-                logical_offset,
-                length,
-            });
+            Self::btrfs_push_prealloc_rewrite_segment(segments, logical_offset, length)?;
             return Ok(());
         }
         let start = usize::try_from(relative_start)
@@ -12381,6 +12378,36 @@ impl OpenFs {
         segments.push(BtrfsExtentRewriteSegment::Data {
             logical_offset,
             data: segment.to_vec(),
+        });
+        Ok(())
+    }
+
+    fn btrfs_push_prealloc_rewrite_segment(
+        segments: &mut Vec<BtrfsExtentRewriteSegment>,
+        logical_offset: u64,
+        length: u64,
+    ) -> ffs_error::Result<()> {
+        if length == 0 {
+            return Ok(());
+        }
+        if let Some(BtrfsExtentRewriteSegment::Prealloc {
+            logical_offset: previous_offset,
+            length: previous_length,
+        }) = segments.last_mut()
+        {
+            let previous_end = previous_offset.checked_add(*previous_length).ok_or_else(|| {
+                FfsError::InvalidGeometry("prealloc rewrite segment end overflow".into())
+            })?;
+            if previous_end == logical_offset {
+                *previous_length = previous_length.checked_add(length).ok_or_else(|| {
+                    FfsError::InvalidGeometry("prealloc rewrite segment length overflow".into())
+                })?;
+                return Ok(());
+            }
+        }
+        segments.push(BtrfsExtentRewriteSegment::Prealloc {
+            logical_offset,
+            length,
         });
         Ok(())
     }
@@ -13720,6 +13747,9 @@ impl OpenFs {
                 .fs_tree
                 .range(&ext_start, &ext_end)
                 .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            let mut touched_extents = Vec::new();
+            let mut segments = Vec::new();
+            let mut zero_cursor = offset;
 
             for (key, extent_bytes) in extents {
                 let extent =
@@ -13734,12 +13764,19 @@ impl OpenFs {
                     continue;
                 }
 
+                if zero_range && zero_cursor < overlap_start {
+                    Self::btrfs_push_prealloc_rewrite_segment(
+                        &mut segments,
+                        zero_cursor,
+                        overlap_start - zero_cursor,
+                    )?;
+                }
+
                 let materialized = if Self::btrfs_extent_is_prealloc(&extent) {
                     Vec::new()
                 } else {
                     self.btrfs_materialize_extent(cx, &extent)?
                 };
-                let mut segments = Vec::new();
                 Self::btrfs_push_rewrite_segment(
                     &mut segments,
                     key.offset,
@@ -13748,13 +13785,10 @@ impl OpenFs {
                     0,
                     overlap_start - key.offset,
                 )?;
-                if zero_range && Self::btrfs_extent_is_prealloc(&extent) {
-                    Self::btrfs_push_rewrite_segment(
+                if zero_range {
+                    Self::btrfs_push_prealloc_rewrite_segment(
                         &mut segments,
                         overlap_start,
-                        &extent,
-                        &materialized,
-                        overlap_start - key.offset,
                         overlap_end - key.offset,
                     )?;
                 }
@@ -13766,14 +13800,25 @@ impl OpenFs {
                     overlap_end - key.offset,
                     logical_len,
                 )?;
-                self.btrfs_rewrite_extent_data_segments(
-                    cx,
-                    &mut alloc,
-                    canonical,
-                    &[(key, extent)],
-                    segments,
+                zero_cursor = zero_cursor.max(overlap_end);
+                touched_extents.push((key, extent));
+            }
+
+            if zero_range && zero_cursor < new_end {
+                Self::btrfs_push_prealloc_rewrite_segment(
+                    &mut segments,
+                    zero_cursor,
+                    new_end - zero_cursor,
                 )?;
             }
+
+            self.btrfs_rewrite_extent_data_segments(
+                cx,
+                &mut alloc,
+                canonical,
+                &touched_extents,
+                segments,
+            )?;
         } else {
             // If there's an existing inline extent at offset 0, convert it to
             // a regular extent before inserting any prealloc extents. btrfs
