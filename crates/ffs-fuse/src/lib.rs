@@ -6245,6 +6245,31 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_ioctl_fibmap_zero_statfs_block_size_returns_einval() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fixture = vec![FiemapExtent {
+            logical: 0,
+            physical: 0,
+            length: 4096,
+            flags: FIEMAP_EXTENT_LAST,
+        }];
+        let mut recorder = IoctlRecordingFs::with_fiemap_fixture(fixture, Arc::clone(&calls));
+        recorder.blksize = 0;
+        let fuse = FrankenFuse::new(Box::new(recorder));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 31, 0, FIBMAP, &0_u32.to_ne_bytes(), 4);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::Statfs(InodeNumber(31)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
     fn dispatch_ioctl_fibmap_unwritten_extent_returns_hole_zero() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let fixture = vec![FiemapExtent {

@@ -3703,7 +3703,9 @@ impl<D: BlockDevice> ThrottleInjector<D> {
             Duration::ZERO
         };
 
-        let total_delay = base_latency + bw_delay + stall_delay;
+        let total_delay = base_latency
+            .saturating_add(bw_delay)
+            .saturating_add(stall_delay);
 
         if total_delay > Duration::ZERO {
             if config.respect_deadline {
@@ -6546,6 +6548,30 @@ mod tests {
             start.elapsed() < Duration::from_millis(100),
             "cancellation should not sleep the full throttle delay"
         );
+        assert_eq!(ti.inner.write_count(), 0);
+        assert!(ti.throttle_log().is_empty());
+    }
+
+    #[test]
+    fn throttle_delay_overflow_saturates_and_respects_deadline() {
+        let dev = CountingBlockDevice::new(MemBlockDevice::new(4096, 8));
+        let config = ThrottleConfig {
+            write_latency: Duration::MAX,
+            stall_probability: 1.0,
+            stall_duration: Duration::from_nanos(1),
+            respect_deadline: true,
+            ..Default::default()
+        };
+        let ti = ThrottleInjector::new(dev, config, 14);
+        let deadline = Cx::for_testing().now() + Duration::from_millis(1);
+        let cx = Cx::for_testing_with_budget(asupersync::Budget::new().with_deadline(deadline));
+        let data = vec![0xF0_u8; 4096];
+
+        let err = ti
+            .write_block(&cx, BlockNumber(0), &data)
+            .expect_err("saturated delay should not panic or reach inner write");
+
+        assert!(matches!(err, FfsError::Cancelled));
         assert_eq!(ti.inner.write_count(), 0);
         assert!(ti.throttle_log().is_empty());
     }
