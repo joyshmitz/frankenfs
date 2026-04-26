@@ -9740,6 +9740,56 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn dispatch_write_fuse_kill_suidgid_flag_does_not_imply_sync() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording(Arc::clone(
+                &calls,
+            ))),
+            &options,
+        );
+
+        let written = fuse
+            .dispatch_write_with_intent(
+                42,
+                21,
+                b"kill-suidgid",
+                WriteIntent::from_fuse(9005, fuse_consts::FUSE_WRITE_KILL_SUIDGID, 0),
+            )
+            .expect("dispatch kill-suidgid write");
+
+        assert_eq!(written, 12);
+        assert_eq!(
+            fuse_consts::FUSE_WRITE_KILL_SUIDGID,
+            fuse_consts::RWF_SYNC,
+            "FUSE_WRITE_KILL_SUIDGID shares the raw bit used by RWF_SYNC"
+        );
+        assert_eq!(
+            calls.lock().expect("lock calls").as_slice(),
+            &[
+                MutationCall::Begin {
+                    op: RequestOp::Write,
+                },
+                MutationCall::Write {
+                    ino: InodeNumber(42),
+                    offset: 21,
+                    data: b"kill-suidgid".to_vec(),
+                },
+                MutationCall::Commit,
+                MutationCall::End {
+                    op: RequestOp::Write,
+                },
+            ],
+            "bit 2 must stay a FUSE metadata hint, not an RWF_SYNC fsync request"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn dispatch_write_fuse_cache_flag_rwf_hipri_hint_keeps_normal_write_contract() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let options = MountOptions {
