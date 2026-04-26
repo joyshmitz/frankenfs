@@ -13190,6 +13190,72 @@ fn btrfs_fuse_fallocate_zero_range_zeroes_range() {
 }
 
 #[test]
+fn btrfs_fuse_fallocate_collapse_range_shifts_tail_and_shrinks_file() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fallocate_collapse_range";
+        let path = mnt.join("collapse_range.bin");
+        let block = 4096_usize;
+        let mut data = Vec::with_capacity(block * 4);
+        data.extend(std::iter::repeat_n(b'A', block));
+        data.extend(std::iter::repeat_n(b'B', block));
+        data.extend(std::iter::repeat_n(b'C', block));
+        data.extend(std::iter::repeat_n(b'D', block));
+        fs::write(&path, &data).expect("seed collapse-range file on btrfs");
+
+        let report = query_fallocate(&path, 0x08, 4096, 4096);
+        assert_eq!(
+            report["res"].as_i64(),
+            Some(0),
+            "btrfs collapse-range fallocate should succeed: {report}"
+        );
+
+        let meta = fs::metadata(&path).expect("stat after btrfs collapse-range");
+        assert_eq!(meta.len(), 12_288, "collapse range must shrink file");
+
+        let readback = fs::read(&path).expect("read after btrfs collapse-range");
+        let mut expected = Vec::with_capacity(block * 3);
+        expected.extend(std::iter::repeat_n(b'A', block));
+        expected.extend(std::iter::repeat_n(b'C', block));
+        expected.extend(std::iter::repeat_n(b'D', block));
+        assert_eq!(readback, expected);
+        emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
+fn btrfs_fuse_fallocate_insert_range_shifts_tail_and_grows_file() {
+    with_btrfs_rw_mount(|mnt| {
+        let scenario_id = "btrfs_rw_fallocate_insert_range";
+        let path = mnt.join("insert_range.bin");
+        let block = 4096_usize;
+        let mut data = Vec::with_capacity(block * 3);
+        data.extend(std::iter::repeat_n(b'A', block));
+        data.extend(std::iter::repeat_n(b'B', block));
+        data.extend(std::iter::repeat_n(b'C', block));
+        fs::write(&path, &data).expect("seed insert-range file on btrfs");
+
+        let report = query_fallocate(&path, 0x20, 4096, 4096);
+        assert_eq!(
+            report["res"].as_i64(),
+            Some(0),
+            "btrfs insert-range fallocate should succeed: {report}"
+        );
+
+        let meta = fs::metadata(&path).expect("stat after btrfs insert-range");
+        assert_eq!(meta.len(), 16_384, "insert range must grow file");
+
+        let readback = fs::read(&path).expect("read after btrfs insert-range");
+        let mut expected = Vec::with_capacity(block * 4);
+        expected.extend(std::iter::repeat_n(b'A', block));
+        expected.extend(std::iter::repeat_n(0, block));
+        expected.extend(std::iter::repeat_n(b'B', block));
+        expected.extend(std::iter::repeat_n(b'C', block));
+        assert_eq!(readback, expected);
+        emit_scenario_result(scenario_id, "PASS", None);
+    });
+}
+
+#[test]
 fn btrfs_fuse_fallocate_on_directory_reports_eisdir() {
     if !command_available("python3") {
         eprintln!("python3 not available, skipping");
@@ -13297,7 +13363,7 @@ fd = os.open(path, os.O_RDWR)
 libc = ctypes.CDLL(None, use_errno=True)
 libc.fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong]
 libc.fallocate.restype = ctypes.c_int
-res = libc.fallocate(fd, 0x20, 0, 4096)
+res = libc.fallocate(fd, 0x40, 0, 4096)
 err = ctypes.get_errno()
 os.close(fd)
 if res == 0:

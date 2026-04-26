@@ -462,6 +462,7 @@ struct BtrfsAllocState {
 }
 
 type BtrfsPurgeAction = (BtrfsKey, Option<(u64, u64)>);
+type BtrfsExtentRewriteSegment = (u64, Vec<u8>);
 
 /// Outcome of crash recovery performed at mount time.
 ///
@@ -11820,22 +11821,37 @@ impl OpenFs {
         "btrfs_rw_fallocate_unsupported_mode_bits";
     const BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE: &str = "btrfs_rw_fallocate_punch_hole";
     const BTRFS_RW_SCENARIO_FALLOCATE_ZERO_RANGE: &str = "btrfs_rw_fallocate_zero_range";
+    const BTRFS_RW_SCENARIO_FALLOCATE_COLLAPSE_RANGE: &str = "btrfs_rw_fallocate_collapse_range";
+    const BTRFS_RW_SCENARIO_FALLOCATE_INSERT_RANGE: &str = "btrfs_rw_fallocate_insert_range";
     const BTRFS_RW_SCENARIO_FLUSH: &str = "btrfs_rw_flush";
     const BTRFS_RW_SCENARIO_FSYNC: &str = "btrfs_rw_fsync";
     const BTRFS_RW_SCENARIO_FSYNCDIR: &str = "btrfs_rw_fsyncdir";
     const BTRFS_FALLOC_FL_KEEP_SIZE: i32 = 0x01;
     const BTRFS_FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+    const BTRFS_FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08;
     const BTRFS_FALLOC_FL_ZERO_RANGE: i32 = 0x10;
+    const BTRFS_FALLOC_FL_INSERT_RANGE: i32 = 0x20;
 
-    fn btrfs_fallocate_flags(mode: i32) -> (bool, bool, bool, i32) {
+    fn btrfs_fallocate_flags(mode: i32) -> (bool, bool, bool, bool, bool, i32) {
         let keep_size = (mode & Self::BTRFS_FALLOC_FL_KEEP_SIZE) != 0;
         let punch_hole = (mode & Self::BTRFS_FALLOC_FL_PUNCH_HOLE) != 0;
+        let collapse_range = (mode & Self::BTRFS_FALLOC_FL_COLLAPSE_RANGE) != 0;
         let zero_range = (mode & Self::BTRFS_FALLOC_FL_ZERO_RANGE) != 0;
+        let insert_range = (mode & Self::BTRFS_FALLOC_FL_INSERT_RANGE) != 0;
         let unsupported_bits = mode
             & !(Self::BTRFS_FALLOC_FL_KEEP_SIZE
                 | Self::BTRFS_FALLOC_FL_PUNCH_HOLE
-                | Self::BTRFS_FALLOC_FL_ZERO_RANGE);
-        (keep_size, punch_hole, zero_range, unsupported_bits)
+                | Self::BTRFS_FALLOC_FL_COLLAPSE_RANGE
+                | Self::BTRFS_FALLOC_FL_ZERO_RANGE
+                | Self::BTRFS_FALLOC_FL_INSERT_RANGE);
+        (
+            keep_size,
+            punch_hole,
+            collapse_range,
+            zero_range,
+            insert_range,
+            unsupported_bits,
+        )
     }
 
     fn ext4_inode_uses_inline_data(inode: &Ext4Inode) -> bool {
@@ -11859,9 +11875,9 @@ impl OpenFs {
         mode: i32,
         operation_id: &str,
         scenario_id: &str,
-    ) -> ffs_error::Result<(bool, bool, bool)> {
+    ) -> ffs_error::Result<(bool, bool, bool, bool, bool)> {
         const EINVAL_ERRNO: i32 = 22;
-        let (keep_size, punch_hole, zero_range, unsupported_bits) =
+        let (keep_size, punch_hole, collapse_range, zero_range, insert_range, unsupported_bits) =
             Self::btrfs_fallocate_flags(mode);
         if unsupported_bits != 0 {
             let unsupported_bits_hex = format!("0x{unsupported_bits:08x}");
@@ -11891,19 +11907,55 @@ impl OpenFs {
                 EINVAL_ERRNO,
             )));
         }
-        Ok((keep_size, punch_hole, zero_range))
+        if collapse_range && (mode & !Self::BTRFS_FALLOC_FL_COLLAPSE_RANGE) != 0 {
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "invalid_collapse_range_mode",
+                "btrfs_fallocate_rejected"
+            );
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                EINVAL_ERRNO,
+            )));
+        }
+        if insert_range && (mode & !Self::BTRFS_FALLOC_FL_INSERT_RANGE) != 0 {
+            warn!(
+                target: "ffs::btrfs::rw",
+                operation_id,
+                scenario_id,
+                outcome = "rejected",
+                error_class = "invalid_insert_range_mode",
+                "btrfs_fallocate_rejected"
+            );
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                EINVAL_ERRNO,
+            )));
+        }
+        Ok((
+            keep_size,
+            punch_hole,
+            collapse_range,
+            zero_range,
+            insert_range,
+        ))
     }
 
     fn btrfs_fallocate_scenario_id(mode: i32) -> &'static str {
-        let (keep_size, punch_hole, zero_range, unsupported_bits) =
+        let (keep_size, punch_hole, collapse_range, zero_range, insert_range, unsupported_bits) =
             Self::btrfs_fallocate_flags(mode);
 
         if unsupported_bits != 0 {
             Self::BTRFS_RW_SCENARIO_FALLOCATE_UNSUPPORTED_MODE_BITS
         } else if punch_hole {
             Self::BTRFS_RW_SCENARIO_FALLOCATE_PUNCH_HOLE
+        } else if collapse_range {
+            Self::BTRFS_RW_SCENARIO_FALLOCATE_COLLAPSE_RANGE
         } else if zero_range {
             Self::BTRFS_RW_SCENARIO_FALLOCATE_ZERO_RANGE
+        } else if insert_range {
+            Self::BTRFS_RW_SCENARIO_FALLOCATE_INSERT_RANGE
         } else if keep_size {
             Self::BTRFS_RW_SCENARIO_FALLOCATE_KEEP_SIZE
         } else {
@@ -12232,6 +12284,193 @@ impl OpenFs {
         }
 
         Ok(())
+    }
+
+    fn btrfs_extent_data_items(
+        alloc: &BtrfsAllocState,
+        canonical: u64,
+    ) -> ffs_error::Result<Vec<(BtrfsKey, BtrfsExtentData)>> {
+        let ext_start = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let ext_end = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: u64::MAX,
+        };
+        alloc
+            .fs_tree
+            .range(&ext_start, &ext_end)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?
+            .into_iter()
+            .map(|(key, extent_bytes)| {
+                parse_extent_data(&extent_bytes)
+                    .map(|extent| (key, extent))
+                    .map_err(|e| parse_to_ffs_error(&e))
+            })
+            .collect()
+    }
+
+    fn btrfs_delete_extent_data_items(
+        alloc: &mut BtrfsAllocState,
+        extents: &[(BtrfsKey, BtrfsExtentData)],
+    ) -> ffs_error::Result<()> {
+        for (key, extent) in extents {
+            alloc
+                .fs_tree
+                .delete(key)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            if let BtrfsExtentData::Regular {
+                disk_bytenr,
+                disk_num_bytes,
+                ..
+            } = extent
+                && *disk_bytenr > 0
+            {
+                alloc
+                    .extent_alloc
+                    .free_extent(*disk_bytenr, *disk_num_bytes, false)
+                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn btrfs_push_rewrite_segment(
+        segments: &mut Vec<BtrfsExtentRewriteSegment>,
+        logical_offset: u64,
+        materialized: &[u8],
+        relative_start: u64,
+        relative_end: u64,
+    ) -> ffs_error::Result<()> {
+        if relative_start >= relative_end {
+            return Ok(());
+        }
+        let start = usize::try_from(relative_start)
+            .map_err(|_| FfsError::InvalidGeometry("segment start overflow".into()))?;
+        let end = usize::try_from(relative_end)
+            .map_err(|_| FfsError::InvalidGeometry("segment end overflow".into()))?;
+        let segment = materialized.get(start..end).ok_or_else(|| {
+            FfsError::InvalidGeometry("extent rewrite segment outside materialized data".into())
+        })?;
+        segments.push((logical_offset, segment.to_vec()));
+        Ok(())
+    }
+
+    fn btrfs_rewrite_extent_data_segments(
+        &self,
+        cx: &Cx,
+        alloc: &mut BtrfsAllocState,
+        canonical: u64,
+        extents: &[(BtrfsKey, BtrfsExtentData)],
+        segments: Vec<BtrfsExtentRewriteSegment>,
+    ) -> ffs_error::Result<()> {
+        Self::btrfs_delete_extent_data_items(alloc, extents)?;
+        for (logical_offset, data) in segments {
+            self.btrfs_insert_regular_extent_segment(cx, alloc, canonical, logical_offset, &data)?;
+        }
+        Ok(())
+    }
+
+    fn btrfs_collapse_extent_range(
+        &self,
+        cx: &Cx,
+        alloc: &mut BtrfsAllocState,
+        canonical: u64,
+        offset: u64,
+        length: u64,
+    ) -> ffs_error::Result<()> {
+        let remove_end = offset
+            .checked_add(length)
+            .ok_or_else(|| FfsError::InvalidGeometry("collapse range overflow".into()))?;
+        let extents = Self::btrfs_extent_data_items(alloc, canonical)?;
+        let mut segments = Vec::new();
+
+        for (key, extent) in &extents {
+            let logical_len = Self::btrfs_extent_logical_len(extent)?;
+            let logical_end = key
+                .offset
+                .checked_add(logical_len)
+                .ok_or_else(|| FfsError::InvalidGeometry("extent logical end overflow".into()))?;
+            let materialized = self.btrfs_materialize_extent(cx, extent)?;
+
+            let left_end = logical_end.min(offset);
+            if key.offset < left_end {
+                Self::btrfs_push_rewrite_segment(
+                    &mut segments,
+                    key.offset,
+                    &materialized,
+                    0,
+                    left_end - key.offset,
+                )?;
+            }
+
+            let right_start = key.offset.max(remove_end);
+            if right_start < logical_end {
+                let shifted_offset = right_start.checked_sub(length).ok_or_else(|| {
+                    FfsError::InvalidGeometry("collapse shifted offset underflow".into())
+                })?;
+                Self::btrfs_push_rewrite_segment(
+                    &mut segments,
+                    shifted_offset,
+                    &materialized,
+                    right_start - key.offset,
+                    logical_end - key.offset,
+                )?;
+            }
+        }
+
+        self.btrfs_rewrite_extent_data_segments(cx, alloc, canonical, &extents, segments)
+    }
+
+    fn btrfs_insert_hole_range(
+        &self,
+        cx: &Cx,
+        alloc: &mut BtrfsAllocState,
+        canonical: u64,
+        offset: u64,
+        length: u64,
+    ) -> ffs_error::Result<()> {
+        let extents = Self::btrfs_extent_data_items(alloc, canonical)?;
+        let mut segments = Vec::new();
+
+        for (key, extent) in &extents {
+            let logical_len = Self::btrfs_extent_logical_len(extent)?;
+            let logical_end = key
+                .offset
+                .checked_add(logical_len)
+                .ok_or_else(|| FfsError::InvalidGeometry("extent logical end overflow".into()))?;
+            let materialized = self.btrfs_materialize_extent(cx, extent)?;
+
+            let left_end = logical_end.min(offset);
+            if key.offset < left_end {
+                Self::btrfs_push_rewrite_segment(
+                    &mut segments,
+                    key.offset,
+                    &materialized,
+                    0,
+                    left_end - key.offset,
+                )?;
+            }
+
+            let right_start = key.offset.max(offset);
+            if right_start < logical_end {
+                let shifted_offset = right_start.checked_add(length).ok_or_else(|| {
+                    FfsError::InvalidGeometry("insert shifted offset overflow".into())
+                })?;
+                Self::btrfs_push_rewrite_segment(
+                    &mut segments,
+                    shifted_offset,
+                    &materialized,
+                    right_start - key.offset,
+                    logical_end - key.offset,
+                )?;
+            }
+        }
+
+        self.btrfs_rewrite_extent_data_segments(cx, alloc, canonical, &extents, segments)
     }
 
     fn btrfs_recompute_inode_nbytes(
@@ -13350,7 +13589,7 @@ impl OpenFs {
             return Ok(());
         }
 
-        let (keep_size, punch_hole, zero_range) =
+        let (keep_size, punch_hole, collapse_range, zero_range, insert_range) =
             Self::btrfs_validate_fallocate_mode(mode, &operation_id, scenario_id)?;
 
         let alloc_mutex = self.require_btrfs_alloc_state()?;
@@ -13372,12 +13611,39 @@ impl OpenFs {
 
         let sectorsize = u64::from(alloc.sectorsize);
         if (offset % sectorsize) != 0 || (length % sectorsize) != 0 {
+            if collapse_range || insert_range {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::EINVAL,
+                )));
+            }
             return Err(FfsError::UnsupportedFeature(
                 "btrfs fallocate currently requires sector-aligned offset/length".to_owned(),
             ));
         }
 
-        if punch_hole || zero_range {
+        if collapse_range {
+            if new_end >= inode.size {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::EINVAL,
+                )));
+            }
+            self.btrfs_collapse_extent_range(cx, &mut alloc, canonical, offset, length)?;
+            inode.size = inode
+                .size
+                .checked_sub(length)
+                .ok_or_else(|| FfsError::InvalidGeometry("collapse size underflow".into()))?;
+        } else if insert_range {
+            if offset >= inode.size {
+                return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                    libc::EINVAL,
+                )));
+            }
+            self.btrfs_insert_hole_range(cx, &mut alloc, canonical, offset, length)?;
+            inode.size = inode
+                .size
+                .checked_add(length)
+                .ok_or_else(|| FfsError::InvalidGeometry("insert size overflow".into()))?;
+        } else if punch_hole || zero_range {
             let ext_start = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
@@ -13590,7 +13856,7 @@ impl OpenFs {
             }
         }
 
-        if !keep_size && new_end > inode.size {
+        if !keep_size && !collapse_range && !insert_range && new_end > inode.size {
             inode.size = new_end;
         }
         inode.nbytes = Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?;
@@ -13614,7 +13880,9 @@ impl OpenFs {
             length,
             keep_size,
             punch_hole,
+            collapse_range,
             zero_range,
+            insert_range,
             "btrfs_fallocate_applied"
         );
         drop(alloc);
@@ -36043,6 +36311,286 @@ mod tests {
             .expect("read after keep-size zero range");
         assert_eq!(after.size, 8);
         assert_eq!(&data[..8], b"existing");
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_collapse_range_shifts_tail_and_shrinks_file() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_usize;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("collapse.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let mut payload = Vec::with_capacity(block * 4);
+        payload.extend(std::iter::repeat_n(b'A', block));
+        payload.extend(std::iter::repeat_n(b'B', block));
+        payload.extend(std::iter::repeat_n(b'C', block));
+        payload.extend(std::iter::repeat_n(b'D', block));
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("seed collapse-range file");
+
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 4096, 4096, 0x08)
+            .expect("btrfs collapse range should succeed");
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after collapse range");
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 12_288)
+            .expect("read after collapse range");
+        let mut expected = Vec::with_capacity(block * 3);
+        expected.extend(std::iter::repeat_n(b'A', block));
+        expected.extend(std::iter::repeat_n(b'C', block));
+        expected.extend(std::iter::repeat_n(b'D', block));
+        assert_eq!(after.size, 12_288);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_insert_range_shifts_tail_and_grows_file() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_usize;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("insert.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let mut payload = Vec::with_capacity(block * 3);
+        payload.extend(std::iter::repeat_n(b'A', block));
+        payload.extend(std::iter::repeat_n(b'B', block));
+        payload.extend(std::iter::repeat_n(b'C', block));
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("seed insert-range file");
+
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 4096, 4096, 0x20)
+            .expect("btrfs insert range should succeed");
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after insert range");
+        let data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16_384)
+            .expect("read after insert range");
+        let mut expected = Vec::with_capacity(block * 4);
+        expected.extend(std::iter::repeat_n(b'A', block));
+        expected.extend(std::iter::repeat_n(0, block));
+        expected.extend(std::iter::repeat_n(b'B', block));
+        expected.extend(std::iter::repeat_n(b'C', block));
+        assert_eq!(after.size, 16_384);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_collapse_range_reaching_eof_rejects_without_mutation() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("collapse_eof.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let payload = vec![b'C'; 12_288];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("seed collapse eof file");
+        let before = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr before collapse eof rejection");
+        let before_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 12_288)
+            .expect("read before collapse eof rejection");
+
+        let err = ops
+            .fallocate(&cx, &mut RequestScope::empty(), attr.ino, 8192, 4096, 0x08)
+            .expect_err("collapse range reaching EOF should reject");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after collapse eof rejection");
+        let after_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 12_288)
+            .expect("read after collapse eof rejection");
+        assert_eq!(after.size, before.size);
+        assert_eq!(after_data, before_data);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_insert_range_at_eof_rejects_without_mutation() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("insert_eof.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let payload = vec![b'I'; 12_288];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("seed insert eof file");
+        let before = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr before insert eof rejection");
+        let before_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16_384)
+            .expect("read before insert eof rejection");
+
+        let err = ops
+            .fallocate(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                before.size,
+                4096,
+                0x20,
+            )
+            .expect_err("insert range at EOF should reject");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after insert eof rejection");
+        let after_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16_384)
+            .expect("read after insert eof rejection");
+        assert_eq!(after.size, before.size);
+        assert_eq!(after_data, before_data);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_range_modes_reject_unaligned_with_einval_without_mutation() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("unaligned_range_modes.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let payload = vec![b'U'; 16_384];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("seed unaligned range-mode file");
+        let before = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr before unaligned range-mode rejection");
+        let before_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16_384)
+            .expect("read before unaligned range-mode rejection");
+
+        for (offset, length, mode) in [
+            (100, 4096, 0x08),
+            (4096, 200, 0x08),
+            (100, 4096, 0x20),
+            (4096, 200, 0x20),
+        ] {
+            let err = ops
+                .fallocate(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    attr.ino,
+                    offset,
+                    length,
+                    mode,
+                )
+                .expect_err("unaligned range mode should reject with EINVAL");
+            assert_eq!(err.to_errno(), libc::EINVAL);
+        }
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after unaligned range-mode rejection");
+        let after_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16_384)
+            .expect("read after unaligned range-mode rejection");
+        assert_eq!(after.size, before.size);
+        assert_eq!(after_data, before_data);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_range_modes_reject_invalid_combinations_without_mutation() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("invalid_range_modes.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let payload = b"preserve-invalid-range-modes".repeat(500);
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("seed invalid range-mode file");
+        let before = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr before invalid mode rejection");
+        let before_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16_384)
+            .expect("read before invalid mode rejection");
+
+        for mode in [
+            0x08 | libc::FALLOC_FL_KEEP_SIZE,
+            0x20 | libc::FALLOC_FL_KEEP_SIZE,
+        ] {
+            let err = ops
+                .fallocate(&cx, &mut RequestScope::empty(), attr.ino, 4096, 4096, mode)
+                .expect_err("exclusive range mode combinations should reject");
+            assert_eq!(err.to_errno(), libc::EINVAL);
+        }
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after invalid mode rejection");
+        let after_data = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 16_384)
+            .expect("read after invalid mode rejection");
+        assert_eq!(after.size, before.size);
+        assert_eq!(after_data, before_data);
     }
 
     #[test]

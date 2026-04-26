@@ -1364,6 +1364,8 @@ See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [P
 | `fallocate` (`mode=0`, `FALLOC_FL_KEEP_SIZE`) | Partially supported | Preallocation paths are supported and validated |
 | `fallocate` (`FALLOC_FL_PUNCH_HOLE\|FALLOC_FL_KEEP_SIZE`) | Supported (experimental) | Success path zero-fills the requested range while preserving file size and unaffected bytes |
 | `fallocate` (`FALLOC_FL_ZERO_RANGE`, optional `FALLOC_FL_KEEP_SIZE`) | Supported (experimental) | Success path zero-fills the requested range; `KEEP_SIZE` preserves EOF while non-`KEEP_SIZE` can extend file size |
+| `fallocate` (`FALLOC_FL_COLLAPSE_RANGE`) | Supported (experimental) | Success path removes the requested aligned range, shifts the tail left, and shrinks the file size |
+| `fallocate` (`FALLOC_FL_INSERT_RANGE`) | Supported (experimental) | Success path inserts an aligned hole, shifts the tail right, and grows the file size |
 | `fallocate` (unknown/extra mode bits) | Unsupported | Must return `EOPNOTSUPP` (`FfsError::UnsupportedFeature`) with no partial data/size mutation before rejection |
 | Unsupported-path observability | Required | Structured logs include `operation_id`, `scenario_id`, `outcome`, and `error_class` |
 
