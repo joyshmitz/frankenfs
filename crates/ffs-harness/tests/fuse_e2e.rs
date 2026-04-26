@@ -1328,6 +1328,37 @@ def chmod_truncate_stat():
     os.truncate(path, 3)
     return {"read": read_text(path), "stat": stable_stat(path)}
 
+def pread_pwrite_seek_fdatasync():
+    if not hasattr(os, "pread") or not hasattr(os, "pwrite"):
+        return {"skipped": "python_offset_io_unavailable"}
+
+    path = os.path.join(base, "io.bin")
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_RDWR, 0o644)
+    try:
+        os.write(fd, b"0123456789")
+        os.pwrite(fd, b"XY", 4)
+        offset_read = os.pread(fd, 8, 2).decode("ascii")
+        seek_pos = os.lseek(fd, -3, os.SEEK_END)
+        os.write(fd, b"END")
+        if hasattr(os, "fdatasync"):
+            os.fdatasync(fd)
+            sync_call = "fdatasync"
+        else:
+            os.fsync(fd)
+            sync_call = "fsync_fallback"
+        final_pos = os.lseek(fd, 0, os.SEEK_CUR)
+    finally:
+        os.close(fd)
+
+    return {
+        "final_pos": final_pos,
+        "offset_read": offset_read,
+        "read": read_text(path),
+        "seek_pos": seek_pos,
+        "stat": stable_stat(path),
+        "sync_call": sync_call,
+    }
+
 def hardlink_symlink():
     path = os.path.join(base, "file.txt")
     hard = os.path.join(base, "hard.txt")
@@ -1398,6 +1429,9 @@ def fsync_directory():
 
 def cleanup():
     os.unlink(os.path.join(base, "file.txt"))
+    io_path = os.path.join(base, "io.bin")
+    if os.path.exists(io_path):
+        os.unlink(io_path)
     os.unlink(os.path.join(base, "renamed.txt"))
     os.unlink(os.path.join(base, "map.bin"))
     os.unlink(os.path.join(base, "moved", "child.txt"))
@@ -1409,6 +1443,7 @@ for step, func in [
     ("mkdir_base", mkdir_base),
     ("create_write_fsync_read", create_write_fsync_read),
     ("chmod_truncate_stat", chmod_truncate_stat),
+    ("pread_pwrite_seek_fdatasync", pread_pwrite_seek_fdatasync),
     ("hardlink_symlink", hardlink_symlink),
     ("rename_unlink", rename_unlink),
     ("nested_dir_rename", nested_dir_rename),
@@ -2746,7 +2781,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
     emit_scenario_result(
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
-        Some("file_lifecycle+dir_ops+attrs+links+mmap+fsync"),
+        Some("file_lifecycle+offset_io+dir_ops+attrs+links+mmap+fsync"),
     );
 }
 
