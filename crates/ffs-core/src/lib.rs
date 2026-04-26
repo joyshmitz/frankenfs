@@ -13734,60 +13734,44 @@ impl OpenFs {
                     continue;
                 }
 
-                let materialized = self.btrfs_materialize_extent(cx, &extent)?;
-                alloc
-                    .fs_tree
-                    .delete(&key)
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                if let BtrfsExtentData::Regular {
-                    disk_bytenr,
-                    disk_num_bytes,
-                    ..
-                } = extent
-                {
-                    if disk_bytenr > 0 {
-                        alloc
-                            .extent_alloc
-                            .free_extent(disk_bytenr, disk_num_bytes, false)
-                            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                    }
-                }
-
-                let left_len = usize::try_from(overlap_start - key.offset).map_err(|_| {
-                    FfsError::InvalidGeometry("left segment length overflow".into())
-                })?;
-                let right_start = usize::try_from(overlap_end - key.offset).map_err(|_| {
-                    FfsError::InvalidGeometry("right segment offset overflow".into())
-                })?;
-                let middle_start = left_len;
-                let middle_end = right_start;
-
-                self.btrfs_insert_regular_extent_segment(
-                    cx,
-                    &mut alloc,
-                    canonical,
+                let materialized = if Self::btrfs_extent_is_prealloc(&extent) {
+                    Vec::new()
+                } else {
+                    self.btrfs_materialize_extent(cx, &extent)?
+                };
+                let mut segments = Vec::new();
+                Self::btrfs_push_rewrite_segment(
+                    &mut segments,
                     key.offset,
-                    &materialized[..left_len],
+                    &extent,
+                    &materialized,
+                    0,
+                    overlap_start - key.offset,
                 )?;
-
-                if zero_range && middle_start < middle_end {
-                    let mut materialized_mut = materialized[left_len..right_start].to_vec();
-                    materialized_mut.fill(0);
-                    self.btrfs_insert_regular_extent_segment(
-                        cx,
-                        &mut alloc,
-                        canonical,
-                        key.offset.saturating_add(left_len as u64),
-                        &materialized_mut,
+                if zero_range && Self::btrfs_extent_is_prealloc(&extent) {
+                    Self::btrfs_push_rewrite_segment(
+                        &mut segments,
+                        overlap_start,
+                        &extent,
+                        &materialized,
+                        overlap_start - key.offset,
+                        overlap_end - key.offset,
                     )?;
                 }
-
-                self.btrfs_insert_regular_extent_segment(
+                Self::btrfs_push_rewrite_segment(
+                    &mut segments,
+                    overlap_end,
+                    &extent,
+                    &materialized,
+                    overlap_end - key.offset,
+                    logical_len,
+                )?;
+                self.btrfs_rewrite_extent_data_segments(
                     cx,
                     &mut alloc,
                     canonical,
-                    overlap_end,
-                    &materialized[right_start..],
+                    &[(key, extent)],
+                    segments,
                 )?;
             }
         } else {
@@ -39937,6 +39921,115 @@ mod tests {
             .unwrap();
         assert!(readback[..4096].iter().all(|byte| *byte == 0));
         assert_eq!(&readback[4096..], payload.as_slice());
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_punch_hole_preserves_unpunched_prealloc_extents() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_u64;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("punch-prealloc.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 3 * block, 0)
+            .expect("seed preallocated range");
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            block,
+            block,
+            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("punch middle block out of prealloc extent");
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after punch");
+        assert_eq!(after.size, 3 * block);
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            2,
+            "punching one block out of prealloc should preserve the two untouched unwritten runs"
+        );
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].length, block);
+        assert_ne!(extents[0].flags & FIEMAP_EXTENT_UNWRITTEN, 0);
+        assert_eq!(extents[1].logical, 2 * block);
+        assert_eq!(extents[1].length, block);
+        assert_ne!(extents[1].flags & FIEMAP_EXTENT_UNWRITTEN, 0);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_zero_range_preserves_prealloc_extents() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_u64;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("zero-prealloc.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 3 * block, 0)
+            .expect("seed preallocated range");
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            block,
+            block,
+            libc::FALLOC_FL_ZERO_RANGE | libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("zero middle block of prealloc extent");
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after zero range");
+        assert_eq!(after.size, 3 * block);
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert!(
+            !extents.is_empty(),
+            "zeroing a preallocated range must not discard the allocation"
+        );
+        assert_eq!(extents.first().expect("first extent").logical, 0);
+        let last = extents.last().expect("last extent");
+        assert_eq!(last.logical + last.length, 3 * block);
+        assert_eq!(
+            extents.iter().map(|extent| extent.length).sum::<u64>(),
+            3 * block,
+            "all preallocated bytes should remain represented after zero range"
+        );
+        assert!(
+            extents
+                .iter()
+                .all(|extent| extent.flags & FIEMAP_EXTENT_UNWRITTEN != 0),
+            "preallocated zero-range extents should remain unwritten"
+        );
     }
 
     #[test]
