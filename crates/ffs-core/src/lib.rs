@@ -13473,16 +13473,17 @@ impl OpenFs {
                                 "existing inline extent length does not fit u64".into(),
                             )
                         })?;
-                        let prev_alloc_size = prev_data_len.saturating_add(sectorsize - 1)
-                            & !(sectorsize - 1);
+                        let prev_alloc_size =
+                            prev_data_len.saturating_add(sectorsize - 1) & !(sectorsize - 1);
                         let prev_allocation = alloc
                             .extent_alloc
                             .alloc_data(prev_alloc_size)
                             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                        if let Err(e) =
-                            self.dev
-                                .write_all_at(cx, ByteOffset(prev_allocation.bytenr), &prev_data)
-                        {
+                        if let Err(e) = self.dev.write_all_at(
+                            cx,
+                            ByteOffset(prev_allocation.bytenr),
+                            &prev_data,
+                        ) {
                             let _ = alloc.extent_alloc.free_extent(
                                 prev_allocation.bytenr,
                                 prev_alloc_size,
@@ -13535,7 +13536,8 @@ impl OpenFs {
                     break;
                 }
 
-                let extent = parse_extent_data(&extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
+                let extent =
+                    parse_extent_data(&extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
                 let logical_len = Self::btrfs_extent_logical_len(&extent)?;
                 let logical_end = key.offset.checked_add(logical_len).ok_or_else(|| {
                     FfsError::InvalidGeometry("extent logical end overflow".into())
