@@ -11,7 +11,6 @@
 pub mod io_engine;
 
 use asupersync::Cx;
-use asupersync::types::Time;
 use ffs_error::{FfsError, Result};
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, CommitSeq,
@@ -27,21 +26,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
 
 #[inline]
 fn cx_checkpoint(cx: &Cx) -> Result<()> {
     cx.checkpoint().map_err(|_| FfsError::Cancelled)
-}
-
-fn current_time() -> Time {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-        });
-    Time::from_nanos(nanos)
 }
 
 const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
@@ -3719,14 +3709,14 @@ impl<D: BlockDevice> ThrottleInjector<D> {
             if config.respect_deadline {
                 cx_checkpoint(cx)?;
                 let budget = cx.budget();
-                let now = current_time();
+                let now = cx.now();
                 if budget.is_past_deadline(now) {
                     return Err(FfsError::Cancelled);
                 }
-                let sleep_duration = budget.remaining_time(now).map_or(total_delay, |remaining| {
-                    Duration::from_nanos(u64::try_from(remaining.as_nanos()).unwrap_or(u64::MAX))
-                });
-                if sleep_duration < total_delay || sleep_duration.is_zero() {
+                if budget
+                    .remaining_time(now)
+                    .is_some_and(|remaining| remaining <= total_delay)
+                {
                     return Err(FfsError::Cancelled);
                 }
                 std::thread::sleep(total_delay);
@@ -6542,7 +6532,7 @@ mod tests {
             ..Default::default()
         };
         let ti = ThrottleInjector::new(dev, config, 13);
-        let deadline = current_time() + Duration::from_millis(1);
+        let deadline = Cx::for_testing().now() + Duration::from_millis(1);
         let cx = Cx::for_testing_with_budget(asupersync::Budget::new().with_deadline(deadline));
         let data = vec![0xEF_u8; 4096];
 

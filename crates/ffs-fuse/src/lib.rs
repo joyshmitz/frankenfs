@@ -2510,30 +2510,29 @@ impl FrankenFuse {
                     Ok(value) => u64::from(value),
                     Err(errno) => return IoctlResult::Error(errno),
                 };
-                let block_size = u64::from(
-                    self.inner
-                        .ops
-                        .statfs(
-                            &Self::cx_for_request(),
-                            &mut RequestScope::empty(),
-                            InodeNumber(ino),
-                        )
-                        .map_or(4096, |s| s.block_size),
-                );
                 let cx = Self::cx_for_request();
-                let extents =
+                let (block_size, extents) =
                     match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
-                        self.inner.ops.fiemap(
+                        let stats = self.inner.ops.statfs(cx, scope, InodeNumber(ino))?;
+                        let block_size = u64::from(stats.block_size);
+                        if block_size == 0 {
+                            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                                libc::EINVAL,
+                            )));
+                        }
+                        let extents = self.inner.ops.fiemap(
                             cx,
                             scope,
                             InodeNumber(ino),
                             logical.saturating_mul(block_size),
                             block_size,
-                        )
+                        )?;
+                        Ok((block_size, extents))
                     }) {
-                        Ok(exts) => exts,
+                        Ok(result) => result,
                         Err(error) => return IoctlResult::Error(error.to_errno()),
                     };
+                let req_byte = logical.saturating_mul(block_size);
                 // Hole / sparse range -> 0 per fs/ext4/inode.c::ext4_get_block.
                 let physical_block = extents
                     .into_iter()
@@ -2542,16 +2541,14 @@ impl FrankenFuse {
                         // queried logical block (fiemap may return an
                         // extent that starts later if the query falls
                         // in a hole).
-                        let req_byte = logical.saturating_mul(block_size);
                         e.logical <= req_byte && req_byte < e.logical.saturating_add(e.length)
                     })
                     .map_or(0_u64, |e| {
                         if e.flags & FIEMAP_EXTENT_UNWRITTEN != 0 {
                             return 0;
                         }
-                        let req_byte = logical.saturating_mul(block_size);
                         let offset_into = req_byte - e.logical;
-                        (e.physical + offset_into) / block_size
+                        e.physical.saturating_add(offset_into) / block_size
                     });
                 let physical_u32 = u32::try_from(physical_block).unwrap_or(u32::MAX);
                 IoctlResult::Data(physical_u32.to_ne_bytes().to_vec())
@@ -5375,6 +5372,7 @@ mod tests {
         GetBtrfsDevInfo(u64, [u8; 16]),
         BtrfsInoLookup(u64, u64),
         Getattr(InodeNumber),
+        Statfs(InodeNumber),
         GetVersion(InodeNumber),
         SetVersion(InodeNumber, u32),
         MoveExt(InodeNumber, u32, u64, u64, u64),
@@ -5740,6 +5738,28 @@ mod tests {
             _ino: InodeNumber,
         ) -> ffs_error::Result<Vec<u8>> {
             Ok(vec![])
+        }
+
+        fn statfs(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<FsStat> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::Statfs(ino));
+            Ok(FsStat {
+                blocks: 4096,
+                blocks_free: 1024,
+                blocks_available: 768,
+                files: 512,
+                files_free: 256,
+                block_size: self.blksize,
+                name_max: 255,
+                fragment_size: self.blksize,
+            })
         }
 
         fn get_inode_flags(
@@ -6191,7 +6211,34 @@ mod tests {
             calls.lock().expect("lock ioctl calls").as_slice(),
             &[
                 IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::Statfs(InodeNumber(17)),
                 IoctlCall::Fiemap(InodeNumber(17), 8192, 4096),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fibmap_uses_statfs_block_size() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fixture = vec![FiemapExtent {
+            logical: 2048,
+            physical: 5120,
+            length: 1024,
+            flags: FIEMAP_EXTENT_LAST,
+        }];
+        let mut recorder = IoctlRecordingFs::with_fiemap_fixture(fixture, Arc::clone(&calls));
+        recorder.blksize = 1024;
+        let fuse = FrankenFuse::new(Box::new(recorder));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 23, 0, FIBMAP, &2_u32.to_ne_bytes(), 4);
+        assert_eq!(response, IoctlResult::Data(5_u32.to_ne_bytes().to_vec()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::Statfs(InodeNumber(23)),
+                IoctlCall::Fiemap(InodeNumber(23), 2048, 1024),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
         );
@@ -6217,6 +6264,7 @@ mod tests {
             calls.lock().expect("lock ioctl calls").as_slice(),
             &[
                 IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::Statfs(InodeNumber(19)),
                 IoctlCall::Fiemap(InodeNumber(19), 4096, 4096),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
