@@ -1328,6 +1328,42 @@ def chmod_truncate_stat():
     os.truncate(path, 3)
     return {"read": read_text(path), "stat": stable_stat(path)}
 
+def utime_access_openat_statvfs():
+    path = os.path.join(base, "file.txt")
+    atime = 1_700_000_000
+    mtime = 1_700_000_100
+    os.utime(path, (atime, mtime))
+    st = os.stat(path)
+    access = {
+        "read": os.access(path, os.R_OK),
+        "write": os.access(path, os.W_OK),
+        "execute": os.access(path, os.X_OK),
+    }
+    vfs = os.statvfs(base)
+    result = {
+        "access": access,
+        "atime": int(st.st_atime),
+        "mtime": int(st.st_mtime),
+        "stat": stable_stat(path),
+        "statvfs": {
+            "frsize_positive": vfs.f_frsize > 0,
+            "namemax_at_least_255": vfs.f_namemax >= 255,
+        },
+    }
+    if os.open in os.supports_dir_fd:
+        dir_fd = os.open(base, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            fd = os.open("file.txt", os.O_RDONLY, dir_fd=dir_fd)
+            try:
+                result["openat_read"] = os.read(fd, 16).decode("ascii")
+            finally:
+                os.close(fd)
+        finally:
+            os.close(dir_fd)
+    else:
+        result["openat_read"] = "python_dir_fd_unavailable"
+    return result
+
 def pread_pwrite_seek_fdatasync():
     if not hasattr(os, "pread") or not hasattr(os, "pwrite"):
         return {"skipped": "python_offset_io_unavailable"}
@@ -1443,6 +1479,7 @@ for step, func in [
     ("mkdir_base", mkdir_base),
     ("create_write_fsync_read", create_write_fsync_read),
     ("chmod_truncate_stat", chmod_truncate_stat),
+    ("utime_access_openat_statvfs", utime_access_openat_statvfs),
     ("pread_pwrite_seek_fdatasync", pread_pwrite_seek_fdatasync),
     ("hardlink_symlink", hardlink_symlink),
     ("rename_unlink", rename_unlink),
@@ -2781,7 +2818,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
     emit_scenario_result(
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
-        Some("file_lifecycle+offset_io+dir_ops+attrs+links+mmap+fsync"),
+        Some("file_lifecycle+offset_io+openat+access+statfs+dir_ops+attrs+links+mmap+fsync"),
     );
 }
 
