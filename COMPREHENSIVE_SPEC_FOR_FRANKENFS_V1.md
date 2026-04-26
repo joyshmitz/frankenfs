@@ -3868,6 +3868,11 @@ fn create_impl(engine: &FrankenFsEngine, cx: &Cx, parent: InodeNumber,
   new blocks via `ffs-alloc` and insert extents via `ffs-extent` if needed,
   (5) commit: assign `CommitSeq`, flip `committed=true`, run SSI validation.
 - `O_APPEND`: offset determined atomically within the transaction.
+- Linux per-operation write intent follows the `pwritev2`/io_uring RWF
+  contract at the FUSE boundary: `RWF_APPEND` forces EOF-offset resolution,
+  `RWF_NOAPPEND` suppresses an open-file `O_APPEND` offset rewrite, and the
+  invalid `RWF_APPEND|RWF_NOAPPEND` combination returns `EINVAL` before EOF
+  lookup or backend mutation.
 - Partial block writes: read-modify-write on full block.
 - RaptorQ: after commit, modified blocks' groups marked for stale repair
   symbols. Re-encoding is asynchronous.

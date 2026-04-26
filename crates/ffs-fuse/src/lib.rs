@@ -969,6 +969,12 @@ impl WriteIntent {
 
     #[cfg(target_os = "linux")]
     const fn unsupported_errno(self) -> Option<i32> {
+        if self.write_flags & fuse_consts::RWF_APPEND != 0
+            && self.write_flags & fuse_consts::RWF_NOAPPEND != 0
+        {
+            return Some(libc::EINVAL);
+        }
+
         let unsupported = self.write_flags & (fuse_consts::RWF_ATOMIC | fuse_consts::RWF_DONTCACHE);
         if unsupported == 0 {
             None
@@ -9964,6 +9970,42 @@ mod tests {
         assert!(
             wrote_at_requested_offset,
             "RWF_NOAPPEND should preserve the caller-provided offset"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dispatch_write_rwf_append_noappend_conflict_rejects_before_mutation() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let options = MountOptions {
+            read_only: false,
+            ..MountOptions::default()
+        };
+        let fuse = FrankenFuse::with_options(
+            Box::new(MutationRecordingFs::with_scope_recording_and_getattr_size(
+                Arc::clone(&calls),
+                777,
+            )),
+            &options,
+        );
+
+        let err = fuse
+            .dispatch_write_with_intent(
+                42,
+                17,
+                b"append-noappend",
+                WriteIntent::from_fuse(
+                    0,
+                    fuse_consts::RWF_APPEND | fuse_consts::RWF_NOAPPEND,
+                    libc::O_APPEND,
+                ),
+            )
+            .expect_err("conflicting RWF_APPEND/RWF_NOAPPEND write should fail");
+
+        assert!(matches!(err, MutationDispatchError::Errno(libc::EINVAL)));
+        assert!(
+            calls.lock().expect("lock calls").is_empty(),
+            "Linux rejects RWF_APPEND|RWF_NOAPPEND before EOF lookup or mutation"
         );
     }
 
