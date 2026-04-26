@@ -8,7 +8,7 @@ use ffs_btrfs::{
     BtrfsDeviceSet, SendCommand, parse_send_stream, replay_tree_log, walk_chunk_tree,
     walk_device_tree,
 };
-use ffs_core::{Ext4JournalReplayMode, FileType, OpenFs, OpenOptions, RequestScope};
+use ffs_core::{Ext4JournalReplayMode, FileType, FsOps, OpenFs, OpenOptions, RequestScope};
 use ffs_fuse::{FrankenFuse, MountOptions, mount_background};
 use ffs_harness::{
     GoldenReference, ParityReport,
@@ -24,8 +24,8 @@ use ffs_ondisk::{
 };
 use ffs_types::{
     BTRFS_MAGIC, BTRFS_SUPER_INFO_OFFSET, EXT4_CASEFOLD_FL, EXT4_COMPR_FL, EXT4_COMPRBLK_FL,
-    EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET, GroupNumber,
-    InodeNumber, ParseError,
+    EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, EXT4_SUPER_MAGIC, EXT4_SUPERBLOCK_OFFSET,
+    FIEMAP_EXTENT_UNWRITTEN, GroupNumber, InodeNumber, ParseError,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -2489,6 +2489,64 @@ fn btrfs_generic_112_preallocation_contract_conforms() {
         "btrfs generic/112 image should be writable"
     );
     assert_generic_112_preallocation_contract("btrfs", &cx, fs, InodeNumber(1), &image_path, None);
+}
+
+#[test]
+fn btrfs_fallocate_preallocates_only_uncovered_holes_conforms() {
+    let cx = Cx::for_testing();
+    let (mut fs, _tmp, _image_path) = open_btrfs_mkfs(128);
+    fs.enable_writes(&cx)
+        .expect("enable writes on btrfs prealloc gap image");
+
+    let attr = fs
+        .create(
+            &cx,
+            InodeNumber(1),
+            OsStr::new("btrfs_prealloc_gap.bin"),
+            0o644,
+            0,
+            0,
+        )
+        .expect("create btrfs prealloc gap file");
+    let live = vec![0x42_u8; 4096];
+    fs.write(&cx, attr.ino, 4096, &live)
+        .expect("write live btrfs extent after leading hole");
+
+    fs.fallocate(&cx, attr.ino, 0, 8192, 0)
+        .expect("preallocate mixed hole/live btrfs range");
+
+    let mut scope = RequestScope::empty();
+    let extents = <OpenFs as FsOps>::fiemap(&fs, &cx, &mut scope, attr.ino, 0, u64::MAX)
+        .expect("fiemap btrfs prealloc gap file");
+    assert_eq!(
+        extents.len(),
+        2,
+        "preallocation should cover the leading hole without overlapping live data"
+    );
+    assert_eq!(extents[0].logical, 0);
+    assert_eq!(extents[0].length, 4096);
+    assert_ne!(
+        extents[0].flags & FIEMAP_EXTENT_UNWRITTEN,
+        0,
+        "leading hole should be represented as an unwritten prealloc extent"
+    );
+    assert_eq!(extents[1].logical, 4096);
+    assert_eq!(extents[1].length, 4096);
+    assert_eq!(
+        extents[1].flags & FIEMAP_EXTENT_UNWRITTEN,
+        0,
+        "live data extent must remain initialized"
+    );
+    assert!(
+        extents[0].logical + extents[0].length <= extents[1].logical,
+        "btrfs prealloc FIEMAP extents must not overlap: {extents:?}"
+    );
+
+    let readback = fs
+        .read(&cx, attr.ino, 0, 8192)
+        .expect("read mixed prealloc/live btrfs file");
+    assert!(readback[..4096].iter().all(|byte| *byte == 0));
+    assert_eq!(&readback[4096..], live.as_slice());
 }
 
 #[test]
