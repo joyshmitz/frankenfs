@@ -10456,6 +10456,102 @@ fn btrfs_fuse_pwritev2_rwf_hipri_preserves_normal_offset_write() {
 }
 
 #[test]
+fn btrfs_fuse_pwritev2_rwf_append_noappend_modes() {
+    with_btrfs_rw_mount(|mnt| {
+        let report = run_pwritev2_rwf_append_modes_probe(mnt);
+        if let Some(skip_reason) = report["skipped"].as_str() {
+            emit_scenario_result(
+                "btrfs_rw_pwritev2_rwf_append_noappend_modes",
+                "SKIP",
+                Some(skip_reason),
+            );
+            return;
+        }
+
+        let append = &report["append"];
+        assert_eq!(
+            append["written"].as_i64(),
+            Some(i64::try_from(b"+append".len()).expect("payload length fits i64")),
+            "btrfs RWF_APPEND should report the appended payload length: {report}"
+        );
+        assert_eq!(
+            append["readback_hex"].as_str(),
+            append["expected_hex"].as_str(),
+            "btrfs RWF_APPEND should ignore caller offset and append at EOF: {report}"
+        );
+
+        let noappend = &report["noappend"];
+        assert_eq!(
+            noappend["written"].as_i64(),
+            Some(i64::try_from(b"XY".len()).expect("payload length fits i64")),
+            "btrfs RWF_NOAPPEND should report the overwrite payload length: {report}"
+        );
+        assert_eq!(
+            noappend["readback_hex"].as_str(),
+            noappend["expected_hex"].as_str(),
+            "btrfs RWF_NOAPPEND should suppress O_APPEND and preserve caller offset: {report}"
+        );
+
+        let conflict = &report["conflict"];
+        assert_eq!(
+            conflict["errno"].as_i64(),
+            Some(i64::from(libc::EINVAL)),
+            "btrfs RWF_APPEND|RWF_NOAPPEND should reject with EINVAL: {report}"
+        );
+        assert_eq!(
+            conflict["readback_hex"].as_str(),
+            conflict["expected_hex"].as_str(),
+            "btrfs RWF_APPEND|RWF_NOAPPEND must reject before data mutation: {report}"
+        );
+
+        emit_scenario_result(
+            "btrfs_rw_pwritev2_rwf_append_noappend_modes",
+            "PASS",
+            Some("append_noappend_offset_and_conflict_contract"),
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_pwritev2_rwf_unsupported_intents_reject_without_mutation() {
+    with_btrfs_rw_mount(|mnt| {
+        let report = run_pwritev2_rwf_unsupported_intents_probe(mnt);
+        if let Some(skip_reason) = report["skipped"].as_str() {
+            emit_scenario_result(
+                "btrfs_rw_pwritev2_rwf_unsupported_intents",
+                "SKIP",
+                Some(skip_reason),
+            );
+            return;
+        }
+
+        for (case_key, flag_name) in [("atomic", "RWF_ATOMIC"), ("dontcache", "RWF_DONTCACHE")] {
+            let case = &report["cases"][case_key];
+            assert_eq!(
+                case["errno"].as_i64(),
+                Some(EOPNOTSUPP_ERRNO),
+                "btrfs {flag_name} should reject with EOPNOTSUPP: {report}"
+            );
+            assert!(
+                case["written"].is_null(),
+                "btrfs {flag_name} should not report a successful byte count: {report}"
+            );
+            assert_eq!(
+                case["readback_hex"].as_str(),
+                case["expected_hex"].as_str(),
+                "btrfs {flag_name} must reject before data mutation: {report}"
+            );
+        }
+
+        emit_scenario_result(
+            "btrfs_rw_pwritev2_rwf_unsupported_intents",
+            "PASS",
+            Some("rwf_atomic_rwf_dontcache_eopnotsupp_no_mutation"),
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_write_to_directory_reports_eisdir() {
     with_btrfs_rw_mount(|mnt| {
         let scenario_id = "btrfs_rw_write_to_directory_errno_eisdir";
