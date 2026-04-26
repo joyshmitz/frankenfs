@@ -4286,12 +4286,16 @@ at boundary, deallocate inner blocks, zero partial boundary blocks. Update
 
 **FALLOC_FL_COLLAPSE_RANGE:** Remove range and shift subsequent data down.
 Rewrites extent tree mappings. Range MUST be block-aligned (`EINVAL`).
+Shifted preallocated/unwritten extents MUST remain preallocated/unwritten at
+their new logical offsets, including FIEMAP `UNWRITTEN` observability.
 
 **FALLOC_FL_ZERO_RANGE:** Zero range without deallocation. Allocated blocks
 get zeroes written. Unallocated blocks marked as uninitialized extents.
 
 **FALLOC_FL_INSERT_RANGE:** Insert hole at offset, shift data up. Inverse of
-collapse. Range MUST be block-aligned.
+collapse. Range MUST be block-aligned. The inserted range is a logical hole;
+shifted preallocated/unwritten extents MUST retain their unwritten FIEMAP
+contract rather than being materialized as plain holes.
 
 Block allocation strategy: goal set to physical block after file's last
 extent for contiguity. Large allocations (>8 MB) use buddy allocator

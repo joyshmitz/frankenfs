@@ -462,7 +462,11 @@ struct BtrfsAllocState {
 }
 
 type BtrfsPurgeAction = (BtrfsKey, Option<(u64, u64)>);
-type BtrfsExtentRewriteSegment = (u64, Vec<u8>);
+
+enum BtrfsExtentRewriteSegment {
+    Data { logical_offset: u64, data: Vec<u8> },
+    Prealloc { logical_offset: u64, length: u64 },
+}
 
 /// Outcome of crash recovery performed at mount time.
 ///
@@ -11992,6 +11996,14 @@ impl OpenFs {
         }
     }
 
+    fn btrfs_extent_is_prealloc(extent: &BtrfsExtentData) -> bool {
+        matches!(
+            extent,
+            BtrfsExtentData::Regular { extent_type, .. }
+                if *extent_type == BTRFS_FILE_EXTENT_PREALLOC
+        )
+    }
+
     fn btrfs_materialize_extent(
         &self,
         cx: &Cx,
@@ -12341,11 +12353,22 @@ impl OpenFs {
     fn btrfs_push_rewrite_segment(
         segments: &mut Vec<BtrfsExtentRewriteSegment>,
         logical_offset: u64,
+        extent: &BtrfsExtentData,
         materialized: &[u8],
         relative_start: u64,
         relative_end: u64,
     ) -> ffs_error::Result<()> {
         if relative_start >= relative_end {
+            return Ok(());
+        }
+        let length = relative_end
+            .checked_sub(relative_start)
+            .ok_or_else(|| FfsError::InvalidGeometry("segment length underflow".into()))?;
+        if Self::btrfs_extent_is_prealloc(extent) {
+            segments.push(BtrfsExtentRewriteSegment::Prealloc {
+                logical_offset,
+                length,
+            });
             return Ok(());
         }
         let start = usize::try_from(relative_start)
@@ -12355,7 +12378,10 @@ impl OpenFs {
         let segment = materialized.get(start..end).ok_or_else(|| {
             FfsError::InvalidGeometry("extent rewrite segment outside materialized data".into())
         })?;
-        segments.push((logical_offset, segment.to_vec()));
+        segments.push(BtrfsExtentRewriteSegment::Data {
+            logical_offset,
+            data: segment.to_vec(),
+        });
         Ok(())
     }
 
@@ -12368,8 +12394,32 @@ impl OpenFs {
         segments: Vec<BtrfsExtentRewriteSegment>,
     ) -> ffs_error::Result<()> {
         Self::btrfs_delete_extent_data_items(alloc, extents)?;
-        for (logical_offset, data) in segments {
-            self.btrfs_insert_regular_extent_segment(cx, alloc, canonical, logical_offset, &data)?;
+        for segment in segments {
+            match segment {
+                BtrfsExtentRewriteSegment::Data {
+                    logical_offset,
+                    data,
+                } => {
+                    self.btrfs_insert_regular_extent_segment(
+                        cx,
+                        alloc,
+                        canonical,
+                        logical_offset,
+                        &data,
+                    )?;
+                }
+                BtrfsExtentRewriteSegment::Prealloc {
+                    logical_offset,
+                    length,
+                } => {
+                    Self::btrfs_insert_prealloc_extent_segment(
+                        alloc,
+                        canonical,
+                        logical_offset,
+                        length,
+                    )?;
+                }
+            }
         }
         Ok(())
     }
@@ -12394,13 +12444,18 @@ impl OpenFs {
                 .offset
                 .checked_add(logical_len)
                 .ok_or_else(|| FfsError::InvalidGeometry("extent logical end overflow".into()))?;
-            let materialized = self.btrfs_materialize_extent(cx, extent)?;
+            let materialized = if Self::btrfs_extent_is_prealloc(extent) {
+                Vec::new()
+            } else {
+                self.btrfs_materialize_extent(cx, extent)?
+            };
 
             let left_end = logical_end.min(offset);
             if key.offset < left_end {
                 Self::btrfs_push_rewrite_segment(
                     &mut segments,
                     key.offset,
+                    extent,
                     &materialized,
                     0,
                     left_end - key.offset,
@@ -12415,6 +12470,7 @@ impl OpenFs {
                 Self::btrfs_push_rewrite_segment(
                     &mut segments,
                     shifted_offset,
+                    extent,
                     &materialized,
                     right_start - key.offset,
                     logical_end - key.offset,
@@ -12442,13 +12498,18 @@ impl OpenFs {
                 .offset
                 .checked_add(logical_len)
                 .ok_or_else(|| FfsError::InvalidGeometry("extent logical end overflow".into()))?;
-            let materialized = self.btrfs_materialize_extent(cx, extent)?;
+            let materialized = if Self::btrfs_extent_is_prealloc(extent) {
+                Vec::new()
+            } else {
+                self.btrfs_materialize_extent(cx, extent)?
+            };
 
             let left_end = logical_end.min(offset);
             if key.offset < left_end {
                 Self::btrfs_push_rewrite_segment(
                     &mut segments,
                     key.offset,
+                    extent,
                     &materialized,
                     0,
                     left_end - key.offset,
@@ -12463,6 +12524,7 @@ impl OpenFs {
                 Self::btrfs_push_rewrite_segment(
                     &mut segments,
                     shifted_offset,
+                    extent,
                     &materialized,
                     right_start - key.offset,
                     logical_end - key.offset,
@@ -36397,6 +36459,162 @@ mod tests {
         expected.extend(std::iter::repeat_n(b'C', block));
         assert_eq!(after.size, 16_384);
         assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_collapse_range_preserves_shifted_prealloc_fiemap() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_u64;
+        let block_usize = usize::try_from(block).unwrap();
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("collapse-prealloc.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let mut payload = Vec::with_capacity(block_usize * 2);
+        payload.extend(std::iter::repeat_n(b'A', block_usize));
+        payload.extend(std::iter::repeat_n(b'B', block_usize));
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("seed live data before collapse");
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            2 * block,
+            block,
+            0,
+        )
+        .expect("preallocate tail before collapse");
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            block,
+            block,
+            libc::FALLOC_FL_COLLAPSE_RANGE,
+        )
+        .expect("collapse live block before prealloc extent");
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after collapse");
+        assert_eq!(after.size, 2 * block);
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            2,
+            "collapse should keep live data plus shifted prealloc extent"
+        );
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].length, block);
+        assert_eq!(extents[0].flags & FIEMAP_EXTENT_UNWRITTEN, 0);
+        assert_eq!(extents[1].logical, block);
+        assert_eq!(extents[1].length, block);
+        assert_ne!(
+            extents[1].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "shifted prealloc extent must remain FIEMAP_UNWRITTEN"
+        );
+
+        let data = ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                0,
+                u32::try_from(2 * block).unwrap(),
+            )
+            .expect("read after collapse");
+        assert_eq!(&data[..block_usize], &payload[..block_usize]);
+        assert!(data[block_usize..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_insert_range_preserves_shifted_prealloc_fiemap() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_u64;
+        let block_usize = usize::try_from(block).unwrap();
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("insert-prealloc.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let payload = vec![b'A'; block_usize];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .expect("seed live data before insert");
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, block, block, 0)
+            .expect("preallocate tail before insert");
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            block,
+            block,
+            libc::FALLOC_FL_INSERT_RANGE,
+        )
+        .expect("insert hole before prealloc extent");
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after insert");
+        assert_eq!(after.size, 3 * block);
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            2,
+            "insert should keep live data plus shifted prealloc extent"
+        );
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].length, block);
+        assert_eq!(extents[0].flags & FIEMAP_EXTENT_UNWRITTEN, 0);
+        assert_eq!(extents[1].logical, 2 * block);
+        assert_eq!(extents[1].length, block);
+        assert_ne!(
+            extents[1].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "shifted prealloc extent must remain FIEMAP_UNWRITTEN"
+        );
+
+        let data = ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                0,
+                u32::try_from(3 * block).unwrap(),
+            )
+            .expect("read after insert");
+        assert_eq!(&data[..block_usize], payload.as_slice());
+        assert!(
+            data[block_usize..2 * block_usize]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert!(data[2 * block_usize..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
