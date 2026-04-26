@@ -1046,6 +1046,26 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Hint that the caller is about to walk the inode and would like
+    /// the extent metadata read into the page cache up-front.
+    ///
+    /// Surfaces what `EXT4_IOC_PRECACHE_EXTENTS` triggers in the kernel:
+    /// `fs/ext4/ioctl.c::ext4_ext_precache` walks the on-disk extent
+    /// tree for the inode and pulls every internal/leaf block into the
+    /// page cache so subsequent reads don't stall on metadata I/O. The
+    /// kernel returns 0 even when the inode has no extents — the
+    /// contract is "best effort, never an error for a valid inode."
+    /// Backends without an out-of-band cache are free to no-op (the
+    /// default), but they should still validate that the inode exists.
+    fn precache_extents(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        Ok(())
+    }
+
     /// Get ext4 inode generation (`EXT4_IOC_GETVERSION`).
     ///
     /// Returns the raw `i_generation` field for the given inode.

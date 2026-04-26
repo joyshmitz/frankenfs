@@ -115,6 +115,14 @@ const FS_IOC_GETFSUUID_SIZE: u32 = 17;
 /// any unknown xflags bit (see `xflags_to_ext4_flags`).
 const FS_IOC_FSSETXATTR: u32 = 0x401C_5820;
 const FS_IOC_FSSETXATTR_SIZE: usize = 28;
+/// `EXT4_IOC_PRECACHE_EXTENTS` = `_IO('f', 38)` = `0x0000_6626`. Hint
+/// ioctl that asks ext4 to pull the inode's on-disk extent tree into
+/// the page cache so subsequent reads don't stall on metadata I/O —
+/// `e2fsck` pass 1 and `debugfs dump_extents` use it before walking
+/// large fragmented files. No input or output payload (it's `_IO`,
+/// size=0); the kernel returns 0 on success and never on a valid
+/// inode (block-mapped inodes are a no-op, not an error).
+const EXT4_IOC_PRECACHE_EXTENTS: u32 = 0x0000_6626;
 /// `EXT4_IOC_MOVE_EXT` = `_IOWR('f', 15, struct move_extent)` on x86_64.
 const EXT4_IOC_MOVE_EXT: u32 = 0xC028_660F;
 /// `FS_IOC_GETFSLABEL` = `_IOR(0x94, 0x31, char[FSLABEL_MAX])` on x86_64.
@@ -2602,6 +2610,20 @@ impl FrankenFuse {
                         .set_inode_fsxattr(cx, scope, InodeNumber(ino), fsx)?;
                     self.inner.ops.commit_request_scope(scope)?;
                     Ok(())
+                }) {
+                    Ok(()) => IoctlResult::Data(Vec::new()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_PRECACHE_EXTENTS => {
+                // _IO with no payload: ignore in_data / out_size and
+                // run the precache walk under a read scope. ext4 always
+                // returns 0 for valid inodes (the per-inode precache is
+                // a best-effort hint), so propagate backend errors but
+                // keep success as an empty Data reply.
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.precache_extents(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(()) => IoctlResult::Data(Vec::new()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
@@ -5337,6 +5359,7 @@ mod tests {
         GetFsxattr(InodeNumber),
         SetFsxattr(InodeNumber, FsxattrInfo),
         FsUuid,
+        PrecacheExtents(InodeNumber),
         TrimRange(u64, u64, u64),
         Commit,
         End(RequestOp),
@@ -5771,6 +5794,19 @@ mod tests {
                 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
                 0xFF, 0x00,
             ])
+        }
+
+        fn precache_extents(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<()> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::PrecacheExtents(ino));
+            Ok(())
         }
 
         fn get_inode_generation(
@@ -6263,6 +6299,55 @@ mod tests {
         assert!(
             matches!(response, IoctlResult::Error(libc::EINVAL)),
             "out_size < 17 must surface EINVAL, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_precache_extents_routes_to_fsops_with_empty_reply() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 42, 0, EXT4_IOC_PRECACHE_EXTENTS, &[], 0);
+        assert_eq!(
+            response,
+            IoctlResult::Data(Vec::new()),
+            "PRECACHE_EXTENTS returns success with no payload, got {response:?}"
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::PrecacheExtents(InodeNumber(42)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_precache_extents_ignores_input_payload_and_out_size() {
+        // _IO ioctls have no payload; the kernel still accepts buffers
+        // of any size because they're never read or written. Our
+        // dispatcher must mirror that: don't reject on non-zero
+        // in_data length or non-zero out_size, just route through.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(
+            &fuse,
+            7,
+            0,
+            EXT4_IOC_PRECACHE_EXTENTS,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            64,
+        );
+        assert_eq!(response, IoctlResult::Data(Vec::new()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::PrecacheExtents(InodeNumber(7)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
         );
     }
 

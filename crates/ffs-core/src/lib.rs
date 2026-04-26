@@ -17656,6 +17656,42 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn precache_extents(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        // ext4_ext_precache walks the extent tree to pull index/leaf
+        // blocks into the page cache so subsequent reads don't stall on
+        // metadata I/O. The kernel returns 0 for inodes with no extents
+        // (block-mapped legacy inodes, fast-symlinks) — match that
+        // contract by treating non-extent inodes as a successful no-op
+        // rather than EOPNOTSUPP. For extent-based inodes we walk the
+        // tree via collect_extents_with_scope; the side effect of that
+        // walk is that ffs-extent's per-scope block cache populates
+        // every internal/leaf block exactly once, which is what
+        // userspace was asking for.
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let inode =
+                    self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                if inode.flags & ffs_types::EXT4_EXTENTS_FL != 0 {
+                    let _ = self.collect_extents_with_scope(cx, scope, &inode)?;
+                }
+                Ok(())
+            }
+            // btrfs stores extent items inline in the FS tree alongside
+            // inode metadata, so reading the inode already touches the
+            // same blocks ext4_ext_precache would warm. Validate the
+            // inode exists and return Ok.
+            FsFlavor::Btrfs(_) => {
+                let _ = self.btrfs_read_inode_attr(cx, ino)?;
+                Ok(())
+            }
+        }
+    }
+
     fn get_inode_generation(
         &self,
         cx: &Cx,
