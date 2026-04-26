@@ -140,10 +140,9 @@ pub fn parse_check_output(
                 continue;
             }
 
-            let candidate = if lower.contains("not run")
-                || lower.contains("notrun")
-                || lower.contains("skipped")
-            {
+            let candidate = if lower.contains("not run") || lower.contains("notrun") {
+                Some(XfstestsStatus::NotRun)
+            } else if lower.contains("skipped") {
                 Some(XfstestsStatus::Skipped)
             } else if contains_word(&lower, "fail")
                 || contains_word(&lower, "failed")
@@ -174,7 +173,7 @@ pub fn parse_check_output(
 
     if check_rc == 0 && !dry_run {
         for case in &mut cases {
-            if case.status == XfstestsStatus::NotRun {
+            if case.status == XfstestsStatus::NotRun && case.output_snippet.is_none() {
                 case.status = XfstestsStatus::Passed;
             }
         }
@@ -430,6 +429,22 @@ generic/030  skipped: needs root\n";
         let run = parse_check_output(&selected, "", 0, false);
         assert_eq!(run.tests[0].status, XfstestsStatus::Passed);
         assert_eq!(run.passed, 1);
+    }
+
+    #[test]
+    fn parse_check_output_preserves_explicit_not_run_status() {
+        let selected = vec!["generic/001".to_owned(), "generic/030".to_owned()];
+        let log = "\
+generic/001  -- not run: requires aio-stress\n\
+generic/030  skipped: needs root\n";
+
+        let run = parse_check_output(&selected, log, 0, false);
+
+        assert_eq!(run.not_run, 1);
+        assert_eq!(run.skipped, 1);
+        assert_eq!(run.passed, 0);
+        assert_eq!(run.tests[0].status, XfstestsStatus::NotRun);
+        assert_eq!(run.tests[1].status, XfstestsStatus::Skipped);
     }
 
     #[test]
