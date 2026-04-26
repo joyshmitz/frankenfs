@@ -12395,9 +12395,11 @@ impl OpenFs {
             length: previous_length,
         }) = segments.last_mut()
         {
-            let previous_end = previous_offset.checked_add(*previous_length).ok_or_else(|| {
-                FfsError::InvalidGeometry("prealloc rewrite segment end overflow".into())
-            })?;
+            let previous_end = previous_offset
+                .checked_add(*previous_length)
+                .ok_or_else(|| {
+                    FfsError::InvalidGeometry("prealloc rewrite segment end overflow".into())
+                })?;
             if previous_end == logical_offset {
                 *previous_length = previous_length.checked_add(length).ok_or_else(|| {
                     FfsError::InvalidGeometry("prealloc rewrite segment length overflow".into())
@@ -36423,6 +36425,129 @@ mod tests {
             &original[8192..],
             "zero range must preserve data outside the requested range"
         );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_zero_range_preserves_regular_allocation() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_u64;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("zero-regular-allocation.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let mut original = vec![b'A'; usize::try_from(block).unwrap()];
+        original.extend(vec![b'B'; usize::try_from(block).unwrap()]);
+        original.extend(vec![b'C'; usize::try_from(block).unwrap()]);
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &original)
+            .expect("seed regular extents before zero range");
+        let stat_before_zero = ops
+            .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
+            .expect("statfs before zero range");
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            block,
+            block,
+            libc::FALLOC_FL_ZERO_RANGE,
+        )
+        .expect("zero middle block of regular data extent");
+
+        let stat_after_zero = ops
+            .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
+            .expect("statfs after zero range");
+        assert_eq!(
+            stat_after_zero.blocks_free, stat_before_zero.blocks_free,
+            "ZERO_RANGE must not deallocate already allocated regular data blocks"
+        );
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(extents.len(), 3);
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].length, block);
+        assert_eq!(extents[0].flags & FIEMAP_EXTENT_UNWRITTEN, 0);
+        assert_eq!(extents[1].logical, block);
+        assert_eq!(extents[1].length, block);
+        assert_ne!(extents[1].flags & FIEMAP_EXTENT_UNWRITTEN, 0);
+        assert_eq!(extents[2].logical, 2 * block);
+        assert_eq!(extents[2].length, block);
+        assert_eq!(extents[2].flags & FIEMAP_EXTENT_UNWRITTEN, 0);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_zero_range_allocates_unwritten_hole() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let block = 4096_u64;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("zero-hole.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let stat_before_zero = ops
+            .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
+            .expect("statfs before zero range");
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            2 * block,
+            libc::FALLOC_FL_ZERO_RANGE,
+        )
+        .expect("zero range over hole should allocate unwritten extent");
+
+        let stat_after_zero = ops
+            .statfs(&cx, &mut RequestScope::empty(), InodeNumber(1))
+            .expect("statfs after zero range");
+        assert!(
+            stat_after_zero.blocks_free < stat_before_zero.blocks_free,
+            "ZERO_RANGE over a hole must reserve backing space"
+        );
+
+        let after = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after zero range");
+        assert_eq!(after.size, 2 * block);
+
+        let readback = ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                0,
+                u32::try_from(2 * block).unwrap(),
+            )
+            .expect("read zero-range hole");
+        assert!(readback.iter().all(|byte| *byte == 0));
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].length, 2 * block);
+        assert_ne!(extents[0].flags & FIEMAP_EXTENT_UNWRITTEN, 0);
     }
 
     #[test]
