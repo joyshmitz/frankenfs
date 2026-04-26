@@ -11688,6 +11688,94 @@ finally:
 }
 
 #[test]
+fn btrfs_fuse_ioctl_ino_lookup_via_mounted_path() {
+    if !command_available("python3") {
+        eprintln!("python3 not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        let child = mnt.join("ino_lookup_child.txt");
+        fs::write(&child, b"btrfs ino lookup mounted-path child\n")
+            .expect("create btrfs ino lookup child");
+
+        let script = format!(
+            r#"
+import errno, os, fcntl, struct
+
+BTRFS_IOC_INO_LOOKUP = 0xd0009412
+BTRFS_INO_LOOKUP_ARGS_SIZE = 4096
+BTRFS_FS_TREE_OBJECTID = 5
+BTRFS_FIRST_FREE_OBJECTID = 256
+
+def ino_lookup(fd, treeid, objectid):
+    buf = bytearray(BTRFS_INO_LOOKUP_ARGS_SIZE)
+    struct.pack_into('<Q', buf, 0x00, treeid)
+    struct.pack_into('<Q', buf, 0x08, objectid)
+    fcntl.ioctl(fd, BTRFS_IOC_INO_LOOKUP, buf, True)
+    resolved_treeid, resolved_objectid = struct.unpack_from('<QQ', buf, 0x00)
+    raw_path = bytes(buf[0x10:]).split(b'\x00', 1)[0]
+    return resolved_treeid, resolved_objectid, raw_path
+
+fd = os.open({mnt:?}, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    root_treeid, root_objectid, root_path = ino_lookup(fd, 0, BTRFS_FIRST_FREE_OBJECTID)
+    assert root_treeid == BTRFS_FS_TREE_OBJECTID, "treeid=0 root lookup should resolve to FS_TREE, got %d" % root_treeid
+    assert root_objectid == BTRFS_FIRST_FREE_OBJECTID, "root objectid should be echoed"
+    assert root_path == b'', "subvolume root path should be empty, got %r" % (root_path,)
+
+    workspace_objectid = os.stat({mnt:?}).st_ino
+    ws_treeid, ws_objectid, ws_path = ino_lookup(fd, 0, workspace_objectid)
+    assert ws_treeid == BTRFS_FS_TREE_OBJECTID, "workspace lookup should resolve mounted tree, got %d" % ws_treeid
+    assert ws_objectid == workspace_objectid, "workspace objectid should be echoed"
+    assert ws_path == b'testdir/', "workspace path should be testdir/, got %r" % (ws_path,)
+
+    child_objectid = os.stat({child:?}).st_ino
+    child_treeid, child_echo, child_path = ino_lookup(fd, BTRFS_FS_TREE_OBJECTID, child_objectid)
+    assert child_treeid == BTRFS_FS_TREE_OBJECTID, "explicit tree lookup should preserve FS_TREE, got %d" % child_treeid
+    assert child_echo == child_objectid, "child objectid should be echoed"
+    assert child_path == b'testdir/ino_lookup_child.txt/', "child path mismatch: %r" % (child_path,)
+
+    missing = bytearray(BTRFS_INO_LOOKUP_ARGS_SIZE)
+    struct.pack_into('<Q', missing, 0x00, 0)
+    struct.pack_into('<Q', missing, 0x08, 0x7fffffffffffffff)
+    try:
+        fcntl.ioctl(fd, BTRFS_IOC_INO_LOOKUP, missing, True)
+    except OSError as exc:
+        assert exc.errno == errno.ENOENT, "missing objectid should return ENOENT, got %d" % exc.errno
+    else:
+        raise AssertionError("missing objectid unexpectedly succeeded")
+
+    print("workspace_objectid=%d child_objectid=%d child_path=%s" % (workspace_objectid, child_objectid, child_path.decode('ascii')))
+    print("PASS")
+finally:
+    os.close(fd)
+"#,
+            mnt = mnt.to_str().unwrap(),
+            child = child.to_str().unwrap()
+        );
+
+        let out = Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run python3 INO_LOOKUP ioctl script");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("PASS"),
+            "BTRFS_IOC_INO_LOOKUP via mounted path failed: stdout={stdout}, stderr={stderr}"
+        );
+
+        emit_scenario_result(
+            "btrfs_ioctl_ino_lookup_mounted_path",
+            "PASS",
+            Some("root_workspace_runtime_child_and_missing_inode_contract"),
+        );
+    });
+}
+
+#[test]
 fn btrfs_fuse_xattr_posix_acl_list_and_get() {
     with_btrfs_rw_mount(|mnt| {
         let file_path = mnt.join("acl_test_file.txt");
