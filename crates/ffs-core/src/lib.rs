@@ -13789,7 +13789,7 @@ impl OpenFs {
                     Self::btrfs_push_prealloc_rewrite_segment(
                         &mut segments,
                         overlap_start,
-                        overlap_end - key.offset,
+                        overlap_end - overlap_start,
                     )?;
                 }
                 Self::btrfs_push_rewrite_segment(
