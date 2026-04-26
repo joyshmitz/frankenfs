@@ -10362,6 +10362,73 @@ fn with_btrfs_rw_mount(f: impl FnOnce(&Path)) {
     });
 }
 
+fn assert_btrfs_pwritev2_rwf_persists_after_remount(
+    flag_name: &str,
+    file_name: &str,
+    payload: &[u8],
+    scenario_id: &str,
+    pass_detail: &str,
+) {
+    if !btrfs_fuse_available() {
+        eprintln!("btrfs FUSE prerequisites not met, skipping");
+        return;
+    }
+
+    let tmp = TempDir::new().expect("tmpdir");
+    let image = create_btrfs_test_image(tmp.path());
+    let mnt = tmp.path().join("mnt");
+    fs::create_dir_all(&mnt).expect("create btrfs mountpoint");
+    let mount_opts = MountOptions {
+        read_only: false,
+        auto_unmount: false,
+        ..MountOptions::default()
+    };
+    let Some(session) = try_mount_btrfs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+
+    let workspace = mnt.join(BTRFS_TEST_WORKSPACE);
+    assert!(
+        workspace.is_dir(),
+        "seeded btrfs workspace missing at {}",
+        workspace.display()
+    );
+    let report = run_pwritev2_rwf_probe(&workspace, flag_name, file_name, payload);
+    if let Some(skip_reason) = report["skipped"].as_str() {
+        emit_scenario_result(scenario_id, "SKIP", Some(skip_reason));
+        return;
+    }
+
+    let expected_written = i64::try_from(payload.len()).expect("payload length should fit i64");
+    assert_eq!(
+        report["written"].as_i64(),
+        Some(expected_written),
+        "btrfs pwritev2 {flag_name} should report the full payload length: {report}"
+    );
+    let payload_hex = report["payload_hex"]
+        .as_str()
+        .expect("pwritev2 RWF probe should report payload_hex");
+    assert_eq!(
+        report["readback_hex"].as_str(),
+        Some(payload_hex),
+        "btrfs pwritev2 {flag_name} write should be immediately readable: {report}"
+    );
+
+    drop(session);
+
+    let Some(_remount) = try_mount_btrfs_rw_with_options(&image, &mnt, &mount_opts) else {
+        return;
+    };
+    let persisted = fs::read(mnt.join(BTRFS_TEST_WORKSPACE).join(file_name))
+        .expect("read btrfs pwritev2 RWF probe after remount");
+    assert_eq!(
+        persisted.as_slice(),
+        payload,
+        "btrfs {flag_name} pwritev2 payload should survive remount"
+    );
+    emit_scenario_result(scenario_id, "PASS", Some(pass_detail));
+}
+
 fn with_btrfs_ro_sync_fixture(f: impl FnOnce(&Path, &Path, &Path)) {
     if !btrfs_fuse_available() {
         eprintln!("btrfs FUSE prerequisites not met, skipping");
@@ -10409,6 +10476,28 @@ fn btrfs_fuse_create_and_read_file() {
         let content = fs::read_to_string(&path).expect("read file on btrfs");
         assert_eq!(content, "Hello from btrfs FUSE!\n");
     });
+}
+
+#[test]
+fn btrfs_fuse_pwritev2_rwf_dsync_persists_written_data_after_remount() {
+    assert_btrfs_pwritev2_rwf_persists_after_remount(
+        "RWF_DSYNC",
+        "btrfs_rwf_dsync_probe.bin",
+        b"btrfs-rwf-dsync-through-fuse\n",
+        "btrfs_rw_pwritev2_rwf_dsync",
+        "pwritev2_rwf_dsync",
+    );
+}
+
+#[test]
+fn btrfs_fuse_pwritev2_rwf_sync_persists_written_data_after_remount() {
+    assert_btrfs_pwritev2_rwf_persists_after_remount(
+        "RWF_SYNC",
+        "btrfs_rwf_sync_probe.bin",
+        b"btrfs-rwf-sync-through-fuse\n",
+        "btrfs_rw_pwritev2_rwf_sync",
+        "pwritev2_rwf_sync",
+    );
 }
 
 #[test]
