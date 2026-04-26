@@ -11,6 +11,7 @@
 pub mod io_engine;
 
 use asupersync::Cx;
+use asupersync::types::Time;
 use ffs_error::{FfsError, Result};
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, CommitSeq,
@@ -26,12 +27,21 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, trace, warn};
 
 #[inline]
 fn cx_checkpoint(cx: &Cx) -> Result<()> {
     cx.checkpoint().map_err(|_| FfsError::Cancelled)
+}
+
+fn current_time() -> Time {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+        });
+    Time::from_nanos(nanos)
 }
 
 const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
@@ -3678,7 +3688,7 @@ impl<D: BlockDevice> ThrottleInjector<D> {
     }
 
     /// Compute and apply the delay for an operation.
-    fn apply_delay(&self, cx: &Cx, is_read: bool, block: BlockNumber, data_len: u32) {
+    fn apply_delay(&self, cx: &Cx, is_read: bool, block: BlockNumber, data_len: u32) -> Result<()> {
         let config = self.config.lock().clone();
 
         let base_latency = if is_read {
@@ -3707,12 +3717,24 @@ impl<D: BlockDevice> ThrottleInjector<D> {
 
         if total_delay > Duration::ZERO {
             if config.respect_deadline {
-                // Check Cx cancellation before sleeping.
-                if cx.checkpoint().is_err() {
-                    return;
+                cx_checkpoint(cx)?;
+                let budget = cx.budget();
+                let now = current_time();
+                if budget.is_past_deadline(now) {
+                    return Err(FfsError::Cancelled);
                 }
+                let sleep_duration = match budget.remaining_time(now) {
+                    Some(remaining) => Duration::from_nanos(remaining.as_nanos()),
+                    None => total_delay,
+                };
+                if sleep_duration < total_delay || sleep_duration.is_zero() {
+                    return Err(FfsError::Cancelled);
+                }
+                std::thread::sleep(total_delay);
+                cx_checkpoint(cx)?;
+            } else {
+                std::thread::sleep(total_delay);
             }
-            std::thread::sleep(total_delay);
         }
 
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
@@ -3723,18 +3745,19 @@ impl<D: BlockDevice> ThrottleInjector<D> {
             stalled,
             sequence: seq,
         });
+        Ok(())
     }
 }
 
 impl<D: BlockDevice> BlockDevice for ThrottleInjector<D> {
     fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
-        self.apply_delay(cx, true, block, self.inner.block_size());
+        self.apply_delay(cx, true, block, self.inner.block_size())?;
         self.inner.read_block(cx, block)
     }
 
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
         let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
-        self.apply_delay(cx, false, block, len);
+        self.apply_delay(cx, false, block, len)?;
         self.inner.write_block(cx, block, data)
     }
 
@@ -6487,6 +6510,55 @@ mod tests {
         assert_eq!(log.len(), 2); // write + read
         assert!(!log[0].stalled);
         assert!(!log[1].stalled);
+    }
+
+    #[test]
+    fn throttle_respect_deadline_cancels_before_inner_write() {
+        let dev = CountingBlockDevice::new(MemBlockDevice::new(4096, 8));
+        let config = ThrottleConfig {
+            write_latency: Duration::from_millis(10),
+            respect_deadline: true,
+            ..Default::default()
+        };
+        let ti = ThrottleInjector::new(dev, config, 12);
+        let past_deadline = asupersync::Budget::new().with_deadline(asupersync::types::Time::ZERO);
+        let cx = Cx::for_testing_with_budget(past_deadline);
+        let data = vec![0xEE_u8; 4096];
+
+        let err = ti
+            .write_block(&cx, BlockNumber(0), &data)
+            .expect_err("expired deadline should cancel before throttled write");
+
+        assert!(matches!(err, FfsError::Cancelled));
+        assert_eq!(ti.inner.write_count(), 0);
+        assert!(ti.throttle_log().is_empty());
+    }
+
+    #[test]
+    fn throttle_respect_deadline_rejects_delay_that_cannot_fit() {
+        let dev = CountingBlockDevice::new(MemBlockDevice::new(4096, 8));
+        let config = ThrottleConfig {
+            write_latency: Duration::from_secs(1),
+            respect_deadline: true,
+            ..Default::default()
+        };
+        let ti = ThrottleInjector::new(dev, config, 13);
+        let deadline = current_time() + Duration::from_millis(1);
+        let cx = Cx::for_testing_with_budget(asupersync::Budget::new().with_deadline(deadline));
+        let data = vec![0xEF_u8; 4096];
+
+        let start = Instant::now();
+        let err = ti
+            .write_block(&cx, BlockNumber(0), &data)
+            .expect_err("delay that exceeds the remaining deadline should cancel");
+
+        assert!(matches!(err, FfsError::Cancelled));
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "cancellation should not sleep the full throttle delay"
+        );
+        assert_eq!(ti.inner.write_count(), 0);
+        assert!(ti.throttle_log().is_empty());
     }
 
     #[test]
