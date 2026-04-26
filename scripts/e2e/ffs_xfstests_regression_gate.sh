@@ -117,12 +117,17 @@ strict = int(sys.argv[5])
 results = json.loads(results_path.read_text(encoding="utf-8"))
 baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 
-# Load allowlist
-allowlisted_ids = set()
+# Load allowlist. Only explicit non-pass dispositions may exempt a
+# regression. Tracking statuses such as likely_pass are evidence notes, not
+# permission to mask pass-to-fail drift.
+REGRESSION_EXEMPT_STATUSES = {"known_fail", "wont_fix"}
+allowlist_by_id = {}
 if allowlist_path.exists():
     allowlist = json.loads(allowlist_path.read_text(encoding="utf-8"))
     for entry in allowlist:
-        allowlisted_ids.add(entry.get("test_id", ""))
+        test_id = entry.get("test_id")
+        if isinstance(test_id, str) and test_id:
+            allowlist_by_id[test_id] = entry
 
 # Build status maps
 current_status = {}
@@ -150,12 +155,15 @@ for test_id, expected in baseline_status.items():
 
     # Regression: was passing, now failing or skipped
     if expected == "passed" and actual in ("failed", "skipped", "not_run"):
-        is_allowlisted = test_id in allowlisted_ids
+        allowlist_entry = allowlist_by_id.get(test_id, {})
+        allowlist_status = allowlist_entry.get("status")
+        is_allowlisted = allowlist_status in REGRESSION_EXEMPT_STATUSES
         regressions.append({
             "test_id": test_id,
             "baseline": expected,
             "current": actual,
             "allowlisted": is_allowlisted,
+            "allowlist_status": allowlist_status,
         })
     # Improvement: was failing/skipped, now passing
     elif expected in ("failed", "skipped", "not_run") and actual == "passed":
@@ -206,7 +214,9 @@ if regressions:
     print(f"\n  Regressions:", file=sys.stderr)
     for r in regressions:
         tag = " [allowlisted]" if r["allowlisted"] else " ** BLOCKING **"
-        print(f"    {r['test_id']}: {r['baseline']} -> {r['current']}{tag}", file=sys.stderr)
+        status = r.get("allowlist_status")
+        status_note = f" allowlist_status={status}" if status else ""
+        print(f"    {r['test_id']}: {r['baseline']} -> {r['current']}{tag}{status_note}", file=sys.stderr)
 
 print(f"\nReport: {report_path}", file=sys.stderr)
 sys.exit(0 if verdict == "pass" else 1)
