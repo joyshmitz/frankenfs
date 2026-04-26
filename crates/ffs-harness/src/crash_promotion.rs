@@ -14,6 +14,49 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+fn sanitize_path_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "unknown".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+        && !value.is_empty()
+    {
+        return value.to_owned();
+    }
+
+    let mut quoted = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn rust_string_literal_contents(value: &str) -> String {
+    value.escape_default().to_string()
+}
+
 fn manifest_fuzz_targets(repo_root: &Path) -> Vec<String> {
     let manifest_path = repo_root.join("fuzz").join("Cargo.toml");
     let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
@@ -180,8 +223,9 @@ pub fn discover_crashes(campaign_dir: &Path) -> Vec<CrashArtifact> {
 #[must_use]
 pub fn minimize_command(target: &str, crash_path: &Path) -> String {
     format!(
-        "cargo fuzz tmin {target} --fuzz-dir fuzz -- {}",
-        crash_path.display()
+        "cargo fuzz tmin {} --fuzz-dir fuzz -- {}",
+        shell_quote(target),
+        shell_quote(&crash_path.to_string_lossy())
     )
 }
 
@@ -191,7 +235,9 @@ pub fn seed_filename(crash: &CrashArtifact) -> String {
     let campaign = crash.campaign_id.as_deref().unwrap_or("manual");
     format!(
         "regression_{}_{}_{}bytes",
-        crash.target, campaign, crash.input_size
+        sanitize_path_component(&crash.target),
+        sanitize_path_component(campaign),
+        crash.input_size
     )
 }
 
@@ -220,6 +266,7 @@ pub fn test_function_name(crash: &CrashArtifact) -> String {
 #[must_use]
 pub fn generate_regression_test_source(case: &RegressionCase) -> String {
     let tag = &case.tag;
+    let seed_path = rust_string_literal_contents(&case.seed_path.display().to_string());
     format!(
         r#"/// Regression test promoted from fuzz crash.
 ///
@@ -252,7 +299,7 @@ fn {test_name}() {{
         minimized = tag.minimized,
         corpus_seed = tag.corpus_seed,
         test_name = case.test_name,
-        seed_path = case.seed_path.display(),
+        seed_path = seed_path,
     )
 }
 
@@ -434,6 +481,13 @@ mod tests {
     }
 
     #[test]
+    fn minimize_command_shell_quotes_untrusted_tokens() {
+        let cmd = minimize_command("fuzz target", Path::new("/tmp/crash; touch injected"));
+        assert!(cmd.contains("'fuzz target'"));
+        assert!(cmd.contains("'/tmp/crash; touch injected'"));
+    }
+
+    #[test]
     fn seed_filename_includes_target_and_campaign() {
         let crash = CrashArtifact {
             target: "fuzz_ext4_metadata".to_owned(),
@@ -447,6 +501,22 @@ mod tests {
         assert!(name.contains("fuzz_ext4_metadata"));
         assert!(name.contains("20260312T120000Z"));
         assert!(name.contains("42bytes"));
+    }
+
+    #[test]
+    fn seed_filename_sanitizes_path_components() {
+        let crash = CrashArtifact {
+            target: "fuzz_ext4/metadata".to_owned(),
+            crash_path: PathBuf::from("/tmp/crash-abc"),
+            campaign_id: Some("campaign with spaces".to_owned()),
+            commit_sha: None,
+            minimized: false,
+            input_size: 7,
+        };
+        assert_eq!(
+            seed_filename(&crash),
+            "regression_fuzz_ext4_metadata_campaign_with_spaces_7bytes"
+        );
     }
 
     #[test]
@@ -489,6 +559,26 @@ mod tests {
         assert!(source.contains("Commit at discovery: `abc1234`"));
         assert!(source.contains("Minimized: `true`"));
         assert!(source.contains("parse_superblock_region"));
+    }
+
+    #[test]
+    fn generate_regression_test_escapes_seed_path_literal() {
+        let case = RegressionCase {
+            test_name: "regression_fuzz_ext4_metadata_quoted".to_owned(),
+            tag: RegressionTag {
+                target: "fuzz_ext4_metadata".to_owned(),
+                campaign_id: "quoted".to_owned(),
+                commit_sha: "abc1234".to_owned(),
+                promoted_at: "2026-03-12".to_owned(),
+                minimized: false,
+                corpus_seed: "quoted".to_owned(),
+            },
+            seed_path: PathBuf::from("tests/fuzz_corpus/quote\"and\\slash.bin"),
+            test_path: PathBuf::from("tests/fuzz_regressions.rs"),
+        };
+        let source = generate_regression_test_source(&case);
+        assert!(source.contains("quote\\\"and\\\\slash.bin"));
+        assert!(!source.contains("quote\"and\\slash.bin"));
     }
 
     #[test]

@@ -27,7 +27,8 @@
 //! # GF(256) arithmetic
 //!
 //! Global parity uses Galois Field GF(2^8) with the standard AES
-//! irreducible polynomial `x^8 + x^4 + x^3 + x + 1` (0x11B).
+//! irreducible polynomial `x^8 + x^4 + x^3 + x + 1` (0x11B) and
+//! primitive element `0x03`.
 //!
 //! # `unsafe_code = "forbid"` Compliance
 //!
@@ -79,22 +80,6 @@ mod gf256 {
         table
     };
 
-    /// Precomputed 2^i table for fast global parity coefficients.
-    const EXP2: [u8; 512] = {
-        let mut table = [0_u8; 512];
-        let mut val = 1_u32;
-        let mut i = 0;
-        while i < 512 {
-            table[i] = val.to_le_bytes()[0];
-            val <<= 1;
-            if val >= 256 {
-                val ^= 0x11B;
-            }
-            i += 1;
-        }
-        table
-    };
-
     /// Multiply two elements in GF(256).
     #[must_use]
     pub fn mul(a: u8, b: u8) -> u8 {
@@ -106,10 +91,10 @@ mod gf256 {
         EXP[log_a + log_b]
     }
 
-    /// Compute 2^exponent in GF(256).
+    /// Compute generator^exponent in GF(256).
     #[must_use]
-    pub fn exp2(exponent: usize) -> u8 {
-        EXP2[exponent % 255]
+    pub fn generator_pow(exponent: usize) -> u8 {
+        EXP[exponent % 255]
     }
 
     /// Compute the multiplicative inverse of `a` in GF(256).
@@ -157,6 +142,21 @@ mod gf256 {
                 }
             }
         }
+
+        #[test]
+        fn generator_has_full_nonzero_field_order() {
+            let mut seen = [false; 256];
+            for exponent in 0..255 {
+                let value = generator_pow(exponent);
+                assert_ne!(value, 0, "generator power {exponent} produced zero");
+                assert!(
+                    !seen[value as usize],
+                    "generator power {exponent} repeated value {value}"
+                );
+                seen[value as usize] = true;
+            }
+            assert_eq!(generator_pow(255), 1);
+        }
     }
 }
 
@@ -178,14 +178,31 @@ impl LrcConfig {
     ///
     /// # Panics
     ///
-    /// Panics if `data_blocks` is not divisible by `local_group_size`,
-    /// or if `local_group_size` is zero.
+    /// Panics if `data_blocks` is zero, `local_group_size` is zero,
+    /// `data_blocks` is not divisible by `local_group_size`, or the
+    /// GF(256) global parity limits would be exceeded.
     #[must_use]
     pub fn new(data_blocks: u32, local_group_size: u32, global_parity_count: u32) -> Self {
+        assert!(data_blocks > 0, "data_blocks must be > 0");
         assert!(local_group_size > 0, "local_group_size must be > 0");
         assert!(
             data_blocks % local_group_size == 0,
             "data_blocks ({data_blocks}) must be divisible by local_group_size ({local_group_size})"
+        );
+        assert!(
+            global_parity_count <= 255,
+            "global_parity_count must be <= 255 for GF(256)"
+        );
+        assert!(
+            global_parity_count == 0 || data_blocks <= 255,
+            "data_blocks must be <= 255 when global parity is enabled"
+        );
+        let local_parity_count = data_blocks / local_group_size;
+        let total_blocks =
+            u64::from(data_blocks) + u64::from(local_parity_count) + u64::from(global_parity_count);
+        assert!(
+            u32::try_from(total_blocks).is_ok(),
+            "total LRC block count must fit in u32"
         );
         Self {
             data_blocks,
@@ -209,13 +226,19 @@ impl LrcConfig {
     /// Total number of blocks (data + local parity + global parity).
     #[must_use]
     pub fn total_blocks(&self) -> u32 {
-        self.data_blocks + self.local_parity_count() + self.global_parity_count
+        self.data_blocks
+            .checked_add(self.local_parity_count())
+            .and_then(|count| count.checked_add(self.global_parity_count))
+            .expect("total LRC block count overflow")
     }
 
     /// Total storage overhead as a fraction.
     #[must_use]
     pub fn overhead_fraction(&self) -> f64 {
-        let parity = self.local_parity_count() + self.global_parity_count;
+        let parity = self
+            .local_parity_count()
+            .checked_add(self.global_parity_count)
+            .expect("LRC parity block count overflow");
         f64::from(parity) / f64::from(self.data_blocks)
     }
 }
@@ -232,6 +255,14 @@ impl LrcConfig {
 /// Panics if `data.len() != config.data_blocks` or block sizes differ.
 #[must_use]
 pub fn encode_local(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    assert!(config.data_blocks > 0, "data_blocks must be > 0");
+    assert!(config.local_group_size > 0, "local_group_size must be > 0");
+    assert!(
+        config.data_blocks % config.local_group_size == 0,
+        "data_blocks ({}) must be divisible by local_group_size ({})",
+        config.data_blocks,
+        config.local_group_size
+    );
     assert_eq!(
         data.len(),
         config.data_blocks as usize,
@@ -262,19 +293,25 @@ pub fn encode_local(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
 /// Encode global parity blocks using Reed-Solomon in GF(256).
 ///
 /// Global parity `P_j[byte] = sum_{i=0}^{k-1} alpha^{(i+1)*(j+1)} * data[i][byte]`
-/// where `alpha = 2` is a generator element.
+/// where `alpha = 0x03` is a primitive generator element.
 ///
 /// Returns `p` global parity blocks.
 ///
 /// # Panics
 ///
-/// Panics if `config.global_parity_count > 255` (GF(256) limit).
+/// Panics if `config.global_parity_count > 255`, if global parity is
+/// enabled for more than 255 data blocks, or if block sizes differ.
 #[must_use]
 pub fn encode_global(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    assert!(config.data_blocks > 0, "data_blocks must be > 0");
     assert_eq!(data.len(), config.data_blocks as usize);
     assert!(
         config.global_parity_count <= 255,
         "global parity count must fit in GF(256)"
+    );
+    assert!(
+        config.global_parity_count == 0 || config.data_blocks <= 255,
+        "global parity requires at most 255 data blocks"
     );
 
     let block_size = data[0].len();
@@ -285,9 +322,8 @@ pub fn encode_global(config: &LrcConfig, data: &[Vec<u8>]) -> Vec<Vec<u8>> {
     for j in 0..p {
         let mut parity = vec![0_u8; block_size];
         for (i, block) in data.iter().enumerate() {
-            // coefficient = alpha^((i+1)*(j+1)) where alpha = 2
-            let exponent = ((i + 1) * (j + 1)) % 255;
-            let coeff = gf256::exp2(exponent);
+            assert_eq!(block.len(), block_size, "block size mismatch");
+            let coeff = global_parity_coeff(i, j);
             gf256_mul_xor_into(&mut parity, block, coeff);
         }
         global_parities.push(parity);
@@ -350,6 +386,10 @@ pub fn repair_local_single(
 ) -> Option<Vec<u8>> {
     let group_size = config.local_group_size as usize;
     assert_eq!(available_blocks.len(), group_size);
+    let missing_idx = usize::try_from(missing_idx_in_group).ok()?;
+    if missing_idx >= group_size || group_idx >= config.num_groups() {
+        return None;
+    }
 
     // Count missing blocks in this group.
     let missing_count = available_blocks.iter().filter(|b| b.is_none()).count();
@@ -358,7 +398,7 @@ pub fn repair_local_single(
     }
 
     // Verify the missing index matches.
-    if available_blocks[missing_idx_in_group as usize].is_some() {
+    if available_blocks[missing_idx].is_some() {
         return None; // The specified block isn't actually missing.
     }
 
@@ -369,13 +409,12 @@ pub fn repair_local_single(
     for (i, block) in available_blocks.iter().enumerate() {
         if let Some(b) = block {
             assert_eq!(b.len(), block_size, "block size mismatch");
-            if i != missing_idx_in_group as usize {
+            if i != missing_idx {
                 xor_into(&mut recovered, b);
             }
         }
     }
 
-    let _ = group_idx; // used by callers for logging/indexing
     Some(recovered)
 }
 
@@ -394,6 +433,16 @@ pub fn repair_global(
     block_size: usize,
 ) -> RepairResult {
     let p = config.global_parity_count as usize;
+    if !config_supports_global_repair(config)
+        || availability.data.len() != config.data_blocks as usize
+        || availability
+            .data
+            .iter()
+            .flatten()
+            .any(|block| block.len() != block_size)
+    {
+        return failed_global_repair();
+    }
 
     // Find missing data block indices.
     let missing: Vec<usize> = availability
@@ -414,15 +463,18 @@ pub fn repair_global(
         };
     }
 
+    if availability.global_parity.len() != p
+        || availability
+            .global_parity
+            .iter()
+            .flatten()
+            .any(|block| block.len() != block_size)
+    {
+        return failed_global_repair();
+    }
+
     if missing.len() > p {
-        return RepairResult {
-            success: false,
-            blocks_repaired: 0,
-            repaired_indices: Vec::new(),
-            recovered_data: BTreeMap::new(),
-            used_local_only: false,
-            used_global: true,
-        };
+        return failed_global_repair();
     }
 
     // Check we have enough global parity blocks.
@@ -434,14 +486,7 @@ pub fn repair_global(
         .collect();
 
     if available_global.len() < missing.len() {
-        return RepairResult {
-            success: false,
-            blocks_repaired: 0,
-            repaired_indices: Vec::new(),
-            recovered_data: BTreeMap::new(),
-            used_local_only: false,
-            used_global: true,
-        };
+        return failed_global_repair();
     }
 
     // Build the system of equations in GF(256).
@@ -462,16 +507,14 @@ pub fn repair_global(
     for (eq_idx, &(parity_j, parity_data)) in available_global.iter().take(m).enumerate() {
         // Build coefficients for missing blocks.
         for (col, &missing_i) in missing.iter().enumerate() {
-            let exp = ((missing_i + 1) * (parity_j + 1)) % 255;
-            coeff_matrix[eq_idx][col] = gf256::exp2(exp);
+            coeff_matrix[eq_idx][col] = global_parity_coeff(missing_i, parity_j);
         }
 
         // RHS = P_j XOR sum_{known} coeff * D_known
         rhs[eq_idx].copy_from_slice(&parity_data[..block_size]);
         for (i, block_opt) in availability.data.iter().enumerate() {
             if let Some(block) = block_opt {
-                let exp = ((i + 1) * (parity_j + 1)) % 255;
-                let coeff = gf256::exp2(exp);
+                let coeff = global_parity_coeff(i, parity_j);
                 gf256_mul_xor_into(&mut rhs[eq_idx], block, coeff);
             }
         }
@@ -484,14 +527,7 @@ pub fn repair_global(
         let pivot_row = (col..m).find(|&row| coeff_matrix[row][col] != 0);
         let Some(pivot_row) = pivot_row else {
             // Singular matrix — cannot recover.
-            return RepairResult {
-                success: false,
-                blocks_repaired: 0,
-                repaired_indices: Vec::new(),
-                recovered_data: BTreeMap::new(),
-                used_local_only: false,
-                used_global: true,
-            };
+            return failed_global_repair();
         };
 
         // Swap rows.
@@ -553,6 +589,30 @@ pub fn repair_global(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+fn config_supports_global_repair(config: &LrcConfig) -> bool {
+    config.data_blocks > 0
+        && config.local_group_size > 0
+        && config.data_blocks % config.local_group_size == 0
+        && config.global_parity_count <= 255
+        && (config.global_parity_count == 0 || config.data_blocks <= 255)
+}
+
+fn failed_global_repair() -> RepairResult {
+    RepairResult {
+        success: false,
+        blocks_repaired: 0,
+        repaired_indices: Vec::new(),
+        recovered_data: BTreeMap::new(),
+        used_local_only: false,
+        used_global: true,
+    }
+}
+
+fn global_parity_coeff(data_idx: usize, parity_idx: usize) -> u8 {
+    let exponent = ((data_idx + 1) * (parity_idx + 1)) % 255;
+    gf256::generator_pow(exponent)
+}
 
 /// XOR `src` into `dst` (byte-by-byte).
 fn xor_into(dst: &mut [u8], src: &[u8]) {
@@ -706,6 +766,33 @@ mod tests {
     }
 
     #[test]
+    fn global_repair_handles_columns_separated_by_51() {
+        let cfg = LrcConfig::new(104, 4, 2);
+        let data = make_data(104, 32);
+        let global = encode_global(&cfg, &data);
+
+        let mut available_data: Vec<Option<Vec<u8>>> =
+            data.iter().map(|block| Some(block.clone())).collect();
+        available_data[0] = None;
+        available_data[51] = None;
+
+        let availability = BlockAvailability {
+            data: available_data,
+            local_parity: vec![],
+            global_parity: global.iter().map(|p| Some(p.clone())).collect(),
+        };
+
+        let result = repair_global(&cfg, &availability, 32);
+        assert!(
+            result.success,
+            "global repair should not become singular for 51-apart columns"
+        );
+        assert_eq!(result.blocks_repaired, 2);
+        assert_eq!(result.recovered_data.get(&0), Some(&data[0]));
+        assert_eq!(result.recovered_data.get(&51), Some(&data[51]));
+    }
+
+    #[test]
     fn global_repair_exceeds_capacity() {
         let cfg = LrcConfig::new(4, 2, 1);
         let data = make_data(4, 32);
@@ -825,9 +912,21 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "data_blocks must be > 0")]
+    fn lrc_config_rejects_zero_data_blocks() {
+        let _ = LrcConfig::new(0, 4, 1);
+    }
+
+    #[test]
     #[should_panic(expected = "must be divisible by")]
     fn lrc_config_rejects_indivisible() {
         let _ = LrcConfig::new(7, 3, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "data_blocks must be <= 255")]
+    fn lrc_config_rejects_too_many_global_data_columns() {
+        let _ = LrcConfig::new(256, 4, 1);
     }
 
     #[test]
@@ -879,6 +978,46 @@ mod tests {
         let data = make_data(8, 16);
         let global = encode_global(&cfg, &data);
         assert_eq!(global.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "block size mismatch")]
+    fn encode_global_rejects_mismatched_block_sizes() {
+        let cfg = LrcConfig::new(4, 2, 1);
+        let mut data = make_data(4, 16);
+        data[2].truncate(8);
+        let _ = encode_global(&cfg, &data);
+    }
+
+    #[test]
+    fn local_repair_invalid_group_or_missing_index_returns_none() {
+        let cfg = LrcConfig::new(4, 2, 1);
+        let data = make_data(4, 16);
+        let local = encode_local(&cfg, &data);
+        let available: Vec<Option<&[u8]>> = vec![Some(&data[0]), None];
+
+        assert_eq!(repair_local_single(&cfg, 0, 2, &available, &local[0]), None);
+        assert_eq!(repair_local_single(&cfg, 2, 1, &available, &local[0]), None);
+    }
+
+    #[test]
+    fn global_repair_rejects_mismatched_parity_size_without_panic() {
+        let cfg = LrcConfig::new(4, 2, 1);
+        let data = make_data(4, 16);
+        let availability = BlockAvailability {
+            data: vec![
+                None,
+                Some(data[1].clone()),
+                Some(data[2].clone()),
+                Some(data[3].clone()),
+            ],
+            local_parity: vec![],
+            global_parity: vec![Some(vec![0_u8; 8])],
+        };
+
+        let result = repair_global(&cfg, &availability, 16);
+        assert!(!result.success);
+        assert!(result.used_global);
     }
 
     #[test]
@@ -1093,6 +1232,22 @@ mod tests {
             data: data.iter().map(|b| Some(b.clone())).collect(),
             local_parity: vec![],
             global_parity: global.iter().map(|p| Some(p.clone())).collect(),
+        };
+
+        let result = repair_global(&cfg, &availability, 32);
+        assert!(result.success);
+        assert_eq!(result.blocks_repaired, 0);
+        assert!(!result.used_global);
+    }
+
+    #[test]
+    fn no_failures_do_not_require_available_global_parity() {
+        let cfg = LrcConfig::new(4, 2, 2);
+        let data = make_data(4, 32);
+        let availability = BlockAvailability {
+            data: data.iter().map(|b| Some(b.clone())).collect(),
+            local_parity: vec![],
+            global_parity: vec![],
         };
 
         let result = repair_global(&cfg, &availability, 32);
