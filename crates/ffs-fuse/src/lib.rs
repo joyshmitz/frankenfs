@@ -11,9 +11,9 @@ pub mod per_core;
 
 use asupersync::Cx;
 use ffs_core::{
-    BackpressureDecision, BackpressureGate, DirEntry as FfsDirEntry, FiemapExtent,
-    FileType as FfsFileType, FsOps, FsStat, FsxattrInfo, InodeAttr, ReleaseRequest, RequestOp,
-    RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
+    BackpressureDecision, BackpressureGate, DirEntry as FfsDirEntry, FIEMAP_EXTENT_UNWRITTEN,
+    FiemapExtent, FileType as FfsFileType, FsOps, FsStat, FsxattrInfo, InodeAttr, ReleaseRequest,
+    RequestOp, RequestScope, SeekWhence, SetAttrRequest, XattrSetMode,
 };
 use ffs_error::FfsError;
 use ffs_types::{EXT4_EXTENTS_FL, InodeNumber};
@@ -2531,6 +2531,9 @@ impl FrankenFuse {
                         e.logical <= req_byte && req_byte < e.logical.saturating_add(e.length)
                     })
                     .map_or(0_u64, |e| {
+                        if e.flags & FIEMAP_EXTENT_UNWRITTEN != 0 {
+                            return 0;
+                        }
                         let req_byte = logical.saturating_mul(block_size);
                         let offset_into = req_byte - e.logical;
                         (e.physical + offset_into) / block_size
@@ -5354,6 +5357,7 @@ mod tests {
         btrfs_fs_info: Option<Vec<u8>>,
         btrfs_dev_info: Option<Vec<u8>>,
         btrfs_ino_lookup_result: Option<(u64, Vec<u8>)>,
+        fiemap_fixture: Option<Vec<FiemapExtent>>,
         calls: Arc<Mutex<Vec<IoctlCall>>>,
     }
 
@@ -5373,6 +5377,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5392,6 +5397,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5414,6 +5420,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5433,6 +5440,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5452,6 +5460,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5471,6 +5480,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5495,6 +5505,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5518,6 +5529,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5537,6 +5549,7 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5556,6 +5569,7 @@ mod tests {
                 btrfs_fs_info: Some(payload),
                 btrfs_dev_info: None,
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
         }
@@ -5575,8 +5589,18 @@ mod tests {
                 btrfs_fs_info: None,
                 btrfs_dev_info: Some(payload),
                 btrfs_ino_lookup_result: None,
+                fiemap_fixture: None,
                 calls,
             }
+        }
+
+        fn with_fiemap_fixture(
+            fiemap_fixture: Vec<FiemapExtent>,
+            calls: Arc<Mutex<Vec<IoctlCall>>>,
+        ) -> Self {
+            let mut fs = Self::new(0, calls);
+            fs.fiemap_fixture = Some(fiemap_fixture);
+            fs
         }
     }
 
@@ -5900,7 +5924,7 @@ mod tests {
                 .lock()
                 .expect("lock ioctl calls")
                 .push(IoctlCall::Fiemap(ino, start, length));
-            Ok(vec![])
+            Ok(self.fiemap_fixture.clone().unwrap_or_default())
         }
 
         fn fsync(
@@ -6070,6 +6094,58 @@ mod tests {
         assert!(
             matches!(response, IoctlResult::Error(libc::EINVAL)),
             "short out_size must surface EINVAL, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fibmap_maps_written_extent_physical_block() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fixture = vec![FiemapExtent {
+            logical: 8192,
+            physical: 32768,
+            length: 4096,
+            flags: FIEMAP_EXTENT_LAST,
+        }];
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_fiemap_fixture(
+            fixture,
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 17, 0, FIBMAP, &2_u32.to_ne_bytes(), 4);
+        assert_eq!(response, IoctlResult::Data(8_u32.to_ne_bytes().to_vec()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::Fiemap(InodeNumber(17), 8192, 4096),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_fibmap_unwritten_extent_returns_hole_zero() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fixture = vec![FiemapExtent {
+            logical: 4096,
+            physical: 16384,
+            length: 4096,
+            flags: FIEMAP_EXTENT_LAST | FIEMAP_EXTENT_UNWRITTEN,
+        }];
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::with_fiemap_fixture(
+            fixture,
+            Arc::clone(&calls),
+        )));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 19, 0, FIBMAP, &1_u32.to_ne_bytes(), 4);
+        assert_eq!(response, IoctlResult::Data(0_u32.to_ne_bytes().to_vec()));
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::Fiemap(InodeNumber(19), 4096, 4096),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
         );
     }
 
