@@ -12076,6 +12076,66 @@ impl OpenFs {
         Ok(())
     }
 
+    fn btrfs_insert_prealloc_extent_segment(
+        alloc: &mut BtrfsAllocState,
+        canonical: u64,
+        logical_offset: u64,
+        length: u64,
+    ) -> ffs_error::Result<()> {
+        if length == 0 {
+            return Ok(());
+        }
+
+        let sectorsize = u64::from(alloc.sectorsize);
+        let alloc_size = length
+            .checked_add(sectorsize - 1)
+            .ok_or_else(|| FfsError::InvalidGeometry("prealloc length overflow".into()))?
+            & !(sectorsize - 1);
+        let allocation = alloc
+            .extent_alloc
+            .alloc_data(alloc_size)
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+
+        let extent = BtrfsExtentData::Regular {
+            generation: alloc.generation,
+            ram_bytes: length,
+            extent_type: BTRFS_FILE_EXTENT_PREALLOC,
+            compression: 0,
+            disk_bytenr: allocation.bytenr,
+            disk_num_bytes: alloc_size,
+            extent_offset: 0,
+            num_bytes: length,
+        };
+        let extent_key = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: logical_offset,
+        };
+        if let Err(e) = alloc.fs_tree.insert(extent_key, &extent.to_bytes()) {
+            let _ = alloc
+                .extent_alloc
+                .free_extent(allocation.bytenr, alloc_size, false);
+            return Err(btrfs_mutation_to_ffs(&e));
+        }
+        Ok(())
+    }
+
+    fn btrfs_align_up(value: u64, alignment: u64) -> ffs_error::Result<u64> {
+        debug_assert!(alignment > 0);
+        let remainder = value % alignment;
+        if remainder == 0 {
+            return Ok(value);
+        }
+        value
+            .checked_add(alignment - remainder)
+            .ok_or_else(|| FfsError::InvalidGeometry("aligned offset overflow".into()))
+    }
+
+    fn btrfs_align_down(value: u64, alignment: u64) -> u64 {
+        debug_assert!(alignment > 0);
+        value - (value % alignment)
+    }
+
     fn btrfs_remove_overlapping_extent_data(
         &self,
         cx: &Cx,
@@ -13388,131 +13448,128 @@ impl OpenFs {
                 )?;
             }
         } else {
-            // Check if a data extent (inline or regular non-prealloc) already
-            // exists at this offset. If so, skip the prealloc to avoid
-            // overwriting the user's data.
-            let probe_key = BtrfsKey {
+            // If there's an existing inline extent at offset 0, convert it to
+            // a regular extent before inserting any prealloc extents. btrfs
+            // cannot mix inline and regular file extent items for one inode.
+            let inline_key = BtrfsKey {
                 objectid: canonical,
                 item_type: BTRFS_ITEM_EXTENT_DATA,
-                offset,
+                offset: 0,
             };
-            let already_has_data =
-                alloc
-                    .fs_tree
-                    .range(&probe_key, &probe_key)
-                    .is_ok_and(|existing| {
-                        existing
-                            .first()
-                            .is_some_and(|(_, edata)| match parse_extent_data(edata) {
-                                Ok(BtrfsExtentData::Inline { .. }) => true,
-                                Ok(BtrfsExtentData::Regular { extent_type, .. }) => {
-                                    extent_type != BTRFS_FILE_EXTENT_PREALLOC
-                                }
-                                Err(_) => false,
-                            })
-                    });
-
-            if !already_has_data {
-                // If there's an existing inline extent at offset 0, convert it
-                // to a regular extent because a file cannot mix inline and regular extents.
-                let inline_key = BtrfsKey {
-                    objectid: canonical,
-                    item_type: BTRFS_ITEM_EXTENT_DATA,
-                    offset: 0,
-                };
-                if let Ok(existing) = alloc.fs_tree.range(&inline_key, &inline_key) {
-                    if let Some((_, edata)) = existing.first() {
-                        if let Ok(BtrfsExtentData::Inline {
-                            data: prev_data, ..
-                        }) = parse_extent_data(edata)
+            if let Ok(existing) = alloc.fs_tree.range(&inline_key, &inline_key) {
+                if let Some((_, edata)) = existing.first()
+                    && let Ok(BtrfsExtentData::Inline {
+                        data: prev_data, ..
+                    }) = parse_extent_data(edata)
+                {
+                    alloc
+                        .fs_tree
+                        .delete(&inline_key)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                    let sectorsize = u64::from(alloc.sectorsize);
+                    if !prev_data.is_empty() {
+                        let prev_data_len = u64::try_from(prev_data.len()).map_err(|_| {
+                            FfsError::InvalidGeometry(
+                                "existing inline extent length does not fit u64".into(),
+                            )
+                        })?;
+                        let prev_alloc_size = prev_data_len.saturating_add(sectorsize - 1)
+                            & !(sectorsize - 1);
+                        let prev_allocation = alloc
+                            .extent_alloc
+                            .alloc_data(prev_alloc_size)
+                            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+                        if let Err(e) =
+                            self.dev
+                                .write_all_at(cx, ByteOffset(prev_allocation.bytenr), &prev_data)
                         {
-                            alloc
-                                .fs_tree
-                                .delete(&inline_key)
-                                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                            let sectorsize = u64::from(alloc.sectorsize);
-                            if !prev_data.is_empty() {
-                                let prev_data_len =
-                                    u64::try_from(prev_data.len()).map_err(|_| {
-                                        FfsError::InvalidGeometry(
-                                            "existing inline extent length does not fit u64".into(),
-                                        )
-                                    })?;
-                                let prev_alloc_size = prev_data_len.saturating_add(sectorsize - 1)
-                                    & !(sectorsize - 1);
-                                let prev_allocation = alloc
-                                    .extent_alloc
-                                    .alloc_data(prev_alloc_size)
-                                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-                                if let Err(e) = self.dev.write_all_at(
-                                    cx,
-                                    ByteOffset(prev_allocation.bytenr),
-                                    &prev_data,
-                                ) {
-                                    let _ = alloc.extent_alloc.free_extent(
-                                        prev_allocation.bytenr,
-                                        prev_alloc_size,
-                                        false,
-                                    );
-                                    return Err(e);
-                                }
-                                let prev_extent = BtrfsExtentData::Regular {
-                                    generation: alloc.generation,
-                                    ram_bytes: prev_data_len,
-                                    extent_type: BTRFS_FILE_EXTENT_REG,
-                                    compression: 0,
-                                    disk_bytenr: prev_allocation.bytenr,
-                                    disk_num_bytes: prev_alloc_size,
-                                    extent_offset: 0,
-                                    num_bytes: prev_data_len,
-                                };
-                                if let Err(e) =
-                                    alloc.fs_tree.insert(inline_key, &prev_extent.to_bytes())
-                                {
-                                    let _ = alloc.extent_alloc.free_extent(
-                                        prev_allocation.bytenr,
-                                        prev_alloc_size,
-                                        false,
-                                    );
-                                    return Err(btrfs_mutation_to_ffs(&e));
-                                }
-                            }
+                            let _ = alloc.extent_alloc.free_extent(
+                                prev_allocation.bytenr,
+                                prev_alloc_size,
+                                false,
+                            );
+                            return Err(e);
+                        }
+                        let prev_extent = BtrfsExtentData::Regular {
+                            generation: alloc.generation,
+                            ram_bytes: prev_data_len,
+                            extent_type: BTRFS_FILE_EXTENT_REG,
+                            compression: 0,
+                            disk_bytenr: prev_allocation.bytenr,
+                            disk_num_bytes: prev_alloc_size,
+                            extent_offset: 0,
+                            num_bytes: prev_data_len,
+                        };
+                        if let Err(e) = alloc.fs_tree.insert(inline_key, &prev_extent.to_bytes()) {
+                            let _ = alloc.extent_alloc.free_extent(
+                                prev_allocation.bytenr,
+                                prev_alloc_size,
+                                false,
+                            );
+                            return Err(btrfs_mutation_to_ffs(&e));
                         }
                     }
                 }
+            }
 
-                let sectorsize = u64::from(alloc.sectorsize);
-                let alloc_size = length
-                    .checked_add(sectorsize - 1)
-                    .ok_or_else(|| FfsError::InvalidGeometry("offset + length overflow".into()))?
-                    & !(sectorsize - 1);
+            let ext_start = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: 0,
+            };
+            let ext_end = BtrfsKey {
+                objectid: canonical,
+                item_type: BTRFS_ITEM_EXTENT_DATA,
+                offset: u64::MAX,
+            };
+            let extents = alloc
+                .fs_tree
+                .range(&ext_start, &ext_end)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            let sectorsize = u64::from(alloc.sectorsize);
+            let mut cursor = offset;
+            let mut prealloc_gaps = Vec::new();
 
-                let allocation = alloc
-                    .extent_alloc
-                    .alloc_data(alloc_size)
-                    .map_err(|e| btrfs_mutation_to_ffs(&e))?;
-
-                let extent = BtrfsExtentData::Regular {
-                    generation: alloc.generation,
-                    ram_bytes: length,
-                    extent_type: BTRFS_FILE_EXTENT_PREALLOC,
-                    compression: 0,
-                    disk_bytenr: allocation.bytenr,
-                    disk_num_bytes: alloc_size,
-                    extent_offset: 0,
-                    num_bytes: length,
-                };
-                let extent_key = BtrfsKey {
-                    objectid: canonical,
-                    item_type: BTRFS_ITEM_EXTENT_DATA,
-                    offset,
-                };
-                if let Err(e) = alloc.fs_tree.insert(extent_key, &extent.to_bytes()) {
-                    let _ = alloc
-                        .extent_alloc
-                        .free_extent(allocation.bytenr, alloc_size, false);
-                    return Err(btrfs_mutation_to_ffs(&e));
+            for (key, extent_bytes) in extents {
+                if key.offset >= new_end {
+                    break;
                 }
+
+                let extent = parse_extent_data(&extent_bytes).map_err(|e| parse_to_ffs_error(&e))?;
+                let logical_len = Self::btrfs_extent_logical_len(&extent)?;
+                let logical_end = key.offset.checked_add(logical_len).ok_or_else(|| {
+                    FfsError::InvalidGeometry("extent logical end overflow".into())
+                })?;
+                if logical_end <= cursor {
+                    continue;
+                }
+
+                if key.offset > cursor {
+                    let gap_start = Self::btrfs_align_up(cursor, sectorsize)?;
+                    let gap_end = Self::btrfs_align_down(key.offset.min(new_end), sectorsize);
+                    if gap_start < gap_end {
+                        prealloc_gaps.push((gap_start, gap_end - gap_start));
+                    }
+                }
+
+                cursor = cursor.max(logical_end.min(new_end));
+                if cursor >= new_end {
+                    break;
+                }
+            }
+
+            if cursor < new_end {
+                let gap_start = Self::btrfs_align_up(cursor, sectorsize)?;
+                let gap_end = Self::btrfs_align_down(new_end, sectorsize);
+                if gap_start < gap_end {
+                    prealloc_gaps.push((gap_start, gap_end - gap_start));
+                }
+            }
+
+            for (gap_offset, gap_len) in prealloc_gaps {
+                Self::btrfs_insert_prealloc_extent_segment(
+                    &mut alloc, canonical, gap_offset, gap_len,
+                )?;
             }
         }
 
@@ -38796,6 +38853,103 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192)
             .unwrap();
         assert_eq!(data, payload);
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_overlapping_existing_extent_does_not_create_unwritten_overlap() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("overlap-fiemap.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let payload = vec![0x5A_u8; 8192];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &payload)
+            .unwrap();
+
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 4096, 4096, 0)
+            .unwrap();
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            1,
+            "prealloc over initialized data must not create an overlapping unwritten extent"
+        );
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].length, 8192);
+        assert_eq!(
+            extents[0].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "initialized data extent must not be marked unwritten"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_preallocates_only_uncovered_hole_before_live_extent() {
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("partial-overlap-fiemap.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .unwrap();
+        let payload = vec![0x42_u8; 4096];
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 4096, &payload)
+            .unwrap();
+
+        ops.fallocate(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192, 0)
+            .unwrap();
+
+        let mut scope = RequestScope::empty();
+        let extents = fs.fiemap(&cx, &mut scope, attr.ino, 0, u64::MAX).unwrap();
+        assert_eq!(
+            extents.len(),
+            2,
+            "prealloc should fill only the uncovered leading hole"
+        );
+        assert_eq!(extents[0].logical, 0);
+        assert_eq!(extents[0].length, 4096);
+        assert_ne!(
+            extents[0].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "leading prealloc extent must be marked unwritten"
+        );
+        assert_eq!(extents[1].logical, 4096);
+        assert_eq!(extents[1].length, 4096);
+        assert_eq!(
+            extents[1].flags & FIEMAP_EXTENT_UNWRITTEN,
+            0,
+            "live data extent must not be marked unwritten"
+        );
+        assert!(
+            extents[0].logical + extents[0].length <= extents[1].logical,
+            "FIEMAP extents must not overlap: {extents:?}"
+        );
+
+        let readback = ops
+            .read(&cx, &mut RequestScope::empty(), attr.ino, 0, 8192)
+            .unwrap();
+        assert!(readback[..4096].iter().all(|byte| *byte == 0));
+        assert_eq!(&readback[4096..], payload.as_slice());
     }
 
     #[test]
