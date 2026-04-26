@@ -3312,7 +3312,6 @@ impl FrankenFuse {
         len: u64,
         flags: u32,
     ) -> Result<u32, MutationDispatchError> {
-        self.enforce_mutation_guards(RequestOp::Write, ino_out)?;
         if flags != 0 {
             return Err(MutationDispatchError::Errno(libc::EINVAL));
         }
@@ -3323,6 +3322,7 @@ impl FrankenFuse {
         if len == 0 {
             return Ok(0);
         }
+        self.enforce_mutation_guards(RequestOp::Write, ino_out)?;
         let copy_len = len.min(u64::from(u32::MAX));
         let cx = Self::cx_for_request();
         let copied = {
@@ -10710,6 +10710,24 @@ mod tests {
         assert!(
             calls.lock().expect("lock calls").is_empty(),
             "zero-length copy_file_range must not open a request scope, commit, read, or write"
+        );
+    }
+
+    #[test]
+    fn dispatch_copy_file_range_zero_length_bypasses_read_only_guard() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(MutationRecordingFs::with_scope_recording(
+            Arc::clone(&calls),
+        )));
+
+        assert_eq!(
+            fuse.dispatch_copy_file_range(1, 5, 2, 7, 0, 0)
+                .expect("zero-length copy_file_range should not require a writable mount"),
+            0
+        );
+        assert!(
+            calls.lock().expect("lock calls").is_empty(),
+            "zero-length copy_file_range must bypass read-only guards and backend scopes"
         );
     }
 
