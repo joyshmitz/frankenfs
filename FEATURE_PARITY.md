@@ -200,7 +200,10 @@ same-inode ranges; validated zero-length requests now return `0` without
 opening a backend request scope, committing, reading, writing, or invalidating
 readahead, matching the Linux no-op contract. Mounted-path coverage writes 16
 MiB through `splice(2)` pipe-to-file transfer and verifies byte-for-byte
-SHA-256 equality.
+SHA-256 equality, while direct ext4 and btrfs `copy_file_range(2)` probes now
+exercise cross-file offset copies, same-inode non-overlapping copies,
+zero-length no-ops, and same-inode overlap `EINVAL`/no-drift behavior through
+the mounted FUSE path.
 Additional mounted-path probes mirror the local xfstests splice/sendfile cases
 that actually exercise this surface (`generic/249`, `generic/591`, and
 `generic/680`). The 1 GiB `sendfile(2)` throughput comparison is retained as an

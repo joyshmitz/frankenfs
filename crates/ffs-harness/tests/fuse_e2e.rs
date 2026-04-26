@@ -2137,6 +2137,183 @@ fn run_splice_pipe_to_file_probe(root: &Path) -> Value {
     serde_json::from_slice(&output.stdout).expect("splice probe JSON")
 }
 
+const COPY_FILE_RANGE_OFFSETS_SCRIPT: &str = r#"
+import errno
+import json
+import os
+import sys
+
+if not hasattr(os, "copy_file_range"):
+    print(json.dumps({"skipped": "python_os_copy_file_range_unavailable"}))
+    sys.exit(0)
+
+unsupported_errnos = {errno.ENOSYS, errno.EOPNOTSUPP}
+if hasattr(errno, "ENOTSUP"):
+    unsupported_errnos.add(errno.ENOTSUP)
+
+root = sys.argv[1]
+
+def read(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+def copy_or_skip(src_fd, dst_fd, count, src_offset, dst_offset, label):
+    try:
+        return os.copy_file_range(
+            src_fd,
+            dst_fd,
+            count,
+            offset_src=src_offset,
+            offset_dst=dst_offset,
+        )
+    except OSError as exc:
+        if exc.errno in unsupported_errnos:
+            print(json.dumps({
+                "skipped": label + "_unsupported_by_kernel_or_fuse",
+                "errno": exc.errno,
+            }, sort_keys=True))
+            sys.exit(0)
+        raise
+
+src_path = os.path.join(root, "copy_file_range_src.bin")
+dst_path = os.path.join(root, "copy_file_range_dst.bin")
+src_bytes = b"0123456789abcdef"
+dst_initial = b"ABCDEFGHIJK"
+with open(src_path, "wb") as fh:
+    fh.write(src_bytes)
+with open(dst_path, "wb") as fh:
+    fh.write(dst_initial)
+
+src_fd = os.open(src_path, os.O_RDONLY)
+dst_fd = os.open(dst_path, os.O_RDWR)
+try:
+    cross_copied = copy_or_skip(src_fd, dst_fd, 5, 3, 2, "cross_file")
+    os.fsync(dst_fd)
+finally:
+    os.close(src_fd)
+    os.close(dst_fd)
+cross_expected = dst_initial[:2] + src_bytes[3:8] + dst_initial[7:]
+cross_readback = read(dst_path)
+
+same_path = os.path.join(root, "copy_file_range_same_inode.bin")
+same_initial = b"abcdefghijklmnop"
+with open(same_path, "wb") as fh:
+    fh.write(same_initial)
+
+same_fd = os.open(same_path, os.O_RDWR)
+try:
+    same_copied = copy_or_skip(same_fd, same_fd, 4, 0, 8, "same_inode_nonoverlap")
+    zero_copied = copy_or_skip(same_fd, same_fd, 0, 1, 4, "zero_length")
+    os.fsync(same_fd)
+    try:
+        os.copy_file_range(same_fd, same_fd, 4, offset_src=0, offset_dst=2)
+    except OSError as exc:
+        overlap_errno = exc.errno
+    else:
+        overlap_errno = 0
+finally:
+    os.close(same_fd)
+
+same_expected = same_initial[:8] + same_initial[:4] + same_initial[12:]
+same_readback = read(same_path)
+
+print(json.dumps({
+    "cross_file": {
+        "copied": cross_copied,
+        "expected_hex": cross_expected.hex(),
+        "readback_hex": cross_readback.hex(),
+    },
+    "same_inode": {
+        "copied": same_copied,
+        "expected_hex": same_expected.hex(),
+        "readback_hex": same_readback.hex(),
+    },
+    "zero_length": {
+        "copied": zero_copied,
+    },
+    "overlap": {
+        "errno": overlap_errno,
+        "expected_hex": same_expected.hex(),
+        "readback_hex": same_readback.hex(),
+    },
+}, sort_keys=True))
+"#;
+
+fn run_copy_file_range_offsets_probe(root: &Path) -> Value {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(COPY_FILE_RANGE_OFFSETS_SCRIPT)
+        .arg(root)
+        .output()
+        .expect("run python3 copy_file_range probe");
+    assert!(
+        output.status.success(),
+        "python3 copy_file_range probe failed for {}: stdout={} stderr={}",
+        root.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("copy_file_range probe JSON")
+}
+
+fn assert_copy_file_range_offsets_and_overlap_contract(root: &Path, scenario_id: &str) {
+    let report = run_copy_file_range_offsets_probe(root);
+    if let Some(reason) = report["skipped"].as_str() {
+        emit_scenario_result(scenario_id, "SKIP", Some(reason));
+        return;
+    }
+
+    let cross = &report["cross_file"];
+    assert_eq!(
+        cross["copied"].as_i64(),
+        Some(5),
+        "cross-file copy_file_range should report copied byte count: {report}"
+    );
+    assert_eq!(
+        cross["readback_hex"].as_str(),
+        cross["expected_hex"].as_str(),
+        "cross-file copy_file_range should copy the requested source offset into destination \
+         offset: {report}"
+    );
+
+    let same_inode = &report["same_inode"];
+    assert_eq!(
+        same_inode["copied"].as_i64(),
+        Some(4),
+        "same-inode non-overlapping copy_file_range should report copied byte count: {report}"
+    );
+    assert_eq!(
+        same_inode["readback_hex"].as_str(),
+        same_inode["expected_hex"].as_str(),
+        "same-inode non-overlapping copy_file_range should preserve exact offset semantics: \
+         {report}"
+    );
+
+    assert_eq!(
+        report["zero_length"]["copied"].as_i64(),
+        Some(0),
+        "zero-length copy_file_range should return 0: {report}"
+    );
+
+    let overlap = &report["overlap"];
+    assert_eq!(
+        overlap["errno"].as_i64(),
+        Some(i64::from(libc::EINVAL)),
+        "same-inode overlapping copy_file_range should reject with EINVAL: {report}"
+    );
+    assert_eq!(
+        overlap["readback_hex"].as_str(),
+        overlap["expected_hex"].as_str(),
+        "overlapping copy_file_range rejection must not mutate data: {report}"
+    );
+
+    emit_scenario_result(
+        scenario_id,
+        "PASS",
+        Some("offsets_zero_length_and_overlap_contract_verified"),
+    );
+}
+
 const SENDFILE_32M_SCRIPT: &str = r#"
 import hashlib
 import json
@@ -7924,6 +8101,21 @@ fn fuse_splice_pipe_to_file_16m_roundtrip() {
 }
 
 #[test]
+fn fuse_copy_file_range_offsets_and_overlap_contract() {
+    if !fuse_available() || !command_available("python3") {
+        eprintln!("FUSE or python3 prerequisites not met, skipping");
+        return;
+    }
+
+    with_rw_mount(|mnt| {
+        assert_copy_file_range_offsets_and_overlap_contract(
+            mnt,
+            "ext4_rw_copy_file_range_offsets_and_overlap",
+        );
+    });
+}
+
+#[test]
 fn fuse_xfstests_generic_249_sendfile_32m_roundtrip() {
     if !fuse_available() || !command_available("python3") {
         eprintln!("FUSE or python3 prerequisites not met, skipping");
@@ -10750,6 +10942,21 @@ fn btrfs_fuse_pwritev2_rwf_unsupported_intents_reject_without_mutation() {
             "btrfs_rw_pwritev2_rwf_unsupported_intents",
             "PASS",
             Some("rwf_atomic_rwf_dontcache_eopnotsupp_no_mutation"),
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_copy_file_range_offsets_and_overlap_contract() {
+    if !command_available("python3") {
+        eprintln!("python3 not available, skipping");
+        return;
+    }
+
+    with_btrfs_rw_mount(|mnt| {
+        assert_copy_file_range_offsets_and_overlap_contract(
+            mnt,
+            "btrfs_rw_copy_file_range_offsets_and_overlap",
         );
     });
 }
