@@ -3723,10 +3723,9 @@ impl<D: BlockDevice> ThrottleInjector<D> {
                 if budget.is_past_deadline(now) {
                     return Err(FfsError::Cancelled);
                 }
-                let sleep_duration = match budget.remaining_time(now) {
-                    Some(remaining) => Duration::from_nanos(remaining.as_nanos()),
-                    None => total_delay,
-                };
+                let sleep_duration = budget.remaining_time(now).map_or(total_delay, |remaining| {
+                    Duration::from_nanos(u64::try_from(remaining.as_nanos()).unwrap_or(u64::MAX))
+                });
                 if sleep_duration < total_delay || sleep_duration.is_zero() {
                     return Err(FfsError::Cancelled);
                 }
