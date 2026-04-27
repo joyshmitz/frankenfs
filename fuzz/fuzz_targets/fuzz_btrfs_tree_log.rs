@@ -210,7 +210,7 @@ fn build_leaf_entries(
             data: cursor.take_vec(payload_len),
         });
     }
-    entries.sort_by(|left, right| key_order_tuple(&left.key).cmp(&key_order_tuple(&right.key)));
+    entries.sort_by_key(|entry| key_order_tuple(&entry.key));
     entries
 }
 
@@ -488,7 +488,11 @@ fn assert_results_match(
             );
         }
         (left, right) => {
-            panic!("{context} changed success/failure mode: left={left:?} right={right:?}");
+            assert_eq!(
+                left.is_ok(),
+                right.is_ok(),
+                "{context} changed success/failure mode: left={left:?} right={right:?}"
+            );
         }
     }
 }

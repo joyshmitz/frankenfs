@@ -330,6 +330,169 @@ impl MountOptions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum MountOptionParseError {
+    NonUtf8,
+    EmptyOption,
+    EmptyKey,
+    MissingValue { option: String },
+    UnexpectedValue { option: String },
+    InvalidValue { option: String, value: String },
+    UnknownOption { option: String },
+}
+
+#[doc(hidden)]
+pub fn parse_mount_options_for_fuzzing(
+    input: &[u8],
+) -> Result<MountOptions, MountOptionParseError> {
+    let text = std::str::from_utf8(input).map_err(|_| MountOptionParseError::NonUtf8)?;
+    parse_mount_option_text(text)
+}
+
+fn parse_mount_option_text(text: &str) -> Result<MountOptions, MountOptionParseError> {
+    let mut options = MountOptions::default();
+    if text.trim().is_empty() {
+        return Ok(options);
+    }
+
+    for raw_option in text.split(',') {
+        let option = raw_option.trim();
+        if option.is_empty() {
+            return Err(MountOptionParseError::EmptyOption);
+        }
+        apply_mount_option(option, &mut options)?;
+    }
+
+    Ok(options)
+}
+
+fn apply_mount_option(
+    option: &str,
+    options: &mut MountOptions,
+) -> Result<(), MountOptionParseError> {
+    let (key, value) = split_mount_option(option)?;
+    match key {
+        "ro" => {
+            reject_mount_option_value(key, value)?;
+            options.read_only = true;
+        }
+        "rw" => {
+            reject_mount_option_value(key, value)?;
+            options.read_only = false;
+        }
+        "read_only" => {
+            options.read_only = parse_mount_bool(key, value)?;
+        }
+        "allow_other" => {
+            options.allow_other = parse_mount_bool_or_flag(key, value, true)?;
+        }
+        "noallow_other" => {
+            reject_mount_option_value(key, value)?;
+            options.allow_other = false;
+        }
+        "auto_unmount" => {
+            options.auto_unmount = parse_mount_bool_or_flag(key, value, true)?;
+        }
+        "noauto_unmount" => {
+            reject_mount_option_value(key, value)?;
+            options.auto_unmount = false;
+        }
+        "worker_threads" | "threads" => {
+            options.worker_threads = parse_mount_usize(key, value)?;
+        }
+        "fsname" | "subtype" => {
+            let _ = require_mount_option_value(key, value)?;
+        }
+        "max_read" | "max_background" | "congestion_threshold" => {
+            let _ = parse_mount_usize(key, value)?;
+        }
+        "default_permissions" | "noatime" => {
+            reject_mount_option_value(key, value)?;
+        }
+        _ => {
+            return Err(MountOptionParseError::UnknownOption {
+                option: key.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn split_mount_option(option: &str) -> Result<(&str, Option<&str>), MountOptionParseError> {
+    let mut pieces = option.splitn(2, '=');
+    let Some(key) = pieces.next() else {
+        return Err(MountOptionParseError::EmptyOption);
+    };
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(MountOptionParseError::EmptyKey);
+    }
+    Ok((key, pieces.next().map(str::trim)))
+}
+
+fn require_mount_option_value<'a>(
+    option: &str,
+    value: Option<&'a str>,
+) -> Result<&'a str, MountOptionParseError> {
+    let Some(value) = value else {
+        return Err(MountOptionParseError::MissingValue {
+            option: option.to_owned(),
+        });
+    };
+    if value.is_empty() {
+        return Err(MountOptionParseError::InvalidValue {
+            option: option.to_owned(),
+            value: value.to_owned(),
+        });
+    }
+    Ok(value)
+}
+
+fn reject_mount_option_value(
+    option: &str,
+    value: Option<&str>,
+) -> Result<(), MountOptionParseError> {
+    if value.is_some() {
+        return Err(MountOptionParseError::UnexpectedValue {
+            option: option.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_mount_bool(option: &str, value: Option<&str>) -> Result<bool, MountOptionParseError> {
+    match require_mount_option_value(option, value)? {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        value => Err(MountOptionParseError::InvalidValue {
+            option: option.to_owned(),
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn parse_mount_bool_or_flag(
+    option: &str,
+    value: Option<&str>,
+    flag_value: bool,
+) -> Result<bool, MountOptionParseError> {
+    match value {
+        Some(_) => parse_mount_bool(option, value),
+        None => Ok(flag_value),
+    }
+}
+
+fn parse_mount_usize(option: &str, value: Option<&str>) -> Result<usize, MountOptionParseError> {
+    let value = require_mount_option_value(option, value)?;
+    value
+        .parse::<usize>()
+        .map_err(|_| MountOptionParseError::InvalidValue {
+            option: option.to_owned(),
+            value: value.to_owned(),
+        })
+}
+
 // ── Cache-line padding ──────────────────────────────────────────────────────
 
 /// Pad a value to 64 bytes to avoid false sharing between hot counters
@@ -11470,6 +11633,35 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, MountOption::CUSTOM(v) if v == "congestion_threshold=6"))
         );
+    }
+
+    #[test]
+    fn parse_mount_options_accepts_supported_csv_flags() {
+        let opts = parse_mount_options_for_fuzzing(
+            b"rw,allow_other,auto_unmount=false,worker_threads=4,fsname=frankenfs,subtype=ffs",
+        )
+        .expect("supported mount option csv should parse");
+
+        assert!(!opts.read_only);
+        assert!(opts.allow_other);
+        assert!(!opts.auto_unmount);
+        assert_eq!(opts.worker_threads, 4);
+    }
+
+    #[test]
+    fn parse_mount_options_rejects_malformed_csv() {
+        assert!(matches!(
+            parse_mount_options_for_fuzzing(b"rw,,allow_other"),
+            Err(MountOptionParseError::EmptyOption)
+        ));
+        assert!(matches!(
+            parse_mount_options_for_fuzzing(b"worker_threads=not-a-number"),
+            Err(MountOptionParseError::InvalidValue { .. })
+        ));
+        assert!(matches!(
+            parse_mount_options_for_fuzzing(&[0xFF, b'r', b'o']),
+            Err(MountOptionParseError::NonUtf8)
+        ));
     }
 
     #[test]

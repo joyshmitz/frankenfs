@@ -3,7 +3,9 @@
 use asupersync::Cx;
 use ffs_core::{DirEntry, FileType, FsOps, InodeAttr, RequestScope};
 use ffs_error::FfsError;
-use ffs_fuse::{mount_option_labels_for_fuzzing, FrankenFuse, MountOptions};
+use ffs_fuse::{
+    mount_option_labels_for_fuzzing, parse_mount_options_for_fuzzing, FrankenFuse, MountOptions,
+};
 use ffs_types::{crc32c, InodeNumber};
 use libfuzzer_sys::fuzz_target;
 use std::ffi::OsStr;
@@ -14,6 +16,7 @@ const MAX_INPUT_BYTES: usize = 4096;
 const MAX_INITIAL_BYTES: usize = 1024;
 const MAX_IO_BYTES: usize = 2048;
 const MAX_FILE_BYTES: usize = 8192;
+const MAX_MOUNT_OPTION_BYTES: usize = 256;
 
 const SRC_INO: u64 = 11;
 const DST_INO: u64 = 12;
@@ -59,6 +62,21 @@ enum IoOutcome {
 struct MountOutcome {
     labels: Vec<String>,
     resolved_threads: usize,
+    parsed: MountParseOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MountParseOutcome {
+    Parsed {
+        read_only: bool,
+        allow_other: bool,
+        auto_unmount: bool,
+        worker_threads: usize,
+        label_crc32c: u32,
+    },
+    Rejected {
+        error_crc32c: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +362,11 @@ fn fuzz_worker_threads(cursor: &mut ByteCursor<'_>) -> usize {
     }
 }
 
+fn fuzz_mount_option_bytes(cursor: &mut ByteCursor<'_>) -> Vec<u8> {
+    let len = usize::from(cursor.next_u16()).min(MAX_MOUNT_OPTION_BYTES);
+    cursor.fill_bytes(len)
+}
+
 fn fuzz_len(cursor: &mut ByteCursor<'_>) -> u32 {
     match cursor.next_u8() % 6 {
         0 => 0,
@@ -378,6 +401,7 @@ fn fuzz_ino(cursor: &mut ByteCursor<'_>) -> u64 {
 }
 
 fn mount_outcome(cursor: &mut ByteCursor<'_>) -> (MountOptions, MountOutcome) {
+    let mount_option_bytes = fuzz_mount_option_bytes(cursor);
     let options = MountOptions {
         read_only: cursor.next_bool(),
         allow_other: cursor.next_bool(),
@@ -423,8 +447,27 @@ fn mount_outcome(cursor: &mut ByteCursor<'_>) -> (MountOptions, MountOutcome) {
         MountOutcome {
             labels,
             resolved_threads: options.resolved_thread_count(),
+            parsed: mount_parse_outcome(&mount_option_bytes),
         },
     )
+}
+
+fn mount_parse_outcome(input: &[u8]) -> MountParseOutcome {
+    match parse_mount_options_for_fuzzing(input) {
+        Ok(options) => {
+            let labels = mount_option_labels_for_fuzzing(&options);
+            MountParseOutcome::Parsed {
+                read_only: options.read_only,
+                allow_other: options.allow_other,
+                auto_unmount: options.auto_unmount,
+                worker_threads: options.worker_threads,
+                label_crc32c: crc32c(labels.join(",").as_bytes()),
+            }
+        }
+        Err(error) => MountParseOutcome::Rejected {
+            error_crc32c: crc32c(format!("{error:?}").as_bytes()),
+        },
+    }
 }
 
 fn bytes_outcome(result: std::result::Result<Vec<u8>, i32>) -> IoOutcome {

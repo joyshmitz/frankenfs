@@ -320,8 +320,8 @@ fn write_jbd2_header(block: &mut [u8], block_type: u32, sequence: u32) {
     block[8..12].copy_from_slice(&sequence.to_be_bytes());
 }
 
-fn write_jbd2_superblock_v2(
-    block: &mut [u8],
+#[derive(Clone, Copy)]
+struct Jbd2SuperblockV2 {
     block_size: u32,
     max_len: u32,
     first_log_block: u32,
@@ -329,15 +329,17 @@ fn write_jbd2_superblock_v2(
     start_block: u32,
     num_fc_blocks: u32,
     feature_incompat: u32,
-) {
+}
+
+fn write_jbd2_superblock_v2(block: &mut [u8], superblock: Jbd2SuperblockV2) {
     write_jbd2_header(block, 4, 0);
-    block[12..16].copy_from_slice(&block_size.to_be_bytes());
-    block[16..20].copy_from_slice(&max_len.to_be_bytes());
-    block[20..24].copy_from_slice(&first_log_block.to_be_bytes());
-    block[24..28].copy_from_slice(&start_sequence.to_be_bytes());
-    block[28..32].copy_from_slice(&start_block.to_be_bytes());
-    block[40..44].copy_from_slice(&feature_incompat.to_be_bytes());
-    block[84..88].copy_from_slice(&num_fc_blocks.to_be_bytes());
+    block[12..16].copy_from_slice(&superblock.block_size.to_be_bytes());
+    block[16..20].copy_from_slice(&superblock.max_len.to_be_bytes());
+    block[20..24].copy_from_slice(&superblock.first_log_block.to_be_bytes());
+    block[24..28].copy_from_slice(&superblock.start_sequence.to_be_bytes());
+    block[28..32].copy_from_slice(&superblock.start_block.to_be_bytes());
+    block[40..44].copy_from_slice(&superblock.feature_incompat.to_be_bytes());
+    block[84..88].copy_from_slice(&superblock.num_fc_blocks.to_be_bytes());
 }
 
 fn build_fc_tag(tag_type: u16, payload: &[u8]) -> Vec<u8> {
@@ -389,13 +391,15 @@ fn build_external_journal_image(
     let mut image = vec![0_u8; block_size * blocks];
     write_jbd2_superblock_v2(
         &mut image[..block_size],
-        u32::try_from(block_size).expect("block_size fits u32"),
-        u32::try_from(blocks).expect("block count fits u32"),
-        1,
-        1,
-        1,
-        0,
-        0,
+        Jbd2SuperblockV2 {
+            block_size: u32::try_from(block_size).expect("block_size fits u32"),
+            max_len: u32::try_from(blocks).expect("block count fits u32"),
+            first_log_block: 1,
+            start_sequence: 1,
+            start_block: 1,
+            num_fc_blocks: 0,
+            feature_incompat: 0,
+        },
     );
     image[48..64].copy_from_slice(&uuid);
 
@@ -482,13 +486,15 @@ fn build_ext4_image_with_fast_commit_evidence() -> Vec<u8> {
     let journal_sb = JOURNAL_SUPERBLOCK_BLOCK * BLOCK_SIZE;
     write_jbd2_superblock_v2(
         &mut image[journal_sb..journal_sb + BLOCK_SIZE],
-        BLOCK_SIZE as u32,
-        6,
-        1,
-        1,
-        1,
-        2,
-        JBD2_FEATURE_INCOMPAT_FAST_COMMIT,
+        Jbd2SuperblockV2 {
+            block_size: BLOCK_SIZE as u32,
+            max_len: 6,
+            first_log_block: 1,
+            start_sequence: 1,
+            start_block: 1,
+            num_fc_blocks: 2,
+            feature_incompat: JBD2_FEATURE_INCOMPAT_FAST_COMMIT,
+        },
     );
 
     let mut fc_payload = build_fc_inode_update_transaction(42, 1);
@@ -632,7 +638,7 @@ fn build_case(seed: SeedCase, cursor: &mut ByteCursor<'_>) -> JournalReplayCase 
         SeedCase::ExternalJournalDirty => {
             let (mut image, external_journal) = build_ext4_image_with_external_journal(true);
             image[EXT4_LAST_ORPHAN_OFFSET..EXT4_LAST_ORPHAN_OFFSET + 4]
-                .copy_from_slice(&u32::from(InodeNumber(11).0 as u32).to_le_bytes());
+                .copy_from_slice(&(InodeNumber(11).0 as u32).to_le_bytes());
             JournalReplayCase {
                 image,
                 external_journal: Some(external_journal),
