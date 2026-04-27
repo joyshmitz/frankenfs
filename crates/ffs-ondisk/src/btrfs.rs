@@ -13,6 +13,7 @@ const BTRFS_ITEM_SIZE: usize = 25;
 const BTRFS_KEY_PTR_SIZE: usize = 33;
 /// Maximum tree depth in btrfs (kernel enforces 8 levels, 0-7).
 const BTRFS_MAX_LEVEL: u8 = 7;
+const BTRFS_MAX_SUPERBLOCK_SIZE_FIELD: u32 = 256 * 1024;
 const BTRFS_SUPER_LABEL_OFFSET: usize = 0x12B;
 const BTRFS_SUPER_LABEL_LEN: usize = 256;
 const BTRFS_SYS_CHUNK_ARRAY_OFFSET: usize = 0x32B;
@@ -103,15 +104,21 @@ impl BtrfsSuperblock {
             });
         }
         // Sane upper bounds (256K for sector/stripe, 256K for node)
-        if sectorsize > 256 * 1024 {
+        if sectorsize > BTRFS_MAX_SUPERBLOCK_SIZE_FIELD {
             return Err(ParseError::InvalidField {
                 field: "sectorsize",
                 reason: "exceeds 256K upper bound",
             });
         }
-        if nodesize > 256 * 1024 {
+        if nodesize > BTRFS_MAX_SUPERBLOCK_SIZE_FIELD {
             return Err(ParseError::InvalidField {
                 field: "nodesize",
+                reason: "exceeds 256K upper bound",
+            });
+        }
+        if stripesize > BTRFS_MAX_SUPERBLOCK_SIZE_FIELD {
+            return Err(ParseError::InvalidField {
+                field: "stripesize",
                 reason: "exceeds 256K upper bound",
             });
         }
@@ -2651,6 +2658,23 @@ mod tests {
     }
 
     #[test]
+    fn superblock_rejects_oversized_stripesize() {
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+        sb[0x9C..0xA0].copy_from_slice(&524_288_u32.to_le_bytes());
+        let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "stripesize",
+                reason: "exceeds 256K upper bound",
+            }
+        );
+    }
+
+    #[test]
     fn leaf_items_zero_nritems() {
         let block = make_block(512, 0, 0);
         let (header, items) = parse_leaf_items(&block).expect("empty leaf");
@@ -3655,6 +3679,24 @@ mod tests {
             assert!(matches!(
                 err,
                 ParseError::InvalidField { field: "nodesize", .. }
+            ));
+        }
+
+        /// Superblock rejects nonzero stripesize > 256K.
+        #[test]
+        fn btrfs_proptest_superblock_rejects_oversized_stripesize(
+            shift in 19_u32..=30,
+        ) {
+            let stripesize = 1_u32 << shift;
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+            sb[0x9C..0xA0].copy_from_slice(&stripesize.to_le_bytes());
+            let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+            assert!(matches!(
+                err,
+                ParseError::InvalidField { field: "stripesize", .. }
             ));
         }
 
