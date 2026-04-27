@@ -1642,6 +1642,27 @@ def rename_unlink():
         "renamed_read": read_text(renamed),
     }
 
+def rename_replace_existing():
+    src = os.path.join(base, "replace_src.txt")
+    dst = os.path.join(base, "replace_dst.txt")
+    with open(src, "wb") as f:
+        f.write(b"replacement")
+        f.flush()
+        os.fsync(f.fileno())
+    with open(dst, "wb") as f:
+        f.write(b"original")
+        f.flush()
+        os.fsync(f.fileno())
+    before_dst_stat = stable_stat(dst)
+    os.rename(src, dst)
+    return {
+        "before_dst_stat": before_dst_stat,
+        "dst_read_after_rename": read_text(dst),
+        "dst_stat_after_rename": stable_stat(dst),
+        "entries": entries(base),
+        "src_exists_after_rename": os.path.exists(src),
+    }
+
 def nested_dir_rename():
     sub = os.path.join(base, "sub")
     moved = os.path.join(base, "moved")
@@ -1725,6 +1746,12 @@ def cleanup():
     open_rename_moved_path = os.path.join(base, "open_rename_moved.txt")
     if os.path.exists(open_rename_moved_path):
         os.unlink(open_rename_moved_path)
+    replace_src_path = os.path.join(base, "replace_src.txt")
+    if os.path.exists(replace_src_path):
+        os.unlink(replace_src_path)
+    replace_dst_path = os.path.join(base, "replace_dst.txt")
+    if os.path.exists(replace_dst_path):
+        os.unlink(replace_dst_path)
     os.unlink(os.path.join(base, "renamed.txt"))
     os.unlink(os.path.join(base, "map.bin"))
     os.unlink(os.path.join(base, "moved", "child.txt"))
@@ -1746,6 +1773,7 @@ for step, func in [
     ("hardlink_symlink", hardlink_symlink),
     ("symlink_at_nofollow_contracts", symlink_at_nofollow_contracts),
     ("rename_unlink", rename_unlink),
+    ("rename_replace_existing", rename_replace_existing),
     ("nested_dir_rename", nested_dir_rename),
     ("mmap_write_flush", mmap_write_flush),
     ("fsync_directory", fsync_directory),
@@ -3297,6 +3325,44 @@ fn syscall_conformance_reference_probe_covers_open_rename_fd_lifetime() {
 }
 
 #[test]
+fn syscall_conformance_reference_probe_covers_rename_replace_existing() {
+    if !command_available("python3") {
+        eprintln!("python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let reference = reference_conformance_tempdir();
+    let report = run_syscall_conformance_probe(reference.path());
+    let records = report
+        .as_array()
+        .expect("syscall conformance report should be a JSON array");
+    let replace = records
+        .iter()
+        .find(|record| record["step"].as_str() == Some("rename_replace_existing"))
+        .expect("missing rename-replace step in report");
+    assert_eq!(
+        replace["ok"].as_bool(),
+        Some(true),
+        "rename-replace step should succeed on the reference filesystem: {replace}"
+    );
+
+    let result = &replace["result"];
+    assert_eq!(result["before_dst_stat"]["kind"].as_str(), Some("file"));
+    assert_eq!(result["before_dst_stat"]["size"].as_u64(), Some(8));
+    assert_eq!(result["src_exists_after_rename"].as_bool(), Some(false));
+    assert_eq!(
+        result["dst_read_after_rename"].as_str(),
+        Some("replacement")
+    );
+    assert_eq!(
+        result["dst_stat_after_rename"]["kind"].as_str(),
+        Some("file")
+    );
+    assert_eq!(result["dst_stat_after_rename"]["size"].as_u64(), Some(11));
+    assert_eq!(result["dst_stat_after_rename"]["nlink"].as_u64(), Some(1));
+}
+
+#[test]
 fn syscall_conformance_reference_probe_covers_symlink_at_nofollow_contracts() {
     if !command_available("python3") {
         eprintln!("python3 prerequisites not met, skipping");
@@ -3365,7 +3431,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
         Some(
-            "file_lifecycle+fd_metadata+dirfd_mutation+offset_io+truncate_extend+open_unlink_fd+open_rename_fd+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
+            "file_lifecycle+fd_metadata+dirfd_mutation+offset_io+truncate_extend+open_unlink_fd+open_rename_fd+rename_replace+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
         ),
     );
 }
