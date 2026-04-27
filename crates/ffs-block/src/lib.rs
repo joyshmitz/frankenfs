@@ -34,6 +34,18 @@ fn cx_checkpoint(cx: &Cx) -> Result<()> {
     cx.checkpoint().map_err(|_| FfsError::Cancelled)
 }
 
+#[inline]
+fn saturating_fetch_increment(counter: &std::sync::atomic::AtomicU64) -> u64 {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_add(1);
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(previous) => return previous,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
 
 #[inline]
@@ -3517,7 +3529,7 @@ impl<D: BlockDevice> FaultInjector<D> {
         };
 
         if matched {
-            let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+            let seq = saturating_fetch_increment(&self.sequence);
             self.log.lock().push(FaultRecord {
                 target,
                 sequence: seq,
@@ -3764,7 +3776,7 @@ impl<D: BlockDevice> ThrottleInjector<D> {
             }
         }
 
-        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let seq = saturating_fetch_increment(&self.sequence);
         self.log.lock().push(ThrottleRecord {
             is_read,
             block,
@@ -6495,6 +6507,25 @@ mod tests {
     }
 
     #[test]
+    fn fault_log_sequence_saturates_at_numeric_limit() {
+        let dev = MemBlockDevice::new(4096, 16);
+        let fi = FaultInjector::new(dev, 11);
+        let cx = Cx::for_testing();
+
+        fi.fail_on_read(BlockNumber(0), FaultMode::Persistent);
+        fi.sequence.store(u64::MAX, Ordering::Relaxed);
+
+        assert!(fi.read_block(&cx, BlockNumber(0)).is_err());
+        assert!(fi.read_block(&cx, BlockNumber(0)).is_err());
+
+        let log = fi.fault_log();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].sequence, u64::MAX);
+        assert_eq!(log[1].sequence, u64::MAX);
+        assert_eq!(fi.sequence.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
     fn fault_crash_point_registered_fires_on_operation() {
         // Register a fault that acts as a "crash point" — it fires at
         // a specific write operation, simulating a crash during fsync.
@@ -6902,6 +6933,24 @@ mod tests {
         for (i, record) in log.iter().enumerate() {
             assert_eq!(record.sequence, u64::try_from(i).unwrap());
         }
+    }
+
+    #[test]
+    fn throttle_log_sequence_saturates_at_numeric_limit() {
+        let dev = MemBlockDevice::new(4096, 8);
+        let ti = ThrottleInjector::new(dev, ThrottleConfig::default(), 9);
+        let cx = Cx::for_testing();
+
+        ti.sequence.store(u64::MAX, Ordering::Relaxed);
+
+        let _ = ti.read_block(&cx, BlockNumber(0)).unwrap();
+        let _ = ti.read_block(&cx, BlockNumber(1)).unwrap();
+
+        let log = ti.throttle_log();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].sequence, u64::MAX);
+        assert_eq!(log[1].sequence, u64::MAX);
+        assert_eq!(ti.sequence.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]
