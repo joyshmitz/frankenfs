@@ -305,24 +305,25 @@ pub fn create_inode(
     // Read old generation from the on-disk inode slot so we can bump it.
     // This is the NFS-style generation counter: when an inode number is reused,
     // incrementing the generation lets the FUSE/NFS layer detect stale handles.
-    let old_generation = locate_inode(alloc.ino, geo, groups)
-        .and_then(|loc| {
-            let buf = dev.read_block(cx, loc.block).ok()?;
+    let old_generation = match locate_inode(alloc.ino, geo, groups) {
+        Some(loc) => {
+            let buf = dev.read_block(cx, loc.block)?;
             let data = buf.as_slice();
             let off = loc.byte_offset;
             // generation lives at offset 0x64 in the raw inode (4 bytes LE).
-            if off + 0x68 <= data.len() {
-                Some(u32::from_le_bytes([
+            if off.checked_add(0x68).is_some_and(|end| end <= data.len()) {
+                u32::from_le_bytes([
                     data[off + 0x64],
                     data[off + 0x65],
                     data[off + 0x66],
                     data[off + 0x67],
-                ]))
+                ])
             } else {
-                None
+                0
             }
-        })
-        .unwrap_or(0);
+        }
+        None => 0,
+    };
 
     // Initialize extent tree root (empty tree: magic + 0 entries, max 4, depth 0).
     let mut extent_bytes = vec![0u8; 60];
@@ -564,6 +565,47 @@ mod tests {
 
         fn sync(&self, _cx: &Cx) -> Result<()> {
             Ok(())
+        }
+    }
+
+    struct ReadFailingBlockDevice {
+        inner: MemBlockDevice,
+        fail_block: BlockNumber,
+    }
+
+    impl ReadFailingBlockDevice {
+        fn new(block_size: u32, fail_block: BlockNumber) -> Self {
+            Self {
+                inner: MemBlockDevice::new(block_size),
+                fail_block,
+            }
+        }
+    }
+
+    impl BlockDevice for ReadFailingBlockDevice {
+        fn read_block(&self, cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+            if block == self.fail_block {
+                return Err(FfsError::Io(std::io::Error::other(
+                    "injected inode-table read failure",
+                )));
+            }
+            self.inner.read_block(cx, block)
+        }
+
+        fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()> {
+            self.inner.write_block(cx, block, data)
+        }
+
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+
+        fn block_count(&self) -> u64 {
+            self.inner.block_count()
+        }
+
+        fn sync(&self, cx: &Cx) -> Result<()> {
+            self.inner.sync(cx)
         }
     }
 
@@ -1572,6 +1614,36 @@ mod tests {
         .unwrap();
         assert_eq!(ino2, ino1, "should reuse the freed inode number");
         assert_eq!(inode2.generation, 2, "reuse: 1 → 2");
+    }
+
+    #[test]
+    fn create_inode_propagates_generation_read_failure() {
+        let cx = test_cx();
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let fail_block = groups[0].inode_table_block;
+        let dev = ReadFailingBlockDevice::new(4096, fail_block);
+
+        let err = create_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            0o100_644,
+            0,
+            0,
+            GroupNumber(0),
+            0,
+            1_700_000_000,
+            0,
+            &mock_pctx(),
+        )
+        .expect_err("inode-table read failure should not be coerced to generation zero");
+
+        assert!(
+            matches!(err, FfsError::Io(_)),
+            "unexpected create_inode error: {err:?}"
+        );
     }
 
     // ── Edge-case and error-path hardening tests ──────────────────────
