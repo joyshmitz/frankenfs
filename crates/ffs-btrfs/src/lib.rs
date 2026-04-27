@@ -69,6 +69,12 @@ pub const BTRFS_FILE_EXTENT_INLINE: u8 = 0;
 pub const BTRFS_FILE_EXTENT_REG: u8 = 1;
 pub const BTRFS_FILE_EXTENT_PREALLOC: u8 = 2;
 
+/// Compression type values in EXTENT_DATA payloads.
+pub const BTRFS_COMPRESS_NONE: u8 = 0;
+pub const BTRFS_COMPRESS_ZLIB: u8 = 1;
+pub const BTRFS_COMPRESS_LZO: u8 = 2;
+pub const BTRFS_COMPRESS_ZSTD: u8 = 3;
+
 /// Internal MVCC metadata block base used for btrfs transaction manifests.
 const BTRFS_TX_META_BASE_BLOCK: u64 = 0x4_0000_0000;
 /// Internal MVCC metadata block base used for tree-root pointer updates.
@@ -947,6 +953,15 @@ pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
     let encryption = data[17];
     let other_encoding = read_u16(data, 18, "extent_data.other_encoding")?;
     let extent_type = data[20];
+    if !matches!(
+        compression,
+        BTRFS_COMPRESS_NONE | BTRFS_COMPRESS_ZLIB | BTRFS_COMPRESS_LZO | BTRFS_COMPRESS_ZSTD
+    ) {
+        return Err(ParseError::InvalidField {
+            field: "extent_data.compression",
+            reason: "unsupported compression",
+        });
+    }
     if encryption != 0 {
         return Err(ParseError::InvalidField {
             field: "extent_data.encryption",
@@ -6367,6 +6382,14 @@ mod tests {
         let mut truncated_regular = vec![0_u8; 52];
         truncated_regular[20] = BTRFS_FILE_EXTENT_REG;
         assert_insufficient_data(parse_extent_data(&truncated_regular), 53, 0, 52);
+
+        let mut unsupported_compression = inline.to_bytes();
+        unsupported_compression[16] = 0xff;
+        assert_invalid_field(
+            parse_extent_data(&unsupported_compression),
+            "extent_data.compression",
+            "unsupported compression",
+        );
 
         let mut encrypted_inline = inline.to_bytes();
         encrypted_inline[17] = 1;
