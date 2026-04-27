@@ -7071,6 +7071,8 @@ impl OpenFs {
             });
         }
 
+        Self::verify_e2compr_cluster_checksum(cluster_start, &raw_data, data_end)?;
+
         // Read holemap.
         let holemap = &raw_data[16..16 + holemap_nbytes];
 
@@ -7118,6 +7120,34 @@ impl OpenFs {
         }
 
         Ok(output)
+    }
+
+    fn verify_e2compr_cluster_checksum(
+        cluster_start: u32,
+        raw_data: &[u8],
+        data_end: usize,
+    ) -> Result<(), FfsError> {
+        if data_end < 8 || data_end > raw_data.len() {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!(
+                    "e2compr: checksum range end {data_end} exceeds available data {}",
+                    raw_data.len()
+                ),
+            });
+        }
+        let stored = u32::from_le_bytes([raw_data[4], raw_data[5], raw_data[6], raw_data[7]]);
+        let seed = u32::from_le_bytes([raw_data[0], raw_data[1], raw_data[2], raw_data[3]]);
+        let computed = adler32_seeded(seed, &raw_data[8..data_end]);
+        if stored != computed {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!(
+                    "e2compr: bad cluster checksum 0x{stored:08X}, expected 0x{computed:08X}"
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Dispatch e2compr decompression based on method table index.
@@ -20985,6 +21015,67 @@ mod tests {
         let data = b"uncompressed passthrough data";
         let result = OpenFs::e2compr_decompress(1, data, data.len()).unwrap(); // method 1 = auto (none)
         assert_eq!(result, data);
+    }
+
+    fn build_e2compr_gzip_cluster_bytes(data: &[u8]) -> (Vec<u8>, usize) {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).expect("compress test payload");
+        let compressed = encoder.finish().expect("finish compression");
+
+        let header_total = 16_usize;
+        let data_end = header_total + compressed.len();
+        let mut raw = vec![0_u8; data_end];
+        raw[0..2].copy_from_slice(&ffs_types::EXT2_COMPRESS_MAGIC.to_le_bytes());
+        raw[2] = 20; // gzip5
+        raw[3] = 0; // no holemap bytes
+        raw[8..12].copy_from_slice(
+            &u32::try_from(data.len())
+                .expect("test payload length fits u32")
+                .to_le_bytes(),
+        );
+        raw[12..16].copy_from_slice(
+            &u32::try_from(compressed.len())
+                .expect("compressed test payload length fits u32")
+                .to_le_bytes(),
+        );
+        raw[header_total..data_end].copy_from_slice(&compressed);
+
+        let seed = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        let checksum = adler32_seeded(seed, &raw[8..data_end]);
+        raw[4..8].copy_from_slice(&checksum.to_le_bytes());
+        (raw, data_end)
+    }
+
+    #[test]
+    fn e2compr_cluster_checksum_matches_writer_convention() {
+        let (raw, data_end) =
+            build_e2compr_gzip_cluster_bytes(b"checksum-protected e2compr payload");
+        OpenFs::verify_e2compr_cluster_checksum(0, &raw, data_end)
+            .expect("writer checksum should validate");
+    }
+
+    #[test]
+    fn e2compr_cluster_checksum_mismatch_rejects_before_decode() {
+        let (mut raw, data_end) =
+            build_e2compr_gzip_cluster_bytes(b"checksum-protected e2compr payload");
+        raw[data_end - 1] ^= 0x01;
+
+        let err = OpenFs::verify_e2compr_cluster_checksum(7, &raw, data_end)
+            .expect_err("tampered checksum rejects");
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption {
+                    block: 7,
+                    ref detail
+                } if detail.contains("e2compr: bad cluster checksum")
+            ),
+            "unexpected checksum error: {err:?}"
+        );
     }
 
     fn assert_e2compr_legacy_exclusion(
