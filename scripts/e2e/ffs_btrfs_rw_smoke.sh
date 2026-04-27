@@ -79,7 +79,7 @@ record_test() {
     TEST_MESSAGES+=("$message")
 
     log_test "$name" "$status" "$duration_ms"
-    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|status=${status}|duration_ms=${duration_ms}"
+    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${status}|duration_ms=${duration_ms}"
     if [[ -n "$message" ]]; then
         e2e_log "  detail: $message"
     fi

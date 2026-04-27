@@ -557,9 +557,7 @@ e2e_emit_json_summary() {
         # Parse: SCENARIO_RESULT|scenario_id=X|outcome=Y[|detail=Z]
         local scenario_id outcome detail
         scenario_id=$(echo "$line" | sed -n 's/.*scenario_id=\([^|]*\).*/\1/p')
-        # Try outcome= first, fall back to status= for legacy scripts
         outcome=$(echo "$line" | sed -n 's/.*outcome=\([^|]*\).*/\1/p')
-        [[ -z "$outcome" ]] && outcome=$(echo "$line" | sed -n 's/.*status=\([^|]*\).*/\1/p')
         detail=$(echo "$line" | sed -n 's/.*detail=\(.*\)/\1/p')
 
         [[ -z "$scenario_id" || -z "$outcome" ]] && continue

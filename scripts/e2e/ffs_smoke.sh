@@ -69,7 +69,7 @@ scenario_result() {
     local scenario_id="$1"
     local status="$2"
     local detail="$3"
-    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|status=${status}|detail=${detail}"
+    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${status}|detail=${detail}"
 }
 
 # Initialize test
