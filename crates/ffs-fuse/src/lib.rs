@@ -6737,8 +6737,12 @@ mod tests {
         let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
 
         let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FS_IOC_GETFSSYSFSPATH, &[], 129);
+        assert!(
+            matches!(response, IoctlResult::Data(_)),
+            "expected IoctlResult::Data, got {response:?}"
+        );
         let IoctlResult::Data(bytes) = response else {
-            panic!("expected IoctlResult::Data, got {response:?}");
+            return;
         };
         assert_eq!(
             bytes.len(),
