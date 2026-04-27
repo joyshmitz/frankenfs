@@ -1051,10 +1051,19 @@ pub fn parse_dev_item(data: &[u8]) -> Result<BtrfsDevItem, ParseError> {
         });
     }
 
+    let total_bytes = read_le_u64(data, 8)?;
+    let bytes_used = read_le_u64(data, 16)?;
+    if bytes_used > total_bytes {
+        return Err(ParseError::InvalidField {
+            field: "bytes_used",
+            reason: "exceeds total_bytes",
+        });
+    }
+
     Ok(BtrfsDevItem {
         devid: read_le_u64(data, 0)?,
-        total_bytes: read_le_u64(data, 8)?,
-        bytes_used: read_le_u64(data, 16)?,
+        total_bytes,
+        bytes_used,
         io_align: read_le_u32(data, 24)?,
         io_width: read_le_u32(data, 28)?,
         sector_size: read_le_u32(data, 32)?,
@@ -4380,6 +4389,22 @@ mod tests {
         assert_eq!(item.total_bytes, 1024 * 1024 * 1024);
         assert_eq!(item.bytes_used, 500 * 1024 * 1024);
         assert_eq!(item.sector_size, 4096);
+    }
+
+    #[test]
+    fn parse_dev_item_rejects_bytes_used_above_total() {
+        let mut data = vec![0u8; 98];
+        data[8..16].copy_from_slice(&4096_u64.to_le_bytes());
+        data[16..24].copy_from_slice(&8192_u64.to_le_bytes());
+
+        let err = parse_dev_item(&data).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "bytes_used",
+                reason: "exceeds total_bytes",
+            }
+        );
     }
 
     #[test]
