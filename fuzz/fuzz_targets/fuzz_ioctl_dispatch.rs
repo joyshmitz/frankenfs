@@ -1,7 +1,9 @@
 #![no_main]
 
 use asupersync::Cx;
-use ffs_core::{DirEntry, FiemapExtent, FileType, FsOps, InodeAttr, RequestScope};
+use ffs_core::{
+    DirEntry, FiemapExtent, FileType, FsOps, FsStat, FsxattrInfo, InodeAttr, RequestScope,
+};
 use ffs_error::FfsError;
 use ffs_fuse::{FrankenFuse, MountOptions};
 use ffs_types::{crc32c, InodeNumber};
@@ -31,6 +33,18 @@ const FSCRYPT_POLICY_V2_SIZE: usize = 24;
 const FSCRYPT_POLICY_EX_HEADER_SIZE: usize = 8;
 const FIEMAP_HEADER_SIZE: usize = 32;
 const FIEMAP_EXTENT_SIZE: usize = 56;
+const FS_IOC_FSGETXATTR: u32 = 0x801C_5821;
+const FS_IOC_FSGETXATTR_SIZE: usize = 28;
+const FIBMAP: u32 = 0x0000_0001;
+const FIBMAP_SIZE: usize = 4;
+const FITRIM: u32 = 0xC018_5879;
+const FITRIM_SIZE: usize = 24;
+const FS_IOC_GETFSUUID: u32 = 0x8011_1500;
+const FS_IOC_GETFSUUID_SIZE: usize = 17;
+const FS_IOC_FSSETXATTR: u32 = 0x401C_5820;
+const FS_IOC_FSSETXATTR_SIZE: usize = 28;
+const EXT4_IOC_PRECACHE_EXTENTS: u32 = 0x0000_6626;
+const EXT4_IOC_CLEAR_ES_CACHE: u32 = 0x0000_6628;
 const MOVE_EXT_SIZE: usize = 40;
 const FSLABEL_MAX: usize = 256;
 const BTRFS_IOC_FS_INFO_SIZE: usize = 1024;
@@ -43,6 +57,13 @@ enum CommandKind {
     Fiemap,
     GetFlags,
     GetVersion,
+    Fibmap,
+    Fitrim,
+    GetFsUuid,
+    GetFsxattr,
+    SetFsxattr,
+    PrecacheExtents,
+    ClearExtentStatusCache,
     SetVersion,
     GetEncryptionPolicy,
     GetEncryptionPolicyEx,
@@ -58,20 +79,27 @@ enum CommandKind {
 
 impl CommandKind {
     fn from_selector(selector: u8) -> Self {
-        match selector % 14 {
+        match selector % 21 {
             0 => Self::Fiemap,
             1 => Self::GetFlags,
             2 => Self::GetVersion,
-            3 => Self::SetVersion,
-            4 => Self::GetEncryptionPolicy,
-            5 => Self::GetEncryptionPolicyEx,
-            6 => Self::SetFlags,
-            7 => Self::MoveExt,
-            8 => Self::GetFsLabel,
-            9 => Self::SetFsLabel,
-            10 => Self::BtrfsFsInfo,
-            11 => Self::BtrfsDevInfo,
-            12 => Self::BtrfsInoLookup,
+            3 => Self::Fibmap,
+            4 => Self::Fitrim,
+            5 => Self::GetFsUuid,
+            6 => Self::GetFsxattr,
+            7 => Self::SetFsxattr,
+            8 => Self::PrecacheExtents,
+            9 => Self::ClearExtentStatusCache,
+            10 => Self::SetVersion,
+            11 => Self::GetEncryptionPolicy,
+            12 => Self::GetEncryptionPolicyEx,
+            13 => Self::SetFlags,
+            14 => Self::MoveExt,
+            15 => Self::GetFsLabel,
+            16 => Self::SetFsLabel,
+            17 => Self::BtrfsFsInfo,
+            18 => Self::BtrfsDevInfo,
+            19 => Self::BtrfsInoLookup,
             _ => Self::Unknown,
         }
     }
@@ -81,6 +109,13 @@ impl CommandKind {
             Self::Fiemap => FS_IOC_FIEMAP,
             Self::GetFlags => EXT4_IOC_GETFLAGS,
             Self::GetVersion => EXT4_IOC_GETVERSION,
+            Self::Fibmap => FIBMAP,
+            Self::Fitrim => FITRIM,
+            Self::GetFsUuid => FS_IOC_GETFSUUID,
+            Self::GetFsxattr => FS_IOC_FSGETXATTR,
+            Self::SetFsxattr => FS_IOC_FSSETXATTR,
+            Self::PrecacheExtents => EXT4_IOC_PRECACHE_EXTENTS,
+            Self::ClearExtentStatusCache => EXT4_IOC_CLEAR_ES_CACHE,
             Self::SetVersion => EXT4_IOC_SETVERSION,
             Self::GetEncryptionPolicy => FS_IOC_GET_ENCRYPTION_POLICY,
             Self::GetEncryptionPolicyEx => FS_IOC_GET_ENCRYPTION_POLICY_EX,
@@ -164,6 +199,10 @@ struct FuzzFs {
     btrfs_dev_info: Vec<u8>,
     btrfs_ino_lookup: (u64, Vec<u8>),
     fiemap_extents: Vec<FiemapExtent>,
+    fsxattr_info: FsxattrInfo,
+    fs_uuid: [u8; 16],
+    stat_block_size: u32,
+    trim_result: u64,
     move_ext_result: u64,
 }
 
@@ -217,6 +256,22 @@ impl FuzzFs {
             nul_terminated_bytes(cursor, ino_lookup_name_len),
         );
         let fiemap_extents = build_extents(cursor);
+        let fsxattr_info = FsxattrInfo {
+            xflags: cursor.next_u32(),
+            extsize: cursor.next_u32(),
+            nextents: cursor.next_u32(),
+            projid: cursor.next_u32(),
+            cowextsize: cursor.next_u32(),
+        };
+        let fs_uuid = build_uuid(cursor);
+        let stat_block_size = match cursor.next_u8() % 6 {
+            0 => 0,
+            1 => 512,
+            2 => 1024,
+            3 => 4096,
+            4 => 65_536,
+            _ => u32::from(cursor.next_u16()).max(1),
+        };
 
         Self {
             attr,
@@ -233,6 +288,10 @@ impl FuzzFs {
             btrfs_dev_info,
             btrfs_ino_lookup,
             fiemap_extents,
+            fsxattr_info,
+            fs_uuid,
+            stat_block_size,
+            trim_result: cursor.next_u64(),
             move_ext_result: cursor.next_u64() & 0xFFFF,
         }
     }
@@ -288,6 +347,24 @@ impl FsOps for FuzzFs {
         Ok(b"target".to_vec())
     }
 
+    fn statfs(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<FsStat> {
+        Ok(FsStat {
+            blocks: 1024,
+            blocks_free: 512,
+            blocks_available: 256,
+            files: 64,
+            files_free: 32,
+            block_size: self.stat_block_size,
+            name_max: 255,
+            fragment_size: self.stat_block_size,
+        })
+    }
+
     fn fsync(
         &self,
         _cx: &Cx,
@@ -308,6 +385,58 @@ impl FsOps for FuzzFs {
         _length: u64,
     ) -> ffs_error::Result<Vec<FiemapExtent>> {
         Ok(self.fiemap_extents.clone())
+    }
+
+    fn get_inode_fsxattr(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<FsxattrInfo> {
+        Ok(self.fsxattr_info)
+    }
+
+    fn trim_range(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _start: u64,
+        len: u64,
+        _min_len: u64,
+    ) -> ffs_error::Result<u64> {
+        Ok(self.trim_result.min(len))
+    }
+
+    fn fs_uuid(&self) -> ffs_error::Result<[u8; 16]> {
+        Ok(self.fs_uuid)
+    }
+
+    fn set_inode_fsxattr(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+        _info: FsxattrInfo,
+    ) -> ffs_error::Result<()> {
+        Ok(())
+    }
+
+    fn precache_extents(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        Ok(())
+    }
+
+    fn clear_extent_status_cache(
+        &self,
+        _cx: &Cx,
+        _scope: &mut RequestScope,
+        _ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        Ok(())
     }
 
     fn get_inode_flags(
@@ -454,6 +583,12 @@ fn build_extents(cursor: &mut ByteCursor<'_>) -> Vec<FiemapExtent> {
     extents
 }
 
+fn build_uuid(cursor: &mut ByteCursor<'_>) -> [u8; 16] {
+    let mut uuid = [0_u8; 16];
+    uuid.copy_from_slice(&cursor.fill_bytes(16));
+    uuid
+}
+
 fn fiemap_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
     let mut request = vec![0_u8; FIEMAP_HEADER_SIZE];
     request[0..8].copy_from_slice(&cursor.next_u64().to_ne_bytes());
@@ -474,6 +609,83 @@ fn fiemap_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
         }
     };
     (request, out_size)
+}
+
+fn fibmap_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
+    let mut request = cursor.next_u32().to_ne_bytes().to_vec();
+    match cursor.next_u8() % 4 {
+        0 => request.clear(),
+        1 => request.truncate(FIBMAP_SIZE - 1),
+        2 => {}
+        _ => request.extend(cursor.fill_bytes(4)),
+    }
+    let out_size = match cursor.next_u8() % 3 {
+        0 => 0,
+        1 => (FIBMAP_SIZE - 1) as u32,
+        _ => FIBMAP_SIZE as u32,
+    };
+    (request, out_size)
+}
+
+fn fitrim_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
+    let mut request = Vec::with_capacity(FITRIM_SIZE);
+    request.extend_from_slice(&cursor.next_u64().to_ne_bytes());
+    request.extend_from_slice(&cursor.next_u64().to_ne_bytes());
+    request.extend_from_slice(&cursor.next_u64().to_ne_bytes());
+    match cursor.next_u8() % 4 {
+        0 => request.clear(),
+        1 => request.truncate(FITRIM_SIZE - 1),
+        2 => {}
+        _ => request.extend(cursor.fill_bytes(8)),
+    }
+    let out_size = match cursor.next_u8() % 3 {
+        0 => 0,
+        1 => (FITRIM_SIZE - 1) as u32,
+        _ => FITRIM_SIZE as u32,
+    };
+    (request, out_size)
+}
+
+fn fs_uuid_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
+    let input_len = usize::from(cursor.next_u8() % 8);
+    let out_size = match cursor.next_u8() % 3 {
+        0 => 0,
+        1 => (FS_IOC_GETFSUUID_SIZE - 1) as u32,
+        _ => FS_IOC_GETFSUUID_SIZE as u32,
+    };
+    (cursor.fill_bytes(input_len), out_size)
+}
+
+fn fsxattr_get_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
+    let input_len = usize::from(cursor.next_u8() % 8);
+    let out_size = match cursor.next_u8() % 3 {
+        0 => 0,
+        1 => (FS_IOC_FSGETXATTR_SIZE - 1) as u32,
+        _ => FS_IOC_FSGETXATTR_SIZE as u32,
+    };
+    (cursor.fill_bytes(input_len), out_size)
+}
+
+fn fsxattr_set_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
+    let mut request = Vec::with_capacity(FS_IOC_FSSETXATTR_SIZE);
+    request.extend_from_slice(&cursor.next_u32().to_le_bytes());
+    request.extend_from_slice(&cursor.next_u32().to_le_bytes());
+    request.extend_from_slice(&cursor.next_u32().to_le_bytes());
+    request.extend_from_slice(&cursor.next_u32().to_le_bytes());
+    request.extend_from_slice(&cursor.next_u32().to_le_bytes());
+    request.extend_from_slice(&cursor.fill_bytes(8));
+    match cursor.next_u8() % 4 {
+        0 => request.clear(),
+        1 => request.truncate(FS_IOC_FSSETXATTR_SIZE - 1),
+        2 => {}
+        _ => request.extend(cursor.fill_bytes(8)),
+    }
+    (request, cursor.next_u32())
+}
+
+fn no_payload_hint_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
+    let input_len = usize::from(cursor.next_u8() % 16);
+    (cursor.fill_bytes(input_len), cursor.next_u32())
 }
 
 fn get_encryption_policy_request(cursor: &mut ByteCursor<'_>) -> (Vec<u8>, u32) {
@@ -595,6 +807,30 @@ fn build_ioctl_request(kind: CommandKind, cursor: &mut ByteCursor<'_>) -> (u32, 
                 cursor.next_u32() % 4
             };
             (kind.cmd(), Vec::new(), out_size)
+        }
+        CommandKind::Fibmap => {
+            let (request, out_size) = fibmap_request(cursor);
+            (kind.cmd(), request, out_size)
+        }
+        CommandKind::Fitrim => {
+            let (request, out_size) = fitrim_request(cursor);
+            (kind.cmd(), request, out_size)
+        }
+        CommandKind::GetFsUuid => {
+            let (request, out_size) = fs_uuid_request(cursor);
+            (kind.cmd(), request, out_size)
+        }
+        CommandKind::GetFsxattr => {
+            let (request, out_size) = fsxattr_get_request(cursor);
+            (kind.cmd(), request, out_size)
+        }
+        CommandKind::SetFsxattr => {
+            let (request, out_size) = fsxattr_set_request(cursor);
+            (kind.cmd(), request, out_size)
+        }
+        CommandKind::PrecacheExtents | CommandKind::ClearExtentStatusCache => {
+            let (request, out_size) = no_payload_hint_request(cursor);
+            (kind.cmd(), request, out_size)
         }
         CommandKind::SetVersion | CommandKind::SetFlags => {
             let request_len = usize::from(cursor.next_u8() % 8);
