@@ -3467,6 +3467,12 @@ fn parse_chunk_item_stripes(
             actual: data.len(),
         });
     }
+    if data.len() > required {
+        return Err(ParseError::InvalidField {
+            field: "stripes",
+            reason: "does not match declared stripe count",
+        });
+    }
 
     let mut stripes = Vec::with_capacity(stripe_count);
     let mut off = BTRFS_CHUNK_ITEM_FIXED_SIZE;
@@ -8199,6 +8205,15 @@ mod tests {
         let mut truncated_stripe = data;
         truncated_stripe.truncate(48 + 31);
         assert_insufficient_data(parse_chunk_item(&truncated_stripe, 0x100_0000), 112, 48, 79);
+
+        let mut trailing_stripe_payload =
+            make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, chunk_type, 1);
+        trailing_stripe_payload.extend_from_slice(b"extra");
+        assert_invalid_field(
+            parse_chunk_item(&trailing_stripe_payload, 0x100_0000),
+            "stripes",
+            "does not match declared stripe count",
+        );
 
         let zero_stripes = make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, chunk_type, 0);
         assert_invalid_field(
