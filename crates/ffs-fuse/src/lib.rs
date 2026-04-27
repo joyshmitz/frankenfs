@@ -532,6 +532,17 @@ pub struct AtomicMetrics {
 }
 
 impl AtomicMetrics {
+    fn saturating_add(counter: &AtomicU64, delta: u64) {
+        while counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(delta))
+            })
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -545,25 +556,25 @@ impl AtomicMetrics {
     }
 
     fn record_ok(&self) {
-        self.requests_total.0.fetch_add(1, Ordering::Relaxed);
-        self.requests_ok.0.fetch_add(1, Ordering::Relaxed);
+        Self::saturating_add(&self.requests_total.0, 1);
+        Self::saturating_add(&self.requests_ok.0, 1);
     }
 
     fn record_err(&self) {
-        self.requests_total.0.fetch_add(1, Ordering::Relaxed);
-        self.requests_err.0.fetch_add(1, Ordering::Relaxed);
+        Self::saturating_add(&self.requests_total.0, 1);
+        Self::saturating_add(&self.requests_err.0, 1);
     }
 
     fn record_bytes_read(&self, n: u64) {
-        self.bytes_read.0.fetch_add(n, Ordering::Relaxed);
+        Self::saturating_add(&self.bytes_read.0, n);
     }
 
     fn record_throttled(&self) {
-        self.requests_throttled.0.fetch_add(1, Ordering::Relaxed);
+        Self::saturating_add(&self.requests_throttled.0, 1);
     }
 
     fn record_shed(&self) {
-        self.requests_shed.0.fetch_add(1, Ordering::Relaxed);
+        Self::saturating_add(&self.requests_shed.0, 1);
     }
 
     /// Snapshot of all counters (for diagnostics / reporting).
@@ -11253,6 +11264,31 @@ mod tests {
         assert_eq!(s.requests_ok, 2);
         assert_eq!(s.requests_err, 1);
         assert_eq!(s.bytes_read, 1024);
+    }
+
+    #[test]
+    fn atomic_metrics_saturate_at_numeric_limits() {
+        let m = AtomicMetrics::new();
+        m.requests_total.0.store(u64::MAX - 1, Ordering::Relaxed);
+        m.requests_ok.0.store(u64::MAX, Ordering::Relaxed);
+        m.requests_err.0.store(u64::MAX - 1, Ordering::Relaxed);
+        m.bytes_read.0.store(u64::MAX - 8, Ordering::Relaxed);
+        m.requests_throttled.0.store(u64::MAX, Ordering::Relaxed);
+        m.requests_shed.0.store(u64::MAX - 1, Ordering::Relaxed);
+
+        m.record_ok();
+        m.record_err();
+        m.record_bytes_read(16);
+        m.record_throttled();
+        m.record_shed();
+
+        let s = m.snapshot();
+        assert_eq!(s.requests_total, u64::MAX);
+        assert_eq!(s.requests_ok, u64::MAX);
+        assert_eq!(s.requests_err, u64::MAX);
+        assert_eq!(s.bytes_read, u64::MAX);
+        assert_eq!(s.requests_throttled, u64::MAX);
+        assert_eq!(s.requests_shed, u64::MAX);
     }
 
     #[test]
