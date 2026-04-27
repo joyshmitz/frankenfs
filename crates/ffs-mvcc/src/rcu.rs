@@ -40,6 +40,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, trace, warn};
 
+fn saturating_increment(counter: &AtomicU64) -> u64 {
+    loop {
+        match counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(1))
+        }) {
+            Ok(previous) => return previous.saturating_add(1),
+            Err(_) => std::hint::spin_loop(),
+        }
+    }
+}
+
 // ─── RcuCell ────────────────────────────────────────────────────────────────
 
 /// A single RCU-protected value.
@@ -130,7 +141,7 @@ impl<T> RcuCell<T> {
     /// drops (QSBR-like reclamation via `Arc` refcount).
     pub fn update(&self, new_value: T) {
         self.inner.store(Arc::new(new_value));
-        let count = self.update_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let count = saturating_increment(&self.update_count);
         debug!(
             target: "ffs::mvcc::rcu",
             update_count = count,
@@ -141,7 +152,7 @@ impl<T> RcuCell<T> {
     /// Atomically publish a new value from an existing `Arc<T>`.
     pub fn update_arc(&self, new_arc: Arc<T>) {
         self.inner.store(new_arc);
-        let count = self.update_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let count = saturating_increment(&self.update_count);
         debug!(
             target: "ffs::mvcc::rcu",
             update_count = count,
@@ -155,7 +166,7 @@ impl<T> RcuCell<T> {
     /// the value is freed when this `Arc` drops.
     pub fn swap(&self, new_value: T) -> Arc<T> {
         let old = self.inner.swap(Arc::new(new_value));
-        self.update_count.fetch_add(1, Ordering::Relaxed);
+        saturating_increment(&self.update_count);
         old
     }
 
@@ -274,13 +285,13 @@ impl<K: Clone + Ord + Hash + fmt::Debug, V: Clone + fmt::Debug> RcuMap<K, V> {
         self.inner.store(Arc::new(new_map));
         drop(guard);
 
-        let count = self.update_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let count = saturating_increment(&self.update_count);
         info!(
             target: "ffs::mvcc::rcu",
             update_count = count,
             "rcu_map_update"
         );
-        if count % self.churn_threshold == 0 {
+        if self.churn_threshold != 0 && count % self.churn_threshold == 0 {
             warn!(
                 target: "ffs::mvcc::rcu",
                 update_count = count,
@@ -304,7 +315,7 @@ impl<K: Clone + Ord + Hash + fmt::Debug, V: Clone + fmt::Debug> RcuMap<K, V> {
         self.inner.store(Arc::new(new_map));
         drop(guard);
 
-        self.update_count.fetch_add(1, Ordering::Relaxed);
+        saturating_increment(&self.update_count);
         true
     }
 
@@ -330,14 +341,14 @@ impl<K: Clone + Ord + Hash + fmt::Debug, V: Clone + fmt::Debug> RcuMap<K, V> {
     pub fn replace(&self, new_map: BTreeMap<K, Arc<V>>) {
         let _guard = self.write_lock.lock();
         self.inner.store(Arc::new(new_map));
-        self.update_count.fetch_add(1, Ordering::Relaxed);
+        saturating_increment(&self.update_count);
     }
 
     /// Clear all entries (publish an empty map).
     pub fn clear(&self) {
         let _guard = self.write_lock.lock();
         self.inner.store(Arc::new(BTreeMap::new()));
-        self.update_count.fetch_add(1, Ordering::Relaxed);
+        saturating_increment(&self.update_count);
     }
 }
 
@@ -662,6 +673,23 @@ mod tests {
     }
 
     #[test]
+    fn rcu_cell_update_count_saturates_at_numeric_limit() {
+        let cell = RcuCell::new(0_u64);
+        cell.update_count.store(u64::MAX - 1, Ordering::Relaxed);
+
+        cell.update(1);
+        assert_eq!(cell.update_count(), u64::MAX);
+
+        cell.update_arc(Arc::new(2));
+        assert_eq!(cell.update_count(), u64::MAX);
+
+        let old = cell.swap(3);
+        assert_eq!(*old, 2);
+        assert_eq!(**cell.load(), 3);
+        assert_eq!(cell.update_count(), u64::MAX);
+    }
+
+    #[test]
     fn rcu_cell_load_arc_returns_independent_arc() {
         let cell = RcuCell::new(99_u32);
         let arc1 = cell.load_arc();
@@ -683,6 +711,37 @@ mod tests {
         }
         assert_eq!(map.update_count(), 5);
         assert_eq!(map.len(), 5);
+    }
+
+    #[test]
+    fn rcu_map_zero_churn_threshold_does_not_panic() {
+        let map: RcuMap<u64, u64> = RcuMap::with_churn_threshold(0);
+        map.insert(1, 10);
+        assert_eq!(map.update_count(), 1);
+        assert_eq!(map.get(&1).as_deref().copied(), Some(10));
+    }
+
+    #[test]
+    fn rcu_map_update_count_saturates_at_numeric_limit() {
+        let map: RcuMap<u64, u64> = RcuMap::new();
+        map.update_count.store(u64::MAX - 1, Ordering::Relaxed);
+
+        map.insert(1, 10);
+        assert_eq!(map.update_count(), u64::MAX);
+
+        map.insert(2, 20);
+        assert_eq!(map.update_count(), u64::MAX);
+
+        assert!(map.remove(&1));
+        assert_eq!(map.update_count(), u64::MAX);
+
+        let mut replacement = BTreeMap::new();
+        replacement.insert(3, Arc::new(30));
+        map.replace(replacement);
+        assert_eq!(map.update_count(), u64::MAX);
+
+        map.clear();
+        assert_eq!(map.update_count(), u64::MAX);
     }
 
     #[test]
