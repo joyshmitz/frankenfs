@@ -1249,6 +1249,21 @@ struct IoctlTraceProbe {
 }
 
 impl IoctlTraceProbe {
+    fn saturating_add_u64(counter: &AtomicU64, delta: u64) {
+        while counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(delta))
+            })
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+    }
+
+    fn record_dropped_event(&self) {
+        Self::saturating_add_u64(&self.dropped_events, 1);
+    }
+
     fn new(path: PathBuf) -> Self {
         let (sender, receiver) = sync_channel::<IoctlTraceMsg>(IOCTL_TRACE_CHANNEL_CAPACITY);
         let worker_path = path.clone();
@@ -1289,7 +1304,7 @@ impl IoctlTraceProbe {
             })
             .is_err()
         {
-            self.dropped_events.fetch_add(1, Ordering::Relaxed);
+            self.record_dropped_event();
         }
     }
 
@@ -8353,6 +8368,22 @@ mod tests {
                 "ino=12 cmd=0xdeadbeef in_len=0 out_size=0",
             ]
         );
+    }
+
+    #[test]
+    fn ioctl_trace_dropped_events_saturate_at_numeric_limits() {
+        let probe = IoctlTraceProbe {
+            path: PathBuf::new(),
+            sender: None,
+            worker: None,
+            dropped_events: Arc::new(AtomicU64::new(u64::MAX - 1)),
+        };
+
+        probe.record_dropped_event();
+        probe.record_dropped_event();
+
+        assert_eq!(probe.dropped_events.load(Ordering::Relaxed), u64::MAX);
+        probe.dropped_events.store(0, Ordering::Relaxed);
     }
 
     #[test]
