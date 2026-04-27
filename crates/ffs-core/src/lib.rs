@@ -12733,8 +12733,12 @@ impl OpenFs {
             .range(&ext_start, &ext_end)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?
         {
-            if let Ok(BtrfsExtentData::Regular { num_bytes, .. }) = parse_extent_data(&edata) {
-                total_nbytes = total_nbytes.saturating_add(num_bytes);
+            if let BtrfsExtentData::Regular { num_bytes, .. } =
+                parse_extent_data(&edata).map_err(|e| parse_to_ffs_error(&e))?
+            {
+                total_nbytes = total_nbytes.checked_add(num_bytes).ok_or_else(|| {
+                    FfsError::InvalidGeometry("btrfs inode nbytes overflow".into())
+                })?;
             }
         }
         Ok(total_nbytes)
@@ -13156,25 +13160,7 @@ impl OpenFs {
         }
 
         // Recompute nbytes (total physical space used by regular extents).
-        let mut total_nbytes = 0_u64;
-        let ext_start = BtrfsKey {
-            objectid: canonical,
-            item_type: BTRFS_ITEM_EXTENT_DATA,
-            offset: 0,
-        };
-        let ext_end = BtrfsKey {
-            objectid: canonical,
-            item_type: BTRFS_ITEM_EXTENT_DATA,
-            offset: u64::MAX,
-        };
-        if let Ok(extents) = alloc.fs_tree.range(&ext_start, &ext_end) {
-            for (_, edata) in extents {
-                if let Ok(BtrfsExtentData::Regular { num_bytes, .. }) = parse_extent_data(&edata) {
-                    total_nbytes = total_nbytes.saturating_add(num_bytes);
-                }
-            }
-        }
-        inode.nbytes = total_nbytes;
+        inode.nbytes = Self::btrfs_recompute_inode_nbytes(&alloc, canonical)?;
 
         let (secs, nanos) = Self::btrfs_now_timestamp();
         inode.mtime_sec = secs;
@@ -39021,6 +39007,45 @@ mod tests {
             )
             .expect("unlink should fail closed and preserve directory entry");
         assert_eq!(lookup.ino, attr.ino);
+    }
+
+    #[test]
+    fn btrfs_recompute_inode_nbytes_rejects_malformed_extent_data() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("bad_nbytes.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create file before extent corruption");
+        let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
+
+        let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        let extent_key = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        alloc
+            .fs_tree
+            .insert(extent_key, &[0xAA, 0xBB, 0xCC])
+            .expect("insert malformed extent payload");
+
+        let err = OpenFs::btrfs_recompute_inode_nbytes(&alloc, canonical)
+            .expect_err("malformed EXTENT_DATA must fail nbytes recompute");
+        drop(alloc);
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "unexpected nbytes recompute error: {err:?}"
+        );
     }
 
     fn corrupt_btrfs_dir_item_payload(fs: &OpenFs, parent_oid: u64, name: &[u8], payload: &[u8]) {
