@@ -58,8 +58,8 @@ impl EpochCounter {
     /// Advance to the next epoch, returning the new epoch value.
     ///
     /// This is the only contention point in the per-core WAL design: a single
-    /// atomic fetch-add. Under typical workloads epoch advancement is infrequent
-    /// (once per group commit), so contention is negligible.
+    /// atomic compare-and-update. Under typical workloads epoch advancement is
+    /// infrequent (once per group commit), so contention is negligible.
     pub fn advance(&self) -> u64 {
         match self
             .value
@@ -323,14 +323,22 @@ thread_local! {
 /// Next thread-local core ID (used for tracing, not for CPU affinity).
 static NEXT_CORE_ID: AtomicU64 = AtomicU64::new(0);
 
+fn allocate_core_id(counter: &AtomicU64) -> usize {
+    let id = match counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        current.checked_add(1)
+    }) {
+        Ok(previous) | Err(previous) => previous,
+    };
+    usize::try_from(id).unwrap_or(usize::MAX)
+}
+
 /// Initialize (or reinitialize) the current thread's WAL buffer.
 ///
 /// Must be called before any `with_thread_buffer` calls on this thread.
 /// Safe to call multiple times — replaces the previous buffer (any un-drained
 /// entries are lost).
 pub fn init_thread_buffer(config: WalBufferConfig) {
-    let core_id = NEXT_CORE_ID.fetch_add(1, Ordering::Relaxed);
-    let core_id = usize::try_from(core_id).unwrap_or(usize::MAX);
+    let core_id = allocate_core_id(&NEXT_CORE_ID);
     THREAD_WAL_BUFFER.with(|cell| {
         *cell.borrow_mut() = Some(CoreWalBuffer::new(core_id, config));
     });
@@ -1092,6 +1100,26 @@ mod tests {
         buf.append_abort(1, TxnId(30));
         assert_eq!(buf.len(), 1);
         assert_eq!(buf.payload_bytes(), 0);
+    }
+
+    #[test]
+    fn core_id_allocator_saturates_without_wrapping() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+
+        let penultimate = allocate_core_id(&counter);
+        assert_eq!(
+            penultimate,
+            usize::try_from(u64::MAX - 1).unwrap_or(usize::MAX)
+        );
+        assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
+
+        let saturated = allocate_core_id(&counter);
+        assert_eq!(saturated, usize::MAX);
+        assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
+
+        let still_saturated = allocate_core_id(&counter);
+        assert_eq!(still_saturated, usize::MAX);
+        assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
     }
 
     #[test]
