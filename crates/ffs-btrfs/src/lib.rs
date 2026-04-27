@@ -119,21 +119,43 @@ pub struct BtrfsInodeRef {
 }
 
 impl BtrfsInodeRef {
+    /// Fallibly serialize to the on-disk INODE_REF entry layout.
+    ///
+    /// Layout: index(8) + name_len(2) + name bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError::InvalidField`] when the name cannot fit in the
+    /// on-disk `u16` `name_len` field.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>, ParseError> {
+        let name_len = btrfs_name_len_u16(self.name.len(), "inode_ref.name_len")?;
+        let mut buf = Vec::with_capacity(10 + usize::from(name_len));
+        buf.extend_from_slice(&self.index.to_le_bytes());
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&self.name);
+        Ok(buf)
+    }
+
     /// Serialize to the on-disk INODE_REF entry layout.
     ///
     /// Layout: index(8) + name_len(2) + name bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the name cannot fit in the on-disk `u16` `name_len` field.
+    /// Use [`Self::try_to_bytes`] when serializing untrusted or caller-owned names.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let name_len = self.name.len();
-        let mut buf = Vec::with_capacity(10 + name_len);
-        buf.extend_from_slice(&self.index.to_le_bytes());
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            buf.extend_from_slice(&(name_len as u16).to_le_bytes());
-        }
-        buf.extend_from_slice(&self.name);
-        buf
+        self.try_to_bytes()
+            .expect("BtrfsInodeRef name length exceeds u16::MAX")
     }
+}
+
+fn btrfs_name_len_u16(len: usize, field: &'static str) -> Result<u16, ParseError> {
+    u16::try_from(len).map_err(|_| ParseError::InvalidField {
+        field,
+        reason: "name length exceeds u16::MAX",
+    })
 }
 
 /// Descriptor for an enumerated btrfs subvolume.
@@ -278,27 +300,44 @@ pub struct BtrfsDirItem {
 }
 
 impl BtrfsDirItem {
-    /// Serialize to the on-disk DIR_ITEM / DIR_INDEX layout.
+    /// Fallibly serialize to the on-disk DIR_ITEM / DIR_INDEX layout.
     ///
     /// Layout: location key (objectid:8 + type:1 + offset:8) + transid(8) +
     /// data_len(2) + name_len(2) + file_type(1) + name bytes.
     /// `transid` is set to zero (not tracked in our VFS layer).
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let name_len = self.name.len();
-        let mut buf = vec![0u8; 30 + name_len];
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError::InvalidField`] when the name cannot fit in the
+    /// on-disk `u16` `name_len` field.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>, ParseError> {
+        let name_len = btrfs_name_len_u16(self.name.len(), "dir_item.name_len")?;
+        let mut buf = vec![0u8; 30 + usize::from(name_len)];
         buf[0..8].copy_from_slice(&self.child_objectid.to_le_bytes());
         buf[8] = self.child_key_type;
         buf[9..17].copy_from_slice(&self.child_key_offset.to_le_bytes());
         // transid at 17..25 (zero)
         // data_len at 25..27 (zero — no trailing payload)
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            buf[27..29].copy_from_slice(&(name_len as u16).to_le_bytes());
-        }
+        buf[27..29].copy_from_slice(&name_len.to_le_bytes());
         buf[29] = self.file_type;
-        buf[30..30 + name_len].copy_from_slice(&self.name);
-        buf
+        buf[30..].copy_from_slice(&self.name);
+        Ok(buf)
+    }
+
+    /// Serialize to the on-disk DIR_ITEM / DIR_INDEX layout.
+    ///
+    /// Layout: location key (objectid:8 + type:1 + offset:8) + transid(8) +
+    /// data_len(2) + name_len(2) + file_type(1) + name bytes.
+    /// `transid` is set to zero (not tracked in our VFS layer).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the name cannot fit in the on-disk `u16` `name_len` field.
+    /// Use [`Self::try_to_bytes`] when serializing untrusted or caller-owned names.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.try_to_bytes()
+            .expect("BtrfsDirItem name length exceeds u16::MAX")
     }
 }
 
@@ -6409,6 +6448,25 @@ mod tests {
     }
 
     #[test]
+    fn inode_ref_try_to_bytes_rejects_name_len_overflow() {
+        let original = BtrfsInodeRef {
+            index: 42,
+            name: vec![b'x'; usize::from(u16::MAX) + 1],
+        };
+
+        let err = original
+            .try_to_bytes()
+            .expect_err("oversized inode_ref name should fail before encoding");
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "inode_ref.name_len",
+                reason: "name length exceeds u16::MAX",
+            }
+        ));
+    }
+
+    #[test]
     fn inode_item_round_trip() {
         let original = BtrfsInodeItem {
             generation: 42,
@@ -6462,6 +6520,28 @@ mod tests {
         let parsed = parse_dir_items(&bytes).expect("round-trip parse");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], original);
+    }
+
+    #[test]
+    fn dir_item_try_to_bytes_rejects_name_len_overflow() {
+        let original = BtrfsDirItem {
+            child_objectid: 258,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: BTRFS_FT_REG_FILE,
+            name: vec![b'x'; usize::from(u16::MAX) + 1],
+        };
+
+        let err = original
+            .try_to_bytes()
+            .expect_err("oversized dir_item name should fail before encoding");
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_item.name_len",
+                reason: "name length exceeds u16::MAX",
+            }
+        ));
     }
 
     #[test]

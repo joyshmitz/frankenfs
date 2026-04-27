@@ -14584,7 +14584,7 @@ impl OpenFs {
             item_type: BTRFS_ITEM_DIR_ITEM,
             offset: u64::from(name_hash),
         };
-        let new_bytes = item.to_bytes();
+        let new_bytes = item.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
 
         // btrfs stores multiple dir entries with the same CRC32C hash in a
         // single tree item (concatenated payloads). Merge with any existing
@@ -14745,7 +14745,9 @@ impl OpenFs {
                 } else {
                     let mut new_payload = Vec::new();
                     for entry in remaining {
-                        new_payload.extend_from_slice(&entry.to_bytes());
+                        let entry_bytes =
+                            entry.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
+                        new_payload.extend_from_slice(&entry_bytes);
                     }
                     alloc
                         .fs_tree
@@ -14810,7 +14812,8 @@ impl OpenFs {
         } else {
             let mut payload = Vec::new();
             for entry in &remaining_index_entries {
-                payload.extend_from_slice(&entry.to_bytes());
+                let entry_bytes = entry.try_to_bytes().map_err(|e| parse_to_ffs_error(&e))?;
+                payload.extend_from_slice(&entry_bytes);
             }
             alloc
                 .fs_tree
