@@ -2819,8 +2819,7 @@ impl BtrfsExtentAllocator {
             offset: u64::MAX,
         };
 
-        let extents = self.extent_tree.range(&range_start, &range_end);
-        let extents = extents.unwrap_or_default();
+        let extents = self.extent_tree.range(&range_start, &range_end)?;
 
         // Scan for gaps between existing extents.
         let alloc_offset = self.block_groups[&bg_start].alloc_offset;
@@ -8533,6 +8532,26 @@ mod tests {
             .alloc_data(512)
             .expect_err("overflowing block group end should be rejected");
         assert_eq!(err, BtrfsMutationError::AddressOverflow);
+
+        let bg = alloc.block_group(bg_start).expect("bg");
+        assert_eq!(
+            bg.used_bytes, 0,
+            "failed allocation should not change accounting"
+        );
+        assert_eq!(alloc.delayed_ref_count(), 0);
+    }
+
+    #[test]
+    fn extent_allocator_adversarial_propagates_range_scan_errors() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_start = 0x10_0000;
+        alloc.add_block_group(bg_start, make_data_bg(bg_start, 8192));
+        alloc.extent_tree.root = u64::MAX;
+
+        let err = alloc
+            .alloc_data(4096)
+            .expect_err("broken allocation tree should fail closed");
+        assert_eq!(err, BtrfsMutationError::MissingNode(u64::MAX));
 
         let bg = alloc.block_group(bg_start).expect("bg");
         assert_eq!(
