@@ -13953,12 +13953,14 @@ impl OpenFs {
                 item_type: BTRFS_ITEM_EXTENT_DATA,
                 offset: 0,
             };
-            if let Ok(existing) = alloc.fs_tree.range(&inline_key, &inline_key) {
-                if let Some((_, edata)) = existing.first()
-                    && let Ok(BtrfsExtentData::Inline {
-                        data: prev_data, ..
-                    }) = parse_extent_data(edata)
-                {
+            let existing = alloc
+                .fs_tree
+                .range(&inline_key, &inline_key)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            if let Some((_, edata)) = existing.first() {
+                let inline_extent = parse_extent_data(edata).map_err(|e| parse_to_ffs_error(&e))?;
+                if matches!(inline_extent, BtrfsExtentData::Inline { .. }) {
+                    let prev_data = self.btrfs_materialize_extent(cx, &inline_extent)?;
                     alloc
                         .fs_tree
                         .delete(&inline_key)
@@ -36817,6 +36819,102 @@ mod tests {
             "KEEP_SIZE preallocation should reduce free space: before={}, after={}",
             stat_before.blocks_free,
             stat_after.blocks_free
+        );
+    }
+
+    #[test]
+    fn btrfs_write_fallocate_materializes_compressed_inline_extent() {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write as _;
+
+        let _guard = log_contract_guard();
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let original = b"compressed inline fallocate payload ".repeat(12);
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("compressed-inline.bin"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create compressed inline file");
+        ops.write(&cx, &mut RequestScope::empty(), attr.ino, 0, &original)
+            .expect("seed inline payload");
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(&original)
+            .expect("write zlib fixture payload");
+        let compressed = encoder.finish().expect("finish zlib fixture");
+        assert!(
+            compressed.len() < original.len(),
+            "fixture must be meaningfully compressed"
+        );
+
+        let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
+        let extent_key = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
+        {
+            let mut alloc = alloc_mutex.lock();
+            let compressed_extent = BtrfsExtentData::Inline {
+                generation: alloc.generation,
+                ram_bytes: u64::try_from(original.len()).unwrap(),
+                compression: 1,
+                data: compressed,
+            };
+            alloc
+                .fs_tree
+                .update(&extent_key, &compressed_extent.to_bytes())
+                .expect("replace inline extent with compressed fixture");
+        }
+
+        ops.fallocate(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            4096,
+            4096,
+            libc::FALLOC_FL_KEEP_SIZE,
+        )
+        .expect("preallocate beyond compressed inline data");
+
+        let preserved = ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                0,
+                u32::try_from(original.len()).unwrap(),
+            )
+            .expect("read materialized inline data");
+        assert_eq!(preserved, original);
+
+        let entries = alloc_mutex
+            .lock()
+            .fs_tree
+            .range(&extent_key, &extent_key)
+            .expect("lookup converted extent");
+        let converted = parse_extent_data(&entries[0].1).expect("parse converted extent");
+        assert!(
+            matches!(
+                converted,
+                BtrfsExtentData::Regular {
+                    compression: 0,
+                    num_bytes,
+                    ..
+                } if num_bytes == u64::try_from(original.len()).unwrap()
+            ),
+            "fallocate should convert inline data to an uncompressed regular extent: {converted:?}"
         );
     }
 
