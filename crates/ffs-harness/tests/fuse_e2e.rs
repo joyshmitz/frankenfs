@@ -1335,6 +1335,25 @@ def create_write_fsync_read():
         os.close(fd)
     return {"read": readback, "stat": stable_stat(path)}
 
+def fd_metadata_ops():
+    path = os.path.join(base, "fd.txt")
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
+    try:
+        os.write(fd, b"bravo")
+        os.fchmod(fd, 0o640)
+        os.ftruncate(fd, 3)
+        os.fsync(fd)
+        st = os.fstat(fd)
+        fd_stat = {
+            "kind": "file" if stat.S_ISREG(st.st_mode) else "other",
+            "mode": stat.S_IMODE(st.st_mode),
+            "size": st.st_size,
+            "nlink": st.st_nlink,
+        }
+    finally:
+        os.close(fd)
+    return {"read": read_text(path), "fstat": fd_stat, "stat": stable_stat(path)}
+
 def chmod_truncate_stat():
     path = os.path.join(base, "file.txt")
     os.chmod(path, 0o600)
@@ -1496,6 +1515,7 @@ def negative_errno_contracts():
 
 def cleanup():
     os.unlink(os.path.join(base, "file.txt"))
+    os.unlink(os.path.join(base, "fd.txt"))
     io_path = os.path.join(base, "io.bin")
     if os.path.exists(io_path):
         os.unlink(io_path)
@@ -1509,6 +1529,7 @@ def cleanup():
 for step, func in [
     ("mkdir_base", mkdir_base),
     ("create_write_fsync_read", create_write_fsync_read),
+    ("fd_metadata_ops", fd_metadata_ops),
     ("chmod_truncate_stat", chmod_truncate_stat),
     ("utime_access_openat_statvfs", utime_access_openat_statvfs),
     ("pread_pwrite_seek_fdatasync", pread_pwrite_seek_fdatasync),
@@ -2868,6 +2889,37 @@ fn syscall_conformance_reference_probe_covers_negative_errno_contracts() {
 }
 
 #[test]
+fn syscall_conformance_reference_probe_covers_fd_metadata_contracts() {
+    if !command_available("python3") {
+        eprintln!("python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let reference = reference_conformance_tempdir();
+    let report = run_syscall_conformance_probe(reference.path());
+    let records = report
+        .as_array()
+        .expect("syscall conformance report should be a JSON array");
+    let fd_metadata = records
+        .iter()
+        .find(|record| record["step"].as_str() == Some("fd_metadata_ops"))
+        .expect("missing fd metadata step in report");
+    assert_eq!(
+        fd_metadata["ok"].as_bool(),
+        Some(true),
+        "fd metadata step should succeed on the reference filesystem: {fd_metadata}"
+    );
+
+    let result = &fd_metadata["result"];
+    assert_eq!(result["read"].as_str(), Some("bra"));
+    assert_eq!(result["stat"], result["fstat"]);
+    assert_eq!(result["stat"]["kind"].as_str(), Some("file"));
+    assert_eq!(result["stat"]["mode"].as_u64(), Some(0o640));
+    assert_eq!(result["stat"]["size"].as_u64(), Some(3));
+    assert_eq!(result["stat"]["nlink"].as_u64(), Some(1));
+}
+
+#[test]
 fn fuse_conformance_syscall_sequence_matches_linux_reference() {
     if !fuse_available() || !command_available("python3") {
         eprintln!("FUSE or python3 prerequisites not met, skipping");
@@ -2899,7 +2951,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
         Some(
-            "file_lifecycle+offset_io+openat+access+statvfs+dir_ops+attrs+links+mmap+fsync+negative_errno",
+            "file_lifecycle+fd_metadata+offset_io+openat+access+statvfs+dir_ops+attrs+links+mmap+fsync+negative_errno",
         ),
     );
 }
