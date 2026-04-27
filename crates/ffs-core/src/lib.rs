@@ -6926,10 +6926,14 @@ impl OpenFs {
     ///    (after the `system.data` xattr header, 4 bytes overhead)
     ///
     /// The total inline capacity is typically ~60 + (inode_size - 128 - extra_isize - 4) bytes.
-    fn read_ext4_inline_data(inode: &Ext4Inode, offset: u64, size: u32) -> Vec<u8> {
+    fn read_ext4_inline_data(
+        inode: &Ext4Inode,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<u8>, FfsError> {
         let file_size = inode.size;
         if offset >= file_size {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Assemble inline data: i_block (60 bytes) + xattr ibody payload.
@@ -6942,13 +6946,12 @@ impl OpenFs {
         inline_data.extend_from_slice(&inode.extent_bytes);
 
         // Parse ibody xattrs to find the system.data continuation.
-        if let Ok(xattrs) = ffs_ondisk::parse_ibody_xattrs(inode) {
-            for xattr in &xattrs {
-                // name_index 7 = EXT4_XATTR_INDEX_SYSTEM, name = "data"
-                if xattr.name_index == 7 && xattr.name == b"data" {
-                    inline_data.extend_from_slice(&xattr.value);
-                    break;
-                }
+        let xattrs = ffs_ondisk::parse_ibody_xattrs(inode).map_err(|e| parse_to_ffs_error(&e))?;
+        for xattr in &xattrs {
+            // name_index 7 = EXT4_XATTR_INDEX_SYSTEM, name = "data"
+            if xattr.name_index == 7 && xattr.name == b"data" {
+                inline_data.extend_from_slice(&xattr.value);
+                break;
             }
         }
 
@@ -6961,18 +6964,18 @@ impl OpenFs {
         let end = start.saturating_add(to_read_usize);
 
         if start >= inline_data.len() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         if end <= inline_data.len() {
-            inline_data[start..end].to_vec()
+            Ok(inline_data[start..end].to_vec())
         } else {
             // File claims more data than is inline — return what we have.
             let available_end = inline_data.len().min(end);
             let mut out = inline_data[start..available_end].to_vec();
             // Pad with zeros if file_size extends beyond inline capacity.
             out.resize(to_read_usize, 0);
-            out
+            Ok(out)
         }
     }
 
@@ -17120,7 +17123,7 @@ impl FsOps for OpenFs {
 
                 // Inline data: file content stored directly in inode's i_block area.
                 if Self::ext4_inode_uses_inline_data(&inode) {
-                    return Ok(Self::read_ext4_inline_data(&inode, offset, size));
+                    return Self::read_ext4_inline_data(&inode, offset, size);
                 }
 
                 // Indirect block addressing (legacy pre-extent inodes).
@@ -19988,6 +19991,47 @@ mod tests {
         buf[0x28..0x2C].copy_from_slice(&block0.to_le_bytes());
         buf[0x2C..0x30].copy_from_slice(&block1.to_le_bytes());
         Ext4Inode::parse_from_bytes(&buf).expect("test inode")
+    }
+
+    fn malformed_inline_data_xattr_ibody() -> Vec<u8> {
+        let mut ibody = Vec::new();
+        ibody.extend_from_slice(&ffs_types::EXT4_XATTR_MAGIC.to_le_bytes());
+        ibody.push(4); // e_name_len
+        ibody.push(7); // EXT4_XATTR_INDEX_SYSTEM
+        ibody.extend_from_slice(&4_u16.to_le_bytes()); // e_value_offs overlaps entry table
+        ibody.extend_from_slice(&0_u32.to_le_bytes()); // e_value_block
+        ibody.extend_from_slice(&4_u32.to_le_bytes()); // e_value_size
+        ibody.extend_from_slice(&0_u32.to_le_bytes()); // e_hash
+        ibody.extend_from_slice(b"data");
+        ibody
+    }
+
+    #[test]
+    fn ext4_inline_data_rejects_malformed_ibody_xattr() {
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        inode.flags = ffs_types::EXT4_INLINE_DATA_FL;
+        inode.size = 64;
+        inode.extent_bytes = (0_u8..60).collect();
+        inode.xattr_ibody = malformed_inline_data_xattr_ibody();
+
+        let err = OpenFs::read_ext4_inline_data(&inode, 0, 64)
+            .expect_err("malformed inline-data ibody xattr should fail");
+        assert!(
+            matches!(err, FfsError::Format(ref detail) if detail.contains("xattr_value")),
+            "unexpected inline-data xattr error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn ext4_inline_data_allows_i_block_without_ibody_xattrs() {
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        inode.flags = ffs_types::EXT4_INLINE_DATA_FL;
+        inode.size = 4;
+        inode.extent_bytes = b"data".to_vec();
+
+        let bytes = OpenFs::read_ext4_inline_data(&inode, 0, 4)
+            .expect("i_block-only inline data should not require ibody xattrs");
+        assert_eq!(bytes, b"data");
     }
 
     #[test]
