@@ -1012,6 +1012,25 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
+    /// Return the kernel-side sysfs path of the underlying block device,
+    /// or an empty `Vec` for backends with no sysfs visibility.
+    ///
+    /// Surfaces what `FS_IOC_GETFSSYSFSPATH` (Linux 6.7+) returns. The
+    /// kernel struct is `u8 len + u8 name[128]` (129 bytes total).
+    /// Userspace probes (systemd-mount, blkid, util-linux) treat
+    /// `len == 0` as "no sysfs path available" and silently skip rather
+    /// than erroring, so a userspace FUSE backend whose `ByteDevice` has
+    /// no /sys entry should return an empty `Vec` here. The dispatcher
+    /// pads to 128 bytes and writes `len` as the first byte.
+    ///
+    /// Backends that DO surface a sysfs path (e.g., a future loop-device
+    /// adapter that knows its `/sys/block/loopN` path) must return at
+    /// most 128 bytes; longer paths are rejected as `EINVAL` by the
+    /// dispatcher to keep the wire-format contract.
+    fn fs_sysfs_path(&self) -> ffs_error::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
     /// Apply userspace-supplied [`FsxattrInfo`] (the `FS_IOC_FSSETXATTR`
     /// payload) to the inode.
     ///

@@ -116,6 +116,18 @@ const FITRIM_SIZE: u32 = 24;
 /// `0x8011_1500`.
 const FS_IOC_GETFSUUID: u32 = 0x8011_1500;
 const FS_IOC_GETFSUUID_SIZE: u32 = 17;
+/// `FS_IOC_GETFSSYSFSPATH` = `_IOR(0x15, 1, struct fs_sysfs_path)` on
+/// x86_64 (Linux 6.7+, see `<uapi/linux/fs.h>` `struct fs_sysfs_path`).
+/// Reply is 129 bytes: `u8 len` + `u8 name[128]`. Encoded ioctl number
+/// per `_IOR((dir=2)<<30 | (size=129)<<16 | (type=0x15)<<8 | nr=1)` =
+/// `0x8081_1501`. Userspace probes (systemd-mount, blkid, util-linux)
+/// silently skip `len == 0` rather than treating it as an error, so a
+/// userspace FUSE backend whose `ByteDevice` has no /sys entry should
+/// surface an empty path here — that mirrors what tmpfs / overlayfs
+/// already do.
+const FS_IOC_GETFSSYSFSPATH: u32 = 0x8081_1501;
+const FS_IOC_GETFSSYSFSPATH_SIZE: u32 = 129;
+const FS_IOC_GETFSSYSFSPATH_NAME_MAX: usize = 128;
 /// `FS_IOC_FSSETXATTR` = `_IOW('X', 32, struct fsxattr)` on x86_64.
 /// Same 28-byte payload as the GET side; userspace passes the new
 /// projid + xflags, ext4 rejects non-zero extsize/cowextsize and
@@ -2326,6 +2338,31 @@ impl FrankenFuse {
         buf
     }
 
+    /// Serialise a sysfs path into the 129-byte `struct fs_sysfs_path`
+    /// payload returned by `FS_IOC_GETFSSYSFSPATH`. Layout per
+    /// `<uapi/linux/fs.h>`: `u8 len` + `u8 name[128]`. `name` is
+    /// zero-padded; `len` records the actual byte count. An empty path
+    /// (the FUSE-backend default) encodes to `len = 0` followed by 128
+    /// NUL bytes — userspace probes treat that as "no sysfs visibility"
+    /// and skip silently. Returns `Err(EINVAL)` if the backend hands us
+    /// a path longer than the 128-byte field can hold; the dispatcher
+    /// turns that into a userspace EINVAL per the ioctl contract.
+    fn encode_fs_sysfs_path_response(path: &[u8]) -> Result<Vec<u8>, i32> {
+        if path.len() > FS_IOC_GETFSSYSFSPATH_NAME_MAX {
+            return Err(libc::EINVAL);
+        }
+        let mut buf = vec![0_u8; FS_IOC_GETFSSYSFSPATH_SIZE as usize];
+        // Cast is safe: bounds-checked against NAME_MAX (128) above.
+        #[expect(clippy::cast_possible_truncation)]
+        {
+            buf[0] = path.len() as u8; // len byte
+        }
+        buf[1..=path.len()].copy_from_slice(path);
+        // bytes [1 + path.len() .. 129] stay zero (NUL-padded name field).
+        debug_assert_eq!(buf.len(), FS_IOC_GETFSSYSFSPATH_SIZE as usize);
+        Ok(buf)
+    }
+
     /// Parse the 28-byte `struct fsxattr` payload that userspace passes
     /// through `FS_IOC_FSSETXATTR`. Returns `EINVAL` if the buffer is
     /// the wrong length — callers must surface that errno verbatim per
@@ -2789,6 +2826,18 @@ impl FrankenFuse {
                 }
                 match self.inner.ops.fs_uuid() {
                     Ok(uuid) => IoctlResult::Data(Self::encode_fsuuid_response(&uuid)),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            FS_IOC_GETFSSYSFSPATH => {
+                if out_size < FS_IOC_GETFSSYSFSPATH_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                match self.inner.ops.fs_sysfs_path() {
+                    Ok(path) => match Self::encode_fs_sysfs_path_response(&path) {
+                        Ok(buf) => IoctlResult::Data(buf),
+                        Err(errno) => IoctlResult::Error(errno),
+                    },
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -5589,6 +5638,7 @@ mod tests {
         GetFsxattr(InodeNumber),
         SetFsxattr(InodeNumber, FsxattrInfo),
         FsUuid,
+        FsSysfsPath,
         PrecacheExtents(InodeNumber),
         ClearEsCache(InodeNumber),
         TrimRange(u64, u64, u64),
@@ -6060,6 +6110,19 @@ mod tests {
                 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
                 0xFF, 0x00,
             ])
+        }
+
+        fn fs_sysfs_path(&self) -> ffs_error::Result<Vec<u8>> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::FsSysfsPath);
+            // Deterministic non-empty fixture so the encoder regression
+            // can pin both the len byte and the NUL-padded tail. The
+            // production OpenFs override returns Vec::new() for both
+            // ext4 and btrfs (no sysfs visibility through ByteDevice),
+            // so a separate empty-path test exercises that contract.
+            Ok(b"/sys/fs/frankenfs/fixture".to_vec())
         }
 
         fn precache_extents(
@@ -6662,6 +6725,88 @@ mod tests {
             matches!(response, IoctlResult::Error(libc::EINVAL)),
             "out_size < 17 must surface EINVAL, got {response:?}"
         );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getfssysfspath_encodes_129_byte_struct_with_fixture_path() {
+        // bd-04xv6: round-trip a non-empty backend path through the
+        // FS_IOC_GETFSSYSFSPATH wire format. The IoctlRecordingFs fixture
+        // hands us "/sys/fs/frankenfs/fixture" (25 bytes); the encoder
+        // must emit len=25 + the path + NUL padding for a total of 129.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FS_IOC_GETFSSYSFSPATH, &[], 129);
+        let IoctlResult::Data(bytes) = response else {
+            panic!("expected IoctlResult::Data, got {response:?}");
+        };
+        assert_eq!(
+            bytes.len(),
+            129,
+            "fs_sysfs_path struct is exactly 129 bytes (1 len + 128 name)"
+        );
+        let expected_path = b"/sys/fs/frankenfs/fixture";
+        let expected_len = u8::try_from(expected_path.len()).expect("fixture <= 128 bytes");
+        assert_eq!(bytes[0], expected_len);
+        assert_eq!(&bytes[1..=expected_path.len()], expected_path);
+        // Tail must be NUL-padded.
+        assert!(
+            bytes[expected_path.len() + 1..].iter().all(|&b| b == 0),
+            "name field tail must be NUL-padded"
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[IoctlCall::FsSysfsPath]
+        );
+    }
+
+    #[test]
+    fn encode_fs_sysfs_path_response_empty_path_encodes_len_zero_with_nul_padding() {
+        // bd-04xv6: prove the empty-path encoding (the production
+        // OpenFs default for both ext4 and btrfs since a userspace
+        // FUSE backend has no /sys entry to surface) round-trips as
+        // len=0 + 128 zero bytes. Userspace probes treat this as
+        // "no sysfs visibility" and skip silently.
+        let buf = FrankenFuse::encode_fs_sysfs_path_response(&[]).expect("encode empty path");
+        assert_eq!(buf.len(), 129);
+        assert_eq!(buf[0], 0, "len byte must be 0 for empty backend path");
+        assert!(
+            buf[1..].iter().all(|&b| b == 0),
+            "all 128 name bytes must be NUL when backend reports no path"
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getfssysfspath_short_buffer_returns_einval() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, FS_IOC_GETFSSYSFSPATH, &[], 128);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EINVAL)),
+            "out_size < 129 must surface EINVAL, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn encode_fs_sysfs_path_response_rejects_overlong_path_with_einval() {
+        // The 128-byte name field cannot accommodate a 129-byte path;
+        // backends that try to surface one must surface EINVAL through
+        // the dispatcher rather than truncating silently.
+        let too_long = vec![b'/'; 129];
+        let err = FrankenFuse::encode_fs_sysfs_path_response(&too_long).unwrap_err();
+        assert_eq!(err, libc::EINVAL);
+    }
+
+    #[test]
+    fn encode_fs_sysfs_path_response_accepts_max_length_path() {
+        // 128-byte path fills the name field exactly; len=128, no padding.
+        let max = vec![b'a'; 128];
+        let buf = FrankenFuse::encode_fs_sysfs_path_response(&max).expect("encode 128-byte path");
+        assert_eq!(buf.len(), 129);
+        assert_eq!(buf[0], 128);
+        assert!(buf[1..].iter().all(|&b| b == b'a'));
     }
 
     #[test]
