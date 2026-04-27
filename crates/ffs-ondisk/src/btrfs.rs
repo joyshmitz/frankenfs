@@ -402,8 +402,15 @@ fn parse_chunk_stripes(
 
     let mut stripes = Vec::with_capacity(stripes_count);
     for _ in 0..stripes_count {
+        let devid = read_le_u64(data, *cur)?;
+        if devid == 0 {
+            return Err(ParseError::InvalidField {
+                field: "stripe_devid",
+                reason: "must be non-zero",
+            });
+        }
         stripes.push(BtrfsStripe {
-            devid: read_le_u64(data, *cur)?,
+            devid,
             offset: read_le_u64(data, *cur + 8)?,
             dev_uuid: read_fixed::<16>(data, *cur + 16)?,
         });

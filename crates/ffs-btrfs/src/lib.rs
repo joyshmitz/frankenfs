@@ -3297,20 +3297,19 @@ impl BtrfsExtentAllocator {
 
 // ── btrfs multi-device support ─────────────────────────────────────────────
 
-/// A set of physical devices backing a btrfs filesystem.
-///
+const BTRFS_CHUNK_ITEM_FIXED_SIZE: usize = 48;
+const BTRFS_CHUNK_ITEM_STRIPE_SIZE: usize = 32;
+
 /// Parse a single chunk item from its raw on-disk data.
 ///
 /// The `logical_offset` is the chunk's key.offset (logical start address).
 /// The data contains the fixed chunk header (48 bytes) + stripe entries.
 fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry, ParseError> {
     use ffs_types::{read_le_u16, read_le_u32, read_le_u64};
-    const CHUNK_FIXED: usize = 48;
-    const STRIPE_SIZE: usize = 32;
 
-    if data.len() < CHUNK_FIXED {
+    if data.len() < BTRFS_CHUNK_ITEM_FIXED_SIZE {
         return Err(ParseError::InsufficientData {
-            needed: CHUNK_FIXED,
+            needed: BTRFS_CHUNK_ITEM_FIXED_SIZE,
             offset: 0,
             actual: data.len(),
         });
@@ -3353,39 +3352,7 @@ fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry,
     }
 
     let stripe_count = usize::from(num_stripes);
-    let required = CHUNK_FIXED
-        .checked_add(stripe_count.saturating_mul(STRIPE_SIZE))
-        .ok_or(ParseError::InvalidField {
-            field: "stripes",
-            reason: "chunk stripe payload overflows usize",
-        })?;
-    if data.len() < required {
-        return Err(ParseError::InsufficientData {
-            needed: required,
-            offset: CHUNK_FIXED,
-            actual: data.len(),
-        });
-    }
-
-    let mut stripes = Vec::with_capacity(stripe_count);
-    let mut off = CHUNK_FIXED;
-    for _ in 0..stripe_count {
-        stripes.push(ffs_ondisk::BtrfsStripe {
-            devid: read_le_u64(data, off)?,
-            offset: read_le_u64(data, off + 8)?,
-            dev_uuid: {
-                let uuid_off = off + 16;
-                if uuid_off + 16 > data.len() {
-                    [0u8; 16]
-                } else {
-                    let mut uuid = [0u8; 16];
-                    uuid.copy_from_slice(&data[uuid_off..uuid_off + 16]);
-                    uuid
-                }
-            },
-        });
-        off += STRIPE_SIZE;
-    }
+    let stripes = parse_chunk_item_stripes(data, stripe_count)?;
 
     Ok(BtrfsChunkEntry {
         key: BtrfsKey {
@@ -3404,6 +3371,62 @@ fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry,
         sub_stripes,
         stripes,
     })
+}
+
+fn parse_chunk_item_stripes(
+    data: &[u8],
+    stripe_count: usize,
+) -> Result<Vec<ffs_ondisk::BtrfsStripe>, ParseError> {
+    use ffs_types::read_le_u64;
+
+    let stripe_bytes = stripe_count
+        .checked_mul(BTRFS_CHUNK_ITEM_STRIPE_SIZE)
+        .ok_or(ParseError::InvalidField {
+            field: "stripes",
+            reason: "chunk stripe payload overflows usize",
+        })?;
+    let required = BTRFS_CHUNK_ITEM_FIXED_SIZE
+        .checked_add(stripe_bytes)
+        .ok_or(ParseError::InvalidField {
+            field: "stripes",
+            reason: "chunk stripe payload overflows usize",
+        })?;
+    if data.len() < required {
+        return Err(ParseError::InsufficientData {
+            needed: required,
+            offset: BTRFS_CHUNK_ITEM_FIXED_SIZE,
+            actual: data.len(),
+        });
+    }
+
+    let mut stripes = Vec::with_capacity(stripe_count);
+    let mut off = BTRFS_CHUNK_ITEM_FIXED_SIZE;
+    for _ in 0..stripe_count {
+        let devid = read_le_u64(data, off)?;
+        if devid == 0 {
+            return Err(ParseError::InvalidField {
+                field: "stripe_devid",
+                reason: "must be non-zero",
+            });
+        }
+        stripes.push(ffs_ondisk::BtrfsStripe {
+            devid,
+            offset: read_le_u64(data, off + 8)?,
+            dev_uuid: {
+                let uuid_off = off + 16;
+                if uuid_off + 16 > data.len() {
+                    [0u8; 16]
+                } else {
+                    let mut uuid = [0u8; 16];
+                    uuid.copy_from_slice(&data[uuid_off..uuid_off + 16]);
+                    uuid
+                }
+            },
+        });
+        off += BTRFS_CHUNK_ITEM_STRIPE_SIZE;
+    }
+
+    Ok(stripes)
 }
 
 /// Walk the chunk tree to build a complete chunk map.
@@ -3466,6 +3489,7 @@ pub fn walk_device_tree(
 /// Device reader: reads `len` bytes from physical offset, returns data or error.
 type DeviceReader = Box<dyn Fn(u64, usize) -> Result<Vec<u8>, ffs_types::ParseError> + Send + Sync>;
 
+/// A set of physical devices backing a btrfs filesystem.
 pub struct BtrfsDeviceSet {
     /// Map from devid → device read closure.
     devices: std::collections::BTreeMap<u64, DeviceReader>,
@@ -8089,6 +8113,15 @@ mod tests {
             parse_chunk_item(&zero_stripe_len, 0x100_0000),
             "stripe_len",
             "chunk has zero stripe length",
+        );
+
+        let mut zero_stripe_devid =
+            make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, chunk_type, 1);
+        zero_stripe_devid[48..56].copy_from_slice(&0_u64.to_le_bytes());
+        assert_invalid_field(
+            parse_chunk_item(&zero_stripe_devid, 0x100_0000),
+            "stripe_devid",
+            "must be non-zero",
         );
 
         let multi_raid_type = chunk_type_flags::BTRFS_BLOCK_GROUP_DATA

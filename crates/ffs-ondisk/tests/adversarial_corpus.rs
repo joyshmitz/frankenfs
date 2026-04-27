@@ -1058,6 +1058,18 @@ fn btrfs_sys_chunk_adversarial_samples() -> Vec<(String, Vec<u8>)> {
         ),
     ));
 
+    let mut zero_stripe_devid = make_btrfs_sys_chunk(
+        BTRFS_TEST_CHUNK_LENGTH,
+        4096,
+        BTRFS_TEST_BLOCK_GROUP_SYSTEM,
+        1,
+    );
+    write_btrfs_chunk_stripe(&mut zero_stripe_devid, 0, 0, 0x2000);
+    samples.push((
+        "synthetic_btrfs_sys_chunk_zero_stripe_devid.bin".to_owned(),
+        zero_stripe_devid,
+    ));
+
     samples.push((
         "synthetic_btrfs_sys_chunk_multiple_raid_profiles.bin".to_owned(),
         make_btrfs_sys_chunk(
@@ -3144,6 +3156,17 @@ fn btrfs_sys_chunk_adversarial_samples_exercise_boundaries() {
         zero_stripes,
         ParseError::InvalidField {
             field: "num_stripes",
+            ..
+        }
+    ));
+
+    let zero_stripe_devid =
+        parse_sys_chunk_array(&samples["synthetic_btrfs_sys_chunk_zero_stripe_devid.bin"])
+            .expect_err("zero stripe device IDs must be rejected");
+    assert!(matches!(
+        zero_stripe_devid,
+        ParseError::InvalidField {
+            field: "stripe_devid",
             ..
         }
     ));
