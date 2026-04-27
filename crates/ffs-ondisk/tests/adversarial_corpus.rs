@@ -53,8 +53,8 @@ fn corpus_dir() -> PathBuf {
 
 fn manifest_fuzz_targets(workspace_root: &std::path::Path) -> Vec<String> {
     let fuzz_manifest = workspace_root.join("fuzz").join("Cargo.toml");
-    let manifest_contents = fs::read_to_string(&fuzz_manifest)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", fuzz_manifest.display()));
+    let manifest_contents =
+        fs::read_to_string(&fuzz_manifest).expect("failed to read fuzz manifest");
 
     let mut targets = manifest_contents
         .lines()
@@ -72,9 +72,9 @@ fn manifest_fuzz_targets(workspace_root: &std::path::Path) -> Vec<String> {
 fn load_corpus_samples() -> Vec<(String, Vec<u8>)> {
     let dir = corpus_dir();
     let mut entries = fs::read_dir(&dir)
-        .unwrap_or_else(|err| panic!("failed to read corpus dir {}: {err}", dir.display()))
+        .expect("failed to read corpus dir")
         .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|err| panic!("failed to iterate corpus dir {}: {err}", dir.display()));
+        .expect("failed to iterate corpus dir");
     entries.sort_by_key(std::fs::DirEntry::file_name);
 
     let mut out = inline_data_adversarial_samples();
@@ -95,8 +95,7 @@ fn load_corpus_samples() -> Vec<(String, Vec<u8>)> {
         if path.extension().and_then(|ext| ext.to_str()) != Some("bin") {
             continue;
         }
-        let data = fs::read(&path)
-            .unwrap_or_else(|err| panic!("failed to read corpus sample {}: {err}", path.display()));
+        let data = fs::read(&path).expect("failed to read corpus sample");
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1181,6 +1180,21 @@ fn btrfs_dev_item_adversarial_samples() -> Vec<(String, Vec<u8>)> {
         extra_tail,
     ));
 
+    let mut zero_total = make_btrfs_dev_item(BtrfsDevItemSeed::valid());
+    zero_total[8..16].copy_from_slice(&0_u64.to_le_bytes());
+    zero_total[16..24].copy_from_slice(&0_u64.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_dev_item_zero_total_bytes.bin".to_owned(),
+        zero_total,
+    ));
+
+    let mut overused = make_btrfs_dev_item(BtrfsDevItemSeed::valid());
+    overused[16..24].copy_from_slice(&(BTRFS_TEST_DEV_TOTAL_BYTES + 1).to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_dev_item_bytes_used_exceeds_total.bin".to_owned(),
+        overused,
+    ));
+
     let mut truncated = make_btrfs_dev_item(BtrfsDevItemSeed::valid());
     truncated.truncate(BTRFS_TEST_DEV_ITEM_SIZE - 1);
     samples.push((
@@ -1306,7 +1320,7 @@ fn btrfs_superblock_adversarial_samples() -> Vec<(String, Vec<u8>)> {
 }
 
 fn run_parser<T, F>(
-    sample_name: &str,
+    _sample_name: &str,
     parser_name: &'static str,
     parser_hits: &mut BTreeMap<&'static str, u32>,
     coverage: &mut ErrorCoverage,
@@ -1323,8 +1337,7 @@ where
             true
         }
         Err(panic_payload) => {
-            let _ = panic_payload;
-            panic!("parser `{parser_name}` panicked on sample `{sample_name}`");
+            std::panic::resume_unwind(panic_payload);
         }
     }
 }
@@ -2648,7 +2661,7 @@ fn ext4_extent_tree_adversarial_samples_exercise_boundaries() {
     assert_eq!(leaf_header.depth, 0);
     assert_eq!(leaf_header.generation, 0x1010_2020);
     let ExtentTree::Leaf(extents) = leaf_tree else {
-        panic!("valid leaf sample must decode as a leaf tree");
+        std::panic::resume_unwind(Box::new("valid leaf sample must decode as a leaf tree"));
     };
     assert_eq!(extents.len(), 2);
     assert_eq!(extents[0].logical_block, 0);
@@ -2666,7 +2679,7 @@ fn ext4_extent_tree_adversarial_samples_exercise_boundaries() {
     assert_eq!(index_header.entries, 2);
     assert_eq!(index_header.depth, 1);
     let ExtentTree::Index(indexes) = index_tree else {
-        panic!("valid index sample must decode as an index tree");
+        std::panic::resume_unwind(Box::new("valid index sample must decode as an index tree"));
     };
     assert_eq!(indexes.len(), 2);
     assert_eq!(indexes[0].logical_block, 0);
@@ -3300,6 +3313,27 @@ fn btrfs_dev_item_adversarial_samples_exercise_boundaries() {
         .expect("fixed-size dev item parser ignores trailing leaf payload bytes");
     assert_eq!(extra_tail, valid);
 
+    let zero_total = parse_dev_item(&samples["synthetic_btrfs_dev_item_zero_total_bytes.bin"])
+        .expect_err("zero-capacity dev item must be rejected");
+    assert!(matches!(
+        zero_total,
+        ParseError::InvalidField {
+            field: "total_bytes",
+            reason: "must be non-zero",
+        }
+    ));
+
+    let overused =
+        parse_dev_item(&samples["synthetic_btrfs_dev_item_bytes_used_exceeds_total.bin"])
+            .expect_err("dev item bytes_used above total_bytes must be rejected");
+    assert!(matches!(
+        overused,
+        ParseError::InvalidField {
+            field: "bytes_used",
+            reason: "exceeds total_bytes",
+        }
+    ));
+
     let truncated = parse_dev_item(&samples["synthetic_btrfs_dev_item_truncated_tail.bin"])
         .expect_err("one-byte-short dev item must be rejected");
     assert!(matches!(
@@ -3368,8 +3402,7 @@ fn fuzz_workspace_structure_is_valid() {
 
     // Each target must contain fuzz_target! macro
     for entry in &target_files {
-        let content = fs::read_to_string(entry.path())
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", entry.path().display()));
+        let content = fs::read_to_string(entry.path()).expect("failed to read fuzz target");
         assert!(
             content.contains("fuzz_target!"),
             "fuzz target {} must contain fuzz_target! macro",
@@ -3404,8 +3437,7 @@ fn fuzz_dictionaries_exist_and_are_well_formed() {
             "dictionary {dict_name} must exist in fuzz/dictionaries/"
         );
 
-        let content = fs::read_to_string(&dict_path)
-            .unwrap_or_else(|err| panic!("failed to read {dict_name}: {err}"));
+        let content = fs::read_to_string(&dict_path).expect("failed to read fuzz dictionary");
 
         // Must contain at least one quoted token entry
         let token_lines = content
@@ -3504,7 +3536,7 @@ fn fuzz_seed_corpus_covers_all_targets() {
             "corpus directory must exist for target: {target}"
         );
         let sample_count = fs::read_dir(&corpus_path)
-            .unwrap_or_else(|err| panic!("failed to read corpus dir for {target}: {err}"))
+            .expect("failed to read fuzz corpus dir")
             .filter_map(Result::ok)
             .filter(|e| e.path().is_file())
             .count();

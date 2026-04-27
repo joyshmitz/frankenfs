@@ -1053,6 +1053,12 @@ pub fn parse_dev_item(data: &[u8]) -> Result<BtrfsDevItem, ParseError> {
 
     let total_bytes = read_le_u64(data, 8)?;
     let bytes_used = read_le_u64(data, 16)?;
+    if total_bytes == 0 {
+        return Err(ParseError::InvalidField {
+            field: "total_bytes",
+            reason: "must be non-zero",
+        });
+    }
     if bytes_used > total_bytes {
         return Err(ParseError::InvalidField {
             field: "bytes_used",
@@ -4403,6 +4409,19 @@ mod tests {
             ParseError::InvalidField {
                 field: "bytes_used",
                 reason: "exceeds total_bytes",
+            }
+        );
+    }
+
+    #[test]
+    fn parse_dev_item_rejects_zero_total_bytes() {
+        let data = vec![0u8; 98];
+        let err = parse_dev_item(&data).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "total_bytes",
+                reason: "must be non-zero",
             }
         );
     }
