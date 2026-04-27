@@ -3793,6 +3793,13 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
         });
     }
 
+    if !saw_end {
+        return Err(ffs_types::ParseError::InvalidField {
+            field: "send_stream",
+            reason: "missing end command",
+        });
+    }
+
     Ok(SendStreamParseResult { version, commands })
 }
 
@@ -9786,11 +9793,8 @@ mod tests {
     fn parse_send_stream_adversarial_samples_exercise_boundaries() {
         let mut no_end = make_send_stream_data();
         append_send_command(&mut no_end, 0xffff, &[]);
-        let parsed = parse_send_stream(&no_end).expect("parse unknown command at EOF");
-        assert_eq!(parsed.version, BTRFS_SEND_STREAM_VERSION);
-        assert_eq!(parsed.commands.len(), 1);
-        assert_eq!(parsed.commands[0].cmd, SendCommand::Unspec);
-        assert!(parsed.commands[0].attrs.is_empty());
+        let err = parse_send_stream(&no_end).unwrap_err();
+        assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
 
         let mut attrs = Vec::new();
         append_send_attr(&mut attrs, 15, b"");

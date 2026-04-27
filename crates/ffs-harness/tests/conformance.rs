@@ -3190,6 +3190,21 @@ fn btrfs_send_stream_unknown_command_preserves_attrs_as_unspec() {
 }
 
 #[test]
+fn btrfs_send_stream_rejects_missing_end_command() {
+    let mut data = Vec::new();
+    data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+    data.extend_from_slice(&1_u32.to_le_bytes());
+    append_send_stream_command(
+        &mut data,
+        SendCommand::Mkdir as u16,
+        &[(15, b"/unterminated")],
+    );
+
+    let err = parse_send_stream(&data).unwrap_err();
+    assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
+}
+
+#[test]
 fn btrfs_subvolume_mount_root_alias_conforms() {
     let cx = Cx::for_testing();
     let (fs, _tmp) = open_btrfs_subvolume_mount_image();
@@ -4394,6 +4409,7 @@ fn full_conformance_gate_pass() {
     ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only();
     btrfs_send_stream_multi_command_conforms();
     btrfs_send_stream_unknown_command_preserves_attrs_as_unspec();
+    btrfs_send_stream_rejects_missing_end_command();
     btrfs_transparent_decompression_zlib_regular_extent_conforms();
     btrfs_transparent_decompression_lzo_regular_extent_conforms();
     btrfs_transparent_decompression_zstd_regular_extent_conforms();
