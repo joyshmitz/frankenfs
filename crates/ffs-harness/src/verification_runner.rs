@@ -240,8 +240,9 @@ pub fn check_script_conformance(script_source: &str) -> Vec<ConformanceViolation
         violations.push(ConformanceViolation::NoScenarioMarkers);
     }
 
-    // Should use outcome= not status= in markers
-    if script_source.contains("|status=") && !script_source.contains("|outcome=") {
+    // Should use outcome= not status= in every marker. A script can otherwise
+    // hide a legacy marker behind one conforming marker elsewhere.
+    if script_source.contains("|status=") {
         violations.push(ConformanceViolation::LegacyStatusField);
     }
 
@@ -550,6 +551,20 @@ source "$REPO_ROOT/scripts/e2e/lib.sh"
 e2e_init "test"
 FAIL_COUNT=0
 SCENARIO_RESULT|scenario_id=test_case|status=PASS
+"#;
+        let violations = check_script_conformance(script);
+        assert!(violations.contains(&ConformanceViolation::LegacyStatusField));
+    }
+
+    #[test]
+    fn script_mixing_outcome_and_legacy_status_field_detected() {
+        let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+source "$REPO_ROOT/scripts/e2e/lib.sh"
+e2e_init "test"
+FAIL_COUNT=0
+SCENARIO_RESULT|scenario_id=test_good_case|outcome=PASS
+SCENARIO_RESULT|scenario_id=test_legacy_case|status=PASS
 "#;
         let violations = check_script_conformance(script);
         assert!(violations.contains(&ConformanceViolation::LegacyStatusField));
