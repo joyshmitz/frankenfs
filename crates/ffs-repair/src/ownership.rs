@@ -225,7 +225,7 @@ impl RepairOwnership {
         let json = serde_json::to_string_pretty(&record).map_err(std::io::Error::other)?;
 
         // Atomic write: write to temp, then rename
-        let tmp_path = temp_record_path(record_path);
+        let tmp_path = temp_record_path(record_path)?;
         std::fs::write(&tmp_path, &json)?;
         std::fs::rename(&tmp_path, record_path)?;
 
@@ -374,7 +374,7 @@ impl RepairOwnership {
 
         guard.record.renew();
         let json = serde_json::to_string_pretty(&guard.record).map_err(std::io::Error::other)?;
-        let tmp_path = temp_record_path(&guard.record_path);
+        let tmp_path = temp_record_path(&guard.record_path)?;
         std::fs::write(&tmp_path, &json)?;
         std::fs::rename(&tmp_path, &guard.record_path)?;
         debug!(
@@ -557,9 +557,17 @@ fn ymd_to_days(year: u64, month: u64, day: u64) -> u64 {
     era * 146_097 + doe - 719_468
 }
 
-fn temp_record_path(record_path: &Path) -> PathBuf {
-    let nonce = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    record_path.with_extension(format!("tmp-{}-{nonce}", std::process::id()))
+fn next_temp_file_nonce(counter: &AtomicU64) -> std::io::Result<u64> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| std::io::Error::other("repair ownership temporary file nonce exhausted"))
+}
+
+fn temp_record_path(record_path: &Path) -> std::io::Result<PathBuf> {
+    let nonce = next_temp_file_nonce(&TEMP_FILE_COUNTER)?;
+    Ok(record_path.with_extension(format!("tmp-{}-{nonce}", std::process::id())))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -1019,11 +1027,24 @@ mod tests {
     #[test]
     fn temp_record_path_is_unique_per_write_attempt() {
         let record_path = PathBuf::from("/tmp/.image.img.ffs-repair-owner.json");
-        let first = temp_record_path(&record_path);
-        let second = temp_record_path(&record_path);
+        let first = temp_record_path(&record_path).expect("first temp path");
+        let second = temp_record_path(&record_path).expect("second temp path");
         assert_ne!(first, second);
         assert_eq!(first.parent(), record_path.parent());
         assert_eq!(second.parent(), record_path.parent());
+    }
+
+    #[test]
+    fn temp_file_nonce_rejects_numeric_limit_without_wrapping() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+
+        let nonce = next_temp_file_nonce(&counter).expect("last usable nonce");
+        assert_eq!(nonce, u64::MAX - 1);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+
+        let err = next_temp_file_nonce(&counter).expect_err("counter exhaustion should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
     }
 
     fn record_fixture(
