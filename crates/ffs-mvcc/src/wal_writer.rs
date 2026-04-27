@@ -416,7 +416,7 @@ impl WalWriter {
 
         // ── Sync policy ──────────────────────────────────────────────────
         let pending_before = self.appends_since_sync;
-        self.appends_since_sync += 1;
+        self.increment_pending_sync_count(1);
         let synced = match self.maybe_sync(op_id, commit_seq) {
             Ok(s) => s,
             Err(e) => return Err(self.rollback_failed_append(write_offset, pending_before, e)),
@@ -576,8 +576,7 @@ impl WalWriter {
 
         // ── Single sync ───────────────────────────────────────────────────
         let pending_before = self.appends_since_sync;
-        self.appends_since_sync +=
-            u32::try_from(commits.len()).expect("coalesced append count fits in u32");
+        self.increment_pending_sync_count(u32::try_from(commits.len()).unwrap_or(u32::MAX));
         let synced = match self.maybe_sync(op_id, prev_seq) {
             Ok(s) => s,
             Err(e) => return Err(self.rollback_failed_append(base_offset, pending_before, e)),
@@ -617,8 +616,12 @@ impl WalWriter {
 
     fn next_op_id(&mut self) -> u64 {
         let id = self.next_operation_id;
-        self.next_operation_id += 1;
+        self.next_operation_id = self.next_operation_id.saturating_add(1);
         id
+    }
+
+    fn increment_pending_sync_count(&mut self, delta: u32) {
+        self.appends_since_sync = self.appends_since_sync.saturating_add(delta);
     }
 
     fn rollback_failed_append(
@@ -876,7 +879,10 @@ mod tests {
                 assert_eq!(c.writes[0].block, BlockNumber(10));
                 assert_eq!(c.writes[0].data, vec![0xAA; 32]);
             }
-            other => panic!("expected Commit, got {other:?}"),
+            other => assert!(
+                matches!(other, DecodeResult::Commit(_)),
+                "expected Commit, got {other:?}"
+            ),
         }
 
         let _ = std::fs::remove_file(&path);
@@ -902,7 +908,10 @@ mod tests {
                     let size = commit_byte_size(&data[offset..]).expect("size");
                     offset += size;
                 }
-                other => panic!("expected Commit at seq {i}, got {other:?}"),
+                other => assert!(
+                    matches!(other, DecodeResult::Commit(_)),
+                    "expected Commit at seq {i}, got {other:?}"
+                ),
             }
         }
 
@@ -1061,6 +1070,40 @@ mod tests {
         let flushed = w.flush().expect("flush");
         assert_eq!(flushed, 5);
         assert_eq!(w.pending_sync_count(), 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pending_sync_count_saturates_at_numeric_limit() {
+        let path = tmp_path();
+        let config = WalWriterConfig {
+            sync_policy: SyncPolicy::Manual,
+            ..WalWriterConfig::default()
+        };
+        let mut w = WalWriter::create(&path, config).expect("create");
+        w.appends_since_sync = u32::MAX;
+
+        let result = w
+            .append_commit(&make_commit(1, 1, &[]))
+            .expect("append at saturated pending count");
+
+        assert!(!result.synced);
+        assert_eq!(result.pending_sync_count, u32::MAX);
+        assert_eq!(w.pending_sync_count(), u32::MAX);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn operation_id_saturates_at_numeric_limit() {
+        let path = tmp_path();
+        let mut w = WalWriter::create(&path, WalWriterConfig::default()).expect("create");
+        w.next_operation_id = u64::MAX;
+
+        assert_eq!(w.next_op_id(), u64::MAX);
+        assert_eq!(w.next_operation_id, u64::MAX);
+        assert_eq!(w.next_op_id(), u64::MAX);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -1377,9 +1420,37 @@ mod tests {
                     let size = commit_byte_size(&all_data[offset..]).unwrap();
                     offset += size;
                 }
-                other => panic!("expected Commit, got {other:?}"),
+                other => assert!(
+                    matches!(other, DecodeResult::Commit(_)),
+                    "expected Commit, got {other:?}"
+                ),
             }
         }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn coalesced_pending_sync_count_saturates_at_numeric_limit() {
+        let path = tmp_path();
+        let config = WalWriterConfig {
+            sync_policy: SyncPolicy::Manual,
+            ..WalWriterConfig::default()
+        };
+        let mut w = WalWriter::create(&path, config).unwrap();
+        w.appends_since_sync = u32::MAX - 1;
+
+        let commits = vec![make_commit(1, 1, &[]), make_commit(2, 2, &[])];
+        let results = w.append_commits_coalesced(&commits).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| !result.synced));
+        assert!(
+            results
+                .iter()
+                .all(|result| result.pending_sync_count == u32::MAX)
+        );
+        assert_eq!(w.pending_sync_count(), u32::MAX);
 
         let _ = std::fs::remove_file(&path);
     }
