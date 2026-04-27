@@ -14684,7 +14684,10 @@ impl OpenFs {
             .range(&start, &end)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         for (_, data) in items {
-            let entries = parse_dir_items(&data).unwrap_or_default();
+            let entries = Self::btrfs_parse_dir_items(
+                &data,
+                "malformed btrfs DIR_ITEM payload during lookup",
+            )?;
             if let Some(e) = entries.into_iter().find(|e| e.name == name) {
                 return Ok(e);
             }
@@ -14692,6 +14695,16 @@ impl OpenFs {
         Err(FfsError::NotFound(
             String::from_utf8_lossy(name).into_owned(),
         ))
+    }
+
+    fn btrfs_parse_dir_items(
+        payload: &[u8],
+        context: &'static str,
+    ) -> ffs_error::Result<Vec<BtrfsDirItem>> {
+        parse_dir_items(payload).map_err(|e| FfsError::Corruption {
+            block: 0,
+            detail: format!("{context}: {e}"),
+        })
     }
 
     /// Remove a directory entry (DIR_ITEM and DIR_INDEX) from the FS tree.
@@ -14731,7 +14744,10 @@ impl OpenFs {
             .range(&start, &end)
             .map_err(|e| btrfs_mutation_to_ffs(&e))?;
         for (key, payload) in items {
-            let entries = parse_dir_items(&payload).unwrap_or_default();
+            let entries = Self::btrfs_parse_dir_items(
+                &payload,
+                "malformed btrfs DIR_ITEM payload during removal",
+            )?;
             let original_len = entries.len();
             let remaining: Vec<_> = entries
                 .into_iter()
@@ -39005,6 +39021,94 @@ mod tests {
             )
             .expect("unlink should fail closed and preserve directory entry");
         assert_eq!(lookup.ino, attr.ino);
+    }
+
+    fn corrupt_btrfs_dir_item_payload(fs: &OpenFs, parent_oid: u64, name: &[u8], payload: &[u8]) {
+        let dir_item_key = BtrfsKey {
+            objectid: parent_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(ffs_types::crc32c_append(0, name)),
+        };
+        let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        alloc
+            .fs_tree
+            .update(&dir_item_key, payload)
+            .expect("corrupt dir item payload");
+    }
+
+    #[test]
+    fn btrfs_lookup_rejects_malformed_dir_item_payload() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let name = b"bad_lookup.txt";
+
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("bad_lookup.txt"),
+            0o644,
+            0,
+            0,
+        )
+        .expect("create file before dir item corruption");
+
+        let root_oid = fs.btrfs_canonical_inode(InodeNumber(1)).unwrap();
+        corrupt_btrfs_dir_item_payload(&fs, root_oid, name, &[0xAA, 0xBB, 0xCC]);
+
+        let err = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("bad_lookup.txt"),
+            )
+            .expect_err("malformed DIR_ITEM must fail closed");
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption { ref detail, .. }
+                    if detail.contains("malformed btrfs DIR_ITEM payload during lookup")
+            ),
+            "unexpected malformed DIR_ITEM lookup error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_remove_named_dir_item_rejects_malformed_payload() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let name = b"bad_remove.txt";
+
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("bad_remove.txt"),
+            0o644,
+            0,
+            0,
+        )
+        .expect("create file before dir item corruption");
+
+        let root_oid = fs.btrfs_canonical_inode(InodeNumber(1)).unwrap();
+        corrupt_btrfs_dir_item_payload(&fs, root_oid, name, &[0xDD]);
+
+        let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
+        let err = {
+            let mut alloc = alloc_mutex.lock();
+            OpenFs::btrfs_remove_named_dir_item(&mut alloc, root_oid, name)
+                .expect_err("malformed DIR_ITEM removal must fail closed")
+        };
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption { ref detail, .. }
+                    if detail.contains("malformed btrfs DIR_ITEM payload during removal")
+            ),
+            "unexpected malformed DIR_ITEM removal error: {err:?}"
+        );
     }
 
     #[test]
