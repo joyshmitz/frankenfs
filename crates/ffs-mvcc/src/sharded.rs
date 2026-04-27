@@ -64,7 +64,7 @@ pub struct ShardedMvccStore {
     /// Latest commit sequence number that has completed installation.
     completed_commit: AtomicU64,
     /// Inline snapshot tracking (for callers who don't use SnapshotRegistry).
-    active_snapshots: RwLock<BTreeMap<CommitSeq, u32>>,
+    active_snapshots: RwLock<BTreeMap<CommitSeq, u64>>,
     /// Compression policy for version chains.
     compression_policy: CompressionPolicy,
     /// Conflict resolution policy (Strict / SafeMerge / Adaptive).
@@ -635,7 +635,10 @@ impl ShardedMvccStore {
     /// Register a snapshot as active (inline tracking).
     pub fn register_snapshot(&self, snapshot: Snapshot) {
         let mut active = self.active_snapshots.write();
-        *active.entry(snapshot.high).or_insert(0) += 1;
+        active
+            .entry(snapshot.high)
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
     }
 
     /// Release a previously registered snapshot.
@@ -645,7 +648,7 @@ impl ShardedMvccStore {
             if count <= 1 {
                 active.remove(&snapshot.high);
             } else {
-                active.insert(snapshot.high, count - 1);
+                active.insert(snapshot.high, count.saturating_sub(1));
             }
             true
         })
@@ -663,8 +666,9 @@ impl ShardedMvccStore {
         self.active_snapshots
             .read()
             .values()
-            .map(|c| *c as usize)
-            .sum()
+            .fold(0_usize, |total, count| {
+                total.saturating_add(usize::try_from(*count).unwrap_or(usize::MAX))
+            })
     }
 
     // ── GC / pruning ────────────────────────────────────────────────────
@@ -902,10 +906,40 @@ mod tests {
             CommitError::DurabilityFailure { detail } => {
                 assert!(detail.contains("commit sequence exhausted"));
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => assert!(
+                matches!(other, CommitError::DurabilityFailure { .. }),
+                "unexpected error: {other:?}"
+            ),
         }
 
         assert_eq!(store.current_snapshot().high, CommitSeq(0));
+    }
+
+    #[test]
+    fn sharded_snapshot_ref_count_saturates_at_numeric_limit() {
+        let store = make_store(4);
+        let snap = Snapshot {
+            high: CommitSeq(42),
+        };
+
+        {
+            let mut active = store.active_snapshots.write();
+            active.insert(snap.high, u64::MAX);
+        }
+
+        store.register_snapshot(snap);
+        assert_eq!(
+            store.active_snapshots.read().get(&snap.high).copied(),
+            Some(u64::MAX)
+        );
+        assert_eq!(store.active_snapshot_count(), usize::MAX);
+
+        assert!(store.release_snapshot(snap));
+        assert_eq!(
+            store.active_snapshots.read().get(&snap.high).copied(),
+            Some(u64::MAX - 1)
+        );
+        assert_eq!(store.watermark(), Some(snap.high));
     }
 
     #[test]
@@ -1174,10 +1208,10 @@ mod tests {
                         txn.stage_write(block, vec![value; 8]);
                         match store.commit(txn) {
                             Ok(_) => committed += 1,
-                            Err((CommitError::Conflict { .. }, _)) => {
-                                // Expected under contention.
-                            }
-                            Err((e, _)) => panic!("unexpected error: {e}"),
+                            Err((err, _)) => assert!(
+                                matches!(err, CommitError::Conflict { .. }),
+                                "unexpected error: {err}"
+                            ),
                         }
                     }
                     committed
