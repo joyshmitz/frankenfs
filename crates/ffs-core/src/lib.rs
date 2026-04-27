@@ -103,6 +103,58 @@ struct Ext4CompressedClusterWrite {
     new_blocks: Vec<BlockNumber>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum E2ComprCodec {
+    Lzv1,
+    Lzrw3a,
+    Gzip { level: u32 },
+    Bzip2,
+    Lzo1x1,
+    None,
+}
+
+impl E2ComprCodec {
+    fn from_method_index(method_idx: u8) -> Result<Self, FfsError> {
+        match method_idx {
+            0 => Ok(Self::Lzv1),
+            1..=3 => Ok(Self::None),
+            4 => Ok(Self::Bzip2),
+            8 => Ok(Self::Lzrw3a),
+            10 => Ok(Self::Lzo1x1),
+            16 => Ok(Self::Gzip { level: 1 }),
+            17 => Ok(Self::Gzip { level: 2 }),
+            18 => Ok(Self::Gzip { level: 3 }),
+            19 => Ok(Self::Gzip { level: 4 }),
+            20 => Ok(Self::Gzip { level: 5 }),
+            21 => Ok(Self::Gzip { level: 6 }),
+            22 => Ok(Self::Gzip { level: 7 }),
+            23 => Ok(Self::Gzip { level: 8 }),
+            24 => Ok(Self::Gzip { level: 9 }),
+            _ => Err(FfsError::UnsupportedFeature(format!(
+                "e2compr: unsupported method index {method_idx}"
+            ))),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Lzv1 => "lzv1",
+            Self::Lzrw3a => "lzrw3a",
+            Self::Gzip { .. } => "gzip",
+            Self::Bzip2 => "bzip2",
+            Self::Lzo1x1 => "LZO",
+            Self::None => "none",
+        }
+    }
+
+    fn legacy_exclusion(self, method_idx: u8, operation: &str) -> FfsError {
+        FfsError::UnsupportedFeature(format!(
+            "e2compr: method {method_idx} selects legacy {} codec; FrankenFS V1 supports gzip, LZO, and passthrough none only for {operation}",
+            self.name()
+        ))
+    }
+}
+
 /// Detected filesystem type with the parsed superblock embedded.
 ///
 /// Returned by [`detect_filesystem`] and stored in [`OpenFs::flavor`].
@@ -7074,24 +7126,10 @@ impl OpenFs {
         compressed: &[u8],
         ulen: usize,
     ) -> Result<Vec<u8>, FfsError> {
-        // Method table: index → (algorithm_id, xarg).
-        // We only need algorithm_id for decompression.
-        let alg_id = match method_idx {
-            0 => 0,       // lzv1
-            1..=3 => 5,   // auto/defer/never → none
-            4 => 3,       // bzip2
-            8 => 1,       // lzrw3a
-            10 => 4,      // lzo1x_1
-            16..=24 => 2, // gzip1-gzip9
-            _ => {
-                return Err(FfsError::UnsupportedFeature(format!(
-                    "e2compr: unsupported method index {method_idx}"
-                )));
-            }
-        };
+        let codec = E2ComprCodec::from_method_index(method_idx)?;
 
-        match alg_id {
-            2 => {
+        match codec {
+            E2ComprCodec::Gzip { .. } => {
                 // GZIP: raw deflate via flate2.
                 use flate2::read::ZlibDecoder;
                 use std::io::Read;
@@ -7105,7 +7143,7 @@ impl OpenFs {
                     })?;
                 Ok(output)
             }
-            4 => {
+            E2ComprCodec::Lzo1x1 => {
                 // LZO: lzokay-native.
                 let output =
                     lzokay_native::decompress_all(compressed, Some(ulen)).map_err(|e| {
@@ -7116,13 +7154,13 @@ impl OpenFs {
                     })?;
                 Ok(output)
             }
-            5 => {
+            E2ComprCodec::None => {
                 // None: uncompressed (method auto/defer/never).
                 Ok(compressed.to_vec())
             }
-            other => Err(FfsError::UnsupportedFeature(format!(
-                "e2compr: algorithm {other} not implemented (lzv1/lzrw3a/bzip2 are rare legacy formats)"
-            ))),
+            E2ComprCodec::Lzv1 | E2ComprCodec::Lzrw3a | E2ComprCodec::Bzip2 => {
+                Err(codec.legacy_exclusion(method_idx, "decompression"))
+            }
         }
     }
 
@@ -8034,37 +8072,19 @@ impl OpenFs {
 
     /// Compress data using the e2compr method table.
     fn e2compr_compress(method_idx: u8, data: &[u8]) -> Result<Vec<u8>, FfsError> {
-        let alg_id = match method_idx {
-            0 => 0,
-            1..=3 => 5,
-            4 => 3,
-            8 => 1,
-            10 => 4,
-            16..=24 => 2,
-            _ => {
-                return Err(FfsError::UnsupportedFeature(format!(
-                    "e2compr: unsupported method index {method_idx} for compression"
-                )));
+        let codec = E2ComprCodec::from_method_index(method_idx).map_err(|err| match err {
+            FfsError::UnsupportedFeature(message) => {
+                FfsError::UnsupportedFeature(format!("{message} for compression"))
             }
-        };
+            other => other,
+        })?;
 
-        match alg_id {
-            2 => {
+        match codec {
+            E2ComprCodec::Gzip { level } => {
                 // GZIP: raw deflate via flate2.
                 use flate2::Compression;
                 use flate2::write::ZlibEncoder;
                 use std::io::Write;
-                let level = match method_idx {
-                    16 => 1,
-                    17 => 2,
-                    18 => 3,
-                    19 => 4,
-                    20 => 5,
-                    22 => 7,
-                    23 => 8,
-                    24 => 9,
-                    _ => 6, // default (method 21 = gzip6)
-                };
                 let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(level));
                 encoder.write_all(data).map_err(|e| FfsError::Corruption {
                     block: 0,
@@ -8075,20 +8095,20 @@ impl OpenFs {
                     detail: format!("e2compr gzip compress finish failed: {e}"),
                 })
             }
-            4 => {
+            E2ComprCodec::Lzo1x1 => {
                 // LZO.
                 lzokay_native::compress(data).map_err(|e| FfsError::Corruption {
                     block: 0,
                     detail: format!("e2compr LZO compress failed: {e}"),
                 })
             }
-            5 => {
+            E2ComprCodec::None => {
                 // None (auto/defer/never): passthrough.
                 Ok(data.to_vec())
             }
-            other => Err(FfsError::UnsupportedFeature(format!(
-                "e2compr: algorithm {other} not implemented for compression"
-            ))),
+            E2ComprCodec::Lzv1 | E2ComprCodec::Lzrw3a | E2ComprCodec::Bzip2 => {
+                Err(codec.legacy_exclusion(method_idx, "compression"))
+            }
         }
     }
 }
@@ -20967,10 +20987,66 @@ mod tests {
         assert_eq!(result, data);
     }
 
+    fn assert_e2compr_legacy_exclusion(
+        err: FfsError,
+        method_idx: u8,
+        codec: &str,
+        operation: &str,
+    ) {
+        let message = if let FfsError::UnsupportedFeature(message) = err {
+            message
+        } else {
+            String::new()
+        };
+        assert!(
+            !message.is_empty(),
+            "expected UnsupportedFeature for e2compr method {method_idx}"
+        );
+        assert!(
+            message.contains(&format!("method {method_idx} selects legacy {codec} codec")),
+            "message should identify exact legacy codec, got: {message}"
+        );
+        assert!(
+            message.contains("FrankenFS V1 supports gzip, LZO, and passthrough none only"),
+            "message should describe supported V1 e2compr scope, got: {message}"
+        );
+        assert!(
+            message.contains(operation),
+            "message should name the rejected operation, got: {message}"
+        );
+        assert!(
+            !message.contains("not implemented"),
+            "legacy codec exclusion must not look like an undocumented stub: {message}"
+        );
+    }
+
     #[test]
     fn e2compr_decompress_unsupported_method() {
-        let result = OpenFs::e2compr_decompress(31, b"data", 4);
-        assert!(result.is_err());
+        let err = OpenFs::e2compr_decompress(31, b"data", 4).expect_err("method 31 rejects");
+        let message = if let FfsError::UnsupportedFeature(message) = err {
+            message
+        } else {
+            String::new()
+        };
+        assert!(
+            !message.is_empty(),
+            "expected UnsupportedFeature for unsupported e2compr method"
+        );
+        assert!(message.contains("unsupported method index 31"));
+        assert!(!message.contains("not implemented"));
+    }
+
+    #[test]
+    fn e2compr_rare_legacy_codecs_are_explicit_v1_exclusions() {
+        for (method_idx, codec) in [(0, "lzv1"), (4, "bzip2"), (8, "lzrw3a")] {
+            let err = OpenFs::e2compr_decompress(method_idx, b"data", 4)
+                .expect_err("rare legacy decompression codec rejects");
+            assert_e2compr_legacy_exclusion(err, method_idx, codec, "decompression");
+
+            let err = OpenFs::e2compr_compress(method_idx, b"data")
+                .expect_err("rare legacy compression codec rejects");
+            assert_e2compr_legacy_exclusion(err, method_idx, codec, "compression");
+        }
     }
 
     #[test]

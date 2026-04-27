@@ -4718,10 +4718,12 @@ uncompressed cluster rewrite when compression does not help.
 This support is intentionally scoped to the e2compr formats currently
 implemented in code: gzip, LZO, and the passthrough "none" modes used by the
 legacy method table. Rare legacy codecs such as lzv1, lzrw3a, and bzip2 remain
-deterministically rejected as unsupported. The canonical parity claim is
-therefore no longer "mount accepts but inode reads fail"; instead, the tracked
-V1 contract is implemented ext4 e2compr read/write compatibility with explicit
-rejection for unimplemented rare codecs.
+deterministically rejected as unsupported with codec-specific `EOPNOTSUPP`
+errors. Concretely, method index 0 (`lzv1`), index 4 (`bzip2`), and index 8
+(`lzrw3a`) are explicit V1 exclusions for both compression and decompression.
+The canonical parity claim is therefore no longer "mount accepts but inode
+reads fail"; instead, the tracked V1 contract is implemented ext4 e2compr
+read/write compatibility with explicit rejection for excluded rare codecs.
 
 ---
 ## 16. Implementation Phases
