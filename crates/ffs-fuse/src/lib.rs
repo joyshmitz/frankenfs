@@ -958,30 +958,23 @@ impl FuseInodeLocks {
         ordered.sort_unstable_by_key(|ino| ino.0);
         ordered.dedup();
 
-        let entries: Vec<(InodeNumber, Arc<FuseInodeLock>)> = {
-            let mut table = match self.table.try_lock() {
-                Ok(guard) => guard,
-                Err(TryLockError::Poisoned(poisoned)) => {
-                    warn!("FuseInodeLocks table poisoned during try_acquire, recovering");
-                    poisoned.into_inner()
-                }
-                Err(TryLockError::WouldBlock) => return None,
+        let mut guards = Vec::with_capacity(ordered.len());
+        for ino in ordered {
+            let lock = {
+                let mut table = match self.table.try_lock() {
+                    Ok(guard) => guard,
+                    Err(TryLockError::Poisoned(poisoned)) => {
+                        warn!("FuseInodeLocks table poisoned during try_acquire, recovering");
+                        poisoned.into_inner()
+                    }
+                    Err(TryLockError::WouldBlock) => return None,
+                };
+                Arc::clone(
+                    table
+                        .entry(ino)
+                        .or_insert_with(|| Arc::new(FuseInodeLock::default())),
+                )
             };
-            ordered
-                .into_iter()
-                .map(|ino| {
-                    let lock = Arc::clone(
-                        table
-                            .entry(ino)
-                            .or_insert_with(|| Arc::new(FuseInodeLock::default())),
-                    );
-                    (ino, lock)
-                })
-                .collect()
-        };
-
-        let mut guards = Vec::with_capacity(entries.len());
-        for (ino, lock) in entries {
             guards.push(lock.try_acquire(ino, Arc::clone(self))?);
         }
 
@@ -12554,6 +12547,31 @@ CUSTOM("congestion_threshold=3")"#;
             locks.table_len(),
             0,
             "sequential acquire/drop of 100K inodes must not accumulate"
+        );
+    }
+
+    #[test]
+    fn fuse_inode_locks_try_acquire_failure_does_not_preinsert_idle_entries() {
+        let locks = Arc::new(FuseInodeLocks::default());
+        let held_guard = locks.acquire(&[InodeNumber(1)]);
+
+        assert!(
+            locks
+                .try_acquire(&[InodeNumber(1), InodeNumber(2)])
+                .is_none(),
+            "try_acquire should fail while the first inode is already held"
+        );
+        assert_eq!(
+            locks.table_len(),
+            1,
+            "failed try_acquire must not retain an idle entry for an inode it never acquired"
+        );
+
+        drop(held_guard);
+        assert_eq!(
+            locks.table_len(),
+            0,
+            "the original held inode should still evict on final guard drop"
         );
     }
 
