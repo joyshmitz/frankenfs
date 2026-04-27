@@ -451,11 +451,44 @@ impl ShardedMvccStore {
         }
     }
 
+    fn next_txn_id(&self) -> Result<TxnId, CommitError> {
+        match self
+            .next_txn
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if (1..u64::MAX).contains(&current) {
+                    Some(current + 1)
+                } else {
+                    None
+                }
+            }) {
+            Ok(prev) => Ok(TxnId(prev)),
+            Err(current) => Err(CommitError::DurabilityFailure {
+                detail: format!("transaction id exhausted at {current}"),
+            }),
+        }
+    }
+
     /// Begin a new transaction at the current snapshot.
-    pub fn begin(&self) -> Transaction {
-        let id = TxnId(self.next_txn.fetch_add(1, Ordering::SeqCst));
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommitError::DurabilityFailure`] if the transaction ID
+    /// allocator is exhausted or has reached an invalid sentinel state.
+    pub fn try_begin(&self) -> Result<Transaction, CommitError> {
+        let id = self.next_txn_id()?;
         let snapshot = self.current_snapshot();
-        Transaction::new(id, snapshot)
+        Ok(Transaction::new(id, snapshot))
+    }
+
+    /// Begin a new transaction at the current snapshot.
+    ///
+    /// If the transaction ID allocator is exhausted, this compatibility entry
+    /// point returns a sentinel transaction that [`Self::commit`] rejects before
+    /// any writes are installed. Use [`Self::try_begin`] when callers need to
+    /// handle exhaustion explicitly at begin time.
+    pub fn begin(&self) -> Transaction {
+        self.try_begin()
+            .unwrap_or_else(|_| Transaction::new(TxnId(u64::MAX), self.current_snapshot()))
     }
 
     /// The latest commit sequence for a block (per-shard query).
@@ -489,6 +522,15 @@ impl ShardedMvccStore {
     /// Shard locks are acquired in sorted order to prevent deadlocks.
     #[allow(clippy::result_large_err)]
     pub fn commit(&self, txn: Transaction) -> Result<CommitSeq, (CommitError, Transaction)> {
+        if txn.id().0 == 0 || txn.id().0 == u64::MAX {
+            return Err((
+                CommitError::DurabilityFailure {
+                    detail: format!("invalid transaction id {}", txn.id().0),
+                },
+                txn,
+            ));
+        }
+
         if txn.write_set().is_empty() {
             // Read-only transaction: nothing to commit.
             return Ok(self.current_snapshot().high);
@@ -913,6 +955,62 @@ mod tests {
         }
 
         assert_eq!(store.current_snapshot().high, CommitSeq(0));
+    }
+
+    #[test]
+    fn transaction_id_exhaustion_returns_error_without_wrap() {
+        let store = make_store(1);
+        store.next_txn.store(u64::MAX - 1, Ordering::SeqCst);
+
+        let txn = store.try_begin().expect("last transaction id");
+        assert_eq!(txn.id(), TxnId(u64::MAX - 1));
+        assert_eq!(store.next_txn.load(Ordering::SeqCst), u64::MAX);
+
+        let err = store
+            .try_begin()
+            .expect_err("transaction id allocator should be exhausted");
+        match err {
+            CommitError::DurabilityFailure { detail } => {
+                assert!(detail.contains("transaction id exhausted"));
+            }
+            other => assert!(
+                matches!(other, CommitError::DurabilityFailure { .. }),
+                "unexpected error: {other:?}"
+            ),
+        }
+        assert_eq!(store.next_txn.load(Ordering::SeqCst), u64::MAX);
+
+        let mut sentinel = store.begin();
+        assert_eq!(sentinel.id(), TxnId(u64::MAX));
+        sentinel.stage_write(BlockNumber(7), vec![0xA5]);
+        let (err, _) = store
+            .commit(sentinel)
+            .expect_err("sentinel transaction id should not commit");
+        match err {
+            CommitError::DurabilityFailure { detail } => {
+                assert!(detail.contains("invalid transaction id"));
+            }
+            other => assert!(
+                matches!(other, CommitError::DurabilityFailure { .. }),
+                "unexpected error: {other:?}"
+            ),
+        }
+        assert_eq!(store.current_snapshot().high, CommitSeq(0));
+
+        store.next_txn.store(0, Ordering::SeqCst);
+        let err = store
+            .try_begin()
+            .expect_err("zero transaction id state should fail closed");
+        match err {
+            CommitError::DurabilityFailure { detail } => {
+                assert!(detail.contains("transaction id exhausted"));
+            }
+            other => assert!(
+                matches!(other, CommitError::DurabilityFailure { .. }),
+                "unexpected error: {other:?}"
+            ),
+        }
+        assert_eq!(store.next_txn.load(Ordering::SeqCst), 0);
     }
 
     #[test]
