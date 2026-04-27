@@ -3646,6 +3646,66 @@ pub struct SendStreamParseResult {
     pub commands: Vec<SendStreamCommand>,
 }
 
+const BTRFS_SEND_CRC32C_POLY: u32 = 0x82F6_3B78;
+
+fn btrfs_send_crc32c(seed: u32, data: &[u8]) -> u32 {
+    let mut crc = seed;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ BTRFS_SEND_CRC32C_POLY
+            };
+        }
+    }
+    crc
+}
+
+fn send_stream_command_crc32c(command: &[u8]) -> u32 {
+    let mut crc = btrfs_send_crc32c(0, &command[..6]);
+    crc = btrfs_send_crc32c(crc, &[0_u8; 4]);
+    btrfs_send_crc32c(crc, &command[10..])
+}
+
+fn parse_send_stream_attrs(
+    cmd_data: &[u8],
+    cmd_data_start: usize,
+) -> Result<Vec<(u16, Vec<u8>)>, ffs_types::ParseError> {
+    let mut attrs = Vec::new();
+    let mut attr_pos = 0;
+    while attr_pos + 4 <= cmd_data.len() {
+        let attr_type = u16::from_le_bytes([cmd_data[attr_pos], cmd_data[attr_pos + 1]]);
+        let attr_len =
+            u16::from_le_bytes([cmd_data[attr_pos + 2], cmd_data[attr_pos + 3]]) as usize;
+        attr_pos += 4;
+        let Some(attr_end) = attr_pos.checked_add(attr_len) else {
+            return Err(ffs_types::ParseError::InvalidField {
+                field: "send_stream_attr_len",
+                reason: "overflow",
+            });
+        };
+        if attr_end > cmd_data.len() {
+            return Err(ffs_types::ParseError::InsufficientData {
+                needed: attr_len,
+                offset: cmd_data_start + attr_pos,
+                actual: cmd_data.len().saturating_sub(attr_pos),
+            });
+        }
+        attrs.push((attr_type, cmd_data[attr_pos..attr_end].to_vec()));
+        attr_pos = attr_end;
+    }
+    if attr_pos != cmd_data.len() {
+        return Err(ffs_types::ParseError::InsufficientData {
+            needed: 4,
+            offset: cmd_data_start + attr_pos,
+            actual: cmd_data.len().saturating_sub(attr_pos),
+        });
+    }
+    Ok(attrs)
+}
+
 /// Parse a btrfs send stream from raw bytes.
 ///
 /// The send stream format is:
@@ -3675,11 +3735,13 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
     let mut saw_end = false;
 
     while pos + 10 <= data.len() {
+        let command_start = pos;
         // Command header: len(u32), cmd(u16), crc32(u32)
         let cmd_len =
             u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let cmd_type = u16::from_le_bytes([data[pos + 4], data[pos + 5]]);
-        // Skip crc32 at pos+6..pos+10
+        let expected_crc =
+            u32::from_le_bytes([data[pos + 6], data[pos + 7], data[pos + 8], data[pos + 9]]);
         pos += 10;
 
         let cmd_data_start = pos;
@@ -3697,52 +3759,24 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
             });
         }
 
+        let computed_crc = send_stream_command_crc32c(&data[command_start..cmd_end]);
+        if computed_crc != expected_crc {
+            return Err(ffs_types::ParseError::InvalidField {
+                field: "send_stream_crc32c",
+                reason: "command crc32c mismatch",
+            });
+        }
+
         let cmd_data = &data[pos..cmd_end];
         pos = cmd_end;
 
         let cmd = SendCommand::from_u16(cmd_type).unwrap_or(SendCommand::Unspec);
+        let attrs = parse_send_stream_attrs(cmd_data, cmd_data_start)?;
+        commands.push(SendStreamCommand { cmd, attrs });
         if cmd == SendCommand::End {
-            commands.push(SendStreamCommand {
-                cmd,
-                attrs: Vec::new(),
-            });
             saw_end = true;
             break;
         }
-
-        // Parse attributes within command data.
-        let mut attrs = Vec::new();
-        let mut attr_pos = 0;
-        while attr_pos + 4 <= cmd_data.len() {
-            let attr_type = u16::from_le_bytes([cmd_data[attr_pos], cmd_data[attr_pos + 1]]);
-            let attr_len =
-                u16::from_le_bytes([cmd_data[attr_pos + 2], cmd_data[attr_pos + 3]]) as usize;
-            attr_pos += 4;
-            let Some(attr_end) = attr_pos.checked_add(attr_len) else {
-                return Err(ffs_types::ParseError::InvalidField {
-                    field: "send_stream_attr_len",
-                    reason: "overflow",
-                });
-            };
-            if attr_end > cmd_data.len() {
-                return Err(ffs_types::ParseError::InsufficientData {
-                    needed: attr_len,
-                    offset: cmd_data_start + attr_pos,
-                    actual: cmd_data.len().saturating_sub(attr_pos),
-                });
-            }
-            attrs.push((attr_type, cmd_data[attr_pos..attr_end].to_vec()));
-            attr_pos = attr_end;
-        }
-        if attr_pos != cmd_data.len() {
-            return Err(ffs_types::ParseError::InsufficientData {
-                needed: 4,
-                offset: cmd_data_start + attr_pos,
-                actual: cmd_data.len().saturating_sub(attr_pos),
-            });
-        }
-
-        commands.push(SendStreamCommand { cmd, attrs });
     }
 
     if pos < data.len() {
@@ -9720,10 +9754,13 @@ mod tests {
     fn append_send_command(data: &mut Vec<u8>, cmd: u16, payload: &[u8]) {
         let payload_len =
             u32::try_from(payload.len()).expect("test send command payload length fits u32");
+        let command_start = data.len();
         data.extend_from_slice(&payload_len.to_le_bytes());
         data.extend_from_slice(&cmd.to_le_bytes());
         data.extend_from_slice(&0_u32.to_le_bytes());
         data.extend_from_slice(payload);
+        let crc = send_stream_command_crc32c(&data[command_start..]);
+        data[command_start + 6..command_start + 10].copy_from_slice(&crc.to_le_bytes());
     }
 
     fn append_send_attr(payload: &mut Vec<u8>, attr_type: u16, attr_data: &[u8]) {
@@ -9736,13 +9773,8 @@ mod tests {
 
     #[test]
     fn parse_send_stream_minimal() {
-        let mut data = Vec::new();
-        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
-        data.extend_from_slice(&1_u32.to_le_bytes()); // version 1
-        // END command: len=0, cmd=21, crc=0
-        data.extend_from_slice(&0_u32.to_le_bytes()); // len
-        data.extend_from_slice(&21_u16.to_le_bytes()); // cmd = End
-        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
+        let mut data = make_send_stream_data();
+        append_send_command(&mut data, SendCommand::End as u16, &[]);
 
         let result = parse_send_stream(&data).unwrap();
         assert_eq!(result.version, 1);
@@ -9779,37 +9811,48 @@ mod tests {
         partial_header.extend_from_slice(&[0xaa; 9]);
         assert_insufficient_data(parse_send_stream(&partial_header), 10, 27, 9);
 
+        let mut end_payload = Vec::new();
+        append_send_attr(&mut end_payload, 15, b"x");
         let mut end_with_payload = make_send_stream_data();
-        append_send_command(&mut end_with_payload, 21, b"ignored");
-        let parsed = parse_send_stream(&end_with_payload).expect("parse end command payload");
+        append_send_command(&mut end_with_payload, 21, &end_payload);
+        let parsed = parse_send_stream(&end_with_payload).expect("parse end command TLV payload");
         assert_eq!(parsed.commands.len(), 1);
         assert_eq!(parsed.commands[0].cmd, SendCommand::End);
-        assert!(parsed.commands[0].attrs.is_empty());
+        assert_eq!(parsed.commands[0].attrs, vec![(15, b"x".to_vec())]);
+    }
+
+    #[test]
+    fn parse_send_stream_rejects_crc_mismatch() {
+        let mut data = make_send_stream_data();
+        append_send_command(&mut data, SendCommand::End as u16, &[]);
+        data[23] ^= 0x01;
+
+        let err = parse_send_stream(&data).unwrap_err();
+        assert!(matches!(err, ffs_types::ParseError::InvalidField { .. }));
+    }
+
+    #[test]
+    fn parse_send_stream_rejects_malformed_end_payload() {
+        let mut data = make_send_stream_data();
+        append_send_command(&mut data, SendCommand::End as u16, b"bad");
+
+        let err = parse_send_stream(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            ffs_types::ParseError::InsufficientData { .. }
+        ));
     }
 
     #[test]
     #[allow(clippy::cast_possible_truncation)]
     fn parse_send_stream_with_mkdir() {
-        let mut data = Vec::new();
-        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
-        data.extend_from_slice(&1_u32.to_le_bytes()); // version 1
-
         // MKDIR command with path attribute
         let path = b"/testdir";
-        let attr_data_len = 4 + path.len(); // attr header (4) + path bytes
-        // Command header
-        data.extend_from_slice(&(attr_data_len as u32).to_le_bytes()); // len
-        data.extend_from_slice(&4_u16.to_le_bytes()); // cmd = Mkdir
-        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
-        // Path attribute: type=15 (Path), len=8
-        data.extend_from_slice(&15_u16.to_le_bytes());
-        data.extend_from_slice(&(path.len() as u16).to_le_bytes());
-        data.extend_from_slice(path);
-
-        // END command
-        data.extend_from_slice(&0_u32.to_le_bytes());
-        data.extend_from_slice(&21_u16.to_le_bytes());
-        data.extend_from_slice(&0_u32.to_le_bytes());
+        let mut payload = Vec::new();
+        append_send_attr(&mut payload, 15, path);
+        let mut data = make_send_stream_data();
+        append_send_command(&mut data, SendCommand::Mkdir as u16, &payload);
+        append_send_command(&mut data, SendCommand::End as u16, &[]);
 
         let result = parse_send_stream(&data).unwrap();
         assert_eq!(result.commands.len(), 2);
@@ -9858,16 +9901,12 @@ mod tests {
 
     #[test]
     fn parse_send_stream_rejects_truncated_attribute() {
-        let mut data = Vec::new();
-        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
-        data.extend_from_slice(&1_u32.to_le_bytes());
-
         // Command with attribute header but missing attribute payload.
-        data.extend_from_slice(&4_u32.to_le_bytes()); // cmd_len (attr header only)
-        data.extend_from_slice(&4_u16.to_le_bytes()); // cmd = Mkdir
-        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
-        data.extend_from_slice(&15_u16.to_le_bytes()); // attr type = Path
-        data.extend_from_slice(&8_u16.to_le_bytes()); // attr len (missing payload)
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&15_u16.to_le_bytes()); // attr type = Path
+        payload.extend_from_slice(&8_u16.to_le_bytes()); // attr len (missing payload)
+        let mut data = make_send_stream_data();
+        append_send_command(&mut data, SendCommand::Mkdir as u16, &payload);
 
         let err = parse_send_stream(&data).unwrap_err();
         assert!(matches!(
@@ -9878,14 +9917,8 @@ mod tests {
 
     #[test]
     fn parse_send_stream_rejects_truncated_attribute_header() {
-        let mut data = Vec::new();
-        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
-        data.extend_from_slice(&1_u32.to_le_bytes());
-
-        data.extend_from_slice(&2_u32.to_le_bytes()); // cmd_len (partial attr header)
-        data.extend_from_slice(&4_u16.to_le_bytes()); // cmd = Mkdir
-        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
-        data.extend_from_slice(&[0x11, 0x22]); // partial attribute header
+        let mut data = make_send_stream_data();
+        append_send_command(&mut data, SendCommand::Mkdir as u16, &[0x11, 0x22]);
 
         let err = parse_send_stream(&data).unwrap_err();
         assert!(matches!(
@@ -9896,12 +9929,8 @@ mod tests {
 
     #[test]
     fn parse_send_stream_rejects_trailing_bytes_after_end() {
-        let mut data = Vec::new();
-        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
-        data.extend_from_slice(&1_u32.to_le_bytes());
-        data.extend_from_slice(&0_u32.to_le_bytes()); // cmd_len
-        data.extend_from_slice(&21_u16.to_le_bytes()); // cmd = End
-        data.extend_from_slice(&0_u32.to_le_bytes()); // crc
+        let mut data = make_send_stream_data();
+        append_send_command(&mut data, SendCommand::End as u16, &[]);
         data.extend_from_slice(&[0xEE, 0xFF]); // trailing bytes
 
         let err = parse_send_stream(&data).unwrap_err();

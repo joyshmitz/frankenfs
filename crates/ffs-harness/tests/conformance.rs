@@ -2598,10 +2598,28 @@ fn ext4_fast_commit_truncated_stream_falls_back_to_jbd2_only() {
     assert_eq!(&target[..16], b"JBD2-REPLAY-TEST");
 }
 
+const BTRFS_SEND_CRC32C_POLY: u32 = 0x82F6_3B78;
+
+fn btrfs_send_crc32c(seed: u32, data: &[u8]) -> u32 {
+    let mut crc = seed;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ BTRFS_SEND_CRC32C_POLY
+            };
+        }
+    }
+    crc
+}
+
 fn append_send_stream_command(stream: &mut Vec<u8>, cmd: u16, attrs: &[(u16, &[u8])]) {
     let payload_len: usize = attrs.iter().map(|(_, value)| 4 + value.len()).sum();
     let payload_len =
         u32::try_from(payload_len).expect("send stream command payload length fits u32");
+    let command_start = stream.len();
     stream.extend_from_slice(&payload_len.to_le_bytes());
     stream.extend_from_slice(&cmd.to_le_bytes());
     stream.extend_from_slice(&0_u32.to_le_bytes());
@@ -2611,6 +2629,10 @@ fn append_send_stream_command(stream: &mut Vec<u8>, cmd: u16, attrs: &[(u16, &[u
         stream.extend_from_slice(&value_len.to_le_bytes());
         stream.extend_from_slice(value);
     }
+    let mut crc = btrfs_send_crc32c(0, &stream[command_start..command_start + 6]);
+    crc = btrfs_send_crc32c(crc, &[0_u8; 4]);
+    crc = btrfs_send_crc32c(crc, &stream[command_start + 10..]);
+    stream[command_start + 6..command_start + 10].copy_from_slice(&crc.to_le_bytes());
 }
 
 const BTRFS_TEST_NODESIZE: u32 = 4096;
