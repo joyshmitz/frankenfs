@@ -427,6 +427,41 @@ fn dir_item_empty_name_length_2_roundtrips() {
 }
 
 #[test]
+fn dir_item_zero_name_len_rejected() {
+    let payload = vec![0u8; 30];
+    let err = parse_dir_items(&payload).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_item.name_len",
+                reason: "must be non-zero"
+            }
+        ),
+        "expected zero dir-item name rejection, got {err:?}"
+    );
+
+    let item = BtrfsDirItem {
+        child_objectid: 256,
+        child_key_type: 1,
+        child_key_offset: 0,
+        file_type: 2,
+        name: Vec::new(),
+    };
+    let err = item.try_to_bytes().unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_item.name_len",
+                reason: "must be non-zero"
+            }
+        ),
+        "expected zero dir-item encoder rejection, got {err:?}"
+    );
+}
+
+#[test]
 fn dir_item_nonzero_data_len_rejected() {
     let item = BtrfsDirItem {
         child_objectid: 257,
@@ -518,6 +553,38 @@ fn inode_ref_long_name_255_bytes_roundtrips() {
     assert_eq!(bytes.len(), 10 + 255);
     let decoded = parse_inode_refs(&bytes).expect("parse 255-byte-name inode_ref");
     assert_eq!(decoded, vec![item]);
+}
+
+#[test]
+fn inode_ref_zero_name_len_rejected() {
+    let payload = vec![0u8; 10];
+    let err = parse_inode_refs(&payload).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "inode_ref.name_len",
+                reason: "must be non-zero"
+            }
+        ),
+        "expected zero inode-ref name rejection, got {err:?}"
+    );
+
+    let item = BtrfsInodeRef {
+        index: 1,
+        name: Vec::new(),
+    };
+    let err = item.try_to_bytes().unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "inode_ref.name_len",
+                reason: "must be non-zero"
+            }
+        ),
+        "expected zero inode-ref encoder rejection, got {err:?}"
+    );
 }
 
 // EXTENT_DATA (inline and regular)
@@ -726,6 +793,22 @@ fn xattr_item_empty_value_parses_as_zero_length_value() {
             name: name.to_vec(),
             value: Vec::new(),
         }]
+    );
+}
+
+#[test]
+fn xattr_item_zero_name_len_rejected() {
+    let payload = vec![0u8; 30];
+    let err = parse_xattr_items(&payload).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "xattr.name_len",
+                reason: "must be non-zero"
+            }
+        ),
+        "expected zero xattr name rejection, got {err:?}"
     );
 }
 

@@ -175,6 +175,12 @@ impl BtrfsInodeRef {
 }
 
 fn btrfs_name_len_u16(len: usize, field: &'static str) -> Result<u16, ParseError> {
+    if len == 0 {
+        return Err(ParseError::InvalidField {
+            field,
+            reason: "must be non-zero",
+        });
+    }
     u16::try_from(len).map_err(|_| ParseError::InvalidField {
         field,
         reason: "name length exceeds u16::MAX",
@@ -394,6 +400,12 @@ pub fn parse_xattr_items(data: &[u8]) -> Result<Vec<BtrfsXattrItem>, ParseError>
         }
         let data_len = usize::from(read_u16(data, cur + 25, "xattr.data_len")?);
         let name_len = usize::from(read_u16(data, cur + 27, "xattr.name_len")?);
+        if name_len == 0 {
+            return Err(ParseError::InvalidField {
+                field: "xattr.name_len",
+                reason: "must be non-zero",
+            });
+        }
 
         let name_start = cur + HEADER;
         let name_end = name_start
@@ -709,6 +721,12 @@ pub fn parse_inode_refs(data: &[u8]) -> Result<Vec<BtrfsInodeRef>, ParseError> {
 
         let index = read_u64(data, cur, "inode_ref.index")?;
         let name_len = usize::from(read_u16(data, cur + 8, "inode_ref.name_len")?);
+        if name_len == 0 {
+            return Err(ParseError::InvalidField {
+                field: "inode_ref.name_len",
+                reason: "must be non-zero",
+            });
+        }
         let name_start = cur + HEADER;
         let name_end = name_start
             .checked_add(name_len)
@@ -1002,6 +1020,12 @@ pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
         let data_len = usize::from(read_u16(data, cur + 25, "dir_item.data_len")?);
         let name_len = usize::from(read_u16(data, cur + 27, "dir_item.name_len")?);
         let file_type = data[cur + 29];
+        if name_len == 0 {
+            return Err(ParseError::InvalidField {
+                field: "dir_item.name_len",
+                reason: "must be non-zero",
+            });
+        }
         if data_len != 0 {
             return Err(ParseError::InvalidField {
                 field: "dir_item.data_len",
@@ -6525,6 +6549,13 @@ mod tests {
 
         assert_insufficient_data(parse_dir_items(&[0_u8; 29]), 30, 0, 29);
 
+        let empty_name = vec![0_u8; 30];
+        assert_invalid_field(
+            parse_dir_items(&empty_name),
+            "dir_item.name_len",
+            "must be non-zero",
+        );
+
         let mut name_overflow = vec![0_u8; 30];
         name_overflow[27..29].copy_from_slice(&5_u16.to_le_bytes());
         assert_insufficient_data(parse_dir_items(&name_overflow), 35, 0, 30);
@@ -6556,6 +6587,13 @@ mod tests {
         );
 
         assert_insufficient_data(parse_xattr_items(&[0_u8; 29]), 30, 0, 29);
+
+        let empty_name = vec![0_u8; 30];
+        assert_invalid_field(
+            parse_xattr_items(&empty_name),
+            "xattr.name_len",
+            "must be non-zero",
+        );
 
         let mut name_overflow = vec![0_u8; 30];
         name_overflow[27..29].copy_from_slice(&5_u16.to_le_bytes());
@@ -6785,6 +6823,25 @@ mod tests {
     }
 
     #[test]
+    fn inode_ref_try_to_bytes_rejects_empty_name() {
+        let original = BtrfsInodeRef {
+            index: 42,
+            name: Vec::new(),
+        };
+
+        let err = original
+            .try_to_bytes()
+            .expect_err("empty inode_ref name should fail before encoding");
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "inode_ref.name_len",
+                reason: "must be non-zero",
+            }
+        ));
+    }
+
+    #[test]
     fn inode_item_round_trip() {
         let original = BtrfsInodeItem {
             generation: 42,
@@ -6858,6 +6915,28 @@ mod tests {
             ParseError::InvalidField {
                 field: "dir_item.name_len",
                 reason: "name length exceeds u16::MAX",
+            }
+        ));
+    }
+
+    #[test]
+    fn dir_item_try_to_bytes_rejects_empty_name() {
+        let original = BtrfsDirItem {
+            child_objectid: 258,
+            child_key_type: BTRFS_ITEM_INODE_ITEM,
+            child_key_offset: 0,
+            file_type: BTRFS_FT_REG_FILE,
+            name: Vec::new(),
+        };
+
+        let err = original
+            .try_to_bytes()
+            .expect_err("empty dir_item name should fail before encoding");
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_item.name_len",
+                reason: "must be non-zero",
             }
         ));
     }
