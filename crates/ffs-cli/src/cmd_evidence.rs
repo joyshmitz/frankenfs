@@ -301,7 +301,8 @@ struct SummaryAccumulator {
 impl SummaryAccumulator {
     fn ingest(&mut self, record: &EvidenceRecord) {
         let name = evidence_event_type_name(record.event_type);
-        *self.event_type_counts.entry(name.to_owned()).or_insert(0) += 1;
+        let event_count = self.event_type_counts.entry(name.to_owned()).or_insert(0);
+        Self::increment_usize(event_count);
 
         let ts = record.timestamp_ns;
         self.min_ts = Some(self.min_ts.map_or(ts, |m: u64| m.min(ts)));
@@ -313,37 +314,53 @@ impl SummaryAccumulator {
 
         match record.event_type {
             EvidenceEventType::WalRecovery => {
-                self.recovery_count += 1;
+                Self::increment_usize(&mut self.recovery_count);
                 if let Some(w) = record.wal_recovery.as_ref() {
-                    self.total_commits_replayed += w.commits_replayed;
-                    self.total_records_discarded += w.records_discarded;
+                    Self::add_u64(&mut self.total_commits_replayed, w.commits_replayed);
+                    Self::add_u64(&mut self.total_records_discarded, w.records_discarded);
                 }
             }
-            EvidenceEventType::TxnAborted => self.aborts += 1,
-            EvidenceEventType::SerializationConflict => self.conflicts += 1,
+            EvidenceEventType::TxnAborted => Self::increment_usize(&mut self.aborts),
+            EvidenceEventType::SerializationConflict => Self::increment_usize(&mut self.conflicts),
             EvidenceEventType::CorruptionDetected => {
-                self.corruptions_detected += 1;
+                Self::increment_usize(&mut self.corruptions_detected);
                 if let Some(c) = record.corruption.as_ref() {
-                    self.total_blocks_corrupt += u64::from(c.blocks_affected);
+                    Self::add_u64(&mut self.total_blocks_corrupt, u64::from(c.blocks_affected));
                 }
             }
-            EvidenceEventType::RepairAttempted => self.repairs_attempted += 1,
-            EvidenceEventType::RepairSucceeded => self.repairs_succeeded += 1,
-            EvidenceEventType::RepairFailed => self.repairs_failed += 1,
-            EvidenceEventType::ScrubCycleComplete => self.scrub_cycles += 1,
-            EvidenceEventType::BackpressureActivated => self.backpressure_events += 1,
+            EvidenceEventType::RepairAttempted => {
+                Self::increment_usize(&mut self.repairs_attempted);
+            }
+            EvidenceEventType::RepairSucceeded => {
+                Self::increment_usize(&mut self.repairs_succeeded);
+            }
+            EvidenceEventType::RepairFailed => {
+                Self::increment_usize(&mut self.repairs_failed);
+            }
+            EvidenceEventType::ScrubCycleComplete => Self::increment_usize(&mut self.scrub_cycles),
+            EvidenceEventType::BackpressureActivated => {
+                Self::increment_usize(&mut self.backpressure_events);
+            }
             EvidenceEventType::FlushBatch => {
-                self.flush_batches += 1;
+                Self::increment_usize(&mut self.flush_batches);
                 if let Some(f) = record.flush_batch.as_ref() {
-                    self.total_blocks_flushed += f.blocks_flushed;
+                    Self::add_u64(&mut self.total_blocks_flushed, f.blocks_flushed);
                 }
             }
             EvidenceEventType::DurabilityPolicyChanged
             | EvidenceEventType::RefreshPolicyChanged => {
-                self.policy_changes += 1;
+                Self::increment_usize(&mut self.policy_changes);
             }
             _ => {}
         }
+    }
+
+    fn increment_usize(counter: &mut usize) {
+        *counter = counter.saturating_add(1);
+    }
+
+    fn add_u64(total: &mut u64, delta: u64) {
+        *total = total.saturating_add(delta);
     }
 
     fn finalize(mut self, total: usize, preset: Option<&str>) -> EvidenceSummary {
@@ -1367,8 +1384,12 @@ mod tests {
     use super::{
         PRESET_CACHE, PRESET_CONTENTION, PRESET_METRICS, PRESET_MVCC, PRESET_PRESSURE_TRANSITIONS,
         PRESET_REPAIR_FAILURES, PRESET_REPAIR_LIVE, PRESET_REPLAY_ANOMALIES, PresetMode,
-        validate_evidence_args,
+        SummaryAccumulator, evidence_event_type_name, validate_evidence_args,
     };
+    use ffs_repair::evidence::{
+        CorruptionDetail, EvidenceEventType, EvidenceRecord, FlushBatchDetail, WalRecoveryDetail,
+    };
+    use std::collections::BTreeMap;
 
     #[test]
     fn validate_evidence_args_rejects_unknown_preset() {
@@ -1489,5 +1510,148 @@ mod tests {
             ),
             "no-preset validation path should not classify as a preset mode"
         );
+    }
+
+    #[test]
+    fn summary_accumulator_saturates_numeric_limits() {
+        let maxed_events = [
+            EvidenceEventType::WalRecovery,
+            EvidenceEventType::TxnAborted,
+            EvidenceEventType::SerializationConflict,
+            EvidenceEventType::CorruptionDetected,
+            EvidenceEventType::RepairAttempted,
+            EvidenceEventType::RepairSucceeded,
+            EvidenceEventType::RepairFailed,
+            EvidenceEventType::ScrubCycleComplete,
+            EvidenceEventType::BackpressureActivated,
+            EvidenceEventType::FlushBatch,
+            EvidenceEventType::DurabilityPolicyChanged,
+            EvidenceEventType::RefreshPolicyChanged,
+        ];
+        let mut accumulator = SummaryAccumulator {
+            event_type_counts: maxed_events
+                .iter()
+                .map(|event_type| (evidence_event_type_name(*event_type).to_owned(), usize::MAX))
+                .collect::<BTreeMap<_, _>>(),
+            recovery_count: usize::MAX,
+            total_commits_replayed: u64::MAX,
+            total_records_discarded: u64::MAX,
+            aborts: usize::MAX,
+            conflicts: usize::MAX,
+            corruptions_detected: usize::MAX,
+            repairs_attempted: usize::MAX,
+            repairs_succeeded: usize::MAX,
+            repairs_failed: usize::MAX,
+            scrub_cycles: usize::MAX,
+            total_blocks_corrupt: u64::MAX,
+            backpressure_events: usize::MAX,
+            flush_batches: usize::MAX,
+            total_blocks_flushed: u64::MAX,
+            policy_changes: usize::MAX,
+            ..SummaryAccumulator::default()
+        };
+
+        let mut wal_recovery = bare_record(1, EvidenceEventType::WalRecovery, 0);
+        wal_recovery.wal_recovery = Some(WalRecoveryDetail {
+            commits_replayed: u64::MAX,
+            versions_replayed: 0,
+            records_discarded: u64::MAX,
+            wal_valid_bytes: 0,
+            wal_total_bytes: 0,
+            used_checkpoint: false,
+            checkpoint_commit_seq: None,
+        });
+
+        let mut corruption = bare_record(4, EvidenceEventType::CorruptionDetected, 7);
+        corruption.corruption = Some(CorruptionDetail {
+            blocks_affected: u32::MAX,
+            corruption_kind: "crc".to_owned(),
+            severity: "critical".to_owned(),
+            detail: "bad crc".to_owned(),
+        });
+
+        let mut flush_batch = bare_record(10, EvidenceEventType::FlushBatch, 0);
+        flush_batch.flush_batch = Some(FlushBatchDetail {
+            blocks_flushed: u64::MAX,
+            bytes_written: 0,
+            flush_duration_us: 0,
+        });
+
+        let records = [
+            wal_recovery,
+            bare_record(2, EvidenceEventType::TxnAborted, 0),
+            bare_record(3, EvidenceEventType::SerializationConflict, 0),
+            corruption,
+            bare_record(5, EvidenceEventType::RepairAttempted, 0),
+            bare_record(6, EvidenceEventType::RepairSucceeded, 0),
+            bare_record(7, EvidenceEventType::RepairFailed, 0),
+            bare_record(8, EvidenceEventType::ScrubCycleComplete, 0),
+            bare_record(9, EvidenceEventType::BackpressureActivated, 0),
+            flush_batch,
+            bare_record(11, EvidenceEventType::DurabilityPolicyChanged, 0),
+            bare_record(12, EvidenceEventType::RefreshPolicyChanged, 0),
+        ];
+        for record in &records {
+            accumulator.ingest(record);
+        }
+
+        for event_type in maxed_events {
+            assert_eq!(
+                accumulator.event_type_counts[evidence_event_type_name(event_type)],
+                usize::MAX
+            );
+        }
+        assert_eq!(accumulator.recovery_count, usize::MAX);
+        assert_eq!(accumulator.total_commits_replayed, u64::MAX);
+        assert_eq!(accumulator.total_records_discarded, u64::MAX);
+        assert_eq!(accumulator.aborts, usize::MAX);
+        assert_eq!(accumulator.conflicts, usize::MAX);
+        assert_eq!(accumulator.corruptions_detected, usize::MAX);
+        assert_eq!(accumulator.repairs_attempted, usize::MAX);
+        assert_eq!(accumulator.repairs_succeeded, usize::MAX);
+        assert_eq!(accumulator.repairs_failed, usize::MAX);
+        assert_eq!(accumulator.scrub_cycles, usize::MAX);
+        assert_eq!(accumulator.total_blocks_corrupt, u64::MAX);
+        assert_eq!(accumulator.backpressure_events, usize::MAX);
+        assert_eq!(accumulator.flush_batches, usize::MAX);
+        assert_eq!(accumulator.total_blocks_flushed, u64::MAX);
+        assert_eq!(accumulator.policy_changes, usize::MAX);
+        assert_eq!(accumulator.min_ts, Some(1));
+        assert_eq!(accumulator.max_ts, Some(12));
+        assert_eq!(accumulator.groups, vec![7]);
+    }
+
+    fn bare_record(
+        timestamp_ns: u64,
+        event_type: EvidenceEventType,
+        block_group: u32,
+    ) -> EvidenceRecord {
+        EvidenceRecord {
+            timestamp_ns,
+            event_type,
+            block_group,
+            block_range: None,
+            corruption: None,
+            repair: None,
+            scrub_cycle: None,
+            policy: None,
+            symbol_refresh: None,
+            wal_recovery: None,
+            transaction_commit: None,
+            txn_aborted: None,
+            serialization_conflict: None,
+            version_gc: None,
+            snapshot_advanced: None,
+            flush_batch: None,
+            backpressure_activated: None,
+            dirty_block_discarded: None,
+            durability_policy_changed: None,
+            refresh_policy_changed: None,
+            merge_proof_checked: None,
+            merge_applied: None,
+            merge_rejected: None,
+            policy_switched: None,
+            contention_sample: None,
+        }
     }
 }
