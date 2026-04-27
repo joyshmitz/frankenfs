@@ -1442,6 +1442,47 @@ def hardlink_symlink():
         "sym_target": os.readlink(sym),
     }
 
+def symlink_at_nofollow_contracts():
+    sym = os.path.join(base, "sym.txt")
+    result = {
+        "follow_stat": stable_stat(sym),
+        "lstat": stable_stat(sym, follow=False),
+        "open_symlink_nofollow": capture_error(
+            "open_symlink_nofollow",
+            lambda: os.close(os.open(sym, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))),
+        ),
+    }
+    supports_dir_fd = getattr(os, "supports_dir_fd", set())
+    if os.open in supports_dir_fd:
+        dir_fd = os.open(base, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            fd = os.open("file.txt", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dir_fd)
+            try:
+                result["regular_openat_no_follow_read"] = os.read(fd, 16).decode("ascii")
+            finally:
+                os.close(fd)
+            if os.stat in supports_dir_fd:
+                st = os.stat("sym.txt", dir_fd=dir_fd, follow_symlinks=False)
+                result["fstatat_lstat"] = {
+                    "kind": "symlink" if stat.S_ISLNK(st.st_mode) else "other",
+                    "mode": stat.S_IMODE(st.st_mode),
+                    "size": st.st_size,
+                    "nlink": st.st_nlink,
+                }
+            else:
+                result["fstatat_lstat"] = "python_stat_dir_fd_unavailable"
+            if os.readlink in supports_dir_fd:
+                result["readlinkat"] = os.readlink("sym.txt", dir_fd=dir_fd)
+            else:
+                result["readlinkat"] = "python_readlink_dir_fd_unavailable"
+        finally:
+            os.close(dir_fd)
+    else:
+        result["regular_openat_no_follow_read"] = "python_open_dir_fd_unavailable"
+        result["fstatat_lstat"] = "python_open_dir_fd_unavailable"
+        result["readlinkat"] = "python_open_dir_fd_unavailable"
+    return result
+
 def rename_unlink():
     hard = os.path.join(base, "hard.txt")
     renamed = os.path.join(base, "renamed.txt")
@@ -1534,6 +1575,7 @@ for step, func in [
     ("utime_access_openat_statvfs", utime_access_openat_statvfs),
     ("pread_pwrite_seek_fdatasync", pread_pwrite_seek_fdatasync),
     ("hardlink_symlink", hardlink_symlink),
+    ("symlink_at_nofollow_contracts", symlink_at_nofollow_contracts),
     ("rename_unlink", rename_unlink),
     ("nested_dir_rename", nested_dir_rename),
     ("mmap_write_flush", mmap_write_flush),
@@ -2920,6 +2962,43 @@ fn syscall_conformance_reference_probe_covers_fd_metadata_contracts() {
 }
 
 #[test]
+fn syscall_conformance_reference_probe_covers_symlink_at_nofollow_contracts() {
+    if !command_available("python3") {
+        eprintln!("python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let reference = reference_conformance_tempdir();
+    let report = run_syscall_conformance_probe(reference.path());
+    let records = report
+        .as_array()
+        .expect("syscall conformance report should be a JSON array");
+    let symlink_at = records
+        .iter()
+        .find(|record| record["step"].as_str() == Some("symlink_at_nofollow_contracts"))
+        .expect("missing symlink-at nofollow step in report");
+    assert_eq!(
+        symlink_at["ok"].as_bool(),
+        Some(true),
+        "symlink-at nofollow step should succeed on the reference filesystem: {symlink_at}"
+    );
+
+    let result = &symlink_at["result"];
+    assert_eq!(result["follow_stat"]["kind"].as_str(), Some("file"));
+    assert_eq!(result["follow_stat"]["size"].as_u64(), Some(3));
+    assert_eq!(result["lstat"]["kind"].as_str(), Some("symlink"));
+    assert_eq!(result["lstat"]["size"].as_u64(), Some(8));
+    assert_eq!(result["readlinkat"].as_str(), Some("file.txt"));
+    assert_eq!(
+        result["regular_openat_no_follow_read"].as_str(),
+        Some("alp")
+    );
+    assert_eq!(result["fstatat_lstat"], result["lstat"]);
+    let checks = [result["open_symlink_nofollow"].clone()];
+    assert_syscall_negative_errno(&checks, "open_symlink_nofollow", libc::ELOOP);
+}
+
+#[test]
 fn fuse_conformance_syscall_sequence_matches_linux_reference() {
     if !fuse_available() || !command_available("python3") {
         eprintln!("FUSE or python3 prerequisites not met, skipping");
@@ -2951,7 +3030,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
         Some(
-            "file_lifecycle+fd_metadata+offset_io+openat+access+statvfs+dir_ops+attrs+links+mmap+fsync+negative_errno",
+            "file_lifecycle+fd_metadata+offset_io+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
         ),
     );
 }
