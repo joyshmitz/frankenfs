@@ -1042,6 +1042,7 @@ pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
 /// Parse an EXTENT_DATA payload for regular or inline extents.
 pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
     const FIXED: usize = 21; // generation(8) + ram_bytes(8) + compression(1) + encryption(1) + other_encoding(2) + type(1)
+    const REGULAR_SIZE: usize = FIXED + 32; // disk_bytenr + disk_num_bytes + extent_offset + num_bytes
 
     if data.len() < FIXED {
         return Err(ParseError::InsufficientData {
@@ -1087,11 +1088,17 @@ pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
         }),
         BTRFS_FILE_EXTENT_REG | BTRFS_FILE_EXTENT_PREALLOC => {
             // disk_bytenr + disk_num_bytes + extent_offset + num_bytes
-            if data.len() < FIXED + 32 {
+            if data.len() < REGULAR_SIZE {
                 return Err(ParseError::InsufficientData {
-                    needed: FIXED + 32,
+                    needed: REGULAR_SIZE,
                     offset: 0,
                     actual: data.len(),
+                });
+            }
+            if data.len() > REGULAR_SIZE {
+                return Err(ParseError::InvalidField {
+                    field: "extent_data.length",
+                    reason: "trailing bytes after fixed extent payload",
                 });
             }
             Ok(BtrfsExtentData::Regular {
@@ -6591,6 +6598,14 @@ mod tests {
         let mut truncated_regular = vec![0_u8; 52];
         truncated_regular[20] = BTRFS_FILE_EXTENT_REG;
         assert_insufficient_data(parse_extent_data(&truncated_regular), 53, 0, 52);
+
+        let mut trailing_regular = prealloc.to_bytes();
+        trailing_regular.push(0);
+        assert_invalid_field(
+            parse_extent_data(&trailing_regular),
+            "extent_data.length",
+            "trailing bytes after fixed extent payload",
+        );
 
         let mut unsupported_compression = inline.to_bytes();
         unsupported_compression[16] = 0xff;

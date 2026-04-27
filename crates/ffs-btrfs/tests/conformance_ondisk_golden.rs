@@ -641,6 +641,23 @@ fn extent_data_regular_short_after_header_rejected() {
 }
 
 #[test]
+fn extent_data_regular_trailing_payload_rejected() {
+    let mut bytes = GOLDEN_EXTENT_DATA_REG.to_vec();
+    bytes.push(0xAA);
+    let err = parse_extent_data(&bytes).expect_err("trailing regular extent bytes must reject");
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "extent_data.length",
+                reason: "trailing bytes after fixed extent payload"
+            }
+        ),
+        "expected trailing-length rejection, got {err:?}"
+    );
+}
+
+#[test]
 fn extent_data_unknown_type_rejected() {
     // Valid 21-byte header with an unsupported extent type byte.
     let mut bytes = vec![0u8; 21];
