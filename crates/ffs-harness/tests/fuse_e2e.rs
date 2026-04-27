@@ -1261,6 +1261,7 @@ fn with_rw_mount_sized(image_size_bytes: u64, f: impl FnOnce(&Path)) {
 
 const SYSCALL_CONFORMANCE_SCRIPT: &str = r#"
 import json
+import errno
 import mmap
 import os
 import stat
@@ -1305,6 +1306,18 @@ def record(step, func):
             "errno": exc.errno,
             "result": None,
         })
+
+def capture_error(label, func):
+    try:
+        func()
+    except OSError as exc:
+        return {
+            "label": label,
+            "ok": False,
+            "errno": exc.errno,
+            "name": errno.errorcode.get(exc.errno, "UNKNOWN"),
+        }
+    return {"label": label, "ok": True, "errno": None, "name": None}
 
 def mkdir_base():
     os.mkdir(base, 0o755)
@@ -1464,6 +1477,23 @@ def fsync_directory():
         os.close(fd)
     return {"entries": entries(base)}
 
+def negative_errno_contracts():
+    missing = os.path.join(base, "missing.txt")
+    checks = [
+        capture_error("mkdir_existing", lambda: os.mkdir(base, 0o755)),
+        capture_error("unlink_missing", lambda: os.unlink(missing)),
+        capture_error(
+            "rename_missing",
+            lambda: os.rename(missing, os.path.join(base, "also_missing.txt")),
+        ),
+        capture_error("rmdir_nonempty", lambda: os.rmdir(os.path.join(base, "moved"))),
+    ]
+    return {
+        "checks": checks,
+        "entries": entries(base),
+        "moved_entries": entries(os.path.join(base, "moved")),
+    }
+
 def cleanup():
     os.unlink(os.path.join(base, "file.txt"))
     io_path = os.path.join(base, "io.bin")
@@ -1487,6 +1517,7 @@ for step, func in [
     ("nested_dir_rename", nested_dir_rename),
     ("mmap_write_flush", mmap_write_flush),
     ("fsync_directory", fsync_directory),
+    ("negative_errno_contracts", negative_errno_contracts),
     ("cleanup", cleanup),
 ]:
     record(step, func)
@@ -2788,6 +2819,54 @@ fn reference_conformance_tempdir() -> TempDir {
     TempDir::new().expect("reference tempdir")
 }
 
+fn assert_syscall_negative_errno(checks: &[Value], label: &str, expected_errno: i32) {
+    let check = checks
+        .iter()
+        .find(|check| check["label"].as_str() == Some(label))
+        .expect("missing negative syscall check");
+    assert_eq!(
+        check["ok"].as_bool(),
+        Some(false),
+        "{label} should fail in the negative syscall matrix: {check}"
+    );
+    assert_eq!(
+        check["errno"].as_i64(),
+        Some(i64::from(expected_errno)),
+        "{label} should surface errno {expected_errno}: {check}"
+    );
+}
+
+#[test]
+fn syscall_conformance_reference_probe_covers_negative_errno_contracts() {
+    if !command_available("python3") {
+        eprintln!("python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let reference = reference_conformance_tempdir();
+    let report = run_syscall_conformance_probe(reference.path());
+    let records = report
+        .as_array()
+        .expect("syscall conformance report should be a JSON array");
+    let negative = records
+        .iter()
+        .find(|record| record["step"].as_str() == Some("negative_errno_contracts"))
+        .expect("missing negative errno step in report");
+    assert_eq!(
+        negative["ok"].as_bool(),
+        Some(true),
+        "negative errno step should report captured errors without aborting: {negative}"
+    );
+    let checks = negative["result"]["checks"]
+        .as_array()
+        .expect("negative errno step should include check records");
+
+    assert_syscall_negative_errno(checks, "mkdir_existing", libc::EEXIST);
+    assert_syscall_negative_errno(checks, "unlink_missing", libc::ENOENT);
+    assert_syscall_negative_errno(checks, "rename_missing", libc::ENOENT);
+    assert_syscall_negative_errno(checks, "rmdir_nonempty", libc::ENOTEMPTY);
+}
+
 #[test]
 fn fuse_conformance_syscall_sequence_matches_linux_reference() {
     if !fuse_available() || !command_available("python3") {
@@ -2819,7 +2898,9 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
     emit_scenario_result(
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
-        Some("file_lifecycle+offset_io+openat+access+statvfs+dir_ops+attrs+links+mmap+fsync"),
+        Some(
+            "file_lifecycle+offset_io+openat+access+statvfs+dir_ops+attrs+links+mmap+fsync+negative_errno",
+        ),
     );
 }
 
