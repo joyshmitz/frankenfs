@@ -14,7 +14,19 @@ use super::vfs::RequestOp;
 use asupersync::SystemPressure;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, trace};
+
+fn saturating_increment_relaxed(counter: &AtomicU64) {
+    while counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(1))
+        })
+        .is_err()
+    {
+        std::hint::spin_loop();
+    }
+}
 
 // ── Compute budget and degradation ─────────────────────────────────────────
 
@@ -428,7 +440,7 @@ impl std::fmt::Debug for BackpressureGate {
 pub struct PressureMonitor {
     budget: ComputeBudget,
     fsm: Arc<DegradationFsm>,
-    sample_count: std::sync::atomic::AtomicU64,
+    sample_count: AtomicU64,
 }
 
 impl PressureMonitor {
@@ -440,7 +452,7 @@ impl PressureMonitor {
         Self {
             budget,
             fsm,
-            sample_count: std::sync::atomic::AtomicU64::new(0),
+            sample_count: AtomicU64::new(0),
         }
     }
 
@@ -449,8 +461,7 @@ impl PressureMonitor {
     /// Returns any transition that occurred.
     pub fn sample(&self) -> Option<DegradationTransition> {
         self.budget.sample();
-        self.sample_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        saturating_increment_relaxed(&self.sample_count);
         self.fsm.tick()
     }
 
@@ -475,7 +486,7 @@ impl PressureMonitor {
     /// Number of samples taken.
     #[must_use]
     pub fn sample_count(&self) -> u64 {
-        self.sample_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.sample_count.load(Ordering::Relaxed)
     }
 
     /// Current degradation level.
@@ -497,5 +508,23 @@ impl std::fmt::Debug for PressureMonitor {
             .field("fsm", &self.fsm)
             .field("samples", &self.sample_count())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pressure_monitor_sample_count_saturates_at_numeric_limit() {
+        let pressure = Arc::new(SystemPressure::new());
+        let monitor = PressureMonitor::new(pressure, 1);
+        monitor.sample_count.store(u64::MAX - 1, Ordering::Relaxed);
+
+        monitor.sample();
+        assert_eq!(monitor.sample_count(), u64::MAX);
+
+        monitor.sample();
+        assert_eq!(monitor.sample_count(), u64::MAX);
     }
 }
