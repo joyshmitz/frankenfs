@@ -126,10 +126,22 @@ impl MappingTable {
     }
 
     pub fn allocate_page(&self) -> Result<PageId> {
-        let page_raw = self.next_page_id.fetch_add(1, Ordering::AcqRel);
-        let page_index = usize::try_from(page_raw).map_err(|_| FfsError::NoSpace)?;
-        if page_index >= self.pages.len() {
-            return Err(FfsError::NoSpace);
+        let capacity = u64::try_from(self.pages.len()).map_err(|_| FfsError::NoSpace)?;
+        let mut page_raw = self.next_page_id.load(Ordering::Acquire);
+        loop {
+            if page_raw >= capacity {
+                return Err(FfsError::NoSpace);
+            }
+            let next_page = page_raw.checked_add(1).ok_or(FfsError::NoSpace)?;
+            match self.next_page_id.compare_exchange_weak(
+                page_raw,
+                next_page,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => page_raw = observed,
+            }
         }
         debug!(
             target: "ffs::bwtree",
@@ -551,9 +563,19 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BwKey, BwValue, ConsolidationConfig, MappingTable, PageDelta, PageId, chain_length,
+        BwKey, BwValue, ConsolidationConfig, FfsError, MappingTable, PageDelta, PageId,
+        chain_length,
     };
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, atomic::Ordering};
+
+    fn start_test_thread<F>(f: F) -> std::thread::JoinHandle<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        std::thread::Builder::new()
+            .spawn(f)
+            .expect("spawn test thread")
+    }
 
     #[test]
     fn single_thread_insert_delete_lookup_round_trip() {
@@ -653,7 +675,7 @@ mod tests {
         for worker in 0..workers {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 for slot in 0..keys_per_worker {
                     let key = BwKey(worker * 1_000 + slot);
@@ -850,7 +872,7 @@ mod tests {
         {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 let config = ConsolidationConfig {
                     chain_threshold: 1,
@@ -866,7 +888,7 @@ mod tests {
         for worker in 0..2_u64 {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 let base = 1000 + worker * 100;
                 for i in 0..50 {
@@ -1105,7 +1127,7 @@ mod tests {
         for worker in 0..4_u64 {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 let base = worker * 1000;
                 for i in 0..500 {
@@ -1120,7 +1142,7 @@ mod tests {
         for _ in 0..4 {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 // Readers must never see corrupt state
                 for probe in 0..2000 {
@@ -1164,7 +1186,7 @@ mod tests {
         {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 for i in 1000..1500_u64 {
                     table
@@ -1178,7 +1200,7 @@ mod tests {
         {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 for i in 0..500_u64 {
                     table.delete(page, BwKey(i)).expect("delete");
@@ -1217,7 +1239,7 @@ mod tests {
         {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 for round in 0..10_u64 {
                     for i in 0..100 {
@@ -1233,7 +1255,7 @@ mod tests {
         {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 for _ in 0..5 {
                     for i in 0..100_u64 {
@@ -1310,6 +1332,20 @@ mod tests {
         table.allocate_page().expect("second alloc");
         let result = table.allocate_page();
         assert!(result.is_err(), "should fail when capacity exhausted");
+        assert_eq!(table.next_page_id.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn page_allocation_numeric_limit_does_not_wrap_to_existing_page() {
+        let table = MappingTable::with_capacity(1);
+        table.next_page_id.store(u64::MAX, Ordering::Release);
+
+        let err = table
+            .allocate_page()
+            .expect_err("numeric limit must not wrap to page 0");
+
+        assert!(matches!(err, FfsError::NoSpace));
+        assert_eq!(table.next_page_id.load(Ordering::Acquire), u64::MAX);
     }
 
     #[test]
@@ -1416,7 +1452,7 @@ mod tests {
         for (idx, &page) in pages.iter().enumerate() {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 let base = (idx as u64) * 1000;
                 for i in 0..100 {
@@ -1431,7 +1467,7 @@ mod tests {
         for &page in &pages {
             let table = Arc::clone(&table);
             let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
+            handles.push(start_test_thread(move || {
                 barrier.wait();
                 let config = ConsolidationConfig {
                     chain_threshold: 1,
