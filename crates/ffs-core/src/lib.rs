@@ -17555,6 +17555,24 @@ impl FsOps for OpenFs {
         }
     }
 
+    fn get_inode_state(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        match &self.flavor {
+            FsFlavor::Ext4(_) => {
+                let _ = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
+                Ok(0)
+            }
+            FsFlavor::Btrfs(_) => {
+                let _ = self.btrfs_read_inode_attr(cx, ino)?;
+                Ok(0)
+            }
+        }
+    }
+
     fn get_inode_fsxattr(
         &self,
         cx: &Cx,
@@ -22790,6 +22808,20 @@ mod tests {
             .get_inode_flags(&cx, &mut scope, InodeNumber(11))
             .unwrap();
         assert_ne!(flags & ffs_types::EXT4_EXTENTS_FL, 0);
+    }
+
+    #[test]
+    fn get_inode_state_validates_ext4_inode_and_returns_empty_state() {
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let mut scope = RequestScope::empty();
+        let state = fs
+            .get_inode_state(&cx, &mut scope, InodeNumber(11))
+            .unwrap();
+        assert_eq!(state, 0);
     }
 
     #[test]

@@ -82,6 +82,9 @@ const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
 const FS_IOC_GET_ENCRYPTION_POLICY_EX: u32 = 0xC009_6616;
 /// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
+/// `EXT4_IOC_GETSTATE` = `_IOR('f', 41, __u32)` on x86_64.
+const EXT4_IOC_GETSTATE: u32 = 0x8004_6629;
+const EXT4_IOC_GETSTATE_SIZE: u32 = 4;
 /// `FS_IOC_FSGETXATTR` = `_IOR('X', 31, struct fsxattr)` on x86_64.
 /// `struct fsxattr` is 28 bytes: u32 xflags + u32 extsize + u32 nextents
 /// + u32 projid + u32 cowextsize + 8-byte pad.
@@ -2641,6 +2644,18 @@ impl FrankenFuse {
                     self.inner.ops.get_inode_flags(cx, scope, InodeNumber(ino))
                 }) {
                     Ok(flags) => IoctlResult::Data(flags.to_ne_bytes().to_vec()),
+                    Err(error) => IoctlResult::Error(error.to_errno()),
+                }
+            }
+            EXT4_IOC_GETSTATE => {
+                if out_size < EXT4_IOC_GETSTATE_SIZE {
+                    return IoctlResult::Error(libc::EINVAL);
+                }
+                let cx = Self::cx_for_request();
+                match self.with_request_scope(&cx, RequestOp::IoctlRead, |cx, scope| {
+                    self.inner.ops.get_inode_state(cx, scope, InodeNumber(ino))
+                }) {
+                    Ok(state) => IoctlResult::Data(state.to_ne_bytes().to_vec()),
                     Err(error) => IoctlResult::Error(error.to_errno()),
                 }
             }
@@ -5522,6 +5537,7 @@ mod tests {
         GetEncryptionPolicy(InodeNumber),
         GetEncryptionPolicyEx(InodeNumber),
         GetFlags(InodeNumber),
+        GetState(InodeNumber),
         GetFsLabel,
         SetFsLabel(Vec<u8>),
         GetBtrfsFsInfo,
@@ -5931,6 +5947,19 @@ mod tests {
             Ok(self.flags)
         }
 
+        fn get_inode_state(
+            &self,
+            _cx: &Cx,
+            _scope: &mut RequestScope,
+            ino: InodeNumber,
+        ) -> ffs_error::Result<u32> {
+            self.calls
+                .lock()
+                .expect("lock ioctl calls")
+                .push(IoctlCall::GetState(ino));
+            Ok(0xA5A5_1234)
+        }
+
         fn get_inode_fsxattr(
             &self,
             _cx: &Cx,
@@ -6318,6 +6347,36 @@ mod tests {
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getstate_encodes_u32_state_in_native_endian() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 29, 0, EXT4_IOC_GETSTATE, &[], 4);
+        assert_eq!(
+            response,
+            IoctlResult::Data(0xA5A5_1234_u32.to_ne_bytes().to_vec())
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetState(InodeNumber(29)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getstate_short_output_returns_einval() {
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(
+            0,
+            Arc::new(Mutex::new(Vec::new())),
+        )));
+        let response = dispatch_ioctl_for_testing(&fuse, 29, 0, EXT4_IOC_GETSTATE, &[], 3);
+        assert_eq!(response, IoctlResult::Error(libc::EINVAL));
     }
 
     #[test]
