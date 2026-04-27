@@ -96,6 +96,8 @@ const BTRFS_ROOT_ITEM_LEVEL_OFFSET: usize = 238;
 const BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET: usize = 239;
 const BTRFS_ROOT_ITEM_UUID_OFFSET: usize = 247;
 const BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET: usize = 263;
+const BTRFS_ROOT_ITEM_UUID_END: usize = BTRFS_ROOT_ITEM_UUID_OFFSET + 16;
+const BTRFS_ROOT_ITEM_PARENT_UUID_END: usize = BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET + 16;
 
 /// Parsed subset of `btrfs_root_item` needed for tree bootstrapping,
 /// subvolume enumeration, and snapshot navigation.
@@ -546,14 +548,20 @@ fn read_u64(data: &[u8], off: usize, field: &'static str) -> Result<u64, ParseEr
 /// - offset 216: `refs` (u32)
 /// - offset 238: `level` (u8)
 /// - offset 239: `generation_v2` (u64) — validates newer optional fields
-/// - offset 247: `uuid` (16 bytes) — zero if payload too short/stale
-/// - offset 263: `parent_uuid` (16 bytes) — zero if payload too short/stale
+/// - offset 247: `uuid` (16 bytes) — zero if absent/stale, rejected if partial and valid
+/// - offset 263: `parent_uuid` (16 bytes) — zero if absent/stale, rejected if partial and valid
 pub fn parse_root_item(data: &[u8]) -> Result<BtrfsRootItem, ParseError> {
     if data.len() < BTRFS_ROOT_ITEM_LEGACY_SIZE {
         return Err(ParseError::InsufficientData {
             needed: BTRFS_ROOT_ITEM_LEGACY_SIZE,
             offset: 0,
             actual: data.len(),
+        });
+    }
+    if data.len() > BTRFS_ROOT_ITEM_LEGACY_SIZE && data.len() < BTRFS_ROOT_ITEM_UUID_OFFSET {
+        return Err(ParseError::InvalidField {
+            field: "root_item.generation_v2",
+            reason: "partial extension field",
         });
     }
 
@@ -578,28 +586,48 @@ pub fn parse_root_item(data: &[u8]) -> Result<BtrfsRootItem, ParseError> {
 
     // UUID-era fields are valid only when generation_v2 matches generation;
     // older kernels can leave stale values behind after modifying the root.
-    let extended_fields_valid = data.len() >= BTRFS_ROOT_ITEM_UUID_OFFSET
-        && read_u64(
+    let extended_fields_valid = if data.len() >= BTRFS_ROOT_ITEM_UUID_OFFSET {
+        read_u64(
             data,
             BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET,
             "root_item.generation_v2",
-        )? == generation;
+        )? == generation
+    } else {
+        false
+    };
+    if extended_fields_valid
+        && data.len() > BTRFS_ROOT_ITEM_UUID_OFFSET
+        && data.len() < BTRFS_ROOT_ITEM_UUID_END
+    {
+        return Err(ParseError::InvalidField {
+            field: "root_item.uuid",
+            reason: "partial extension field",
+        });
+    }
+    if extended_fields_valid
+        && data.len() > BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET
+        && data.len() < BTRFS_ROOT_ITEM_PARENT_UUID_END
+    {
+        return Err(ParseError::InvalidField {
+            field: "root_item.parent_uuid",
+            reason: "partial extension field",
+        });
+    }
 
-    let uuid = if extended_fields_valid && data.len() >= BTRFS_ROOT_ITEM_UUID_OFFSET + 16 {
+    let uuid = if extended_fields_valid && data.len() >= BTRFS_ROOT_ITEM_UUID_END {
         read_exact::<16>(data, BTRFS_ROOT_ITEM_UUID_OFFSET, "root_item.uuid")?
     } else {
         [0u8; 16]
     };
-    let parent_uuid =
-        if extended_fields_valid && data.len() >= BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET + 16 {
-            read_exact::<16>(
-                data,
-                BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET,
-                "root_item.parent_uuid",
-            )?
-        } else {
-            [0u8; 16]
-        };
+    let parent_uuid = if extended_fields_valid && data.len() >= BTRFS_ROOT_ITEM_PARENT_UUID_END {
+        read_exact::<16>(
+            data,
+            BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET,
+            "root_item.parent_uuid",
+        )?
+    } else {
+        [0u8; 16]
+    };
 
     if bytenr == 0 {
         return Err(ParseError::InvalidField {
@@ -6351,6 +6379,19 @@ mod tests {
         assert_eq!(parsed.root_dirid, 256);
         assert_eq!(parsed.level, 2);
 
+        let valid_generation_v2_only = make_root_item_payload(247, 0x2345_0000);
+        let parsed =
+            parse_root_item(&valid_generation_v2_only).expect("parse generation_v2-only root item");
+        assert_eq!(parsed.bytenr, 0x2345_0000);
+        assert_eq!(parsed.uuid, [0; 16]);
+        assert_eq!(parsed.parent_uuid, [0; 16]);
+
+        let valid_uuid_only = make_root_item_payload(263, 0x3456_0000);
+        let parsed = parse_root_item(&valid_uuid_only).expect("parse uuid-only root item");
+        assert_eq!(parsed.bytenr, 0x3456_0000);
+        assert_eq!(parsed.uuid[0], 0x11);
+        assert_eq!(parsed.parent_uuid, [0; 16]);
+
         let valid_uuid = make_root_item_payload(279, 0x5678_0000);
         let parsed = parse_root_item(&valid_uuid).expect("parse root item with uuids");
         assert_eq!(parsed.bytenr, 0x5678_0000);
@@ -6365,6 +6406,24 @@ mod tests {
         assert_eq!(parsed.parent_uuid, [0; 16]);
 
         assert_insufficient_data(parse_root_item(&[0_u8; 238]), 239, 0, 238);
+        let partial_generation_v2 = make_root_item_payload(240, 0x1234_0000);
+        assert_invalid_field(
+            parse_root_item(&partial_generation_v2),
+            "root_item.generation_v2",
+            "partial extension field",
+        );
+        let partial_uuid = make_root_item_payload(248, 0x1234_0000);
+        assert_invalid_field(
+            parse_root_item(&partial_uuid),
+            "root_item.uuid",
+            "partial extension field",
+        );
+        let partial_parent_uuid = make_root_item_payload(264, 0x1234_0000);
+        assert_invalid_field(
+            parse_root_item(&partial_parent_uuid),
+            "root_item.parent_uuid",
+            "partial extension field",
+        );
 
         let zero_bytenr = make_root_item_payload(239, 0);
         assert_invalid_field(

@@ -774,11 +774,65 @@ fn root_item_stale_generation_v2_zeros_uuids() {
 }
 
 #[test]
+fn root_item_partial_extension_fields_rejected() {
+    let mut partial_generation_v2 = vec![0u8; 240];
+    partial_generation_v2[160..168].copy_from_slice(&5u64.to_le_bytes());
+    partial_generation_v2[176..184].copy_from_slice(&0x4000u64.to_le_bytes());
+    partial_generation_v2[238] = 2;
+    let err = parse_root_item(&partial_generation_v2).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "root_item.generation_v2",
+                reason: "partial extension field"
+            }
+        ),
+        "expected partial generation_v2 rejection, got {err:?}"
+    );
+
+    let mut partial_uuid = vec![0u8; 248];
+    partial_uuid[160..168].copy_from_slice(&5u64.to_le_bytes());
+    partial_uuid[176..184].copy_from_slice(&0x4000u64.to_le_bytes());
+    partial_uuid[238] = 2;
+    partial_uuid[239..247].copy_from_slice(&5u64.to_le_bytes());
+    let err = parse_root_item(&partial_uuid).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "root_item.uuid",
+                reason: "partial extension field"
+            }
+        ),
+        "expected partial uuid rejection, got {err:?}"
+    );
+
+    let mut partial_parent_uuid = vec![0u8; 264];
+    partial_parent_uuid[160..168].copy_from_slice(&5u64.to_le_bytes());
+    partial_parent_uuid[176..184].copy_from_slice(&0x4000u64.to_le_bytes());
+    partial_parent_uuid[238] = 2;
+    partial_parent_uuid[239..247].copy_from_slice(&5u64.to_le_bytes());
+    partial_parent_uuid[247..263].copy_from_slice(&[0xAA; 16]);
+    let err = parse_root_item(&partial_parent_uuid).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "root_item.parent_uuid",
+                reason: "partial extension field"
+            }
+        ),
+        "expected partial parent_uuid rejection, got {err:?}"
+    );
+}
+
+#[test]
 fn root_item_bytenr_zero_rejected() {
-    let mut fixture = vec![0u8; 256];
+    let mut fixture = vec![0u8; 239];
     // bytenr @ 176 stays 0 and must be rejected.
-    // Must still fill other required fields so the parser doesn't fail on
-    // InsufficientData first.
+    // Use the exact legacy payload size so this isolates the bytenr invariant,
+    // not UUID-era extension validation.
     let err = parse_root_item(&fixture).unwrap_err();
     let msg = format!("{err:?}");
     assert!(
