@@ -1637,6 +1637,20 @@ pub struct FcReplayResult {
     pub fallback_required: bool,
 }
 
+impl FcReplayResult {
+    fn record_block_scanned(&mut self) {
+        self.blocks_scanned = self.blocks_scanned.saturating_add(1);
+    }
+
+    fn record_transaction_found(&mut self) {
+        self.transactions_found = self.transactions_found.saturating_add(1);
+    }
+
+    fn record_incomplete_transaction(&mut self) {
+        self.incomplete_transactions = self.incomplete_transactions.saturating_add(1);
+    }
+}
+
 #[derive(Debug, Default)]
 struct PendingFcTransaction {
     active: bool,
@@ -1651,7 +1665,7 @@ impl PendingFcTransaction {
 
 fn discard_pending_fc_transaction(result: &mut FcReplayResult, pending: &mut PendingFcTransaction) {
     if pending.has_pending_work() {
-        result.incomplete_transactions += 1;
+        result.record_incomplete_transaction();
         result.fallback_required = true;
         pending.active = false;
         pending.operations.clear();
@@ -1765,7 +1779,7 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
                 }
                 discard_pending_fc_transaction(&mut result, &mut pending);
                 pending.active = true;
-                result.blocks_scanned += 1;
+                result.record_block_scanned();
             }
             FcTag::Tail => {
                 if !pending.active {
@@ -1779,7 +1793,7 @@ pub fn replay_fast_commit(data: &[u8]) -> Result<FcReplayResult> {
                 }
                 result.last_tid =
                     u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                result.transactions_found += 1;
+                result.record_transaction_found();
                 result.operations.append(&mut pending.operations);
                 pending.active = false;
             }
@@ -1829,6 +1843,32 @@ mod fc_tests {
         assert_eq!(result.transactions_found, 0);
         assert_eq!(result.incomplete_transactions, 0);
         assert!(!result.fallback_required);
+    }
+
+    #[test]
+    fn fast_commit_replay_counters_saturate_at_numeric_limits() {
+        let mut result = FcReplayResult {
+            blocks_scanned: u64::MAX,
+            transactions_found: u64::MAX,
+            incomplete_transactions: u64::MAX,
+            ..FcReplayResult::default()
+        };
+
+        result.record_block_scanned();
+        result.record_transaction_found();
+
+        let mut pending = PendingFcTransaction {
+            active: true,
+            operations: vec![FcOperation::InodeUpdate(42)],
+        };
+        discard_pending_fc_transaction(&mut result, &mut pending);
+
+        assert_eq!(result.blocks_scanned, u64::MAX);
+        assert_eq!(result.transactions_found, u64::MAX);
+        assert_eq!(result.incomplete_transactions, u64::MAX);
+        assert!(result.fallback_required);
+        assert!(!pending.active);
+        assert!(pending.operations.is_empty());
     }
 
     #[test]
