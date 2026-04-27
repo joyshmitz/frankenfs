@@ -44,9 +44,9 @@
 | BtrfsInodeItem | ✅ | ✅ | 8 | 8 | 100% | via fstree_leaf fixture plus timestamp nanosecond bound rejection and fixed-size trailing-byte rejection |
 | BtrfsDirItem | ✅ | ✅ | 6 | 6 | 100% | via fstree_leaf fixture plus nonzero data_len rejection and zero-length name rejection |
 | BtrfsXattrItem | ✅ | ✅ | 1 | 1 | 100% | zero-length name rejection while zero-length values remain accepted |
-| BtrfsExtentData | ✅ | ✅ | 6 | 6 | 100% | via fstree_leaf fixture plus fixed-size regular payload trailing-byte rejection |
+| BtrfsExtentData | ✅ | ✅ | 7 | 7 | 100% | via fstree_leaf fixture plus fixed-size regular/prealloc payload trailing-byte rejection and uncompressed disk-range rejection |
 
-**btrfs Total: 85 MUST clauses, 85 passing = 100.0%**
+**btrfs Total: 86 MUST clauses, 86 passing = 100.0%**
 
 ## Priority Gaps
 
@@ -70,7 +70,7 @@ None. All identified on-disk structures have conformance fixtures.
 | Btrfs chunk-tree items | ✅ | ✅ | deterministic adversarial regression tests cover valid multi-stripe chunk-tree item parsing, fixed header truncation, declared stripe payload truncation, trailing payload rejection after declared stripes, zero chunk length, zero stripe length, zero io_align/io_width/sector_size geometry fields, zero stripes, zero stripe device IDs, and multiple RAID profile bit rejection |
 | Btrfs dev items | ✅ | ✅ | synthetic adversarial seeds cover full field-layout parsing, max numeric/classification values, trailing bytes after the fixed 98-byte item, zero device ID rejection, zero-capacity device rejection, impossible `bytes_used > total_bytes` accounting, and truncated payload rejection |
 | Btrfs superblocks | ✅ | ✅ | synthetic adversarial seeds cover valid superblock-region parsing, image-offset parsing, bad magic, zero and non-power-of-two sizing fields, oversized sector/node/stripe sizing fields, zero-capacity, zero-device, and `bytes_used > total_bytes` accounting rejection, unsupported checksum types, oversized sys_chunk_array declarations, invalid root/chunk/log tree levels, and short region/image rejection |
-| Btrfs item payload parsers | ✅ | ✅ | deterministic adversarial regression tests cover root/root_ref/inode/dir/xattr/extent payload valid boundaries, multi-entry dir/xattr payloads, short headers, length overflows, zero-length name rejection for ROOT_REF/INODE_REF/DIR_ITEM/XATTR_ITEM, ROOT_ITEM partial extension-field rejection, nonzero DIR_ITEM data_len rejection, fixed-size INODE_ITEM trailing-byte rejection, fixed-size regular EXTENT_DATA trailing-byte rejection, unsupported extent types, compression values, encoding fields, invalid inode timestamp nanoseconds, zero root bytenr rejection, and malformed ROOT_REF fallback behavior for subvolumes/snapshots |
+| Btrfs item payload parsers | ✅ | ✅ | deterministic adversarial regression tests cover root/root_ref/inode/dir/xattr/extent payload valid boundaries, multi-entry dir/xattr payloads, short headers, length overflows, zero-length name rejection for ROOT_REF/INODE_REF/DIR_ITEM/XATTR_ITEM, ROOT_ITEM partial extension-field rejection, nonzero DIR_ITEM data_len rejection, fixed-size INODE_ITEM trailing-byte rejection, fixed-size regular EXTENT_DATA trailing-byte rejection, uncompressed EXTENT_DATA disk-range rejection, unsupported extent types, compression values, encoding fields, invalid inode timestamp nanoseconds, zero root bytenr rejection, and malformed ROOT_REF fallback behavior for subvolumes/snapshots |
 | Btrfs send streams | ✅ | ✅ | deterministic adversarial regression tests cover command CRC32C validation, missing-END rejection, unknown command fallback, zero-length and unknown attributes, multi-attribute commands, trailing partial command headers, and END payload TLV validation |
 | Btrfs delayed refs | ✅ | ✅ | deterministic adversarial regression tests cover zero-limit flush preservation, bounded partial flush accounting, delete-underflow queue preservation, and sequence-ordered drain across extent key order |
 | Btrfs transactions | ✅ | ✅ | deterministic adversarial mutation tests cover same-tree root replacement, delayed-ref commit failure nonvisibility, and tree-root address overflow nonvisibility |

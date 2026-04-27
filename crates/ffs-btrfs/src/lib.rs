@@ -1131,15 +1131,46 @@ pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
                     reason: "trailing bytes after fixed extent payload",
                 });
             }
+            let disk_bytenr = read_u64(data, 21, "extent_data.disk_bytenr")?;
+            let disk_num_bytes = read_u64(data, 29, "extent_data.disk_num_bytes")?;
+            let extent_offset = read_u64(data, 37, "extent_data.offset")?;
+            let num_bytes = read_u64(data, 45, "extent_data.num_bytes")?;
+
+            // Validate source-slice arithmetic for extents that read from
+            // backing bytes. Compressed extents slice the decompressed
+            // `ram_bytes` payload, while uncompressed extents address
+            // `disk_num_bytes` bytes from `disk_bytenr`.
+            if compression != BTRFS_COMPRESS_NONE || disk_bytenr != 0 {
+                let extent_end =
+                    extent_offset
+                        .checked_add(num_bytes)
+                        .ok_or(ParseError::InvalidField {
+                            field: "extent_data.extent_offset+num_bytes",
+                            reason: "source slice arithmetic overflow",
+                        })?;
+                if compression != BTRFS_COMPRESS_NONE && extent_end > ram_bytes {
+                    return Err(ParseError::InvalidField {
+                        field: "extent_data.extent_offset+num_bytes",
+                        reason: "source slice exceeds ram_bytes",
+                    });
+                }
+                if compression == BTRFS_COMPRESS_NONE && extent_end > disk_num_bytes {
+                    return Err(ParseError::InvalidField {
+                        field: "extent_data.extent_offset+num_bytes",
+                        reason: "source slice exceeds disk_num_bytes",
+                    });
+                }
+            }
+
             Ok(BtrfsExtentData::Regular {
                 generation,
                 ram_bytes,
                 extent_type,
                 compression,
-                disk_bytenr: read_u64(data, 21, "extent_data.disk_bytenr")?,
-                disk_num_bytes: read_u64(data, 29, "extent_data.disk_num_bytes")?,
-                extent_offset: read_u64(data, 37, "extent_data.offset")?,
-                num_bytes: read_u64(data, 45, "extent_data.num_bytes")?,
+                disk_bytenr,
+                disk_num_bytes,
+                extent_offset,
+                num_bytes,
             })
         }
         _ => Err(ParseError::InvalidField {
@@ -6628,6 +6659,7 @@ mod tests {
         assert_insufficient_data(parse_xattr_items(&value_overflow), 35, 0, 31);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn assert_extent_data_adversarial_boundaries() {
         let inline = BtrfsExtentData::Inline {
             generation: 9,
@@ -6699,6 +6731,89 @@ mod tests {
             parse_extent_data(&unknown_type),
             "extent_data.type",
             "unsupported extent type",
+        );
+
+        // Compressed extent source slice arithmetic: extent_offset + num_bytes overflow.
+        let overflow_extent = BtrfsExtentData::Regular {
+            generation: 1,
+            ram_bytes: 4096,
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: BTRFS_COMPRESS_ZSTD,
+            disk_bytenr: 0x100_000,
+            disk_num_bytes: 2048,
+            extent_offset: u64::MAX - 100,
+            num_bytes: 200,
+        };
+        assert_invalid_field(
+            parse_extent_data(&overflow_extent.to_bytes()),
+            "extent_data.extent_offset+num_bytes",
+            "source slice arithmetic overflow",
+        );
+
+        // Compressed extent source slice: extent_offset + num_bytes > ram_bytes.
+        let exceeds_ram_bytes = BtrfsExtentData::Regular {
+            generation: 1,
+            ram_bytes: 4096,
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: BTRFS_COMPRESS_ZLIB,
+            disk_bytenr: 0x100_000,
+            disk_num_bytes: 2048,
+            extent_offset: 4000,
+            num_bytes: 200,
+        };
+        assert_invalid_field(
+            parse_extent_data(&exceeds_ram_bytes.to_bytes()),
+            "extent_data.extent_offset+num_bytes",
+            "source slice exceeds ram_bytes",
+        );
+
+        // Valid compressed extent: extent_offset + num_bytes == ram_bytes.
+        let valid_compressed = BtrfsExtentData::Regular {
+            generation: 1,
+            ram_bytes: 4096,
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: BTRFS_COMPRESS_LZO,
+            disk_bytenr: 0x100_000,
+            disk_num_bytes: 2048,
+            extent_offset: 1024,
+            num_bytes: 3072,
+        };
+        assert_eq!(
+            parse_extent_data(&valid_compressed.to_bytes()).expect("parse valid compressed"),
+            valid_compressed
+        );
+
+        // Uncompressed extents must stay within their declared on-disk extent.
+        let out_of_range_disk_extent = BtrfsExtentData::Regular {
+            generation: 1,
+            ram_bytes: 8192,
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: BTRFS_COMPRESS_NONE,
+            disk_bytenr: 0x100_000,
+            disk_num_bytes: 4096,
+            extent_offset: 4096,
+            num_bytes: 4096,
+        };
+        assert_invalid_field(
+            parse_extent_data(&out_of_range_disk_extent.to_bytes()),
+            "extent_data.extent_offset+num_bytes",
+            "source slice exceeds disk_num_bytes",
+        );
+
+        // Uncompressed extent with disk_bytenr=0 (hole): validation is skipped.
+        let hole_extent = BtrfsExtentData::Regular {
+            generation: 1,
+            ram_bytes: 0,
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: BTRFS_COMPRESS_NONE,
+            disk_bytenr: 0,
+            disk_num_bytes: 0,
+            extent_offset: 0,
+            num_bytes: 0,
+        };
+        assert_eq!(
+            parse_extent_data(&hole_extent.to_bytes()).expect("parse hole extent"),
+            hole_extent
         );
     }
 

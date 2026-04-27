@@ -17,10 +17,10 @@
 //! emit but must decode from real images.
 
 use ffs_btrfs::{
-    BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_REG, BTRFS_MAX_TREE_LEVEL, BtrfsDirItem,
-    BtrfsExtentData, BtrfsInodeItem, BtrfsInodeRef, BtrfsXattrItem, parse_dir_items,
-    parse_extent_data, parse_inode_item, parse_inode_refs, parse_root_item, parse_root_ref,
-    parse_xattr_items,
+    BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_PREALLOC, BTRFS_FILE_EXTENT_REG,
+    BTRFS_MAX_TREE_LEVEL, BtrfsDirItem, BtrfsExtentData, BtrfsInodeItem, BtrfsInodeRef,
+    BtrfsXattrItem, parse_dir_items, parse_extent_data, parse_inode_item, parse_inode_refs,
+    parse_root_item, parse_root_ref, parse_xattr_items,
 };
 use ffs_types::ParseError;
 
@@ -721,6 +721,43 @@ fn extent_data_regular_trailing_payload_rejected() {
             }
         ),
         "expected trailing-length rejection, got {err:?}"
+    );
+}
+
+#[test]
+fn extent_data_prealloc_trailing_payload_rejected() {
+    let mut bytes = GOLDEN_EXTENT_DATA_REG.to_vec();
+    bytes[20] = BTRFS_FILE_EXTENT_PREALLOC;
+    bytes.push(0xAA);
+    let err = parse_extent_data(&bytes).expect_err("trailing prealloc extent bytes must reject");
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "extent_data.length",
+                reason: "trailing bytes after fixed extent payload"
+            }
+        ),
+        "expected trailing-length rejection, got {err:?}"
+    );
+}
+
+#[test]
+fn extent_data_uncompressed_range_past_disk_num_bytes_rejected() {
+    let mut bytes = GOLDEN_EXTENT_DATA_REG.to_vec();
+    bytes[8..16].copy_from_slice(&8192_u64.to_le_bytes()); // ram_bytes
+    bytes[37..45].copy_from_slice(&1_u64.to_le_bytes()); // extent_offset
+
+    let err = parse_extent_data(&bytes).expect_err("out-of-range uncompressed extent must reject");
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "extent_data.extent_offset+num_bytes",
+                reason: "source slice exceeds disk_num_bytes"
+            }
+        ),
+        "expected uncompressed disk range rejection, got {err:?}"
     );
 }
 
