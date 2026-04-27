@@ -12985,6 +12985,7 @@ impl OpenFs {
         // Use 160 to leave room for the dir item and inode item in the same leaf.
         let mut can_be_inline = end.max(inode.size) <= u64::from(nodesize).saturating_sub(160)
             && u64::try_from(data.len()).unwrap_or(u64::MAX) <= max_inline;
+        let mut existing_inline = None;
 
         if can_be_inline {
             let ext_start = BtrfsKey {
@@ -12997,36 +12998,23 @@ impl OpenFs {
                 item_type: BTRFS_ITEM_EXTENT_DATA,
                 offset: u64::MAX,
             };
-            if let Ok(extents) = alloc.fs_tree.range(&ext_start, &ext_end) {
-                for (k, edata) in extents {
-                    if k.offset > 0 {
-                        can_be_inline = false;
-                        break;
-                    }
-                    if !matches!(
-                        parse_extent_data(&edata),
-                        Ok(BtrfsExtentData::Inline { .. })
-                    ) {
-                        can_be_inline = false;
-                        break;
-                    }
+            let extents = alloc
+                .fs_tree
+                .range(&ext_start, &ext_end)
+                .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+            for (k, edata) in extents {
+                let extent = parse_extent_data(&edata).map_err(|e| parse_to_ffs_error(&e))?;
+                if k.offset > 0 || !matches!(extent, BtrfsExtentData::Inline { .. }) {
+                    can_be_inline = false;
+                    existing_inline = None;
+                    break;
                 }
+                existing_inline = Some(extent);
             }
         }
 
         if can_be_inline {
             // Inline extent: store data directly in the tree item.
-            let existing_key = BtrfsKey {
-                objectid: canonical,
-                item_type: BTRFS_ITEM_EXTENT_DATA,
-                offset: 0,
-            };
-            let existing_inline = alloc
-                .fs_tree
-                .range(&existing_key, &existing_key)
-                .ok()
-                .and_then(|existing| existing.first().cloned())
-                .and_then(|(_, edata)| parse_extent_data(&edata).ok());
             let existing_inline_len = match &existing_inline {
                 Some(BtrfsExtentData::Inline {
                     compression,
@@ -39046,6 +39034,65 @@ mod tests {
             matches!(err, FfsError::Corruption { .. }),
             "unexpected nbytes recompute error: {err:?}"
         );
+    }
+
+    #[test]
+    fn btrfs_write_rejects_malformed_existing_inline_extent() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("bad_inline.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create inline test file");
+        ops.write(
+            &cx,
+            &mut RequestScope::empty(),
+            attr.ino,
+            0,
+            b"original inline content",
+        )
+        .expect("initial inline write");
+        let canonical = fs.btrfs_canonical_inode(attr.ino).unwrap();
+
+        let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
+        let mut alloc = alloc_mutex.lock();
+        let extent_key = BtrfsKey {
+            objectid: canonical,
+            item_type: BTRFS_ITEM_EXTENT_DATA,
+            offset: 0,
+        };
+        let malformed = vec![0xAA, 0xBB, 0xCC];
+        alloc
+            .fs_tree
+            .update(&extent_key, &malformed)
+            .expect("corrupt inline extent payload");
+        drop(alloc);
+
+        let err = ops
+            .write(&cx, &mut RequestScope::empty(), attr.ino, 0, b"replacement")
+            .expect_err("malformed existing inline extent should fail closed");
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "unexpected inline overwrite error: {err:?}"
+        );
+
+        let preserved = {
+            let alloc = alloc_mutex.lock();
+            alloc
+                .fs_tree
+                .range(&extent_key, &extent_key)
+                .expect("extent lookup after failed overwrite")
+        };
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(preserved[0].1, malformed);
     }
 
     fn corrupt_btrfs_dir_item_payload(fs: &OpenFs, parent_oid: u64, name: &[u8], payload: &[u8]) {
