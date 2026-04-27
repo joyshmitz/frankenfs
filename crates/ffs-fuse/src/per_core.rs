@@ -56,6 +56,39 @@ pub struct CoreMetrics {
 }
 
 impl CoreMetrics {
+    fn saturating_add_u64(counter: &AtomicU64, delta: u64) {
+        while counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(delta))
+            })
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+    }
+
+    fn saturating_add_i64(counter: &AtomicI64, delta: i64) {
+        while counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(delta))
+            })
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+    }
+
+    fn saturating_decrement_nonnegative_i64(counter: &AtomicI64) {
+        while counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(1).max(0))
+            })
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+    }
+
     /// Create zeroed metrics.
     #[must_use]
     pub fn new() -> Self {
@@ -71,23 +104,23 @@ impl CoreMetrics {
 
     /// Record a request beginning processing.
     pub fn begin_request(&self) {
-        self.pending_requests.fetch_add(1, Ordering::Relaxed);
+        Self::saturating_add_i64(&self.pending_requests, 1);
     }
 
     /// Record a request processed.
     pub fn record_request(&self) {
-        self.requests.fetch_add(1, Ordering::Relaxed);
-        self.pending_requests.fetch_sub(1, Ordering::Relaxed);
+        Self::saturating_add_u64(&self.requests, 1);
+        Self::saturating_decrement_nonnegative_i64(&self.pending_requests);
     }
 
     /// Record a cache hit.
     pub fn record_hit(&self) {
-        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        Self::saturating_add_u64(&self.cache_hits, 1);
     }
 
     /// Record a cache miss.
     pub fn record_miss(&self) {
-        self.cache_misses.fetch_add(1, Ordering::Relaxed);
+        Self::saturating_add_u64(&self.cache_misses, 1);
     }
 
     /// Snapshot the metrics for reporting.
@@ -125,11 +158,11 @@ impl CoreMetricsSnapshot {
     /// Cache hit rate as a fraction [0.0, 1.0].
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
-        let total = self.cache_hits + self.cache_misses;
-        if total == 0 {
+        if self.cache_hits == 0 && self.cache_misses == 0 {
             return 0.0;
         }
-        self.cache_hits as f64 / total as f64
+        let total = self.cache_hits as f64 + self.cache_misses as f64;
+        self.cache_hits as f64 / total
     }
 }
 
@@ -295,7 +328,7 @@ impl PerCoreDispatcher {
             .core_metrics
             .iter()
             .map(|m| m.pending_requests.load(Ordering::Relaxed))
-            .sum();
+            .fold(0, i64::saturating_add);
 
         if total <= 0 {
             return false;
@@ -317,22 +350,26 @@ impl PerCoreDispatcher {
         let mut total_pending_requests = 0_i64;
         let mut total_hits = 0_u64;
         let mut total_misses = 0_u64;
+        let mut total_hits_for_rate = 0.0_f64;
+        let mut total_misses_for_rate = 0.0_f64;
         let mut per_core = Vec::with_capacity(self.core_metrics.len());
 
         for metrics in &self.core_metrics {
             let snap = metrics.snapshot();
-            total_requests += snap.requests;
-            total_pending_requests += snap.pending_requests;
-            total_hits += snap.cache_hits;
-            total_misses += snap.cache_misses;
+            total_requests = total_requests.saturating_add(snap.requests);
+            total_pending_requests = total_pending_requests.saturating_add(snap.pending_requests);
+            total_hits = total_hits.saturating_add(snap.cache_hits);
+            total_misses = total_misses.saturating_add(snap.cache_misses);
+            total_hits_for_rate += snap.cache_hits as f64;
+            total_misses_for_rate += snap.cache_misses as f64;
             per_core.push(snap);
         }
 
-        let total_io = total_hits + total_misses;
-        let hit_rate = if total_io == 0 {
+        let total_io_for_rate = total_hits_for_rate + total_misses_for_rate;
+        let hit_rate = if total_hits == 0 && total_misses == 0 {
             0.0
         } else {
-            total_hits as f64 / total_io as f64
+            total_hits_for_rate / total_io_for_rate
         };
 
         AggregateMetrics {
@@ -530,6 +567,69 @@ mod tests {
     }
 
     #[test]
+    fn core_metrics_saturate_at_numeric_limits() {
+        let m = CoreMetrics::new();
+        m.requests.store(u64::MAX - 1, Ordering::Relaxed);
+        m.pending_requests.store(i64::MAX, Ordering::Relaxed);
+        m.cache_hits.store(u64::MAX - 1, Ordering::Relaxed);
+        m.cache_misses.store(u64::MAX, Ordering::Relaxed);
+
+        m.begin_request();
+        m.record_hit();
+        m.record_miss();
+        let saturated_begin = m.snapshot();
+        assert_eq!(saturated_begin.pending_requests, i64::MAX);
+        assert_eq!(saturated_begin.cache_hits, u64::MAX);
+        assert_eq!(saturated_begin.cache_misses, u64::MAX);
+
+        m.pending_requests.store(0, Ordering::Relaxed);
+        m.record_request();
+        let completed = m.snapshot();
+        assert_eq!(completed.requests, u64::MAX);
+        assert_eq!(completed.pending_requests, 0);
+    }
+
+    #[test]
+    fn core_metrics_hit_rate_handles_saturated_bounds() {
+        let snap = CoreMetricsSnapshot {
+            requests: 0,
+            pending_requests: 0,
+            cache_hits: u64::MAX,
+            cache_misses: u64::MAX,
+            stolen_from: 0,
+            stolen_to: 0,
+        };
+
+        assert!((snap.hit_rate() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregate_metrics_saturates_numeric_totals() {
+        let cfg = PerCoreConfig {
+            num_cores: 2,
+            ..Default::default()
+        };
+        let disp = PerCoreDispatcher::new(cfg);
+
+        let m0 = disp.core_metrics(0).unwrap();
+        m0.requests.store(u64::MAX, Ordering::Relaxed);
+        m0.pending_requests.store(i64::MAX, Ordering::Relaxed);
+        m0.cache_hits.store(u64::MAX, Ordering::Relaxed);
+
+        let m1 = disp.core_metrics(1).unwrap();
+        m1.requests.store(u64::MAX, Ordering::Relaxed);
+        m1.pending_requests.store(i64::MAX, Ordering::Relaxed);
+        m1.cache_misses.store(u64::MAX, Ordering::Relaxed);
+
+        let agg = disp.aggregate_metrics();
+        assert_eq!(agg.total_requests, u64::MAX);
+        assert_eq!(agg.total_pending_requests, i64::MAX);
+        assert_eq!(agg.total_cache_hits, u64::MAX);
+        assert_eq!(agg.total_cache_misses, u64::MAX);
+        assert!((agg.aggregate_hit_rate - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn aggregate_imbalance_ratio() {
         let cfg = PerCoreConfig {
             num_cores: 2,
@@ -571,6 +671,25 @@ mod tests {
         assert!(disp.should_steal(1));
         // Core 0 is busy → should not steal.
         assert!(!disp.should_steal(0));
+    }
+
+    #[test]
+    fn should_steal_saturates_pending_total() {
+        let cfg = PerCoreConfig {
+            num_cores: 2,
+            steal_threshold: 2.0,
+            ..Default::default()
+        };
+        let disp = PerCoreDispatcher::new(cfg);
+        disp.core_metrics[0]
+            .pending_requests
+            .store(i64::MAX, Ordering::Relaxed);
+        disp.core_metrics[1]
+            .pending_requests
+            .store(i64::MAX, Ordering::Relaxed);
+
+        assert!(!disp.should_steal(0));
+        assert!(!disp.should_steal(1));
     }
 
     #[test]
