@@ -74,8 +74,8 @@ struct MetricInner {
 /// Fixed-bucket histogram state.
 ///
 /// Buckets are defined at construction time. Each bucket stores a count of
-/// observations that fell at or below its upper bound. A final +Inf bucket
-/// captures everything above the last explicit bound.
+/// observations assigned to its upper bound. A final +Inf bucket captures
+/// everything above the last explicit bound.
 #[derive(Debug)]
 struct HistogramState {
     /// Upper bounds of each bucket (sorted ascending).
@@ -86,6 +86,18 @@ struct HistogramState {
     sum: AtomicU64,
     /// Total observation count.
     total: AtomicU64,
+}
+
+fn saturating_fetch_add_i64(value: &AtomicI64, delta: i64) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(delta))
+    });
+}
+
+fn saturating_fetch_add_u64(value: &AtomicU64, delta: u64) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(delta))
+    });
 }
 
 impl Default for HistogramState {
@@ -113,9 +125,13 @@ const DEFAULT_HISTOGRAM_BOUNDS: [u64; 12] = [
 
 impl HistogramState {
     fn with_bounds(bounds: &[u64]) -> Self {
+        let mut bounds = bounds.to_vec();
+        bounds.sort_unstable();
+        bounds.dedup();
+
         let counts = (0..=bounds.len()).map(|_| AtomicU64::new(0)).collect();
         Self {
-            bounds: bounds.to_vec(),
+            bounds,
             counts,
             sum: AtomicU64::new(0),
             total: AtomicU64::new(0),
@@ -125,9 +141,9 @@ impl HistogramState {
     fn observe(&self, value: u64) {
         // Find the first bucket whose bound >= value
         let idx = self.bounds.partition_point(|&b| b < value);
-        self.counts[idx].fetch_add(1, Ordering::Relaxed);
-        self.sum.fetch_add(value, Ordering::Relaxed);
-        self.total.fetch_add(1, Ordering::Relaxed);
+        saturating_fetch_add_u64(&self.counts[idx], 1);
+        saturating_fetch_add_u64(&self.sum, value);
+        saturating_fetch_add_u64(&self.total, 1);
     }
 
     fn snapshot(&self) -> HistogramSnapshot {
@@ -159,9 +175,7 @@ impl MetricHandle {
             return;
         }
         if self.inner.kind == MetricKind::Counter {
-            self.inner
-                .value
-                .fetch_add(i64::try_from(n).unwrap_or(i64::MAX), Ordering::Relaxed);
+            saturating_fetch_add_i64(&self.inner.value, i64::try_from(n).unwrap_or(i64::MAX));
         }
     }
 
@@ -183,7 +197,7 @@ impl MetricHandle {
             return;
         }
         if self.inner.kind == MetricKind::Gauge {
-            self.inner.value.fetch_add(delta, Ordering::Relaxed);
+            saturating_fetch_add_i64(&self.inner.value, delta);
         }
     }
 
@@ -482,6 +496,18 @@ mod tests {
     }
 
     #[test]
+    fn counter_increment_saturates_at_i64_max() {
+        let registry = MetricsRegistry::new();
+        registry.enable();
+        let counter = registry.register("test.ops", MetricKind::Counter);
+        counter.increment(u64::MAX);
+        counter.increment(1);
+
+        let snap = registry.snapshot();
+        assert_eq!(snap.metrics["test.ops"].value, Some(i64::MAX));
+    }
+
+    #[test]
     fn counter_disabled_is_noop() {
         let registry = MetricsRegistry::new();
         // Not enabled
@@ -507,6 +533,23 @@ mod tests {
         gauge.adjust(5);
         let snap = registry.snapshot();
         assert_eq!(snap.metrics["cache.size"].value, Some(37));
+    }
+
+    #[test]
+    fn gauge_adjust_saturates_at_numeric_bounds() {
+        let registry = MetricsRegistry::new();
+        registry.enable();
+        let gauge = registry.register("cache.size", MetricKind::Gauge);
+
+        gauge.set(i64::MAX);
+        gauge.adjust(1);
+        let snap = registry.snapshot();
+        assert_eq!(snap.metrics["cache.size"].value, Some(i64::MAX));
+
+        gauge.set(i64::MIN);
+        gauge.adjust(-1);
+        let snap = registry.snapshot();
+        assert_eq!(snap.metrics["cache.size"].value, Some(i64::MIN));
     }
 
     #[test]
@@ -560,6 +603,51 @@ mod tests {
         assert_eq!(h.buckets[1].count, 1);
         assert_eq!(h.buckets[2].count, 1);
         assert_eq!(h.inf_count, 1);
+    }
+
+    #[test]
+    fn histogram_custom_bounds_are_sorted_and_deduplicated() {
+        let registry = MetricsRegistry::new();
+        registry.enable();
+        let hist = registry.register_histogram("custom.hist", &[100, 10, 100, 1000]);
+
+        hist.observe(5);
+        hist.observe(50);
+        hist.observe(500);
+        hist.observe(5000);
+
+        let snap = registry.snapshot();
+        let h = snap.metrics["custom.hist"].histogram.as_ref().unwrap();
+        let bounds = h.buckets.iter().map(|bucket| bucket.le).collect::<Vec<_>>();
+        assert_eq!(bounds, vec![10, 100, 1000]);
+        assert_eq!(h.buckets[0].count, 1);
+        assert_eq!(h.buckets[1].count, 1);
+        assert_eq!(h.buckets[2].count, 1);
+        assert_eq!(h.inf_count, 1);
+    }
+
+    #[test]
+    fn histogram_totals_saturate_on_overflow() {
+        let registry = MetricsRegistry::new();
+        registry.enable();
+        let hist = registry.register_histogram("custom.hist", &[10]);
+        hist.inner
+            .histogram
+            .sum
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        hist.inner
+            .histogram
+            .total
+            .store(u64::MAX, Ordering::Relaxed);
+        hist.inner.histogram.counts[0].store(u64::MAX, Ordering::Relaxed);
+
+        hist.observe(5);
+
+        let snap = registry.snapshot();
+        let h = snap.metrics["custom.hist"].histogram.as_ref().unwrap();
+        assert_eq!(h.sum, u64::MAX);
+        assert_eq!(h.count, u64::MAX);
+        assert_eq!(h.buckets[0].count, u64::MAX);
     }
 
     #[test]
