@@ -13421,8 +13421,10 @@ impl OpenFs {
         new_name: &[u8],
         child_is_dir: bool,
     ) -> ffs_error::Result<bool> {
-        let Ok(target) = self.btrfs_lookup_dir_entry(alloc, new_parent_oid, new_name) else {
-            return Ok(false);
+        let target = match self.btrfs_lookup_dir_entry(alloc, new_parent_oid, new_name) {
+            Ok(target) => target,
+            Err(FfsError::NotFound(_)) => return Ok(false),
+            Err(err) => return Err(err),
         };
 
         let target_oid = target.child_objectid;
@@ -13500,7 +13502,12 @@ impl OpenFs {
         Self::btrfs_remove_inode_ref(&mut alloc, child.child_objectid, parent_oid, name)?;
 
         // If target exists, remove it first and handle nlink cleanup.
-        if let Ok(target) = self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
+        let target = match self.btrfs_lookup_dir_entry(&alloc, new_parent_oid, new_name) {
+            Ok(target) => Some(target),
+            Err(FfsError::NotFound(_)) => None,
+            Err(err) => return Err(err),
+        };
+        if let Some(target) = target {
             let target_oid = target.child_objectid;
             let target_is_dir = target.file_type == BTRFS_FT_DIR;
             self.btrfs_remove_dir_entry(&mut alloc, new_parent_oid, new_name)?;
@@ -39278,6 +39285,88 @@ mod tests {
                     if detail.contains("malformed btrfs DIR_ITEM payload during removal")
             ),
             "unexpected malformed DIR_ITEM removal error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_rename_rejects_malformed_target_lookup_without_moving_source() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+        let source_name = b"rename_source.txt";
+        let new_name = b"rename_new_name.txt";
+        let source_hash = ffs_types::crc32c_append(0, source_name);
+        let broken_name = [
+            b"rename_broken_neighbor_0.txt".as_slice(),
+            b"rename_broken_neighbor_1.txt".as_slice(),
+            b"rename_broken_neighbor_2.txt".as_slice(),
+            b"rename_broken_neighbor_3.txt".as_slice(),
+        ]
+        .into_iter()
+        .find(|candidate| ffs_types::crc32c_append(0, candidate) > source_hash)
+        .expect("test fixture should include a sibling sorted after the source");
+
+        let source = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(source_name),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create rename source");
+        ops.create(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::from_bytes(broken_name),
+            0o644,
+            0,
+            0,
+        )
+        .expect("create sibling with malformed DIR_ITEM");
+
+        let root_oid = fs.btrfs_canonical_inode(InodeNumber(1)).unwrap();
+        corrupt_btrfs_dir_item_payload(&fs, root_oid, broken_name, &[0xAA, 0xBB]);
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(source_name),
+                InodeNumber(1),
+                OsStr::from_bytes(new_name),
+            )
+            .expect_err("malformed target lookup scan should fail closed");
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption { ref detail, .. }
+                    if detail.contains("malformed btrfs DIR_ITEM payload during lookup")
+            ),
+            "unexpected malformed rename target error: {err:?}"
+        );
+
+        let source_key = BtrfsKey {
+            objectid: root_oid,
+            item_type: BTRFS_ITEM_DIR_ITEM,
+            offset: u64::from(ffs_types::crc32c_append(0, source_name)),
+        };
+        let alloc_mutex = fs.require_btrfs_alloc_state().unwrap();
+        let source_entries = alloc_mutex
+            .lock()
+            .fs_tree
+            .range(&source_key, &source_key)
+            .expect("source dir item lookup");
+        let parsed_source =
+            parse_dir_items(&source_entries[0].1).expect("source dir item remains parseable");
+        assert!(
+            parsed_source
+                .iter()
+                .any(|entry| entry.name == source_name && entry.child_objectid == source.ino.0),
+            "source entry should remain after failed rename: {parsed_source:?}"
         );
     }
 
