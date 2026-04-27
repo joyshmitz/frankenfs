@@ -3001,7 +3001,29 @@ impl BtrfsExtentAllocator {
             offset: num_bytes,
         };
 
-        // Remove from extent tree.
+        let extent_end = bytenr
+            .checked_add(num_bytes)
+            .ok_or(BtrfsMutationError::AddressOverflow)?;
+        let mut owning_bg = None;
+        for bg in self.block_groups.values() {
+            let bg_end = bg
+                .start
+                .checked_add(bg.item.total_bytes)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            if bytenr >= bg.start && extent_end <= bg_end {
+                let used_after = bg.item.used_bytes.checked_sub(num_bytes).ok_or(
+                    BtrfsMutationError::BrokenInvariant("block group used bytes underflow"),
+                )?;
+                owning_bg = Some((bg.start, used_after));
+                break;
+            }
+        }
+
+        let (root, used_after) = owning_bg.ok_or(BtrfsMutationError::BrokenInvariant(
+            "extent has no owning block group",
+        ))?;
+
+        // Remove from extent tree only after ownership and accounting checks pass.
         self.extent_tree.delete(&key)?;
         trace!(
             target: "ffs::btrfs::alloc",
@@ -3009,31 +3031,25 @@ impl BtrfsExtentAllocator {
         );
 
         // Update block group accounting.
-        let mut owning_bg = None;
-        for bg in self.block_groups.values_mut() {
-            let bg_end = bg
-                .start
-                .checked_add(bg.item.total_bytes)
-                .ok_or(BtrfsMutationError::AddressOverflow)?;
-            if bytenr >= bg.start && bytenr < bg_end {
-                let used_before = bg.item.used_bytes;
-                bg.item.used_bytes = bg.item.used_bytes.saturating_sub(num_bytes);
-                owning_bg = Some(bg.start);
-                trace!(
-                    target: "ffs::btrfs::alloc",
-                    block_group = bg.start,
-                    used_before,
-                    used_after = bg.item.used_bytes,
-                    delta = num_bytes,
-                    "bg_accounting_free"
-                );
-                break;
-            }
-        }
+        let bg = self
+            .block_groups
+            .get_mut(&root)
+            .ok_or(BtrfsMutationError::BrokenInvariant(
+                "extent owner block group disappeared",
+            ))?;
+        let used_before = bg.item.used_bytes;
+        bg.item.used_bytes = used_after;
+        trace!(
+            target: "ffs::btrfs::alloc",
+            block_group = bg.start,
+            used_before,
+            used_after = bg.item.used_bytes,
+            delta = num_bytes,
+            "bg_accounting_free"
+        );
 
         // Queue delayed ref for delete.
         let extent = ExtentKey { bytenr, num_bytes };
-        let root = owning_bg.unwrap_or_default();
         let ref_type = if is_metadata {
             BtrfsRef::TreeBlock {
                 root,
@@ -8616,6 +8632,88 @@ mod tests {
             num_bytes: ext.num_bytes,
         };
         assert_eq!(alloc.extent_refcount(key), 0);
+    }
+
+    #[test]
+    fn extent_allocator_adversarial_rejects_free_without_owning_block_group() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x10_0000, make_data_bg(0x10_0000, 8192));
+        let bytenr = 0x20_0000;
+        let key = BtrfsKey {
+            objectid: bytenr,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: 4096,
+        };
+        let extent_item = BtrfsExtentItem {
+            refs: 1,
+            generation: 1,
+            flags: 0,
+        };
+        alloc
+            .extent_tree
+            .insert(key, &extent_item.to_bytes())
+            .expect("insert orphan extent");
+
+        let err = alloc
+            .free_extent(bytenr, 4096, false)
+            .expect_err("orphan extent should fail closed");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("extent has no owning block group")
+        );
+
+        assert_eq!(
+            alloc
+                .extent_tree
+                .range(&key, &key)
+                .expect("extent lookup should still work")
+                .len(),
+            1,
+            "failed free should not delete the extent item"
+        );
+        assert_eq!(alloc.delayed_ref_count(), 0);
+    }
+
+    #[test]
+    fn extent_allocator_adversarial_rejects_free_accounting_underflow() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_start = 0x10_0000;
+        alloc.add_block_group(bg_start, make_data_bg(bg_start, 8192));
+        let key = BtrfsKey {
+            objectid: bg_start,
+            item_type: BTRFS_ITEM_EXTENT_ITEM,
+            offset: 4096,
+        };
+        let extent_item = BtrfsExtentItem {
+            refs: 1,
+            generation: 1,
+            flags: 0,
+        };
+        alloc
+            .extent_tree
+            .insert(key, &extent_item.to_bytes())
+            .expect("insert inconsistent extent");
+
+        let err = alloc
+            .free_extent(bg_start, 4096, false)
+            .expect_err("accounting underflow should fail closed");
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("block group used bytes underflow")
+        );
+
+        let bg = alloc.block_group(bg_start).expect("bg");
+        assert_eq!(bg.used_bytes, 0);
+        assert_eq!(
+            alloc
+                .extent_tree
+                .range(&key, &key)
+                .expect("extent lookup should still work")
+                .len(),
+            1,
+            "failed free should not delete the extent item"
+        );
+        assert_eq!(alloc.delayed_ref_count(), 0);
     }
 
     #[test]
