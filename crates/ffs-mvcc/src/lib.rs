@@ -969,11 +969,11 @@ impl EbrVersionReclaimer {
         let handle = self.collector.register();
         let guard = handle.pin();
         for version in retired {
-            self.retired_versions.fetch_add(1, Ordering::Relaxed);
+            saturating_increment_atomic(self.retired_versions.as_ref(), Ordering::Relaxed);
             let reclaimed = Arc::clone(&self.reclaimed_versions);
             guard.defer(move || {
                 drop(version);
-                reclaimed.fetch_add(1, Ordering::Relaxed);
+                saturating_increment_atomic(reclaimed.as_ref(), Ordering::Relaxed);
             });
         }
     }
@@ -5505,6 +5505,30 @@ mod tests {
         let after = store.ebr_stats();
         assert_eq!(before, after);
         assert_eq!(after.pending_versions(), 0);
+    }
+
+    #[test]
+    fn ebr_reclaimer_counters_saturate_at_numeric_limits() {
+        let reclaimer = EbrVersionReclaimer::default();
+        reclaimer
+            .retired_versions
+            .store(u64::MAX, Ordering::Relaxed);
+        reclaimer
+            .reclaimed_versions
+            .store(u64::MAX, Ordering::Relaxed);
+
+        reclaimer.retire_versions(vec![BlockVersion {
+            block: BlockNumber(1),
+            commit_seq: CommitSeq(1),
+            writer: TxnId(1),
+            data: VersionData::Full(vec![0xA5; 8]),
+        }]);
+        reclaimer.collect();
+
+        let stats = reclaimer.stats();
+        assert_eq!(stats.retired_versions, u64::MAX);
+        assert_eq!(stats.reclaimed_versions, u64::MAX);
+        assert_eq!(stats.pending_versions(), 0);
     }
 
     #[test]
