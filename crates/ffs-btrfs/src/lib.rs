@@ -967,6 +967,12 @@ pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
         let data_len = usize::from(read_u16(data, cur + 25, "dir_item.data_len")?);
         let name_len = usize::from(read_u16(data, cur + 27, "dir_item.name_len")?);
         let file_type = data[cur + 29];
+        if data_len != 0 {
+            return Err(ParseError::InvalidField {
+                field: "dir_item.data_len",
+                reason: "must be zero for directory entries",
+            });
+        }
 
         let name_start = cur + HEADER;
         let name_end = name_start
@@ -975,16 +981,10 @@ pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
                 field: "dir_item.name_len",
                 reason: "overflow",
             })?;
-        let payload_end = name_end
-            .checked_add(data_len)
-            .ok_or(ParseError::InvalidField {
-                field: "dir_item.data_len",
-                reason: "overflow",
-            })?;
 
-        if payload_end > data.len() {
+        if name_end > data.len() {
             return Err(ParseError::InsufficientData {
-                needed: payload_end,
+                needed: name_end,
                 offset: cur,
                 actual: data.len(),
             });
@@ -998,7 +998,7 @@ pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
             name: data[name_start..name_end].to_vec(),
         });
 
-        cur = payload_end;
+        cur = name_end;
     }
 
     Ok(out)
@@ -6444,9 +6444,14 @@ mod tests {
         assert_insufficient_data(parse_dir_items(&name_overflow), 35, 0, 30);
 
         second.name = b"n".to_vec();
-        let mut data_overflow = second.to_bytes();
-        data_overflow[25..27].copy_from_slice(&4_u16.to_le_bytes());
-        assert_insufficient_data(parse_dir_items(&data_overflow), 35, 0, 31);
+        let mut nonzero_data_len = second.to_bytes();
+        nonzero_data_len[25..27].copy_from_slice(&4_u16.to_le_bytes());
+        nonzero_data_len.extend_from_slice(b"data");
+        assert_invalid_field(
+            parse_dir_items(&nonzero_data_len),
+            "dir_item.data_len",
+            "must be zero for directory entries",
+        );
     }
 
     fn assert_xattr_item_adversarial_boundaries() {

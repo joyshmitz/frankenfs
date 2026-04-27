@@ -408,6 +408,32 @@ fn dir_item_empty_name_length_2_roundtrips() {
     assert_eq!(decoded, vec![item]);
 }
 
+#[test]
+fn dir_item_nonzero_data_len_rejected() {
+    let item = BtrfsDirItem {
+        child_objectid: 257,
+        child_key_type: 1,
+        child_key_offset: 0,
+        file_type: 1,
+        name: b"hello.txt".to_vec(),
+    };
+    let mut payload = item.to_bytes();
+    payload[25..27].copy_from_slice(&4u16.to_le_bytes());
+    payload.extend_from_slice(b"data");
+
+    let err = parse_dir_items(&payload).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "dir_item.data_len",
+                reason: "must be zero for directory entries"
+            }
+        ),
+        "expected DIR_ITEM data_len rejection, got {err:?}"
+    );
+}
+
 // INODE_REF (10 + name_len bytes per entry)
 
 /// Golden INODE_REF payload: one entry index=2, name="subdir" (6 bytes).
