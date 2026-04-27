@@ -45,6 +45,7 @@ const JBD2_TAG_CHECKSUM_OFFSET_V1_V2: usize = 4;
 const JBD2_TAG_FLAGS_OFFSET_V3: usize = 4;
 const JBD2_TAG_HIGH_OFFSET_V3: usize = 8;
 const JBD2_TAG_CHECKSUM_OFFSET_V3: usize = 12;
+const JBD2_SUPERBLOCK_MIN_PARSE_SIZE: usize = 88;
 
 const JBD2_TAG_FLAG_ESCAPE: u32 = 0x0000_0001;
 const JBD2_TAG_FLAG_SAME_UUID: u32 = 0x0000_0002;
@@ -76,6 +77,10 @@ pub struct Jbd2Superblock {
 impl Jbd2Superblock {
     #[must_use]
     pub fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < JBD2_SUPERBLOCK_MIN_PARSE_SIZE {
+            return None;
+        }
+
         let header = Jbd2Header::parse(bytes)?;
         if header.magic != JBD2_MAGIC
             || (header.block_type != JBD2_BLOCKTYPE_SUPERBLOCK_V1
@@ -85,13 +90,8 @@ impl Jbd2Superblock {
         }
 
         // JBD2 UUID is at offset 48, 16 bytes.
-        let uuid = if bytes.len() >= 64 {
-            let mut u = [0u8; 16];
-            u.copy_from_slice(&bytes[48..64]);
-            u
-        } else {
-            [0u8; 16]
-        };
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&bytes[48..64]);
 
         Some(Self {
             block_size: read_be_u32(bytes, 12)?,
@@ -99,10 +99,10 @@ impl Jbd2Superblock {
             first_log_block: read_be_u32(bytes, 20)?,
             start_sequence: read_be_u32(bytes, 24)?,
             start_block: read_be_u32(bytes, 28)?,
-            feature_compat: read_be_u32(bytes, 36).unwrap_or(0),
-            feature_incompat: read_be_u32(bytes, 40).unwrap_or(0),
-            feature_ro_compat: read_be_u32(bytes, 44).unwrap_or(0),
-            num_fc_blocks: read_be_u32(bytes, 84).unwrap_or(0),
+            feature_compat: read_be_u32(bytes, 36)?,
+            feature_incompat: read_be_u32(bytes, 40)?,
+            feature_ro_compat: read_be_u32(bytes, 44)?,
+            num_fc_blocks: read_be_u32(bytes, 84)?,
             uuid,
         })
     }
@@ -2916,6 +2916,20 @@ mod tests {
         out[40..44].copy_from_slice(&feature_incompat.to_be_bytes());
         out[48..64].copy_from_slice(&uuid);
         out
+    }
+
+    #[test]
+    fn jbd2_superblock_parse_rejects_truncated_consumed_fields() {
+        let block = jbd2_superblock_block(512, 1, 1, 0, JBD2_FEATURE_INCOMPAT_CSUM_V3, [7; 16]);
+
+        assert!(
+            Jbd2Superblock::parse(&block[..JBD2_SUPERBLOCK_MIN_PARSE_SIZE - 1]).is_none(),
+            "truncated superblock must not default missing fixed fields"
+        );
+        assert!(
+            Jbd2Superblock::parse(&block[..JBD2_SUPERBLOCK_MIN_PARSE_SIZE]).is_some(),
+            "minimum consumed superblock fields should parse"
+        );
     }
 
     fn descriptor_block(block_size: usize, seq: u32, tags: &[(u32, u32)]) -> Vec<u8> {
