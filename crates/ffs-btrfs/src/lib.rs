@@ -75,12 +75,27 @@ pub const BTRFS_COMPRESS_ZLIB: u8 = 1;
 pub const BTRFS_COMPRESS_LZO: u8 = 2;
 pub const BTRFS_COMPRESS_ZSTD: u8 = 3;
 
+/// Highest valid btrfs tree level. The kernel's `BTRFS_MAX_LEVEL` is the
+/// level count (8), so valid on-disk levels are `0..=7`.
+pub const BTRFS_MAX_TREE_LEVEL: u8 = 7;
+
 /// Internal MVCC metadata block base used for btrfs transaction manifests.
 const BTRFS_TX_META_BASE_BLOCK: u64 = 0x4_0000_0000;
 /// Internal MVCC metadata block base used for tree-root pointer updates.
 const BTRFS_TX_TREE_ROOT_BASE_BLOCK: u64 = 0x4_1000_0000;
 /// Internal MVCC metadata block base used for pending-free ledgers.
 const BTRFS_TX_PENDING_FREE_BASE_BLOCK: u64 = 0x4_2000_0000;
+
+const BTRFS_ROOT_ITEM_LEGACY_SIZE: usize = 239;
+const BTRFS_ROOT_ITEM_GENERATION_OFFSET: usize = 160;
+const BTRFS_ROOT_ITEM_ROOT_DIRID_OFFSET: usize = 168;
+const BTRFS_ROOT_ITEM_BYTENR_OFFSET: usize = 176;
+const BTRFS_ROOT_ITEM_FLAGS_OFFSET: usize = 208;
+const BTRFS_ROOT_ITEM_REFS_OFFSET: usize = 216;
+const BTRFS_ROOT_ITEM_LEVEL_OFFSET: usize = 238;
+const BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET: usize = 239;
+const BTRFS_ROOT_ITEM_UUID_OFFSET: usize = 247;
+const BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET: usize = 263;
 
 /// Parsed subset of `btrfs_root_item` needed for tree bootstrapping,
 /// subvolume enumeration, and snapshot navigation.
@@ -524,50 +539,78 @@ fn read_u64(data: &[u8], off: usize, field: &'static str) -> Result<u64, ParseEr
 /// enumerate subvolumes, and identify snapshots.
 ///
 /// Layout (stable for the supported on-disk variants):
-/// - offset 160: `expected_generation` (u64)
+/// - offset 160: `generation` (u64)
 /// - offset 168: `root_dirid` (u64)
 /// - offset 176: `bytenr` (u64)
 /// - offset 208: `flags` (u64)
-/// - offset 216: `refs` (u64)
-/// - offset 224: `uuid` (16 bytes) — optional, zero if payload too short
-/// - offset 240: `parent_uuid` (16 bytes) — optional, zero if payload too short
-/// - last byte: `level` (u8)
+/// - offset 216: `refs` (u32)
+/// - offset 238: `level` (u8)
+/// - offset 239: `generation_v2` (u64) — validates newer optional fields
+/// - offset 247: `uuid` (16 bytes) — zero if payload too short/stale
+/// - offset 263: `parent_uuid` (16 bytes) — zero if payload too short/stale
 pub fn parse_root_item(data: &[u8]) -> Result<BtrfsRootItem, ParseError> {
-    if data.len() < 224 {
+    if data.len() < BTRFS_ROOT_ITEM_LEGACY_SIZE {
         return Err(ParseError::InsufficientData {
-            needed: 224,
+            needed: BTRFS_ROOT_ITEM_LEGACY_SIZE,
             offset: 0,
             actual: data.len(),
         });
     }
 
-    let generation = read_u64(data, 160, "root_item.generation")?;
-    let root_dirid = read_u64(data, 168, "root_item.root_dirid")?;
-    let bytenr = read_u64(data, 176, "root_item.bytenr")?;
-    let flags = read_u64(data, 208, "root_item.flags")?;
-    let refs = read_u64(data, 216, "root_item.refs")?;
-    let level = *data.last().ok_or(ParseError::InsufficientData {
-        needed: 1,
-        offset: 0,
-        actual: data.len(),
-    })?;
+    let generation = read_u64(
+        data,
+        BTRFS_ROOT_ITEM_GENERATION_OFFSET,
+        "root_item.generation",
+    )?;
+    let root_dirid = read_u64(
+        data,
+        BTRFS_ROOT_ITEM_ROOT_DIRID_OFFSET,
+        "root_item.root_dirid",
+    )?;
+    let bytenr = read_u64(data, BTRFS_ROOT_ITEM_BYTENR_OFFSET, "root_item.bytenr")?;
+    let flags = read_u64(data, BTRFS_ROOT_ITEM_FLAGS_OFFSET, "root_item.flags")?;
+    let refs = u64::from(read_u32(
+        data,
+        BTRFS_ROOT_ITEM_REFS_OFFSET,
+        "root_item.refs",
+    )?);
+    let level = read_exact::<1>(data, BTRFS_ROOT_ITEM_LEVEL_OFFSET, "root_item.level")?[0];
 
-    // UUID fields are optional (older format root items may be shorter)
-    let uuid = if data.len() >= 240 {
-        read_exact::<16>(data, 224, "root_item.uuid")?
+    // UUID-era fields are valid only when generation_v2 matches generation;
+    // older kernels can leave stale values behind after modifying the root.
+    let extended_fields_valid = data.len() >= BTRFS_ROOT_ITEM_UUID_OFFSET
+        && read_u64(
+            data,
+            BTRFS_ROOT_ITEM_GENERATION_V2_OFFSET,
+            "root_item.generation_v2",
+        )? == generation;
+
+    let uuid = if extended_fields_valid && data.len() >= BTRFS_ROOT_ITEM_UUID_OFFSET + 16 {
+        read_exact::<16>(data, BTRFS_ROOT_ITEM_UUID_OFFSET, "root_item.uuid")?
     } else {
         [0u8; 16]
     };
-    let parent_uuid = if data.len() >= 256 {
-        read_exact::<16>(data, 240, "root_item.parent_uuid")?
-    } else {
-        [0u8; 16]
-    };
+    let parent_uuid =
+        if extended_fields_valid && data.len() >= BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET + 16 {
+            read_exact::<16>(
+                data,
+                BTRFS_ROOT_ITEM_PARENT_UUID_OFFSET,
+                "root_item.parent_uuid",
+            )?
+        } else {
+            [0u8; 16]
+        };
 
     if bytenr == 0 {
         return Err(ParseError::InvalidField {
             field: "root_item.bytenr",
             reason: "must be non-zero",
+        });
+    }
+    if level > BTRFS_MAX_TREE_LEVEL {
+        return Err(ParseError::InvalidField {
+            field: "root_item.level",
+            reason: "exceeds maximum btrfs tree level",
         });
     }
 
@@ -6198,7 +6241,7 @@ mod tests {
 
     fn make_root_item_payload(len: usize, bytenr: u64) -> Vec<u8> {
         assert!(
-            len >= 224,
+            len >= 239,
             "root item test payload must include fixed fields"
         );
 
@@ -6207,14 +6250,17 @@ mod tests {
         payload[168..176].copy_from_slice(&256_u64.to_le_bytes());
         payload[176..184].copy_from_slice(&bytenr.to_le_bytes());
         payload[208..216].copy_from_slice(&1_u64.to_le_bytes());
-        payload[216..224].copy_from_slice(&3_u64.to_le_bytes());
-        if len >= 240 {
-            payload[224..240].copy_from_slice(&[0x11; 16]);
+        payload[216..220].copy_from_slice(&3_u32.to_le_bytes());
+        payload[238] = 2;
+        if len >= 247 {
+            payload[239..247].copy_from_slice(&7_u64.to_le_bytes());
         }
-        if len >= 256 {
-            payload[240..256].copy_from_slice(&[0x22; 16]);
+        if len >= 263 {
+            payload[247..263].copy_from_slice(&[0x11; 16]);
         }
-        payload[len - 1] = 2;
+        if len >= 279 {
+            payload[263..279].copy_from_slice(&[0x22; 16]);
+        }
         payload
     }
 
@@ -6279,27 +6325,41 @@ mod tests {
     }
 
     fn assert_root_item_adversarial_boundaries() {
-        let valid_min = make_root_item_payload(224, 0x1234_0000);
+        let valid_min = make_root_item_payload(239, 0x1234_0000);
         let parsed = parse_root_item(&valid_min).expect("parse minimal root item");
         assert_eq!(parsed.bytenr, 0x1234_0000);
         assert_eq!(parsed.generation, 7);
         assert_eq!(parsed.root_dirid, 256);
         assert_eq!(parsed.level, 2);
 
-        let valid_uuid = make_root_item_payload(256, 0x5678_0000);
+        let valid_uuid = make_root_item_payload(279, 0x5678_0000);
         let parsed = parse_root_item(&valid_uuid).expect("parse root item with uuids");
         assert_eq!(parsed.bytenr, 0x5678_0000);
         assert_eq!(parsed.uuid[0], 0x11);
         assert_eq!(parsed.parent_uuid[0], 0x22);
         assert_eq!(parsed.level, 2);
 
-        assert_insufficient_data(parse_root_item(&[0_u8; 223]), 224, 0, 223);
+        let mut stale_uuid = valid_uuid;
+        stale_uuid[239..247].copy_from_slice(&6_u64.to_le_bytes());
+        let parsed = parse_root_item(&stale_uuid).expect("parse stale-uuid root item");
+        assert_eq!(parsed.uuid, [0; 16]);
+        assert_eq!(parsed.parent_uuid, [0; 16]);
 
-        let zero_bytenr = make_root_item_payload(224, 0);
+        assert_insufficient_data(parse_root_item(&[0_u8; 238]), 239, 0, 238);
+
+        let zero_bytenr = make_root_item_payload(239, 0);
         assert_invalid_field(
             parse_root_item(&zero_bytenr),
             "root_item.bytenr",
             "must be non-zero",
+        );
+
+        let mut bad_level = make_root_item_payload(239, 0x1234_0000);
+        bad_level[238] = BTRFS_MAX_TREE_LEVEL + 1;
+        assert_invalid_field(
+            parse_root_item(&bad_level),
+            "root_item.level",
+            "exceeds maximum btrfs tree level",
         );
     }
 
@@ -9305,14 +9365,15 @@ mod tests {
     // ── Subvolume enumeration tests ────────────────────────────────
 
     fn make_root_item_data(bytenr: u64, generation: u64, flags: u64) -> Vec<u8> {
-        let mut data = vec![0_u8; 272];
+        let mut data = vec![0_u8; 279];
         data[160..168].copy_from_slice(&generation.to_le_bytes()); // generation
         data[168..176].copy_from_slice(&256_u64.to_le_bytes()); // root_dirid
         data[176..184].copy_from_slice(&bytenr.to_le_bytes()); // bytenr
         data[208..216].copy_from_slice(&flags.to_le_bytes()); // flags
-        data[216..224].copy_from_slice(&1_u64.to_le_bytes()); // refs
-        // uuid at 224, parent_uuid at 240 — left as zeros
-        data[271] = 0; // level
+        data[216..220].copy_from_slice(&1_u32.to_le_bytes()); // refs
+        // uuid at 247, parent_uuid at 263 — left as zeros
+        data[238] = 0; // level
+        data[239..247].copy_from_slice(&generation.to_le_bytes()); // generation_v2
         data
     }
 
@@ -9324,8 +9385,8 @@ mod tests {
         parent_uuid: [u8; 16],
     ) -> Vec<u8> {
         let mut data = make_root_item_data(bytenr, generation, flags);
-        data[224..240].copy_from_slice(&uuid);
-        data[240..256].copy_from_slice(&parent_uuid);
+        data[247..263].copy_from_slice(&uuid);
+        data[263..279].copy_from_slice(&parent_uuid);
         data
     }
 

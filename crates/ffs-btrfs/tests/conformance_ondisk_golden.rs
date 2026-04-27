@@ -17,9 +17,10 @@
 //! emit but must decode from real images.
 
 use ffs_btrfs::{
-    BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_REG, BtrfsDirItem, BtrfsExtentData, BtrfsInodeItem,
-    BtrfsInodeRef, BtrfsXattrItem, parse_dir_items, parse_extent_data, parse_inode_item,
-    parse_inode_refs, parse_root_item, parse_root_ref, parse_xattr_items,
+    BTRFS_FILE_EXTENT_INLINE, BTRFS_FILE_EXTENT_REG, BTRFS_MAX_TREE_LEVEL, BtrfsDirItem,
+    BtrfsExtentData, BtrfsInodeItem, BtrfsInodeRef, BtrfsXattrItem, parse_dir_items,
+    parse_extent_data, parse_inode_item, parse_inode_refs, parse_root_item, parse_root_ref,
+    parse_xattr_items,
 };
 use ffs_types::ParseError;
 
@@ -669,15 +670,15 @@ fn xattr_item_empty_value_parses_as_zero_length_value() {
 
 // ROOT_ITEM (parse-only; no in-tree encoder)
 
-/// Parse-only golden: exercises parser on a 256-byte ROOT_ITEM payload with
+/// Parse-only golden: exercises parser on a 279-byte ROOT_ITEM payload with
 /// UUID fields present. Our in-tree code does not emit ROOT_ITEM bytes (the
 /// writable path seeds alloc state from disk and mutates in-memory), so this
 /// is a one-way fixture test; encoder side is XFAIL.
 ///
 /// See DISCREPANCIES.md DISC-BTRFS-002.
 #[test]
-fn golden_root_item_256_bytes_parse_only() {
-    let mut fixture = vec![0u8; 256];
+fn golden_root_item_279_bytes_parse_only() {
+    let mut fixture = vec![0u8; 279];
     // generation @ 160 = 5
     fixture[160..168].copy_from_slice(&5u64.to_le_bytes());
     // root_dirid @ 168 = 256 (BTRFS_FIRST_FREE_OBJECTID)
@@ -687,18 +688,19 @@ fn golden_root_item_256_bytes_parse_only() {
     // flags @ 208 = 1 (read-only subvolume bit)
     fixture[208..216].copy_from_slice(&1u64.to_le_bytes());
     // refs @ 216 = 1
-    fixture[216..224].copy_from_slice(&1u64.to_le_bytes());
-    // uuid @ 224: 0xAA bytes
-    for b in &mut fixture[224..240] {
+    fixture[216..220].copy_from_slice(&1u32.to_le_bytes());
+    // level @ 238 = 2
+    fixture[238] = 2;
+    // generation_v2 @ 239 = generation, so UUID-era fields are valid
+    fixture[239..247].copy_from_slice(&5u64.to_le_bytes());
+    // uuid @ 247: 0xAA bytes
+    for b in &mut fixture[247..263] {
         *b = 0xAA;
     }
-    // parent_uuid @ 240: 0xBB bytes
-    for b in &mut fixture[240..256] {
+    // parent_uuid @ 263: 0xBB bytes
+    for b in &mut fixture[263..279] {
         *b = 0xBB;
     }
-    // level at last byte. 256-byte payload means level is fixture[255] = 0xBB.
-    // That's the last parent_uuid byte, and it doubles as level.
-    // To control level independently, shrink payload to 255 bytes? Keep as-is.
 
     let decoded = parse_root_item(&fixture).expect("parse root_item");
     assert_eq!(decoded.bytenr, 0x4000);
@@ -708,7 +710,23 @@ fn golden_root_item_256_bytes_parse_only() {
     assert_eq!(decoded.refs, 1);
     assert_eq!(decoded.uuid, [0xAA; 16]);
     assert_eq!(decoded.parent_uuid, [0xBB; 16]);
-    assert_eq!(decoded.level, 0xBB, "level is the last byte of the payload");
+    assert_eq!(decoded.level, 2);
+}
+
+#[test]
+fn root_item_stale_generation_v2_zeros_uuids() {
+    let mut fixture = vec![0u8; 279];
+    fixture[160..168].copy_from_slice(&5u64.to_le_bytes());
+    fixture[176..184].copy_from_slice(&0x4000u64.to_le_bytes());
+    fixture[238] = 2;
+    fixture[239..247].copy_from_slice(&4u64.to_le_bytes());
+    fixture[247..263].copy_from_slice(&[0xAA; 16]);
+    fixture[263..279].copy_from_slice(&[0xBB; 16]);
+
+    let decoded = parse_root_item(&fixture).expect("parse stale generation_v2 root_item");
+    assert_eq!(decoded.uuid, [0; 16]);
+    assert_eq!(decoded.parent_uuid, [0; 16]);
+    assert_eq!(decoded.level, 2);
 }
 
 #[test]
@@ -732,8 +750,27 @@ fn root_item_bytenr_zero_rejected() {
 }
 
 #[test]
+fn root_item_impossible_level_rejected() {
+    let mut fixture = vec![0u8; 239];
+    fixture[176..184].copy_from_slice(&0x4000u64.to_le_bytes());
+    fixture[238] = BTRFS_MAX_TREE_LEVEL + 1;
+
+    let err = parse_root_item(&fixture).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "root_item.level",
+                reason: "exceeds maximum btrfs tree level"
+            }
+        ),
+        "expected invalid root item level rejection, got {err:?}"
+    );
+}
+
+#[test]
 fn root_item_short_payload_rejected() {
-    for len in 0..224 {
+    for len in 0..239 {
         let err = parse_root_item(&vec![0u8; len]).unwrap_err();
         let msg = format!("{err:?}");
         assert!(

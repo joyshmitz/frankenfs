@@ -38,12 +38,12 @@
 | BtrfsKey | ✅ | ✅ | 3 | 3 | 100% | via leaf fixtures |
 | BtrfsKeyPtr | ✅ | ✅ | 2 | 2 | 100% | internal node pointers |
 | BtrfsDevItem | ✅ | ✅ | 7 | 7 | 100% | 1TB device with 512GB used plus invalid ID/accounting rejection |
-| BtrfsRootItem | ✅ | ✅ | 5 | 5 | 100% | via roottree_leaf fixture |
+| BtrfsRootItem | ✅ | ✅ | 7 | 7 | 100% | via roottree_leaf fixture plus fixed-offset level/UUID layout, stale generation_v2 invalidation, and impossible level rejection |
 | BtrfsInodeItem | ✅ | ✅ | 7 | 7 | 100% | via fstree_leaf fixture plus timestamp nanosecond bound rejection |
 | BtrfsDirItem | ✅ | ✅ | 4 | 4 | 100% | via fstree_leaf fixture |
 | BtrfsExtentData | ✅ | ✅ | 5 | 5 | 100% | via fstree_leaf fixture |
 
-**btrfs Total: 70 MUST clauses, 70 passing = 100.0%**
+**btrfs Total: 72 MUST clauses, 72 passing = 100.0%**
 
 ## Priority Gaps
 
