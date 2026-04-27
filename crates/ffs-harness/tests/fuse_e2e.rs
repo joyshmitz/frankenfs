@@ -1293,6 +1293,10 @@ def read_text(path):
     with open(path, "rb") as f:
         return f.read().decode("ascii")
 
+def read_hex(path):
+    with open(path, "rb") as f:
+        return f.read().hex()
+
 def entries(path):
     return sorted(os.listdir(path))
 
@@ -1428,6 +1432,26 @@ def pread_pwrite_seek_fdatasync():
         "sync_call": sync_call,
     }
 
+def truncate_extend_zero_fill():
+    path = os.path.join(base, "sparse.bin")
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_RDWR, 0o644)
+    try:
+        os.write(fd, b"hi")
+        os.ftruncate(fd, 6)
+        os.lseek(fd, 0, os.SEEK_SET)
+        after_extend = os.read(fd, 6).hex()
+        os.lseek(fd, 5, os.SEEK_SET)
+        os.write(fd, b"Z")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+    return {
+        "after_extend_hex": after_extend,
+        "after_patch_hex": read_hex(path),
+        "stat": stable_stat(path),
+    }
+
 def hardlink_symlink():
     path = os.path.join(base, "file.txt")
     hard = os.path.join(base, "hard.txt")
@@ -1560,6 +1584,9 @@ def cleanup():
     io_path = os.path.join(base, "io.bin")
     if os.path.exists(io_path):
         os.unlink(io_path)
+    sparse_path = os.path.join(base, "sparse.bin")
+    if os.path.exists(sparse_path):
+        os.unlink(sparse_path)
     os.unlink(os.path.join(base, "renamed.txt"))
     os.unlink(os.path.join(base, "map.bin"))
     os.unlink(os.path.join(base, "moved", "child.txt"))
@@ -1574,6 +1601,7 @@ for step, func in [
     ("chmod_truncate_stat", chmod_truncate_stat),
     ("utime_access_openat_statvfs", utime_access_openat_statvfs),
     ("pread_pwrite_seek_fdatasync", pread_pwrite_seek_fdatasync),
+    ("truncate_extend_zero_fill", truncate_extend_zero_fill),
     ("hardlink_symlink", hardlink_symlink),
     ("symlink_at_nofollow_contracts", symlink_at_nofollow_contracts),
     ("rename_unlink", rename_unlink),
@@ -2962,6 +2990,35 @@ fn syscall_conformance_reference_probe_covers_fd_metadata_contracts() {
 }
 
 #[test]
+fn syscall_conformance_reference_probe_covers_truncate_extension_zero_fill() {
+    if !command_available("python3") {
+        eprintln!("python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let reference = reference_conformance_tempdir();
+    let report = run_syscall_conformance_probe(reference.path());
+    let records = report
+        .as_array()
+        .expect("syscall conformance report should be a JSON array");
+    let sparse = records
+        .iter()
+        .find(|record| record["step"].as_str() == Some("truncate_extend_zero_fill"))
+        .expect("missing truncate-extension zero-fill step in report");
+    assert_eq!(
+        sparse["ok"].as_bool(),
+        Some(true),
+        "truncate-extension zero-fill step should succeed on the reference filesystem: {sparse}"
+    );
+
+    let result = &sparse["result"];
+    assert_eq!(result["after_extend_hex"].as_str(), Some("686900000000"));
+    assert_eq!(result["after_patch_hex"].as_str(), Some("68690000005a"));
+    assert_eq!(result["stat"]["kind"].as_str(), Some("file"));
+    assert_eq!(result["stat"]["size"].as_u64(), Some(6));
+}
+
+#[test]
 fn syscall_conformance_reference_probe_covers_symlink_at_nofollow_contracts() {
     if !command_available("python3") {
         eprintln!("python3 prerequisites not met, skipping");
@@ -3030,7 +3087,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
         Some(
-            "file_lifecycle+fd_metadata+offset_io+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
+            "file_lifecycle+fd_metadata+offset_io+truncate_extend+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
         ),
     );
 }
