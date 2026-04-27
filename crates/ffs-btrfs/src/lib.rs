@@ -3479,6 +3479,24 @@ fn parse_chunk_item(data: &[u8], logical_offset: u64) -> Result<BtrfsChunkEntry,
             reason: "chunk has zero stripe length",
         });
     }
+    if io_align == 0 {
+        return Err(ParseError::InvalidField {
+            field: "io_align",
+            reason: "must be non-zero",
+        });
+    }
+    if io_width == 0 {
+        return Err(ParseError::InvalidField {
+            field: "io_width",
+            reason: "must be non-zero",
+        });
+    }
+    if sector_size == 0 {
+        return Err(ParseError::InvalidField {
+            field: "sector_size",
+            reason: "must be non-zero",
+        });
+    }
     if num_stripes == 0 {
         return Err(ParseError::InvalidField {
             field: "stripes",
@@ -8401,6 +8419,31 @@ mod tests {
             parse_chunk_item(&zero_stripe_len, 0x100_0000),
             "stripe_len",
             "chunk has zero stripe length",
+        );
+
+        let mut zero_io_align = make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, chunk_type, 1);
+        zero_io_align[32..36].copy_from_slice(&0_u32.to_le_bytes());
+        assert_invalid_field(
+            parse_chunk_item(&zero_io_align, 0x100_0000),
+            "io_align",
+            "must be non-zero",
+        );
+
+        let mut zero_io_width = make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, chunk_type, 1);
+        zero_io_width[36..40].copy_from_slice(&0_u32.to_le_bytes());
+        assert_invalid_field(
+            parse_chunk_item(&zero_io_width, 0x100_0000),
+            "io_width",
+            "must be non-zero",
+        );
+
+        let mut zero_sector_size =
+            make_chunk_item_payload(8 * 1024 * 1024, 64 * 1024, chunk_type, 1);
+        zero_sector_size[40..44].copy_from_slice(&0_u32.to_le_bytes());
+        assert_invalid_field(
+            parse_chunk_item(&zero_sector_size, 0x100_0000),
+            "sector_size",
+            "must be non-zero",
         );
 
         let mut zero_stripe_devid =

@@ -31,7 +31,7 @@
 | Structure | Fixture | Test | MUST Clauses | Passing | Score | Notes |
 |-----------|:-------:|:----:|:------------:|:-------:|:-----:|-------|
 | BtrfsSuperblock | ✅ | ✅ | 18 | 18 | 100% | sparse + with_chunks variants plus invalid accounting rejection |
-| BtrfsChunkEntry | ✅ | ✅ | 6 | 6 | 100% | via superblock sys_chunk_array |
+| BtrfsChunkEntry | ✅ | ✅ | 9 | 9 | 100% | via superblock sys_chunk_array plus zero geometry-field rejection |
 | BtrfsStripe | ✅ | ✅ | 4 | 4 | 100% | via chunk entries plus non-zero device ID rejection |
 | BtrfsHeader | ✅ | ✅ | 5 | 5 | 100% | via leaf fixtures |
 | BtrfsItem | ✅ | ✅ | 4 | 4 | 100% | via leaf fixtures |
@@ -46,7 +46,7 @@
 | BtrfsXattrItem | ✅ | ✅ | 1 | 1 | 100% | zero-length name rejection while zero-length values remain accepted |
 | BtrfsExtentData | ✅ | ✅ | 6 | 6 | 100% | via fstree_leaf fixture plus fixed-size regular payload trailing-byte rejection |
 
-**btrfs Total: 82 MUST clauses, 82 passing = 100.0%**
+**btrfs Total: 85 MUST clauses, 85 passing = 100.0%**
 
 ## Priority Gaps
 
@@ -66,8 +66,8 @@ None. All identified on-disk structures have conformance fixtures.
 | Ext4 group descriptors | ✅ | ✅ | synthetic adversarial seeds cover 32-byte and 64-byte descriptor field composition, metadata checksum stamping/verification, checksum corruption rejection, invalid descriptor size, and short descriptor rejection |
 | Ext4 MMP blocks | ✅ | ✅ | synthetic adversarial seeds cover clean/fsck/active/unknown sequence statuses, bad magic rejection, checksum corruption rejection, and short-block rejection |
 | Btrfs tree blocks | ✅ | ✅ | synthetic adversarial seeds cover valid leaf and internal nodes, excessive tree level, leaf payload overlap with the item table, payload out-of-block bounds, overlapping leaf payload ranges, zero child block pointers, and tree-block checksum stamping/corruption |
-| Btrfs sys_chunk_array | ✅ | ✅ | synthetic adversarial seeds cover valid single-device bootstrap mapping, bad chunk key type/objectid, zero chunk length, zero stripe length, zero stripes, zero stripe device IDs, multiple RAID profile bits, and truncated stripe data |
-| Btrfs chunk-tree items | ✅ | ✅ | deterministic adversarial regression tests cover valid multi-stripe chunk-tree item parsing, fixed header truncation, declared stripe payload truncation, trailing payload rejection after declared stripes, zero chunk length, zero stripe length, zero stripes, zero stripe device IDs, and multiple RAID profile bit rejection |
+| Btrfs sys_chunk_array | ✅ | ✅ | synthetic adversarial seeds cover valid single-device bootstrap mapping, bad chunk key type/objectid, zero chunk length, zero stripe length, zero io_align/io_width/sector_size geometry fields, zero stripes, zero stripe device IDs, multiple RAID profile bits, and truncated stripe data |
+| Btrfs chunk-tree items | ✅ | ✅ | deterministic adversarial regression tests cover valid multi-stripe chunk-tree item parsing, fixed header truncation, declared stripe payload truncation, trailing payload rejection after declared stripes, zero chunk length, zero stripe length, zero io_align/io_width/sector_size geometry fields, zero stripes, zero stripe device IDs, and multiple RAID profile bit rejection |
 | Btrfs dev items | ✅ | ✅ | synthetic adversarial seeds cover full field-layout parsing, max numeric/classification values, trailing bytes after the fixed 98-byte item, zero device ID rejection, zero-capacity device rejection, impossible `bytes_used > total_bytes` accounting, and truncated payload rejection |
 | Btrfs superblocks | ✅ | ✅ | synthetic adversarial seeds cover valid superblock-region parsing, image-offset parsing, bad magic, zero and non-power-of-two sizing fields, oversized sector/node/stripe sizing fields, zero-capacity, zero-device, and `bytes_used > total_bytes` accounting rejection, unsupported checksum types, oversized sys_chunk_array declarations, invalid root/chunk/log tree levels, and short region/image rejection |
 | Btrfs item payload parsers | ✅ | ✅ | deterministic adversarial regression tests cover root/root_ref/inode/dir/xattr/extent payload valid boundaries, multi-entry dir/xattr payloads, short headers, length overflows, zero-length name rejection for INODE_REF/DIR_ITEM/XATTR_ITEM, ROOT_ITEM partial extension-field rejection, nonzero DIR_ITEM data_len rejection, fixed-size INODE_ITEM trailing-byte rejection, fixed-size regular EXTENT_DATA trailing-byte rejection, unsupported extent types, compression values, encoding fields, invalid inode timestamp nanoseconds, zero root bytenr rejection, and malformed ROOT_REF fallback behavior for subvolumes/snapshots |
