@@ -6955,28 +6955,38 @@ impl OpenFs {
             }
         }
 
-        let to_read = (file_size - offset)
-            .min(u64::from(size))
-            .min(inline_data.len() as u64);
-
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        let to_read_usize = usize::try_from(to_read).unwrap_or(0);
-        let end = start.saturating_add(to_read_usize);
-
-        if start >= inline_data.len() {
-            return Ok(Vec::new());
+        let inline_capacity =
+            u64::try_from(inline_data.len()).map_err(|_| FfsError::Corruption {
+                block: 0,
+                detail: "ext4 inline data capacity exceeds u64".to_owned(),
+            })?;
+        if file_size > inline_capacity {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "ext4 inline data size {file_size} exceeds inline capacity {inline_capacity}"
+                ),
+            });
         }
 
-        if end <= inline_data.len() {
-            Ok(inline_data[start..end].to_vec())
-        } else {
-            // File claims more data than is inline — return what we have.
-            let available_end = inline_data.len().min(end);
-            let mut out = inline_data[start..available_end].to_vec();
-            // Pad with zeros if file_size extends beyond inline capacity.
-            out.resize(to_read_usize, 0);
-            Ok(out)
-        }
+        let to_read = (file_size - offset).min(u64::from(size));
+
+        let start = usize::try_from(offset).map_err(|_| FfsError::Corruption {
+            block: 0,
+            detail: format!("ext4 inline data offset {offset} exceeds addressable range"),
+        })?;
+        let to_read_usize = usize::try_from(to_read).map_err(|_| FfsError::Corruption {
+            block: 0,
+            detail: format!("ext4 inline data read size {to_read} exceeds addressable range"),
+        })?;
+        let end = start
+            .checked_add(to_read_usize)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: "ext4 inline data read range overflow".to_owned(),
+            })?;
+
+        Ok(inline_data[start..end].to_vec())
     }
 
     /// Read file data from an ext2/ext4 inode with compressed clusters (e2compr).
@@ -20032,6 +20042,21 @@ mod tests {
         let bytes = OpenFs::read_ext4_inline_data(&inode, 0, 4)
             .expect("i_block-only inline data should not require ibody xattrs");
         assert_eq!(bytes, b"data");
+    }
+
+    #[test]
+    fn ext4_inline_data_rejects_size_beyond_inline_capacity() {
+        let mut inode = make_test_inode(ffs_types::S_IFREG | 0o644, 0, 0);
+        inode.flags = ffs_types::EXT4_INLINE_DATA_FL;
+        inode.size = 61;
+        inode.extent_bytes = (0_u8..60).collect();
+
+        let err = OpenFs::read_ext4_inline_data(&inode, 0, 61)
+            .expect_err("oversized inline-data inode should fail closed");
+        assert!(
+            matches!(err, FfsError::Corruption { ref detail, .. } if detail.contains("exceeds inline capacity")),
+            "unexpected oversized inline-data error: {err:?}"
+        );
     }
 
     #[test]
