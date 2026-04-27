@@ -797,6 +797,28 @@ fn root_ref_minimal_payload_parses() {
     assert_eq!(decoded.name, b"sub");
 }
 
+#[test]
+fn root_ref_trailing_payload_rejected() {
+    let mut payload = vec![0u8; 25];
+    payload[0..8].copy_from_slice(&256u64.to_le_bytes());
+    payload[8..16].copy_from_slice(&1u64.to_le_bytes());
+    payload[16..18].copy_from_slice(&3u16.to_le_bytes());
+    payload[18..21].copy_from_slice(b"sub");
+    payload[21..25].copy_from_slice(b"junk");
+
+    let err = parse_root_ref(&payload).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "root_ref.name_len",
+                reason: "does not match payload length"
+            }
+        ),
+        "expected trailing payload rejection, got {err:?}"
+    );
+}
+
 // Coverage glue
 
 #[test]

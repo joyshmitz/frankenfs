@@ -652,6 +652,12 @@ pub fn parse_root_ref(data: &[u8]) -> Result<BtrfsRootRef, ParseError> {
             actual: data.len() - 18,
         });
     }
+    if data.len() > name_end {
+        return Err(ParseError::InvalidField {
+            field: "root_ref.name_len",
+            reason: "does not match payload length",
+        });
+    }
     Ok(BtrfsRootRef {
         dirid,
         sequence,
@@ -9503,6 +9509,34 @@ mod tests {
         assert_eq!(subvols[0].name, "subvol-600");
     }
 
+    #[test]
+    fn enumerate_subvolumes_trailing_root_ref_uses_fallback_name() {
+        let mut malformed_ref = make_root_ref_data(256, b"broken");
+        malformed_ref.extend_from_slice(b"trailing");
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 601,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_data(0x6000, 22, 0),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 5,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 601,
+                },
+                data: malformed_ref,
+            },
+        ];
+
+        let subvols = enumerate_subvolumes(&entries);
+        assert_eq!(subvols.len(), 1);
+        assert_eq!(subvols[0].name, "subvol-601");
+    }
+
     // ── Snapshot enumeration tests ─────────────────────────────────
 
     #[test]
@@ -9845,11 +9879,12 @@ mod tests {
         assert_eq!(parsed.name, long_name);
 
         let mut trailing = make_root_ref_data(512, b"subvol");
-        trailing[8..16].copy_from_slice(&42_u64.to_le_bytes());
-        trailing.extend_from_slice(b"ignored-trailing");
-        let parsed = parse_root_ref(&trailing).expect("parse root ref with trailing bytes");
-        assert_eq!(parsed.sequence, 42);
-        assert_eq!(parsed.name, b"subvol");
+        trailing.extend_from_slice(b"trailing");
+        assert_invalid_field(
+            parse_root_ref(&trailing),
+            "root_ref.name_len",
+            "does not match payload length",
+        );
 
         assert_insufficient_data(parse_root_ref(&[0_u8; 17]), 18, 0, 17);
 
