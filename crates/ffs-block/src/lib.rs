@@ -3625,10 +3625,13 @@ pub struct ThrottleInjector<D: BlockDevice> {
     rng_state: std::sync::atomic::AtomicU64,
 }
 
+const DEFAULT_THROTTLE_RNG_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
 impl<D: BlockDevice> ThrottleInjector<D> {
     /// Wrap a device with the given throttle configuration.
     #[must_use]
     pub fn new(inner: D, config: ThrottleConfig, seed: u64) -> Self {
+        let seed = Self::normalize_seed(seed);
         Self {
             inner,
             config: Mutex::new(config),
@@ -3636,6 +3639,14 @@ impl<D: BlockDevice> ThrottleInjector<D> {
             sequence: std::sync::atomic::AtomicU64::new(0),
             seed,
             rng_state: std::sync::atomic::AtomicU64::new(seed),
+        }
+    }
+
+    const fn normalize_seed(seed: u64) -> u64 {
+        if seed == 0 {
+            DEFAULT_THROTTLE_RNG_SEED
+        } else {
+            seed
         }
     }
 
@@ -6736,6 +6747,37 @@ mod tests {
 
         ti.reset();
         assert!(ti.throttle_log().is_empty());
+    }
+
+    #[test]
+    fn throttle_zero_seed_is_normalized_for_rng_replay() {
+        let dev = MemBlockDevice::new(4096, 8);
+        let ti = ThrottleInjector::new(dev, ThrottleConfig::default(), 0);
+        assert_ne!(
+            ti.seed(),
+            0,
+            "zero is a degenerate xorshift state and must be normalized"
+        );
+
+        let first = ti.next_random();
+        let second = ti.next_random();
+        assert_ne!(
+            first.to_bits(),
+            0,
+            "normalized zero seed should not emit a zero first sample"
+        );
+        assert_ne!(
+            first.to_bits(),
+            second.to_bits(),
+            "normalized zero seed should advance the RNG state"
+        );
+
+        ti.reset();
+        assert_eq!(
+            ti.next_random().to_bits(),
+            first.to_bits(),
+            "reset should restore deterministic replay from the normalized seed"
+        );
     }
 
     #[test]
