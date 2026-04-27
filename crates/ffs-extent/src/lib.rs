@@ -992,12 +992,12 @@ impl ExtentCacheStats {
     /// Hit rate as a fraction in `[0.0, 1.0]`. Returns 0.0 if no lookups.
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
-        let total = self.hits + self.misses;
-        if total == 0 {
-            0.0
-        } else {
-            self.hits as f64 / total as f64
+        if self.hits == 0 && self.misses == 0 {
+            return 0.0;
         }
+        let hits = self.hits as f64;
+        let total = hits + self.misses as f64;
+        hits / total
     }
 }
 
@@ -1045,14 +1045,14 @@ impl ExtentCache {
             .map(|(&k, e)| (k, e.mapping, e.generation));
 
         let Some((key, mapping, entry_gen)) = candidate else {
-            inner.misses += 1;
+            inner.misses = inner.misses.saturating_add(1);
             return None;
         };
 
         let extent_end = u64::from(mapping.logical_start) + u64::from(mapping.count);
         if u64::from(logical_block) < extent_end && entry_gen == current_gen {
-            inner.hits += 1;
-            let clock = inner.hits + inner.misses;
+            inner.hits = inner.hits.saturating_add(1);
+            let clock = inner.hits.saturating_add(inner.misses);
             if let Some(e) = inner.entries.get_mut(&key) {
                 e.last_access = clock;
             }
@@ -1068,7 +1068,7 @@ impl ExtentCache {
                 unwritten: mapping.unwritten,
             })
         } else {
-            inner.misses += 1;
+            inner.misses = inner.misses.saturating_add(1);
             // Stale entry — remove it.
             if entry_gen != current_gen {
                 inner.entries.remove(&key);
@@ -1086,7 +1086,7 @@ impl ExtentCache {
             return;
         }
 
-        let access_clock = inner.hits + inner.misses;
+        let access_clock = inner.hits.saturating_add(inner.misses);
         let current_gen = inner.generation;
 
         let key = (ns, mapping.logical_start);
@@ -1097,7 +1097,7 @@ impl ExtentCache {
             if let Some((&victim_key, _)) = inner.entries.iter().min_by_key(|(_, e)| e.last_access)
             {
                 inner.entries.remove(&victim_key);
-                inner.evictions += 1;
+                inner.evictions = inner.evictions.saturating_add(1);
             }
         }
 
@@ -1146,7 +1146,7 @@ impl ExtentCache {
     pub fn invalidate_all(&self) {
         let mut inner = self.inner.write();
         inner.entries.clear();
-        inner.generation += 1;
+        inner.generation = inner.generation.saturating_add(1);
     }
 
     /// Return a snapshot of cache performance counters.
@@ -4818,6 +4818,62 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
             generation: 0,
         };
         assert!(empty_stats.hit_rate().abs() <= f64::EPSILON);
+
+        let saturated_stats = ExtentCacheStats {
+            hits: u64::MAX,
+            misses: u64::MAX,
+            evictions: 0,
+            entries: 0,
+            capacity: 1024,
+            generation: 0,
+        };
+        assert!((saturated_stats.hit_rate() - 0.5).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn cache_counters_saturate_at_numeric_limits() {
+        let cache = ExtentCache::with_capacity(1);
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: 1000,
+                count: 1,
+                unwritten: false,
+            },
+        );
+
+        {
+            let mut inner = cache.inner.write();
+            inner.hits = u64::MAX;
+            inner.misses = u64::MAX;
+            inner.evictions = u64::MAX;
+            inner.generation = u64::MAX;
+            inner
+                .entries
+                .get_mut(&(0, 0))
+                .expect("seed cache entry")
+                .generation = u64::MAX;
+        }
+
+        assert!(cache.lookup(0, 0).is_some());
+        assert!(cache.lookup(0, 99).is_none());
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 10,
+                physical_start: 2000,
+                count: 1,
+                unwritten: false,
+            },
+        );
+        cache.invalidate_all();
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, u64::MAX);
+        assert_eq!(stats.misses, u64::MAX);
+        assert_eq!(stats.evictions, u64::MAX);
+        assert_eq!(stats.generation, u64::MAX);
     }
 
     #[test]
