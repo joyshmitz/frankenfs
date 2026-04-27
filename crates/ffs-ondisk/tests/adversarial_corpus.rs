@@ -1180,6 +1180,13 @@ fn btrfs_dev_item_adversarial_samples() -> Vec<(String, Vec<u8>)> {
         extra_tail,
     ));
 
+    let mut zero_devid = make_btrfs_dev_item(BtrfsDevItemSeed::valid());
+    zero_devid[0..8].copy_from_slice(&0_u64.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_dev_item_zero_devid.bin".to_owned(),
+        zero_devid,
+    ));
+
     let mut zero_total = make_btrfs_dev_item(BtrfsDevItemSeed::valid());
     zero_total[8..16].copy_from_slice(&0_u64.to_le_bytes());
     zero_total[16..24].copy_from_slice(&0_u64.to_le_bytes());
@@ -3377,6 +3384,16 @@ fn btrfs_dev_item_adversarial_samples_exercise_boundaries() {
     let extra_tail = parse_dev_item(&samples["synthetic_btrfs_dev_item_extra_tail.bin"])
         .expect("fixed-size dev item parser ignores trailing leaf payload bytes");
     assert_eq!(extra_tail, valid);
+
+    let zero_devid = parse_dev_item(&samples["synthetic_btrfs_dev_item_zero_devid.bin"])
+        .expect_err("zero device IDs must be rejected");
+    assert!(matches!(
+        zero_devid,
+        ParseError::InvalidField {
+            field: "devid",
+            reason: "must be non-zero",
+        }
+    ));
 
     let zero_total = parse_dev_item(&samples["synthetic_btrfs_dev_item_zero_total_bytes.bin"])
         .expect_err("zero-capacity dev item must be rejected");

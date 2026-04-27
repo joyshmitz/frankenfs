@@ -1072,8 +1072,15 @@ pub fn parse_dev_item(data: &[u8]) -> Result<BtrfsDevItem, ParseError> {
         });
     }
 
+    let devid = read_le_u64(data, 0)?;
     let total_bytes = read_le_u64(data, 8)?;
     let bytes_used = read_le_u64(data, 16)?;
+    if devid == 0 {
+        return Err(ParseError::InvalidField {
+            field: "devid",
+            reason: "must be non-zero",
+        });
+    }
     if total_bytes == 0 {
         return Err(ParseError::InvalidField {
             field: "total_bytes",
@@ -1088,7 +1095,7 @@ pub fn parse_dev_item(data: &[u8]) -> Result<BtrfsDevItem, ParseError> {
     }
 
     Ok(BtrfsDevItem {
-        devid: read_le_u64(data, 0)?,
+        devid,
         total_bytes,
         bytes_used,
         io_align: read_le_u32(data, 24)?,
@@ -4498,6 +4505,7 @@ mod tests {
     #[test]
     fn parse_dev_item_rejects_bytes_used_above_total() {
         let mut data = vec![0u8; 98];
+        data[0..8].copy_from_slice(&1_u64.to_le_bytes());
         data[8..16].copy_from_slice(&4096_u64.to_le_bytes());
         data[16..24].copy_from_slice(&8192_u64.to_le_bytes());
 
@@ -4512,8 +4520,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_dev_item_rejects_zero_devid() {
+        let mut data = vec![0u8; 98];
+        data[8..16].copy_from_slice(&4096_u64.to_le_bytes());
+        data[16..24].copy_from_slice(&2048_u64.to_le_bytes());
+
+        let err = parse_dev_item(&data).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "devid",
+                reason: "must be non-zero",
+            }
+        );
+    }
+
+    #[test]
     fn parse_dev_item_rejects_zero_total_bytes() {
-        let data = vec![0u8; 98];
+        let mut data = vec![0u8; 98];
+        data[0..8].copy_from_slice(&1_u64.to_le_bytes());
         let err = parse_dev_item(&data).unwrap_err();
         assert_eq!(
             err,
