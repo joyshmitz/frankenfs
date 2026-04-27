@@ -1407,6 +1407,58 @@ def utime_access_openat_statvfs():
         result["openat_read"] = "python_dir_fd_unavailable"
     return result
 
+def dirfd_mutation_contracts():
+    supports_dir_fd = getattr(os, "supports_dir_fd", set())
+    required = [os.open, os.mkdir, os.rename, os.unlink, os.rmdir]
+    if any(func not in supports_dir_fd for func in required):
+        return {"skipped": "python_dir_fd_mutation_unavailable"}
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_fd = os.open(base, flags)
+    try:
+        fd = os.open(
+            "dirfd_file.txt",
+            os.O_CREAT | os.O_EXCL | os.O_RDWR,
+            0o644,
+            dir_fd=dir_fd,
+        )
+        try:
+            os.write(fd, b"dirfd")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.mkdir("dirfd_dir", 0o755, dir_fd=dir_fd)
+        entries_after_create = entries(base)
+        os.rename(
+            "dirfd_file.txt",
+            "dirfd_renamed.txt",
+            src_dir_fd=dir_fd,
+            dst_dir_fd=dir_fd,
+        )
+        old_exists_after_rename = os.path.exists(os.path.join(base, "dirfd_file.txt"))
+        new_path = os.path.join(base, "dirfd_renamed.txt")
+        new_exists_after_rename = os.path.exists(new_path)
+        renamed_read = read_text(new_path)
+        renamed_stat = stable_stat(new_path)
+        os.unlink("dirfd_renamed.txt", dir_fd=dir_fd)
+        file_exists_after_unlink = os.path.exists(new_path)
+        os.rmdir("dirfd_dir", dir_fd=dir_fd)
+        dir_exists_after_rmdir = os.path.exists(os.path.join(base, "dirfd_dir"))
+        entries_after_cleanup = entries(base)
+    finally:
+        os.close(dir_fd)
+
+    return {
+        "dir_exists_after_rmdir": dir_exists_after_rmdir,
+        "entries_after_cleanup": entries_after_cleanup,
+        "entries_after_create": entries_after_create,
+        "file_exists_after_unlink": file_exists_after_unlink,
+        "new_exists_after_rename": new_exists_after_rename,
+        "old_exists_after_rename": old_exists_after_rename,
+        "renamed_read": renamed_read,
+        "renamed_stat": renamed_stat,
+    }
+
 def pread_pwrite_seek_fdatasync():
     if not hasattr(os, "pread") or not hasattr(os, "pwrite"):
         return {"skipped": "python_offset_io_unavailable"}
@@ -1658,6 +1710,15 @@ def cleanup():
     sparse_path = os.path.join(base, "sparse.bin")
     if os.path.exists(sparse_path):
         os.unlink(sparse_path)
+    dirfd_file_path = os.path.join(base, "dirfd_file.txt")
+    if os.path.exists(dirfd_file_path):
+        os.unlink(dirfd_file_path)
+    dirfd_renamed_path = os.path.join(base, "dirfd_renamed.txt")
+    if os.path.exists(dirfd_renamed_path):
+        os.unlink(dirfd_renamed_path)
+    dirfd_dir_path = os.path.join(base, "dirfd_dir")
+    if os.path.exists(dirfd_dir_path):
+        os.rmdir(dirfd_dir_path)
     open_rename_path = os.path.join(base, "open_rename.txt")
     if os.path.exists(open_rename_path):
         os.unlink(open_rename_path)
@@ -1677,6 +1738,7 @@ for step, func in [
     ("fd_metadata_ops", fd_metadata_ops),
     ("chmod_truncate_stat", chmod_truncate_stat),
     ("utime_access_openat_statvfs", utime_access_openat_statvfs),
+    ("dirfd_mutation_contracts", dirfd_mutation_contracts),
     ("pread_pwrite_seek_fdatasync", pread_pwrite_seek_fdatasync),
     ("truncate_extend_zero_fill", truncate_extend_zero_fill),
     ("open_unlink_fd_lifetime", open_unlink_fd_lifetime),
@@ -3069,6 +3131,59 @@ fn syscall_conformance_reference_probe_covers_fd_metadata_contracts() {
 }
 
 #[test]
+fn syscall_conformance_reference_probe_covers_dirfd_mutation_contracts() {
+    if !command_available("python3") {
+        eprintln!("python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let reference = reference_conformance_tempdir();
+    let report = run_syscall_conformance_probe(reference.path());
+    let records = report
+        .as_array()
+        .expect("syscall conformance report should be a JSON array");
+    let dirfd = records
+        .iter()
+        .find(|record| record["step"].as_str() == Some("dirfd_mutation_contracts"))
+        .expect("missing dirfd mutation step in report");
+    assert_eq!(
+        dirfd["ok"].as_bool(),
+        Some(true),
+        "dirfd mutation step should succeed on the reference filesystem: {dirfd}"
+    );
+
+    let result = &dirfd["result"];
+    if let Some(skipped) = result["skipped"].as_str() {
+        eprintln!("dirfd mutation prerequisites not met, skipping: {skipped}");
+        return;
+    }
+
+    let entries_after_create = result["entries_after_create"]
+        .as_array()
+        .expect("dirfd mutation step should include create entries");
+    assert!(
+        entries_after_create
+            .iter()
+            .any(|entry| entry.as_str() == Some("dirfd_file.txt")),
+        "openat-created file should appear before rename: {entries_after_create:?}"
+    );
+    assert!(
+        entries_after_create
+            .iter()
+            .any(|entry| entry.as_str() == Some("dirfd_dir")),
+        "mkdirat-created directory should appear before rmdir: {entries_after_create:?}"
+    );
+    assert_eq!(result["old_exists_after_rename"].as_bool(), Some(false));
+    assert_eq!(result["new_exists_after_rename"].as_bool(), Some(true));
+    assert_eq!(result["renamed_read"].as_str(), Some("dirfd"));
+    assert_eq!(result["renamed_stat"]["kind"].as_str(), Some("file"));
+    assert_eq!(result["renamed_stat"]["size"].as_u64(), Some(5));
+    assert_eq!(result["renamed_stat"]["nlink"].as_u64(), Some(1));
+    assert_eq!(result["file_exists_after_unlink"].as_bool(), Some(false));
+    assert_eq!(result["dir_exists_after_rmdir"].as_bool(), Some(false));
+}
+
+#[test]
 fn syscall_conformance_reference_probe_covers_truncate_extension_zero_fill() {
     if !command_available("python3") {
         eprintln!("python3 prerequisites not met, skipping");
@@ -3250,7 +3365,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
         Some(
-            "file_lifecycle+fd_metadata+offset_io+truncate_extend+open_unlink_fd+open_rename_fd+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
+            "file_lifecycle+fd_metadata+dirfd_mutation+offset_io+truncate_extend+open_unlink_fd+open_rename_fd+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
         ),
     );
 }
