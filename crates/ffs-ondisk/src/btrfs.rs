@@ -83,6 +83,7 @@ impl BtrfsSuperblock {
         let stripesize = read_le_u32(region, 0x9C)?;
         let total_bytes = read_le_u64(region, 0x70)?;
         let bytes_used = read_le_u64(region, 0x78)?;
+        let num_devices = read_le_u64(region, 0x88)?;
 
         // Validate sectorsize: must be non-zero and power-of-two, 4K typical
         if sectorsize == 0 || !sectorsize.is_power_of_two() {
@@ -134,6 +135,12 @@ impl BtrfsSuperblock {
             return Err(ParseError::InvalidField {
                 field: "bytes_used",
                 reason: "exceeds total_bytes",
+            });
+        }
+        if num_devices == 0 {
+            return Err(ParseError::InvalidField {
+                field: "num_devices",
+                reason: "must be non-zero",
             });
         }
 
@@ -188,7 +195,7 @@ impl BtrfsSuperblock {
             total_bytes,
             bytes_used,
             root_dir_objectid: read_le_u64(region, 0x80)?,
-            num_devices: read_le_u64(region, 0x88)?,
+            num_devices,
             sectorsize,
             nodesize,
             stripesize,
@@ -1462,9 +1469,10 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn set_valid_superblock_accounting(sb: &mut [u8]) {
+    fn set_valid_superblock_device_accounting(sb: &mut [u8]) {
         sb[0x70..0x78].copy_from_slice(&1_000_000_u64.to_le_bytes());
         sb[0x78..0x80].copy_from_slice(&123_456_u64.to_le_bytes());
+        sb[0x88..0x90].copy_from_slice(&1_u64.to_le_bytes());
     }
 
     #[test]
@@ -1500,7 +1508,7 @@ mod tests {
     fn representative_sys_chunk_superblock() -> [u8; BTRFS_SUPER_INFO_SIZE] {
         let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
         sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
-        set_valid_superblock_accounting(&mut sb);
+        set_valid_superblock_device_accounting(&mut sb);
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0x9C..0xA0].copy_from_slice(&65536_u32.to_le_bytes());
@@ -1690,7 +1698,7 @@ mod tests {
     fn superblock_rejects_unsupported_csum_type() {
         let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
         sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
-        set_valid_superblock_accounting(&mut sb);
+        set_valid_superblock_device_accounting(&mut sb);
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0xC4..0xC6].copy_from_slice(&1_u16.to_le_bytes());
@@ -1738,6 +1746,26 @@ mod tests {
             ParseError::InvalidField {
                 field: "bytes_used",
                 reason: "exceeds total_bytes",
+            }
+        );
+    }
+
+    #[test]
+    fn superblock_rejects_zero_num_devices() {
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x70..0x78].copy_from_slice(&4096_u64.to_le_bytes());
+        sb[0x78..0x80].copy_from_slice(&0_u64.to_le_bytes());
+        sb[0x88..0x90].copy_from_slice(&0_u64.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+        sb[0xC4..0xC6].copy_from_slice(&ffs_types::BTRFS_CSUM_TYPE_CRC32C.to_le_bytes());
+        let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "num_devices",
+                reason: "must be non-zero",
             }
         );
     }
@@ -2417,7 +2445,7 @@ mod tests {
         let mut image = vec![0_u8; BTRFS_SUPER_INFO_OFFSET + BTRFS_SUPER_INFO_SIZE];
         let sb_region = &mut image[BTRFS_SUPER_INFO_OFFSET..];
         sb_region[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
-        set_valid_superblock_accounting(sb_region);
+        set_valid_superblock_device_accounting(sb_region);
         sb_region[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb_region[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb_region[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
@@ -2481,7 +2509,7 @@ mod tests {
     fn superblock_rejects_oversized_sys_chunk_array() {
         let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
         sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
-        set_valid_superblock_accounting(&mut sb);
+        set_valid_superblock_device_accounting(&mut sb);
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
@@ -2706,7 +2734,7 @@ mod tests {
         ] {
             let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
             sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
-            set_valid_superblock_accounting(&mut sb);
+            set_valid_superblock_device_accounting(&mut sb);
             sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
             sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
             sb[offset] = BTRFS_MAX_LEVEL + 1;
@@ -2727,7 +2755,7 @@ mod tests {
         // Zero stripesize is explicitly allowed (not power-of-two check)
         let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
         sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
-        set_valid_superblock_accounting(&mut sb);
+        set_valid_superblock_device_accounting(&mut sb);
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0x9C..0xA0].copy_from_slice(&0_u32.to_le_bytes()); // zero stripesize
@@ -2764,7 +2792,7 @@ mod tests {
         "BtrfsSuperblock { csum: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ",
         "fsid: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ",
         "bytenr: 0, flags: 0, magic: 5575266562640200287, generation: 0, root: 0, chunk_root: 0, ",
-        "log_root: 0, total_bytes: 1000000, bytes_used: 123456, root_dir_objectid: 0, num_devices: 0, ",
+        "log_root: 0, total_bytes: 1000000, bytes_used: 123456, root_dir_objectid: 0, num_devices: 1, ",
         "sectorsize: 4096, nodesize: 16384, stripesize: 4096, compat_flags: 0, compat_ro_flags: 0, ",
         "incompat_flags: 0, csum_type: 0, root_level: 0, chunk_root_level: 0, log_root_level: 0, ",
         "label: \"\", sys_chunk_array_size: 0, sys_chunk_array: [] }",
@@ -2773,7 +2801,7 @@ mod tests {
     fn representative_btrfs_superblock() -> BtrfsSuperblock {
         let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
         sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
-        set_valid_superblock_accounting(&mut sb);
+        set_valid_superblock_device_accounting(&mut sb);
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());
@@ -3513,7 +3541,7 @@ mod tests {
             total_bytes in 1_u64..=u64::MAX,
             bytes_used_seed in any::<u64>(),
             root_dir_objectid in any::<u64>(),
-            num_devices in any::<u64>(),
+            num_devices in 1_u64..=u64::MAX,
             compat_flags in any::<u64>(),
             compat_ro_flags in any::<u64>(),
             incompat_flags in any::<u64>(),
@@ -3951,7 +3979,7 @@ mod tests {
         ) {
             let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
             sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
-            set_valid_superblock_accounting(&mut sb);
+            set_valid_superblock_device_accounting(&mut sb);
             sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
             sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
             sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes());

@@ -1305,6 +1305,13 @@ fn btrfs_superblock_adversarial_samples() -> Vec<(String, Vec<u8>)> {
         overused,
     ));
 
+    let mut zero_devices = valid_region.clone();
+    zero_devices[0x88..0x90].copy_from_slice(&0_u64.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_superblock_zero_num_devices.bin".to_owned(),
+        zero_devices,
+    ));
+
     let mut oversized_sys_chunk_array = valid_region.clone();
     oversized_sys_chunk_array[0xA0..0xA4].copy_from_slice(&2049_u32.to_le_bytes());
     samples.push((
@@ -3204,6 +3211,11 @@ fn assert_valid_btrfs_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) ->
 }
 
 fn assert_invalid_btrfs_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) {
+    assert_invalid_btrfs_superblock_shape_samples(samples);
+    assert_invalid_btrfs_superblock_accounting_samples(samples);
+}
+
+fn assert_invalid_btrfs_superblock_shape_samples(samples: &BTreeMap<String, Vec<u8>>) {
     let short_image =
         BtrfsSuperblock::parse_from_image(&samples["synthetic_btrfs_superblock_short_image.bin"])
             .expect_err("short images must be rejected before slicing the superblock region");
@@ -3271,6 +3283,20 @@ fn assert_invalid_btrfs_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) 
         }
     ));
 
+    let oversized_sys_chunk_array = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_oversized_sys_chunk_array.bin"],
+    )
+    .expect_err("oversized sys_chunk_array declarations must be rejected");
+    assert!(matches!(
+        oversized_sys_chunk_array,
+        ParseError::InvalidField {
+            field: "sys_chunk_array_size",
+            ..
+        }
+    ));
+}
+
+fn assert_invalid_btrfs_superblock_accounting_samples(samples: &BTreeMap<String, Vec<u8>>) {
     let zero_total = BtrfsSuperblock::parse_superblock_region(
         &samples["synthetic_btrfs_superblock_zero_total_bytes.bin"],
     )
@@ -3295,15 +3321,15 @@ fn assert_invalid_btrfs_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) 
         }
     ));
 
-    let oversized_sys_chunk_array = BtrfsSuperblock::parse_superblock_region(
-        &samples["synthetic_btrfs_superblock_oversized_sys_chunk_array.bin"],
+    let zero_devices = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_zero_num_devices.bin"],
     )
-    .expect_err("oversized sys_chunk_array declarations must be rejected");
+    .expect_err("zero-device superblocks must be rejected");
     assert!(matches!(
-        oversized_sys_chunk_array,
+        zero_devices,
         ParseError::InvalidField {
-            field: "sys_chunk_array_size",
-            ..
+            field: "num_devices",
+            reason: "must be non-zero",
         }
     ));
 }
