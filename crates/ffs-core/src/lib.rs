@@ -5906,11 +5906,10 @@ impl OpenFs {
     /// having to split". For very fragmented filesystems the latter can be
     /// orders of magnitude smaller than the former.
     ///
-    /// btrfs is currently a stub: btrfs uses extent-tree allocation, not a
-    /// per-group bitmap, so the answer is "free space in the largest free
-    /// extent" — derived from `extent_alloc.total_used()` and the
-    /// superblock total. Returns the total free byte count divided by
-    /// sector size as a conservative upper bound.
+    /// btrfs uses extent-tree allocation, not a per-group bitmap, so the
+    /// answer is the largest physical free extent discovered by the live
+    /// extent allocator. Read-only mounts that have not initialized allocator
+    /// state fall back to the superblock's total free byte count.
     ///
     /// # Errors
     ///
@@ -5932,18 +5931,16 @@ impl OpenFs {
                 Ok(best)
             }
             FsFlavor::Btrfs(sb) => {
-                // btrfs has no per-group bitmap. Use the live alloc state's
-                // total free bytes as a conservative upper bound on the
-                // longest contiguous run; precise tracking would require
-                // walking the extent tree's free-space map.
                 let unit = u64::from(sb.sectorsize.max(1));
-                let used_bytes = self
-                    .btrfs_alloc_state
-                    .as_ref()
-                    .map_or(sb.bytes_used, |alloc_mutex| {
-                        alloc_mutex.lock().extent_alloc.total_used()
-                    });
-                let free_bytes = sb.total_bytes.saturating_sub(used_bytes);
+                let free_bytes = if let Some(alloc_mutex) = self.btrfs_alloc_state.as_ref() {
+                    alloc_mutex
+                        .lock()
+                        .extent_alloc
+                        .largest_free_extent(BTRFS_BLOCK_GROUP_DATA)
+                        .map_err(|e| btrfs_mutation_to_ffs(&e))?
+                } else {
+                    sb.total_bytes.saturating_sub(sb.bytes_used)
+                };
                 Ok(free_bytes / unit)
             }
         }
@@ -34527,6 +34524,46 @@ mod tests {
     fn btrfs_write_enable_writes_sets_writable() {
         let (fs, _cx) = open_writable_btrfs();
         assert!(fs.is_writable());
+    }
+
+    #[test]
+    fn btrfs_largest_contiguous_free_run_uses_allocator_gaps() {
+        let (fs, cx) = open_writable_btrfs();
+        let sectorsize = u64::from(fs.btrfs_superblock().expect("btrfs").sectorsize);
+
+        {
+            let alloc_mutex = fs.btrfs_alloc_state.as_ref().expect("btrfs alloc state");
+            let mut alloc = alloc_mutex.lock();
+            let _first = alloc
+                .extent_alloc
+                .alloc_data(16 * sectorsize)
+                .expect("first allocation");
+            let middle = alloc
+                .extent_alloc
+                .alloc_data(16 * sectorsize)
+                .expect("middle allocation");
+            let _last = alloc
+                .extent_alloc
+                .alloc_data(16 * sectorsize)
+                .expect("last allocation");
+            alloc
+                .extent_alloc
+                .free_extent(middle.bytenr, middle.num_bytes, false)
+                .expect("free middle allocation");
+
+            assert_eq!(
+                alloc.extent_alloc.total_free(BTRFS_BLOCK_GROUP_DATA) / sectorsize,
+                64,
+                "fixture should leave more total free blocks than any one gap"
+            );
+            drop(alloc);
+        }
+
+        assert_eq!(
+            fs.largest_contiguous_free_run(&cx)
+                .expect("largest contiguous btrfs run"),
+            48
+        );
     }
 
     #[test]

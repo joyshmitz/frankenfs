@@ -3107,6 +3107,92 @@ impl BtrfsExtentAllocator {
             .sum()
     }
 
+    /// Largest currently allocatable free extent across matching block groups.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BtrfsMutationError::AddressOverflow`] if a tracked block-group
+    /// or extent range cannot be represented as a half-open byte interval.
+    pub fn largest_free_extent(&self, type_flags: u64) -> Result<u64, BtrfsMutationError> {
+        let mut best = 0_u64;
+
+        for bg in self
+            .block_groups
+            .values()
+            .filter(|bg| (bg.item.flags & type_flags) != 0)
+        {
+            let bg_end = bg
+                .start
+                .checked_add(bg.item.total_bytes)
+                .ok_or(BtrfsMutationError::AddressOverflow)?;
+            let range_start = BtrfsKey {
+                objectid: bg.start,
+                item_type: BTRFS_ITEM_EXTENT_ITEM,
+                offset: 0,
+            };
+            let range_end = BtrfsKey {
+                objectid: bg_end,
+                item_type: BTRFS_ITEM_METADATA_ITEM,
+                offset: u64::MAX,
+            };
+            let mut allocated_ranges = Vec::new();
+            let mut materialized_used = 0_u64;
+
+            for (key, _) in self.extent_tree.range(&range_start, &range_end)? {
+                if key.objectid >= bg_end {
+                    break;
+                }
+                let extent_start = key.objectid.max(bg.start);
+                let extent_end = key
+                    .objectid
+                    .checked_add(key.offset)
+                    .ok_or(BtrfsMutationError::AddressOverflow)?
+                    .min(bg_end);
+                if extent_start < extent_end {
+                    let extent_len = extent_end - extent_start;
+                    materialized_used = materialized_used
+                        .checked_add(extent_len)
+                        .ok_or(BtrfsMutationError::AddressOverflow)?;
+                    allocated_ranges.push((extent_start, extent_end));
+                }
+            }
+
+            let untracked_used = bg
+                .item
+                .used_bytes
+                .saturating_sub(materialized_used)
+                .min(bg.item.total_bytes);
+            if untracked_used > 0 {
+                allocated_ranges.push((
+                    bg.start,
+                    bg.start
+                        .checked_add(untracked_used)
+                        .ok_or(BtrfsMutationError::AddressOverflow)?,
+                ));
+            }
+            allocated_ranges.sort_unstable_by_key(|&(start, end)| (start, end));
+
+            let mut cursor = bg.start;
+            let mut group_best = 0_u64;
+            for (extent_start, extent_end) in allocated_ranges {
+                if extent_end <= cursor {
+                    continue;
+                }
+                if cursor < extent_start {
+                    group_best = group_best.max(extent_start - cursor);
+                }
+                cursor = extent_end;
+            }
+
+            if cursor < bg_end {
+                group_best = group_best.max(bg_end - cursor);
+            }
+            best = best.max(group_best.min(bg.item.free_bytes()));
+        }
+
+        Ok(best)
+    }
+
     /// Total used bytes across all block groups.
     #[must_use]
     pub fn total_used(&self) -> u64 {
@@ -8529,6 +8615,76 @@ mod tests {
         assert_eq!(alloc.total_used(), 4096 + 8192);
         assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_DATA), bg_size - 4096);
         assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_METADATA), bg_size - 8192);
+    }
+
+    #[test]
+    fn largest_free_extent_reports_fragmented_data_gap() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_start = 0x10_0000;
+        alloc.add_block_group(bg_start, make_data_bg(bg_start, 16 * 4096));
+
+        let _first = alloc.alloc_data(4 * 4096).expect("first");
+        let middle = alloc.alloc_data(4 * 4096).expect("middle");
+        let _last = alloc.alloc_data(4 * 4096).expect("last");
+        alloc
+            .free_extent(middle.bytenr, middle.num_bytes, false)
+            .expect("free middle");
+
+        assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_DATA), 8 * 4096);
+        assert_eq!(
+            alloc
+                .largest_free_extent(BTRFS_BLOCK_GROUP_DATA)
+                .expect("largest gap"),
+            4 * 4096
+        );
+    }
+
+    #[test]
+    fn largest_free_extent_respects_untracked_used_prefix() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let bg_start = 0x10_0000;
+        let mut bg = make_data_bg(bg_start, 64 * 4096);
+        bg.used_bytes = 16 * 4096;
+        alloc.add_block_group(bg_start, bg);
+
+        let first = alloc.alloc_data(16 * 4096).expect("first");
+        let _second = alloc.alloc_data(8 * 4096).expect("second");
+        alloc
+            .free_extent(first.bytenr, first.num_bytes, false)
+            .expect("free first");
+
+        assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_DATA), 40 * 4096);
+        assert_eq!(
+            alloc
+                .largest_free_extent(BTRFS_BLOCK_GROUP_DATA)
+                .expect("largest gap"),
+            24 * 4096
+        );
+    }
+
+    #[test]
+    fn largest_free_extent_is_scoped_by_block_group_type() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        let data_start = 0x10_0000;
+        let meta_start = 0x20_0000;
+        alloc.add_block_group(data_start, make_data_bg(data_start, 16 * 4096));
+        alloc.add_block_group(meta_start, make_meta_bg(meta_start, 32 * 4096));
+
+        let _data = alloc.alloc_data(12 * 4096).expect("data");
+        let _meta = alloc.alloc_metadata(4 * 4096).expect("metadata");
+
+        assert_eq!(
+            alloc
+                .largest_free_extent(BTRFS_BLOCK_GROUP_DATA)
+                .expect("data largest"),
+            4 * 4096
+        );
+        assert_eq!(
+            alloc
+                .largest_free_extent(BTRFS_BLOCK_GROUP_METADATA)
+                .expect("metadata largest"),
+            28 * 4096
+        );
     }
 
     #[test]
