@@ -5339,6 +5339,42 @@ impl OpenFs {
         }
     }
 
+    fn btrfs_decompressed_extent_slice(
+        disk_bytenr: u64,
+        extent_offset: u64,
+        extent_delta: u64,
+        copy_len: usize,
+        decompressed: &[u8],
+    ) -> Result<&[u8], FfsError> {
+        let source_offset =
+            extent_offset
+                .checked_add(extent_delta)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: disk_bytenr,
+                    detail: "compressed extent source offset overflow".into(),
+                })?;
+        let src_start = usize::try_from(source_offset).map_err(|_| FfsError::Corruption {
+            block: disk_bytenr,
+            detail: "compressed extent source offset exceeds addressable size".into(),
+        })?;
+        let src_end = src_start
+            .checked_add(copy_len)
+            .ok_or_else(|| FfsError::Corruption {
+                block: disk_bytenr,
+                detail: "compressed extent source range overflow".into(),
+            })?;
+        if src_end > decompressed.len() {
+            return Err(FfsError::Corruption {
+                block: disk_bytenr,
+                detail: format!(
+                    "decompressed extent too short: need {src_end} bytes, got {}",
+                    decompressed.len()
+                ),
+            });
+        }
+        Ok(&decompressed[src_start..src_end])
+    }
+
     #[allow(clippy::too_many_lines)]
     fn btrfs_read_file(
         &self,
@@ -5615,25 +5651,14 @@ impl OpenFs {
                         }
                         let decompressed =
                             Self::btrfs_decompress(&compressed, *compression, ram_bytes_usize)?;
-                        let src_start =
-                            usize::try_from(*extent_offset + extent_delta).map_err(|_| {
-                                FfsError::Corruption {
-                                    block: *disk_bytenr,
-                                    detail: "compressed extent source offset overflow".into(),
-                                }
-                            })?;
-                        let src_end = src_start + copy_len;
-                        if src_end > decompressed.len() {
-                            return Err(FfsError::Corruption {
-                                block: *disk_bytenr,
-                                detail: format!(
-                                    "decompressed extent too short: need {src_end} bytes, got {}",
-                                    decompressed.len()
-                                ),
-                            });
-                        }
-                        out[dst_start..dst_start + copy_len]
-                            .copy_from_slice(&decompressed[src_start..src_end]);
+                        let decompressed_slice = Self::btrfs_decompressed_extent_slice(
+                            *disk_bytenr,
+                            *extent_offset,
+                            extent_delta,
+                            copy_len,
+                            &decompressed,
+                        )?;
+                        out[dst_start..dst_start + copy_len].copy_from_slice(decompressed_slice);
                     } else {
                         // Uncompressed: direct read from logical address.
                         let source_logical = disk_bytenr
@@ -12203,20 +12228,14 @@ impl OpenFs {
                     }
                     let decompressed =
                         Self::btrfs_decompress(&compressed, *compression, ram_bytes_usize)?;
-                    let src_start = usize::try_from(*extent_offset).map_err(|_| {
-                        FfsError::InvalidGeometry("compressed extent source offset overflow".into())
-                    })?;
-                    let src_end = src_start.saturating_add(copy_len);
-                    if src_end > decompressed.len() {
-                        return Err(FfsError::Corruption {
-                            block: *disk_bytenr,
-                            detail: format!(
-                                "decompressed extent too short: need {src_end} bytes, got {}",
-                                decompressed.len()
-                            ),
-                        });
-                    }
-                    buf.copy_from_slice(&decompressed[src_start..src_end]);
+                    let decompressed_slice = Self::btrfs_decompressed_extent_slice(
+                        *disk_bytenr,
+                        *extent_offset,
+                        0,
+                        copy_len,
+                        &decompressed,
+                    )?;
+                    buf.copy_from_slice(decompressed_slice);
                     return Ok(buf);
                 }
 
@@ -25744,6 +25763,49 @@ mod tests {
                     if detail.contains("btrfs LZO total_len")
             ),
             "unexpected LZO framing error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_decompressed_extent_slice_allows_valid_range() {
+        let decompressed = b"0123456789abcdef";
+        let slice = OpenFs::btrfs_decompressed_extent_slice(77, 4, 2, 5, decompressed)
+            .expect("valid compressed extent slice");
+
+        assert_eq!(slice, b"6789a");
+    }
+
+    #[test]
+    fn btrfs_decompressed_extent_slice_rejects_offset_overflow() {
+        let err = OpenFs::btrfs_decompressed_extent_slice(77, u64::MAX, 1, 1, b"data")
+            .expect_err("overflowing source offset rejects");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption {
+                    block: 77,
+                    ref detail,
+                } if detail.contains("compressed extent source offset overflow")
+            ),
+            "unexpected compressed extent offset error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_decompressed_extent_slice_rejects_short_payload() {
+        let err = OpenFs::btrfs_decompressed_extent_slice(77, 3, 0, 8, b"abcdef")
+            .expect_err("range beyond decompressed bytes rejects");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption {
+                    block: 77,
+                    ref detail,
+                } if detail.contains("decompressed extent too short")
+            ),
+            "unexpected compressed extent length error: {err:?}"
         );
     }
 
