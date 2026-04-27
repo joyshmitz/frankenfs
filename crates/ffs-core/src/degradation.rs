@@ -288,15 +288,15 @@ impl DegradationFsm {
                 // Escalate immediately.
                 state.level = observed;
                 state.recovery_count = 0;
-                state.transition_count += 1;
+                state.transition_count = state.transition_count.saturating_add(1);
             }
             std::cmp::Ordering::Less => {
                 // Require sustained improvement before de-escalating.
-                state.recovery_count += 1;
+                state.recovery_count = state.recovery_count.saturating_add(1);
                 if state.recovery_count >= self.recovery_samples {
                     state.level = observed;
                     state.recovery_count = 0;
-                    state.transition_count += 1;
+                    state.transition_count = state.transition_count.saturating_add(1);
                 }
             }
             std::cmp::Ordering::Equal => {
@@ -526,5 +526,37 @@ mod tests {
 
         monitor.sample();
         assert_eq!(monitor.sample_count(), u64::MAX);
+    }
+
+    #[test]
+    fn degradation_fsm_counters_saturate_at_numeric_limits() {
+        let pressure = Arc::new(SystemPressure::new());
+        let fsm = DegradationFsm::new(Arc::clone(&pressure), u32::MAX);
+
+        {
+            let mut state = fsm.current.lock();
+            state.level = DegradationLevel::Normal;
+            state.transition_count = u64::MAX;
+        }
+
+        pressure.set_headroom(0.05);
+        let transition = fsm.tick().expect("escalation transition");
+        assert_eq!(transition.from, DegradationLevel::Normal);
+        assert_eq!(transition.to, DegradationLevel::Emergency);
+        assert_eq!(fsm.transition_count(), u64::MAX);
+
+        {
+            let mut state = fsm.current.lock();
+            state.level = DegradationLevel::Emergency;
+            state.recovery_count = u32::MAX - 1;
+            state.transition_count = u64::MAX;
+        }
+
+        pressure.set_headroom(0.95);
+        let transition = fsm.tick().expect("recovery transition");
+        assert_eq!(transition.from, DegradationLevel::Emergency);
+        assert_eq!(transition.to, DegradationLevel::Normal);
+        assert_eq!(fsm.transition_count(), u64::MAX);
+        assert_eq!(fsm.current.lock().recovery_count, 0);
     }
 }
