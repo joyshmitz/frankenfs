@@ -519,11 +519,22 @@ impl EpochManager {
     /// Returns `Some(new_epoch)` if the epoch was advanced (commit threshold
     /// reached), or `None` if the epoch stays the same.
     pub fn record_commit(&self) -> Option<u64> {
-        let prev = self.commits_in_epoch.fetch_add(1, Ordering::AcqRel);
-        if prev.saturating_add(1) >= self.config.commit_threshold {
+        let commits = self.increment_commits_in_epoch();
+        if commits >= self.config.commit_threshold {
             self.try_advance(false)
         } else {
             None
+        }
+    }
+
+    fn increment_commits_in_epoch(&self) -> u64 {
+        match self
+            .commits_in_epoch
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_add(1))
+            }) {
+            Ok(previous) => previous.saturating_add(1),
+            Err(current) => current,
         }
     }
 
@@ -1463,6 +1474,22 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 2); // Epoch advanced from 1 to 2
         assert_eq!(mgr.current_epoch(), 2);
+    }
+
+    #[test]
+    fn epoch_manager_commit_count_saturates_at_numeric_limit() {
+        let cfg = EpochManagerConfig {
+            commit_threshold: u64::MAX,
+            epoch_interval: std::time::Duration::from_secs(3600),
+        };
+        let mgr = EpochManager::new(cfg);
+        mgr.commits_in_epoch.store(u64::MAX, Ordering::Release);
+
+        let result = mgr.record_commit();
+
+        assert_eq!(result, Some(2));
+        assert_eq!(mgr.current_epoch(), 2);
+        assert_eq!(mgr.commits_in_epoch.load(Ordering::Acquire), 0);
     }
 
     #[test]
