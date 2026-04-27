@@ -83,6 +83,36 @@ pub struct IoEngineStats {
     pub batches: u64,
 }
 
+impl IoEngineStats {
+    fn record_batch(&mut self) {
+        self.batches = self.batches.saturating_add(1);
+    }
+
+    fn record_read_submission(&mut self) {
+        self.reads = self.reads.saturating_add(1);
+    }
+
+    fn record_write_submission(&mut self) {
+        self.writes = self.writes.saturating_add(1);
+    }
+
+    fn record_sync_submission(&mut self) {
+        self.syncs = self.syncs.saturating_add(1);
+    }
+
+    fn record_bytes_read(&mut self, bytes: usize) {
+        self.bytes_read = self.bytes_read.saturating_add(Self::usize_to_u64(bytes));
+    }
+
+    fn record_bytes_written(&mut self, bytes: usize) {
+        self.bytes_written = self.bytes_written.saturating_add(Self::usize_to_u64(bytes));
+    }
+
+    fn usize_to_u64(value: usize) -> u64 {
+        u64::try_from(value).unwrap_or(u64::MAX)
+    }
+}
+
 /// Pluggable I/O engine interface.
 ///
 /// Engines accept a batch of I/O operations and return completions.
@@ -156,19 +186,18 @@ impl IoEngine for PreadPwriteEngine {
 
         {
             let mut stats = self.stats.lock();
-            stats.batches += 1;
+            stats.record_batch();
         }
 
         let results: Vec<IoCompletion> = ops
             .into_iter()
             .map(|op| match op {
                 IoOp::Read { offset, mut buf } => {
-                    self.stats.lock().reads += 1;
+                    self.stats.lock().record_read_submission();
                     match self.file.read_exact_at(&mut buf, offset) {
                         Ok(()) => {
-                            let n = buf.len() as u64;
                             let mut s = self.stats.lock();
-                            s.bytes_read += n;
+                            s.record_bytes_read(buf.len());
                             drop(s);
                             IoCompletion::Read(buf)
                         }
@@ -176,11 +205,11 @@ impl IoEngine for PreadPwriteEngine {
                     }
                 }
                 IoOp::Write { offset, data } => {
-                    self.stats.lock().writes += 1;
+                    self.stats.lock().record_write_submission();
                     match self.file.write_all_at(&data, offset) {
                         Ok(()) => {
                             let mut s = self.stats.lock();
-                            s.bytes_written += data.len() as u64;
+                            s.record_bytes_written(data.len());
                             drop(s);
                             IoCompletion::Write
                         }
@@ -188,7 +217,7 @@ impl IoEngine for PreadPwriteEngine {
                     }
                 }
                 IoOp::Sync => {
-                    self.stats.lock().syncs += 1;
+                    self.stats.lock().record_sync_submission();
                     match self.file.sync_all() {
                         Ok(()) => IoCompletion::Sync,
                         Err(e) => IoCompletion::Error(FfsError::Io(e)),
@@ -269,13 +298,13 @@ impl std::fmt::Debug for MemIoEngine {
 impl IoEngine for MemIoEngine {
     fn submit_batch(&self, ops: Vec<IoOp>) -> Vec<IoCompletion> {
         let mut data = self.data.lock();
-        self.stats.lock().batches += 1;
+        self.stats.lock().record_batch();
 
         let results: Vec<IoCompletion> = ops
             .into_iter()
             .map(|op| match op {
                 IoOp::Read { offset, mut buf } => {
-                    self.stats.lock().reads += 1;
+                    self.stats.lock().record_read_submission();
                     let range = match Self::checked_range(
                         offset,
                         buf.len(),
@@ -287,14 +316,13 @@ impl IoEngine for MemIoEngine {
                         Err(err) => return IoCompletion::Error(err),
                     };
                     buf.copy_from_slice(&data[range]);
-                    let n = buf.len() as u64;
                     let mut s = self.stats.lock();
-                    s.bytes_read += n;
+                    s.record_bytes_read(buf.len());
                     drop(s);
                     IoCompletion::Read(buf)
                 }
                 IoOp::Write { offset, data: wd } => {
-                    self.stats.lock().writes += 1;
+                    self.stats.lock().record_write_submission();
                     let range = match Self::checked_range(
                         offset,
                         wd.len(),
@@ -307,11 +335,11 @@ impl IoEngine for MemIoEngine {
                     };
                     data[range].copy_from_slice(&wd);
                     let mut s = self.stats.lock();
-                    s.bytes_written += wd.len() as u64;
+                    s.record_bytes_written(wd.len());
                     IoCompletion::Write
                 }
                 IoOp::Sync => {
-                    self.stats.lock().syncs += 1;
+                    self.stats.lock().record_sync_submission();
                     IoCompletion::Sync
                 }
             })
@@ -515,6 +543,44 @@ mod tests {
         assert_eq!(stats.writes, 2);
         assert_eq!(stats.bytes_written, 300);
         assert_eq!(stats.batches, 2);
+    }
+
+    #[test]
+    fn mem_engine_stats_saturate_at_numeric_limits() {
+        let engine = MemIoEngine::new(4096);
+        {
+            let mut stats = engine.stats.lock();
+            stats.batches = u64::MAX;
+            stats.reads = u64::MAX;
+            stats.writes = u64::MAX;
+            stats.syncs = u64::MAX;
+            stats.bytes_read = u64::MAX - 1;
+            stats.bytes_written = u64::MAX - 1;
+        }
+
+        let completions = engine.submit_batch(vec![
+            IoOp::Read {
+                offset: 0,
+                buf: vec![0_u8; 4],
+            },
+            IoOp::Write {
+                offset: 0,
+                data: vec![1_u8; 4],
+            },
+            IoOp::Sync,
+        ]);
+
+        assert!(matches!(completions[0], IoCompletion::Read(_)));
+        assert!(matches!(completions[1], IoCompletion::Write));
+        assert!(matches!(completions[2], IoCompletion::Sync));
+
+        let stats = engine.stats();
+        assert_eq!(stats.batches, u64::MAX);
+        assert_eq!(stats.reads, u64::MAX);
+        assert_eq!(stats.writes, u64::MAX);
+        assert_eq!(stats.syncs, u64::MAX);
+        assert_eq!(stats.bytes_read, u64::MAX);
+        assert_eq!(stats.bytes_written, u64::MAX);
     }
 
     #[test]
