@@ -116,6 +116,13 @@ impl BtrfsSuperblock {
             });
         }
 
+        let root_level = region[0xC6];
+        let chunk_root_level = region[0xC7];
+        let log_root_level = region[0xC8];
+        validate_superblock_tree_level("root_level", root_level)?;
+        validate_superblock_tree_level("chunk_root_level", chunk_root_level)?;
+        validate_superblock_tree_level("log_root_level", log_root_level)?;
+
         // Parse sys_chunk_array_size and validate
         let sys_chunk_array_size = read_le_u32(region, 0xA0)?;
         let sys_array_len =
@@ -166,9 +173,9 @@ impl BtrfsSuperblock {
             compat_ro_flags: read_le_u64(region, 0xB4)?,
             incompat_flags: read_le_u64(region, 0xBC)?,
             csum_type: read_le_u16(region, 0xC4)?,
-            root_level: region[0xC6],
-            chunk_root_level: region[0xC7],
-            log_root_level: region[0xC8],
+            root_level,
+            chunk_root_level,
+            log_root_level,
             label: trim_nul_padded(&read_fixed::<BTRFS_SUPER_LABEL_LEN>(
                 region,
                 BTRFS_SUPER_LABEL_OFFSET,
@@ -196,6 +203,16 @@ impl BtrfsSuperblock {
 
         Self::parse_superblock_region(&image[BTRFS_SUPER_INFO_OFFSET..end])
     }
+}
+
+fn validate_superblock_tree_level(field: &'static str, level: u8) -> Result<(), ParseError> {
+    if level > BTRFS_MAX_LEVEL {
+        return Err(ParseError::InvalidField {
+            field,
+            reason: "exceeds btrfs max tree level",
+        });
+    }
+    Ok(())
 }
 
 // ── sys_chunk_array entry types ──────────────────────────────────────────────
@@ -2576,6 +2593,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn superblock_rejects_tree_levels_above_max() {
+        for (offset, field) in [
+            (0xC6, "root_level"),
+            (0xC7, "chunk_root_level"),
+            (0xC8, "log_root_level"),
+        ] {
+            let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+            sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+            sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+            sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+            sb[offset] = BTRFS_MAX_LEVEL + 1;
+
+            let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+            assert_eq!(
+                err,
+                ParseError::InvalidField {
+                    field,
+                    reason: "exceeds btrfs max tree level",
+                }
+            );
+        }
     }
 
     #[test]
