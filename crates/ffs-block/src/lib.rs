@@ -701,11 +701,11 @@ impl CacheMetrics {
     /// Returns 0.0 if no accesses have been made.
     #[must_use]
     pub fn hit_ratio(&self) -> f64 {
-        let total = self.hits + self.misses;
-        if total == 0 {
+        let total = self.hits as f64 + self.misses as f64;
+        if total == 0.0 {
             0.0
         } else {
-            self.hits as f64 / total as f64
+            self.hits as f64 / total
         }
     }
 
@@ -1032,6 +1032,15 @@ impl ArcState {
         }
     }
 
+    fn increment_counter(counter: &mut u64) {
+        *counter = counter.saturating_add(1);
+    }
+
+    fn add_usize_to_counter(counter: &mut u64, delta: usize) {
+        let delta = u64::try_from(delta).unwrap_or(u64::MAX);
+        *counter = counter.saturating_add(delta);
+    }
+
     fn resident_len(&self) -> usize {
         self.t1.len() + self.t2.len()
     }
@@ -1257,7 +1266,7 @@ impl ArcState {
                     self.loc.insert(victim, ArcList::B2);
                     self.b2.push_back(victim);
                 }
-                self.evictions += 1;
+                Self::increment_counter(&mut self.evictions);
             } else if from_t1 {
                 self.t1.push_back(victim);
                 self.loc.insert(victim, ArcList::T1);
@@ -1280,7 +1289,7 @@ impl ArcState {
     }
 
     fn on_hit(&mut self, key: BlockNumber) {
-        self.hits += 1;
+        Self::increment_counter(&mut self.hits);
         #[cfg(feature = "s3fifo")]
         {
             self.s3_on_hit(key);
@@ -1292,7 +1301,7 @@ impl ArcState {
     }
 
     fn on_miss_or_ghost_hit(&mut self, key: BlockNumber) {
-        self.misses += 1;
+        Self::increment_counter(&mut self.misses);
         #[cfg(feature = "s3fifo")]
         {
             self.s3_on_miss_or_ghost_hit(key);
@@ -1312,7 +1321,7 @@ impl ArcState {
             }
 
             if matches!(self.loc.get(&key), Some(ArcList::B1)) {
-                self.b1_ghost_hits += 1;
+                Self::increment_counter(&mut self.b1_ghost_hits);
                 let b1_len = self.b1.len().max(1);
                 let b2_len = self.b2.len().max(1);
                 let delta = (b2_len / b1_len).max(1);
@@ -1325,7 +1334,7 @@ impl ArcState {
             }
 
             if matches!(self.loc.get(&key), Some(ArcList::B2)) {
-                self.b2_ghost_hits += 1;
+                Self::increment_counter(&mut self.b2_ghost_hits);
                 let b1_len = self.b1.len().max(1);
                 let b2_len = self.b2.len().max(1);
                 let delta = (b1_len / b2_len).max(1);
@@ -1347,7 +1356,7 @@ impl ArcState {
                 } else if let Some(victim) = self.t1.pop_front() {
                     if self.evict_resident(victim) {
                         let _ = self.loc.remove(&victim);
-                        self.evictions += 1;
+                        Self::increment_counter(&mut self.evictions);
                     } else {
                         self.t1.push_front(victim);
                         self.loc.insert(victim, ArcList::T1);
@@ -2974,7 +2983,7 @@ impl<D: BlockDevice> ArcCache<D> {
         for candidate in &pending_flush {
             guard.clear_dirty(candidate.block, candidate.seq);
         }
-        guard.dirty_flushes += pending_flush.len() as u64;
+        ArcState::add_usize_to_counter(&mut guard.dirty_flushes, pending_flush.len());
         info!(
             event = "pending_flush_batch_complete",
             blocks = pending_flush.len(),
@@ -3169,7 +3178,7 @@ impl<D: BlockDevice> BlockCache for ArcCache<D> {
         let _ = guard.loc.remove(&block);
 
         let evicted = if removed {
-            guard.evictions += 1;
+            ArcState::increment_counter(&mut guard.evictions);
             true
         } else {
             false
@@ -3247,7 +3256,7 @@ impl<D: BlockDevice> ArcCache<D> {
         for candidate in &flushes {
             guard.clear_dirty(candidate.block, candidate.seq);
         }
-        guard.dirty_flushes += flushes.len() as u64;
+        ArcState::add_usize_to_counter(&mut guard.dirty_flushes, flushes.len());
         let metrics = guard.snapshot_metrics();
         drop(guard);
         info!(
@@ -3330,7 +3339,7 @@ impl<D: BlockDevice> ArcCache<D> {
         for candidate in &flushes {
             guard.clear_dirty(candidate.block, candidate.seq);
         }
-        guard.dirty_flushes += flushes.len() as u64;
+        ArcState::add_usize_to_counter(&mut guard.dirty_flushes, flushes.len());
         let metrics = guard.snapshot_metrics();
         info!(
             event = "mvcc_flush_commit_batch",
@@ -5670,6 +5679,53 @@ mod tests {
         assert_eq!(m.misses, 1);
         assert_eq!(m.hits, 1);
         assert!((m.hit_ratio() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cache_metrics_hit_ratio_handles_numeric_limits() {
+        let mut metrics = ArcState::new(4).snapshot_metrics();
+        metrics.hits = u64::MAX;
+        metrics.misses = u64::MAX;
+
+        assert!((metrics.hit_ratio() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn arc_state_metric_counters_saturate_at_numeric_limits() {
+        let mut state = ArcState::new(2);
+
+        state.hits = u64::MAX;
+        state.on_hit(BlockNumber(0));
+        assert_eq!(state.hits, u64::MAX);
+
+        state.misses = u64::MAX;
+        state.on_miss_or_ghost_hit(BlockNumber(1));
+        assert_eq!(state.misses, u64::MAX);
+
+        state.evictions = u64::MAX;
+        ArcState::increment_counter(&mut state.evictions);
+        assert_eq!(state.evictions, u64::MAX);
+
+        state.dirty_flushes = u64::MAX - 1;
+        ArcState::add_usize_to_counter(&mut state.dirty_flushes, 2);
+        assert_eq!(state.dirty_flushes, u64::MAX);
+
+        #[cfg(not(feature = "s3fifo"))]
+        {
+            let mut b1_state = ArcState::new(2);
+            b1_state.b1_ghost_hits = u64::MAX;
+            b1_state.b1.push_back(BlockNumber(10));
+            b1_state.loc.insert(BlockNumber(10), ArcList::B1);
+            b1_state.on_miss_or_ghost_hit(BlockNumber(10));
+            assert_eq!(b1_state.b1_ghost_hits, u64::MAX);
+
+            let mut b2_state = ArcState::new(2);
+            b2_state.b2_ghost_hits = u64::MAX;
+            b2_state.b2.push_back(BlockNumber(20));
+            b2_state.loc.insert(BlockNumber(20), ArcList::B2);
+            b2_state.on_miss_or_ghost_hit(BlockNumber(20));
+            assert_eq!(b2_state.b2_ghost_hits, u64::MAX);
+        }
     }
 
     #[test]
