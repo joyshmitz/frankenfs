@@ -153,8 +153,8 @@ fn run_worker(cache: &ExtentCache, worker_id: usize, stream: &[u8]) {
                 let ns = u64::from(cursor.next_u8()) % NAMESPACE_DOMAIN;
                 let logical_block = cursor.next_u32() % LOGICAL_DOMAIN;
                 if let Some(mapping) = cache.lookup(ns, logical_block) {
-                    let end = u64::from(mapping.logical_start)
-                        .saturating_add(u64::from(mapping.count));
+                    let end =
+                        u64::from(mapping.logical_start).saturating_add(u64::from(mapping.count));
                     assert!(
                         u64::from(logical_block) >= u64::from(mapping.logical_start)
                             && u64::from(logical_block) < end,

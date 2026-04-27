@@ -3,7 +3,7 @@
 use asupersync::Cx;
 use ffs_block::ByteDevice;
 use ffs_core::{
-    Ext4JournalReplayMode, ExternalJournalInfo, Ext4FastCommitReplayEvidence, OpenFs, OpenOptions,
+    Ext4FastCommitReplayEvidence, Ext4JournalReplayMode, ExternalJournalInfo, OpenFs, OpenOptions,
 };
 use ffs_error::{FfsError, Result};
 use ffs_journal::ReplayOutcome as JournalReplayOutcome;
@@ -11,7 +11,9 @@ use ffs_mvcc::persist::WalRecoveryReport;
 use ffs_mvcc::wal::{self, WalCommit, WalHeader, WalWrite, HEADER_SIZE as WAL_HEADER_SIZE};
 use ffs_mvcc::wal_replay::ReplayOutcome as WalReplayOutcome;
 use ffs_ondisk::{EXT4_ORPHAN_FS, EXT4_VALID_FS};
-use ffs_types::{ByteOffset, CommitSeq, InodeNumber, TxnId, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC};
+use ffs_types::{
+    ByteOffset, CommitSeq, InodeNumber, TxnId, EXT4_SUPERBLOCK_OFFSET, EXT4_SUPER_MAGIC,
+};
 use libfuzzer_sys::fuzz_target;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -103,9 +105,17 @@ impl SeedCase {
 enum WalOutcomeClass {
     Clean,
     EmptyLog,
-    TruncatedTail { discarded: u64 },
-    CorruptTail { discarded: u64, first_corrupt_offset: u64 },
-    MonotonicityViolation { violating_seq: u64, expected_after: u64 },
+    TruncatedTail {
+        discarded: u64,
+    },
+    CorruptTail {
+        discarded: u64,
+        first_corrupt_offset: u64,
+    },
+    MonotonicityViolation {
+        violating_seq: u64,
+        expected_after: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -498,7 +508,8 @@ fn build_ext4_image_with_external_journal(dirty_recovery: bool) -> (Vec<u8>, Vec
     );
     image[EXT4_COMPAT_OFFSET..EXT4_COMPAT_OFFSET + 4]
         .copy_from_slice(&(compat | 0x0004).to_le_bytes());
-    image[EXT4_JOURNAL_DEV_OFFSET..EXT4_JOURNAL_DEV_OFFSET + 4].copy_from_slice(&1_u32.to_le_bytes());
+    image[EXT4_JOURNAL_DEV_OFFSET..EXT4_JOURNAL_DEV_OFFSET + 4]
+        .copy_from_slice(&1_u32.to_le_bytes());
     set_test_journal_uuid(&mut image, JOURNAL_UUID);
     let state = if dirty_recovery { 0 } else { EXT4_VALID_FS };
     image[EXT4_STATE_OFFSET..EXT4_STATE_OFFSET + 2].copy_from_slice(&state.to_le_bytes());
@@ -638,7 +649,10 @@ fn build_case(seed: SeedCase, cursor: &mut ByteCursor<'_>) -> JournalReplayCase 
     if cursor.next_bool() {
         case.wal_bytes.get_or_insert_with(build_wal_bytes);
     }
-    if cursor.next_bool() && case.external_journal.is_none() && matches!(seed, SeedCase::InternalJournal | SeedCase::FastCommit) {
+    if cursor.next_bool()
+        && case.external_journal.is_none()
+        && matches!(seed, SeedCase::InternalJournal | SeedCase::FastCommit)
+    {
         let (_, external_journal) = build_ext4_image_with_external_journal(cursor.next_bool());
         case.external_journal = Some(external_journal);
         case.image[EXT4_JOURNAL_DEV_OFFSET..EXT4_JOURNAL_DEV_OFFSET + 4]
@@ -705,10 +719,8 @@ fn pick_options(
 fn persistent_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "frankenfs-fuzz-bd-p8c4q-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("frankenfs-fuzz-bd-p8c4q-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         dir
     })
@@ -747,11 +759,9 @@ fn classify_wal(report: &WalRecoveryReport) -> WalClass {
     let outcome = match &report.outcome {
         WalReplayOutcome::Clean => WalOutcomeClass::Clean,
         WalReplayOutcome::EmptyLog => WalOutcomeClass::EmptyLog,
-        WalReplayOutcome::TruncatedTail { records_discarded } => {
-            WalOutcomeClass::TruncatedTail {
-                discarded: *records_discarded,
-            }
-        }
+        WalReplayOutcome::TruncatedTail { records_discarded } => WalOutcomeClass::TruncatedTail {
+            discarded: *records_discarded,
+        },
         WalReplayOutcome::CorruptTail {
             records_discarded,
             first_corrupt_offset,
@@ -795,18 +805,29 @@ fn classify_open(case: &JournalReplayCase, options: &OpenOptions) -> OutcomeClas
     let dev = MemByteDevice::from_vec(case.image.clone());
     match OpenFs::from_device(&cx, Box::new(dev), options) {
         Ok(fs) => {
-            assert!(fs.is_ext4(), "journal replay fuzz target should stay on ext4");
-            assert!(fs.ext4_superblock().is_some(), "ext4 open should expose a superblock");
+            assert!(
+                fs.is_ext4(),
+                "journal replay fuzz target should stay on ext4"
+            );
+            assert!(
+                fs.ext4_superblock().is_some(),
+                "ext4 open should expose a superblock"
+            );
 
             let journal = fs.ext4_journal_replay().map(classify_journal);
             let fast_commit = fs.ext4_fast_commit_replay().map(classify_fast_commit);
             let wal = fs.mvcc_wal_recovery().map(classify_wal);
             let external_journal = fs.external_journal_info.as_ref().map(classify_external);
-            let dirty_recovery = fs.crash_recovery().is_some_and(|recovery| !recovery.was_clean);
+            let dirty_recovery = fs
+                .crash_recovery()
+                .is_some_and(|recovery| !recovery.was_clean);
 
             if let Some(journal) = &journal {
                 assert!(
-                    journal.replayed_blocks <= u64::try_from(journal.committed_sequences).unwrap_or(u64::MAX).saturating_mul(8),
+                    journal.replayed_blocks
+                        <= u64::try_from(journal.committed_sequences)
+                            .unwrap_or(u64::MAX)
+                            .saturating_mul(8),
                     "replayed block count should stay bounded by committed sequences"
                 );
             }

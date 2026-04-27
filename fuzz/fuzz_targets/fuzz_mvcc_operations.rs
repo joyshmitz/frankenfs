@@ -81,11 +81,7 @@ struct Oracle {
 }
 
 impl Oracle {
-    fn record_commit(
-        &mut self,
-        seq: CommitSeq,
-        writes: &BTreeMap<BlockNumber, Vec<u8>>,
-    ) {
+    fn record_commit(&mut self, seq: CommitSeq, writes: &BTreeMap<BlockNumber, Vec<u8>>) {
         assert!(
             seq.0 > self.last_commit_seq,
             "I1: commit sequences must be strictly monotonic (prev={}, got={})",
@@ -136,9 +132,7 @@ fuzz_target!(|data: &[u8]| {
             }
             // Plain stage_write on the most recent transaction.
             1 => {
-                if let (Some(txn), Some(staged)) =
-                    (active.last_mut(), pending_writes.last_mut())
-                {
+                if let (Some(txn), Some(staged)) = (active.last_mut(), pending_writes.last_mut()) {
                     let block = cursor.next_block();
                     let tag = cursor.next_u8();
                     let payload = vec![tag; PAYLOAD_LEN];
@@ -148,9 +142,7 @@ fuzz_target!(|data: &[u8]| {
             }
             // stage_write_with_proof — drives MergeProof plumbing.
             2 => {
-                if let (Some(txn), Some(staged)) =
-                    (active.last_mut(), pending_writes.last_mut())
-                {
+                if let (Some(txn), Some(staged)) = (active.last_mut(), pending_writes.last_mut()) {
                     let block = cursor.next_block();
                     let tag = cursor.next_u8();
                     let proof_selector = cursor.next_u8();
@@ -165,10 +157,7 @@ fuzz_target!(|data: &[u8]| {
             // this moment — whatever we observe at this snapshot later must
             // match that frozen state (or be absent).
             3 => {
-                pre_commit_snapshots.push((
-                    store.current_snapshot(),
-                    oracle.committed.clone(),
-                ));
+                pre_commit_snapshots.push((store.current_snapshot(), oracle.committed.clone()));
             }
             // Commit oldest via generic `commit`.
             4 => {

@@ -9,7 +9,10 @@ fuzz_target!(|data: &[u8]| {
     if data.len() >= 17 && &data[..13] == BTRFS_SEND_STREAM_MAGIC {
         let version = u32::from_le_bytes([data[13], data[14], data[15], data[16]]);
         if let Ok(result) = &parsed {
-            assert_eq!(result.version, version, "parsed version should match header");
+            assert_eq!(
+                result.version, version,
+                "parsed version should match header"
+            );
 
             let end_positions = result
                 .commands

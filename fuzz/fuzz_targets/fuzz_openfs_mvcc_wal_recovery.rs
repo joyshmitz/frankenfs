@@ -189,8 +189,8 @@ fn build_ext4_image() -> Vec<u8> {
     let mut image = vec![0_u8; IMAGE_SIZE];
     let sb_off = EXT4_SUPERBLOCK_OFFSET;
     let block_size = 1024_u32 << EXT4_BLOCK_SIZE_LOG;
-    let blocks_count = u32::try_from(IMAGE_SIZE / usize::try_from(block_size).unwrap_or(1))
-        .unwrap_or(u32::MAX);
+    let blocks_count =
+        u32::try_from(IMAGE_SIZE / usize::try_from(block_size).unwrap_or(1)).unwrap_or(u32::MAX);
 
     image[sb_off + 0x38..sb_off + 0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
     image[sb_off + 0x18..sb_off + 0x1C].copy_from_slice(&EXT4_BLOCK_SIZE_LOG.to_le_bytes());
@@ -321,10 +321,8 @@ fn mutate_bytes(bytes: &mut Vec<u8>, cursor: &mut ByteCursor<'_>) {
 fn persistent_dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "frankenfs-fuzz-bd-mxdc9-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("frankenfs-fuzz-bd-mxdc9-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         dir
     })

@@ -394,7 +394,10 @@ fn mount_outcome(cursor: &mut ByteCursor<'_>) -> (MountOptions, MountOutcome) {
     assert!(contains_prefix(&labels, "max_read="));
     assert_eq!(contains_label(&labels, "ro"), options.read_only);
     assert_eq!(contains_label(&labels, "allow_other"), options.allow_other);
-    assert_eq!(contains_label(&labels, "auto_unmount"), options.auto_unmount);
+    assert_eq!(
+        contains_label(&labels, "auto_unmount"),
+        options.auto_unmount
+    );
     assert!(labels.iter().all(|label| {
         !label.is_empty() && !label.as_bytes().contains(&0) && !label.contains("writeback_cache")
     }));
