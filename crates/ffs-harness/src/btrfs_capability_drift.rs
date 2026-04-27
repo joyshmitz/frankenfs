@@ -99,9 +99,208 @@ pub fn parse_capability_table(feature_parity_content: &str) -> Vec<CapabilityCon
 /// Returns true if a function named `bare_name` exists in the source.
 #[must_use]
 pub fn check_unit_contract(ffs_core_source: &str, bare_name: &str) -> bool {
-    // Match `fn bare_name(` pattern.
-    let pattern = format!("fn {bare_name}(");
-    ffs_core_source.contains(&pattern)
+    if bare_name.is_empty() {
+        return false;
+    }
+
+    let mut tokens = RustCodeTokens::new(ffs_core_source);
+    while let Some(token) = tokens.next() {
+        if token != CodeToken::Ident("fn") {
+            continue;
+        }
+
+        if let Some(CodeToken::Ident(function_name)) = tokens.next()
+            && function_name == bare_name
+            && matches!(tokens.next(), Some(CodeToken::Symbol('(' | '<')))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeToken<'a> {
+    Ident(&'a str),
+    Symbol(char),
+}
+
+struct RustCodeTokens<'a> {
+    src: &'a str,
+    pos: usize,
+}
+
+impl<'a> RustCodeTokens<'a> {
+    fn new(src: &'a str) -> Self {
+        Self { src, pos: 0 }
+    }
+
+    fn skip_trivia_and_literals(&mut self) {
+        while self.pos < self.src.len() {
+            let rest = &self.src[self.pos..];
+
+            if let Some(width) = rest.chars().next().filter(|ch| ch.is_whitespace()) {
+                self.pos += width.len_utf8();
+                continue;
+            }
+
+            if rest.starts_with("//") {
+                self.pos = self.src[self.pos..]
+                    .find('\n')
+                    .map_or(self.src.len(), |offset| self.pos + offset + 1);
+                continue;
+            }
+
+            if rest.starts_with("/*") {
+                self.pos = skip_block_comment(self.src, self.pos);
+                continue;
+            }
+
+            if let Some(end) = raw_string_end(self.src, self.pos) {
+                self.pos = end;
+                continue;
+            }
+
+            if let Some(end) = quoted_string_end(self.src, self.pos) {
+                self.pos = end;
+                continue;
+            }
+
+            break;
+        }
+    }
+}
+
+impl<'a> Iterator for RustCodeTokens<'a> {
+    type Item = CodeToken<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.skip_trivia_and_literals();
+        let rest = self.src.get(self.pos..)?;
+        let byte = rest.as_bytes().first().copied()?;
+
+        if rest.starts_with("r#")
+            && let Some(next) = self.src.as_bytes().get(self.pos + 2).copied()
+            && is_ident_start(next)
+        {
+            let start = self.pos;
+            self.pos += 3;
+            while let Some(next) = self.src.as_bytes().get(self.pos).copied()
+                && is_ident_continue(next)
+            {
+                self.pos += 1;
+            }
+            return Some(CodeToken::Ident(&self.src[start..self.pos]));
+        }
+
+        if is_ident_start(byte) {
+            let start = self.pos;
+            self.pos += 1;
+            while let Some(next) = self.src.as_bytes().get(self.pos).copied()
+                && is_ident_continue(next)
+            {
+                self.pos += 1;
+            }
+            return Some(CodeToken::Ident(&self.src[start..self.pos]));
+        }
+
+        let ch = rest.chars().next()?;
+        self.pos += ch.len_utf8();
+        Some(CodeToken::Symbol(ch))
+    }
+}
+
+const fn is_ident_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+const fn is_ident_continue(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+fn skip_block_comment(src: &str, start: usize) -> usize {
+    let bytes = src.as_bytes();
+    let mut pos = start + 2;
+    let mut depth = 1usize;
+
+    while pos + 1 < bytes.len() {
+        match (bytes[pos], bytes[pos + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                pos += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                pos += 2;
+                if depth == 0 {
+                    return pos;
+                }
+            }
+            _ => pos += 1,
+        }
+    }
+
+    bytes.len()
+}
+
+fn raw_string_end(src: &str, start: usize) -> Option<usize> {
+    let bytes = src.as_bytes();
+    let mut pos = start;
+
+    if bytes.get(pos) == Some(&b'b') && bytes.get(pos + 1) == Some(&b'r') {
+        pos += 1;
+    }
+
+    if bytes.get(pos) != Some(&b'r') {
+        return None;
+    }
+    pos += 1;
+
+    let hashes_start = pos;
+    while bytes.get(pos) == Some(&b'#') {
+        pos += 1;
+    }
+    let hash_count = pos - hashes_start;
+
+    if bytes.get(pos) != Some(&b'"') {
+        return None;
+    }
+    pos += 1;
+    let hashes = &bytes[hashes_start..hashes_start + hash_count];
+
+    while pos < bytes.len() {
+        if bytes[pos] == b'"' && bytes.get(pos + 1..pos + 1 + hash_count) == Some(hashes) {
+            return Some(pos + 1 + hash_count);
+        }
+        pos += 1;
+    }
+
+    Some(bytes.len())
+}
+
+fn quoted_string_end(src: &str, start: usize) -> Option<usize> {
+    let bytes = src.as_bytes();
+    let mut pos = start;
+
+    if bytes.get(pos) == Some(&b'b') && bytes.get(pos + 1) == Some(&b'"') {
+        pos += 1;
+    }
+
+    if bytes.get(pos) != Some(&b'"') {
+        return None;
+    }
+
+    pos += 1;
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b'\\' => pos = pos.saturating_add(2),
+            b'"' => return Some(pos + 1),
+            _ => pos += 1,
+        }
+    }
+
+    Some(bytes.len())
 }
 
 /// Check an E2E contract row against E2E backing source content.
@@ -364,6 +563,43 @@ crash_matrix_label_for_point() {
     fn check_unit_contract_returns_false_for_missing() {
         let fake_source = "fn some_other_function() {}";
         assert!(!check_unit_contract(fake_source, "btrfs_write_nonexistent"));
+    }
+
+    #[test]
+    fn check_unit_contract_matches_real_function_declarations() {
+        let source = r"
+#[test]
+fn btrfs_write_mkdir () {}
+
+fn btrfs_write_generic_contract<T>() {}
+";
+
+        assert!(check_unit_contract(source, "btrfs_write_mkdir"));
+        assert!(check_unit_contract(source, "btrfs_write_generic_contract"));
+    }
+
+    #[test]
+    fn check_unit_contract_ignores_comments_and_literals() {
+        let source = r##"
+// fn btrfs_write_mkdir() {}
+/* fn btrfs_write_mkdir() {} */
+/*
+   nested block comments should not count:
+   /* fn btrfs_write_mkdir() {} */
+*/
+const PLAIN: &str = "fn btrfs_write_mkdir() {}";
+const BYTE: &[u8] = b"fn btrfs_write_mkdir() {}";
+const RAW: &str = r#"fn btrfs_write_mkdir() {}"#;
+const RAW_BYTES: &[u8] = br#"fn btrfs_write_mkdir() {}"#;
+"##;
+
+        assert!(!check_unit_contract(source, "btrfs_write_mkdir"));
+    }
+
+    #[test]
+    fn check_unit_contract_ignores_raw_identifier_named_fn() {
+        let source = "let r#fn = btrfs_write_mkdir();";
+        assert!(!check_unit_contract(source, "btrfs_write_mkdir"));
     }
 
     #[test]
