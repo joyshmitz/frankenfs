@@ -1082,6 +1082,10 @@ impl ExtentCache {
     /// If the cache is at capacity, the least-recently-used entry is evicted.
     pub fn insert(&self, ns: u64, mapping: ExtentMapping) {
         let mut inner = self.inner.write();
+        if inner.capacity == 0 {
+            return;
+        }
+
         let access_clock = inner.hits + inner.misses;
         let current_gen = inner.generation;
 
@@ -4740,6 +4744,29 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         // Entry 0 and 2 should survive.
         assert!(cache.lookup(0, 10).is_some());
         assert!(cache.lookup(0, 210).is_some());
+    }
+
+    #[test]
+    fn cache_zero_capacity_never_stores_entries() {
+        let cache = ExtentCache::with_capacity(0);
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 10,
+                physical_start: 1000,
+                count: 5,
+                unwritten: false,
+            },
+        );
+
+        assert_eq!(cache.stats().entries, 0);
+        assert!(cache.lookup(0, 10).is_none());
+
+        let stats = cache.stats();
+        assert_eq!(stats.capacity, 0);
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.evictions, 0);
     }
 
     #[test]
