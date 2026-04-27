@@ -228,6 +228,34 @@ impl MemIoEngine {
             stats: parking_lot::Mutex::new(IoEngineStats::default()),
         }
     }
+
+    fn checked_range(
+        offset: u64,
+        len: usize,
+        capacity: usize,
+        out_of_bounds_kind: std::io::ErrorKind,
+        out_of_bounds_message: &'static str,
+    ) -> Result<std::ops::Range<usize>> {
+        let start = usize::try_from(offset).map_err(|_| {
+            FfsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "memory I/O offset does not fit usize",
+            ))
+        })?;
+        let end = start.checked_add(len).ok_or_else(|| {
+            FfsError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "memory I/O range overflows usize",
+            ))
+        })?;
+        if end > capacity {
+            return Err(FfsError::Io(std::io::Error::new(
+                out_of_bounds_kind,
+                out_of_bounds_message,
+            )));
+        }
+        Ok(start..end)
+    }
 }
 
 impl std::fmt::Debug for MemIoEngine {
@@ -239,7 +267,6 @@ impl std::fmt::Debug for MemIoEngine {
 }
 
 impl IoEngine for MemIoEngine {
-    #[expect(clippy::cast_possible_truncation)] // 64-bit offsets in memory engine
     fn submit_batch(&self, ops: Vec<IoOp>) -> Vec<IoCompletion> {
         let mut data = self.data.lock();
         self.stats.lock().batches += 1;
@@ -249,15 +276,17 @@ impl IoEngine for MemIoEngine {
             .map(|op| match op {
                 IoOp::Read { offset, mut buf } => {
                     self.stats.lock().reads += 1;
-                    let start = offset as usize;
-                    let end = start + buf.len();
-                    if end > data.len() {
-                        return IoCompletion::Error(FfsError::Io(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "read past end of memory",
-                        )));
-                    }
-                    buf.copy_from_slice(&data[start..end]);
+                    let range = match Self::checked_range(
+                        offset,
+                        buf.len(),
+                        data.len(),
+                        std::io::ErrorKind::UnexpectedEof,
+                        "read past end of memory",
+                    ) {
+                        Ok(range) => range,
+                        Err(err) => return IoCompletion::Error(err),
+                    };
+                    buf.copy_from_slice(&data[range]);
                     let n = buf.len() as u64;
                     let mut s = self.stats.lock();
                     s.bytes_read += n;
@@ -266,15 +295,17 @@ impl IoEngine for MemIoEngine {
                 }
                 IoOp::Write { offset, data: wd } => {
                     self.stats.lock().writes += 1;
-                    let start = offset as usize;
-                    let end = start + wd.len();
-                    if end > data.len() {
-                        return IoCompletion::Error(FfsError::Io(std::io::Error::new(
-                            std::io::ErrorKind::WriteZero,
-                            "write past end of memory",
-                        )));
-                    }
-                    data[start..end].copy_from_slice(&wd);
+                    let range = match Self::checked_range(
+                        offset,
+                        wd.len(),
+                        data.len(),
+                        std::io::ErrorKind::WriteZero,
+                        "write past end of memory",
+                    ) {
+                        Ok(range) => range,
+                        Err(err) => return IoCompletion::Error(err),
+                    };
+                    data[range].copy_from_slice(&wd);
                     let mut s = self.stats.lock();
                     s.bytes_written += wd.len() as u64;
                     IoCompletion::Write
@@ -401,6 +432,38 @@ mod tests {
         assert_eq!(stats.batches, 1);
         assert_eq!(stats.reads, 1);
         assert_eq!(stats.bytes_read, 0);
+    }
+
+    #[test]
+    fn mem_engine_rejects_overflowing_read_range() {
+        let engine = MemIoEngine::new(1024);
+
+        let completions = engine.submit_batch(vec![IoOp::Read {
+            offset: u64::MAX,
+            buf: vec![0_u8; 1],
+        }]);
+
+        assert!(matches!(completions[0], IoCompletion::Error(_)));
+        let stats = engine.stats();
+        assert_eq!(stats.batches, 1);
+        assert_eq!(stats.reads, 1);
+        assert_eq!(stats.bytes_read, 0);
+    }
+
+    #[test]
+    fn mem_engine_rejects_overflowing_write_range() {
+        let engine = MemIoEngine::new(1024);
+
+        let completions = engine.submit_batch(vec![IoOp::Write {
+            offset: u64::MAX,
+            data: vec![0_u8; 1],
+        }]);
+
+        assert!(matches!(completions[0], IoCompletion::Error(_)));
+        let stats = engine.stats();
+        assert_eq!(stats.batches, 1);
+        assert_eq!(stats.writes, 1);
+        assert_eq!(stats.bytes_written, 0);
     }
 
     #[test]
@@ -542,12 +605,14 @@ mod tests {
 
         for (i, comp) in completions.iter().enumerate() {
             let expected = u8::try_from(i + 1).expect("test byte fits in u8");
-            match comp {
-                IoCompletion::Read(buf) => {
-                    assert_eq!(buf[0], expected, "block {i} mismatch");
-                }
-                other => panic!("expected Read, got {other:?}"),
-            }
+            let IoCompletion::Read(buf) = comp else {
+                assert!(
+                    matches!(comp, IoCompletion::Read(_)),
+                    "expected Read, got {comp:?}"
+                );
+                continue;
+            };
+            assert_eq!(buf[0], expected, "block {i} mismatch");
         }
     }
 
