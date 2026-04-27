@@ -896,13 +896,20 @@ pub fn snapshot_diff_by_generation(
 
 /// Parse the subset of `btrfs_inode_item` needed for read-only VFS operations.
 pub fn parse_inode_item(data: &[u8]) -> Result<BtrfsInodeItem, ParseError> {
+    const INODE_ITEM_SIZE: usize = 160;
     const NANOS_PER_SECOND: u32 = 1_000_000_000;
 
-    if data.len() < 160 {
+    if data.len() < INODE_ITEM_SIZE {
         return Err(ParseError::InsufficientData {
-            needed: 160,
+            needed: INODE_ITEM_SIZE,
             offset: 0,
             actual: data.len(),
+        });
+    }
+    if data.len() > INODE_ITEM_SIZE {
+        return Err(ParseError::InvalidField {
+            field: "inode_item.size",
+            reason: "does not match fixed inode item size",
         });
     }
 
@@ -6400,6 +6407,13 @@ mod tests {
             original
         );
         assert_insufficient_data(parse_inode_item(&bytes[..159]), 160, 0, 159);
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_invalid_field(
+            parse_inode_item(&trailing),
+            "inode_item.size",
+            "does not match fixed inode item size",
+        );
 
         for (offset, field) in [
             (120, "inode_item.atime_nsec"),

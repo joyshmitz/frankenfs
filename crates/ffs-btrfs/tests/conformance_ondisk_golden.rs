@@ -317,6 +317,24 @@ fn inode_item_short_payload_rejected() {
     }
 }
 
+#[test]
+fn inode_item_trailing_payload_rejected() {
+    let mut payload = GOLDEN_INODE_ITEM_REGFILE.to_vec();
+    payload.push(0);
+
+    let err = parse_inode_item(&payload).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "inode_item.size",
+                reason: "does not match fixed inode item size"
+            }
+        ),
+        "expected fixed-size inode item rejection, got {err:?}"
+    );
+}
+
 // DIR_ITEM / DIR_INDEX (30 + name_len bytes per entry)
 
 /// Golden DIR_ITEM payload with one entry:
