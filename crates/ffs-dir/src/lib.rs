@@ -67,6 +67,24 @@ fn validate_name(name: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn validate_reserved_tail(block_len: usize, reserved_tail: usize) -> Result<usize> {
+    if reserved_tail != 0 {
+        if reserved_tail < 12 {
+            return Err(FfsError::Format(
+                "directory reserved tail must be 0 or at least 12 bytes".to_owned(),
+            ));
+        }
+        if reserved_tail % 4 != 0 {
+            return Err(FfsError::Format(
+                "directory reserved tail must be 4-byte aligned".to_owned(),
+            ));
+        }
+    }
+    block_len
+        .checked_sub(reserved_tail)
+        .ok_or_else(|| FfsError::Format("directory reserved tail exceeds block length".to_owned()))
+}
+
 fn write_entry(
     block: &mut [u8],
     offset: usize,
@@ -132,7 +150,7 @@ pub fn add_entry(
     validate_name(name)?;
 
     let need = required_rec_len(name.len());
-    let limit = block.len().saturating_sub(reserved_tail);
+    let limit = validate_reserved_tail(block.len(), reserved_tail)?;
     if need > limit {
         return Err(FfsError::NoSpace);
     }
@@ -225,7 +243,7 @@ pub fn remove_entry(block: &mut [u8], name: &[u8], reserved_tail: usize) -> Resu
 
     let mut off = 0usize;
     let mut prev_off_opt: Option<usize> = None;
-    let limit = block.len().saturating_sub(reserved_tail);
+    let limit = validate_reserved_tail(block.len(), reserved_tail)?;
 
     while off + DIR_ENTRY_HEADER_LEN <= limit {
         let rec_len =
@@ -315,7 +333,7 @@ fn update_live_entry_header(
     }
 
     let mut off = 0usize;
-    let limit = block.len().saturating_sub(reserved_tail);
+    let limit = validate_reserved_tail(block.len(), reserved_tail)?;
     while off + DIR_ENTRY_HEADER_LEN <= limit {
         let rec_len =
             usize::from(
@@ -413,7 +431,11 @@ pub fn init_dir_block(
     parent_ino: u32,
     reserved_tail: usize,
 ) -> Result<()> {
-    if block.len() < required_rec_len(1) + required_rec_len(2) + reserved_tail {
+    let usable_len = validate_reserved_tail(block.len(), reserved_tail)?;
+    let min_entries = required_rec_len(1)
+        .checked_add(required_rec_len(2))
+        .ok_or_else(|| FfsError::Format("directory minimum entry size overflow".to_owned()))?;
+    if usable_len < min_entries {
         return Err(FfsError::Format(
             "directory block too small for . and .. entries".to_owned(),
         ));
@@ -421,7 +443,7 @@ pub fn init_dir_block(
     block.fill(0);
 
     let dot_len = required_rec_len(1);
-    let dotdot_len = block.len() - dot_len - reserved_tail;
+    let dotdot_len = usable_len - dot_len;
 
     write_entry(block, 0, self_ino, dot_len, Ext4FileType::Dir, b".")?;
     write_entry(
@@ -1044,6 +1066,40 @@ mod tests {
         let mut block = vec![0u8; 16]; // Too small for . and ..
         let err = init_dir_block(&mut block, 1, 2, 0).unwrap_err();
         assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn init_dir_block_rejects_invalid_reserved_tail_geometry_without_mutation() {
+        for reserved_tail in [1_usize, 8, 13, 128] {
+            let mut block = vec![0xA5; 64];
+            let before = block.clone();
+
+            let err = init_dir_block(&mut block, 1, 2, reserved_tail).unwrap_err();
+
+            assert!(matches!(err, FfsError::Format(_)));
+            assert_eq!(block, before);
+        }
+    }
+
+    #[test]
+    fn mutation_paths_reject_invalid_reserved_tail_geometry_without_mutation() {
+        let mut block = vec![0u8; 128];
+        init_dir_block(&mut block, 2, 2, 0).unwrap();
+
+        let before_add = block.clone();
+        let err = add_entry(&mut block, 10, b"new", Ext4FileType::RegFile, 8).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+        assert_eq!(block, before_add);
+
+        let before_remove = block.clone();
+        let err = remove_entry(&mut block, b".", 13).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+        assert_eq!(block, before_remove);
+
+        let before_retarget = block.clone();
+        let err = retarget_entry(&mut block, b".", 3, Ext4FileType::Dir, 256).unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+        assert_eq!(block, before_retarget);
     }
 
     #[test]
