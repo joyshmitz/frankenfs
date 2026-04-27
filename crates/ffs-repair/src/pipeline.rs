@@ -562,19 +562,30 @@ impl Default for ScrubDaemonMetrics {
 /// Thread-safe atomic metrics for concurrent external repair observation.
 #[derive(Debug, Clone)]
 pub struct RepairPipelineMetrics {
-    pub groups_scrubbed: Arc<AtomicU64>,
-    pub corruption_detected: Arc<AtomicU64>,
-    pub decode_attempts: Arc<AtomicU64>,
-    pub decode_successes: Arc<AtomicU64>,
-    pub symbol_refresh_count: Arc<AtomicU64>,
-    pub symbol_staleness_max_seconds: Arc<AtomicI64>,
-    pub blocks_scanned: Arc<AtomicU64>,
-    pub blocks_recovered: Arc<AtomicU64>,
-    pub blocks_unrecoverable: Arc<AtomicU64>,
-    pub scrub_rounds_completed: Arc<AtomicU64>,
+    groups_scrubbed: Arc<AtomicU64>,
+    corruption_detected: Arc<AtomicU64>,
+    decode_attempts: Arc<AtomicU64>,
+    decode_successes: Arc<AtomicU64>,
+    symbol_refresh_count: Arc<AtomicU64>,
+    symbol_staleness_max_seconds: Arc<AtomicI64>,
+    blocks_scanned: Arc<AtomicU64>,
+    blocks_recovered: Arc<AtomicU64>,
+    blocks_unrecoverable: Arc<AtomicU64>,
+    scrub_rounds_completed: Arc<AtomicU64>,
 }
 
 impl RepairPipelineMetrics {
+    fn saturating_add_u64(counter: &AtomicU64, delta: u64) {
+        while counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(delta))
+            })
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -589,6 +600,42 @@ impl RepairPipelineMetrics {
             blocks_unrecoverable: Arc::new(AtomicU64::new(0)),
             scrub_rounds_completed: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn add_groups_scrubbed(&self, delta: u64) {
+        Self::saturating_add_u64(&self.groups_scrubbed, delta);
+    }
+
+    fn add_corruption_detected(&self, delta: u64) {
+        Self::saturating_add_u64(&self.corruption_detected, delta);
+    }
+
+    fn add_decode_attempts(&self, delta: u64) {
+        Self::saturating_add_u64(&self.decode_attempts, delta);
+    }
+
+    fn add_decode_successes(&self, delta: u64) {
+        Self::saturating_add_u64(&self.decode_successes, delta);
+    }
+
+    fn add_symbol_refresh_count(&self, delta: u64) {
+        Self::saturating_add_u64(&self.symbol_refresh_count, delta);
+    }
+
+    fn add_blocks_scanned(&self, delta: u64) {
+        Self::saturating_add_u64(&self.blocks_scanned, delta);
+    }
+
+    fn add_blocks_recovered(&self, delta: u64) {
+        Self::saturating_add_u64(&self.blocks_recovered, delta);
+    }
+
+    fn add_blocks_unrecoverable(&self, delta: u64) {
+        Self::saturating_add_u64(&self.blocks_unrecoverable, delta);
+    }
+
+    fn add_scrub_rounds_completed(&self, delta: u64) {
+        Self::saturating_add_u64(&self.scrub_rounds_completed, delta);
     }
 
     #[must_use]
@@ -1041,9 +1088,8 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             .groups_scrubbed
             .saturating_add(groups_count);
         if let Some(m) = &self.atomic_metrics {
-            m.groups_scrubbed.fetch_add(groups_count, Ordering::Relaxed);
-            m.blocks_scanned
-                .fetch_add(report.blocks_scanned, Ordering::Relaxed);
+            m.add_groups_scrubbed(groups_count);
+            m.add_blocks_scanned(report.blocks_scanned);
         }
         debug!(
             blocks_scanned = report.blocks_scanned,
@@ -1132,9 +1178,8 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         self.runtime_metrics.groups_scrubbed =
             self.runtime_metrics.groups_scrubbed.saturating_add(1);
         if let Some(m) = &self.atomic_metrics {
-            m.groups_scrubbed.fetch_add(1, Ordering::Relaxed);
-            m.blocks_scanned
-                .fetch_add(report.blocks_scanned, Ordering::Relaxed);
+            m.add_groups_scrubbed(1);
+            m.add_blocks_scanned(report.blocks_scanned);
         }
 
         let scrub_record = EvidenceRecord::from_scrub_report(group.0, &report);
@@ -1520,7 +1565,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         self.runtime_metrics.decode_attempts =
             self.runtime_metrics.decode_attempts.saturating_add(1);
         if let Some(m) = &self.atomic_metrics {
-            m.decode_attempts.fetch_add(1, Ordering::Relaxed);
+            m.add_decode_attempts(1);
         }
         let attempt_detail = RepairDetail {
             generation: 0,
@@ -1651,7 +1696,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                 self.runtime_metrics.decode_successes =
                     self.runtime_metrics.decode_successes.saturating_add(1);
                 if let Some(m) = &self.atomic_metrics {
-                    m.decode_successes.fetch_add(1, Ordering::Relaxed);
+                    m.add_decode_successes(1);
                 }
                 info!(
                     group = group_num.0,
@@ -1703,16 +1748,10 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         };
         if let Some(m) = &self.atomic_metrics {
             if recovered_count > 0 {
-                m.blocks_recovered.fetch_add(
-                    u64::try_from(recovered_count).unwrap_or(u64::MAX),
-                    Ordering::Relaxed,
-                );
+                m.add_blocks_recovered(u64::try_from(recovered_count).unwrap_or(u64::MAX));
             }
             if unrecoverable_count > 0 {
-                m.blocks_unrecoverable.fetch_add(
-                    u64::try_from(unrecoverable_count).unwrap_or(u64::MAX),
-                    Ordering::Relaxed,
-                );
+                m.add_blocks_unrecoverable(u64::try_from(unrecoverable_count).unwrap_or(u64::MAX));
             }
         }
         *total_recovered += recovered_count;
@@ -1920,7 +1959,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         self.runtime_metrics.symbol_refresh_count =
             self.runtime_metrics.symbol_refresh_count.saturating_add(1);
         if let Some(m) = &self.atomic_metrics {
-            m.symbol_refresh_count.fetch_add(1, Ordering::Relaxed);
+            m.add_symbol_refresh_count(1);
         }
 
         Ok(())
@@ -1938,8 +1977,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             .corruption_detected
             .saturating_add(corrupt_count);
         if let Some(m) = &self.atomic_metrics {
-            m.corruption_detected
-                .fetch_add(corrupt_count, Ordering::Relaxed);
+            m.add_corruption_detected(corrupt_count);
         }
         warn!(
             group = group.0,
@@ -2127,7 +2165,7 @@ impl<'a, W: Write> ScrubDaemon<'a, W> {
             self.metrics.scrub_rounds_completed =
                 self.metrics.scrub_rounds_completed.saturating_add(1);
             if let Some(m) = self.pipeline.atomic_metrics.as_ref() {
-                m.scrub_rounds_completed.fetch_add(1, Ordering::Relaxed);
+                m.add_scrub_rounds_completed(1);
                 let telemetry = self.pipeline.refresh_telemetry();
                 m.update_staleness_gauge(&telemetry);
             }
@@ -3133,15 +3171,20 @@ mod tests {
         let err = bootstrap_storage_result(&cx, &device, layout, source_first, 8, 8)
             .expect_err("repair symbols should exceed reserved layout capacity");
 
-        match err {
-            FfsError::RepairFailed(message) => {
+        let message = match err {
+            FfsError::RepairFailed(message) => message,
+            other => {
                 assert!(
-                    message.contains("too many raw symbols for reserved region"),
-                    "unexpected repair error message: {message}"
+                    matches!(other, FfsError::RepairFailed(_)),
+                    "unexpected error variant: {other:?}"
                 );
+                return;
             }
-            other => panic!("unexpected error variant: {other:?}"),
-        }
+        };
+        assert!(
+            message.contains("too many raw symbols for reserved region"),
+            "unexpected repair error message: {message}"
+        );
     }
 
     #[test]
@@ -5732,17 +5775,15 @@ mod tests {
     #[test]
     fn atomic_metrics_increment_and_snapshot() {
         let metrics = RepairPipelineMetrics::new();
-        metrics.groups_scrubbed.fetch_add(5, Ordering::Relaxed);
-        metrics.corruption_detected.fetch_add(2, Ordering::Relaxed);
-        metrics.decode_attempts.fetch_add(3, Ordering::Relaxed);
-        metrics.decode_successes.fetch_add(1, Ordering::Relaxed);
-        metrics.symbol_refresh_count.fetch_add(4, Ordering::Relaxed);
-        metrics.blocks_scanned.fetch_add(1000, Ordering::Relaxed);
-        metrics.blocks_recovered.fetch_add(7, Ordering::Relaxed);
-        metrics.blocks_unrecoverable.fetch_add(2, Ordering::Relaxed);
-        metrics
-            .scrub_rounds_completed
-            .fetch_add(1, Ordering::Relaxed);
+        metrics.add_groups_scrubbed(5);
+        metrics.add_corruption_detected(2);
+        metrics.add_decode_attempts(3);
+        metrics.add_decode_successes(1);
+        metrics.add_symbol_refresh_count(4);
+        metrics.add_blocks_scanned(1000);
+        metrics.add_blocks_recovered(7);
+        metrics.add_blocks_unrecoverable(2);
+        metrics.add_scrub_rounds_completed(1);
         metrics
             .symbol_staleness_max_seconds
             .store(42, Ordering::Relaxed);
@@ -5761,10 +5802,63 @@ mod tests {
     }
 
     #[test]
+    fn atomic_metrics_saturate_at_numeric_limits() {
+        let metrics = RepairPipelineMetrics::new();
+        metrics
+            .groups_scrubbed
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        metrics
+            .corruption_detected
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        metrics
+            .decode_attempts
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        metrics
+            .decode_successes
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        metrics
+            .symbol_refresh_count
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        metrics
+            .blocks_scanned
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        metrics
+            .blocks_recovered
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        metrics
+            .blocks_unrecoverable
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        metrics
+            .scrub_rounds_completed
+            .store(u64::MAX - 1, Ordering::Relaxed);
+
+        metrics.add_groups_scrubbed(5);
+        metrics.add_corruption_detected(5);
+        metrics.add_decode_attempts(5);
+        metrics.add_decode_successes(5);
+        metrics.add_symbol_refresh_count(5);
+        metrics.add_blocks_scanned(5);
+        metrics.add_blocks_recovered(5);
+        metrics.add_blocks_unrecoverable(5);
+        metrics.add_scrub_rounds_completed(5);
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.groups_scrubbed, u64::MAX);
+        assert_eq!(snap.corruption_detected, u64::MAX);
+        assert_eq!(snap.decode_attempts, u64::MAX);
+        assert_eq!(snap.decode_successes, u64::MAX);
+        assert_eq!(snap.symbol_refresh_count, u64::MAX);
+        assert_eq!(snap.blocks_scanned, u64::MAX);
+        assert_eq!(snap.blocks_recovered, u64::MAX);
+        assert_eq!(snap.blocks_unrecoverable, u64::MAX);
+        assert_eq!(snap.scrub_rounds_completed, u64::MAX);
+    }
+
+    #[test]
     fn atomic_metrics_serde_round_trip() {
         let metrics = RepairPipelineMetrics::new();
-        metrics.groups_scrubbed.fetch_add(10, Ordering::Relaxed);
-        metrics.corruption_detected.fetch_add(3, Ordering::Relaxed);
+        metrics.add_groups_scrubbed(10);
+        metrics.add_corruption_detected(3);
         metrics
             .symbol_staleness_max_seconds
             .store(15, Ordering::Relaxed);
@@ -5783,8 +5877,8 @@ mod tests {
                 let m = Arc::clone(&metrics);
                 std::thread::spawn(move || {
                     for _ in 0..100 {
-                        m.groups_scrubbed.fetch_add(1, Ordering::Relaxed);
-                        m.blocks_scanned.fetch_add(10, Ordering::Relaxed);
+                        m.add_groups_scrubbed(1);
+                        m.add_blocks_scanned(10);
                     }
                 })
             })
@@ -6082,7 +6176,13 @@ mod tests {
                 assert_eq!(stored.generation, 1);
                 stored.symbols
             }
-            other => panic!("expected Found, got {other:?}"),
+            other => {
+                assert!(
+                    matches!(other, LookupResult::Found(_)),
+                    "expected Found, got {other:?}"
+                );
+                return;
+            }
         };
 
         // Wait for server thread to finish.
