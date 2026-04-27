@@ -122,6 +122,8 @@ impl BtrfsSuperblock {
         validate_superblock_tree_level("root_level", root_level)?;
         validate_superblock_tree_level("chunk_root_level", chunk_root_level)?;
         validate_superblock_tree_level("log_root_level", log_root_level)?;
+        let csum_type = read_le_u16(region, 0xC4)?;
+        validate_supported_csum_type(csum_type)?;
 
         // Parse sys_chunk_array_size and validate
         let sys_chunk_array_size = read_le_u32(region, 0xA0)?;
@@ -172,7 +174,7 @@ impl BtrfsSuperblock {
             compat_flags: read_le_u64(region, 0xAC)?,
             compat_ro_flags: read_le_u64(region, 0xB4)?,
             incompat_flags: read_le_u64(region, 0xBC)?,
-            csum_type: read_le_u16(region, 0xC4)?,
+            csum_type,
             root_level,
             chunk_root_level,
             log_root_level,
@@ -210,6 +212,16 @@ fn validate_superblock_tree_level(field: &'static str, level: u8) -> Result<(), 
         return Err(ParseError::InvalidField {
             field,
             reason: "exceeds btrfs max tree level",
+        });
+    }
+    Ok(())
+}
+
+fn validate_supported_csum_type(csum_type: u16) -> Result<(), ParseError> {
+    if csum_type != ffs_types::BTRFS_CSUM_TYPE_CRC32C {
+        return Err(ParseError::InvalidField {
+            field: "csum_type",
+            reason: "only CRC32C (type 0) is currently supported",
         });
     }
     Ok(())
@@ -1363,13 +1375,7 @@ pub fn verify_superblock_checksum(region: &[u8]) -> Result<(), ParseError> {
         });
     }
 
-    let csum_type = read_le_u16(region, 0xC4)?;
-    if csum_type != ffs_types::BTRFS_CSUM_TYPE_CRC32C {
-        return Err(ParseError::InvalidField {
-            field: "csum_type",
-            reason: "only CRC32C (type 0) is currently supported",
-        });
-    }
+    validate_supported_csum_type(read_le_u16(region, 0xC4)?)?;
 
     let stored = read_le_u32(region, 0)?;
     let computed = crc32c::crc32c(&region[0x20..BTRFS_SUPER_INFO_SIZE]);
@@ -1400,12 +1406,7 @@ pub fn verify_tree_block_checksum(block: &[u8], csum_type: u16) -> Result<(), Pa
         });
     }
 
-    if csum_type != ffs_types::BTRFS_CSUM_TYPE_CRC32C {
-        return Err(ParseError::InvalidField {
-            field: "csum_type",
-            reason: "only CRC32C (type 0) is currently supported",
-        });
-    }
+    validate_supported_csum_type(csum_type)?;
 
     let stored = read_le_u32(block, 0)?;
     let computed = crc32c::crc32c(&block[0x20..]);
@@ -1441,7 +1442,7 @@ mod tests {
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
         sb[0x9C..0xA0].copy_from_slice(&65536_u32.to_le_bytes());
-        sb[0xC4..0xC6].copy_from_slice(&1_u16.to_le_bytes());
+        sb[0xC4..0xC6].copy_from_slice(&ffs_types::BTRFS_CSUM_TYPE_CRC32C.to_le_bytes());
         sb[0xC6] = 0;
         sb[0xC7] = 1;
         sb[0xC8] = 2;
@@ -1451,6 +1452,7 @@ mod tests {
         assert_eq!(parsed.magic, BTRFS_MAGIC);
         assert_eq!(parsed.sectorsize, 4096);
         assert_eq!(parsed.nodesize, 16384);
+        assert_eq!(parsed.csum_type, ffs_types::BTRFS_CSUM_TYPE_CRC32C);
         assert_eq!(parsed.label, "ffs");
     }
 
@@ -1639,6 +1641,23 @@ mod tests {
                 }
             ),
             "expected nodesize error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn superblock_rejects_unsupported_csum_type() {
+        let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes());
+        sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes());
+        sb[0xC4..0xC6].copy_from_slice(&1_u16.to_le_bytes());
+        let err = BtrfsSuperblock::parse_superblock_region(&sb).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "csum_type",
+                reason: "only CRC32C (type 0) is currently supported",
+            }
         );
     }
 
@@ -3395,13 +3414,13 @@ mod tests {
             compat_flags in any::<u64>(),
             compat_ro_flags in any::<u64>(),
             incompat_flags in any::<u64>(),
-            csum_type in any::<u16>(),
             root_level in 0_u8..=BTRFS_MAX_LEVEL,
             chunk_root_level in 0_u8..=BTRFS_MAX_LEVEL,
             log_root_level in 0_u8..=BTRFS_MAX_LEVEL,
         ) {
             let sectorsize = 1_u32 << sector_shift;
             let nodesize = 1_u32 << node_shift;
+            let csum_type = ffs_types::BTRFS_CSUM_TYPE_CRC32C;
             let mut sb = [0_u8; BTRFS_SUPER_INFO_SIZE];
             sb[0x40..0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
             sb[0x48..0x50].copy_from_slice(&generation.to_le_bytes());
