@@ -3678,14 +3678,30 @@ impl<D: BlockDevice> ThrottleInjector<D> {
 
     /// Deterministic pseudo-random: returns value in [0.0, 1.0).
     fn next_random(&self) -> f64 {
-        // Simple xorshift64 for deterministic, seed-based randomness.
-        let mut s = self.rng_state.load(Ordering::Relaxed);
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        self.rng_state.store(s, Ordering::Relaxed);
-        // Map to [0.0, 1.0)
-        (s >> 11) as f64 / ((1_u64 << 53) as f64)
+        let mut state = self.rng_state.load(Ordering::Relaxed);
+        loop {
+            let next = Self::advance_rng_state(state);
+            match self.rng_state.compare_exchange_weak(
+                state,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Self::rng_state_to_unit_interval(next),
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    fn advance_rng_state(mut state: u64) -> u64 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    }
+
+    fn rng_state_to_unit_interval(state: u64) -> f64 {
+        (state >> 11) as f64 / ((1_u64 << 53) as f64)
     }
 
     /// Compute and apply the delay for an operation.
@@ -6777,6 +6793,40 @@ mod tests {
             ti.next_random().to_bits(),
             first.to_bits(),
             "reset should restore deterministic replay from the normalized seed"
+        );
+    }
+
+    #[test]
+    fn throttle_rng_advances_once_per_concurrent_sample() {
+        let dev = MemBlockDevice::new(4096, 8);
+        let ti = StdArc::new(ThrottleInjector::new(dev, ThrottleConfig::default(), 321));
+        let seed = ti.seed();
+        let threads = 4;
+        let samples_per_thread = 128;
+        let barrier = StdArc::new(std::sync::Barrier::new(threads));
+
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                let ti = StdArc::clone(&ti);
+                let barrier = StdArc::clone(&barrier);
+                s.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..samples_per_thread {
+                        let _ = ti.next_random();
+                    }
+                });
+            }
+        });
+
+        let mut expected = seed;
+        for _ in 0..threads * samples_per_thread {
+            expected = ThrottleInjector::<MemBlockDevice>::advance_rng_state(expected);
+        }
+
+        assert_eq!(
+            ti.rng_state.load(Ordering::Relaxed),
+            expected,
+            "concurrent sampling should not lose RNG state advances"
         );
     }
 
