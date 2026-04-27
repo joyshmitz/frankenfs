@@ -1017,6 +1017,25 @@ fn root_ref_trailing_payload_rejected() {
     );
 }
 
+#[test]
+fn root_ref_zero_name_len_rejected() {
+    let mut payload = vec![0u8; 18];
+    payload[0..8].copy_from_slice(&256u64.to_le_bytes());
+    payload[8..16].copy_from_slice(&1u64.to_le_bytes());
+
+    let err = parse_root_ref(&payload).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::InvalidField {
+                field: "root_ref.name_len",
+                reason: "must be non-zero"
+            }
+        ),
+        "expected zero root_ref name rejection, got {err:?}"
+    );
+}
+
 // Coverage glue
 
 #[test]

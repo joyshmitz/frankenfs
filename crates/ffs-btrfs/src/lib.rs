@@ -684,6 +684,12 @@ pub fn parse_root_ref(data: &[u8]) -> Result<BtrfsRootRef, ParseError> {
     let dirid = read_u64(data, 0, "root_ref.dirid")?;
     let sequence = read_u64(data, 8, "root_ref.sequence")?;
     let name_len = u16::from_le_bytes([data[16], data[17]]);
+    if name_len == 0 {
+        return Err(ParseError::InvalidField {
+            field: "root_ref.name_len",
+            reason: "must be non-zero",
+        });
+    }
     let name_end = 18 + usize::from(name_len);
     if data.len() < name_end {
         return Err(ParseError::InsufficientData {
@@ -10098,9 +10104,11 @@ mod tests {
     #[test]
     fn parse_root_ref_adversarial_samples_exercise_boundaries() {
         let empty_name = make_root_ref_data(256, b"");
-        let parsed = parse_root_ref(&empty_name).expect("parse empty root ref name");
-        assert_eq!(parsed.dirid, 256);
-        assert!(parsed.name.is_empty());
+        assert_invalid_field(
+            parse_root_ref(&empty_name),
+            "root_ref.name_len",
+            "must be non-zero",
+        );
 
         let long_name = vec![b'a'; 255];
         let parsed = parse_root_ref(&make_root_ref_data(4096, &long_name))
