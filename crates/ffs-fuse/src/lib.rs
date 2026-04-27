@@ -82,7 +82,11 @@ const FS_IOC_GET_ENCRYPTION_POLICY: u32 = 0x400C_6615;
 const FS_IOC_GET_ENCRYPTION_POLICY_EX: u32 = 0xC009_6616;
 /// `EXT4_IOC_SETFLAGS` = `_IOW('f', 2, long)` on x86_64.
 const EXT4_IOC_SETFLAGS: u32 = 0x4008_6602;
-/// `EXT4_IOC_GETSTATE` = `_IOR('f', 41, __u32)` on x86_64.
+/// `EXT4_IOC_GETSTATE` = `_IOR('f', 41, __u32)` = `0x8004_6629`.
+/// Returns the kernel-side runtime state bitmap for an inode
+/// (`EXT4_STATE_FLAG_EXT_PRECACHED`, `NEW`, `NEWENTRY`,
+/// `DA_ALLOC_CLOSE`). e2fsprogs / debugfs read it for diagnostic
+/// dumps. Output is a single host-native `u32`.
 const EXT4_IOC_GETSTATE: u32 = 0x8004_6629;
 const EXT4_IOC_GETSTATE_SIZE: u32 = 4;
 /// `FS_IOC_FSGETXATTR` = `_IOR('X', 31, struct fsxattr)` on x86_64.
@@ -2648,6 +2652,12 @@ impl FrankenFuse {
                 }
             }
             EXT4_IOC_GETSTATE => {
+                // _IOR with a 4-byte payload: validate the user buffer
+                // can hold the u32 reply, route through FsOps under
+                // an IoctlRead scope, and encode the host-native u32
+                // back to userspace. The kernel never returns an
+                // error for a valid inode here, but we propagate
+                // backend errors (e.g. ENOENT) the same way.
                 if out_size < EXT4_IOC_GETSTATE_SIZE {
                     return IoctlResult::Error(libc::EINVAL);
                 }
@@ -6722,6 +6732,45 @@ mod tests {
                 IoctlCall::ClearEsCache(InodeNumber(13)),
                 IoctlCall::End(RequestOp::IoctlRead),
             ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getstate_encodes_4_byte_u32_reply() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 73, 0, EXT4_IOC_GETSTATE, &[], 4);
+        assert_eq!(
+            response,
+            IoctlResult::Data(0xA5A5_1234_u32.to_ne_bytes().to_vec()),
+            "GETSTATE returns the host-native u32 fixture, got {response:?}"
+        );
+        assert_eq!(
+            calls.lock().expect("lock ioctl calls").as_slice(),
+            &[
+                IoctlCall::Begin(RequestOp::IoctlRead),
+                IoctlCall::GetState(InodeNumber(73)),
+                IoctlCall::End(RequestOp::IoctlRead),
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatch_ioctl_getstate_short_buffer_returns_einval() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fuse = FrankenFuse::new(Box::new(IoctlRecordingFs::new(0, Arc::clone(&calls))));
+
+        let response = dispatch_ioctl_for_testing(&fuse, 1, 0, EXT4_IOC_GETSTATE, &[], 3);
+        assert!(
+            matches!(response, IoctlResult::Error(libc::EINVAL)),
+            "out_size < 4 must surface EINVAL, got {response:?}"
+        );
+        // Bail before backend dispatch — no GetState recorded.
+        let trace = calls.lock().expect("lock ioctl calls").clone();
+        assert!(
+            !trace.iter().any(|c| matches!(c, IoctlCall::GetState(_))),
+            "must not call FsOps::get_inode_state on a short buffer: {trace:?}"
         );
     }
 

@@ -1046,14 +1046,16 @@ pub trait FsOps: Send + Sync {
         ))
     }
 
-    /// Get ext4 runtime inode state (`EXT4_IOC_GETSTATE`).
+    /// Return the kernel-side runtime state bitmap for an inode.
     ///
-    /// Linux exposes transient kernel-side state bits such as
-    /// `EXT4_STATE_EXT_PRECACHED`, `EXT4_STATE_NEW`, and
-    /// `EXT4_STATE_DA_ALLOC_CLOSE`. FrankenFS has no equivalent
-    /// long-lived kernel inode state in userspace, so the portable
-    /// default is an empty state bitmap. Backends with inode identity
-    /// should still override this to validate that `ino` exists.
+    /// Surfaces what `EXT4_IOC_GETSTATE` reports — the
+    /// `EXT4_STATE_FLAG_*` bits used by `e2fsprogs` and `debugfs` for
+    /// diagnostic dumps (`EXT_PRECACHED`, `NEW`, `NEWENTRY`,
+    /// `DA_ALLOC_CLOSE`). These are kernel-side transient flags with
+    /// no persistent on-disk representation, so a userspace FUSE
+    /// backend has nothing meaningful to expose; the default returns
+    /// `0`. Backends with inode identity should override this to
+    /// validate that `ino` exists.
     fn get_inode_state(
         &self,
         _cx: &Cx,

@@ -17561,6 +17561,12 @@ impl FsOps for OpenFs {
         scope: &mut RequestScope,
         ino: InodeNumber,
     ) -> ffs_error::Result<u32> {
+        // EXT4_STATE_FLAG_* bits are kernel-side transient flags
+        // (EXT_PRECACHED is a per-mount cache flag, NEW/NEWENTRY are
+        // kernel allocator hints, DA_ALLOC_CLOSE is a delayed-alloc
+        // close marker) with no meaningful counterpart in our
+        // userspace MVCC backend. Validate the inode exists so a bogus
+        // ino surfaces as ENOENT/EINVAL, then return an empty bitmap.
         match &self.flavor {
             FsFlavor::Ext4(_) => {
                 let _ = self.read_inode_with_scope(cx, scope, Self::ext4_canonical_inode(ino))?;
