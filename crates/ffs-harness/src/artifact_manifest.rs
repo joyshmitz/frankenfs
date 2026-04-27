@@ -603,30 +603,7 @@ pub fn validate_manifest(manifest: &ArtifactManifest) -> Vec<ManifestValidationE
 /// Check if a scenario ID matches the canonical pattern.
 #[must_use]
 pub fn is_valid_scenario_id(id: &str) -> bool {
-    // Pattern: ^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$
-    // At least 3 underscore-separated segments, all lowercase alphanumeric.
-    let segments: Vec<&str> = id.split('_').collect();
-    if segments.len() < 3 {
-        return false;
-    }
-    for (idx, segment) in segments.iter().enumerate() {
-        if segment.is_empty() {
-            return false;
-        }
-        if idx == 0 {
-            // First segment must start with lowercase letter.
-            if !segment.starts_with(|c: char| c.is_ascii_lowercase()) {
-                return false;
-            }
-        }
-        if !segment
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        {
-            return false;
-        }
-    }
-    true
+    crate::log_contract::e2e_marker::is_valid_scenario_id(id)
 }
 
 // ── Builder convenience ──────────────────────────────────────────────────

@@ -240,13 +240,46 @@ pub mod e2e_marker {
     /// Scenario ID regex pattern.
     pub const SCENARIO_ID_REGEX: &str = r"^[a-z][a-z0-9]*(_[a-z0-9]+){2,}$";
 
+    /// Return true when `id` matches [`SCENARIO_ID_REGEX`].
+    #[must_use]
+    pub fn is_valid_scenario_id(id: &str) -> bool {
+        let mut segments = id.split('_');
+        let Some(first) = segments.next() else {
+            return false;
+        };
+
+        if first.is_empty()
+            || !first.starts_with(|ch: char| ch.is_ascii_lowercase())
+            || !is_lower_alnum(first)
+        {
+            return false;
+        }
+
+        let mut remaining_segments = 0usize;
+        for segment in segments {
+            if segment.is_empty() || !is_lower_alnum(segment) {
+                return false;
+            }
+            remaining_segments += 1;
+        }
+
+        remaining_segments >= 2
+    }
+
+    fn is_lower_alnum(segment: &str) -> bool {
+        segment
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+    }
+
     /// Parse a SCENARIO_RESULT marker line into (scenario_id, outcome, detail).
     ///
     /// Returns `None` if the line is not a valid marker.
     #[must_use]
     pub fn parse_marker(line: &str) -> Option<(&str, &str, Option<&str>)> {
         let line = line.trim();
-        if !line.starts_with(PREFIX) {
+        let mut parts = line.split(SEP);
+        if parts.next()? != PREFIX {
             return None;
         }
 
@@ -254,7 +287,7 @@ pub mod e2e_marker {
         let mut outcome_val = None;
         let mut detail = None;
 
-        for part in line.split(SEP).skip(1) {
+        for part in parts {
             if let Some(val) = part.strip_prefix("scenario_id=") {
                 scenario_id = Some(val);
             } else if let Some(val) = part.strip_prefix("outcome=") {
@@ -264,7 +297,13 @@ pub mod e2e_marker {
             }
         }
 
-        Some((scenario_id?, outcome_val?, detail))
+        let scenario_id = scenario_id?;
+        let outcome_val = outcome_val?;
+        if !is_valid_scenario_id(scenario_id) || !matches!(outcome_val, PASS | FAIL) {
+            return None;
+        }
+
+        Some((scenario_id, outcome_val, detail))
     }
 }
 
@@ -403,9 +442,10 @@ mod tests {
 
     #[test]
     fn e2e_marker_parse_with_detail() {
-        let line = "SCENARIO_RESULT|scenario_id=thresholds_valid|outcome=FAIL|detail=missing_key_x";
+        let line =
+            "SCENARIO_RESULT|scenario_id=thresholds_toml_valid|outcome=FAIL|detail=missing_key_x";
         let (id, outcome_val, detail) = e2e_marker::parse_marker(line).expect("parse");
-        assert_eq!(id, "thresholds_valid");
+        assert_eq!(id, "thresholds_toml_valid");
         assert_eq!(outcome_val, "FAIL");
         assert_eq!(detail, Some("missing_key_x"));
     }
@@ -415,6 +455,39 @@ mod tests {
         assert!(e2e_marker::parse_marker("not a marker").is_none());
         assert!(e2e_marker::parse_marker("SCENARIO_RESULT|outcome=PASS").is_none());
         assert!(e2e_marker::parse_marker("SCENARIO_RESULT|scenario_id=x").is_none());
+    }
+
+    #[test]
+    fn e2e_marker_parse_rejects_invalid_contract_fields() {
+        assert!(
+            e2e_marker::parse_marker("SCENARIO_RESULT|scenario_id=too_short|outcome=PASS")
+                .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker("SCENARIO_RESULT|scenario_id=Upper_case_bad|outcome=PASS")
+                .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker("SCENARIO_RESULT|scenario_id=valid_test_marker|outcome=SKIP")
+                .is_none()
+        );
+        assert!(
+            e2e_marker::parse_marker(
+                "SCENARIO_RESULT_EXTRA|scenario_id=valid_test_marker|outcome=PASS"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn e2e_marker_scenario_id_validator_matches_documented_shape() {
+        assert!(e2e_marker::is_valid_scenario_id("taxonomy_builds_clean"));
+        assert!(e2e_marker::is_valid_scenario_id("a1_b2_c3"));
+        assert!(!e2e_marker::is_valid_scenario_id(""));
+        assert!(!e2e_marker::is_valid_scenario_id("two_segments"));
+        assert!(!e2e_marker::is_valid_scenario_id("1starts_with_digit_bad"));
+        assert!(!e2e_marker::is_valid_scenario_id("has-hyphen_bad_id"));
+        assert!(!e2e_marker::is_valid_scenario_id("has__empty_segment"));
     }
 
     #[test]
