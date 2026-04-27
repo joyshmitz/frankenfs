@@ -39,11 +39,11 @@
 | BtrfsKeyPtr | ✅ | ✅ | 2 | 2 | 100% | internal node pointers |
 | BtrfsDevItem | ✅ | ✅ | 7 | 7 | 100% | 1TB device with 512GB used plus invalid ID/accounting rejection |
 | BtrfsRootItem | ✅ | ✅ | 5 | 5 | 100% | via roottree_leaf fixture |
-| BtrfsInodeItem | ✅ | ✅ | 6 | 6 | 100% | via fstree_leaf fixture |
+| BtrfsInodeItem | ✅ | ✅ | 7 | 7 | 100% | via fstree_leaf fixture plus timestamp nanosecond bound rejection |
 | BtrfsDirItem | ✅ | ✅ | 4 | 4 | 100% | via fstree_leaf fixture |
 | BtrfsExtentData | ✅ | ✅ | 5 | 5 | 100% | via fstree_leaf fixture |
 
-**btrfs Total: 69 MUST clauses, 69 passing = 100.0%**
+**btrfs Total: 70 MUST clauses, 70 passing = 100.0%**
 
 ## Priority Gaps
 
@@ -67,7 +67,7 @@ None. All identified on-disk structures have conformance fixtures.
 | Btrfs chunk-tree items | ✅ | ✅ | deterministic adversarial regression tests cover valid multi-stripe chunk-tree item parsing, fixed header truncation, declared stripe payload truncation, zero chunk length, zero stripe length, zero stripes, zero stripe device IDs, and multiple RAID profile bit rejection |
 | Btrfs dev items | ✅ | ✅ | synthetic adversarial seeds cover full field-layout parsing, max numeric/classification values, trailing bytes after the fixed 98-byte item, zero device ID rejection, zero-capacity device rejection, impossible `bytes_used > total_bytes` accounting, and truncated payload rejection |
 | Btrfs superblocks | ✅ | ✅ | synthetic adversarial seeds cover valid superblock-region parsing, image-offset parsing, bad magic, zero and non-power-of-two sizing fields, oversized sector/node/stripe sizing fields, zero-capacity, zero-device, and `bytes_used > total_bytes` accounting rejection, unsupported checksum types, oversized sys_chunk_array declarations, invalid root/chunk/log tree levels, and short region/image rejection |
-| Btrfs item payload parsers | ✅ | ✅ | deterministic adversarial regression tests cover root/root_ref/inode/dir/xattr/extent payload valid boundaries, multi-entry dir/xattr payloads, short headers, length overflows, unsupported extent types, compression values, and encoding fields, zero root bytenr rejection, and malformed ROOT_REF fallback behavior for subvolumes/snapshots |
+| Btrfs item payload parsers | ✅ | ✅ | deterministic adversarial regression tests cover root/root_ref/inode/dir/xattr/extent payload valid boundaries, multi-entry dir/xattr payloads, short headers, length overflows, unsupported extent types, compression values, encoding fields, invalid inode timestamp nanoseconds, zero root bytenr rejection, and malformed ROOT_REF fallback behavior for subvolumes/snapshots |
 | Btrfs send streams | ✅ | ✅ | deterministic adversarial regression tests cover command CRC32C validation, missing-END rejection, unknown command fallback, zero-length and unknown attributes, multi-attribute commands, trailing partial command headers, and END payload TLV validation |
 | Btrfs delayed refs | ✅ | ✅ | deterministic adversarial regression tests cover zero-limit flush preservation, bounded partial flush accounting, delete-underflow queue preservation, and sequence-ordered drain across extent key order |
 | Btrfs transactions | ✅ | ✅ | deterministic adversarial mutation tests cover same-tree root replacement, delayed-ref commit failure nonvisibility, and tree-root address overflow nonvisibility |

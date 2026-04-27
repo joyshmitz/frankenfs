@@ -847,12 +847,32 @@ pub fn snapshot_diff_by_generation(
 
 /// Parse the subset of `btrfs_inode_item` needed for read-only VFS operations.
 pub fn parse_inode_item(data: &[u8]) -> Result<BtrfsInodeItem, ParseError> {
+    const NANOS_PER_SECOND: u32 = 1_000_000_000;
+
     if data.len() < 160 {
         return Err(ParseError::InsufficientData {
             needed: 160,
             offset: 0,
             actual: data.len(),
         });
+    }
+
+    let atime_nsec = read_u32(data, 120, "inode_item.atime_nsec")?;
+    let ctime_nsec = read_u32(data, 132, "inode_item.ctime_nsec")?;
+    let mtime_nsec = read_u32(data, 144, "inode_item.mtime_nsec")?;
+    let otime_nsec = read_u32(data, 156, "inode_item.otime_nsec")?;
+    for (field, nsec) in [
+        ("inode_item.atime_nsec", atime_nsec),
+        ("inode_item.ctime_nsec", ctime_nsec),
+        ("inode_item.mtime_nsec", mtime_nsec),
+        ("inode_item.otime_nsec", otime_nsec),
+    ] {
+        if nsec >= NANOS_PER_SECOND {
+            return Err(ParseError::InvalidField {
+                field,
+                reason: "must be less than 1_000_000_000",
+            });
+        }
     }
 
     Ok(BtrfsInodeItem {
@@ -865,13 +885,13 @@ pub fn parse_inode_item(data: &[u8]) -> Result<BtrfsInodeItem, ParseError> {
         mode: read_u32(data, 52, "inode_item.mode")?,
         rdev: read_u64(data, 56, "inode_item.rdev")?,
         atime_sec: read_u64(data, 112, "inode_item.atime_sec")?,
-        atime_nsec: read_u32(data, 120, "inode_item.atime_nsec")?,
+        atime_nsec,
         ctime_sec: read_u64(data, 124, "inode_item.ctime_sec")?,
-        ctime_nsec: read_u32(data, 132, "inode_item.ctime_nsec")?,
+        ctime_nsec,
         mtime_sec: read_u64(data, 136, "inode_item.mtime_sec")?,
-        mtime_nsec: read_u32(data, 144, "inode_item.mtime_nsec")?,
+        mtime_nsec,
         otime_sec: read_u64(data, 148, "inode_item.otime_sec")?,
-        otime_nsec: read_u32(data, 156, "inode_item.otime_nsec")?,
+        otime_nsec,
     })
 }
 
@@ -6294,13 +6314,13 @@ mod tests {
             mode: u32::MAX,
             rdev: u64::MAX,
             atime_sec: u64::MAX,
-            atime_nsec: u32::MAX,
+            atime_nsec: 999_999_999,
             ctime_sec: u64::MAX,
-            ctime_nsec: u32::MAX,
+            ctime_nsec: 999_999_999,
             mtime_sec: u64::MAX,
-            mtime_nsec: u32::MAX,
+            mtime_nsec: 999_999_999,
             otime_sec: u64::MAX,
-            otime_nsec: u32::MAX,
+            otime_nsec: 999_999_999,
         };
         let bytes = original.to_bytes();
         assert_eq!(
@@ -6308,6 +6328,21 @@ mod tests {
             original
         );
         assert_insufficient_data(parse_inode_item(&bytes[..159]), 160, 0, 159);
+
+        for (offset, field) in [
+            (120, "inode_item.atime_nsec"),
+            (132, "inode_item.ctime_nsec"),
+            (144, "inode_item.mtime_nsec"),
+            (156, "inode_item.otime_nsec"),
+        ] {
+            let mut invalid_nsec = bytes.clone();
+            invalid_nsec[offset..offset + 4].copy_from_slice(&1_000_000_000_u32.to_le_bytes());
+            assert_invalid_field(
+                parse_inode_item(&invalid_nsec),
+                field,
+                "must be less than 1_000_000_000",
+            );
+        }
     }
 
     fn assert_dir_item_adversarial_boundaries() {
@@ -6791,13 +6826,13 @@ mod tests {
             mode: u32::MAX,
             rdev: u64::MAX,
             atime_sec: u64::MAX,
-            atime_nsec: u32::MAX,
+            atime_nsec: 999_999_999,
             ctime_sec: u64::MAX,
-            ctime_nsec: u32::MAX,
+            ctime_nsec: 999_999_999,
             mtime_sec: u64::MAX,
-            mtime_nsec: u32::MAX,
+            mtime_nsec: 999_999_999,
             otime_sec: u64::MAX,
-            otime_nsec: u32::MAX,
+            otime_nsec: 999_999_999,
         };
         let bytes = original.to_bytes();
         let parsed = parse_inode_item(&bytes).expect("round-trip parse");
@@ -6805,7 +6840,7 @@ mod tests {
         assert_eq!(parsed.nlink, u32::MAX);
         assert_eq!(parsed.rdev, u64::MAX);
         assert_eq!(parsed.atime_sec, u64::MAX);
-        assert_eq!(parsed.otime_nsec, u32::MAX);
+        assert_eq!(parsed.otime_nsec, 999_999_999);
     }
 
     #[test]

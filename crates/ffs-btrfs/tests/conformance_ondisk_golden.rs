@@ -21,6 +21,7 @@ use ffs_btrfs::{
     BtrfsInodeRef, BtrfsXattrItem, parse_dir_items, parse_extent_data, parse_inode_item,
     parse_inode_refs, parse_root_item, parse_root_ref, parse_xattr_items,
 };
+use ffs_types::ParseError;
 
 // Helpers
 
@@ -231,9 +232,12 @@ fn golden_inode_item_dir_zero_times_roundtrip() {
 }
 
 /// Large-generation INODE_ITEM exercising the full u64 range so encoders that
-/// truncate to u32 are caught.
+/// truncate to u32 are caught, while timestamp nanoseconds stay in the valid
+/// timespec subsecond range.
 #[test]
 fn inode_item_u64_bounds_roundtrip() {
+    const MAX_VALID_NSEC: u32 = 999_999_999;
+
     let expected = BtrfsInodeItem {
         generation: u64::MAX,
         size: u64::MAX,
@@ -244,18 +248,59 @@ fn inode_item_u64_bounds_roundtrip() {
         mode: u32::MAX,
         rdev: u64::MAX,
         atime_sec: u64::MAX,
-        atime_nsec: u32::MAX,
+        atime_nsec: MAX_VALID_NSEC,
         ctime_sec: u64::MAX,
-        ctime_nsec: u32::MAX,
+        ctime_nsec: MAX_VALID_NSEC,
         mtime_sec: u64::MAX,
-        mtime_nsec: u32::MAX,
+        mtime_nsec: MAX_VALID_NSEC,
         otime_sec: u64::MAX,
-        otime_nsec: u32::MAX,
+        otime_nsec: MAX_VALID_NSEC,
     };
     let encoded = expected.to_bytes();
     assert_eq!(encoded.len(), 160, "inode_item encoded length must be 160");
     let decoded = parse_inode_item(&encoded).expect("parse max-value inode");
     assert_eq!(decoded, expected, "u64::MAX round-trip diverged");
+}
+
+#[test]
+fn inode_item_timestamp_nanoseconds_must_be_timespec_bounded() {
+    let valid = BtrfsInodeItem {
+        generation: 1,
+        size: 4096,
+        nbytes: 4096,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        mode: 0o100_644,
+        rdev: 0,
+        atime_sec: u64::MAX,
+        atime_nsec: 999_999_999,
+        ctime_sec: u64::MAX,
+        ctime_nsec: 999_999_999,
+        mtime_sec: u64::MAX,
+        mtime_nsec: 999_999_999,
+        otime_sec: u64::MAX,
+        otime_nsec: 999_999_999,
+    };
+    parse_inode_item(&valid.to_bytes()).expect("max valid nanoseconds parse");
+
+    for (offset, field) in [
+        (120, "inode_item.atime_nsec"),
+        (132, "inode_item.ctime_nsec"),
+        (144, "inode_item.mtime_nsec"),
+        (156, "inode_item.otime_nsec"),
+    ] {
+        let mut invalid = valid.to_bytes();
+        invalid[offset..offset + 4].copy_from_slice(&1_000_000_000_u32.to_le_bytes());
+        let err = parse_inode_item(&invalid).expect_err("invalid nanoseconds must be rejected");
+        assert!(matches!(
+            err,
+            ParseError::InvalidField {
+                field: got_field,
+                reason: "must be less than 1_000_000_000",
+            } if got_field == field
+        ));
+    }
 }
 
 #[test]
@@ -541,17 +586,12 @@ fn extent_data_regular_short_after_header_rejected() {
     bytes[20] = BTRFS_FILE_EXTENT_REG;
     for len in 21..53 {
         let truncated = &bytes[..len];
-        let result = parse_extent_data(truncated);
-        match result {
-            Err(e) => {
-                let msg = format!("{e:?}");
-                assert!(
-                    msg.contains("InsufficientData"),
-                    "len={len}: expected InsufficientData, got {e:?}"
-                );
-            }
-            Ok(unexpected) => panic!("len={len} unexpectedly parsed: {unexpected:?}"),
-        }
+        let err = parse_extent_data(truncated).expect_err("truncated extent tail must reject");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("InsufficientData"),
+            "len={len}: expected InsufficientData, got {err:?}"
+        );
     }
 }
 
