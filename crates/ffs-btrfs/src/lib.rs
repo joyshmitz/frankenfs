@@ -944,7 +944,21 @@ pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
     let generation = read_u64(data, 0, "extent_data.generation")?;
     let ram_bytes = read_u64(data, 8, "extent_data.ram_bytes")?;
     let compression = data[16];
+    let encryption = data[17];
+    let other_encoding = read_u16(data, 18, "extent_data.other_encoding")?;
     let extent_type = data[20];
+    if encryption != 0 {
+        return Err(ParseError::InvalidField {
+            field: "extent_data.encryption",
+            reason: "unsupported encryption",
+        });
+    }
+    if other_encoding != 0 {
+        return Err(ParseError::InvalidField {
+            field: "extent_data.other_encoding",
+            reason: "unsupported other encoding",
+        });
+    }
     match extent_type {
         BTRFS_FILE_EXTENT_INLINE => Ok(BtrfsExtentData::Inline {
             generation,
@@ -6353,6 +6367,22 @@ mod tests {
         let mut truncated_regular = vec![0_u8; 52];
         truncated_regular[20] = BTRFS_FILE_EXTENT_REG;
         assert_insufficient_data(parse_extent_data(&truncated_regular), 53, 0, 52);
+
+        let mut encrypted_inline = inline.to_bytes();
+        encrypted_inline[17] = 1;
+        assert_invalid_field(
+            parse_extent_data(&encrypted_inline),
+            "extent_data.encryption",
+            "unsupported encryption",
+        );
+
+        let mut other_encoded_regular = prealloc.to_bytes();
+        other_encoded_regular[18..20].copy_from_slice(&1_u16.to_le_bytes());
+        assert_invalid_field(
+            parse_extent_data(&other_encoded_regular),
+            "extent_data.other_encoding",
+            "unsupported other encoding",
+        );
 
         let mut unknown_type = vec![0_u8; 21];
         unknown_type[20] = 0xff;
