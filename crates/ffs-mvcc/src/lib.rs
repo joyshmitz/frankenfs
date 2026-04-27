@@ -648,22 +648,22 @@ impl ContentionMetrics {
         merge_succeeded: bool,
         aborted: bool,
     ) {
-        self.total_commits += 1;
+        self.total_commits = self.total_commits.saturating_add(1);
         let decay = 1.0 - alpha;
         let conflict_sample = if had_conflict { 1.0 } else { 0.0 };
         self.conflict_rate = decay.mul_add(self.conflict_rate, conflict_sample * alpha);
 
         if had_conflict {
-            self.total_conflicts += 1;
+            self.total_conflicts = self.total_conflicts.saturating_add(1);
             let merge_sample = if merge_succeeded { 1.0 } else { 0.0 };
             self.merge_success_rate = decay.mul_add(self.merge_success_rate, merge_sample * alpha);
             if merge_succeeded {
-                self.total_merges += 1;
+                self.total_merges = self.total_merges.saturating_add(1);
             }
         }
 
         if aborted {
-            self.total_aborts += 1;
+            self.total_aborts = self.total_aborts.saturating_add(1);
         }
         let abort_sample = if aborted { 1.0 } else { 0.0 };
         self.abort_rate = decay.mul_add(self.abort_rate, abort_sample * alpha);
@@ -9269,6 +9269,27 @@ mod tests {
         m.record_commit(alpha, true, false, true);
         assert_eq!(m.total_aborts, 1);
         assert!(m.abort_rate > 0.0);
+    }
+
+    #[test]
+    fn contention_metrics_totals_saturate_at_numeric_limits() {
+        let mut m = ContentionMetrics {
+            total_commits: u64::MAX,
+            total_conflicts: u64::MAX,
+            total_merges: u64::MAX,
+            total_aborts: u64::MAX,
+            ..ContentionMetrics::default()
+        };
+
+        m.record_commit(0.5, true, true, true);
+
+        assert_eq!(m.total_commits, u64::MAX);
+        assert_eq!(m.total_conflicts, u64::MAX);
+        assert_eq!(m.total_merges, u64::MAX);
+        assert_eq!(m.total_aborts, u64::MAX);
+        assert!((m.conflict_rate - 0.5).abs() < f64::EPSILON);
+        assert!((m.merge_success_rate - 1.0).abs() < f64::EPSILON);
+        assert!((m.abort_rate - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
