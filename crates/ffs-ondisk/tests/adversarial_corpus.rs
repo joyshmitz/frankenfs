@@ -1290,6 +1290,21 @@ fn btrfs_superblock_adversarial_samples() -> Vec<(String, Vec<u8>)> {
         bad_stripesize,
     ));
 
+    let mut zero_total_bytes = valid_region.clone();
+    zero_total_bytes[0x70..0x78].copy_from_slice(&0_u64.to_le_bytes());
+    zero_total_bytes[0x78..0x80].copy_from_slice(&0_u64.to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_superblock_zero_total_bytes.bin".to_owned(),
+        zero_total_bytes,
+    ));
+
+    let mut overused = valid_region.clone();
+    overused[0x78..0x80].copy_from_slice(&(BTRFS_TEST_DEV_TOTAL_BYTES + 1).to_le_bytes());
+    samples.push((
+        "synthetic_btrfs_superblock_bytes_used_exceeds_total.bin".to_owned(),
+        overused,
+    ));
+
     let mut oversized_sys_chunk_array = valid_region.clone();
     oversized_sys_chunk_array[0xA0..0xA4].copy_from_slice(&2049_u32.to_le_bytes());
     samples.push((
@@ -3253,6 +3268,30 @@ fn assert_invalid_btrfs_superblock_samples(samples: &BTreeMap<String, Vec<u8>>) 
         ParseError::InvalidField {
             field: "stripesize",
             ..
+        }
+    ));
+
+    let zero_total = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_zero_total_bytes.bin"],
+    )
+    .expect_err("zero total_bytes superblocks must be rejected");
+    assert!(matches!(
+        zero_total,
+        ParseError::InvalidField {
+            field: "total_bytes",
+            reason: "must be non-zero",
+        }
+    ));
+
+    let overused = BtrfsSuperblock::parse_superblock_region(
+        &samples["synthetic_btrfs_superblock_bytes_used_exceeds_total.bin"],
+    )
+    .expect_err("superblock bytes_used above total_bytes must be rejected");
+    assert!(matches!(
+        overused,
+        ParseError::InvalidField {
+            field: "bytes_used",
+            reason: "exceeds total_bytes",
         }
     ));
 
