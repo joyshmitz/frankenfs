@@ -4590,7 +4590,8 @@ Tracked V1 btrfs scope (explicit):
 
 - metadata parsing + validation
 - single- and multi-device chunk mapping for supported RAID/DUP read paths
-- transparent decompression (ZLIB/LZO/ZSTD)
+- transparent decompression (ZLIB/LZO/ZSTD) with exact `ram_bytes`
+  decoded-length validation and malformed LZO frame rejection
 - subvolume mount, tree-log replay, and send-stream parsing
 - btrfs ioctl path lookup for `BTRFS_IOC_INO_LOOKUP`, including `treeid=0`
   mounted-root resolution and explicit tree-id path resolution through ROOT_TREE

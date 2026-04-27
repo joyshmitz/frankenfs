@@ -5227,70 +5227,115 @@ impl OpenFs {
                         block: 0,
                         detail: format!("btrfs zlib decompression failed: {e}"),
                     })?;
-                Ok(out)
+                Self::validate_btrfs_decompressed_len("zlib", out, uncompressed_size)
             }
-            2 => {
-                // LZO with btrfs segment framing:
-                // [total_len: u32 LE] then segments of [seg_len: u32 LE][LZO1X data]
-                // Each segment decompresses to at most one page (4096 bytes).
-                if compressed.len() < 4 {
-                    return Err(FfsError::Corruption {
-                        block: 0,
-                        detail: "btrfs LZO: data too short for header".into(),
-                    });
-                }
-                let total_len = u32::from_le_bytes([
-                    compressed[0],
-                    compressed[1],
-                    compressed[2],
-                    compressed[3],
-                ]) as usize;
-                let mut out = Vec::with_capacity(uncompressed_size);
-                let mut pos = 4; // skip total_len header
-                let data_end = total_len.min(compressed.len());
-                while pos + 4 <= data_end && out.len() < uncompressed_size {
-                    let seg_len = u32::from_le_bytes([
-                        compressed[pos],
-                        compressed[pos + 1],
-                        compressed[pos + 2],
-                        compressed[pos + 3],
-                    ]) as usize;
-                    pos += 4;
-                    if seg_len == 0 || pos + seg_len > data_end {
-                        break;
-                    }
-                    let seg_data = &compressed[pos..pos + seg_len];
-                    let remaining = uncompressed_size - out.len();
-                    // btrfs LZO segments decompress to at most 4096 bytes (PAGE_SIZE
-                    // in the kernel). This is baked into the on-disk format, not the
-                    // runtime system page size.
-                    let page_size = remaining.min(4096);
-                    match lzokay_native::decompress_all(seg_data, Some(page_size)) {
-                        Ok(decompressed) => {
-                            out.extend_from_slice(&decompressed);
-                        }
-                        Err(_) => {
-                            return Err(FfsError::Corruption {
-                                block: 0,
-                                detail: "btrfs LZO segment decompression failed".into(),
-                            });
-                        }
-                    }
-                    pos += seg_len;
-                }
-                Ok(out)
-            }
+            2 => Self::btrfs_decompress_lzo(compressed, uncompressed_size),
             3 => {
                 // ZSTD
                 let out = zstd::decode_all(compressed).map_err(|e| FfsError::Corruption {
                     block: 0,
                     detail: format!("btrfs zstd decompression failed: {e}"),
                 })?;
-                Ok(out)
+                Self::validate_btrfs_decompressed_len("zstd", out, uncompressed_size)
             }
             other => Err(FfsError::UnsupportedFeature(format!(
                 "btrfs compression type {other} not supported"
             ))),
+        }
+    }
+
+    fn btrfs_decompress_lzo(
+        compressed: &[u8],
+        uncompressed_size: usize,
+    ) -> Result<Vec<u8>, FfsError> {
+        // LZO with btrfs segment framing:
+        // [total_len: u32 LE] then segments of [seg_len: u32 LE][LZO1X data].
+        if compressed.len() < 4 {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "btrfs LZO: data too short for header".into(),
+            });
+        }
+        let total_len =
+            u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]])
+                as usize;
+        if total_len < 4 || total_len > compressed.len() {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "btrfs LZO total_len {total_len} outside available {} bytes",
+                    compressed.len()
+                ),
+            });
+        }
+
+        let mut out = Vec::with_capacity(uncompressed_size);
+        let mut pos = 4_usize;
+        while pos < total_len && out.len() < uncompressed_size {
+            if total_len - pos < 4 {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: "btrfs LZO segment header truncated".into(),
+                });
+            }
+            let seg_len = u32::from_le_bytes([
+                compressed[pos],
+                compressed[pos + 1],
+                compressed[pos + 2],
+                compressed[pos + 3],
+            ]) as usize;
+            pos += 4;
+            let seg_end = pos
+                .checked_add(seg_len)
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: "btrfs LZO segment length overflow".into(),
+                })?;
+            if seg_len == 0 || seg_end > total_len {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!("btrfs LZO segment length {seg_len} exceeds remaining frame"),
+                });
+            }
+
+            // btrfs LZO segments decompress to at most one 4096-byte page.
+            let remaining = uncompressed_size - out.len();
+            let page_size = remaining.min(4096);
+            let decompressed =
+                lzokay_native::decompress_all(&compressed[pos..seg_end], Some(page_size)).map_err(
+                    |_| FfsError::Corruption {
+                        block: 0,
+                        detail: "btrfs LZO segment decompression failed".into(),
+                    },
+                )?;
+            out.extend_from_slice(&decompressed);
+            pos = seg_end;
+        }
+
+        if pos != total_len {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: "btrfs LZO frame has trailing segments after expected output".into(),
+            });
+        }
+        Self::validate_btrfs_decompressed_len("LZO", out, uncompressed_size)
+    }
+
+    fn validate_btrfs_decompressed_len(
+        codec: &str,
+        out: Vec<u8>,
+        expected: usize,
+    ) -> Result<Vec<u8>, FfsError> {
+        if out.len() == expected {
+            Ok(out)
+        } else {
+            Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "btrfs {codec} decompressed {} bytes but expected {expected}",
+                    out.len()
+                ),
+            })
         }
     }
 
@@ -25613,6 +25658,93 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), InodeNumber(257), 100, 4096)
             .unwrap();
         assert!(data.is_empty());
+    }
+
+    fn btrfs_test_zlib_compress(data: &[u8]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).expect("compress zlib fixture");
+        encoder.finish().expect("finish zlib fixture")
+    }
+
+    fn btrfs_test_lzo_frame(data: &[u8]) -> Vec<u8> {
+        let mut framed = vec![0_u8; 4];
+        for chunk in data.chunks(4096) {
+            let compressed = lzokay_native::compress(chunk).expect("compress lzo fixture");
+            framed.extend_from_slice(
+                &u32::try_from(compressed.len())
+                    .expect("fixture segment length fits u32")
+                    .to_le_bytes(),
+            );
+            framed.extend_from_slice(&compressed);
+        }
+        let total_len = u32::try_from(framed.len()).expect("fixture frame length fits u32");
+        framed[0..4].copy_from_slice(&total_len.to_le_bytes());
+        framed
+    }
+
+    #[test]
+    fn btrfs_decompress_lzo_accepts_exact_frame_length() {
+        let payload = b"btrfs lzo exact decoded length";
+        let framed = btrfs_test_lzo_frame(payload);
+
+        let decoded = OpenFs::btrfs_decompress(&framed, 2, payload.len())
+            .expect("exact LZO frame should decode");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn btrfs_decompress_zlib_rejects_short_decoded_length() {
+        let compressed = btrfs_test_zlib_compress(b"short zlib payload");
+        let err =
+            OpenFs::btrfs_decompress(&compressed, 1, 4096).expect_err("short zlib output rejects");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption { ref detail, .. }
+                    if detail.contains("btrfs zlib decompressed 18 bytes but expected 4096")
+            ),
+            "unexpected zlib length error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_decompress_zstd_rejects_short_decoded_length() {
+        let compressed =
+            zstd::stream::encode_all(&b"short zstd payload"[..], 0).expect("compress zstd fixture");
+        let err =
+            OpenFs::btrfs_decompress(&compressed, 3, 4096).expect_err("short zstd output rejects");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption { ref detail, .. }
+                    if detail.contains("btrfs zstd decompressed 18 bytes but expected 4096")
+            ),
+            "unexpected zstd length error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_decompress_lzo_rejects_truncated_frame() {
+        let payload = b"btrfs lzo truncated frame payload";
+        let mut framed = btrfs_test_lzo_frame(payload);
+        framed.pop();
+
+        let err = OpenFs::btrfs_decompress(&framed, 2, payload.len())
+            .expect_err("truncated LZO frame rejects");
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption { ref detail, .. }
+                    if detail.contains("btrfs LZO total_len")
+            ),
+            "unexpected LZO framing error: {err:?}"
+        );
     }
 
     #[test]
