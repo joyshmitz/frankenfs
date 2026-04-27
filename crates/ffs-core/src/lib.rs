@@ -6663,7 +6663,7 @@ fn validate_ext4_mmp(cx: &Cx, dev: &dyn ByteDevice, sb: &Ext4Superblock) -> Resu
         }
         ffs_ondisk::ext4::Ext4MmpStatus::Active(seq) => {
             let reason = format!(
-                "ext4 MMP sequence 0x{seq:08X} indicates another writer may be active; write-participating MMP is not implemented"
+                "ext4 MMP sequence 0x{seq:08X} indicates another writer may be active; FrankenFS V1 intentionally refuses active MMP images instead of participating in periodic MMP heartbeat updates"
             );
             log_ext4_mmp_rejected(mmp_block, &mmp, "active_writer_maybe", &reason);
             Err(FfsError::UnsupportedFeature(reason))
@@ -20095,7 +20095,7 @@ mod tests {
     }
 
     #[test]
-    fn open_fs_ext4_mmp_refusal_logs_remain_stable_for_write_participating_states() {
+    fn open_fs_ext4_mmp_refusal_logs_remain_stable_for_non_clean_states() {
         let cases = [
             (
                 "fsck",
@@ -20140,7 +20140,11 @@ mod tests {
                 "unexpected errno for {label}"
             );
             assert!(
-                matches!(err, FfsError::UnsupportedFeature(ref message) if message.contains(needle)),
+                matches!(
+                    err,
+                    FfsError::UnsupportedFeature(ref message)
+                        if message.contains(needle) && !message.contains("not implemented")
+                ),
                 "unexpected error for {label}: {err:?}"
             );
 

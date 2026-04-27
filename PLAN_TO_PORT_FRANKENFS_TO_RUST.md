@@ -63,7 +63,7 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` complete.
 - [x] Implement superblock validation helpers — `validate_v1` (block size, features), `validate_geometry` (blocks_per_group, inodes_per_group, inode_size, first_data_block), `validate_checksum` (CRC32C), `csum_seed`
 - [x] Implement group descriptor parsing (32/64 byte descriptors; 64-bit fields; checksum hooks) — `Ext4GroupDesc` parsing, descriptor checksum hooks, bitmap checksum fields, and bitmap checksum verification/stamping are implemented and wired into `ffs-core` / allocator persistence paths
 - [x] Implement inode location math — `inode_to_group`, `inode_index_in_group` in ffs-types; `Ext4Superblock::inode_table_offset` and `group_desc_offset` in ffs-ondisk
-- [x] Implement ext4 sparse/flex/MMP read-side helpers — sparse_super/sparse_super2 backup-superblock awareness, flex-group helpers, allocator reservation of backup metadata blocks, and conservative MMP mount validation
+- [x] Implement ext4 sparse/flex/MMP read-side helpers — sparse_super/sparse_super2 backup-superblock awareness, flex-group helpers, allocator reservation of backup metadata blocks, and conservative MMP mount validation. V1 explicitly mounts only clean MMP state and rejects fsck/active/unsafe MMP states with `EOPNOTSUPP` rather than participating in periodic writer-heartbeat updates.
 
 ### 0.5 `ffs-ondisk` btrfs (Parsing + Mapping + Tree Primitives)
 

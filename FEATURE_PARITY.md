@@ -33,7 +33,7 @@
 | ext4 inode core decode | `fs/ext4/ext4.h` | ✅ | Implemented in `ffs-ext4` |
 | ext4 extent header decode | `fs/ext4/ext4_extents.h` | ✅ | Implemented in `ffs-ext4` |
 | ext4 extent entry decode | `fs/ext4/ext4_extents.h` | ✅ | Implemented in `ffs-ext4`, with `crates/ffs-harness/tests/kernel_reference.rs` now differentially comparing `collect_extents` against `debugfs blocks` on generated contiguous and deterministic two-extent reference files. |
-| ext4 feature flag validation | `fs/ext4/super.c` | ✅ | Mount validation includes supported incompat/ro_compat policy plus conservative MMP enforcement |
+| ext4 feature flag validation | `fs/ext4/super.c` | ✅ | Mount validation includes supported incompat/ro_compat policy plus conservative MMP enforcement: clean MMP state mounts, and `fsck`, active-writer, or unsafe/unknown MMP states reject deterministically with `EOPNOTSUPP` because FrankenFS V1 does not participate in periodic MMP heartbeat updates. |
 | ext4 group descriptor decode | `fs/ext4/ext4.h` | ✅ | Implemented in `ffs-ondisk` (`Ext4GroupDesc`), including bitmap checksum fields |
 | ext4 directory entry parsing | `fs/ext4/dir.c` | ✅ | Implemented in `ffs-ondisk` |
 | ext4 inode device read | `fs/ext4/inode.c` | ✅ | `OpenFs::read_inode` via `ByteDevice` |

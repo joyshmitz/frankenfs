@@ -4695,11 +4695,12 @@ block-based allocation is sufficient for target workloads.
 
 **Partially supported (read-side validation).** `INCOMPAT_MMP` (0x0100).
 FrankenFS now parses `s_mmp_update_interval`, `s_mmp_block`, and the on-disk
-MMP structure, verifies the MMP magic/checksum, and refuses mount when the MMP
-state indicates `fsck`, an active writer sequence, or an unsafe unknown
-sequence. FrankenFS still does **not** participate in the full kernel MMP
-protocol (periodic sequence updates / live writer heartbeats), so safe support
-is currently conservative: clean MMP state mounts, unsafe states are rejected.
+MMP structure, verifies the MMP magic/checksum, and refuses mount with
+`EOPNOTSUPP` when the MMP state indicates `fsck`, an active writer sequence,
+or an unsafe unknown sequence. FrankenFS V1 intentionally does **not**
+participate in the full kernel MMP protocol (periodic sequence updates / live
+writer heartbeats), so safe support is conservative and explicit: clean MMP
+state mounts, every non-clean state is rejected before write participation.
 
 ### 15.18 Compression
 
