@@ -4711,7 +4711,8 @@ implemented cluster formats. The ext4 read path detects compressed clusters via
 `EXT4_COMPRBLK_FL` plus the `0xFFFFFFFF` sentinel block pointer, parses the
 16-byte cluster header (`0x8EC7` magic, method, holemap, `ulen`, `clen`), and
 verifies the seeded Adler-32 header checksum before decompressing gzip/LZO
-payloads and performing holemap-based block reconstruction. The write path
+payloads, then rejects clusters whose holemap cannot consume every decoded
+byte during block reconstruction. The write path
 performs cluster-aligned compression, computes the same Adler-32 checksum,
 manages holemaps and sentinel pointers, and deterministically falls back to an
 uncompressed cluster rewrite when compression does not help.

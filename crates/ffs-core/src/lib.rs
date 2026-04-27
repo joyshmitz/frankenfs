@@ -7090,13 +7090,39 @@ impl OpenFs {
             });
         }
 
-        // Unpack via holemap: distribute decompressed data into block-sized slots.
-        let cluster_full_size = bs_usize * cluster_nblocks as usize;
+        Self::expand_e2compr_holemap(
+            cluster_start,
+            bs_usize,
+            cluster_nblocks,
+            holemap,
+            &decompressed,
+        )
+    }
+
+    fn expand_e2compr_holemap(
+        cluster_start: u32,
+        block_size: usize,
+        cluster_nblocks: u32,
+        holemap: &[u8],
+        decompressed: &[u8],
+    ) -> Result<Vec<u8>, FfsError> {
+        let cluster_nblocks_usize = usize::try_from(cluster_nblocks).map_err(|_| {
+            FfsError::InvalidGeometry(format!(
+                "e2compr: cluster block count {cluster_nblocks} does not fit usize"
+            ))
+        })?;
+        let cluster_full_size = block_size
+            .checked_mul(cluster_nblocks_usize)
+            .ok_or_else(|| {
+                FfsError::InvalidGeometry(format!(
+                    "e2compr: cluster size overflow for {cluster_nblocks} blocks of {block_size} bytes"
+                ))
+            })?;
         let mut output = vec![0_u8; cluster_full_size];
         let mut src_off = 0_usize;
 
-        for block_idx in 0..cluster_nblocks as usize {
-            let is_hole = if block_idx < holemap_nbytes * 8 {
+        for block_idx in 0..cluster_nblocks_usize {
+            let is_hole = if block_idx < holemap.len() * 8 {
                 let byte = holemap[block_idx / 8];
                 (byte >> (block_idx % 8)) & 1 == 1
             } else {
@@ -7105,18 +7131,30 @@ impl OpenFs {
 
             if is_hole {
                 // Hole: leave zeros.
-            } else if src_off + bs_usize <= decompressed.len() {
-                output[block_idx * bs_usize..(block_idx + 1) * bs_usize]
-                    .copy_from_slice(&decompressed[src_off..src_off + bs_usize]);
-                src_off += bs_usize;
-            } else if src_off < decompressed.len() {
-                // Partial last block.
-                let remaining = decompressed.len() - src_off;
-                output[block_idx * bs_usize..block_idx * bs_usize + remaining]
-                    .copy_from_slice(&decompressed[src_off..]);
-                src_off += remaining;
+                continue;
             }
-            // else: beyond decompressed data, leave zeros (tail of cluster).
+
+            let remaining = decompressed.len().saturating_sub(src_off);
+            if remaining == 0 {
+                // Beyond decompressed data, leave zeros (tail of cluster).
+                continue;
+            }
+
+            let copy_len = remaining.min(block_size);
+            let dst_start = block_idx * block_size;
+            output[dst_start..dst_start + copy_len]
+                .copy_from_slice(&decompressed[src_off..src_off + copy_len]);
+            src_off += copy_len;
+        }
+
+        if src_off != decompressed.len() {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!(
+                    "e2compr: holemap consumed {src_off} of {} decoded bytes",
+                    decompressed.len()
+                ),
+            });
         }
 
         Ok(output)
@@ -21075,6 +21113,33 @@ mod tests {
                 } if detail.contains("e2compr: bad cluster checksum")
             ),
             "unexpected checksum error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn e2compr_holemap_expansion_allows_partial_tail() {
+        let expanded = OpenFs::expand_e2compr_holemap(0, 4, 3, &[0b0000_0010], b"abcde")
+            .expect("partial decoded tail should expand");
+
+        assert_eq!(&expanded[0..4], b"abcd");
+        assert_eq!(&expanded[4..8], &[0, 0, 0, 0]);
+        assert_eq!(&expanded[8..12], &[b'e', 0, 0, 0]);
+    }
+
+    #[test]
+    fn e2compr_holemap_rejects_unconsumed_decoded_bytes() {
+        let err = OpenFs::expand_e2compr_holemap(11, 4, 2, &[0b0000_0011], b"payload")
+            .expect_err("holemap with no non-hole slots cannot consume payload");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption {
+                    block: 11,
+                    ref detail
+                } if detail.contains("e2compr: holemap consumed 0 of 7 decoded bytes")
+            ),
+            "unexpected holemap consistency error: {err:?}"
         );
     }
 
