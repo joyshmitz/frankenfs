@@ -35,6 +35,17 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tracing::{debug, error, info, trace, warn};
 
+fn saturating_increment_atomic(counter: &AtomicU64, ordering: Ordering) -> u64 {
+    loop {
+        if let Ok(previous) = counter.fetch_update(ordering, Ordering::Relaxed, |current| {
+            Some(current.saturating_add(1))
+        }) {
+            return previous.saturating_add(1);
+        }
+        std::hint::spin_loop();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockVersion {
     pub block: BlockNumber,
@@ -1075,7 +1086,7 @@ pub struct MvccStore {
     /// which provide thread-safe RAII lifecycle management decoupled from the
     /// version store lock.  These inline methods are retained for backward
     /// compatibility and for use in single-threaded / test contexts.
-    active_snapshots: BTreeMap<CommitSeq, u32>,
+    active_snapshots: BTreeMap<CommitSeq, u64>,
     /// Recent committed transactions retained for SSI antidependency
     /// checking.  Pruned by `prune_ssi_log`.
     pub(crate) ssi_log: Vec<CommittedTxnRecord>,
@@ -2386,7 +2397,7 @@ impl MvccStore {
         Ok(checks_performed)
     }
 
-    fn force_advance_oldest_snapshot(&mut self) -> Option<(CommitSeq, u32)> {
+    fn force_advance_oldest_snapshot(&mut self) -> Option<(CommitSeq, u64)> {
         let oldest = self.active_snapshots.keys().next().copied()?;
         let refs = self.active_snapshots.get_mut(&oldest)?;
         if *refs > 1 {
@@ -2831,7 +2842,7 @@ impl MvccStore {
     /// each must be paired with a corresponding `release_snapshot`.
     pub fn register_snapshot(&mut self, snapshot: Snapshot) {
         let count = self.active_snapshots.entry(snapshot.high).or_insert(0);
-        *count += 1;
+        *count = count.saturating_add(1);
         trace!(
             commit_seq = snapshot.high.0,
             ref_count_after = *count,
@@ -2849,7 +2860,7 @@ impl MvccStore {
     pub fn release_snapshot(&mut self, snapshot: Snapshot) -> bool {
         let old_watermark = self.watermark();
         if let Some(count) = self.active_snapshots.get_mut(&snapshot.high) {
-            *count -= 1;
+            *count = count.saturating_sub(1);
             let count_after = *count;
             if count_after == 0 {
                 self.active_snapshots.remove(&snapshot.high);
@@ -2903,7 +2914,11 @@ impl MvccStore {
     /// Number of currently active (registered) snapshots.
     #[must_use]
     pub fn active_snapshot_count(&self) -> usize {
-        self.active_snapshots.values().map(|c| *c as usize).sum()
+        self.active_snapshots
+            .values()
+            .fold(0_usize, |total, count| {
+                total.saturating_add(usize::try_from(*count).unwrap_or(usize::MAX))
+            })
     }
 
     /// Prune versions that are no longer needed by any active snapshot.
@@ -2968,7 +2983,7 @@ impl MvccStore {
 /// Snapshot operations only contend on the registry's internal lock.
 #[derive(Debug)]
 pub struct SnapshotRegistry {
-    active: RwLock<BTreeMap<CommitSeq, u32>>,
+    active: RwLock<BTreeMap<CommitSeq, u64>>,
     /// Timestamp of the oldest currently active snapshot registration.
     /// Used for stall detection.
     oldest_registered_at: RwLock<Option<Instant>>,
@@ -3027,7 +3042,7 @@ impl SnapshotRegistry {
     pub fn register(&self, snapshot: Snapshot) {
         let mut active = self.active.write();
         let count = active.entry(snapshot.high).or_insert(0);
-        *count += 1;
+        *count = count.saturating_add(1);
         let count_after = *count;
 
         // Track oldest registration time.
@@ -3041,8 +3056,7 @@ impl SnapshotRegistry {
         }
         drop(active);
 
-        self.acquired_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        saturating_increment_atomic(&self.acquired_total, Ordering::Relaxed);
 
         trace!(
             commit_seq = snapshot.high.0,
@@ -3103,8 +3117,7 @@ impl SnapshotRegistry {
             *self.oldest_registered_at.write() = Some(Instant::now());
         }
 
-        self.released_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        saturating_increment_atomic(&self.released_total, Ordering::Relaxed);
         true
     }
 
@@ -3149,7 +3162,9 @@ impl SnapshotRegistry {
     /// Total number of active snapshot references (counting duplicates).
     #[must_use]
     pub fn active_count(&self) -> usize {
-        self.active.read().values().map(|c| *c as usize).sum()
+        self.active.read().values().fold(0_usize, |total, count| {
+            total.saturating_add(usize::try_from(*count).unwrap_or(usize::MAX))
+        })
     }
 
     /// Number of distinct commit sequences with active snapshots.
@@ -3315,7 +3330,7 @@ impl Drop for StoreBackedFlushPin {
             );
         }
 
-        self.released_flush_pins.fetch_add(1, Ordering::Relaxed);
+        saturating_increment_atomic(&self.released_flush_pins, Ordering::Relaxed);
         trace!(
             target: "ffs::mvcc::flush",
             event = "flush_epoch_guard_released",
@@ -3336,11 +3351,8 @@ impl MvccFlushLifecycle for StoreBackedMvccFlushLifecycle {
         let snapshot = Snapshot { high: commit_seq };
         self.store.write().register_snapshot(snapshot);
 
-        self.active_flush_pins.fetch_add(1, Ordering::SeqCst);
-        let pin_id = self
-            .acquired_flush_pins
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
+        saturating_increment_atomic(&self.active_flush_pins, Ordering::SeqCst);
+        let pin_id = saturating_increment_atomic(&self.acquired_flush_pins, Ordering::Relaxed);
         trace!(
             target: "ffs::mvcc::flush",
             event = "flush_epoch_guard_acquired",
@@ -3665,16 +3677,10 @@ mod tests {
         assert_eq!(c1, CommitSeq(1));
 
         let err = store.commit(t2).expect_err("t2 should conflict");
-        match err {
-            CommitError::Conflict { block, .. } => assert_eq!(block, BlockNumber(7)),
-            CommitError::SsiConflict { .. } => panic!("unexpected SSI conflict from FCW path"),
-            CommitError::ChainBackpressure { .. } => {
-                panic!("unexpected chain backpressure from FCW path")
-            }
-            CommitError::DurabilityFailure { .. } => {
-                panic!("unexpected durability failure from in-memory FCW path")
-            }
-        }
+        assert!(
+            matches!(err, CommitError::Conflict { block, .. } if block == BlockNumber(7)),
+            "expected FCW conflict on block 7, got {err:?}"
+        );
     }
 
     #[test]
@@ -3823,8 +3829,13 @@ mod tests {
         for txn in txns {
             match store.commit(txn) {
                 Ok(_) => successes += 1,
-                Err(CommitError::Conflict { .. }) => failures += 1,
-                Err(other) => panic!("unexpected commit error: {other:?}"),
+                Err(err) => {
+                    assert!(
+                        matches!(&err, CommitError::Conflict { .. }),
+                        "unexpected commit error: {err:?}"
+                    );
+                    failures += 1;
+                }
             }
         }
 
@@ -4607,7 +4618,7 @@ mod tests {
                 let val = u8::try_from(i % 256).unwrap();
                 let data = store
                     .read_visible(block, snap)
-                    .unwrap_or_else(|| panic!("seed {seed}: block {i} must be visible"));
+                    .expect("committed writer block must be visible");
                 assert_eq!(
                     data.as_ref(),
                     &[val; 4],
@@ -4959,6 +4970,26 @@ mod tests {
         store.release_snapshot(snap);
         assert_eq!(store.active_snapshot_count(), 0);
         assert!(store.watermark().is_none());
+    }
+
+    #[test]
+    fn snapshot_ref_count_saturates_at_numeric_limit() {
+        let mut store = MvccStore::new();
+        let snap = Snapshot { high: CommitSeq(5) };
+        store.active_snapshots.insert(snap.high, u64::MAX - 1);
+
+        store.register_snapshot(snap);
+        assert_eq!(store.active_snapshots.get(&snap.high), Some(&u64::MAX));
+
+        store.register_snapshot(snap);
+        assert_eq!(store.active_snapshots.get(&snap.high), Some(&u64::MAX));
+        assert_eq!(store.active_snapshot_count(), usize::MAX);
+
+        assert!(store.release_snapshot(snap));
+        assert_eq!(
+            store.active_snapshots.get(&snap.high),
+            Some(&(u64::MAX - 1))
+        );
     }
 
     #[test]
@@ -5339,7 +5370,10 @@ mod tests {
                     saw_backpressure = true;
                     break;
                 }
-                Err(other) => panic!("unexpected commit error: {other:?}"),
+                Err(other) => assert!(
+                    matches!(other, CommitError::ChainBackpressure { .. }),
+                    "unexpected commit error: {other:?}"
+                ),
             }
         }
         assert!(
@@ -7212,7 +7246,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _handle = SnapshotRegistry::acquire(&registry, snap);
-            panic!("simulated FUSE handler panic");
+            std::panic::panic_any("simulated FUSE handler panic");
         }));
 
         assert!(result.is_err(), "panic should have been caught");
@@ -7255,6 +7289,58 @@ mod tests {
         drop(h2);
         assert_eq!(registry.acquired_total(), 2);
         assert_eq!(registry.released_total(), 2);
+    }
+
+    #[test]
+    fn registry_metrics_and_refcounts_saturate_at_numeric_limits() {
+        let registry = SnapshotRegistry::new();
+        let snap = Snapshot { high: CommitSeq(9) };
+        registry
+            .acquired_total
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        registry
+            .released_total
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        registry.active.write().insert(snap.high, u64::MAX - 1);
+
+        registry.register(snap);
+        assert_eq!(registry.acquired_total(), u64::MAX);
+        assert_eq!(registry.active.read().get(&snap.high), Some(&u64::MAX));
+
+        registry.register(snap);
+        assert_eq!(registry.acquired_total(), u64::MAX);
+        assert_eq!(registry.active.read().get(&snap.high), Some(&u64::MAX));
+
+        assert!(registry.release(snap));
+        assert_eq!(registry.released_total(), u64::MAX);
+        assert_eq!(
+            registry.active.read().get(&snap.high),
+            Some(&(u64::MAX - 1))
+        );
+    }
+
+    #[test]
+    fn store_backed_flush_lifecycle_counters_saturate_at_numeric_limits() {
+        let lifecycle = StoreBackedMvccFlushLifecycle::new(Arc::new(RwLock::new(MvccStore::new())));
+        lifecycle
+            .active_flush_pins
+            .store(u64::MAX, Ordering::SeqCst);
+        lifecycle
+            .acquired_flush_pins
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        lifecycle
+            .released_flush_pins
+            .store(u64::MAX - 1, Ordering::Relaxed);
+
+        let flush_pin = lifecycle
+            .pin_for_flush(BlockNumber(1), CommitSeq(1))
+            .expect("pin at nonzero commit");
+        assert_eq!(lifecycle.active_flush_pins(), u64::MAX);
+        assert_eq!(lifecycle.acquired_flush_pins(), u64::MAX);
+
+        drop(flush_pin);
+        assert_eq!(lifecycle.released_flush_pins(), u64::MAX);
+        assert_eq!(lifecycle.active_flush_pins(), u64::MAX - 1);
     }
 
     #[test]
@@ -7454,7 +7540,10 @@ mod tests {
             CommitError::DurabilityFailure { detail } => {
                 assert!(detail.contains("commit sequence exhausted"));
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => assert!(
+                matches!(other, CommitError::DurabilityFailure { .. }),
+                "unexpected error: {other:?}"
+            ),
         }
         assert_eq!(store.next_commit, u64::MAX);
     }
@@ -8687,7 +8776,10 @@ mod tests {
                 assert_eq!(snapshot, CommitSeq(0));
                 assert_eq!(observed, seq1);
             }
-            other => panic!("expected Conflict, got {other:?}"),
+            other => assert!(
+                matches!(other, CommitError::Conflict { .. }),
+                "expected Conflict, got {other:?}"
+            ),
         }
     }
 
@@ -9513,7 +9605,10 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             CommitError::Conflict { block, .. } => assert_eq!(block, BlockNumber(0)),
-            other => panic!("expected Conflict, got {other:?}"),
+            other => assert!(
+                matches!(other, CommitError::Conflict { .. }),
+                "expected Conflict, got {other:?}"
+            ),
         }
     }
 
