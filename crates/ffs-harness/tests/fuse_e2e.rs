@@ -1262,6 +1262,7 @@ fn with_rw_mount_sized(image_size_bytes: u64, f: impl FnOnce(&Path)) {
 const SYSCALL_CONFORMANCE_SCRIPT: &str = r#"
 import json
 import errno
+import ctypes
 import mmap
 import os
 import stat
@@ -1328,6 +1329,30 @@ def capture_error(label, func):
             "name": errno.errorcode.get(exc.errno, "UNKNOWN"),
         }
     return {"label": label, "ok": True, "errno": None, "name": None}
+
+def renameat2_call(old_path, new_path, flags):
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError:
+        return {"available": False, "ok": False, "errno": errno.ENOSYS, "name": "ENOSYS"}
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    ret = renameat2(-100, old_path.encode(), -100, new_path.encode(), flags)
+    if ret == 0:
+        return {"available": True, "ok": True, "errno": None, "name": None}
+    err = ctypes.get_errno()
+    return {
+        "available": True,
+        "ok": False,
+        "errno": err,
+        "name": errno.errorcode.get(err, "UNKNOWN"),
+    }
 
 def mkdir_base():
     os.mkdir(base, 0o755)
@@ -1663,6 +1688,46 @@ def rename_replace_existing():
         "src_exists_after_rename": os.path.exists(src),
     }
 
+def renameat2_flag_contracts():
+    rename_noreplace = 1
+    rename_exchange = 2
+    free_src = os.path.join(base, "renameat2_free_src.txt")
+    free_dst = os.path.join(base, "renameat2_free_dst.txt")
+    existing_src = os.path.join(base, "renameat2_existing_src.txt")
+    existing_dst = os.path.join(base, "renameat2_existing_dst.txt")
+    exchange_src = os.path.join(base, "renameat2_exchange_src.txt")
+    exchange_dst = os.path.join(base, "renameat2_exchange_dst.txt")
+    for path, payload in [
+        (free_src, b"free-src"),
+        (existing_src, b"existing-src"),
+        (existing_dst, b"existing-dst"),
+        (exchange_src, b"exchange-src"),
+        (exchange_dst, b"exchange-dst"),
+    ]:
+        with open(path, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+
+    free = renameat2_call(free_src, free_dst, rename_noreplace)
+    if not free["available"] or free["errno"] == errno.ENOSYS:
+        return {"available": False, "noreplace_free": free}
+    existing = renameat2_call(existing_src, existing_dst, rename_noreplace)
+    exchange = renameat2_call(exchange_src, exchange_dst, rename_exchange)
+    return {
+        "available": True,
+        "noreplace_free": free,
+        "noreplace_free_src_exists": os.path.exists(free_src),
+        "noreplace_free_dst_read": read_text(free_dst),
+        "noreplace_existing": existing,
+        "noreplace_existing_src_read": read_text(existing_src),
+        "noreplace_existing_dst_read": read_text(existing_dst),
+        "exchange": exchange,
+        "exchange_src_read": read_text(exchange_src),
+        "exchange_dst_read": read_text(exchange_dst),
+        "entries": entries(base),
+    }
+
 def nested_dir_rename():
     sub = os.path.join(base, "sub")
     moved = os.path.join(base, "moved")
@@ -1752,6 +1817,17 @@ def cleanup():
     replace_dst_path = os.path.join(base, "replace_dst.txt")
     if os.path.exists(replace_dst_path):
         os.unlink(replace_dst_path)
+    for renameat2_path in [
+        "renameat2_free_src.txt",
+        "renameat2_free_dst.txt",
+        "renameat2_existing_src.txt",
+        "renameat2_existing_dst.txt",
+        "renameat2_exchange_src.txt",
+        "renameat2_exchange_dst.txt",
+    ]:
+        path = os.path.join(base, renameat2_path)
+        if os.path.exists(path):
+            os.unlink(path)
     os.unlink(os.path.join(base, "renamed.txt"))
     os.unlink(os.path.join(base, "map.bin"))
     os.unlink(os.path.join(base, "moved", "child.txt"))
@@ -1774,6 +1850,7 @@ for step, func in [
     ("symlink_at_nofollow_contracts", symlink_at_nofollow_contracts),
     ("rename_unlink", rename_unlink),
     ("rename_replace_existing", rename_replace_existing),
+    ("renameat2_flag_contracts", renameat2_flag_contracts),
     ("nested_dir_rename", nested_dir_rename),
     ("mmap_write_flush", mmap_write_flush),
     ("fsync_directory", fsync_directory),
@@ -3363,6 +3440,54 @@ fn syscall_conformance_reference_probe_covers_rename_replace_existing() {
 }
 
 #[test]
+fn syscall_conformance_reference_probe_covers_renameat2_flag_contracts() {
+    if !command_available("python3") {
+        eprintln!("python3 prerequisites not met, skipping");
+        return;
+    }
+
+    let reference = reference_conformance_tempdir();
+    let report = run_syscall_conformance_probe(reference.path());
+    let records = report
+        .as_array()
+        .expect("syscall conformance report should be a JSON array");
+    let renameat2 = records
+        .iter()
+        .find(|record| record["step"].as_str() == Some("renameat2_flag_contracts"))
+        .expect("missing renameat2 flag step in report");
+    assert_eq!(
+        renameat2["ok"].as_bool(),
+        Some(true),
+        "renameat2 flag step should succeed on the reference filesystem: {renameat2}"
+    );
+
+    let result = &renameat2["result"];
+    if result["available"].as_bool() == Some(false) {
+        eprintln!("renameat2 unavailable on this worker, skipping");
+        return;
+    }
+    assert_eq!(result["available"].as_bool(), Some(true));
+    assert_eq!(result["noreplace_free"]["ok"].as_bool(), Some(true));
+    assert_eq!(result["noreplace_free_src_exists"].as_bool(), Some(false));
+    assert_eq!(result["noreplace_free_dst_read"].as_str(), Some("free-src"));
+    assert_eq!(
+        result["noreplace_existing"]["errno"].as_i64(),
+        Some(i64::from(libc::EEXIST))
+    );
+    assert_eq!(
+        result["noreplace_existing_src_read"].as_str(),
+        Some("existing-src")
+    );
+    assert_eq!(
+        result["noreplace_existing_dst_read"].as_str(),
+        Some("existing-dst")
+    );
+    assert_eq!(result["exchange"]["ok"].as_bool(), Some(true));
+    assert_eq!(result["exchange_src_read"].as_str(), Some("exchange-dst"));
+    assert_eq!(result["exchange_dst_read"].as_str(), Some("exchange-src"));
+}
+
+#[test]
 fn syscall_conformance_reference_probe_covers_symlink_at_nofollow_contracts() {
     if !command_available("python3") {
         eprintln!("python3 prerequisites not met, skipping");
@@ -3431,7 +3556,7 @@ fn fuse_conformance_syscall_sequence_matches_linux_reference() {
         "ext4_rw_syscall_level_differential_conformance",
         "PASS",
         Some(
-            "file_lifecycle+fd_metadata+dirfd_mutation+offset_io+truncate_extend+open_unlink_fd+open_rename_fd+rename_replace+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
+            "file_lifecycle+fd_metadata+dirfd_mutation+offset_io+truncate_extend+open_unlink_fd+open_rename_fd+rename_replace+renameat2+openat+access+statvfs+dir_ops+attrs+links+fstatat+readlinkat+nofollow+mmap+fsync+negative_errno",
         ),
     );
 }
