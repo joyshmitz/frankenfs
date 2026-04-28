@@ -1201,6 +1201,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scrub_report_human_output_snapshot() {
+        use std::fmt::Write as _;
+
+        let report = ScrubReport {
+            findings: vec![
+                ScrubFinding {
+                    block: BlockNumber(7),
+                    kind: CorruptionKind::ChecksumMismatch,
+                    severity: Severity::Error,
+                    detail: "CRC32C expected 0x5a17beef, got 0x1cedcafe".into(),
+                },
+                ScrubFinding {
+                    block: BlockNumber(9),
+                    kind: CorruptionKind::UnexpectedZeroes,
+                    severity: Severity::Warning,
+                    detail: "block payload is entirely zeroed".into(),
+                },
+                ScrubFinding {
+                    block: BlockNumber(12),
+                    kind: CorruptionKind::BadMagic,
+                    severity: Severity::Critical,
+                    detail: "expected ext4 magic 0xef53".into(),
+                },
+            ],
+            blocks_scanned: 64,
+            blocks_corrupt: 3,
+            blocks_io_error: 1,
+        };
+
+        let mut rendered = report.to_string();
+        for finding in &report.findings {
+            writeln!(&mut rendered).expect("write to String cannot fail");
+            write!(&mut rendered, "{finding}").expect("write to String cannot fail");
+        }
+
+        insta::assert_snapshot!("scrub_report_human_output", rendered);
+    }
+
     // ── Edge-case hardening tests ──────────────────────────────────────
 
     #[test]

@@ -1,0 +1,9 @@
+---
+source: crates/ffs-repair/src/scrub.rs
+assertion_line: 1240
+expression: rendered
+---
+scanned 64 blocks: 3 corrupt, 1 io_errors, 3 findings
+block 7 [error] checksum_mismatch: CRC32C expected 0x5a17beef, got 0x1cedcafe
+block 9 [warning] unexpected_zeroes: block payload is entirely zeroed
+block 12 [critical] bad_magic: expected ext4 magic 0xef53
