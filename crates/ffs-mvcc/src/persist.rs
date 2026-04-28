@@ -893,6 +893,14 @@ fn load_checkpoint(path: &Path, store: &mut MvccStore) -> Result<()> {
         });
     }
 
+    let mut trailing = [0_u8; 1];
+    if reader.read(&mut trailing)? != 0 {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: "checkpoint has trailing bytes after CRC".to_owned(),
+        });
+    }
+
     Ok(())
 }
 
@@ -1676,6 +1684,43 @@ mod tests {
         // Should fail to load corrupted checkpoint
         let result = PersistentMvccStore::open_with_checkpoint(&cx, &wal_path, &ckpt_path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn checkpoint_rejects_trailing_bytes_after_crc() {
+        let cx = test_cx();
+        let wal_tmp = NamedTempFile::new().expect("create wal file");
+        let wal_path = wal_tmp.path().to_path_buf();
+        let ckpt_tmp = NamedTempFile::new().expect("create checkpoint file");
+        let ckpt_path = ckpt_tmp.path().to_path_buf();
+
+        {
+            let store = PersistentMvccStore::open(&cx, &wal_path).expect("open");
+            let mut txn = store.begin();
+            txn.stage_write(BlockNumber(1), vec![1; 32]);
+            store.commit(txn).expect("commit");
+            store.checkpoint(&ckpt_path).expect("checkpoint");
+        }
+
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&ckpt_path)
+                .expect("open checkpoint for append");
+            file.write_all(b"stale checkpoint tail")
+                .expect("append trailing bytes");
+        }
+
+        let err = PersistentMvccStore::open_with_checkpoint(&cx, &wal_path, &ckpt_path)
+            .expect_err("checkpoint with trailing bytes must be rejected");
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption { detail, .. }
+                    if detail.contains("trailing bytes after CRC")
+            ),
+            "expected trailing-byte corruption error"
+        );
     }
 
     // ── Recovery report tests ─────────────────────────────────────────────
