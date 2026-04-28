@@ -302,6 +302,7 @@ pub fn insert(
 ) -> Result<()> {
     let (header, _) = parse_header(root_bytes)?;
     validate_header(&header, ROOT_MAX_ENTRIES)?;
+    validate_insert_extent(&extent)?;
     trace!(
         logical_start = extent.logical_block,
         len = u32::from(actual_len(extent.raw_len)),
@@ -1251,6 +1252,16 @@ fn actual_len(raw_len: u16) -> u16 {
     } else {
         raw_len - EXT_INIT_MAX_LEN
     }
+}
+
+fn validate_insert_extent(extent: &Ext4Extent) -> Result<()> {
+    if actual_len(extent.raw_len) == 0 {
+        return Err(FfsError::InvalidGeometry(format!(
+            "insert: zero-length extent at logical block {}",
+            extent.logical_block
+        )));
+    }
+    Ok(())
 }
 
 /// Encode length with optional unwritten flag.
@@ -2634,6 +2645,35 @@ Hole { hole_len: 90 }
                 offset_in_extent: 0,
             }
         );
+    }
+
+    #[test]
+    fn insert_rejects_zero_length_extent_without_mutating_root() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let before = root;
+        let mut alloc = SeqAllocator::new(100);
+
+        let ext = Ext4Extent {
+            logical_block: 7,
+            raw_len: 0,
+            physical_start: 999,
+        };
+        let err = insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(_))
+                && msg.contains("zero-length extent")
+                && msg.contains("logical block 7"),
+            "error should identify the rejected zero-length insert: {msg}"
+        );
+        assert_eq!(root, before, "failed insert must leave the root unchanged");
+        assert_eq!(alloc.next, 100, "failed insert must not allocate blocks");
+        assert!(matches!(
+            search(&cx, &dev, &root, 7).unwrap(),
+            SearchResult::Hole { .. }
+        ));
     }
 
     #[test]
