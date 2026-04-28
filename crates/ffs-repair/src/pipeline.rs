@@ -4379,9 +4379,11 @@ mod tests {
 
         let (pipeline, _metrics) = daemon.into_parts();
         let records = crate::evidence::parse_evidence_ledger(pipeline.into_ledger());
-        assert!(records.iter().any(|r| {
-            r.event_type == crate::evidence::EvidenceEventType::CorruptionDetected
-        }));
+        assert!(
+            records.iter().any(|r| {
+                r.event_type == crate::evidence::EvidenceEventType::CorruptionDetected
+            })
+        );
         assert!(!records.iter().any(|r| {
             matches!(
                 r.event_type,
