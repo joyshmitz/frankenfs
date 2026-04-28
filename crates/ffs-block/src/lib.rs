@@ -47,6 +47,7 @@ fn saturating_fetch_increment(counter: &std::sync::atomic::AtomicU64) -> u64 {
 }
 
 const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
+const MAX_POWER_OF_TWO_ALIGNMENT: usize = 1_usize << (usize::BITS - 1);
 
 #[inline]
 fn normalized_alignment(requested: usize) -> usize {
@@ -55,7 +56,9 @@ fn normalized_alignment(requested: usize) -> usize {
     } else if requested.is_power_of_two() {
         requested
     } else {
-        requested.next_power_of_two()
+        requested
+            .checked_next_power_of_two()
+            .unwrap_or(MAX_POWER_OF_TWO_ALIGNMENT)
     }
 }
 
@@ -7741,6 +7744,19 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
         assert_eq!(normalized_alignment(4), 4);
         assert_eq!(normalized_alignment(5), 8);
         assert_eq!(normalized_alignment(4096), 4096);
+    }
+
+    #[test]
+    fn normalized_alignment_oversized_request_clamps_to_largest_power_of_two() {
+        assert_eq!(
+            normalized_alignment(MAX_POWER_OF_TWO_ALIGNMENT),
+            MAX_POWER_OF_TWO_ALIGNMENT
+        );
+        assert_eq!(
+            normalized_alignment(MAX_POWER_OF_TWO_ALIGNMENT + 1),
+            MAX_POWER_OF_TWO_ALIGNMENT
+        );
+        assert_eq!(normalized_alignment(usize::MAX), MAX_POWER_OF_TWO_ALIGNMENT);
     }
 
     // ── Additional edge-case hardening tests ──────────────────────────
