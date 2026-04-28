@@ -494,6 +494,11 @@ impl FsGeometry {
     pub fn absolute_to_group_block(&self, block: BlockNumber) -> (GroupNumber, u32) {
         let rel = block.0.saturating_sub(u64::from(self.first_data_block));
         let bpg = u64::from(self.blocks_per_group);
+        if bpg == 0 {
+            // Malformed geometry; return group 0 with capped offset to avoid panic.
+            let offset = u32::try_from(rel).unwrap_or(u32::MAX);
+            return (GroupNumber(0), offset);
+        }
         // Group number: ext4 uses u32 group addressing; cap on overflow.
         let group = u32::try_from(rel / bpg).unwrap_or(u32::MAX);
         // Offset is always < blocks_per_group (u32), so the cast is safe.
@@ -670,7 +675,15 @@ fn persist_group_desc(
     stats: &GroupStats,
 ) -> Result<()> {
     let ds = usize::from(pctx.desc_size);
+    if ds == 0 {
+        return Err(FfsError::InvalidGeometry("desc_size is zero".into()));
+    }
     let descs_per_block = dev.block_size() as usize / ds;
+    if descs_per_block == 0 {
+        return Err(FfsError::InvalidGeometry(
+            "block_size smaller than desc_size".into(),
+        ));
+    }
     let gdt_block_idx = group.0 as usize / descs_per_block;
     let offset_in_block = (group.0 as usize % descs_per_block) * ds;
 
@@ -2891,6 +2904,34 @@ mod tests {
         let (g, _off) = geo.absolute_to_group_block(huge_block);
         // Group should be capped at u32::MAX instead of silently truncating.
         assert_eq!(g, GroupNumber(u32::MAX));
+    }
+
+    #[test]
+    fn absolute_to_group_block_zero_bpg_returns_group_zero_without_panic() {
+        let geo = FsGeometry {
+            block_size: 4096,
+            blocks_per_group: 0, // Malformed geometry
+            inodes_per_group: 2048,
+            inode_size: 256,
+            first_data_block: 1,
+            total_blocks: 1000,
+            total_inodes: 0,
+            group_count: 0,
+            desc_size: 32,
+            reserved_gdt_blocks: 0,
+            first_meta_bg: 0,
+            feature_compat: ffs_ondisk::Ext4CompatFeatures(0),
+            feature_incompat: ffs_ondisk::Ext4IncompatFeatures(0),
+            feature_ro_compat: ffs_ondisk::Ext4RoCompatFeatures(0),
+            log_groups_per_flex: 0,
+            backup_bgs: [0, 0],
+            first_inode: 11,
+            cluster_ratio: 1,
+        };
+        // Must not panic on zero blocks_per_group.
+        let (g, off) = geo.absolute_to_group_block(BlockNumber(100));
+        assert_eq!(g, GroupNumber(0));
+        assert_eq!(off, 99); // 100 - first_data_block(1) = 99
     }
 
     #[test]
