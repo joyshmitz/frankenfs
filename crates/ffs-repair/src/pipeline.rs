@@ -780,6 +780,8 @@ pub struct ScrubWithRecovery<'a, W: Write> {
     runtime_metrics: RepairRuntimeMetrics,
     /// Optional thread-safe atomic metrics for concurrent external observation.
     atomic_metrics: Option<RepairPipelineMetrics>,
+    /// Whether this pipeline may mutate the device for recovery or symbol refresh.
+    repair_writes_enabled: bool,
 }
 
 impl<'a, W: Write> ScrubWithRecovery<'a, W> {
@@ -835,6 +837,7 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             refresh_states,
             runtime_metrics: RepairRuntimeMetrics::default(),
             atomic_metrics: None,
+            repair_writes_enabled: true,
         }
     }
 
@@ -847,6 +850,17 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
     #[must_use]
     pub fn with_metrics(mut self, metrics: RepairPipelineMetrics) -> Self {
         self.atomic_metrics = Some(metrics);
+        self
+    }
+
+    /// Enable or disable repair-side writes.
+    ///
+    /// Disabling this turns the pipeline into detection-only mode: scrub evidence
+    /// and corruption records are still emitted, but recovery and repair-symbol
+    /// refresh writes are skipped. This is used by read-only mount integration.
+    #[must_use]
+    pub const fn with_repair_writes_enabled(mut self, enabled: bool) -> Self {
+        self.repair_writes_enabled = enabled;
         self
     }
 
@@ -1038,6 +1052,9 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             }
         }
         self.mark_group_dirty_with_cause(group, "write")?;
+        if !self.repair_writes_enabled {
+            return Ok(());
+        }
         self.maybe_refresh_dirty_group(cx, group, true)?;
         Ok(())
     }
@@ -1066,6 +1083,9 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
     ///
     /// This is intended for fsync/flush wiring from write-back layers.
     pub fn on_group_flush(&mut self, cx: &Cx, group: GroupNumber) -> Result<()> {
+        if !self.repair_writes_enabled {
+            return Ok(());
+        }
         self.maybe_refresh_dirty_group(cx, group, true)
     }
 
@@ -1098,7 +1118,9 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             "scrub complete"
         );
         self.update_adaptive_policy(&report)?;
-        self.refresh_dirty_groups_now(cx)?;
+        if self.repair_writes_enabled {
+            self.refresh_dirty_groups_now(cx)?;
+        }
         self.sync_atomic_staleness_gauge();
 
         if report.is_clean() {
@@ -1122,14 +1144,22 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         let mut total_unrecoverable: usize = 0;
 
         for (group_cfg, corrupt_blocks) in &grouped_corrupt {
-            let summary = self.recover_group(
-                cx,
-                group_cfg,
-                corrupt_blocks,
-                &mut block_outcomes,
-                &mut total_recovered,
-                &mut total_unrecoverable,
-            )?;
+            let summary = if self.repair_writes_enabled {
+                self.recover_group(
+                    cx,
+                    group_cfg,
+                    corrupt_blocks,
+                    &mut block_outcomes,
+                    &mut total_recovered,
+                    &mut total_unrecoverable,
+                )?
+            } else {
+                for block in corrupt_blocks {
+                    block_outcomes.insert(block.0, BlockOutcome::Unrecoverable);
+                }
+                total_unrecoverable = total_unrecoverable.saturating_add(corrupt_blocks.len());
+                self.observe_corrupt_group(group_cfg.layout.group, corrupt_blocks)?
+            };
             group_summaries.push(summary);
         }
 
@@ -1188,11 +1218,18 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
         })?;
 
         self.update_adaptive_policy(&report)?;
-        self.maybe_refresh_dirty_group(cx, group, false)?;
+        if self.repair_writes_enabled {
+            self.maybe_refresh_dirty_group(cx, group, false)?;
+        }
 
         let corrupt_blocks = Self::corrupt_blocks_from_report(&report);
         if corrupt_blocks.is_empty() {
             return Ok((report, None));
+        }
+
+        if !self.repair_writes_enabled {
+            let summary = self.observe_corrupt_group(group, &corrupt_blocks)?;
+            return Ok((report, Some(summary)));
         }
 
         let mut block_outcomes = BTreeMap::new();
@@ -1207,6 +1244,22 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
             &mut total_unrecoverable,
         )?;
         Ok((report, Some(summary)))
+    }
+
+    fn observe_corrupt_group(
+        &mut self,
+        group: GroupNumber,
+        corrupt_blocks: &[BlockNumber],
+    ) -> Result<GroupRecoverySummary> {
+        self.log_corruption_detected(group, corrupt_blocks)?;
+        Ok(GroupRecoverySummary {
+            group: group.0,
+            corrupt_count: corrupt_blocks.len(),
+            recovered_count: 0,
+            unrecoverable_count: corrupt_blocks.len(),
+            symbols_refreshed: false,
+            decoder_stats: None,
+        })
     }
 
     fn apply_default_refresh_policies(&mut self) {
@@ -1278,6 +1331,9 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
 
     /// Refresh all currently dirty groups using scrub-trigger semantics.
     pub fn refresh_dirty_groups_now(&mut self, cx: &Cx) -> Result<()> {
+        if !self.repair_writes_enabled {
+            return Ok(());
+        }
         let dirty_groups = self.dirty_groups();
         for group in dirty_groups {
             self.maybe_refresh_dirty_group(cx, group, false)?;
@@ -4264,6 +4320,76 @@ mod tests {
                 .iter()
                 .any(|r| r.event_type == crate::evidence::EvidenceEventType::RepairSucceeded)
         );
+    }
+
+    #[test]
+    fn scrub_daemon_detection_only_does_not_write_recovery_blocks() {
+        let cx = Cx::for_testing();
+        let block_size = 256;
+        let device = MemBlockDevice::new(block_size, 128);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
+        let source_first = BlockNumber(0);
+        let source_count = 8;
+
+        let originals = write_source_blocks(&cx, &device, source_first, source_count);
+        bootstrap_storage(&cx, &device, layout, source_first, source_count, 4);
+
+        let corrupt_block = BlockNumber(3);
+        let corrupt_payload = vec![0xEF; block_size as usize];
+        device
+            .write_block(&cx, corrupt_block, &corrupt_payload)
+            .expect("inject corruption");
+
+        let validator = CorruptBlockValidator::new(vec![3]);
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: source_first,
+            source_block_count: source_count,
+        };
+        let mut ledger_buf = Vec::new();
+        let pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_repair_writes_enabled(false);
+        let mut daemon = ScrubDaemon::new(
+            pipeline,
+            ScrubDaemonConfig {
+                interval: Duration::ZERO,
+                cancel_check_interval: Duration::from_millis(1),
+                ..ScrubDaemonConfig::default()
+            },
+        );
+
+        let step = daemon.run_once(&cx).expect("run once");
+        assert_eq!(step.corrupt_count, 1);
+        assert_eq!(step.recovered_count, 0);
+        assert_eq!(step.unrecoverable_count, 1);
+
+        let stored = device
+            .read_block(&cx, corrupt_block)
+            .expect("read stored block");
+        assert_ne!(stored.as_slice(), originals[3].as_slice());
+        assert_eq!(stored.as_slice(), corrupt_payload.as_slice());
+
+        let (pipeline, _metrics) = daemon.into_parts();
+        let records = crate::evidence::parse_evidence_ledger(pipeline.into_ledger());
+        assert!(records.iter().any(|r| {
+            r.event_type == crate::evidence::EvidenceEventType::CorruptionDetected
+        }));
+        assert!(!records.iter().any(|r| {
+            matches!(
+                r.event_type,
+                crate::evidence::EvidenceEventType::RepairAttempted
+                    | crate::evidence::EvidenceEventType::RepairSucceeded
+                    | crate::evidence::EvidenceEventType::SymbolRefresh
+            )
+        }));
     }
 
     #[test]
