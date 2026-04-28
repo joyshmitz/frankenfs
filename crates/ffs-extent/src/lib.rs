@@ -423,7 +423,7 @@ pub fn punch_hole(
 
         // Trim the extent against the hole.
         let (remaining, freed) =
-            ffs_btree::trim_extents(vec![ext], u64::from(logical_start), hole_end);
+            ffs_btree::trim_extents(vec![ext], u64::from(logical_start), hole_end)?;
 
         // Re-insert the remaining pieces (handles node splitting naturally).
         for r in remaining {

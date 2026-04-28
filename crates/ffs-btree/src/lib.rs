@@ -650,7 +650,7 @@ pub fn delete_range(
     if count == 0 {
         return Ok(Vec::new());
     }
-    let logical_end = u64::from(logical_start) + count;
+    let logical_end = u64::from(logical_start).saturating_add(count);
     cx_checkpoint(cx)?;
 
     let (header, _) = parse_header(root_bytes)?;
@@ -664,7 +664,7 @@ pub fn delete_range(
 
     if header.depth == 0 {
         let extents = parse_leaf_entries(root_bytes, &header)?;
-        let (remaining, freed) = trim_extents(extents, u64::from(logical_start), logical_end);
+        let (remaining, freed) = trim_extents(extents, u64::from(logical_start), logical_end)?;
         write_leaf_root(root_bytes, &header, &remaining);
         trace!(
             logical_start,
@@ -803,7 +803,7 @@ fn delete_range_subtree(
 
     if depth == 0 {
         let extents = parse_leaf_entries(data, &header)?;
-        let (remaining, freed) = trim_extents(extents, logical_start, logical_end);
+        let (remaining, freed) = trim_extents(extents, logical_start, logical_end)?;
         let new_data = serialize_leaf_block(block_size, &remaining);
         dev.write_block(cx, BlockNumber(block), &new_data)?;
         Ok(DeleteSubtreeResult {
@@ -955,12 +955,11 @@ fn maybe_shrink_root(
 
 /// Trim/remove extents that overlap `[start, end)`.
 /// Returns (remaining_extents, freed_ranges).
-#[must_use]
 pub fn trim_extents(
     extents: Vec<Ext4Extent>,
     start: u64,
     end: u64,
-) -> (Vec<Ext4Extent>, Vec<FreedRange>) {
+) -> Result<(Vec<Ext4Extent>, Vec<FreedRange>)> {
     let mut remaining = Vec::new();
     let mut freed = Vec::new();
 
@@ -1000,18 +999,30 @@ pub fn trim_extents(
                 // Delete range is in the middle: free the middle, keep right.
                 let middle_len = clamp_to_u16(end - start);
                 freed.push(FreedRange {
-                    physical_start: ext.physical_start + freed_start,
+                    physical_start: checked_physical_add(
+                        "trim_extents middle freed range",
+                        ext.physical_start,
+                        freed_start,
+                    )?,
                     count: middle_len,
                 });
                 let right_offset = end - ext_start;
                 remaining.push(Ext4Extent {
                     logical_block: clamp_to_u32(end),
                     raw_len: encode_len(clamp_to_u16(ext_end - end), ext.is_unwritten()),
-                    physical_start: ext.physical_start + right_offset,
+                    physical_start: checked_physical_add(
+                        "trim_extents right remainder",
+                        ext.physical_start,
+                        right_offset,
+                    )?,
                 });
             } else {
                 freed.push(FreedRange {
-                    physical_start: ext.physical_start + freed_start,
+                    physical_start: checked_physical_add(
+                        "trim_extents suffix freed range",
+                        ext.physical_start,
+                        freed_start,
+                    )?,
                     count: clamp_to_u16(ext_end - start),
                 });
             }
@@ -1025,11 +1036,23 @@ pub fn trim_extents(
             remaining.push(Ext4Extent {
                 logical_block: clamp_to_u32(end),
                 raw_len: encode_len(clamp_to_u16(ext_end - end), ext.is_unwritten()),
-                physical_start: ext.physical_start + u64::from(trim_count),
+                physical_start: checked_physical_add(
+                    "trim_extents left-trim remainder",
+                    ext.physical_start,
+                    u64::from(trim_count),
+                )?,
             });
         }
     }
-    (remaining, freed)
+    Ok((remaining, freed))
+}
+
+fn checked_physical_add(op: &str, physical_start: u64, offset: u64) -> Result<u64> {
+    physical_start.checked_add(offset).ok_or_else(|| {
+        FfsError::InvalidGeometry(format!(
+            "{op}: physical block {physical_start}+{offset} overflows u64"
+        ))
+    })
 }
 
 /// Safely clamp a u64 to u16, saturating at `u16::MAX`.
@@ -1372,7 +1395,6 @@ fn write_index_entry(buf: &mut [u8], idx: &Ext4ExtentIndex) {
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_lossless,
-    clippy::match_wildcard_for_single_variants,
     clippy::needless_range_loop,
     clippy::option_if_let_else,
     clippy::significant_drop_tightening
@@ -1475,6 +1497,16 @@ mod tests {
 
     fn test_cx() -> Cx {
         Cx::for_testing()
+    }
+
+    fn assert_corruption_contains(err: &FfsError, expected: &str) {
+        assert!(
+            matches!(err, FfsError::Corruption { .. }),
+            "expected Corruption, got {err:?}"
+        );
+        if let FfsError::Corruption { detail, .. } = err {
+            assert!(detail.contains(expected));
+        }
     }
 
     fn assert_sorted_non_overlapping(extents: &[Ext4Extent]) {
@@ -1650,15 +1682,18 @@ mod tests {
         // Verify all four can be found.
         for i in 0..4 {
             let result = search(&cx, &dev, &root, i * 100).unwrap();
-            match result {
-                SearchResult::Found {
-                    extent,
-                    offset_in_extent,
-                } => {
-                    assert_eq!(extent.logical_block, i * 100);
-                    assert_eq!(offset_in_extent, 0);
-                }
-                _ => panic!("expected Found for block {}", i * 100),
+            assert!(
+                matches!(&result, SearchResult::Found { .. }),
+                "expected Found for block {}, got {result:?}",
+                i * 100
+            );
+            if let SearchResult::Found {
+                extent,
+                offset_in_extent,
+            } = result
+            {
+                assert_eq!(extent.logical_block, i * 100);
+                assert_eq!(offset_in_extent, 0);
             }
         }
     }
@@ -1695,11 +1730,13 @@ mod tests {
         // All 5 extents should be searchable.
         for i in 0..5 {
             let result = search(&cx, &dev, &root, i * 100).unwrap();
-            match result {
-                SearchResult::Found { extent, .. } => {
-                    assert_eq!(extent.logical_block, i * 100);
-                }
-                _ => panic!("expected Found for block {}", i * 100),
+            assert!(
+                matches!(&result, SearchResult::Found { .. }),
+                "expected Found for block {}, got {result:?}",
+                i * 100
+            );
+            if let SearchResult::Found { extent, .. } = result {
+                assert_eq!(extent.logical_block, i * 100);
             }
         }
     }
@@ -1844,12 +1881,13 @@ Hole { hole_len: 90 }
 
         // Block 0 should still be found.
         let result = search(&cx, &dev, &root, 0).unwrap();
-        match result {
-            SearchResult::Found { extent, .. } => {
-                assert_eq!(extent.logical_block, 0);
-                assert_eq!(actual_len(extent.raw_len), 5);
-            }
-            _ => panic!("expected Found"),
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert_eq!(extent.logical_block, 0);
+            assert_eq!(actual_len(extent.raw_len), 5);
         }
 
         // Block 5 should be a hole.
@@ -1879,13 +1917,14 @@ Hole { hole_len: 90 }
 
         // Block 15 should still be found.
         let result = search(&cx, &dev, &root, 15).unwrap();
-        match result {
-            SearchResult::Found { extent, .. } => {
-                assert_eq!(extent.logical_block, 15);
-                assert_eq!(actual_len(extent.raw_len), 5);
-                assert_eq!(extent.physical_start, 505);
-            }
-            _ => panic!("expected Found"),
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert_eq!(extent.logical_block, 15);
+            assert_eq!(actual_len(extent.raw_len), 5);
+            assert_eq!(extent.physical_start, 505);
         }
     }
 
@@ -1929,12 +1968,13 @@ Hole { hole_len: 90 }
         insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
 
         let result = search(&cx, &dev, &root, 0).unwrap();
-        match result {
-            SearchResult::Found { extent, .. } => {
-                assert!(extent.is_unwritten());
-                assert_eq!(extent.actual_len(), 10);
-            }
-            _ => panic!("expected Found"),
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert!(extent.is_unwritten());
+            assert_eq!(extent.actual_len(), 10);
         }
     }
 
@@ -1974,11 +2014,13 @@ Hole { hole_len: 90 }
         // All 20 extents should be searchable.
         for i in 0..20 {
             let result = search(&cx, &dev, &root, i * 100).unwrap();
-            match result {
-                SearchResult::Found { extent, .. } => {
-                    assert_eq!(extent.logical_block, i * 100);
-                }
-                _ => panic!("expected Found for block {}", i * 100),
+            assert!(
+                matches!(&result, SearchResult::Found { .. }),
+                "expected Found for block {}, got {result:?}",
+                i * 100
+            );
+            if let SearchResult::Found { extent, .. } = result {
+                assert_eq!(extent.logical_block, i * 100);
             }
         }
 
@@ -2005,12 +2047,7 @@ Hole { hole_len: 90 }
 
         let result = search(&cx, &dev, &root, 0);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FfsError::Corruption { detail, .. } => {
-                assert!(detail.contains("bad extent magic"));
-            }
-            other => panic!("expected Corruption, got {other:?}"),
-        }
+        assert_corruption_contains(&result.unwrap_err(), "bad extent magic");
     }
 
     #[test]
@@ -2036,13 +2073,14 @@ Hole { hole_len: 90 }
 
         // Left portion: blocks 0-4.
         let result = search(&cx, &dev, &root, 0).unwrap();
-        match result {
-            SearchResult::Found { extent, .. } => {
-                assert_eq!(extent.logical_block, 0);
-                assert_eq!(actual_len(extent.raw_len), 5);
-                assert_eq!(extent.physical_start, 500);
-            }
-            _ => panic!("expected left portion"),
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected left portion, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert_eq!(extent.logical_block, 0);
+            assert_eq!(actual_len(extent.raw_len), 5);
+            assert_eq!(extent.physical_start, 500);
         }
 
         // Hole: blocks 5-14.
@@ -2051,13 +2089,14 @@ Hole { hole_len: 90 }
 
         // Right portion: blocks 15-19.
         let result = search(&cx, &dev, &root, 15).unwrap();
-        match result {
-            SearchResult::Found { extent, .. } => {
-                assert_eq!(extent.logical_block, 15);
-                assert_eq!(actual_len(extent.raw_len), 5);
-                assert_eq!(extent.physical_start, 515);
-            }
-            _ => panic!("expected right portion"),
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected right portion, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert_eq!(extent.logical_block, 15);
+            assert_eq!(actual_len(extent.raw_len), 5);
+            assert_eq!(extent.physical_start, 515);
         }
     }
 
@@ -2174,12 +2213,13 @@ Hole { hole_len: 90 }
 
         // Original extent still intact.
         let result = search(&cx, &dev, &root, 10).unwrap();
-        match result {
-            SearchResult::Found { extent, .. } => {
-                assert_eq!(extent.logical_block, 10);
-                assert_eq!(actual_len(extent.raw_len), 5);
-            }
-            _ => panic!("expected Found"),
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert_eq!(extent.logical_block, 10);
+            assert_eq!(actual_len(extent.raw_len), 5);
         }
     }
 
@@ -2266,12 +2306,7 @@ Hole { hole_len: 90 }
 
         let result = search(&cx, &dev, &root, 0);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FfsError::Corruption { detail, .. } => {
-                assert!(detail.contains("entries"));
-            }
-            other => panic!("expected Corruption, got {other:?}"),
-        }
+        assert_corruption_contains(&result.unwrap_err(), "entries");
     }
 
     #[test]
@@ -2279,12 +2314,7 @@ Hole { hole_len: 90 }
         let data = [0u8; 6]; // Less than HEADER_SIZE (12).
         let result = parse_header(&data);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FfsError::Corruption { detail, .. } => {
-                assert!(detail.contains("too small"));
-            }
-            other => panic!("expected Corruption, got {other:?}"),
-        }
+        assert_corruption_contains(&result.unwrap_err(), "too small");
     }
 
     #[test]
@@ -2371,13 +2401,14 @@ Hole { hole_len: 90 }
 
         // Remaining extent should still be unwritten.
         let result = search(&cx, &dev, &root, 0).unwrap();
-        match result {
-            SearchResult::Found { extent, .. } => {
-                assert!(extent.is_unwritten());
-                assert_eq!(extent.actual_len(), 10);
-                assert_eq!(extent.physical_start, 500);
-            }
-            _ => panic!("expected Found"),
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert!(extent.is_unwritten());
+            assert_eq!(extent.actual_len(), 10);
+            assert_eq!(extent.physical_start, 500);
         }
     }
 
@@ -2442,11 +2473,13 @@ Hole { hole_len: 90 }
         // Verify all extents are searchable.
         for i in 0..10 {
             let result = search(&cx, &dev, &root, i * 50).unwrap();
-            match result {
-                SearchResult::Found { extent, .. } => {
-                    assert_eq!(extent.logical_block, i * 50);
-                }
-                _ => panic!("expected Found for block {}", i * 50),
+            assert!(
+                matches!(&result, SearchResult::Found { .. }),
+                "expected Found for block {}, got {result:?}",
+                i * 50
+            );
+            if let SearchResult::Found { extent, .. } = result {
+                assert_eq!(extent.logical_block, i * 50);
             }
         }
     }
@@ -2531,12 +2564,7 @@ Hole { hole_len: 90 }
         // Search should detect depth mismatch.
         let result = search(&cx, &dev, &root, 0);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FfsError::Corruption { detail, .. } => {
-                assert!(detail.contains("depth mismatch"));
-            }
-            other => panic!("expected Corruption, got {other:?}"),
-        }
+        assert_corruption_contains(&result.unwrap_err(), "depth mismatch");
     }
 
     #[test]
@@ -2566,12 +2594,7 @@ Hole { hole_len: 90 }
 
         let result = walk(&cx, &dev, &root, &mut |_| Ok(()));
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FfsError::Corruption { detail, .. } => {
-                assert!(detail.contains("depth mismatch"));
-            }
-            other => panic!("expected Corruption, got {other:?}"),
-        }
+        assert_corruption_contains(&result.unwrap_err(), "depth mismatch");
     }
 
     #[test]
@@ -2664,11 +2687,13 @@ Hole { hole_len: 90 }
 
         for i in 0..3 {
             let result = search(&cx, &dev, &root, i * 10).unwrap();
-            match result {
-                SearchResult::Found { extent, .. } => {
-                    assert_eq!(extent.logical_block, i * 10);
-                }
-                _ => panic!("expected Found after reinsert for block {}", i * 10),
+            assert!(
+                matches!(&result, SearchResult::Found { .. }),
+                "expected Found after reinsert for block {}, got {result:?}",
+                i * 10
+            );
+            if let SearchResult::Found { extent, .. } = result {
+                assert_eq!(extent.logical_block, i * 10);
             }
         }
     }
@@ -2709,12 +2734,7 @@ Hole { hole_len: 90 }
 
         let result = search(&cx, &dev, &root, 0);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FfsError::Corruption { detail, .. } => {
-                assert!(detail.contains("max_entries"));
-            }
-            other => panic!("expected Corruption, got {other:?}"),
-        }
+        assert_corruption_contains(&result.unwrap_err(), "max_entries");
     }
 
     #[test]
@@ -2777,6 +2797,28 @@ Hole { hole_len: 90 }
         )
         .unwrap();
         assert_eq!(freed[0].physical_start, 777);
+        assert_eq!(freed[0].count, 5);
+    }
+
+    #[test]
+    fn delete_range_u64_max_count_saturates_end() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        let ext = Ext4Extent {
+            logical_block: u32::MAX - 10,
+            raw_len: 5,
+            physical_start: 888,
+        };
+        insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+
+        let freed =
+            delete_range(&cx, &dev, &mut root, u32::MAX - 10, u64::MAX, &mut alloc).unwrap();
+
+        assert_eq!(freed.len(), 1);
+        assert_eq!(freed[0].physical_start, 888);
         assert_eq!(freed[0].count, 5);
     }
 
@@ -2948,11 +2990,12 @@ Hole { hole_len: 90 }
 
         // Block 0 should be a hole with length 5 (until the first extent).
         let result = search(&cx, &dev, &root, 0).unwrap();
-        match result {
-            SearchResult::Hole { hole_len } => {
-                assert_eq!(hole_len, 5, "hole should extend to block 5");
-            }
-            _ => panic!("expected Hole, got {result:?}"),
+        assert!(
+            matches!(&result, SearchResult::Hole { .. }),
+            "expected Hole, got {result:?}"
+        );
+        if let SearchResult::Hole { hole_len } = result {
+            assert_eq!(hole_len, 5, "hole should extend to block 5");
         }
     }
 
@@ -2972,15 +3015,17 @@ Hole { hole_len: 90 }
         insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
 
         let result = search(&cx, &dev, &root, 0).unwrap();
-        match result {
-            SearchResult::Found {
-                extent,
-                offset_in_extent,
-            } => {
-                assert_eq!(offset_in_extent, 0);
-                assert_eq!(extent.actual_len(), 0x7FFF);
-            }
-            _ => panic!("expected Found"),
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found, got {result:?}"
+        );
+        if let SearchResult::Found {
+            extent,
+            offset_in_extent,
+        } = result
+        {
+            assert_eq!(offset_in_extent, 0);
+            assert_eq!(extent.actual_len(), 0x7FFF);
         }
 
         // Search at block 32766 (last block of extent) should hit.
@@ -3129,25 +3174,32 @@ Hole { hole_len: 90 }
         assert_eq!(walked[1].physical_start, 2000);
 
         // Search at block 4 hits first, block 5 hits second.
-        match search(&cx, &dev, &root, 4).unwrap() {
-            SearchResult::Found {
-                extent,
-                offset_in_extent,
-            } => {
-                assert_eq!(extent.physical_start, 1000);
-                assert_eq!(offset_in_extent, 4);
-            }
-            _ => panic!("expected Found for block 4"),
+        let result = search(&cx, &dev, &root, 4).unwrap();
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found for block 4, got {result:?}"
+        );
+        if let SearchResult::Found {
+            extent,
+            offset_in_extent,
+        } = result
+        {
+            assert_eq!(extent.physical_start, 1000);
+            assert_eq!(offset_in_extent, 4);
         }
-        match search(&cx, &dev, &root, 5).unwrap() {
-            SearchResult::Found {
-                extent,
-                offset_in_extent,
-            } => {
-                assert_eq!(extent.physical_start, 2000);
-                assert_eq!(offset_in_extent, 0);
-            }
-            _ => panic!("expected Found for block 5"),
+
+        let result = search(&cx, &dev, &root, 5).unwrap();
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found for block 5, got {result:?}"
+        );
+        if let SearchResult::Found {
+            extent,
+            offset_in_extent,
+        } = result
+        {
+            assert_eq!(extent.physical_start, 2000);
+            assert_eq!(offset_in_extent, 0);
         }
     }
 
@@ -3200,19 +3252,22 @@ Hole { hole_len: 90 }
         insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
 
         // Searching should find the extent with unwritten flag.
-        match search(&cx, &dev, &root, 5).unwrap() {
-            SearchResult::Found {
-                extent,
-                offset_in_extent,
-            } => {
-                assert_eq!(offset_in_extent, 5);
-                assert!(
-                    extent.raw_len & EXT_INIT_MAX_LEN != 0,
-                    "unwritten flag should be preserved"
-                );
-                assert_eq!(extent.actual_len(), 10);
-            }
-            _ => panic!("expected Found"),
+        let result = search(&cx, &dev, &root, 5).unwrap();
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found, got {result:?}"
+        );
+        if let SearchResult::Found {
+            extent,
+            offset_in_extent,
+        } = result
+        {
+            assert_eq!(offset_in_extent, 5);
+            assert!(
+                extent.raw_len & EXT_INIT_MAX_LEN != 0,
+                "unwritten flag should be preserved"
+            );
+            assert_eq!(extent.actual_len(), 10);
         }
     }
 
@@ -3276,6 +3331,24 @@ Hole { hole_len: 90 }
         assert_eq!(fr, fr2);
         let dbg = format!("{fr:?}");
         assert_eq!(dbg, FREED_RANGE_DEBUG_GOLDEN);
+    }
+
+    #[test]
+    fn trim_extents_rejects_physical_overflow() {
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 20,
+            physical_start: u64::MAX - 4,
+        };
+
+        let err = trim_extents(vec![ext], 5, 15).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(_))
+                && msg.contains("physical block")
+                && msg.contains("overflows u64"),
+            "error should explain the physical address overflow: {msg}"
+        );
     }
 
     #[test]
@@ -3408,14 +3481,16 @@ Hole { hole_len: 90 }
             generation: 0,
         };
         let err = validate_header(&header, 4).unwrap_err();
-        let detail = match err {
-            FfsError::Corruption { detail, .. } => detail,
-            other => panic!("expected Corruption, got {other:?}"),
-        };
         assert!(
-            detail.contains("depth") && detail.contains("limit"),
-            "error must mention depth + limit: {detail}"
+            matches!(&err, FfsError::Corruption { .. }),
+            "expected Corruption, got {err:?}"
         );
+        if let FfsError::Corruption { detail, .. } = err {
+            assert!(
+                detail.contains("depth") && detail.contains("limit"),
+                "error must mention depth + limit: {detail}"
+            );
+        }
 
         let maxed = Ext4ExtentHeader {
             depth: u16::MAX,
@@ -3479,11 +3554,13 @@ Hole { hole_len: 90 }
         .unwrap();
 
         // Block 15 is in the hole: hole_len should be 5 (15..20)
-        match search(&cx, &dev, &root, 15).unwrap() {
-            SearchResult::Hole { hole_len } => {
-                assert_eq!(hole_len, 5, "hole from block 15 to extent at 20");
-            }
-            other => panic!("expected Hole, got {other:?}"),
+        let result = search(&cx, &dev, &root, 15).unwrap();
+        assert!(
+            matches!(&result, SearchResult::Hole { .. }),
+            "expected Hole, got {result:?}"
+        );
+        if let SearchResult::Hole { hole_len } = result {
+            assert_eq!(hole_len, 5, "hole from block 15 to extent at 20");
         }
     }
 
@@ -3515,22 +3592,26 @@ Hole { hole_len: 90 }
         assert_eq!(freed[0].count, 10);
 
         // Block 0 should still be found (left piece: [0..5))
-        match search(&cx, &dev, &root, 0).unwrap() {
-            SearchResult::Found { extent, .. } => {
-                assert_eq!(extent.logical_block, 0);
-                assert_eq!(actual_len(extent.raw_len), 5);
-            }
-            other => panic!("expected Found for block 0, got {other:?}"),
+        let result = search(&cx, &dev, &root, 0).unwrap();
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found for block 0, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert_eq!(extent.logical_block, 0);
+            assert_eq!(actual_len(extent.raw_len), 5);
         }
 
         // Block 15 should still be found (right piece: [15..20))
-        match search(&cx, &dev, &root, 15).unwrap() {
-            SearchResult::Found { extent, .. } => {
-                assert_eq!(extent.logical_block, 15);
-                assert_eq!(actual_len(extent.raw_len), 5);
-                assert_eq!(extent.physical_start, 515);
-            }
-            other => panic!("expected Found for block 15, got {other:?}"),
+        let result = search(&cx, &dev, &root, 15).unwrap();
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found for block 15, got {result:?}"
+        );
+        if let SearchResult::Found { extent, .. } = result {
+            assert_eq!(extent.logical_block, 15);
+            assert_eq!(actual_len(extent.raw_len), 5);
+            assert_eq!(extent.physical_start, 515);
         }
 
         // Block 5 should be in a hole
@@ -3693,15 +3774,18 @@ Hole { hole_len: 90 }
         assert_tree_invariants(&cx, &dev, &root).unwrap();
 
         // Key 0 must be searchable.
-        match search(&cx, &dev, &root, 0).unwrap() {
-            SearchResult::Found {
-                extent,
-                offset_in_extent,
-            } => {
-                assert_eq!(extent.logical_block, 0);
-                assert_eq!(offset_in_extent, 0);
-            }
-            SearchResult::Hole { .. } => panic!("expected Found for key 0, got Hole"),
+        let result = search(&cx, &dev, &root, 0).unwrap();
+        assert!(
+            matches!(&result, SearchResult::Found { .. }),
+            "expected Found for key 0, got {result:?}"
+        );
+        if let SearchResult::Found {
+            extent,
+            offset_in_extent,
+        } = result
+        {
+            assert_eq!(extent.logical_block, 0);
+            assert_eq!(offset_in_extent, 0);
         }
     }
 
@@ -3712,12 +3796,14 @@ Hole { hole_len: 90 }
         let root = make_root();
 
         // Empty tree: search at u32::MAX should return a hole
-        match search(&cx, &dev, &root, u32::MAX).unwrap() {
-            SearchResult::Hole { hole_len } => {
-                // hole_len should be 1 << 32 (saturating_sub behavior in u32 used to return u32::MAX)
-                assert_eq!(hole_len, 1_u64 << 32);
-            }
-            other => panic!("expected Hole, got {other:?}"),
+        let result = search(&cx, &dev, &root, u32::MAX).unwrap();
+        assert!(
+            matches!(&result, SearchResult::Hole { .. }),
+            "expected Hole, got {result:?}"
+        );
+        if let SearchResult::Hole { hole_len } = result {
+            // hole_len should be 1 << 32 (saturating_sub behavior in u32 used to return u32::MAX)
+            assert_eq!(hole_len, 1_u64 << 32);
         }
     }
 
