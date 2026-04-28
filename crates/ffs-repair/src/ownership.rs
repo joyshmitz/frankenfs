@@ -186,9 +186,8 @@ impl RepairOwnership {
                     });
                 }
 
-                // Lease expired or we already own it — claim
-                let new_gen = existing.repair_generation + 1;
-                let new_lease_version = existing.lease_version + 1;
+                // Lease expired or we already own it — claim.
+                let (new_gen, new_lease_version) = next_claim_counters(&existing)?;
                 self.write_claim(&record_path, new_gen, new_lease_version)?;
 
                 // Post-write verification: re-read to detect conflicts
@@ -570,6 +569,24 @@ fn temp_record_path(record_path: &Path) -> std::io::Result<PathBuf> {
     Ok(record_path.with_extension(format!("tmp-{}-{nonce}", std::process::id())))
 }
 
+fn next_claim_counters(record: &CoordinationRecord) -> std::io::Result<(u64, u64)> {
+    let generation = record.repair_generation.checked_add(1).ok_or_else(|| {
+        ownership_counter_exhausted("repair_generation", record.repair_generation)
+    })?;
+    let lease_version = record
+        .lease_version
+        .checked_add(1)
+        .ok_or_else(|| ownership_counter_exhausted("lease_version", record.lease_version))?;
+    Ok((generation, lease_version))
+}
+
+fn ownership_counter_exhausted(field: &str, value: u64) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("repair ownership {field} exhausted at {value}"),
+    )
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -892,6 +909,56 @@ mod tests {
     }
 
     #[test]
+    fn acquire_rejects_exhausted_repair_generation_without_rewriting() {
+        let dir = tempdir();
+        let image = dir.join("test.img");
+        std::fs::write(&image, b"fake image").unwrap();
+
+        let mut record = expired_record_fixture("dead-host", u64::MAX, 4);
+        record.pid = different_pid();
+        let record_path = RepairOwnership::record_path_for(&image);
+        std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+        let mgr = RepairOwnership::new("new-host".into(), "alive".into());
+        let err = mgr
+            .try_acquire(&image)
+            .expect_err("exhausted generation must fail");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("repair_generation"),
+            "wrong error: {err}"
+        );
+        let current = read_test_record(&record_path);
+        assert_eq!(current, record, "failed claim must not rewrite ownership");
+    }
+
+    #[test]
+    fn acquire_rejects_exhausted_lease_version_without_rewriting() {
+        let dir = tempdir();
+        let image = dir.join("test.img");
+        std::fs::write(&image, b"fake image").unwrap();
+
+        let mut record = expired_record_fixture("dead-host", 41, u64::MAX);
+        record.pid = different_pid();
+        let record_path = RepairOwnership::record_path_for(&image);
+        std::fs::write(&record_path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+        let mgr = RepairOwnership::new("new-host".into(), "alive".into());
+        let err = mgr
+            .try_acquire(&image)
+            .expect_err("exhausted lease version must fail");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("lease_version"),
+            "wrong error: {err}"
+        );
+        let current = read_test_record(&record_path);
+        assert_eq!(current, record, "failed claim must not rewrite ownership");
+    }
+
+    #[test]
     fn release_removes_record() {
         let dir = tempdir();
         let image = dir.join("test.img");
@@ -1063,6 +1130,23 @@ mod tests {
             repair_generation,
             groups_owned: vec![],
         }
+    }
+
+    fn expired_record_fixture(
+        host_id: &str,
+        repair_generation: u64,
+        lease_version: u64,
+    ) -> CoordinationRecord {
+        CoordinationRecord {
+            claimed_at: "2020-01-01T00:00:00Z".into(),
+            lease_ttl_secs: 1,
+            ..record_fixture(host_id, repair_generation, lease_version)
+        }
+    }
+
+    fn read_test_record(record_path: &Path) -> CoordinationRecord {
+        let contents = std::fs::read_to_string(record_path).expect("record remains");
+        serde_json::from_str(&contents).expect("parse record")
     }
 
     fn different_pid() -> u32 {

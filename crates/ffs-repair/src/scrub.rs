@@ -729,9 +729,18 @@ mod tests {
 
     fn make_valid_btrfs_superblock_region() -> Vec<u8> {
         let mut sb = vec![0_u8; BTRFS_SUPER_INFO_SIZE];
+        sb[0x30..0x38].copy_from_slice(&(BTRFS_SUPER_INFO_OFFSET as u64).to_le_bytes());
         sb[0x40..0x48].copy_from_slice(&ffs_types::BTRFS_MAGIC.to_le_bytes());
+        sb[0x48..0x50].copy_from_slice(&1_u64.to_le_bytes()); // generation
+        sb[0x50..0x58].copy_from_slice(&4096_u64.to_le_bytes()); // root
+        sb[0x58..0x60].copy_from_slice(&8192_u64.to_le_bytes()); // chunk_root
+        sb[0x70..0x78].copy_from_slice(&1_000_000_u64.to_le_bytes()); // total_bytes
+        sb[0x78..0x80].copy_from_slice(&123_456_u64.to_le_bytes()); // bytes_used
+        sb[0x80..0x88].copy_from_slice(&6_u64.to_le_bytes()); // root_dir_objectid
+        sb[0x88..0x90].copy_from_slice(&1_u64.to_le_bytes()); // num_devices
         sb[0x90..0x94].copy_from_slice(&4096_u32.to_le_bytes()); // sectorsize
         sb[0x94..0x98].copy_from_slice(&16384_u32.to_le_bytes()); // nodesize
+        sb[0x9C..0xA0].copy_from_slice(&4096_u32.to_le_bytes()); // stripesize
         sb[0xC4..0xC6].copy_from_slice(&0_u16.to_le_bytes()); // csum_type=CRC32C
         let csum = crc32c::crc32c(&sb[0x20..BTRFS_SUPER_INFO_SIZE]);
         sb[0..4].copy_from_slice(&csum.to_le_bytes());
