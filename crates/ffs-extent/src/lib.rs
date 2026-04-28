@@ -570,8 +570,24 @@ pub fn insert_range(
     validate_root_header("insert_range", root_bytes)?;
     checked_logical_range_end("insert_range", logical_start, u64::from(count))?;
 
-    // Split a straddling extent; zero-length punch_hole cannot do it.
+    // Preflight all extents that will move right. The operation is destructive
+    // after this point, so reject logical-space overflow before splitting or
+    // deleting any existing mapping.
     let cut = u64::from(logical_start);
+    let mut straddler: Option<Ext4Extent> = None;
+    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
+        let ext_start = u64::from(ext.logical_block);
+        let ext_end = ext_start.saturating_add(u64::from(u32::from(ext.actual_len())));
+        if ext_end > cut {
+            validate_shifted_extent_fits_logical_space("insert_range", ext, count)?;
+        }
+        if ext_start < cut && ext_end > cut {
+            straddler = Some(*ext);
+        }
+        Ok(())
+    })?;
+
+    // Split a straddling extent; zero-length punch_hole cannot do it.
     let mut tree_alloc = GroupBlockAllocator {
         cx,
         dev,
@@ -581,15 +597,6 @@ pub fn insert_range(
         pctx,
     };
 
-    let mut straddler: Option<Ext4Extent> = None;
-    ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
-        let ext_start = u64::from(ext.logical_block);
-        let ext_end = ext_start.saturating_add(u64::from(u32::from(ext.actual_len())));
-        if ext_start < cut && ext_end > cut {
-            straddler = Some(*ext);
-        }
-        Ok(())
-    })?;
     if let Some(ext) = straddler {
         split_insert_range_straddler(cx, dev, root_bytes, cut, ext, &mut tree_alloc)?;
     }
@@ -944,6 +951,35 @@ fn checked_logical_range_end(op: &str, logical_start: u32, count: u64) -> Result
         )));
     }
     Ok(end)
+}
+
+fn validate_shifted_extent_fits_logical_space(
+    op: &str,
+    ext: &Ext4Extent,
+    shift_blocks: u32,
+) -> Result<()> {
+    let ext_start = u64::from(ext.logical_block);
+    let ext_end = ext_start
+        .checked_add(u64::from(ext.actual_len()))
+        .ok_or_else(|| {
+            FfsError::InvalidGeometry(format!(
+                "{op}: extent ending after logical block {} overflows u64",
+                ext.logical_block
+            ))
+        })?;
+    let shifted_end = ext_end
+        .checked_add(u64::from(shift_blocks))
+        .ok_or_else(|| {
+            FfsError::InvalidGeometry(format!(
+                "{op}: shifting extent ending at {ext_end} by {shift_blocks} blocks overflows u64"
+            ))
+        })?;
+    if shifted_end > LOGICAL_BLOCK_SPACE {
+        return Err(FfsError::InvalidGeometry(format!(
+            "{op}: shifting extent ending at {ext_end} by {shift_blocks} blocks exceeds ext4 32-bit block space"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_root_header(op: &str, root_bytes: &[u8; 60]) -> Result<()> {
@@ -2921,6 +2957,44 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
 
         let result = insert_range(&cx, &dev, &mut root, &geo, &mut groups, u32::MAX, 2, &pctx);
         assert_invalid_logical_range(result, "insert_range");
+    }
+
+    #[test]
+    fn insert_range_rejects_tail_shift_past_logical_space_without_mutation() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        allocate_extent(
+            &cx,
+            &dev,
+            &mut root,
+            &geo,
+            &mut groups,
+            u32::MAX,
+            1,
+            &AllocHint::default(),
+            &pctx,
+        )
+        .unwrap();
+        let before = map_logical_to_physical(&cx, &dev, &root, u32::MAX, 1).unwrap();
+
+        let err = insert_range(&cx, &dev, &mut root, &geo, &mut groups, 0, 1, &pctx).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                FfsError::InvalidGeometry(msg)
+                    if msg.contains("shifting extent ending")
+                        && msg.contains("32-bit block space")
+            ),
+            "expected logical-space overflow, got {err:?}"
+        );
+
+        let after = map_logical_to_physical(&cx, &dev, &root, u32::MAX, 1).unwrap();
+        assert_eq!(after, before);
     }
 
     #[test]
