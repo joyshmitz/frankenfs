@@ -570,9 +570,7 @@ pub fn insert_range(
     validate_root_header("insert_range", root_bytes)?;
     checked_logical_range_end("insert_range", logical_start, u64::from(count))?;
 
-    // Phase 1: split any extent that straddles the cut. punch_hole on
-    // a zero-length window does nothing, so we instead emit a pair of
-    // (delete, reinsert-left, reinsert-right) operations explicitly.
+    // Split a straddling extent; zero-length punch_hole cannot do it.
     let cut = u64::from(logical_start);
     let mut tree_alloc = GroupBlockAllocator {
         cx,
@@ -593,53 +591,10 @@ pub fn insert_range(
         Ok(())
     })?;
     if let Some(ext) = straddler {
-        let ext_start = u64::from(ext.logical_block);
-        let ext_len = u64::from(u32::from(ext.actual_len()));
-        let ext_end = ext_start + ext_len;
-        ffs_btree::delete_range(
-            cx,
-            dev,
-            root_bytes,
-            ext.logical_block,
-            ext_len,
-            &mut tree_alloc,
-        )?;
-
-        let left_len_u32 = u32::try_from(cut - ext_start).map_err(|_| {
-            ffs_error::FfsError::Format("insert_range: split width exceeds u32".into())
-        })?;
-        let right_len_u32 = u32::try_from(ext_end - cut).map_err(|_| {
-            ffs_error::FfsError::Format("insert_range: split tail exceeds u32".into())
-        })?;
-        let unwritten = ext.is_unwritten();
-        let make_raw_len = |len: u32, unwritten: bool| -> Result<u16> {
-            let len16 = u16::try_from(len).map_err(|_| {
-                ffs_error::FfsError::Format("insert_range: extent split exceeds u16".into())
-            })?;
-            Ok(if unwritten { len16 | (1 << 15) } else { len16 })
-        };
-        let left = Ext4Extent {
-            logical_block: ext.logical_block,
-            raw_len: make_raw_len(left_len_u32, unwritten)?,
-            physical_start: ext.physical_start,
-        };
-        let right = Ext4Extent {
-            logical_block: u32::try_from(cut)
-                .map_err(|_| ffs_error::FfsError::Format("insert_range: cut exceeds u32".into()))?,
-            raw_len: make_raw_len(right_len_u32, unwritten)?,
-            physical_start: checked_physical_add(
-                "insert_range split tail",
-                ext.physical_start,
-                u64::from(left_len_u32),
-            )?,
-        };
-        ffs_btree::insert(cx, dev, root_bytes, left, &mut tree_alloc)?;
-        ffs_btree::insert(cx, dev, root_bytes, right, &mut tree_alloc)?;
+        split_insert_range_straddler(cx, dev, root_bytes, cut, ext, &mut tree_alloc)?;
     }
 
-    // Phase 2: snapshot every extent at or past the cut and shift them
-    // right by count. Walk in a separate pass after the straddle split
-    // so the snapshot reflects the post-split shape.
+    // Snapshot the post-split tail before shifting it right by count.
     let mut tail: Vec<Ext4Extent> = Vec::new();
     ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
         if u64::from(ext.logical_block) >= cut {
@@ -648,8 +603,7 @@ pub fn insert_range(
         Ok(())
     })?;
 
-    // Iterate right-to-left so an in-place shift cannot collide with an
-    // existing later extent that has not been moved yet.
+    // Move right-to-left so shifted extents cannot collide.
     tail.sort_by_key(|ext| std::cmp::Reverse(ext.logical_block));
     for ext in &tail {
         ffs_btree::delete_range(
@@ -678,6 +632,49 @@ pub fn insert_range(
     }
 
     Ok(())
+}
+
+fn split_insert_range_straddler(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &mut [u8; 60],
+    cut: u64,
+    ext: Ext4Extent,
+    tree_alloc: &mut dyn BlockAllocator,
+) -> Result<()> {
+    let ext_start = u64::from(ext.logical_block);
+    let ext_len = u64::from(u32::from(ext.actual_len()));
+    let ext_end = ext_start + ext_len;
+    ffs_btree::delete_range(cx, dev, root_bytes, ext.logical_block, ext_len, tree_alloc)?;
+
+    let left_len_u32 = u32::try_from(cut - ext_start)
+        .map_err(|_| ffs_error::FfsError::Format("insert_range: split width exceeds u32".into()))?;
+    let right_len_u32 = u32::try_from(ext_end - cut)
+        .map_err(|_| ffs_error::FfsError::Format("insert_range: split tail exceeds u32".into()))?;
+    let unwritten = ext.is_unwritten();
+    let make_raw_len = |len: u32, unwritten: bool| -> Result<u16> {
+        let len16 = u16::try_from(len).map_err(|_| {
+            ffs_error::FfsError::Format("insert_range: extent split exceeds u16".into())
+        })?;
+        Ok(if unwritten { len16 | (1 << 15) } else { len16 })
+    };
+    let left = Ext4Extent {
+        logical_block: ext.logical_block,
+        raw_len: make_raw_len(left_len_u32, unwritten)?,
+        physical_start: ext.physical_start,
+    };
+    let right = Ext4Extent {
+        logical_block: u32::try_from(cut)
+            .map_err(|_| ffs_error::FfsError::Format("insert_range: cut exceeds u32".into()))?,
+        raw_len: make_raw_len(right_len_u32, unwritten)?,
+        physical_start: checked_physical_add(
+            "insert_range split tail",
+            ext.physical_start,
+            u64::from(left_len_u32),
+        )?,
+    };
+    ffs_btree::insert(cx, dev, root_bytes, left, tree_alloc)?;
+    ffs_btree::insert(cx, dev, root_bytes, right, tree_alloc)
 }
 
 // ── Unwritten extent handling ───────────────────────────────────────────────
