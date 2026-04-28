@@ -476,6 +476,15 @@ pub enum CommitError {
     DurabilityFailure { detail: String },
 }
 
+pub(crate) fn validate_transaction_id(txn_id: TxnId) -> Result<(), CommitError> {
+    if txn_id.0 == 0 || txn_id.0 == u64::MAX {
+        return Err(CommitError::DurabilityFailure {
+            detail: format!("invalid transaction id {}", txn_id.0),
+        });
+    }
+    Ok(())
+}
+
 /// Record of a committed transaction kept for SSI antidependency checking.
 ///
 /// `snapshot` and `read_set` are retained for future bidirectional SSI
@@ -1983,6 +1992,8 @@ impl MvccStore {
     }
 
     fn preflight_fcw(&mut self, txn: &Transaction) -> Result<(), CommitError> {
+        validate_transaction_id(txn.id())?;
+
         let chain_cap = self.compression_policy.max_chain_length;
         let prev_effective = self.effective_policy();
         let mut had_conflict = false;
@@ -2097,6 +2108,10 @@ impl MvccStore {
         &mut self,
         txn: Transaction,
     ) -> Result<(CommitSeq, Vec<BlockNumber>), (CommitError, Transaction)> {
+        if let Err(error) = validate_transaction_id(txn.id()) {
+            return Err((error, txn));
+        }
+
         let resolved_writes = match self.resolved_writes_for_commit(&txn) {
             Ok(writes) => writes,
             Err(error) => return Err((error, txn)),
@@ -7570,6 +7585,50 @@ mod tests {
             ),
         }
         assert_eq!(store.next_commit, u64::MAX);
+    }
+
+    #[test]
+    fn reserved_transaction_ids_are_rejected_by_all_commit_paths() {
+        fn assert_invalid_transaction_id(error: CommitError) {
+            match error {
+                CommitError::DurabilityFailure { detail } => {
+                    assert!(detail.contains("invalid transaction id"));
+                }
+                other => assert!(
+                    matches!(other, CommitError::DurabilityFailure { .. }),
+                    "unexpected error: {other:?}"
+                ),
+            }
+        }
+
+        let mut store = MvccStore::new();
+        store.next_txn = u64::MAX;
+
+        let mut sentinel = store.begin();
+        assert_eq!(sentinel.id(), TxnId(u64::MAX));
+        sentinel.stage_write(BlockNumber(0), vec![0xAA; 8]);
+        let err = store
+            .commit(sentinel)
+            .expect_err("FCW commit must reject sentinel transaction id");
+        assert_invalid_transaction_id(err);
+        assert_eq!(store.current_snapshot().high, CommitSeq(0));
+
+        let mut ssi_sentinel = store.begin();
+        assert_eq!(ssi_sentinel.id(), TxnId(u64::MAX));
+        ssi_sentinel.stage_write(BlockNumber(1), vec![0xBB; 8]);
+        let err = store
+            .commit_ssi(ssi_sentinel)
+            .expect_err("SSI commit must reject sentinel transaction id");
+        assert_invalid_transaction_id(err);
+        assert_eq!(store.current_snapshot().high, CommitSeq(0));
+
+        let mut prechecked_sentinel = Transaction::new(TxnId(u64::MAX), store.current_snapshot());
+        prechecked_sentinel.stage_write(BlockNumber(2), vec![0xCC; 8]);
+        let err = store
+            .commit_fcw_prechecked(prechecked_sentinel)
+            .expect_err("prechecked commit must reject sentinel transaction id");
+        assert_invalid_transaction_id(err);
+        assert_eq!(store.current_snapshot().high, CommitSeq(0));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use crate::compression::{self, CompressionPolicy, VersionData};
 use crate::{
     AdaptivePolicyConfig, BlockVersion, CommitError, CommittedTxnRecord, ConflictPolicy,
     ContentionMetrics, MergeProof, Transaction, resolve_version_bytes_at_or_before,
+    validate_transaction_id,
 };
 use ffs_types::{BlockNumber, CommitSeq, Snapshot, TxnId};
 use parking_lot::{RwLock, RwLockWriteGuard};
@@ -522,13 +523,8 @@ impl ShardedMvccStore {
     /// Shard locks are acquired in sorted order to prevent deadlocks.
     #[allow(clippy::result_large_err)]
     pub fn commit(&self, txn: Transaction) -> Result<CommitSeq, (CommitError, Transaction)> {
-        if txn.id().0 == 0 || txn.id().0 == u64::MAX {
-            return Err((
-                CommitError::DurabilityFailure {
-                    detail: format!("invalid transaction id {}", txn.id().0),
-                },
-                txn,
-            ));
+        if let Err(error) = validate_transaction_id(txn.id()) {
+            return Err((error, txn));
         }
 
         if txn.write_set().is_empty() {
@@ -599,6 +595,10 @@ impl ShardedMvccStore {
     /// Commit with Serializable Snapshot Isolation (SSI) enforcement.
     #[allow(clippy::result_large_err)]
     pub fn commit_ssi(&self, txn: Transaction) -> Result<CommitSeq, (CommitError, Transaction)> {
+        if let Err(error) = validate_transaction_id(txn.id()) {
+            return Err((error, txn));
+        }
+
         if txn.write_set().is_empty() {
             return Ok(self.current_snapshot().high);
         }
@@ -986,6 +986,22 @@ mod tests {
         let (err, _) = store
             .commit(sentinel)
             .expect_err("sentinel transaction id should not commit");
+        match err {
+            CommitError::DurabilityFailure { detail } => {
+                assert!(detail.contains("invalid transaction id"));
+            }
+            other => assert!(
+                matches!(other, CommitError::DurabilityFailure { .. }),
+                "unexpected error: {other:?}"
+            ),
+        }
+
+        let mut ssi_sentinel = store.begin();
+        assert_eq!(ssi_sentinel.id(), TxnId(u64::MAX));
+        ssi_sentinel.stage_write(BlockNumber(8), vec![0x5A]);
+        let (err, _) = store
+            .commit_ssi(ssi_sentinel)
+            .expect_err("SSI must reject sentinel transaction id");
         match err {
             CommitError::DurabilityFailure { detail } => {
                 assert!(detail.contains("invalid transaction id"));
