@@ -3240,6 +3240,9 @@ impl BtrfsExtentAllocator {
             item_type,
             offset: num_bytes,
         };
+        if self.extent_tree.range(&key, &key)?.is_empty() {
+            return Err(BtrfsMutationError::KeyNotFound);
+        }
 
         let extent_end = bytenr
             .checked_add(num_bytes)
@@ -3358,8 +3361,9 @@ impl BtrfsExtentAllocator {
         self.block_groups
             .values()
             .filter(|bg| (bg.item.flags & type_flags) != 0)
-            .map(|bg| bg.item.free_bytes())
-            .sum()
+            .fold(0_u64, |total, bg| {
+                total.saturating_add(bg.item.free_bytes())
+            })
     }
 
     /// Largest currently allocatable free extent across matching block groups.
@@ -3453,8 +3457,7 @@ impl BtrfsExtentAllocator {
     pub fn total_used(&self) -> u64 {
         self.block_groups
             .values()
-            .map(|bg| bg.item.used_bytes)
-            .sum()
+            .fold(0_u64, |total, bg| total.saturating_add(bg.item.used_bytes))
     }
 
     /// Total capacity across all block groups.
@@ -3462,8 +3465,7 @@ impl BtrfsExtentAllocator {
     pub fn total_capacity(&self) -> u64 {
         self.block_groups
             .values()
-            .map(|bg| bg.item.total_bytes)
-            .sum()
+            .fold(0_u64, |total, bg| total.saturating_add(bg.item.total_bytes))
     }
 }
 
@@ -7722,6 +7724,51 @@ mod tests {
 
         alloc.alloc_data(100).expect("alloc");
         assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_DATA), 2900);
+    }
+
+    #[test]
+    fn block_group_aggregate_counters_saturate_on_overflow() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(
+            0x10_0000,
+            BtrfsBlockGroupItem {
+                total_bytes: u64::MAX,
+                used_bytes: u64::MAX,
+                flags: BTRFS_BLOCK_GROUP_DATA,
+            },
+        );
+        alloc.add_block_group(
+            0x20_0000,
+            BtrfsBlockGroupItem {
+                total_bytes: 1,
+                used_bytes: 1,
+                flags: BTRFS_BLOCK_GROUP_DATA,
+            },
+        );
+        alloc.add_block_group(
+            0x30_0000,
+            BtrfsBlockGroupItem {
+                total_bytes: u64::MAX,
+                used_bytes: 0,
+                flags: BTRFS_BLOCK_GROUP_METADATA,
+            },
+        );
+        alloc.add_block_group(
+            0x40_0000,
+            BtrfsBlockGroupItem {
+                total_bytes: 1,
+                used_bytes: 0,
+                flags: BTRFS_BLOCK_GROUP_METADATA,
+            },
+        );
+
+        assert_eq!(alloc.total_used(), u64::MAX);
+        assert_eq!(alloc.total_capacity(), u64::MAX);
+        assert_eq!(alloc.total_free(BTRFS_BLOCK_GROUP_METADATA), u64::MAX);
+        assert_eq!(
+            alloc.total_free(BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA),
+            u64::MAX
+        );
     }
 
     #[test]
