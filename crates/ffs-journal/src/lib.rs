@@ -754,7 +754,8 @@ fn replay_jbd2_inner(
         }
     }
 
-    let mut committed_sequences: Vec<u32> = committed_sequences.into_iter().collect();
+    let committed_sequence_set = committed_sequences;
+    let mut committed_sequences: Vec<u32> = committed_sequence_set.iter().copied().collect();
     if !committed_sequences.is_empty() {
         // Sort by u32 value first to make finding the gap easier.
         committed_sequences.sort_unstable();
@@ -845,8 +846,11 @@ fn replay_jbd2_inner(
     }
     stats.replayed_blocks = replayed_blocks;
 
-    stats.incomplete_transactions =
-        u64::try_from(pending.len().saturating_sub(committed_sequences.len())).unwrap_or(u64::MAX);
+    let incomplete_transactions = pending
+        .keys()
+        .filter(|seq| !committed_sequence_set.contains(seq))
+        .count();
+    stats.incomplete_transactions = u64::try_from(incomplete_transactions).unwrap_or(u64::MAX);
 
     Ok(ReplayOutcome {
         committed_sequences,
@@ -5781,6 +5785,34 @@ mod tests {
         assert_eq!(out.committed_sequences, vec![42]);
         assert_eq!(out.stats.orphaned_commit_blocks, 1);
         assert_eq!(out.stats.replayed_blocks, 0);
+    }
+
+    #[test]
+    fn replay_jbd2_incomplete_count_ignores_orphan_commits() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(512, 64);
+        let region = JournalRegion {
+            start: BlockNumber(10),
+            blocks: 4,
+        };
+
+        dev.raw_write(
+            BlockNumber(10),
+            descriptor_block(512, 1, &[(5, JBD2_TAG_FLAG_LAST)]),
+        );
+        dev.raw_write(BlockNumber(11), vec![0xAA; 512]);
+        dev.raw_write(BlockNumber(12), commit_block(512, 2));
+
+        let out = replay_jbd2(&cx, &dev, region).expect("replay");
+
+        assert_eq!(out.committed_sequences, vec![2]);
+        assert_eq!(out.stats.orphaned_commit_blocks, 1);
+        assert_eq!(out.stats.incomplete_transactions, 1);
+        assert_eq!(out.stats.replayed_blocks, 0);
+        assert_eq!(
+            dev.read_block(&cx, BlockNumber(5)).unwrap().as_slice(),
+            &[0_u8; 512]
+        );
     }
 
     #[test]
