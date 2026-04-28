@@ -4317,14 +4317,14 @@ fn open_mount_background_scrub_ledger(
 
 fn run_mount_background_scrub_daemon(
     cx: &Cx,
-    image_path: PathBuf,
+    image_path: &Path,
     plan: MountBackgroundScrubPlan,
     interval: Duration,
-    ledger_path: Option<PathBuf>,
+    ledger_path: Option<&Path>,
     operation_id: &str,
     scenario_id: &str,
 ) -> Result<ScrubDaemonMetrics> {
-    let byte_dev = FileByteDevice::open(&image_path).with_context(|| {
+    let byte_dev = FileByteDevice::open(image_path).with_context(|| {
         format!(
             "failed to open image for background scrub: {}",
             image_path.display()
@@ -4337,7 +4337,7 @@ fn run_mount_background_scrub_daemon(
         )
     })?;
     let validator = scrub_validator(&plan.flavor, plan.block_size);
-    let ledger = open_mount_background_scrub_ledger(ledger_path.as_deref())?;
+    let ledger = open_mount_background_scrub_ledger(ledger_path)?;
     let pipeline = ScrubWithRecovery::new(
         &block_dev,
         validator.as_ref(),
@@ -4429,10 +4429,10 @@ fn start_mount_background_scrub(
         .spawn(move || {
             run_mount_background_scrub_daemon(
                 &thread_cx,
-                image_path,
+                &image_path,
                 plan,
                 interval,
-                ledger_path,
+                ledger_path.as_deref(),
                 &thread_operation_id,
                 &thread_scenario_id,
             )
