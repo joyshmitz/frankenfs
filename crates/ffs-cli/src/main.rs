@@ -4175,6 +4175,277 @@ fn log_mount_shutdown_metrics(
     );
 }
 
+struct MountBackgroundScrubPlan {
+    flavor: FsFlavor,
+    block_size: u32,
+    fs_uuid: [u8; 16],
+    groups: Vec<GroupConfig>,
+}
+
+struct MountBackgroundScrubGuard {
+    cx: Cx,
+    handle: Option<JoinHandle<Result<ScrubDaemonMetrics>>>,
+    operation_id: String,
+    scenario_id: String,
+}
+
+impl MountBackgroundScrubGuard {
+    fn stop(&mut self) {
+        self.cx.set_cancel_requested(true);
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+
+        match handle.join() {
+            Ok(Ok(metrics)) => {
+                info!(
+                    target: "ffs::cli::mount",
+                    operation_id = %self.operation_id,
+                    scenario_id = %self.scenario_id,
+                    outcome = "background_scrub_stopped",
+                    blocks_scanned_total = metrics.blocks_scanned_total,
+                    blocks_corrupt_found = metrics.blocks_corrupt_found,
+                    blocks_recovered = metrics.blocks_recovered,
+                    blocks_unrecoverable = metrics.blocks_unrecoverable,
+                    scrub_rounds_completed = metrics.scrub_rounds_completed,
+                    "mount_background_scrub_stop"
+                );
+            }
+            Ok(Err(error)) => {
+                error!(
+                    target: "ffs::cli::mount",
+                    operation_id = %self.operation_id,
+                    scenario_id = %self.scenario_id,
+                    outcome = "background_scrub_failed",
+                    reason = %error,
+                    "mount_background_scrub_stop"
+                );
+            }
+            Err(_) => {
+                error!(
+                    target: "ffs::cli::mount",
+                    operation_id = %self.operation_id,
+                    scenario_id = %self.scenario_id,
+                    outcome = "background_scrub_panicked",
+                    "mount_background_scrub_stop"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for MountBackgroundScrubGuard {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn build_mount_background_scrub_plan(
+    image_path: &Path,
+    open_fs: &OpenFs,
+) -> Result<MountBackgroundScrubPlan> {
+    if let Some(sb) = open_fs.ext4_superblock() {
+        let specs = build_ext4_repair_group_specs(sb)
+            .context("failed to compute ext4 repair group layout for mount background scrub")?;
+        let groups = specs
+            .iter()
+            .map(|spec| GroupConfig {
+                layout: spec.layout,
+                source_first_block: spec.source_first_block,
+                source_block_count: spec.source_block_count,
+            })
+            .collect();
+        return Ok(MountBackgroundScrubPlan {
+            flavor: FsFlavor::Ext4(sb.clone()),
+            block_size: sb.block_size,
+            fs_uuid: sb.uuid,
+            groups,
+        });
+    }
+
+    if let Some(sb) = open_fs.btrfs_superblock() {
+        let image_len = open_fs.device_len();
+        let block_size = choose_btrfs_scrub_block_size(image_len, sb.nodesize, sb.sectorsize)
+            .with_context(|| {
+                format!(
+                    "failed to derive btrfs mount background scrub block size \
+                     (len_bytes={image_len}, nodesize={}, sectorsize={})",
+                    sb.nodesize, sb.sectorsize
+                )
+            })?;
+        let image_path = image_path.to_path_buf();
+        let specs = discover_btrfs_repair_group_specs(&image_path, block_size)
+            .context("failed to discover btrfs repair group layout for mount background scrub")?;
+        let groups = specs
+            .iter()
+            .map(|spec| GroupConfig {
+                layout: spec.layout,
+                source_first_block: spec.physical_start_block,
+                source_block_count: spec.source_block_count,
+            })
+            .collect();
+        return Ok(MountBackgroundScrubPlan {
+            flavor: FsFlavor::Btrfs(sb.clone()),
+            block_size,
+            fs_uuid: sb.fsid,
+            groups,
+        });
+    }
+
+    bail!("mount background scrub supports ext4 and btrfs images only")
+}
+
+fn open_mount_background_scrub_ledger(
+    path: Option<&Path>,
+) -> Result<Box<dyn std::io::Write + Send>> {
+    match path {
+        Some(path) => {
+            let file = StdOpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| {
+                    format!(
+                        "failed to open mount background scrub evidence ledger: {}",
+                        path.display()
+                    )
+                })?;
+            Ok(Box::new(file))
+        }
+        None => Ok(Box::new(std::io::sink())),
+    }
+}
+
+fn run_mount_background_scrub_daemon(
+    cx: &Cx,
+    image_path: PathBuf,
+    plan: MountBackgroundScrubPlan,
+    interval: Duration,
+    ledger_path: Option<PathBuf>,
+    operation_id: &str,
+    scenario_id: &str,
+) -> Result<ScrubDaemonMetrics> {
+    let byte_dev = FileByteDevice::open(&image_path)
+        .with_context(|| format!("failed to open image for background scrub: {}", image_path.display()))?;
+    let block_dev = ByteBlockDevice::new(byte_dev, plan.block_size).with_context(|| {
+        format!(
+            "failed to create background scrub block device (block_size={})",
+            plan.block_size
+        )
+    })?;
+    let validator = scrub_validator(&plan.flavor, plan.block_size);
+    let ledger = open_mount_background_scrub_ledger(ledger_path.as_deref())?;
+    let pipeline = ScrubWithRecovery::new(
+        &block_dev,
+        validator.as_ref(),
+        plan.fs_uuid,
+        plan.groups,
+        ledger,
+        0,
+    )
+    .with_repair_writes_enabled(false);
+    let mut daemon = ScrubDaemon::new(
+        pipeline,
+        ScrubDaemonConfig {
+            interval,
+            ..ScrubDaemonConfig::default()
+        },
+    );
+
+    info!(
+        target: "ffs::cli::mount",
+        operation_id,
+        scenario_id,
+        interval_secs = interval.as_secs(),
+        repair_writes_enabled = false,
+        "mount_background_scrub_thread_start"
+    );
+
+    daemon
+        .run_until_cancelled(cx)
+        .map_err(anyhow::Error::new)
+}
+
+fn start_mount_background_scrub(
+    image_path: &Path,
+    open_fs: &OpenFs,
+    config: &MountBackgroundScrubConfig,
+    operation_id: &str,
+    scenario_id: &str,
+) -> Result<Option<MountBackgroundScrubGuard>> {
+    if !config.enabled {
+        debug!(
+            target: "ffs::cli::mount",
+            operation_id,
+            scenario_id,
+            outcome = "background_scrub_disabled",
+            explicit = config.explicit,
+            "mount_background_scrub_disabled"
+        );
+        return Ok(None);
+    }
+
+    let plan = match build_mount_background_scrub_plan(image_path, open_fs) {
+        Ok(plan) => plan,
+        Err(error) if !config.explicit => {
+            warn!(
+                target: "ffs::cli::mount",
+                operation_id,
+                scenario_id,
+                outcome = "background_scrub_unavailable",
+                reason = %error,
+                "mount_background_scrub_unavailable"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+
+    let group_count = plan.groups.len();
+    let block_size = plan.block_size;
+    let interval = Duration::from_secs(config.interval_secs);
+    let thread_cx = Cx::for_request();
+    let guard_cx = thread_cx.clone();
+    let image_path = image_path.to_path_buf();
+    let ledger_path = config.ledger_path.clone();
+    let thread_operation_id = operation_id.to_owned();
+    let thread_scenario_id = scenario_id.to_owned();
+
+    info!(
+        target: "ffs::cli::mount",
+        operation_id,
+        scenario_id,
+        outcome = "background_scrub_starting",
+        groups = group_count,
+        block_size,
+        interval_secs = config.interval_secs,
+        repair_writes_enabled = false,
+        "mount_background_scrub_start"
+    );
+
+    let handle = std::thread::Builder::new()
+        .name("ffs-mount-scrub".to_owned())
+        .spawn(move || {
+            run_mount_background_scrub_daemon(
+                &thread_cx,
+                image_path,
+                plan,
+                interval,
+                ledger_path,
+                &thread_operation_id,
+                &thread_scenario_id,
+            )
+        })
+        .context("failed to spawn mount background scrub daemon")?;
+
+    Ok(Some(MountBackgroundScrubGuard {
+        cx: guard_cx,
+        handle: Some(handle),
+        operation_id: operation_id.to_owned(),
+        scenario_id: scenario_id.to_owned(),
+    }))
+}
+
 #[allow(clippy::too_many_lines)]
 fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) -> Result<()> {
     let auto_unmount = env_bool("FFS_AUTO_UNMOUNT", true)?;
@@ -4265,6 +4536,14 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
             .enable_writes(&cx)
             .context("failed to enable write support")?;
     }
+
+    let _background_scrub_guard = start_mount_background_scrub(
+        image_path,
+        &open_fs,
+        &options.background_scrub,
+        &operation_id,
+        scenario_id,
+    )?;
 
     match runtime.mode {
         MountRuntimeMode::Standard => {
@@ -5556,7 +5835,7 @@ mod tests {
         format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
         mount_cmd, mount_operation_id, open_filesystem_for_mount, parse_btrfs_mount_selection,
         read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
-        summarize_repair_staleness, unavailable_repair_info,
+        start_mount_background_scrub, summarize_repair_staleness, unavailable_repair_info,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -7506,6 +7785,81 @@ mod tests {
             MountRuntimeMode::PerCore.scenario_id(false),
             "cli_mount_runtime_per_core_ro"
         );
+    }
+
+    #[test]
+    fn mount_background_scrub_defaults_to_read_only_auto() {
+        let cfg = MountBackgroundScrubConfig::resolve(false, false, false, None, None)
+            .expect("read-only default should resolve");
+        assert!(cfg.enabled);
+        assert!(!cfg.explicit);
+        assert_eq!(
+            cfg.interval_secs,
+            super::DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS
+        );
+        assert!(cfg.ledger_path.is_none());
+    }
+
+    #[test]
+    fn mount_background_scrub_defaults_off_for_read_write() {
+        let cfg = MountBackgroundScrubConfig::resolve(true, false, false, None, None)
+            .expect("read-write default should resolve");
+        assert!(!cfg.enabled);
+        assert!(!cfg.explicit);
+    }
+
+    #[test]
+    fn mount_background_scrub_flag_forces_read_write_detection() {
+        let cfg = MountBackgroundScrubConfig::resolve(
+            true,
+            true,
+            false,
+            Some(11),
+            Some(PathBuf::from("/tmp/ffs-scrub.jsonl")),
+        )
+        .expect("explicit background scrub should resolve");
+        assert!(cfg.enabled);
+        assert!(cfg.explicit);
+        assert_eq!(cfg.interval_secs, 11);
+        assert_eq!(cfg.ledger_path, Some(PathBuf::from("/tmp/ffs-scrub.jsonl")));
+    }
+
+    #[test]
+    fn mount_background_scrub_rejects_disabled_interval() {
+        let err =
+            MountBackgroundScrubConfig::resolve(false, false, true, Some(3), None)
+                .expect_err("disabled scrub cannot accept an interval");
+        assert!(
+            err.to_string()
+                .contains("--background-scrub-interval-secs requires background scrub")
+        );
+    }
+
+    #[test]
+    fn mount_background_scrub_can_start_and_stop_for_ext4() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+        with_temp_image_path(&image, |path| {
+            let cx = asupersync::Cx::for_testing();
+            let open_fs = super::OpenFs::open_with_options(
+                &cx,
+                &path,
+                &super::OpenOptions::default(),
+            )
+            .expect("test ext4 image should open");
+            let cfg = MountBackgroundScrubConfig::resolve(false, true, false, Some(1), None)
+                .expect("background scrub config should resolve");
+            let mut guard = start_mount_background_scrub(
+                &path,
+                &open_fs,
+                &cfg,
+                "mount-bg-scrub-test",
+                "cli_mount_background_scrub_ro",
+            )
+            .expect("background scrub should start")
+            .expect("background scrub should be enabled");
+            guard.stop();
+        });
     }
 
     #[test]
