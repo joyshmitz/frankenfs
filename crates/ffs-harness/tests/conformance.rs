@@ -4235,7 +4235,7 @@ fn ext4_active_mmp_write_open_is_rejected() {
     assert!(
         matches!(err, ffs_error::FfsError::UnsupportedFeature(ref message)
             if message.contains("another writer may be active")
-                && message.contains("write-participating MMP is not implemented")),
+                && message.contains("instead of participating in periodic MMP heartbeat updates")),
         "expected explicit active-MMP UnsupportedFeature, got {err:?}"
     );
     assert_eq!(err.to_errno(), libc::EOPNOTSUPP);
