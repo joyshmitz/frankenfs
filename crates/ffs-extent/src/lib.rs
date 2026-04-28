@@ -382,7 +382,7 @@ pub fn punch_hole(
     cx_checkpoint(cx)?;
     validate_root_header("punch_hole", root_bytes)?;
 
-    let hole_end = u64::from(logical_start).saturating_add(count);
+    let hole_end = checked_logical_range_end("punch_hole", logical_start, count)?;
 
     // Collect extents overlapping the hole.
     let mut overlapping = Vec::new();
@@ -474,6 +474,7 @@ pub fn collapse_range(
     }
     cx_checkpoint(cx)?;
     validate_root_header("collapse_range", root_bytes)?;
+    let cut = checked_logical_range_end("collapse_range", logical_start, u64::from(count))?;
 
     // Phase 1: free + delete extents in [start, start+count). punch_hole
     // also splits any extent that straddles the cut so the right-hand
@@ -493,7 +494,6 @@ pub fn collapse_range(
     // Phase 2: snapshot the tail before mutating the tree. We cannot
     // delete during walk() because the visitor only sees a read-only
     // view of each extent.
-    let cut = u64::from(logical_start) + u64::from(count);
     let mut tail: Vec<Ext4Extent> = Vec::new();
     ffs_btree::walk(cx, dev, root_bytes, &mut |ext: &Ext4Extent| {
         if u64::from(ext.logical_block) >= cut {
@@ -568,6 +568,7 @@ pub fn insert_range(
     }
     cx_checkpoint(cx)?;
     validate_root_header("insert_range", root_bytes)?;
+    checked_logical_range_end("insert_range", logical_start, u64::from(count))?;
 
     // Phase 1: split any extent that straddles the cut. punch_hole on
     // a zero-length window does nothing, so we instead emit a pair of
@@ -1377,6 +1378,19 @@ mod tests {
             .collect()
     }
 
+    fn assert_invalid_logical_range<T: std::fmt::Debug>(result: Result<T>, op: &str) {
+        let err = result.expect_err("logical range past ext4 block space should fail");
+        let msg = format!("{err}");
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(_)),
+            "expected InvalidGeometry, got {err:?}"
+        );
+        assert!(
+            msg.contains(op) && msg.contains("exceeds ext4 32-bit block space"),
+            "error should identify the rejected {op} logical range: {msg}"
+        );
+    }
+
     fn empty_root() -> [u8; 60] {
         let mut root = [0u8; 60];
         // Magic.
@@ -1852,6 +1866,19 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
 
         let freed = punch_hole(&cx, &dev, &mut root, &geo, &mut groups, 0, 10, &pctx).unwrap();
         assert_eq!(freed, 0);
+    }
+
+    #[test]
+    fn punch_hole_rejects_range_past_logical_block_space() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let result = punch_hole(&cx, &dev, &mut root, &geo, &mut groups, u32::MAX, 2, &pctx);
+        assert_invalid_logical_range(result, "punch_hole");
     }
 
     #[test]
@@ -2871,6 +2898,32 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         })
         .unwrap();
         assert_eq!(count, 0, "punching full extent should leave empty tree");
+    }
+
+    #[test]
+    fn collapse_range_rejects_range_past_logical_block_space() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let result = collapse_range(&cx, &dev, &mut root, &geo, &mut groups, u32::MAX, 2, &pctx);
+        assert_invalid_logical_range(result, "collapse_range");
+    }
+
+    #[test]
+    fn insert_range_rejects_range_past_logical_block_space() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let mut groups = make_groups(&geo);
+        let mut root = empty_root();
+        let pctx = mock_pctx();
+
+        let result = insert_range(&cx, &dev, &mut root, &geo, &mut groups, u32::MAX, 2, &pctx);
+        assert_invalid_logical_range(result, "insert_range");
     }
 
     #[test]
