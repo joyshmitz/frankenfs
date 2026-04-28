@@ -34,12 +34,12 @@ use ffs_ondisk::{
     Ext4ImageReader, Ext4Inode, Ext4Superblock, ExtentTree, ext4::Ext4QuotaInodes, parse_dx_root,
     parse_extent_tree, parse_inode_extent_tree,
 };
+use ffs_repair::pipeline::{
+    GroupConfig, ScrubDaemon, ScrubDaemonConfig, ScrubDaemonMetrics, ScrubWithRecovery,
+};
 use ffs_repair::scrub::{
     BlockValidator, BtrfsSuperblockValidator, BtrfsTreeBlockValidator, CompositeValidator,
     Ext4SuperblockValidator, ScrubReport, Scrubber, Severity, ZeroCheckValidator,
-};
-use ffs_repair::pipeline::{
-    GroupConfig, ScrubDaemon, ScrubDaemonConfig, ScrubDaemonMetrics, ScrubWithRecovery,
 };
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, EXT4_SUPERBLOCK_OFFSET,
@@ -173,13 +173,6 @@ impl MountBackgroundScrubConfig {
         if background_scrub && no_background_scrub {
             bail!("--background-scrub and --no-background-scrub are mutually exclusive");
         }
-        if no_background_scrub && interval_secs.is_some() {
-            bail!("--background-scrub-interval-secs requires background scrub to be enabled");
-        }
-        if no_background_scrub && ledger_path.is_some() {
-            bail!("--background-scrub-ledger requires background scrub to be enabled");
-        }
-
         let explicit = background_scrub || no_background_scrub;
         let enabled = if background_scrub {
             true
@@ -188,6 +181,12 @@ impl MountBackgroundScrubConfig {
         } else {
             !read_write
         };
+        if !enabled && interval_secs.is_some() {
+            bail!("--background-scrub-interval-secs requires background scrub to be enabled");
+        }
+        if !enabled && ledger_path.is_some() {
+            bail!("--background-scrub-ledger requires background scrub to be enabled");
+        }
 
         Ok(Self {
             enabled,
@@ -3824,7 +3823,7 @@ fn ext4_mmp_refusal_log_context(error: &ffs_error::FfsError) -> Option<Ext4MmpRe
             sequence: None,
         })
     } else if message.contains("another writer may be active")
-        && message.contains("write-participating MMP is not implemented")
+        && message.contains("instead of participating in periodic MMP heartbeat updates")
     {
         Some(Ext4MmpRefusalLogContext {
             status_class: "active",
@@ -4325,8 +4324,12 @@ fn run_mount_background_scrub_daemon(
     operation_id: &str,
     scenario_id: &str,
 ) -> Result<ScrubDaemonMetrics> {
-    let byte_dev = FileByteDevice::open(&image_path)
-        .with_context(|| format!("failed to open image for background scrub: {}", image_path.display()))?;
+    let byte_dev = FileByteDevice::open(&image_path).with_context(|| {
+        format!(
+            "failed to open image for background scrub: {}",
+            image_path.display()
+        )
+    })?;
     let block_dev = ByteBlockDevice::new(byte_dev, plan.block_size).with_context(|| {
         format!(
             "failed to create background scrub block device (block_size={})",
@@ -4361,9 +4364,7 @@ fn run_mount_background_scrub_daemon(
         "mount_background_scrub_thread_start"
     );
 
-    daemon
-        .run_until_cancelled(cx)
-        .map_err(anyhow::Error::new)
+    daemon.run_until_cancelled(cx).map_err(anyhow::Error::new)
 }
 
 fn start_mount_background_scrub(
@@ -7826,12 +7827,37 @@ mod tests {
 
     #[test]
     fn mount_background_scrub_rejects_disabled_interval() {
-        let err =
-            MountBackgroundScrubConfig::resolve(false, false, true, Some(3), None)
-                .expect_err("disabled scrub cannot accept an interval");
+        let err = MountBackgroundScrubConfig::resolve(false, false, true, Some(3), None)
+            .expect_err("disabled scrub cannot accept an interval");
         assert!(
             err.to_string()
                 .contains("--background-scrub-interval-secs requires background scrub")
+        );
+    }
+
+    #[test]
+    fn mount_background_scrub_rejects_read_write_interval_without_opt_in() {
+        let err = MountBackgroundScrubConfig::resolve(true, false, false, Some(3), None)
+            .expect_err("read-write mount requires explicit scrub opt-in for interval");
+        assert!(
+            err.to_string()
+                .contains("--background-scrub-interval-secs requires background scrub")
+        );
+    }
+
+    #[test]
+    fn mount_background_scrub_rejects_read_write_ledger_without_opt_in() {
+        let err = MountBackgroundScrubConfig::resolve(
+            true,
+            false,
+            false,
+            None,
+            Some(PathBuf::from("/tmp/scrub.jsonl")),
+        )
+        .expect_err("read-write mount requires explicit scrub opt-in for ledger");
+        assert!(
+            err.to_string()
+                .contains("--background-scrub-ledger requires background scrub")
         );
     }
 
@@ -7841,12 +7867,9 @@ mod tests {
         let image = build_test_ext4_image_with_state(EXT4_VALID_FS);
         with_temp_image_path(&image, |path| {
             let cx = asupersync::Cx::for_testing();
-            let open_fs = super::OpenFs::open_with_options(
-                &cx,
-                &path,
-                &super::OpenOptions::default(),
-            )
-            .expect("test ext4 image should open");
+            let open_fs =
+                super::OpenFs::open_with_options(&cx, &path, &super::OpenOptions::default())
+                    .expect("test ext4 image should open");
             let cfg = MountBackgroundScrubConfig::resolve(false, true, false, Some(1), None)
                 .expect("background scrub config should resolve");
             let mut guard = start_mount_background_scrub(
@@ -9182,6 +9205,11 @@ mod tests {
             "standard",
             "--allow-other",
             "--rw",
+            "--background-scrub",
+            "--background-scrub-interval-secs",
+            "9",
+            "--background-scrub-ledger",
+            "/tmp/scrub.jsonl",
             "/tmp/fs.img",
             "/tmp/mnt",
         ])
@@ -9195,6 +9223,10 @@ mod tests {
                 managed_unmount_timeout_secs,
                 allow_other,
                 rw,
+                background_scrub,
+                no_background_scrub,
+                background_scrub_interval_secs,
+                background_scrub_ledger,
                 native,
                 ..
             } => {
@@ -9204,6 +9236,13 @@ mod tests {
                 assert_eq!(managed_unmount_timeout_secs, None);
                 assert!(allow_other);
                 assert!(rw);
+                assert!(background_scrub);
+                assert!(!no_background_scrub);
+                assert_eq!(background_scrub_interval_secs, Some(9));
+                assert_eq!(
+                    background_scrub_ledger,
+                    Some(PathBuf::from("/tmp/scrub.jsonl"))
+                );
                 assert!(!native);
             }
             other => assert!(
@@ -9226,6 +9265,10 @@ mod tests {
                 managed_unmount_timeout_secs,
                 allow_other,
                 rw,
+                background_scrub,
+                no_background_scrub,
+                background_scrub_interval_secs,
+                background_scrub_ledger,
                 native,
                 ..
             } => {
@@ -9235,6 +9278,10 @@ mod tests {
                 assert_eq!(managed_unmount_timeout_secs, None);
                 assert!(!allow_other);
                 assert!(!rw);
+                assert!(!background_scrub);
+                assert!(!no_background_scrub);
+                assert_eq!(background_scrub_interval_secs, None);
+                assert_eq!(background_scrub_ledger, None);
                 assert!(!native);
             }
             other => assert!(
@@ -10105,9 +10152,9 @@ mod tests {
                 .raw_hex
                 .as_ref()
                 .expect("btrfs chunk raw hex should be available");
-            assert!(raw_hex.starts_with(
-                "00000000: 00 01 00 00 00 00 00 00 e4 00 00 00 00 00 00 00\n"
-            ));
+            assert!(
+                raw_hex.starts_with("00000000: 00 01 00 00 00 00 00 00 e4 00 00 00 00 00 00 00\n")
+            );
             assert!(output.limitations.is_empty());
 
             let chunk = output
