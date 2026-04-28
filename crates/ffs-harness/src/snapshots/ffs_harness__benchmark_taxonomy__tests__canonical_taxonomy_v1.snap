@@ -1,0 +1,416 @@
+---
+source: crates/ffs-harness/src/benchmark_taxonomy.rs
+expression: json
+---
+{
+  "version": 1,
+  "operations": {
+    "block_cache_arc_compile_like": {
+      "operation_id": "block_cache_arc_compile_like",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "arc policy: Metadata hot blocks + file I/O mix"
+    },
+    "block_cache_arc_database_like": {
+      "operation_id": "block_cache_arc_database_like",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "arc policy: B-tree simulation workload"
+    },
+    "block_cache_arc_mixed_seq70_hot30": {
+      "operation_id": "block_cache_arc_mixed_seq70_hot30",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "arc policy: 70% sequential + 30% hot set"
+    },
+    "block_cache_arc_sequential_scan": {
+      "operation_id": "block_cache_arc_sequential_scan",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "arc policy: 4-pass sequential scan"
+    },
+    "block_cache_arc_zipf_distribution": {
+      "operation_id": "block_cache_arc_zipf_distribution",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "arc policy: Zipf(1.07) random access"
+    },
+    "block_cache_s3fifo_compile_like": {
+      "operation_id": "block_cache_s3fifo_compile_like",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "s3fifo policy: Metadata hot blocks + file I/O mix"
+    },
+    "block_cache_s3fifo_database_like": {
+      "operation_id": "block_cache_s3fifo_database_like",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "s3fifo policy: B-tree simulation workload"
+    },
+    "block_cache_s3fifo_mixed_seq70_hot30": {
+      "operation_id": "block_cache_s3fifo_mixed_seq70_hot30",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "s3fifo policy: 70% sequential + 30% hot set"
+    },
+    "block_cache_s3fifo_sequential_scan": {
+      "operation_id": "block_cache_s3fifo_sequential_scan",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "s3fifo policy: 4-pass sequential scan"
+    },
+    "block_cache_s3fifo_zipf_distribution": {
+      "operation_id": "block_cache_s3fifo_zipf_distribution",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "s3fifo policy: Zipf(1.07) random access"
+    },
+    "degraded_backpressure_contention_4threads": {
+      "operation_id": "degraded_backpressure_contention_4threads",
+      "family": "degraded_mode",
+      "metric": "throughput",
+      "owning_crate": "ffs-fuse",
+      "description": "4-thread concurrent BackpressureGate.check() throughput"
+    },
+    "degraded_fsm_tick_latency": {
+      "operation_id": "degraded_fsm_tick_latency",
+      "family": "degraded_mode",
+      "metric": "latency",
+      "owning_crate": "ffs-core",
+      "description": "DegradationFsm tick latency (pressure sample processing)"
+    },
+    "degraded_throughput_critical_mixed": {
+      "operation_id": "degraded_throughput_critical_mixed",
+      "family": "degraded_mode",
+      "metric": "throughput",
+      "owning_crate": "ffs-fuse",
+      "description": "Critical-level (writes throttled, metadata writes shed): mixed throughput under pressure"
+    },
+    "degraded_throughput_critical_read": {
+      "operation_id": "degraded_throughput_critical_read",
+      "family": "degraded_mode",
+      "metric": "throughput",
+      "owning_crate": "ffs-fuse",
+      "description": "Critical-level (writes throttled, metadata writes shed): read throughput under pressure"
+    },
+    "degraded_throughput_critical_write": {
+      "operation_id": "degraded_throughput_critical_write",
+      "family": "degraded_mode",
+      "metric": "throughput",
+      "owning_crate": "ffs-fuse",
+      "description": "Critical-level (writes throttled, metadata writes shed): write throughput under pressure"
+    },
+    "degraded_throughput_warning_mixed": {
+      "operation_id": "degraded_throughput_warning_mixed",
+      "family": "degraded_mode",
+      "metric": "throughput",
+      "owning_crate": "ffs-fuse",
+      "description": "Warning-level (background paused, foreground unaffected): mixed throughput under pressure"
+    },
+    "degraded_throughput_warning_read": {
+      "operation_id": "degraded_throughput_warning_read",
+      "family": "degraded_mode",
+      "metric": "throughput",
+      "owning_crate": "ffs-fuse",
+      "description": "Warning-level (background paused, foreground unaffected): read throughput under pressure"
+    },
+    "degraded_throughput_warning_write": {
+      "operation_id": "degraded_throughput_warning_write",
+      "family": "degraded_mode",
+      "metric": "throughput",
+      "owning_crate": "ffs-fuse",
+      "description": "Warning-level (background paused, foreground unaffected): write throughput under pressure"
+    },
+    "extent_resolve_depth0_cached": {
+      "operation_id": "extent_resolve_depth0_cached",
+      "family": "parser",
+      "metric": "latency",
+      "owning_crate": "ffs-extent",
+      "description": "Extent tree resolve in root node (depth-0, no I/O)"
+    },
+    "extent_resolve_depth1_repeated": {
+      "operation_id": "extent_resolve_depth1_repeated",
+      "family": "parser",
+      "metric": "latency",
+      "owning_crate": "ffs-extent",
+      "description": "Extent tree repeated resolve of same block (10x, depth-1)"
+    },
+    "extent_resolve_depth1_uncached": {
+      "operation_id": "extent_resolve_depth1_uncached",
+      "family": "parser",
+      "metric": "latency",
+      "owning_crate": "ffs-extent",
+      "description": "Extent tree resolve with external leaf read (depth-1)"
+    },
+    "extent_resolve_range_50blocks": {
+      "operation_id": "extent_resolve_range_50blocks",
+      "family": "parser",
+      "metric": "latency",
+      "owning_crate": "ffs-extent",
+      "description": "Extent tree batch resolve of 50 contiguous logical blocks"
+    },
+    "fixture_validation": {
+      "operation_id": "fixture_validation",
+      "family": "metadata_ops",
+      "metric": "latency",
+      "owning_crate": "ffs-harness",
+      "description": "Conformance fixture check-fixtures latency"
+    },
+    "fsync_batch_100": {
+      "operation_id": "fsync_batch_100",
+      "family": "write_path",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "100x 4K writes + fsync batch"
+    },
+    "fsync_single_write": {
+      "operation_id": "fsync_single_write",
+      "family": "write_path",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "Single 4K write + fsync"
+    },
+    "metadata_parity_cli": {
+      "operation_id": "metadata_parity_cli",
+      "family": "metadata_ops",
+      "metric": "latency",
+      "owning_crate": "ffs-harness",
+      "description": "CLI parity report generation latency"
+    },
+    "metadata_parity_harness": {
+      "operation_id": "metadata_parity_harness",
+      "family": "metadata_ops",
+      "metric": "latency",
+      "owning_crate": "ffs-harness",
+      "description": "Harness parity report generation latency"
+    },
+    "mount_cold": {
+      "operation_id": "mount_cold",
+      "family": "mount",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Cold FUSE mount latency (no page cache)"
+    },
+    "mount_recovery": {
+      "operation_id": "mount_recovery",
+      "family": "mount",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Mount with journal recovery replay latency"
+    },
+    "mount_runtime_backpressure_degraded": {
+      "operation_id": "mount_runtime_backpressure_degraded",
+      "family": "degraded_mode",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Backpressure decision latency under degraded state"
+    },
+    "mount_runtime_backpressure_emergency": {
+      "operation_id": "mount_runtime_backpressure_emergency",
+      "family": "degraded_mode",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Backpressure shed decision latency under emergency state"
+    },
+    "mount_runtime_backpressure_normal": {
+      "operation_id": "mount_runtime_backpressure_normal",
+      "family": "degraded_mode",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Backpressure decision latency under normal load"
+    },
+    "mount_runtime_metrics_record_throughput": {
+      "operation_id": "mount_runtime_metrics_record_throughput",
+      "family": "mount",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "AtomicMetrics record_ok throughput (ops/sec)"
+    },
+    "mount_runtime_per_core_aggregate_metrics": {
+      "operation_id": "mount_runtime_per_core_aggregate_metrics",
+      "family": "mount",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Per-core aggregate metrics collection latency"
+    },
+    "mount_runtime_per_core_route_inode": {
+      "operation_id": "mount_runtime_per_core_route_inode",
+      "family": "mount",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Per-core dispatcher inode routing latency"
+    },
+    "mount_runtime_per_core_route_lookup": {
+      "operation_id": "mount_runtime_per_core_route_lookup",
+      "family": "mount",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Per-core dispatcher lookup routing latency"
+    },
+    "mount_runtime_per_core_should_steal": {
+      "operation_id": "mount_runtime_per_core_should_steal",
+      "family": "mount",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Per-core work-stealing decision latency"
+    },
+    "mount_warm": {
+      "operation_id": "mount_warm",
+      "family": "mount",
+      "metric": "latency",
+      "owning_crate": "ffs-fuse",
+      "description": "Warm FUSE mount latency (primed page cache)"
+    },
+    "mvcc_commit_fcw": {
+      "operation_id": "mvcc_commit_fcw",
+      "family": "concurrency",
+      "metric": "latency",
+      "owning_crate": "ffs-mvcc",
+      "description": "MVCC first-committer-wins commit"
+    },
+    "mvcc_commit_ssi_5reads": {
+      "operation_id": "mvcc_commit_ssi_5reads",
+      "family": "concurrency",
+      "metric": "latency",
+      "owning_crate": "ffs-mvcc",
+      "description": "MVCC SSI commit with 5-read read set"
+    },
+    "mvcc_contention_2writers": {
+      "operation_id": "mvcc_contention_2writers",
+      "family": "concurrency",
+      "metric": "latency",
+      "owning_crate": "ffs-mvcc",
+      "description": "MVCC commit throughput with 2 concurrent writers"
+    },
+    "mvcc_contention_4writers": {
+      "operation_id": "mvcc_contention_4writers",
+      "family": "concurrency",
+      "metric": "latency",
+      "owning_crate": "ffs-mvcc",
+      "description": "MVCC commit throughput with 4 concurrent writers"
+    },
+    "mvcc_contention_8writers": {
+      "operation_id": "mvcc_contention_8writers",
+      "family": "concurrency",
+      "metric": "latency",
+      "owning_crate": "ffs-mvcc",
+      "description": "MVCC commit throughput with 8 concurrent writers"
+    },
+    "raptorq_decode_group_16blocks": {
+      "operation_id": "raptorq_decode_group_16blocks",
+      "family": "repair",
+      "metric": "latency",
+      "owning_crate": "ffs-repair",
+      "description": "RaptorQ decode a 16-block repair group"
+    },
+    "raptorq_encode_group_16blocks": {
+      "operation_id": "raptorq_encode_group_16blocks",
+      "family": "repair",
+      "metric": "latency",
+      "owning_crate": "ffs-repair",
+      "description": "RaptorQ encode a 16-block repair group"
+    },
+    "read_metadata_inspect_ext4_reference": {
+      "operation_id": "read_metadata_inspect_ext4_reference",
+      "family": "metadata_ops",
+      "metric": "latency",
+      "owning_crate": "ffs-harness",
+      "description": "CLI inspect of ext4 8MB reference image"
+    },
+    "read_metadata_scrub_ext4_reference": {
+      "operation_id": "read_metadata_scrub_ext4_reference",
+      "family": "metadata_ops",
+      "metric": "latency",
+      "owning_crate": "ffs-harness",
+      "description": "CLI scrub of ext4 8MB reference image"
+    },
+    "scrub_clean_256blocks": {
+      "operation_id": "scrub_clean_256blocks",
+      "family": "repair",
+      "metric": "latency",
+      "owning_crate": "ffs-repair",
+      "description": "Scrub 256 clean blocks (no corruption)"
+    },
+    "scrub_corrupted_256blocks": {
+      "operation_id": "scrub_corrupted_256blocks",
+      "family": "repair",
+      "metric": "latency",
+      "owning_crate": "ffs-repair",
+      "description": "Scrub 256 blocks with 10% corruption"
+    },
+    "wal_commit_4k_sync": {
+      "operation_id": "wal_commit_4k_sync",
+      "family": "concurrency",
+      "metric": "latency",
+      "owning_crate": "ffs-mvcc",
+      "description": "WAL 4K commit with fsync"
+    },
+    "wal_write_amplification_16block": {
+      "operation_id": "wal_write_amplification_16block",
+      "family": "concurrency",
+      "metric": "latency",
+      "owning_crate": "ffs-mvcc",
+      "description": "WAL write amplification ratio for 16-block txn"
+    },
+    "wal_write_amplification_1block": {
+      "operation_id": "wal_write_amplification_1block",
+      "family": "concurrency",
+      "metric": "latency",
+      "owning_crate": "ffs-mvcc",
+      "description": "WAL write amplification ratio for 1-block txn"
+    },
+    "write_random_4k": {
+      "operation_id": "write_random_4k",
+      "family": "write_path",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "Random 4K block writes"
+    },
+    "write_seq_4k": {
+      "operation_id": "write_seq_4k",
+      "family": "write_path",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "Sequential 4K block writes"
+    }
+  },
+  "host_profiles": {
+    "ci-github-actions": {
+      "id": "ci-github-actions",
+      "description": "GitHub Actions ubuntu-latest (2-4 vCPU, 7-16GB RAM)",
+      "cpu_model": "GitHub Actions runner",
+      "min_cores": 2,
+      "min_memory_gib": 7,
+      "fuse_available": false,
+      "normalization_factor": 0.15
+    },
+    "csd-threadripper": {
+      "id": "csd-threadripper",
+      "description": "AMD Ryzen Threadripper PRO 5995WX 64-core development server",
+      "cpu_model": "AMD Ryzen Threadripper PRO 5995WX 64-Cores",
+      "min_cores": 64,
+      "min_memory_gib": 512,
+      "fuse_available": true,
+      "normalization_factor": 1.0
+    },
+    "rch-contabo": {
+      "id": "rch-contabo",
+      "description": "Contabo VPS 8-core worker (rch fleet)",
+      "cpu_model": "Contabo VPS",
+      "min_cores": 8,
+      "min_memory_gib": 16,
+      "fuse_available": false,
+      "normalization_factor": 0.25
+    }
+  }
+}

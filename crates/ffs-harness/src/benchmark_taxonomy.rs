@@ -1226,6 +1226,14 @@ mod tests {
     }
 
     #[test]
+    fn canonical_taxonomy_json_snapshot() -> Result<(), serde_json::Error> {
+        let taxonomy = Taxonomy::canonical();
+        let json = serde_json::to_string_pretty(&taxonomy)?;
+        insta::assert_snapshot!("canonical_taxonomy_v1", json);
+        Ok(())
+    }
+
+    #[test]
     fn triage_module_covers_all_taxonomy_families() {
         use crate::perf_comparison::{ComparisonVerdict, SampleStats, TTestResult};
         use crate::perf_triage::{TriageAction, TriageCause, classify_triage};

@@ -31,6 +31,7 @@ ffs-inode = { workspace = true }
 ffs-xattr = { workspace = true }
 flate2 = { workspace = true }
 fuser = { workspace = true }
+insta = { workspace = true }
 libc = { workspace = true }
 lzokay-native = { workspace = true }
 sha2 = { workspace = true }

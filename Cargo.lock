@@ -869,6 +869,7 @@ dependencies = [
  "flate2",
  "fuser",
  "hex",
+ "insta",
  "libc",
  "lzokay-native",
  "parking_lot",
