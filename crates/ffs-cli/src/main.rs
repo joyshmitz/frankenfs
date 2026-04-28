@@ -1943,6 +1943,33 @@ fn build_btrfs_group_info(
     entries
 }
 
+#[must_use]
+fn encode_btrfs_chunk_entry_bytes(chunk: &ffs_ondisk::BtrfsChunkEntry) -> Vec<u8> {
+    debug_assert_eq!(usize::from(chunk.num_stripes), chunk.stripes.len());
+
+    let mut out = Vec::with_capacity(17 + 48 + chunk.stripes.len().saturating_mul(32));
+    out.extend_from_slice(&chunk.key.objectid.to_le_bytes());
+    out.push(chunk.key.item_type);
+    out.extend_from_slice(&chunk.key.offset.to_le_bytes());
+    out.extend_from_slice(&chunk.length.to_le_bytes());
+    out.extend_from_slice(&chunk.owner.to_le_bytes());
+    out.extend_from_slice(&chunk.stripe_len.to_le_bytes());
+    out.extend_from_slice(&chunk.chunk_type.to_le_bytes());
+    out.extend_from_slice(&chunk.io_align.to_le_bytes());
+    out.extend_from_slice(&chunk.io_width.to_le_bytes());
+    out.extend_from_slice(&chunk.sector_size.to_le_bytes());
+    out.extend_from_slice(&chunk.num_stripes.to_le_bytes());
+    out.extend_from_slice(&chunk.sub_stripes.to_le_bytes());
+
+    for stripe in &chunk.stripes {
+        out.extend_from_slice(&stripe.devid.to_le_bytes());
+        out.extend_from_slice(&stripe.offset.to_le_bytes());
+        out.extend_from_slice(&stripe.dev_uuid);
+    }
+
+    out
+}
+
 fn build_mvcc_info(open_fs: &OpenFs) -> MvccInfoOutput {
     let mvcc_guard = open_fs.mvcc_store().read();
     let current_commit_seq = mvcc_guard.current_snapshot().high.0;
@@ -2766,16 +2793,21 @@ fn build_dump_group_output(path: &PathBuf, group: u32, hex: bool) -> Result<Dump
                     entries.len()
                 )
             })?;
-            if hex {
-                limitations
-                    .push("raw hex for btrfs chunk dump is not currently available".to_owned());
-            }
+            let raw_hex = if hex {
+                open_fs
+                    .btrfs_context()
+                    .and_then(|ctx| ctx.chunks.get(index))
+                    .map(encode_btrfs_chunk_entry_bytes)
+                    .map(|bytes| bytes_to_hex_dump(&bytes))
+            } else {
+                None
+            };
             Ok(DumpGroupOutput {
                 filesystem: "btrfs".to_owned(),
                 group,
                 descriptor: None,
                 btrfs_chunk: Some(chunk),
-                raw_hex: None,
+                raw_hex,
                 limitations,
             })
         }
@@ -9613,13 +9645,14 @@ mod tests {
             assert_eq!(output.filesystem, "btrfs");
             assert_eq!(output.group, 0);
             assert!(output.descriptor.is_none());
-            assert!(output.raw_hex.is_none());
-            assert!(
-                output
-                    .limitations
-                    .iter()
-                    .any(|limitation| limitation.contains("raw hex for btrfs chunk dump"))
-            );
+            let raw_hex = output
+                .raw_hex
+                .as_ref()
+                .expect("btrfs chunk raw hex should be available");
+            assert!(raw_hex.starts_with(
+                "00000000: 00 01 00 00 00 00 00 00 e4 00 00 00 00 00 00 00\n"
+            ));
+            assert!(output.limitations.is_empty());
 
             let chunk = output
                 .btrfs_chunk
