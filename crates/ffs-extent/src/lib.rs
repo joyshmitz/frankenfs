@@ -88,6 +88,11 @@ pub fn map_logical_to_physical(
                         ),
                     });
                 }
+                validate_physical_span(
+                    "map_logical_to_physical",
+                    extent.physical_start,
+                    actual_len,
+                )?;
                 let mapping_count = u32::try_from(to_map).map_err(|_| {
                     FfsError::InvalidGeometry(format!(
                         "map_logical_to_physical: extent chunk length {to_map} exceeds u32"
@@ -95,7 +100,11 @@ pub fn map_logical_to_physical(
                 })?;
                 mappings.push(ExtentMapping {
                     logical_start: logical_block,
-                    physical_start: extent.physical_start + u64::from(offset_in_extent),
+                    physical_start: checked_physical_add(
+                        "map_logical_to_physical",
+                        extent.physical_start,
+                        u64::from(offset_in_extent),
+                    )?,
                     count: mapping_count,
                     unwritten: extent.is_unwritten(),
                 });
@@ -162,7 +171,7 @@ impl BlockAllocator for GroupBlockAllocator<'_> {
             self.pctx,
         )?;
         // Update hint to prefer contiguous allocation.
-        self.hint.goal_block = Some(BlockNumber(alloc.start.0 + 1));
+        self.hint.goal_block = alloc.start.0.checked_add(1).map(BlockNumber);
         Ok(alloc.start)
     }
 
@@ -217,7 +226,7 @@ pub fn allocate_extent(
     // Insert into tree. Use a GroupBlockAllocator for tree node allocation.
     let tree_hint = AllocHint {
         goal_group: hint.goal_group,
-        goal_block: Some(BlockNumber(start.0 + u64::from(allocated))),
+        goal_block: start.0.checked_add(u64::from(allocated)).map(BlockNumber),
     };
     let mut tree_alloc = GroupBlockAllocator {
         cx,
@@ -275,7 +284,7 @@ pub fn allocate_unwritten_extent(
 
     let tree_hint = AllocHint {
         goal_group: hint.goal_group,
-        goal_block: Some(BlockNumber(start.0 + u64::from(allocated))),
+        goal_block: start.0.checked_add(u64::from(allocated)).map(BlockNumber),
     };
     let mut tree_alloc = GroupBlockAllocator {
         cx,
@@ -617,7 +626,11 @@ pub fn insert_range(
             logical_block: u32::try_from(cut)
                 .map_err(|_| ffs_error::FfsError::Format("insert_range: cut exceeds u32".into()))?,
             raw_len: make_raw_len(right_len_u32, unwritten)?,
-            physical_start: ext.physical_start.saturating_add(u64::from(left_len_u32)),
+            physical_start: checked_physical_add(
+                "insert_range split tail",
+                ext.physical_start,
+                u64::from(left_len_u32),
+            )?,
         };
         ffs_btree::insert(cx, dev, root_bytes, left, &mut tree_alloc)?;
         ffs_btree::insert(cx, dev, root_bytes, right, &mut tree_alloc)?;
@@ -786,7 +799,11 @@ where
         out.push(Ext4Extent {
             logical_block: mark_start,
             raw_len: mid_len,
-            physical_start: ext.physical_start + u64::from(mark_start - ext.logical_block),
+            physical_start: checked_physical_add(
+                "mark_written written middle",
+                ext.physical_start,
+                u64::from(mark_start - ext.logical_block),
+            )?,
         });
         let right_raw_len =
             encode_unwritten_len("mark_written right unwritten suffix", ext_end - mark_end)?;
@@ -798,7 +815,11 @@ where
         out.push(Ext4Extent {
             logical_block: right_logical_block,
             raw_len: right_raw_len,
-            physical_start: ext.physical_start + (mark_end - ext_start),
+            physical_start: checked_physical_add(
+                "mark_written right unwritten suffix",
+                ext.physical_start,
+                mark_end - ext_start,
+            )?,
         });
     } else if ext_start < mark_start_u64 {
         // Starts before: unwritten prefix + written suffix.
@@ -814,7 +835,11 @@ where
         out.push(Ext4Extent {
             logical_block: mark_start,
             raw_len: suffix_len,
-            physical_start: ext.physical_start + (mark_start_u64 - ext_start),
+            physical_start: checked_physical_add(
+                "mark_written written suffix",
+                ext.physical_start,
+                mark_start_u64 - ext_start,
+            )?,
         });
     } else {
         // Starts within range, extends beyond: written prefix + unwritten suffix.
@@ -834,11 +859,39 @@ where
         out.push(Ext4Extent {
             logical_block: right_logical_block,
             raw_len: unwritten_raw_len,
-            physical_start: ext.physical_start + (mark_end - ext_start),
+            physical_start: checked_physical_add(
+                "mark_written unwritten suffix",
+                ext.physical_start,
+                mark_end - ext_start,
+            )?,
         });
     }
 
     Ok(out)
+}
+
+fn checked_physical_add(op: &str, physical_start: u64, offset: u64) -> Result<u64> {
+    physical_start.checked_add(offset).ok_or_else(|| {
+        FfsError::InvalidGeometry(format!(
+            "{op}: physical block {physical_start}+{offset} overflows u64"
+        ))
+    })
+}
+
+fn physical_span_fits(physical_start: u64, count: u32) -> bool {
+    count != 0
+        && physical_start
+            .checked_add(u64::from(count.saturating_sub(1)))
+            .is_some()
+}
+
+fn validate_physical_span(op: &str, physical_start: u64, count: u32) -> Result<()> {
+    if physical_span_fits(physical_start, count) {
+        return Ok(());
+    }
+    Err(FfsError::InvalidGeometry(format!(
+        "{op}: physical extent [{physical_start}, +{count}) exceeds u64 block space"
+    )))
 }
 
 fn encode_written_len(label: &str, len: u64) -> Result<u16> {
@@ -1051,19 +1104,26 @@ impl ExtentCache {
 
         let extent_end = u64::from(mapping.logical_start) + u64::from(mapping.count);
         if u64::from(logical_block) < extent_end && entry_gen == current_gen {
+            let offset = logical_block - mapping.logical_start;
+            let physical_start = if mapping.physical_start == 0 {
+                0
+            } else if let Some(physical_start) =
+                mapping.physical_start.checked_add(u64::from(offset))
+            {
+                physical_start
+            } else {
+                inner.misses = inner.misses.saturating_add(1);
+                inner.entries.remove(&key);
+                return None;
+            };
             inner.hits = inner.hits.saturating_add(1);
             let clock = inner.hits.saturating_add(inner.misses);
             if let Some(e) = inner.entries.get_mut(&key) {
                 e.last_access = clock;
             }
-            let offset = logical_block - mapping.logical_start;
             Some(ExtentMapping {
                 logical_start: logical_block,
-                physical_start: if mapping.physical_start == 0 {
-                    0
-                } else {
-                    mapping.physical_start + u64::from(offset)
-                },
+                physical_start,
                 count: mapping.count - offset,
                 unwritten: mapping.unwritten,
             })
@@ -1082,7 +1142,11 @@ impl ExtentCache {
     /// If the cache is at capacity, the least-recently-used entry is evicted.
     pub fn insert(&self, ns: u64, mapping: ExtentMapping) {
         let mut inner = self.inner.write();
-        if inner.capacity == 0 {
+        if inner.capacity == 0
+            || mapping.count == 0
+            || (mapping.physical_start != 0
+                && !physical_span_fits(mapping.physical_start, mapping.count))
+        {
             return;
         }
 
@@ -2196,6 +2260,22 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         assert!(out[2].is_unwritten());
         assert_eq!(out[2].logical_block, 7);
         assert_eq!(out[2].actual_len(), 3);
+    }
+
+    #[test]
+    fn split_for_mark_written_rejects_physical_overflow() {
+        let ext = Ext4Extent {
+            logical_block: 0,
+            raw_len: 0x14 | UNWRITTEN_FLAG,
+            physical_start: u64::MAX - 4,
+        };
+
+        let err = split_for_mark_written(&ext, 5, 15_u64, 20_u64).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("physical block") && msg.contains("overflows u64"),
+            "error should explain the physical address overflow: {msg}"
+        );
     }
 
     #[test]
@@ -4594,6 +4674,24 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         let stats = cache.stats();
         assert_eq!(stats.hits, 2);
         assert_eq!(stats.misses, 1);
+    }
+
+    #[test]
+    fn cache_insert_rejects_overflowing_physical_span() {
+        let cache = ExtentCache::new();
+        cache.insert(
+            0,
+            ExtentMapping {
+                logical_start: 0,
+                physical_start: u64::MAX,
+                count: 2,
+                unwritten: false,
+            },
+        );
+
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 0);
+        assert!(cache.lookup(0, 0).is_none());
     }
 
     #[test]
