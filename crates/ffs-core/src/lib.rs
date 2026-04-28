@@ -19690,6 +19690,8 @@ mod tests {
         let mut btrfs_img = vec![0_u8; BTRFS_SUPER_INFO_OFFSET + BTRFS_SUPER_INFO_SIZE];
         let sb2 = BTRFS_SUPER_INFO_OFFSET;
         btrfs_img[sb2 + 0x40..sb2 + 0x48].copy_from_slice(&BTRFS_MAGIC.to_le_bytes());
+        btrfs_img[sb2 + 0x70..sb2 + 0x78].copy_from_slice(&1_000_000_u64.to_le_bytes()); // total_bytes
+        btrfs_img[sb2 + 0x88..sb2 + 0x90].copy_from_slice(&1_u64.to_le_bytes()); // num_devices
         btrfs_img[sb2 + 0x90..sb2 + 0x94].copy_from_slice(&4096_u32.to_le_bytes());
         btrfs_img[sb2 + 0x94..sb2 + 0x98].copy_from_slice(&4096_u32.to_le_bytes());
         let btrfs = detect_filesystem(&btrfs_img).expect("detect btrfs");
@@ -25181,14 +25183,16 @@ mod tests {
         uuid: [u8; 16],
         parent_uuid: [u8; 16],
     ) -> BtrfsLeafEntry {
-        let mut data = vec![0_u8; 272];
-        data[160..168].copy_from_slice(&1_u64.to_le_bytes()); // generation
+        let mut data = vec![0_u8; 279];
+        let generation = 1_u64;
+        data[160..168].copy_from_slice(&generation.to_le_bytes()); // generation
         data[168..176].copy_from_slice(&root_dirid.to_le_bytes());
         data[176..184].copy_from_slice(&bytenr.to_le_bytes());
-        data[216..224].copy_from_slice(&1_u64.to_le_bytes()); // refs
-        data[224..240].copy_from_slice(&uuid);
-        data[240..256].copy_from_slice(&parent_uuid);
-        data[271] = 0; // level
+        data[216..220].copy_from_slice(&1_u32.to_le_bytes()); // refs (u32)
+        data[238] = 0; // level
+        data[239..247].copy_from_slice(&generation.to_le_bytes()); // generation_v2 (must match generation for uuid validity)
+        data[247..263].copy_from_slice(&uuid);
+        data[263..279].copy_from_slice(&parent_uuid);
         BtrfsLeafEntry {
             key: BtrfsKey {
                 objectid,

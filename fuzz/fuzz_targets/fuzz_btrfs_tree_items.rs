@@ -36,15 +36,28 @@ fn assert_root_item_invariants(data: &[u8], parsed: &BtrfsRootItem) {
     assert_eq!(parsed.root_dirid, read_u64(data, 168).unwrap_or_default());
     assert_eq!(parsed.bytenr, read_u64(data, 176).unwrap_or_default());
     assert_eq!(parsed.flags, read_u64(data, 208).unwrap_or_default());
-    assert_eq!(parsed.refs, read_u64(data, 216).unwrap_or_default());
+    assert_eq!(
+        parsed.refs,
+        u64::from(read_u32(data, 216).unwrap_or_default())
+    );
     assert_ne!(
         parsed.bytenr, 0,
         "successful root items must carry a non-zero bytenr"
     );
-    assert_eq!(Some(parsed.level), data.last().copied());
+    assert_eq!(Some(parsed.level), data.get(238).copied());
 
-    let expected_uuid = read_array_16(data, 224).unwrap_or([0_u8; 16]);
-    let expected_parent_uuid = read_array_16(data, 240).unwrap_or([0_u8; 16]);
+    let extended_fields_valid =
+        data.len() >= 247 && read_u64(data, 239).unwrap_or_default() == parsed.generation;
+    let expected_uuid = if extended_fields_valid {
+        read_array_16(data, 247).unwrap_or([0_u8; 16])
+    } else {
+        [0_u8; 16]
+    };
+    let expected_parent_uuid = if extended_fields_valid {
+        read_array_16(data, 263).unwrap_or([0_u8; 16])
+    } else {
+        [0_u8; 16]
+    };
     assert_eq!(parsed.uuid, expected_uuid);
     assert_eq!(parsed.parent_uuid, expected_parent_uuid);
 }
