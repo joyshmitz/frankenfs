@@ -38,6 +38,9 @@ use ffs_repair::scrub::{
     BlockValidator, BtrfsSuperblockValidator, BtrfsTreeBlockValidator, CompositeValidator,
     Ext4SuperblockValidator, ScrubReport, Scrubber, Severity, ZeroCheckValidator,
 };
+use ffs_repair::pipeline::{
+    GroupConfig, ScrubDaemon, ScrubDaemonConfig, ScrubDaemonMetrics, ScrubWithRecovery,
+};
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, EXT4_SUPERBLOCK_OFFSET,
     EXT4_SUPERBLOCK_SIZE, GroupNumber, InodeNumber, MountMode,
@@ -46,10 +49,11 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::env::VarError;
 use std::fmt::Write;
-use std::fs::File;
+use std::fs::{File, OpenOptions as StdOpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -99,6 +103,7 @@ impl LogFormat {
 }
 
 const DEFAULT_MANAGED_UNMOUNT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum MountRuntimeMode {
@@ -150,6 +155,50 @@ impl MountRuntimeConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct MountBackgroundScrubConfig {
+    enabled: bool,
+    explicit: bool,
+    interval_secs: u64,
+    ledger_path: Option<PathBuf>,
+}
+
+impl MountBackgroundScrubConfig {
+    fn resolve(
+        read_write: bool,
+        background_scrub: bool,
+        no_background_scrub: bool,
+        interval_secs: Option<u64>,
+        ledger_path: Option<PathBuf>,
+    ) -> Result<Self> {
+        if background_scrub && no_background_scrub {
+            bail!("--background-scrub and --no-background-scrub are mutually exclusive");
+        }
+        if no_background_scrub && interval_secs.is_some() {
+            bail!("--background-scrub-interval-secs requires background scrub to be enabled");
+        }
+        if no_background_scrub && ledger_path.is_some() {
+            bail!("--background-scrub-ledger requires background scrub to be enabled");
+        }
+
+        let explicit = background_scrub || no_background_scrub;
+        let enabled = if background_scrub {
+            true
+        } else if no_background_scrub {
+            false
+        } else {
+            !read_write
+        };
+
+        Ok(Self {
+            enabled,
+            explicit,
+            interval_secs: interval_secs.unwrap_or(DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS),
+            ledger_path,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MountCmdOptions {
     allow_other: bool,
     read_write: bool,
@@ -158,6 +207,7 @@ struct MountCmdOptions {
     ext4_data_err_policy: Ext4DataErrPolicy,
     ext4_verify_journal_checksums: bool,
     runtime: MountRuntimeConfig,
+    background_scrub: MountBackgroundScrubConfig,
 }
 
 fn default_env_filter() -> EnvFilter {
@@ -351,6 +401,22 @@ enum Command {
         /// Mount read-write (default is read-only).
         #[arg(long)]
         rw: bool,
+        /// Force background scrub even when mounting read-write.
+        ///
+        /// Without this flag, read-only mounts start a detection-only scrub
+        /// daemon automatically and read-write mounts leave it disabled to
+        /// avoid racing the mutable mount path.
+        #[arg(long, conflicts_with = "no_background_scrub")]
+        background_scrub: bool,
+        /// Disable the automatic read-only background scrub daemon.
+        #[arg(long = "no-background-scrub")]
+        no_background_scrub: bool,
+        /// Background scrub tick interval in seconds.
+        #[arg(long = "background-scrub-interval-secs", value_parser = clap::value_parser!(u64).range(1..))]
+        background_scrub_interval_secs: Option<u64>,
+        /// Append background scrub evidence records to this JSONL file.
+        #[arg(long = "background-scrub-ledger")]
+        background_scrub_ledger: Option<PathBuf>,
         /// Enable native MVCC mode (allows repair symbols, version store, BLAKE3).
         ///
         /// By default FrankenFS mounts in compatibility mode where only standard
@@ -1340,6 +1406,10 @@ fn run() -> Result<()> {
             managed_unmount_timeout_secs,
             allow_other,
             rw,
+            background_scrub,
+            no_background_scrub,
+            background_scrub_interval_secs,
+            background_scrub_ledger,
             native,
             ext4_data_err_abort,
             ext4_nojournal_checksum,
@@ -1347,6 +1417,13 @@ fn run() -> Result<()> {
             snapshot,
         } => {
             let btrfs_mount_selection = parse_btrfs_mount_selection(subvol, snapshot)?;
+            let background_scrub = MountBackgroundScrubConfig::resolve(
+                rw,
+                background_scrub,
+                no_background_scrub,
+                background_scrub_interval_secs,
+                background_scrub_ledger,
+            )?;
             mount_cmd(
                 &image,
                 &mountpoint,
@@ -1369,6 +1446,7 @@ fn run() -> Result<()> {
                         mode: runtime_mode,
                         managed_unmount_timeout_secs,
                     },
+                    background_scrub,
                 },
             )
         }
@@ -5908,14 +5986,19 @@ mod tests {
         uuid: [u8; 16],
         parent_uuid: [u8; 16],
     ) -> Vec<u8> {
-        let mut root_item = vec![0_u8; 256];
+        // ROOT_ITEM offsets per parse_root_item in ffs-btrfs:
+        // 160: generation, 168: root_dirid, 176: bytenr, 208: flags, 216: refs,
+        // 238: level, 239: generation_v2, 247: uuid, 263: parent_uuid
+        let mut root_item = vec![0_u8; 279]; // 263 + 16 = 279 for parent_uuid end
         root_item[160..168].copy_from_slice(&generation.to_le_bytes());
         root_item[168..176].copy_from_slice(&root_dirid.to_le_bytes());
         root_item[176..184].copy_from_slice(&bytenr.to_le_bytes());
         root_item[208..216].copy_from_slice(&flags.to_le_bytes());
-        root_item[216..224].copy_from_slice(&1_u64.to_le_bytes());
-        root_item[224..240].copy_from_slice(&uuid);
-        root_item[240..256].copy_from_slice(&parent_uuid);
+        root_item[216..220].copy_from_slice(&1_u32.to_le_bytes()); // refs (u32)
+        root_item[238] = 0; // level
+        root_item[239..247].copy_from_slice(&generation.to_le_bytes()); // generation_v2 must equal generation
+        root_item[247..263].copy_from_slice(&uuid);
+        root_item[263..279].copy_from_slice(&parent_uuid);
         let last = root_item.len() - 1;
         root_item[last] = 0;
         root_item
