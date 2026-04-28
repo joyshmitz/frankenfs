@@ -5549,14 +5549,14 @@ mod tests {
         BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
         BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
-        MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions,
-        RepairFlags, btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output,
-        build_info_output, build_mount_open_options, choose_btrfs_scrub_block_size,
-        ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
-        log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
-        open_filesystem_for_mount, parse_btrfs_mount_selection, read_ext4_group_desc_from_path,
-        read_ext4_inode_from_path, read_file_region, summarize_repair_staleness,
-        unavailable_repair_info,
+        MountBackgroundScrubConfig, MountCmdOptions, MountMode, MountRuntimeConfig,
+        MountRuntimeMode, RepairCommandOptions, RepairFlags, btrfs_chunk_type_flag_names,
+        build_ext4_group_info, build_fsck_output, build_info_output, build_mount_open_options,
+        choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
+        format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
+        mount_cmd, mount_operation_id, open_filesystem_for_mount, parse_btrfs_mount_selection,
+        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
+        summarize_repair_staleness, unavailable_repair_info,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -5582,6 +5582,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tracing::{info, info_span};
     use tracing_subscriber::fmt::MakeWriter;
+
+    fn test_mount_background_scrub_disabled() -> MountBackgroundScrubConfig {
+        MountBackgroundScrubConfig {
+            enabled: false,
+            explicit: true,
+            interval_secs: super::DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS,
+            ledger_path: None,
+        }
+    }
 
     #[derive(Clone, Default)]
     struct SharedLogBuffer {
@@ -7769,6 +7778,7 @@ mod tests {
                             mode: MountRuntimeMode::Standard,
                             managed_unmount_timeout_secs: None,
                         },
+                        background_scrub: test_mount_background_scrub_disabled(),
                     },
                 )
                 .expect_err("non-clean MMP state should reject mount before FUSE starts");
@@ -7838,6 +7848,7 @@ mod tests {
                     mode: MountRuntimeMode::Managed,
                     managed_unmount_timeout_secs: Some(30),
                 },
+                background_scrub: test_mount_background_scrub_disabled(),
             },
         )
         .expect_err("managed mode with missing image should fail at open");
@@ -7867,6 +7878,7 @@ mod tests {
                     mode: MountRuntimeMode::PerCore,
                     managed_unmount_timeout_secs: None,
                 },
+                background_scrub: test_mount_background_scrub_disabled(),
             },
         )
         .expect_err("per-core mode with missing image should fail at open");
@@ -7925,6 +7937,7 @@ mod tests {
                 mode: MountRuntimeMode::Standard,
                 managed_unmount_timeout_secs: None,
             },
+            background_scrub: test_mount_background_scrub_disabled(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -7945,6 +7958,7 @@ mod tests {
                 mode: MountRuntimeMode::Standard,
                 managed_unmount_timeout_secs: None,
             },
+            background_scrub: test_mount_background_scrub_disabled(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -7969,6 +7983,7 @@ mod tests {
                 mode: MountRuntimeMode::Standard,
                 managed_unmount_timeout_secs: None,
             },
+            background_scrub: test_mount_background_scrub_disabled(),
         });
         assert_eq!(
             open_options.btrfs_mount_selection,
@@ -7997,6 +8012,7 @@ mod tests {
                         mode: MountRuntimeMode::Standard,
                         managed_unmount_timeout_secs: None,
                     },
+                    background_scrub: test_mount_background_scrub_disabled(),
                 },
             )
             .expect_err("missing btrfs subvolume should fail before FUSE mount");
@@ -8036,6 +8052,7 @@ mod tests {
                         mode: MountRuntimeMode::Standard,
                         managed_unmount_timeout_secs: None,
                     },
+                    background_scrub: test_mount_background_scrub_disabled(),
                 },
             )
             .expect_err("missing btrfs snapshot should fail before FUSE mount");
@@ -8072,6 +8089,7 @@ mod tests {
                         mode: MountRuntimeMode::Standard,
                         managed_unmount_timeout_secs: None,
                     },
+                    background_scrub: test_mount_background_scrub_disabled(),
                 },
             )
             .expect("named btrfs subvolume should open through mount operator path");
@@ -8127,6 +8145,7 @@ mod tests {
                         mode: MountRuntimeMode::Standard,
                         managed_unmount_timeout_secs: None,
                     },
+                    background_scrub: test_mount_background_scrub_disabled(),
                 },
             )
             .expect("named btrfs snapshot should open through mount operator path");
