@@ -16,6 +16,9 @@ libfuzzer-sys = "0.4"
 [dependencies.ffs-block]
 path = "../crates/ffs-block"
 
+[dependencies.ffs-btree]
+path = "../crates/ffs-btree"
+
 [dependencies.ffs-alloc]
 path = "../crates/ffs-alloc"
 
@@ -72,6 +75,11 @@ doc = false
 [[bin]]
 name = "fuzz_btrfs_metadata"
 path = "fuzz_targets/fuzz_btrfs_metadata.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_btree_bw_tree"
+path = "fuzz_targets/fuzz_btree_bw_tree.rs"
 doc = false
 
 [[bin]]
