@@ -10,8 +10,10 @@ cargo-fuzz = true
 [dependencies]
 anyhow = "1.0.102"
 asupersync = "0.3.1"
+brotli = "8.0"
 crc32c = "0.6.8"
 libfuzzer-sys = "0.4"
+zstd = "0.13"
 
 [dependencies.ffs-block]
 path = "../crates/ffs-block"
@@ -270,4 +272,9 @@ doc = false
 [[bin]]
 name = "fuzz_extent_cache_concurrent"
 path = "fuzz_targets/fuzz_extent_cache_concurrent.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_mvcc_compression_resolve"
+path = "fuzz_targets/fuzz_mvcc_compression_resolve.rs"
 doc = false
