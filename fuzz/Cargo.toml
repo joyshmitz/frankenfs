@@ -85,6 +85,11 @@ path = "fuzz_targets/fuzz_btree_bw_tree.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_block_mem_io_engine"
+path = "fuzz_targets/fuzz_block_mem_io_engine.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_ext4_xattr"
 path = "fuzz_targets/fuzz_ext4_xattr.rs"
 doc = false
