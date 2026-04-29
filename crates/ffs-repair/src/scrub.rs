@@ -240,6 +240,7 @@ impl<'a> Scrubber<'a> {
                     }
                 },
                 Err(e) => {
+                    blocks_corrupt += 1;
                     blocks_io_error += 1;
                     findings.push(ScrubFinding {
                         block,
@@ -856,6 +857,7 @@ mod tests {
             .expect("scrub should succeed");
 
         assert_eq!(report.blocks_scanned, 16);
+        assert_eq!(report.blocks_corrupt, 2);
         assert_eq!(report.blocks_io_error, 2);
         let io_findings: Vec<&ScrubFinding> = report
             .findings

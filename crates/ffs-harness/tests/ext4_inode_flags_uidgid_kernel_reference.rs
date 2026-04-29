@@ -146,8 +146,7 @@ fn parse_signed_or_unsigned_u32(token: &str, label: &str) -> u32 {
         .parse()
         .unwrap_or_else(|e| panic!("non-numeric {label} '{token}': {e}"));
     if signed >= 0 {
-        u32::try_from(signed)
-            .unwrap_or_else(|_| panic!("{label} '{token}' out of u32 range"))
+        u32::try_from(signed).unwrap_or_else(|_| panic!("{label} '{token}' out of u32 range"))
     } else {
         // debugfs cast a `u32 > i32::MAX` to signed. Reinterpret the bit
         // pattern by going through u32::from_le_bytes(i32::to_le_bytes(_)).
@@ -304,16 +303,10 @@ fn ext4_inode_flags_uidgid_kernel_reference_matches_debugfs() {
             );
         }
         if let Some(uid) = case.mutation.uid {
-            run_debugfs_w(
-                &path,
-                &format!("set_inode_field /{} uid {uid}", case.name),
-            );
+            run_debugfs_w(&path, &format!("set_inode_field /{} uid {uid}", case.name));
         }
         if let Some(gid) = case.mutation.gid {
-            run_debugfs_w(
-                &path,
-                &format!("set_inode_field /{} gid {gid}", case.name),
-            );
+            run_debugfs_w(&path, &format!("set_inode_field /{} gid {gid}", case.name));
         }
         if let Some(mode) = case.mutation.mode {
             // debugfs's set_inode_field parses C-style octal (leading `0`).
