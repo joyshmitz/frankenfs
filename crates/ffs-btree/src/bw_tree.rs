@@ -13,7 +13,7 @@
 use crossbeam_epoch as epoch;
 use ffs_error::{FfsError, Result};
 use std::collections::BTreeMap;
-use std::io::Error as IoError;
+use std::io::{Error as IoError, ErrorKind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tracing::{debug, trace, warn};
@@ -106,9 +106,7 @@ impl Drop for PageDelta {
                         Self::Insert { next, .. }
                         | Self::Delete { next, .. }
                         | Self::Split { next, .. }
-                        | Self::Merge { next, .. } => {
-                            std::mem::replace(next, Self::empty_base())
-                        }
+                        | Self::Merge { next, .. } => std::mem::replace(next, Self::empty_base()),
                         Self::Base { .. } => return,
                     };
                     // `node` is dropped at the end of this arm; recursing
@@ -427,7 +425,8 @@ impl MappingTable {
             page_id = page_id.0,
             max_retries = config.max_retries
         );
-        Err(FfsError::Io(IoError::other(
+        Err(FfsError::Io(IoError::new(
+            ErrorKind::WouldBlock,
             "bw-tree consolidation CAS retries exhausted",
         )))
     }
@@ -463,7 +462,7 @@ impl MappingTable {
         for page_id in candidates {
             match self.consolidate_page(page_id, config) {
                 Ok(_) => consolidated += 1,
-                Err(err) => {
+                Err(FfsError::Io(err)) if err.kind() == ErrorKind::WouldBlock => {
                     skipped += 1;
                     warn!(
                         target: "ffs::bwtree",
@@ -472,6 +471,7 @@ impl MappingTable {
                         error = %err,
                     );
                 }
+                Err(err) => return Err(err),
             }
         }
         debug!(
@@ -673,11 +673,11 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BwKey, BwValue, ConsolidationConfig, FfsError, MAX_CHAIN_DEPTH, MappingTable, PageDelta,
-        PageId, chain_length, materialize_from_head,
+        chain_length, materialize_from_head, write_lock, BwKey, BwValue, ConsolidationConfig,
+        FfsError, MappingTable, PageDelta, PageId, MAX_CHAIN_DEPTH, MAX_CHAIN_WALK,
     };
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Barrier, atomic::Ordering};
+    use std::sync::{atomic::Ordering, Arc, Barrier};
 
     fn start_test_thread<F>(f: F) -> std::thread::JoinHandle<()>
     where
@@ -1857,6 +1857,38 @@ mod tests {
             let snap = table.get_page(p).expect("snapshot");
             assert_eq!(chain_length(&snap.head), 1);
         }
+    }
+
+    /// Transient CAS retry exhaustion is safe for `consolidate_all` to skip,
+    /// but structural corruption must still reach the caller. The broad
+    /// catch-all skip path would previously convert this malformed chain into
+    /// `Ok(0)`.
+    #[test]
+    fn consolidate_all_propagates_corrupt_chain() {
+        let table = MappingTable::with_capacity(1);
+        let page = table.allocate_page().expect("alloc");
+
+        let mut head = PageDelta::empty_base();
+        for k in 0..MAX_CHAIN_WALK {
+            let key = BwKey(u64::try_from(k).expect("fits"));
+            head = Arc::new(PageDelta::Insert {
+                key,
+                value: BwValue(key.0),
+                next: head,
+            });
+        }
+
+        let entry = table.entry(page).expect("entry");
+        *write_lock(&entry.head) = head;
+
+        let cfg = ConsolidationConfig {
+            chain_threshold: 1,
+            max_retries: 64,
+        };
+        let err = table
+            .consolidate_all(&cfg)
+            .expect_err("corrupt chain must not be skipped");
+        assert!(matches!(err, FfsError::Corruption { .. }));
     }
 
     /// `chain_length` and `materialize_from_head` previously rejected any
