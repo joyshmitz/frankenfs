@@ -126,10 +126,18 @@ fn encode_entries_region_with_hashes(
                 .checked_add(entry.name.len())
                 .ok_or_else(|| FfsError::Format("xattr entry length overflow".to_owned()))?,
         );
-        let unaligned_start = value_tail
-            .checked_sub(entry.value.len())
-            .ok_or(FfsError::NoSpace)?;
-        let value_start = unaligned_start & !3; // Align down to 4-byte boundary
+        // For empty values there is nothing to align: aligning a zero-length
+        // slice down to a 4-byte boundary would silently consume up to three
+        // bytes of the values region without storing any data, eventually
+        // producing spurious NoSpace errors when packing many empty xattrs.
+        let value_start = if entry.value.is_empty() {
+            value_tail
+        } else {
+            let unaligned_start = value_tail
+                .checked_sub(entry.value.len())
+                .ok_or(FfsError::NoSpace)?;
+            unaligned_start & !3 // Align down to 4-byte boundary
+        };
 
         let entry_end = next_entry
             .checked_add(entry_len)
@@ -180,16 +188,15 @@ fn encode_entries_region_with_hashes(
 }
 
 fn build_inline_ibody(ibody_len: usize, entries: &[Ext4Xattr]) -> Result<Vec<u8>> {
-    if ibody_len == 0 {
+    // Mirror parse_ibody_xattrs: an ibody too small for the 4-byte header
+    // simply has no inline xattrs. Refuse only when the caller asks us to
+    // *write* entries into a region that cannot hold them — that is a
+    // capacity failure, not a format failure.
+    if ibody_len < INLINE_HEADER_LEN {
         if entries.is_empty() {
-            return Ok(Vec::new());
+            return Ok(vec![0_u8; ibody_len]);
         }
         return Err(FfsError::NoSpace);
-    }
-    if ibody_len < INLINE_HEADER_LEN {
-        return Err(FfsError::Format(
-            "inline xattr region shorter than 4-byte header".to_owned(),
-        ));
     }
 
     let mut out = vec![0_u8; ibody_len];
@@ -388,6 +395,18 @@ pub fn set_xattr(
 
     let (name_index, name) = parse_xattr_name(full_name)?;
     check_write_permissions(name_index, access)?;
+
+    // get_xattr / list_xattrs / remove_xattr all refuse to operate when the
+    // inode references an external xattr block but the caller did not provide
+    // it. set_xattr previously skipped this check and silently treated the
+    // external entries as empty, which could write a duplicate of an existing
+    // attribute into the inline ibody and leave the on-disk external block
+    // permanently shadowed by a divergent inline copy.
+    if inode.file_acl != 0 && external_block.is_none() {
+        return Err(FfsError::Format(
+            "inode references external xattr block but none was provided".to_owned(),
+        ));
+    }
 
     let mut inline_entries = parse_inline_entries(inode)?;
     let mut external_entries = if let Some(block) = external_block.as_deref() {
@@ -1102,9 +1121,18 @@ mod tests {
     }
 
     #[test]
-    fn build_inline_ibody_rejects_too_short_header_region() {
-        let err = build_inline_ibody(INLINE_HEADER_LEN - 1, &[]).unwrap_err();
-        assert!(matches!(err, FfsError::Format(_)));
+    fn build_inline_ibody_rejects_too_short_header_region_when_writing_entries() {
+        // Empty entries into a sub-header region is a no-op (mirrors
+        // parse_ibody_xattrs, which returns Ok(empty)). Writing a real entry
+        // into the same region is a capacity failure (NoSpace).
+        let entry = Ext4Xattr {
+            name_index: EXT4_XATTR_INDEX_USER,
+            name: b"x".to_vec(),
+            value: b"v".to_vec(),
+        };
+        let err =
+            build_inline_ibody(INLINE_HEADER_LEN - 1, std::slice::from_ref(&entry)).unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace), "got {err:?}");
     }
 
     // ── Additional edge-case tests ───────────────────────────────────
@@ -2577,5 +2605,120 @@ mod tests {
         let (idx, name) = parse_xattr_name("user.abc").unwrap();
         assert_eq!(idx, 1); // EXT4_XATTR_INDEX_USER
         assert_eq!(name, b"abc");
+    }
+
+    // ── Multi-pass audit regressions ───────────────────────────────────
+
+    /// `set_xattr` must refuse to write when the inode advertises an external
+    /// xattr block but the caller forgot to pass it. Previously this case
+    /// silently treated external as empty and could install a duplicate of an
+    /// existing attribute into the inline ibody, shadowing the on-disk
+    /// external value forever.
+    #[test]
+    fn set_xattr_rejects_missing_external_block_when_file_acl_nonzero() {
+        let mut inode = make_inode(128);
+        inode.file_acl = 4242; // pretends an external block exists on disk
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+
+        let before = inode.xattr_ibody.clone();
+        let err = set_xattr(&mut inode, None, "user.shadow", b"new", access).unwrap_err();
+
+        assert!(
+            matches!(err, FfsError::Format(_)),
+            "expected Format error, got {err:?}"
+        );
+        assert_eq!(
+            inode.xattr_ibody, before,
+            "rejected set_xattr must not mutate the inode"
+        );
+        assert_eq!(inode.file_acl, 4242, "file_acl pointer must be preserved");
+    }
+
+    /// `build_inline_ibody` must accept tiny (1..4-byte) empty regions so a
+    /// roundtrip parse-then-rebuild succeeds for inodes whose ibody is too
+    /// small for the 4-byte xattr header. `parse_ibody_xattrs` already returns
+    /// `Ok(empty)` in that case.
+    #[test]
+    fn build_inline_ibody_tolerates_subheader_empty_region() {
+        for ibody_len in 0..INLINE_HEADER_LEN {
+            let out = build_inline_ibody(ibody_len, &[]).unwrap_or_else(|e| {
+                panic!("ibody_len={ibody_len} with no entries should round-trip: {e:?}")
+            });
+            assert_eq!(out.len(), ibody_len);
+            assert!(
+                out.iter().all(|b| *b == 0),
+                "ibody_len={ibody_len} output must be all zeros"
+            );
+        }
+
+        // Asking to write a non-empty entry into a sub-header region is a
+        // capacity failure, not a format failure — distinguishable so callers
+        // can recover by spilling to external storage.
+        let entry = Ext4Xattr {
+            name_index: EXT4_XATTR_INDEX_USER,
+            name: b"x".to_vec(),
+            value: b"v".to_vec(),
+        };
+        let err = build_inline_ibody(2, std::slice::from_ref(&entry)).unwrap_err();
+        assert!(matches!(err, FfsError::NoSpace), "got {err:?}");
+    }
+
+    /// Empty xattr values must not consume padding bytes in the values region.
+    /// Previously `value_start = (value_tail - 0) & !3` rounded *down* by up
+    /// to 3 bytes per empty value, eventually producing spurious NoSpace
+    /// errors when many empty xattrs were packed together.
+    #[test]
+    fn encode_entries_region_does_not_pad_empty_values() {
+        // A 64-byte region with two empty-value entries (header is 16 bytes
+        // each, plus the 4-byte trailing terminator; values consume 0). With
+        // the previous behaviour we would lose 4-6 bytes to alignment padding
+        // and the second entry's terminator check would fail spuriously when
+        // the region was sized close to the minimum.
+        let entries = vec![
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"a".to_vec(),
+                value: Vec::new(),
+            },
+            Ext4Xattr {
+                name_index: EXT4_XATTR_INDEX_USER,
+                name: b"b".to_vec(),
+                value: Vec::new(),
+            },
+        ];
+        // Two entry headers (20 bytes each after align4(16+1)) + 4-byte
+        // terminator = 44 bytes. Padding-free packing fits in 44 bytes.
+        let region = encode_entries_region(44, &entries, 0)
+            .expect("two empty-value entries must fit without padding");
+        assert_eq!(region.len(), 44);
+
+        // With the bug, even a 50-byte region would underflow value_tail
+        // for the second entry — verify the round-trip parse here too via the
+        // public set_xattr path that exercises the same encoder.
+        let mut inode = make_inode(128);
+        let access = XattrWriteAccess {
+            is_owner: true,
+            has_cap_fowner: false,
+            has_cap_sys_admin: false,
+        };
+        for name in ["user.e1", "user.e2", "user.e3", "user.e4"] {
+            set_xattr(&mut inode, None, name, b"", access)
+                .unwrap_or_else(|e| panic!("set_xattr {name:?} with empty value failed: {e:?}"));
+        }
+        let mut listed = list_xattrs(&inode, None).unwrap();
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                "user.e1".to_owned(),
+                "user.e2".to_owned(),
+                "user.e3".to_owned(),
+                "user.e4".to_owned()
+            ],
+        );
     }
 }
