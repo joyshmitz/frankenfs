@@ -572,6 +572,9 @@ impl RefreshLossModel {
             return 0.0;
         }
         let clamped_rate = finite_nonnegative_or(write_rate, 0.0);
+        if block_threshold == 0 {
+            return finite_loss(self.refresh_io_cost() * clamped_rate);
+        }
         let age_window = if max_staleness_secs.is_finite() && max_staleness_secs > 0.0 {
             max_staleness_secs
         } else {
@@ -1239,6 +1242,17 @@ mod tests {
         let m = RefreshLossModel::default();
         // With zero write rate, block-count never triggers → zero loss.
         assert!((m.expected_loss_block_count(500, 0.0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hybrid_zero_block_threshold_matches_every_write_refresh() {
+        let m = RefreshLossModel::default();
+
+        assert!(
+            (m.expected_loss_hybrid(30.0, 0, 100.0) - m.expected_loss_block_count(0, 100.0)).abs()
+                < f64::EPSILON
+        );
+        assert!((m.expected_loss_hybrid(30.0, 0, 0.0) - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
