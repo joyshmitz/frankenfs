@@ -14511,6 +14511,11 @@ impl OpenFs {
                 "path component must not contain NUL".into(),
             ));
         }
+        if name == b"." || name == b".." {
+            return Err(FfsError::Format(
+                "path component must not be '.' or '..'".into(),
+            ));
+        }
         if name.len() > usize::from(u8::MAX) {
             return Err(FfsError::NameTooLong);
         }
@@ -27951,6 +27956,24 @@ mod tests {
             .lookup(&cx, root, OsStr::from_bytes(b"bad/name"))
             .unwrap_err();
         assert_eq!(bad_lookup.to_errno(), libc::ENOENT);
+
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = fs
+                .rename(
+                    &cx,
+                    root,
+                    OsStr::new("rename_bad_src.txt"),
+                    root,
+                    OsStr::from_bytes(name),
+                )
+                .unwrap_err();
+            assert!(matches!(err, FfsError::Format(_)));
+
+            let looked_up = fs
+                .lookup(&cx, root, OsStr::new("rename_bad_src.txt"))
+                .expect("source should remain after failed reserved-name rename");
+            assert_eq!(looked_up.ino, src.ino);
+        }
     }
 
     #[test]
@@ -28060,6 +28083,18 @@ mod tests {
 
         let after = fs.getattr(&cx, src.ino).expect("getattr after failed link");
         assert_eq!(after.nlink, 1, "failed link should roll back nlink");
+
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = fs
+                .link(&cx, src.ino, root, OsStr::from_bytes(name))
+                .unwrap_err();
+            assert!(matches!(err, FfsError::Format(_)));
+
+            let after = fs
+                .getattr(&cx, src.ino)
+                .expect("getattr after failed reserved-name link");
+            assert_eq!(after.nlink, 1, "failed link should roll back nlink");
+        }
     }
 
     #[test]
@@ -28124,6 +28159,28 @@ mod tests {
             free_after, free_before,
             "failed symlink should not leak inode"
         );
+
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = fs
+                .symlink(
+                    &cx,
+                    root,
+                    OsStr::from_bytes(name),
+                    Path::new("hello.txt"),
+                    1000,
+                    1000,
+                )
+                .unwrap_err();
+            assert!(matches!(err, FfsError::Format(_)));
+
+            let free_after = fs
+                .count_free_inodes_in_group(&cx, GroupNumber(0))
+                .expect("free inode count after reserved-name symlink");
+            assert_eq!(
+                free_after, free_before,
+                "failed symlink should not leak inode"
+            );
+        }
     }
 
     #[test]
@@ -31842,6 +31899,13 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::EINVAL);
 
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = fs
+                .create(&cx, root, OsStr::from_bytes(name), 0o644, 0, 0)
+                .unwrap_err();
+            assert_eq!(err.to_errno(), libc::EINVAL);
+        }
+
         // Same for mkdir.
         let err = fs
             .mkdir(&cx, root, OsStr::new(""), 0o755, 0, 0)
@@ -31857,6 +31921,13 @@ mod tests {
             .mkdir(&cx, root, OsStr::from_bytes(b"a\0b"), 0o755, 0, 0)
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::EINVAL);
+
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = fs
+                .mkdir(&cx, root, OsStr::from_bytes(name), 0o755, 0, 0)
+                .unwrap_err();
+            assert_eq!(err.to_errno(), libc::EINVAL);
+        }
     }
 
     #[test]
@@ -35365,6 +35436,21 @@ mod tests {
             .expect_err("create with NUL should fail");
         assert!(matches!(err, FfsError::Format(_)));
 
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = ops
+                .create(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    InodeNumber(1),
+                    OsStr::from_bytes(name),
+                    0o644,
+                    0,
+                    0,
+                )
+                .expect_err("create with reserved dot component should fail");
+            assert!(matches!(err, FfsError::Format(_)));
+        }
+
         let lookup_err = ops
             .lookup(
                 &cx,
@@ -35406,6 +35492,21 @@ mod tests {
             )
             .expect_err("mkdir with NUL should fail");
         assert!(matches!(err, FfsError::Format(_)));
+
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = ops
+                .mkdir(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    InodeNumber(1),
+                    OsStr::from_bytes(name),
+                    0o755,
+                    0,
+                    0,
+                )
+                .expect_err("mkdir with reserved dot component should fail");
+            assert!(matches!(err, FfsError::Format(_)));
+        }
 
         let lookup_err = ops
             .lookup(
@@ -35932,6 +36033,30 @@ mod tests {
             )
             .expect("source should remain after failed rename");
         assert_eq!(looked_up.ino, attr.ino);
+
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = ops
+                .rename(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    InodeNumber(1),
+                    OsStr::new("rename_src.txt"),
+                    InodeNumber(1),
+                    OsStr::from_bytes(name),
+                )
+                .expect_err("rename with reserved dot component should fail");
+            assert!(matches!(err, FfsError::Format(_)));
+
+            let looked_up = ops
+                .lookup(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    InodeNumber(1),
+                    OsStr::new("rename_src.txt"),
+                )
+                .expect("source should remain after failed reserved-name rename");
+            assert_eq!(looked_up.ino, attr.ino);
+        }
     }
 
     #[test]
@@ -36025,6 +36150,21 @@ mod tests {
             )
             .expect_err("invalid symlink name must not be created");
         assert_eq!(lookup_err.to_errno(), libc::ENOENT);
+
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = ops
+                .symlink(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    InodeNumber(1),
+                    OsStr::from_bytes(name),
+                    Path::new("/tmp/target"),
+                    0,
+                    0,
+                )
+                .expect_err("symlink with reserved dot component should fail");
+            assert!(matches!(err, FfsError::Format(_)));
+        }
     }
 
     #[test]
@@ -36151,6 +36291,24 @@ mod tests {
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .expect("getattr after failed link");
         assert_eq!(updated.nlink, 1, "failed link must not bump nlink");
+
+        for name in [b".".as_slice(), b"..".as_slice()] {
+            let err = ops
+                .link(
+                    &cx,
+                    &mut RequestScope::empty(),
+                    attr.ino,
+                    InodeNumber(1),
+                    OsStr::from_bytes(name),
+                )
+                .expect_err("link with reserved dot component should fail");
+            assert!(matches!(err, FfsError::Format(_)));
+
+            let updated = ops
+                .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+                .expect("getattr after failed reserved-name link");
+            assert_eq!(updated.nlink, 1, "failed link must not bump nlink");
+        }
     }
 
     #[test]
