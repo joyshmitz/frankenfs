@@ -520,6 +520,7 @@ dependencies = [
  "crc32c",
  "ffs-alloc",
  "ffs-block",
+ "ffs-btree",
  "ffs-btrfs",
  "ffs-core",
  "ffs-dir",
