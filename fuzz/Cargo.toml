@@ -240,6 +240,11 @@ path = "fuzz_targets/fuzz_alloc_bitmap.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_alloc_succinct"
+path = "fuzz_targets/fuzz_alloc_succinct.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_dir_operations"
 path = "fuzz_targets/fuzz_dir_operations.rs"
 doc = false
