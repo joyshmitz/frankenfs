@@ -1,0 +1,1 @@
+P_allocator_pressure_v1: repeated low-domain allocations force tree growth and metadata writes
