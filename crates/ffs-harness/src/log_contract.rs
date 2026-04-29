@@ -84,6 +84,7 @@ pub mod field {
         SCENARIO_ID,
         OUTCOME,
         ERROR_CLASS,
+        SUBSYSTEM,
         DURATION_US,
         TXN_ID,
         COMMIT_SEQ,
@@ -370,6 +371,30 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), field::CANONICAL_FIELDS.len());
+    }
+
+    #[test]
+    fn canonical_fields_include_declared_schema_constants() {
+        let declared = [
+            field::OPERATION_ID,
+            field::SCENARIO_ID,
+            field::OUTCOME,
+            field::ERROR_CLASS,
+            field::SUBSYSTEM,
+            field::DURATION_US,
+            field::TXN_ID,
+            field::COMMIT_SEQ,
+            field::GROUP_ID,
+            field::INO,
+            field::OFFSET,
+        ];
+
+        for field_name in declared {
+            assert!(
+                field::CANONICAL_FIELDS.contains(&field_name),
+                "canonical field list is missing declared field {field_name}",
+            );
+        }
     }
 
     #[test]
