@@ -18885,8 +18885,28 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
 
     // ── Level 2: Group descriptor checksums ────────────────────────────
     let csum_seed = sb.csum_seed();
-    let groups_count = sb.groups_count();
+    let raw_groups_count = sb.groups_count();
     let desc_size = sb.group_desc_size();
+
+    // Cap the group-descriptor scan: a corrupted superblock advertising
+    // u32::MAX groups previously caused this loop to push billions of
+    // failure verdicts before returning, OOM-ing the integrity checker
+    // itself. 65536 groups covers a 16-PiB filesystem at default
+    // 4 KiB-block geometry; anything larger is malformed and the
+    // truncated scan still surfaces the corruption via the verdict
+    // added below.
+    const MAX_GROUPS_VERIFIED: u32 = 65_536;
+    let groups_count = raw_groups_count.min(MAX_GROUPS_VERIFIED);
+    if raw_groups_count > MAX_GROUPS_VERIFIED {
+        verdicts.push(CheckVerdict {
+            component: "groups_count".to_owned(),
+            passed: false,
+            detail: format!(
+                "superblock advertises {raw_groups_count} groups; capped scan at {MAX_GROUPS_VERIFIED}"
+            ),
+        });
+        failed = failed.saturating_add(1);
+    }
 
     for g in 0..groups_count {
         let group = ffs_types::GroupNumber(g);
@@ -18995,22 +19015,36 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     let mut inode_bitmap_cache: std::collections::HashMap<u32, Vec<u8>> =
         std::collections::HashMap::new();
 
-    // Check inodes: root (2), then first_ino..first_ino+check_limit
-    let ino_list: Vec<u32> = {
-        let mut v = vec![2_u32]; // root inode
-        let start = first_ino.max(2);
-        let end = start
-            .saturating_add(check_limit)
-            .min(inodes_count.saturating_add(1));
-        for i in start..end {
-            if i != 2 {
-                v.push(i);
-            }
-        }
-        v
-    };
+    // Iterate inodes lazily: root (2), then first_ino..first_ino+check_limit.
+    // Materialising this as a Vec was vulnerable to OOM when a corrupted
+    // superblock advertised inodes_count near u32::MAX — the eager push
+    // allocated ~16 GiB before the per-iteration check_limit guard fired.
+    let inode_iter_start = first_ino.max(2);
+    let inode_iter_end = inode_iter_start
+        .saturating_add(check_limit)
+        .min(inodes_count.saturating_add(1));
+    let ino_iter = std::iter::once(2_u32)
+        .chain((inode_iter_start..inode_iter_end).filter(|&i| i != 2));
 
-    for &ino in &ino_list {
+    // Guard against a corrupted superblock advertising inodes_per_group == 0:
+    // every per-inode iteration below divides by it, so a malformed image
+    // would otherwise crash the integrity check itself. Record the failure
+    // and skip the inode-checksum scan; the posterior summary downstream
+    // still runs over whatever level-1/level-2 verdicts have been collected.
+    let inodes_per_group = sb.inodes_per_group;
+    if inodes_per_group == 0 {
+        verdicts.push(CheckVerdict {
+            component: "inodes_per_group".to_owned(),
+            passed: false,
+            detail: "superblock advertises zero inodes per group".to_owned(),
+        });
+        failed = failed.saturating_add(1);
+    }
+
+    for ino in ino_iter {
+        if inodes_per_group == 0 {
+            break;
+        }
         if inodes_checked >= u64::from(check_limit) {
             break;
         }
