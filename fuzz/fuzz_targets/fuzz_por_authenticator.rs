@@ -70,12 +70,19 @@ fuzz_target!(|data: &[u8]| {
     let base_index = derive_base_index(data);
     let blocks = derive_blocks(data);
 
+    // The harness intentionally exercises base_index values up to u64::MAX
+    // (e.g., to validate the per-block bind-to-index assertion under
+    // wrapping_add), so the index sequence must wrap rather than panic on
+    // overflow inside the harness itself. compute_authenticator and
+    // verify_authenticator both accept any u64 index.
+    let block_index = |offset: usize| base_index.wrapping_add(offset as u64);
+
     let built = AuthenticatorTable::build(
         &key,
         blocks
             .iter()
             .enumerate()
-            .map(|(offset, block)| (base_index + offset as u64, block.as_slice())),
+            .map(|(offset, block)| (block_index(offset), block.as_slice())),
     );
 
     assert_eq!(
@@ -91,7 +98,7 @@ fuzz_target!(|data: &[u8]| {
 
     let mut manual = AuthenticatorTable::with_capacity(blocks.len());
     for (offset, block) in blocks.iter().enumerate() {
-        let index = base_index + offset as u64;
+        let index = block_index(offset);
         let auth = compute_authenticator(&key, index, block);
         assert!(
             verify_authenticator(&key, index, block, &auth),
