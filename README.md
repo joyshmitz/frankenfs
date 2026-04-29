@@ -270,7 +270,7 @@ For multi-threaded workloads, `ShardedMvccStore` partitions version chains acros
 
 ## Deep Dive: Self-Healing Durability
 
-FrankenFS doesn't wait for `fsck` to discover corruption. It continuously monitors block integrity and automatically recovers corrupted data using fountain-coded repair symbols.
+FrankenFS can detect corruption during scrub cycles and recover corrupted data from fountain-coded repair symbols through the explicit `ffs repair` / `ffs fsck --repair` paths. The `ffs mount` path also owns a detection-only background scrub lifecycle for read-only mounts, so mount-time monitoring can surface corruption without mutating image data or repair-symbol state.
 
 ### RaptorQ Fountain Codes (RFC 6330)
 
@@ -835,7 +835,7 @@ Each inode includes a CRC32c checksum (`i_checksum_lo` + `i_checksum_hi`) comput
 
 ## Deep Dive: Background Scrub Pipeline
 
-The scrub pipeline (`ffs-repair::pipeline`) continuously monitors block integrity and orchestrates automatic recovery.
+The scrub pipeline (`ffs-repair::pipeline`) scans block integrity, emits evidence for detected corruption, and orchestrates recovery when it is run in repair-enabled mode. Mount-time background scrub uses the same pipeline in detection-only mode, leaving block repair and repair-symbol refresh to explicit `ffs repair` / `ffs fsck --repair` operations.
 
 ### Scrub Cycle
 
