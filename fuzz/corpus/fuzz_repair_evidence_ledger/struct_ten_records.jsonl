@@ -1,0 +1,10 @@
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":0,"snapshot_advanced":{"old_commit_seq":0,"new_commit_seq":1,"versions_eligible":0}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":1,"snapshot_advanced":{"old_commit_seq":1,"new_commit_seq":2,"versions_eligible":1}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":2,"snapshot_advanced":{"old_commit_seq":2,"new_commit_seq":3,"versions_eligible":2}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":3,"snapshot_advanced":{"old_commit_seq":3,"new_commit_seq":4,"versions_eligible":3}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":0,"snapshot_advanced":{"old_commit_seq":4,"new_commit_seq":5,"versions_eligible":4}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":1,"snapshot_advanced":{"old_commit_seq":5,"new_commit_seq":6,"versions_eligible":5}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":2,"snapshot_advanced":{"old_commit_seq":6,"new_commit_seq":7,"versions_eligible":6}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":3,"snapshot_advanced":{"old_commit_seq":7,"new_commit_seq":8,"versions_eligible":7}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":0,"snapshot_advanced":{"old_commit_seq":8,"new_commit_seq":9,"versions_eligible":8}}
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":1,"snapshot_advanced":{"old_commit_seq":9,"new_commit_seq":10,"versions_eligible":9}}

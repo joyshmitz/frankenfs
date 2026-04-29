@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"merge_rejected","block_group":5,"merge_rejected":{"txn_id":201,"block_id":512,"proof_variant":"Unsafe","reason":"no proof variant matches conflict shape"}}

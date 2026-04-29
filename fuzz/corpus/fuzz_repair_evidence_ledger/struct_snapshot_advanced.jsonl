@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":1,"snapshot_advanced":{"old_commit_seq":100,"new_commit_seq":200,"versions_eligible":50}}

@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"refresh_policy_changed","block_group":3,"refresh_policy_changed":{"block_group":3,"old_policy":"lazy","new_policy":"eager"}}

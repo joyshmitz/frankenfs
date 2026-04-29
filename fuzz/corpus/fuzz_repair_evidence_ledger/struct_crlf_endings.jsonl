@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"contention_sample","block_group":0,"contention_sample":{"conflict_rate":0.0,"merge_success_rate":1.0,"abort_rate":0.0,"total_commits":0,"total_conflicts":0,"total_merges":0,"total_aborts":0,"effective_policy":"init"}}

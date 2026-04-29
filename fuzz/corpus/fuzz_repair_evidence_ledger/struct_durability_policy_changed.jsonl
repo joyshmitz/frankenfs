@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"durability_policy_changed","block_group":0,"durability_policy_changed":{"old_overhead":0.1,"new_overhead":0.05,"posterior_alpha":50.0,"posterior_beta":950.0,"posterior_mean":0.05}}

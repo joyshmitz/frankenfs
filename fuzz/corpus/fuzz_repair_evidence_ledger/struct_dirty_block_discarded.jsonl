@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"dirty_block_discarded","block_group":2,"dirty_block_discarded":{"block_id":42,"txn_id":7,"reason":"abort"}}

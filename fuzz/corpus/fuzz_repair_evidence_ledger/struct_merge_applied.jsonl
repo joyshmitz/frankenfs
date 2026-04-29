@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"merge_applied","block_group":5,"merge_applied":{"txn_id":200,"merged_block_count":4,"combined_write_set_bytes":16384,"proof_variant":"AppendOnly"}}

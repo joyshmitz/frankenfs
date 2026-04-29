@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"policy_switched","block_group":0,"policy_switched":{"from_policy":"optimistic","to_policy":"pessimistic","expected_loss_delta":0.001,"trigger_reason":"contention_rate_change"}}

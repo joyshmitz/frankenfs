@@ -1,0 +1,3 @@
+{"timestamp_ns":1000000000000000000,"event_type":"snapshot_advanced","block_group":0,"snapshot_advanced":{"old_commit_seq":1,"new_commit_seq":2,"versions_eligible":0}}
+{"timestamp_ns":1000000000000000000,"event_type":"backpressure_activated","block_group":0,"backpressure_activated":{"dirty_ratio":0.5,"threshold":0.7}}
+{"timestamp_ns":1000000000000000000,"event_type":"dirty_block_discarded","block_group":0,"dirty_block_discarded":{"block_id":1,"txn_id":1,"reason":"abort"}}

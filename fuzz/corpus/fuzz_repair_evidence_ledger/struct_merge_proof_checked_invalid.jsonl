@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000000000000,"event_type":"merge_proof_checked","block_group":5,"merge_proof_checked":{"txn_id":101,"block_id":256,"proof_variant":"IndependentKeys","valid":false,"rejection_reason":"key range overlap"}}
