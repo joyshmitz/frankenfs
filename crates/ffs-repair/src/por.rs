@@ -381,6 +381,13 @@ where
             continue;
         };
 
+        let block_hash = *blake3::hash(&block_data).as_bytes();
+        if block_hash != response.block_hash {
+            failed += 1;
+            failed_indices.push(challenge.index);
+            continue;
+        }
+
         // Verify the authenticator.
         if verify_authenticator(key, challenge.index, &block_data, &response.authenticator) {
             passed += 1;
@@ -673,6 +680,34 @@ mod tests {
 
         assert!(!result.audit_passed);
         assert_eq!(result.failed, 5); // all fail due to nonce mismatch
+    }
+
+    #[test]
+    fn por_rejects_tampered_response_block_hash() {
+        let key = test_key();
+        let blocks = make_blocks(10, 4096);
+        let table = AuthenticatorTable::build(
+            &key,
+            blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (i as u64, b.as_slice())),
+        );
+
+        let seed = *blake3::hash(b"block-hash-tamper-test").as_bytes();
+        let challenges = ChallengeSet::generate(&seed, 10, 5);
+        let mut responses =
+            respond_to_challenges(&challenges, &table, |idx| get_block(&blocks, idx));
+        assert!(!responses.responses.is_empty());
+
+        let tampered_index = responses.responses[0].index;
+        responses.responses[0].block_hash[0] ^= 0xFF;
+
+        let result = verify_responses(&key, &challenges, &responses, |idx| get_block(&blocks, idx));
+
+        assert!(!result.audit_passed);
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.failed_indices, vec![tampered_index]);
     }
 
     #[test]
