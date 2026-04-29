@@ -164,14 +164,30 @@ fuzz_target!(|data: &[u8]| {
         );
 
         if first_result == "ok:true" {
+            // add_entry permits duplicate names — a directory can legitimately
+            // contain multiple entries sharing a basename (different inodes).
+            // The "removing the same name twice fails" property only holds
+            // when the name is unique in our model; otherwise the second
+            // remove finds the next duplicate.
+            let occurrences = names
+                .iter()
+                .filter(|(name, _, _)| name == target_name)
+                .count();
             let retry =
                 normalize_remove_result(remove_entry(&mut first, target_name, reserved_tail));
+            let expected_retry = if occurrences > 1 { "ok:true" } else { "ok:false" };
             assert_eq!(
-                retry, "ok:false",
-                "after removing a live entry, removing the same name again should report not found"
+                retry, expected_retry,
+                "after removing a live entry of a {} name, second remove must report {}",
+                if occurrences > 1 { "duplicated" } else { "unique" },
+                expected_retry,
             );
         }
 
+        // Same caveat for htree_remove: duplicate (hash, block) pairs can
+        // exist when names collide on hash — but we use ino as block_id and
+        // each entry has a distinct ino, so (hash, block) pairs are always
+        // unique here. Assert the unique-mapping invariant directly.
         assert!(
             htree_remove(&mut htree_entries, *target_hash, *target_block),
             "removing an existing htree mapping must succeed"
