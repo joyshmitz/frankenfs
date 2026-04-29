@@ -20,6 +20,14 @@ use tracing::{debug, trace, warn};
 
 const MAX_CAS_RETRIES: usize = 1_024;
 const MAX_CHAIN_DEPTH: usize = 16_384;
+/// Hard ceiling for chain-walk loops. The consolidation logic keeps real
+/// chains far below `MAX_CHAIN_DEPTH`; this is a runaway-loop guard, not a
+/// correctness limit. The grace headroom over `MAX_CHAIN_DEPTH` accommodates
+/// brief overshoots when several threads race to append before any of them
+/// hits the pre-consolidation trigger — a 16385-node chain (`MAX_CHAIN_DEPTH`
+/// deltas plus the base) would previously be rejected as `Corruption` even
+/// when its base node was perfectly valid.
+const MAX_CHAIN_WALK: usize = MAX_CHAIN_DEPTH * 2;
 const DEFAULT_CONSOLIDATION_THRESHOLD: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,6 +70,60 @@ impl PageDelta {
         Arc::new(Self::Base {
             entries: BTreeMap::new(),
         })
+    }
+}
+
+/// Iterative `Drop` for the `next: Arc<Self>` chain.
+///
+/// `PageDelta` forms a singly-linked list via `Arc<Self>`, so the default
+/// recursive `Drop` walks the chain through nested stack frames and overflows
+/// the thread stack on any chain that approaches `MAX_CHAIN_DEPTH`. Ordinarily
+/// pre-consolidation would keep chains short, but `defer_reclaim` hands the
+/// *old* head (potentially tens of thousands of nodes) to crossbeam-epoch for
+/// deferred drop right after a consolidation CAS — and that drop eventually
+/// runs on a worker thread with the default 2 MiB stack, where ~16 KiB-deep
+/// recursion explodes.
+///
+/// The standard trick: extract `next` and walk the chain in a loop, only
+/// touching uniquely-owned arcs. Shared arcs bail out and let the remaining
+/// owners drive their own (shorter, by definition) drop chain.
+impl Drop for PageDelta {
+    fn drop(&mut self) {
+        let mut head = match self {
+            Self::Insert { next, .. }
+            | Self::Delete { next, .. }
+            | Self::Split { next, .. }
+            | Self::Merge { next, .. } => std::mem::replace(next, Self::empty_base()),
+            Self::Base { .. } => return,
+        };
+        // `self`'s default field-drops still run after this method returns,
+        // but `next` now holds an empty base, so its Drop terminates in O(1).
+
+        loop {
+            match Arc::try_unwrap(head) {
+                Ok(mut node) => {
+                    let next_arc = match &mut node {
+                        Self::Insert { next, .. }
+                        | Self::Delete { next, .. }
+                        | Self::Split { next, .. }
+                        | Self::Merge { next, .. } => {
+                            std::mem::replace(next, Self::empty_base())
+                        }
+                        Self::Base { .. } => return,
+                    };
+                    // `node` is dropped at the end of this arm; recursing
+                    // back into our Drop impl picks up the empty base via
+                    // the `Base` short-circuit above, so the recursion is
+                    // bounded by one frame.
+                    head = next_arc;
+                }
+                Err(_shared) => {
+                    // Some other Arc clone is keeping the rest of the chain
+                    // alive; let that owner walk it.
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -305,17 +367,25 @@ impl MappingTable {
 
             if chain_len_before <= 1 {
                 // Already a base page (or single delta on base); nothing to do.
+                // Reporting entries_count here as a hard-coded zero misleads
+                // operator dashboards and metrics consumers, so read the
+                // actual count from the base node when one is present.
+                let entries_count = match snapshot.head.as_ref() {
+                    PageDelta::Base { entries } => entries.len(),
+                    _ => 0,
+                };
                 trace!(
                     target: "ffs::bwtree",
                     event = "bw_consolidate_skip",
                     page_id = page_id.0,
                     chain_len = chain_len_before,
+                    entries_count,
                     reason = "already_base"
                 );
                 return Ok(ConsolidationResult {
                     chain_len_before,
                     chain_len_after: chain_len_before,
-                    entries_count: 0,
+                    entries_count,
                     cas_attempts: 0,
                 });
             }
@@ -381,17 +451,34 @@ impl MappingTable {
 
     /// Consolidate all pages whose chain length exceeds the configured
     /// threshold. Returns the number of pages successfully consolidated.
+    ///
+    /// Per-page failures (e.g., CAS retry exhaustion under heavy concurrent
+    /// load) are logged at warn level and skipped; the contract is "best
+    /// effort, return how many succeeded" — failing one transient page must
+    /// not throw away the work already done on the preceding pages.
     pub fn consolidate_all(&self, config: &ConsolidationConfig) -> Result<usize> {
         let candidates = self.scan_for_consolidation(config.chain_threshold);
         let mut consolidated = 0;
+        let mut skipped = 0;
         for page_id in candidates {
-            self.consolidate_page(page_id, config)?;
-            consolidated += 1;
+            match self.consolidate_page(page_id, config) {
+                Ok(_) => consolidated += 1,
+                Err(err) => {
+                    skipped += 1;
+                    warn!(
+                        target: "ffs::bwtree",
+                        event = "bw_consolidate_all_skip",
+                        page_id = page_id.0,
+                        error = %err,
+                    );
+                }
+            }
         }
         debug!(
             target: "ffs::bwtree",
             event = "bw_consolidate_all_done",
             consolidated,
+            skipped,
             threshold = config.chain_threshold
         );
         Ok(consolidated)
@@ -441,13 +528,20 @@ pub struct ConsolidationResult {
 }
 
 /// Count the number of delta nodes in a chain (including the base page).
+///
+/// Walks at most `MAX_CHAIN_WALK` nodes and returns that limit if no base
+/// is reached — a defensive cap, not a correctness claim. Healthy chains
+/// stay well under `MAX_CHAIN_DEPTH`; the headroom over that threshold lets
+/// brief overshoots (concurrent appenders all observing `chain_len <
+/// MAX_CHAIN_DEPTH` before any of them consolidates) report an accurate
+/// count instead of being silently truncated.
 #[must_use]
 pub fn chain_length(head: &Arc<PageDelta>) -> usize {
     let mut cursor = Arc::clone(head);
     let mut len = 0_usize;
     loop {
         len += 1;
-        if len > MAX_CHAIN_DEPTH {
+        if len > MAX_CHAIN_WALK {
             return len;
         }
         match cursor.as_ref() {
@@ -511,11 +605,11 @@ fn materialize_from_head(head: &Arc<PageDelta>) -> Result<(BTreeMap<BwKey, BwVal
 
     loop {
         chain_len = chain_len.saturating_add(1);
-        if chain_len > MAX_CHAIN_DEPTH {
+        if chain_len > MAX_CHAIN_WALK {
             return Err(FfsError::Corruption {
                 block: 0,
                 detail: format!(
-                    "bw-tree delta chain exceeded max depth ({MAX_CHAIN_DEPTH}) without base page"
+                    "bw-tree delta chain exceeded walk limit ({MAX_CHAIN_WALK}) without base page"
                 ),
             });
         }
@@ -580,8 +674,9 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 mod tests {
     use super::{
         BwKey, BwValue, ConsolidationConfig, FfsError, MAX_CHAIN_DEPTH, MappingTable, PageDelta,
-        PageId, chain_length,
+        PageId, chain_length, materialize_from_head,
     };
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier, atomic::Ordering};
 
     fn start_test_thread<F>(f: F) -> std::thread::JoinHandle<()>
@@ -1690,5 +1785,113 @@ mod tests {
             table.lookup(page, BwKey(1)).expect("lookup"),
             Some(BwValue(1))
         );
+    }
+
+    // ── Multi-pass audit regressions ───────────────────────────────────
+
+    /// `consolidate_page` previously reported `entries_count = 0` whenever it
+    /// took the "already consolidated" early-return path, which made the
+    /// metric useless for any healthy consolidated page. Read the actual
+    /// count from the `Base` node instead.
+    #[test]
+    fn consolidate_page_reports_actual_entries_count_when_already_base() {
+        let table = MappingTable::with_capacity(2);
+        let page = table.allocate_page().expect("alloc");
+
+        // Force consolidation so the chain is exactly one Base with a known
+        // number of entries.
+        for k in 0..7_u64 {
+            table.insert(page, BwKey(k), BwValue(k)).expect("insert");
+        }
+        let cfg = ConsolidationConfig::default();
+        let first = table.consolidate_page(page, &cfg).expect("consolidate");
+        assert_eq!(first.entries_count, 7);
+        assert_eq!(first.chain_len_after, 1);
+
+        // Second call observes chain_len_before <= 1 and takes the no-op
+        // path. Before the fix, entries_count would be 0; after it must
+        // reflect the seven entries actually present in the base.
+        let again = table
+            .consolidate_page(page, &cfg)
+            .expect("consolidate no-op");
+        assert!(again.chain_len_before <= 1);
+        assert_eq!(again.cas_attempts, 0);
+        assert_eq!(
+            again.entries_count, 7,
+            "no-op consolidation must report the real entry count, not 0"
+        );
+    }
+
+    /// `consolidate_all` previously aborted on the first per-page failure,
+    /// dropping the count of pages it had already finished. This test
+    /// drives a successful run; the regression is documented by the
+    /// invariant that on success it returns the count rather than 0.
+    #[test]
+    fn consolidate_all_returns_count_of_successful_pages() {
+        let table = MappingTable::with_capacity(8);
+
+        // Build several pages with chains long enough to qualify for
+        // consolidation under the default threshold.
+        let cfg = ConsolidationConfig::default();
+        let mut pages = Vec::new();
+        for _ in 0..4 {
+            let p = table.allocate_page().expect("alloc");
+            for k in 0..(cfg.chain_threshold + 2) {
+                let key = BwKey(u64::try_from(k).expect("fits"));
+                table.insert(p, key, BwValue(0)).expect("insert");
+            }
+            pages.push(p);
+        }
+
+        // Sanity: scan finds every qualifying page exactly once.
+        let candidates = table.scan_for_consolidation(cfg.chain_threshold);
+        for p in &pages {
+            assert!(candidates.contains(p));
+        }
+
+        let consolidated = table.consolidate_all(&cfg).expect("consolidate_all");
+        assert_eq!(consolidated, pages.len());
+
+        // Each page now has chain length 1.
+        for p in pages {
+            let snap = table.get_page(p).expect("snapshot");
+            assert_eq!(chain_length(&snap.head), 1);
+        }
+    }
+
+    /// `chain_length` and `materialize_from_head` previously rejected any
+    /// chain longer than `MAX_CHAIN_DEPTH`. In practice, multiple appenders
+    /// racing past the pre-consolidation check can briefly leave a chain at
+    /// `MAX_CHAIN_DEPTH + k`; rejecting it as `Corruption` is a false
+    /// positive. The walk limit now sits at `MAX_CHAIN_WALK` (2× the depth
+    /// trigger) to absorb that race.
+    #[test]
+    fn materialize_from_head_tolerates_chain_overshoot() {
+        // Build a chain of MAX_CHAIN_DEPTH + 1 nodes (one more than the
+        // pre-consolidation trigger): MAX_CHAIN_DEPTH Insert deltas on a
+        // base with one entry. This shape is what a brief race produces
+        // before a thread reaches the consolidation branch.
+        let mut head: Arc<PageDelta> = Arc::new(PageDelta::Base {
+            entries: BTreeMap::from([(BwKey(0), BwValue(0))]),
+        });
+        for k in 1..=MAX_CHAIN_DEPTH {
+            head = Arc::new(PageDelta::Insert {
+                key: BwKey(u64::try_from(k).expect("fits")),
+                value: BwValue(u64::try_from(k).expect("fits")),
+                next: head,
+            });
+        }
+        // Chain depth: 1 base + MAX_CHAIN_DEPTH deltas = MAX_CHAIN_DEPTH + 1
+        // nodes total.
+        assert_eq!(chain_length(&head), MAX_CHAIN_DEPTH + 1);
+
+        let (state, observed_len) =
+            materialize_from_head(&head).expect("overshoot must materialize cleanly");
+        assert_eq!(observed_len, MAX_CHAIN_DEPTH + 1);
+        // Every key from 0 through MAX_CHAIN_DEPTH must be present.
+        assert_eq!(state.len(), MAX_CHAIN_DEPTH + 1);
+        assert_eq!(state.get(&BwKey(0)).copied(), Some(BwValue(0)));
+        let last = u64::try_from(MAX_CHAIN_DEPTH).expect("fits");
+        assert_eq!(state.get(&BwKey(last)).copied(), Some(BwValue(last)));
     }
 }
