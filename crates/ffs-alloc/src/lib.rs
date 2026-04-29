@@ -415,7 +415,11 @@ impl FsGeometry {
 
     #[must_use]
     pub fn gdt_blocks_count(&self) -> u32 {
-        let desc_per_block = self.block_size / u32::from(self.desc_size);
+        let desc_size = u32::from(self.desc_size);
+        if desc_size == 0 {
+            return 0;
+        }
+        let desc_per_block = self.block_size / desc_size;
         if desc_per_block == 0 {
             return 0;
         }
@@ -2932,6 +2936,15 @@ mod tests {
         let (g, off) = geo.absolute_to_group_block(BlockNumber(100));
         assert_eq!(g, GroupNumber(0));
         assert_eq!(off, 99); // 100 - first_data_block(1) = 99
+    }
+
+    #[test]
+    fn gdt_blocks_count_zero_desc_size_returns_zero_without_panic() {
+        let mut geo = make_geometry();
+        geo.desc_size = 0;
+
+        assert_eq!(geo.gdt_blocks_count(), 0);
+        assert_eq!(geo.base_meta_blocks_in_group(GroupNumber(0)), 1);
     }
 
     #[test]
