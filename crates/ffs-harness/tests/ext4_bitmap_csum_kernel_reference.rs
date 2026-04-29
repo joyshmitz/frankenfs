@@ -11,10 +11,10 @@
 //! formula across multiple groups.
 //!
 //! Strategy:
-//!   * Generate two image variants (4 KiB / 1 KiB block sizes) so both the
-//!     32-byte and 64-byte descriptor widths are exercised — the bitmap
-//!     csum is split into a 16-bit lo half (always present) and a 16-bit
-//!     hi half (only when the descriptor is 64 bytes).
+//!   * Generate image variants that cover 4 KiB / 1 KiB block sizes and both
+//!     32-byte and 64-byte descriptor widths. The bitmap csum is split into a
+//!     16-bit lo half (always present) and a 16-bit hi half (only when the
+//!     descriptor is 64 bytes).
 //!   * For every group, read the on-disk block-bitmap and inode-bitmap
 //!     blocks, recompute their CRC32C tails, and assert they validate
 //!     against the stored value. Confirm the wider 64-bit csum form
@@ -27,11 +27,11 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use ffs_ondisk::Ext4ImageReader;
 use ffs_ondisk::ext4::{
     block_bitmap_checksum_value, inode_bitmap_checksum_value, verify_block_bitmap_checksum,
     verify_inode_bitmap_checksum,
 };
+use ffs_ondisk::Ext4ImageReader;
 use ffs_types::{BlockNumber, GroupNumber};
 
 /// `EXT4_BG_INODE_UNINIT` — the inode bitmap is uninitialised; the kernel
@@ -96,6 +96,14 @@ const VARIANTS: &[Variant] = &[
         block_size: 4096,
         features: "^has_journal",
     },
+    // Force legacy 32-byte descriptors so the csum value APIs prove their
+    // low-16-bit truncation path against a kernel-written image.
+    Variant {
+        tag: "4k_no64bit",
+        size_bytes: 64 * 1024 * 1024,
+        block_size: 4096,
+        features: "^has_journal,^64bit",
+    },
 ];
 
 fn create_image(variant: &Variant) -> PathBuf {
@@ -132,7 +140,6 @@ struct VerifyStats {
     block_csums_skipped_uninit: usize,
     #[allow(dead_code)] // visible in panic-time Debug formatting only
     inode_csums_skipped_uninit: usize,
-    #[allow(dead_code)] // visible in panic-time Debug formatting only
     desc_size_observed: u16,
     block_size_observed: u32,
 }
@@ -259,6 +266,8 @@ fn ext4_bitmap_csum_kernel_reference() {
     let mut total_inode_csums = 0_usize;
     let mut saw_4k = false;
     let mut saw_1k = false;
+    let mut saw_desc32 = false;
+    let mut saw_desc64 = false;
 
     for variant in VARIANTS {
         let path = create_image(variant);
@@ -291,11 +300,20 @@ fn ext4_bitmap_csum_kernel_reference() {
         if stats.block_size_observed == 1024 {
             saw_1k = true;
         }
+        if stats.desc_size_observed == 32 {
+            saw_desc32 = true;
+        }
+        if stats.desc_size_observed >= 64 {
+            saw_desc64 = true;
+        }
 
         std::fs::remove_file(&path).ok();
     }
 
-    assert!(total_groups >= 2, "expected at least two groups across the corpus, got {total_groups}");
+    assert!(
+        total_groups >= 2,
+        "expected at least two groups across the corpus, got {total_groups}"
+    );
     assert!(
         total_block_csums >= 1,
         "at least one group must have an initialised block bitmap that we verified"
@@ -304,5 +322,12 @@ fn ext4_bitmap_csum_kernel_reference() {
         total_inode_csums >= 1,
         "at least one group must have an initialised inode bitmap that we verified"
     );
-    assert!(saw_4k && saw_1k, "expected both 4 KiB and 1 KiB block geometries");
+    assert!(
+        saw_4k && saw_1k,
+        "expected both 4 KiB and 1 KiB block geometries"
+    );
+    assert!(
+        saw_desc32 && saw_desc64,
+        "expected both 32-byte and 64-byte group descriptor widths"
+    );
 }
