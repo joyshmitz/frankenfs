@@ -306,6 +306,12 @@ struct Comparison {
     descriptor_csum_kind: Ext4GroupDescChecksumKind,
 }
 
+// The body is intentionally one long sequence of `assert_field_eq` calls
+// for every group descriptor field. Splitting it out into per-field helpers
+// would just shuffle the comparisons through accessor functions without
+// improving clarity, and the function is read top-to-bottom as the spec
+// of "every field we promise to keep in sync with e2fsprogs."
+#[allow(clippy::too_many_lines)]
 fn compare_image(variant: &ImageVariant) -> Comparison {
     let path = create_image(variant);
     let bytes = std::fs::read(&path).expect("read formatted image");
