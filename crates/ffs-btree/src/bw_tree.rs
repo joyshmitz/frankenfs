@@ -209,6 +209,22 @@ impl MappingTable {
         for attempt in 1..=MAX_CAS_RETRIES {
             let snapshot = self.get_page(page_id)?;
             let _guard = epoch::pin();
+
+            let chain_len = chain_length(&snapshot.head);
+            if chain_len >= MAX_CHAIN_DEPTH {
+                let (state, _) = materialize_from_head(&snapshot.head)?;
+                let new_base = Arc::new(PageDelta::Base { entries: state });
+                if self.cas_page(page_id, snapshot.epoch, new_base)? {
+                    debug!(
+                        target: "ffs::bwtree",
+                        event = "bw_append_preconsolidate",
+                        page_id = page_id.0,
+                        chain_len
+                    );
+                }
+                continue;
+            }
+
             let new_head = Arc::new(mutation.to_delta(snapshot.head));
             if self.cas_page(page_id, snapshot.epoch, new_head)? {
                 return Ok(attempt);
@@ -563,8 +579,8 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BwKey, BwValue, ConsolidationConfig, FfsError, MappingTable, PageDelta, PageId,
-        chain_length,
+        BwKey, BwValue, ConsolidationConfig, FfsError, MAX_CHAIN_DEPTH, MappingTable, PageDelta,
+        PageId, chain_length,
     };
     use std::sync::{Arc, Barrier, atomic::Ordering};
 
@@ -1020,6 +1036,32 @@ mod tests {
                 Some(BwValue(i))
             );
         }
+    }
+
+    #[test]
+    fn append_at_chain_depth_limit_preconsolidates_before_appending() {
+        let table = MappingTable::with_capacity(1);
+        let page = table.allocate_page().expect("alloc");
+        let limit_keys =
+            u64::try_from(MAX_CHAIN_DEPTH - 1).expect("chain depth fits in u64 for tests");
+
+        for i in 0..limit_keys {
+            table.insert(page, BwKey(i), BwValue(i)).expect("insert");
+        }
+
+        let snap_before = table.get_page(page).expect("get before");
+        assert_eq!(chain_length(&snap_before.head), MAX_CHAIN_DEPTH);
+
+        table
+            .insert(page, BwKey(u64::MAX), BwValue(99))
+            .expect("append after preconsolidation");
+
+        let state = table.materialize_page(page).expect("materialize");
+        assert_eq!(state.len(), MAX_CHAIN_DEPTH);
+        assert_eq!(state.get(&BwKey(u64::MAX)).copied(), Some(BwValue(99)));
+
+        let snap_after = table.get_page(page).expect("get after");
+        assert_eq!(chain_length(&snap_after.head), 2);
     }
 
     // ── Comprehensive unit tests (bd-1mdk.3) ─────────────────────
