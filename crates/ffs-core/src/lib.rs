@@ -18850,6 +18850,8 @@ fn ln_gamma(x: f64) -> f64 {
 /// * `max_inodes` - maximum number of inodes to verify (0 = all)
 #[allow(clippy::too_many_lines)]
 pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityReport, FfsError> {
+    const MAX_GROUPS_VERIFIED: u32 = 65_536;
+
     let reader = Ext4ImageReader::new(image).map_err(|e| parse_to_ffs_error(&e))?;
     let sb = &reader.sb;
 
@@ -18895,7 +18897,6 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     // 4 KiB-block geometry; anything larger is malformed and the
     // truncated scan still surfaces the corruption via the verdict
     // added below.
-    const MAX_GROUPS_VERIFIED: u32 = 65_536;
     let groups_count = raw_groups_count.min(MAX_GROUPS_VERIFIED);
     if raw_groups_count > MAX_GROUPS_VERIFIED {
         verdicts.push(CheckVerdict {
@@ -19023,8 +19024,8 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     let inode_iter_end = inode_iter_start
         .saturating_add(check_limit)
         .min(inodes_count.saturating_add(1));
-    let ino_iter = std::iter::once(2_u32)
-        .chain((inode_iter_start..inode_iter_end).filter(|&i| i != 2));
+    let ino_iter =
+        std::iter::once(2_u32).chain((inode_iter_start..inode_iter_end).filter(|&i| i != 2));
 
     // Guard against a corrupted superblock advertising inodes_per_group == 0:
     // every per-inode iteration below divides by it, so a malformed image

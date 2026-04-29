@@ -343,7 +343,17 @@ pub fn evaluate_retention(
         .sum();
 
     if total_bytes > policy.max_total_bytes {
-        let mut running_total = total_bytes;
+        let already_selected_bytes: u64 = prune_indices
+            .iter()
+            .map(|&idx| {
+                manifests[idx]
+                    .artifacts
+                    .iter()
+                    .map(|a| a.size_bytes)
+                    .sum::<u64>()
+            })
+            .sum();
+        let mut running_total = total_bytes.saturating_sub(already_selected_bytes);
         for (idx, manifest) in manifests.iter().enumerate() {
             if running_total <= policy.max_total_bytes {
                 break;
@@ -1048,6 +1058,32 @@ mod tests {
             "oldest manifest should be pruned for count"
         );
         assert_eq!(prune.len(), 1);
+    }
+
+    #[test]
+    fn evaluate_retention_size_budget_counts_already_selected_manifests() {
+        let mut old_large = make_manifest("run-old-large", "gate_a", "2025-01-01T00:00:00Z");
+        old_large.artifacts[0].size_bytes = 900;
+        let mut new_a = make_manifest("run-new-a", "gate_a", "2026-03-02T00:00:00Z");
+        new_a.artifacts[0].size_bytes = 200;
+        let mut new_b = make_manifest("run-new-b", "gate_a", "2026-03-03T00:00:00Z");
+        new_b.artifacts[0].size_bytes = 200;
+
+        let policy = RetentionPolicy {
+            max_age_days: 30,
+            max_total_bytes: 500,
+            max_count_per_gate: 99,
+            ..RetentionPolicy::default()
+        };
+
+        let current_days = 2026 * 365 + 3 * 30 + 4;
+        let prune = evaluate_retention(&[old_large, new_a, new_b], &policy, current_days);
+
+        assert_eq!(
+            prune,
+            vec![0],
+            "old selected manifest already brings total bytes below the size budget",
+        );
     }
 
     #[test]
