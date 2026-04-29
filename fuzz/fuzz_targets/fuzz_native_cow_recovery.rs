@@ -326,13 +326,6 @@ fn mutate_commits(
     mutated
 }
 
-fn normalize_snapshot(snapshot: NormalizedSnapshot) -> NormalizedSnapshot {
-    snapshot
-        .into_iter()
-        .filter(|(_, bytes)| !bytes.iter().all(|byte| *byte == 0))
-        .collect()
-}
-
 fn expected_snapshot(commits: &[RecoveredCommit], block_size: usize) -> NormalizedSnapshot {
     let mut expected = BTreeMap::new();
     for commit in commits {
@@ -424,8 +417,8 @@ fuzz_target!(|data: &[u8]| {
     );
 
     if replay_first.is_ok() {
-        let left = normalize_snapshot(replay_dev_first.snapshot());
-        let right = normalize_snapshot(replay_dev_second.snapshot());
+        let left = replay_dev_first.snapshot();
+        let right = replay_dev_second.snapshot();
         assert_eq!(left, right, "replay snapshots must be deterministic");
 
         let expected = expected_snapshot(&replay_commits, block_size_usize);
