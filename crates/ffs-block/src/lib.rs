@@ -7074,7 +7074,10 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
             counted,
             8,
             FlushDaemonConfig {
-                interval: Duration::from_millis(5),
+                // Keep the "writes are initially deferred" assertion below
+                // independent of scheduler timing; shutdown/drop still proves
+                // the daemon joins and performs its final flush.
+                interval: Duration::from_millis(250),
                 batch_size: 4,
                 ..FlushDaemonConfig::default()
             },
