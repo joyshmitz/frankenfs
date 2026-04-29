@@ -27957,6 +27957,38 @@ mod tests {
             .unwrap_err();
         assert_eq!(bad_lookup.to_errno(), libc::ENOENT);
 
+        let err = fs
+            .rename(
+                &cx,
+                root,
+                OsStr::new("rename_bad_src.txt"),
+                root,
+                OsStr::from_bytes(b"bad\0name"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = fs
+            .lookup(&cx, root, OsStr::new("rename_bad_src.txt"))
+            .expect("source should remain after failed NUL-name rename");
+        assert_eq!(looked_up.ino, src.ino);
+
+        let err = fs
+            .rename(
+                &cx,
+                root,
+                OsStr::from_bytes(b"rename_bad\0src.txt"),
+                root,
+                OsStr::new("rename_bad_dst.txt"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = fs
+            .lookup(&cx, root, OsStr::new("rename_bad_src.txt"))
+            .expect("source should remain after failed NUL-source rename");
+        assert_eq!(looked_up.ino, src.ino);
+
         for name in [b".".as_slice(), b"..".as_slice()] {
             let err = fs
                 .rename(
@@ -28084,6 +28116,16 @@ mod tests {
         let after = fs.getattr(&cx, src.ino).expect("getattr after failed link");
         assert_eq!(after.nlink, 1, "failed link should roll back nlink");
 
+        let err = fs
+            .link(&cx, src.ino, root, OsStr::from_bytes(b"bad\0link"))
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let after = fs
+            .getattr(&cx, src.ino)
+            .expect("getattr after failed NUL-name link");
+        assert_eq!(after.nlink, 1, "failed link should roll back nlink");
+
         for name in [b".".as_slice(), b"..".as_slice()] {
             let err = fs
                 .link(&cx, src.ino, root, OsStr::from_bytes(name))
@@ -28155,6 +28197,26 @@ mod tests {
         let free_after = fs
             .count_free_inodes_in_group(&cx, GroupNumber(0))
             .expect("free inode count after symlink");
+        assert_eq!(
+            free_after, free_before,
+            "failed symlink should not leak inode"
+        );
+
+        let err = fs
+            .symlink(
+                &cx,
+                root,
+                OsStr::from_bytes(b"bad\0link"),
+                Path::new("hello.txt"),
+                1000,
+                1000,
+            )
+            .unwrap_err();
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let free_after = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count after NUL-name symlink");
         assert_eq!(
             free_after, free_before,
             "failed symlink should not leak inode"
@@ -29800,9 +29862,42 @@ mod tests {
                 0,
                 0,
                 0,
-            )
-            .expect("mknod socket");
+        )
+        .expect("mknod socket");
         assert_eq!(sock.kind, FileType::Socket);
+    }
+
+    #[test]
+    fn ext4_mknod_rejects_nul_name_before_inode_allocation() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let free_before = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count before mknod");
+
+        let err = fs
+            .mknod(
+                &cx,
+                root,
+                OsStr::from_bytes(b"bad\0node"),
+                ffs_types::S_IFCHR | 0o600,
+                0,
+                0,
+                0,
+            )
+            .expect_err("mknod with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let free_after = fs
+            .count_free_inodes_in_group(&cx, GroupNumber(0))
+            .expect("free inode count after failed mknod");
+        assert_eq!(
+            free_after, free_before,
+            "invalid mknod name must not allocate an inode"
+        );
     }
 
     #[test]
@@ -32073,6 +32168,29 @@ mod tests {
     }
 
     #[test]
+    fn write_unlink_rejects_nul_name_without_mutating_source() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .create(&cx, root, OsStr::new("unlink_nul_src.txt"), 0o644, 0, 0)
+            .expect("create source");
+
+        let err = fs
+            .unlink(&cx, root, OsStr::from_bytes(b"unlink\0nul.txt"))
+            .expect_err("unlink with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = fs
+            .lookup(&cx, root, OsStr::new("unlink_nul_src.txt"))
+            .expect("source should remain after failed NUL-name unlink");
+        assert_eq!(looked_up.ino, attr.ino);
+    }
+
+    #[test]
     fn write_unlink_zero_links_count_reports_corruption() {
         let Some(fs) = open_writable_ext4() else {
             return;
@@ -32295,6 +32413,29 @@ mod tests {
 
         let gone = fs.lookup(&cx, root, OsStr::new("empty_rm"));
         assert!(gone.is_err(), "directory should be gone");
+    }
+
+    #[test]
+    fn write_rmdir_rejects_nul_name_without_mutating_source() {
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let attr = fs
+            .mkdir(&cx, root, OsStr::new("rmdir_nul_src"), 0o755, 0, 0)
+            .expect("mkdir source");
+
+        let err = fs
+            .rmdir(&cx, root, OsStr::from_bytes(b"rmdir\0nul"))
+            .expect_err("rmdir with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = fs
+            .lookup(&cx, root, OsStr::new("rmdir_nul_src"))
+            .expect("directory should remain after failed NUL-name rmdir");
+        assert_eq!(looked_up.ino, attr.ino);
     }
 
     #[test]
@@ -36034,6 +36175,50 @@ mod tests {
             .expect("source should remain after failed rename");
         assert_eq!(looked_up.ino, attr.ino);
 
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rename_src.txt"),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad\0name"),
+            )
+            .expect_err("rename with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rename_src.txt"),
+            )
+            .expect("source should remain after failed NUL-name rename");
+        assert_eq!(looked_up.ino, attr.ino);
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"rename\0src.txt"),
+                InodeNumber(1),
+                OsStr::new("rename_dst.txt"),
+            )
+            .expect_err("rename with NUL source should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rename_src.txt"),
+            )
+            .expect("source should remain after failed NUL-source rename");
+        assert_eq!(looked_up.ino, attr.ino);
+
         for name in [b".".as_slice(), b"..".as_slice()] {
             let err = ops
                 .rename(
@@ -36150,6 +36335,19 @@ mod tests {
             )
             .expect_err("invalid symlink name must not be created");
         assert_eq!(lookup_err.to_errno(), libc::ENOENT);
+
+        let err = ops
+            .symlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad\0link"),
+                Path::new("/tmp/target"),
+                0,
+                0,
+            )
+            .expect_err("symlink with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
 
         for name in [b".".as_slice(), b"..".as_slice()] {
             let err = ops
@@ -36290,6 +36488,22 @@ mod tests {
         let updated = ops
             .getattr(&cx, &mut RequestScope::empty(), attr.ino)
             .expect("getattr after failed link");
+        assert_eq!(updated.nlink, 1, "failed link must not bump nlink");
+
+        let err = ops
+            .link(
+                &cx,
+                &mut RequestScope::empty(),
+                attr.ino,
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad\0link"),
+            )
+            .expect_err("link with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let updated = ops
+            .getattr(&cx, &mut RequestScope::empty(), attr.ino)
+            .expect("getattr after failed NUL-name link");
         assert_eq!(updated.nlink, 1, "failed link must not bump nlink");
 
         for name in [b".".as_slice(), b"..".as_slice()] {
