@@ -131,6 +131,7 @@ enum NameValidity {
     Valid,
     Empty,
     ContainsSlash,
+    ContainsNul,
     TooLong,
 }
 
@@ -140,6 +141,8 @@ impl NameValidity {
             Self::Empty
         } else if bytes.contains(&b'/') {
             Self::ContainsSlash
+        } else if bytes.contains(&0) {
+            Self::ContainsNul
         } else if bytes.len() > usize::from(u8::MAX) {
             Self::TooLong
         } else {

@@ -14506,6 +14506,11 @@ impl OpenFs {
                 "path component must not contain '/'".into(),
             ));
         }
+        if name.contains(&0) {
+            return Err(FfsError::Format(
+                "path component must not contain NUL".into(),
+            ));
+        }
         if name.len() > usize::from(u8::MAX) {
             return Err(FfsError::NameTooLong);
         }
@@ -31832,6 +31837,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::EINVAL);
 
+        let err = fs
+            .create(&cx, root, OsStr::from_bytes(b"bad\0name"), 0o644, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
         // Same for mkdir.
         let err = fs
             .mkdir(&cx, root, OsStr::new(""), 0o755, 0, 0)
@@ -31840,6 +31850,11 @@ mod tests {
 
         let err = fs
             .mkdir(&cx, root, OsStr::new("a/b"), 0o755, 0, 0)
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let err = fs
+            .mkdir(&cx, root, OsStr::from_bytes(b"a\0b"), 0o755, 0, 0)
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::EINVAL);
     }
@@ -35337,6 +35352,19 @@ mod tests {
             .expect_err("create with slash should fail");
         assert!(matches!(err, FfsError::Format(_)));
 
+        let err = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad\0name"),
+                0o644,
+                0,
+                0,
+            )
+            .expect_err("create with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
         let lookup_err = ops
             .lookup(
                 &cx,
@@ -35364,6 +35392,19 @@ mod tests {
                 0,
             )
             .expect_err("mkdir with slash should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let err = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"bad\0dir"),
+                0o755,
+                0,
+                0,
+            )
+            .expect_err("mkdir with NUL should fail");
         assert!(matches!(err, FfsError::Format(_)));
 
         let lookup_err = ops

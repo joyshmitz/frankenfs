@@ -64,6 +64,16 @@ fn validate_name(name: &[u8]) -> Result<()> {
             "directory entry name exceeds 255 bytes".to_owned(),
         ));
     }
+    if name.contains(&b'/') {
+        return Err(FfsError::Format(
+            "directory entry name cannot contain '/'".to_owned(),
+        ));
+    }
+    if name.contains(&0) {
+        return Err(FfsError::Format(
+            "directory entry name cannot contain NUL".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -1307,6 +1317,20 @@ mod tests {
         let too_long = vec![b'a'; 256];
         let err = add_entry(&mut block, 10, &too_long, Ext4FileType::RegFile, 0).unwrap_err();
         assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn add_entry_rejects_path_separator_and_nul_names() {
+        let mut block = vec![0u8; 4096];
+        write_entry(&mut block, 0, 1, 4096, Ext4FileType::Dir, b".").unwrap();
+
+        let slash_err =
+            add_entry(&mut block, 10, b"bad/name", Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(slash_err, FfsError::Format(_)));
+
+        let nul_err =
+            add_entry(&mut block, 10, b"bad\0name", Ext4FileType::RegFile, 0).unwrap_err();
+        assert!(matches!(nul_err, FfsError::Format(_)));
     }
 
     #[test]
