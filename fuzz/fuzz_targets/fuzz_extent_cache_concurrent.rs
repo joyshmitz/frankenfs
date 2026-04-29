@@ -106,7 +106,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     for h in handles {
-        let _ = h.join();
+        h.join()
+            .expect("extent-cache fuzz worker must surface invariant panics");
     }
 
     // Post-workload invariants that hold no matter how workers interleaved.
