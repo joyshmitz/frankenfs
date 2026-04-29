@@ -11,6 +11,63 @@ use serde::{Deserialize, Serialize};
 
 const CANDIDATE_STEP: f64 = 0.001;
 const MIN_POSITIVE_PARAM: f64 = 1e-9;
+const DEFAULT_DATA_LOSS_COST: f64 = 1_000_000.0;
+const DEFAULT_STORAGE_COST: f64 = 1.0;
+const DEFAULT_MIN_OVERHEAD: f64 = 0.03;
+const DEFAULT_MAX_OVERHEAD: f64 = 0.10;
+const DEFAULT_METADATA_MULTIPLIER: f64 = 2.0;
+const DEFAULT_REFRESH_IO_COST: f64 = 0.01;
+const DEFAULT_CRASH_RATE_PER_SEC: f64 = 1.0 / 31_536_000.0;
+const DEFAULT_CORRUPTION_PROBABILITY: f64 = 0.01;
+
+#[must_use]
+fn positive_param(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value.max(MIN_POSITIVE_PARAM)
+    } else {
+        MIN_POSITIVE_PARAM
+    }
+}
+
+#[must_use]
+fn finite_nonnegative_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+#[must_use]
+fn unit_interval_or(value: f64, fallback: f64) -> f64 {
+    let value = if value.is_finite() { value } else { fallback };
+    value.clamp(0.0, 1.0)
+}
+
+#[must_use]
+fn positive_ratio(numerator: f64, denominator_part: f64) -> f64 {
+    let scale = numerator.max(denominator_part);
+    if scale <= 0.0 {
+        return 0.0;
+    }
+    let scaled_numerator = numerator / scale;
+    let scaled_denominator_part = denominator_part / scale;
+    let denominator = scaled_numerator + scaled_denominator_part;
+    if denominator <= 0.0 {
+        0.0
+    } else {
+        unit_interval_or(scaled_numerator / denominator, 0.0)
+    }
+}
+
+#[must_use]
+fn finite_loss(value: f64) -> f64 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        f64::MAX
+    }
+}
 
 /// Adaptive overhead decision for a block group.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -57,11 +114,11 @@ impl Default for DurabilityAutopilot {
         Self {
             alpha: 1.0,
             beta: 100.0,
-            data_loss_cost: 1_000_000.0,
-            storage_cost: 1.0,
-            min_overhead: 0.03,
-            max_overhead: 0.10,
-            metadata_multiplier: 2.0,
+            data_loss_cost: DEFAULT_DATA_LOSS_COST,
+            storage_cost: DEFAULT_STORAGE_COST,
+            min_overhead: DEFAULT_MIN_OVERHEAD,
+            max_overhead: DEFAULT_MAX_OVERHEAD,
+            metadata_multiplier: DEFAULT_METADATA_MULTIPLIER,
         }
     }
 }
@@ -80,27 +137,19 @@ impl DurabilityAutopilot {
         let clamped_corrupted = corrupted.min(checked);
         let clean = checked.saturating_sub(clamped_corrupted);
 
-        self.alpha = self.alpha.max(MIN_POSITIVE_PARAM) + clamped_corrupted as f64;
-        self.beta = self.beta.max(MIN_POSITIVE_PARAM) + clean as f64;
+        self.alpha = positive_param(self.alpha) + clamped_corrupted as f64;
+        self.beta = positive_param(self.beta) + clean as f64;
     }
 
     #[must_use]
     pub fn posterior_mean(&self) -> f64 {
-        let alpha = self.alpha.max(MIN_POSITIVE_PARAM);
-        let beta = self.beta.max(MIN_POSITIVE_PARAM);
-        let denom = alpha + beta;
-        if denom <= 0.0 {
-            return 0.0;
-        }
-        (alpha / denom).clamp(0.0, 1.0)
+        let (alpha, beta) = self.posterior_params();
+        positive_ratio(alpha, beta)
     }
 
     #[must_use]
     pub fn posterior_params(&self) -> (f64, f64) {
-        (
-            self.alpha.max(MIN_POSITIVE_PARAM),
-            self.beta.max(MIN_POSITIVE_PARAM),
-        )
+        (positive_param(self.alpha), positive_param(self.beta))
     }
 
     /// Compute unrecoverable risk bound for overhead fraction and group size.
@@ -110,7 +159,7 @@ impl DurabilityAutopilot {
             return 0.0;
         }
 
-        let capped_overhead = overhead.clamp(0.0, 1.0);
+        let capped_overhead = unit_interval_or(overhead, 0.0);
         let decodable = (f64::from(source_block_count) * capped_overhead)
             .floor()
             .clamp(0.0, f64::from(source_block_count));
@@ -137,11 +186,13 @@ impl DurabilityAutopilot {
         source_block_count: u32,
         loss_cost: f64,
     ) -> f64 {
-        let bounded_overhead = overhead.clamp(0.0, 1.0);
+        let bounded_overhead = unit_interval_or(overhead, 0.0);
+        let storage_cost = finite_nonnegative_or(self.storage_cost, DEFAULT_STORAGE_COST);
+        let loss_cost = finite_nonnegative_or(loss_cost, DEFAULT_DATA_LOSS_COST);
         let risk = self.risk_bound(bounded_overhead, source_block_count);
-        let redundancy_cost = self.storage_cost * bounded_overhead;
+        let redundancy_cost = storage_cost * bounded_overhead;
         let corruption_cost = loss_cost * risk;
-        redundancy_cost + corruption_cost
+        finite_loss(redundancy_cost + corruption_cost)
     }
 
     /// Choose optimal overhead in `[min_overhead, max_overhead]`.
@@ -153,7 +204,8 @@ impl DurabilityAutopilot {
     /// Choose optimal overhead for metadata-critical groups.
     #[must_use]
     pub fn optimal_overhead_metadata(&self, source_block_count: u32) -> f64 {
-        let metadata_cost = self.data_loss_cost * self.metadata_multiplier.max(1.0);
+        let metadata_cost = self.data_loss_cost()
+            * finite_nonnegative_or(self.metadata_multiplier, DEFAULT_METADATA_MULTIPLIER).max(1.0);
         self.optimize_overhead(source_block_count, metadata_cost)
     }
 
@@ -201,17 +253,20 @@ impl DurabilityAutopilot {
         };
         let risk_bound = self.risk_bound(selected_overhead, source_block_count);
         let expected_loss = if metadata_group {
-            let metadata_cost = self.data_loss_cost * self.metadata_multiplier.max(1.0);
+            let metadata_cost = self.data_loss_cost()
+                * finite_nonnegative_or(self.metadata_multiplier, DEFAULT_METADATA_MULTIPLIER)
+                    .max(1.0);
             self.expected_loss_custom(selected_overhead, source_block_count, metadata_cost)
         } else {
             self.expected_loss(selected_overhead, source_block_count)
         };
+        let (posterior_alpha, posterior_beta) = self.posterior_params();
 
         OverheadDecision {
             overhead_ratio: selected_overhead,
             corruption_posterior: self.posterior_mean(),
-            posterior_alpha: self.alpha.max(MIN_POSITIVE_PARAM),
-            posterior_beta: self.beta.max(MIN_POSITIVE_PARAM),
+            posterior_alpha,
+            posterior_beta,
             risk_bound,
             expected_loss,
             symbols_selected: Self::symbol_count_for_overhead(
@@ -228,7 +283,7 @@ impl DurabilityAutopilot {
         if source_block_count == 0 {
             return 0;
         }
-        let bounded_overhead = overhead_ratio.clamp(0.0, 1.0);
+        let bounded_overhead = unit_interval_or(overhead_ratio, 0.0);
         let raw_count = f64::from(source_block_count) * bounded_overhead;
         if !raw_count.is_finite() || raw_count <= 0.0 {
             return 0;
@@ -243,9 +298,15 @@ impl DurabilityAutopilot {
 
     #[must_use]
     fn normalized_bounds(&self) -> (f64, f64) {
-        let min_overhead = self.min_overhead.clamp(0.0, 1.0);
-        let max_overhead = self.max_overhead.clamp(min_overhead, 1.0);
+        let min_overhead = unit_interval_or(self.min_overhead, DEFAULT_MIN_OVERHEAD);
+        let max_overhead =
+            unit_interval_or(self.max_overhead, DEFAULT_MAX_OVERHEAD).max(min_overhead);
         (min_overhead, max_overhead)
+    }
+
+    #[must_use]
+    fn data_loss_cost(&self) -> f64 {
+        finite_nonnegative_or(self.data_loss_cost, DEFAULT_DATA_LOSS_COST)
     }
 }
 
@@ -255,8 +316,8 @@ fn beta_binomial_tail(alpha: f64, beta: f64, draws: u32, cutoff: u32) -> f64 {
         return 0.0;
     }
 
-    let alpha = alpha.max(MIN_POSITIVE_PARAM);
-    let beta = beta.max(MIN_POSITIVE_PARAM);
+    let alpha = positive_param(alpha);
+    let beta = positive_param(beta);
 
     let mut log_total = f64::NEG_INFINITY;
     let mut log_tail = f64::NEG_INFINITY;
@@ -283,7 +344,7 @@ fn beta_binomial_tail(alpha: f64, beta: f64, draws: u32, cutoff: u32) -> f64 {
         return 0.0;
     }
 
-    (log_tail - log_total).exp().clamp(0.0, 1.0)
+    unit_interval_or((log_tail - log_total).exp(), 0.0)
 }
 
 #[must_use]
@@ -404,10 +465,10 @@ pub struct RefreshLossModel {
 impl Default for RefreshLossModel {
     fn default() -> Self {
         Self {
-            data_loss_cost: 1_000_000.0,
-            refresh_io_cost: 0.01,
-            crash_rate_per_sec: 1.0 / 31_536_000.0, // 1 crash/year
-            corruption_probability: 0.01,
+            data_loss_cost: DEFAULT_DATA_LOSS_COST,
+            refresh_io_cost: DEFAULT_REFRESH_IO_COST,
+            crash_rate_per_sec: DEFAULT_CRASH_RATE_PER_SEC, // 1 crash/year
+            corruption_probability: DEFAULT_CORRUPTION_PROBABILITY,
             source_block_count: 32_768,
         }
     }
@@ -453,19 +514,19 @@ impl RefreshLossModel {
         if self.source_block_count == 0 {
             return 0.0; // No blocks → no loss.
         }
-        if max_staleness_secs <= 0.0 {
+        if !max_staleness_secs.is_finite() || max_staleness_secs <= 0.0 {
             // Degenerate: refresh on every tick → infinite refresh cost rate.
             return f64::MAX;
         }
         let blocks = f64::from(self.source_block_count);
-        let clamped_rate = write_rate.max(0.0);
+        let clamped_rate = finite_nonnegative_or(write_rate, 0.0);
         // Average stale fraction over the refresh interval.
         let avg_stale_blocks = (clamped_rate * max_staleness_secs / 2.0).min(blocks);
         let avg_stale_fraction = avg_stale_blocks / blocks;
         let data_loss_rate =
-            self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
-        let refresh_amortized = self.refresh_io_cost / max_staleness_secs;
-        data_loss_rate * self.data_loss_cost + refresh_amortized
+            self.crash_rate_per_sec() * avg_stale_fraction * self.corruption_probability();
+        let refresh_amortized = self.refresh_io_cost() / max_staleness_secs;
+        finite_loss(data_loss_rate * self.data_loss_cost() + refresh_amortized)
     }
 
     /// Expected loss rate (per second) for block-count refresh with the given threshold.
@@ -478,10 +539,10 @@ impl RefreshLossModel {
         if self.source_block_count == 0 {
             return 0.0; // No blocks → no loss.
         }
-        let clamped_rate = write_rate.max(0.0);
+        let clamped_rate = finite_nonnegative_or(write_rate, 0.0);
         if block_threshold == 0 {
             // Refresh on every write → cost = refresh_io_cost per write.
-            return self.refresh_io_cost * clamped_rate;
+            return finite_loss(self.refresh_io_cost() * clamped_rate);
         }
         if clamped_rate <= 0.0 {
             // No writes → no refreshes, no stale blocks, no loss.
@@ -492,9 +553,9 @@ impl RefreshLossModel {
         let avg_stale_blocks = (threshold_f / 2.0).min(blocks);
         let avg_stale_fraction = avg_stale_blocks / blocks;
         let data_loss_rate =
-            self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
-        let refresh_amortized = self.refresh_io_cost * clamped_rate / threshold_f;
-        data_loss_rate * self.data_loss_cost + refresh_amortized
+            self.crash_rate_per_sec() * avg_stale_fraction * self.corruption_probability();
+        let refresh_amortized = self.refresh_io_cost() * clamped_rate / threshold_f;
+        finite_loss(data_loss_rate * self.data_loss_cost() + refresh_amortized)
     }
 
     /// Expected loss rate (per second) for hybrid refresh (min of age and block-count).
@@ -510,8 +571,8 @@ impl RefreshLossModel {
         if self.source_block_count == 0 {
             return 0.0;
         }
-        let clamped_rate = write_rate.max(0.0);
-        let age_window = if max_staleness_secs > 0.0 {
+        let clamped_rate = finite_nonnegative_or(write_rate, 0.0);
+        let age_window = if max_staleness_secs.is_finite() && max_staleness_secs > 0.0 {
             max_staleness_secs
         } else {
             f64::INFINITY
@@ -524,7 +585,7 @@ impl RefreshLossModel {
         let effective_window = age_window.min(block_window);
         if effective_window <= 0.0 {
             // Refresh on every write.
-            return self.refresh_io_cost * clamped_rate;
+            return finite_loss(self.refresh_io_cost() * clamped_rate);
         }
         let blocks = f64::from(self.source_block_count);
         let avg_stale_blocks = if effective_window.is_finite() {
@@ -536,13 +597,13 @@ impl RefreshLossModel {
         };
         let avg_stale_fraction = avg_stale_blocks / blocks;
         let data_loss_rate =
-            self.crash_rate_per_sec * avg_stale_fraction * self.corruption_probability;
+            self.crash_rate_per_sec() * avg_stale_fraction * self.corruption_probability();
         let refresh_amortized = if effective_window.is_finite() {
-            self.refresh_io_cost / effective_window
+            self.refresh_io_cost() / effective_window
         } else {
             0.0
         };
-        data_loss_rate * self.data_loss_cost + refresh_amortized
+        finite_loss(data_loss_rate * self.data_loss_cost() + refresh_amortized)
     }
 
     /// Compare all three policies for a given workload and return the best.
@@ -570,7 +631,7 @@ impl RefreshLossModel {
             loss_age_only: loss_age,
             loss_block_count: loss_block,
             loss_hybrid,
-            age_trigger_secs: max_staleness_secs,
+            age_trigger_secs: finite_nonnegative_or(max_staleness_secs, 0.0),
             block_trigger_count: block_threshold,
             best_policy: best,
         }
@@ -587,7 +648,11 @@ impl RefreshLossModel {
         max_staleness_secs: f64,
         block_threshold: u32,
     ) -> Option<f64> {
-        if self.source_block_count == 0 || max_staleness_secs <= 0.0 || block_threshold == 0 {
+        if self.source_block_count == 0
+            || !max_staleness_secs.is_finite()
+            || max_staleness_secs <= 0.0
+            || block_threshold == 0
+        {
             return None;
         }
         // Binary search for the write rate where block-count loss == age-only loss.
@@ -601,6 +666,9 @@ impl RefreshLossModel {
         // Check if block-count is always better or always worse.
         let diff_lo = loss_age_lo - loss_block_lo;
         let diff_hi = loss_age_hi - loss_block_hi;
+        if !diff_lo.is_finite() || !diff_hi.is_finite() {
+            return None;
+        }
         if diff_lo.signum() == diff_hi.signum() {
             return None; // No crossover in range.
         }
@@ -609,6 +677,9 @@ impl RefreshLossModel {
             let mid = f64::midpoint(lo, hi);
             let diff = self.expected_loss_age_only(max_staleness_secs, mid)
                 - self.expected_loss_block_count(block_threshold, mid);
+            if !diff.is_finite() {
+                return None;
+            }
             if diff.abs() < 1e-15 {
                 return Some(mid);
             }
@@ -619,6 +690,26 @@ impl RefreshLossModel {
             }
         }
         Some(f64::midpoint(lo, hi))
+    }
+
+    #[must_use]
+    fn data_loss_cost(&self) -> f64 {
+        finite_nonnegative_or(self.data_loss_cost, DEFAULT_DATA_LOSS_COST)
+    }
+
+    #[must_use]
+    fn refresh_io_cost(&self) -> f64 {
+        finite_nonnegative_or(self.refresh_io_cost, DEFAULT_REFRESH_IO_COST)
+    }
+
+    #[must_use]
+    fn crash_rate_per_sec(&self) -> f64 {
+        finite_nonnegative_or(self.crash_rate_per_sec, DEFAULT_CRASH_RATE_PER_SEC)
+    }
+
+    #[must_use]
+    fn corruption_probability(&self) -> f64 {
+        unit_interval_or(self.corruption_probability, DEFAULT_CORRUPTION_PROBABILITY)
     }
 }
 
@@ -687,6 +778,38 @@ mod tests {
         assert!(decision.expected_loss.is_finite());
         assert!(decision.risk_bound.is_finite());
         assert!(decision.symbols_selected <= 1);
+    }
+
+    #[test]
+    fn autopilot_sanitizes_non_finite_configuration_values() {
+        let mut ap = DurabilityAutopilot {
+            alpha: f64::NAN,
+            beta: f64::INFINITY,
+            data_loss_cost: f64::NAN,
+            storage_cost: f64::NEG_INFINITY,
+            min_overhead: f64::NAN,
+            max_overhead: f64::NAN,
+            metadata_multiplier: f64::NAN,
+        };
+
+        ap.update_posterior(1, 2);
+        let (alpha, beta) = ap.posterior_params();
+        assert!(alpha.is_finite() && alpha > 0.0);
+        assert!(beta.is_finite() && beta > 0.0);
+
+        let decision = ap.decision_for_group(32, true);
+        assert!((DEFAULT_MIN_OVERHEAD..=DEFAULT_MAX_OVERHEAD).contains(&decision.overhead_ratio));
+        assert!(decision.corruption_posterior.is_finite());
+        assert!(decision.risk_bound.is_finite());
+        assert!(decision.expected_loss.is_finite());
+        assert!(decision.symbols_selected <= 32);
+
+        assert!(ap.expected_loss(f64::NAN, 32).is_finite());
+        assert!((0.0..=1.0).contains(&ap.risk_bound(f64::NAN, 32)));
+        assert_eq!(
+            DurabilityAutopilot::symbol_count_for_overhead(32, f64::NAN),
+            0
+        );
     }
 
     #[test]
@@ -1124,6 +1247,31 @@ mod tests {
         // Zero staleness = "refresh every tick" → infinite cost.
         let loss = m.expected_loss_age_only(0.0, 100.0);
         assert!(loss >= f64::MAX - 1.0, "expected f64::MAX, got {loss}");
+    }
+
+    #[test]
+    fn refresh_loss_model_sanitizes_non_finite_inputs() {
+        let m = RefreshLossModel {
+            data_loss_cost: f64::NAN,
+            refresh_io_cost: f64::INFINITY,
+            crash_rate_per_sec: f64::NAN,
+            corruption_probability: f64::INFINITY,
+            source_block_count: 1024,
+        };
+
+        let loss_age = m.expected_loss_age_only(30.0, f64::NAN);
+        let loss_block = m.expected_loss_block_count(0, f64::INFINITY);
+        let loss_hybrid = m.expected_loss_hybrid(f64::NAN, 500, f64::NAN);
+        assert!(loss_age.is_finite() && loss_age >= 0.0);
+        assert!(loss_block.is_finite() && loss_block >= 0.0);
+        assert!(loss_hybrid.is_finite() && loss_hybrid >= 0.0);
+
+        let cmp = m.compare_policies(f64::NAN, 500, WorkloadProfile::Heavy);
+        assert!(cmp.loss_age_only.is_finite());
+        assert!(cmp.loss_block_count.is_finite());
+        assert!(cmp.loss_hybrid.is_finite());
+        assert!(cmp.age_trigger_secs.is_finite());
+        assert_eq!(m.block_count_dominance_threshold(f64::NAN, 500), None);
     }
 
     // ── Verification Gate: bd-m5wf.4.5 — adaptive refresh improvement ────

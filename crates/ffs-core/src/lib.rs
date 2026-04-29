@@ -19164,6 +19164,71 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
 ///
 /// Uses a conjugate Beta-Binomial model: `alpha` counts corrupt observations,
 /// `beta` counts clean observations. Starts with a uniform prior (1, 1).
+const MIN_DURABILITY_POSTERIOR_PARAM: f64 = 1e-9;
+const DEFAULT_DURABILITY_CORRUPTION_COST: f64 = 10_000.0;
+const DEFAULT_DURABILITY_REDUNDANCY_COST: f64 = 25.0;
+const DEFAULT_DURABILITY_Z_SCORE: f64 = 3.0;
+const MIN_REPAIR_OVERHEAD_RATIO: f64 = 1.03;
+const MAX_REPAIR_OVERHEAD_RATIO: f64 = 1.10;
+const DEFAULT_REPAIR_OVERHEAD_RATIO: f64 = 1.05;
+
+#[must_use]
+fn durability_positive_param(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value.max(MIN_DURABILITY_POSTERIOR_PARAM)
+    } else {
+        MIN_DURABILITY_POSTERIOR_PARAM
+    }
+}
+
+#[must_use]
+fn durability_finite_nonnegative_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+#[must_use]
+fn durability_unit_interval_or(value: f64, fallback: f64) -> f64 {
+    let value = if value.is_finite() { value } else { fallback };
+    value.clamp(0.0, 1.0)
+}
+
+#[must_use]
+fn durability_positive_ratio(numerator: f64, denominator_part: f64) -> f64 {
+    let scale = numerator.max(denominator_part);
+    if scale <= 0.0 {
+        return 0.0;
+    }
+    let scaled_numerator = numerator / scale;
+    let scaled_denominator_part = denominator_part / scale;
+    let denominator = scaled_numerator + scaled_denominator_part;
+    if denominator <= 0.0 {
+        0.0
+    } else {
+        durability_unit_interval_or(scaled_numerator / denominator, 0.0)
+    }
+}
+
+#[must_use]
+fn durability_finite_loss(value: f64) -> f64 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        f64::MAX
+    }
+}
+
+#[must_use]
+fn repair_overhead_or_default(value: f64) -> f64 {
+    if !value.is_finite() {
+        return DEFAULT_REPAIR_OVERHEAD_RATIO;
+    }
+    value.clamp(MIN_REPAIR_OVERHEAD_RATIO, MAX_REPAIR_OVERHEAD_RATIO)
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct DurabilityPosterior {
     /// Corrupt observation count (Beta distribution alpha parameter).
@@ -19198,26 +19263,28 @@ impl DurabilityPosterior {
         let scanned = scanned_blocks as f64;
         let corrupted = (corrupted_blocks.min(scanned_blocks)) as f64;
         let clean = (scanned - corrupted).max(0.0);
-        self.alpha += corrupted;
-        self.beta += clean;
+        self.alpha = durability_positive_param(self.alpha) + corrupted;
+        self.beta = durability_positive_param(self.beta) + clean;
     }
 
     /// Posterior mean corruption rate: `alpha / (alpha + beta)`.
     #[must_use]
     pub fn expected_corruption_rate(&self) -> f64 {
-        self.alpha / (self.alpha + self.beta)
+        let alpha = durability_positive_param(self.alpha);
+        let beta = durability_positive_param(self.beta);
+        durability_positive_ratio(alpha, beta)
     }
 
     /// Posterior variance of the corruption rate estimate.
     #[must_use]
     pub fn variance(&self) -> f64 {
-        let a = self.alpha;
-        let b = self.beta;
+        let a = durability_positive_param(self.alpha);
+        let b = durability_positive_param(self.beta);
         let denom = (a + b).powi(2) * (a + b + 1.0);
-        if denom <= 0.0 {
+        if !denom.is_finite() || denom <= 0.0 {
             return 0.0;
         }
-        (a * b) / denom
+        durability_finite_nonnegative_or((a * b) / denom, 0.0)
     }
 }
 
@@ -19238,9 +19305,9 @@ pub struct DurabilityLossModel {
 impl Default for DurabilityLossModel {
     fn default() -> Self {
         Self {
-            corruption_cost: 10_000.0,
-            redundancy_cost: 25.0,
-            z_score: 3.0,
+            corruption_cost: DEFAULT_DURABILITY_CORRUPTION_COST,
+            redundancy_cost: DEFAULT_DURABILITY_REDUNDANCY_COST,
+            z_score: DEFAULT_DURABILITY_Z_SCORE,
         }
     }
 }
@@ -19321,19 +19388,22 @@ impl DurabilityAutopilot {
         candidates: &[f64],
         source_block_count: u32,
     ) -> RedundancyDecision {
-        const MIN_OVERHEAD: f64 = 1.03;
-        const MAX_OVERHEAD: f64 = 1.10;
-        const DEFAULT_OVERHEAD: f64 = 1.05;
-
         let p_mean = self.posterior.expected_corruption_rate();
-        let p_hi = self
-            .loss
-            .z_score
-            .mul_add(self.posterior.variance().sqrt(), p_mean)
-            .clamp(0.0, 1.0);
+        let variance = self.posterior.variance();
+        let z_score =
+            durability_finite_nonnegative_or(self.loss.z_score, DEFAULT_DURABILITY_Z_SCORE);
+        let p_hi = durability_unit_interval_or(z_score.mul_add(variance.sqrt(), p_mean), 1.0);
+        let redundancy_cost = durability_finite_nonnegative_or(
+            self.loss.redundancy_cost,
+            DEFAULT_DURABILITY_REDUNDANCY_COST,
+        );
+        let corruption_cost = durability_finite_nonnegative_or(
+            self.loss.corruption_cost,
+            DEFAULT_DURABILITY_CORRUPTION_COST,
+        );
 
         let mut best = RedundancyDecision {
-            repair_overhead: DEFAULT_OVERHEAD,
+            repair_overhead: DEFAULT_REPAIR_OVERHEAD_RATIO,
             expected_loss: f64::INFINITY,
             posterior_mean_corruption_rate: p_mean,
             posterior_hi_corruption_rate: p_hi,
@@ -19346,7 +19416,10 @@ impl DurabilityAutopilot {
         let mut considered_any = false;
 
         for candidate in candidates {
-            if !candidate.is_finite() || *candidate < MIN_OVERHEAD || *candidate > MAX_OVERHEAD {
+            if !candidate.is_finite()
+                || *candidate < MIN_REPAIR_OVERHEAD_RATIO
+                || *candidate > MAX_REPAIR_OVERHEAD_RATIO
+            {
                 continue;
             }
             considered_any = true;
@@ -19368,9 +19441,9 @@ impl DurabilityAutopilot {
                 (-k * kl.max(0.0)).exp()
             };
 
-            let redundancy_loss = self.loss.redundancy_cost * rho;
-            let corruption_loss = self.loss.corruption_cost * risk_bound;
-            let expected_loss = redundancy_loss + corruption_loss;
+            let redundancy_loss = redundancy_cost * rho;
+            let corruption_loss = corruption_cost * risk_bound;
+            let expected_loss = durability_finite_loss(redundancy_loss + corruption_loss);
 
             if expected_loss < best.expected_loss {
                 best = RedundancyDecision {
@@ -19386,10 +19459,11 @@ impl DurabilityAutopilot {
         }
 
         if !considered_any {
-            best.repair_overhead = DEFAULT_OVERHEAD;
-            best.redundancy_loss = self.loss.redundancy_cost * (DEFAULT_OVERHEAD - 1.0);
-            best.corruption_loss = self.loss.corruption_cost;
-            best.expected_loss = best.redundancy_loss + best.corruption_loss;
+            best.repair_overhead = DEFAULT_REPAIR_OVERHEAD_RATIO;
+            best.redundancy_loss = redundancy_cost * (DEFAULT_REPAIR_OVERHEAD_RATIO - 1.0);
+            best.corruption_loss = corruption_cost;
+            best.expected_loss =
+                durability_finite_loss(best.redundancy_loss + best.corruption_loss);
         }
 
         best
@@ -19414,7 +19488,7 @@ pub struct RepairPolicy {
 impl Default for RepairPolicy {
     fn default() -> Self {
         Self {
-            overhead_ratio: 1.05,
+            overhead_ratio: DEFAULT_REPAIR_OVERHEAD_RATIO,
             eager_refresh: false,
             autopilot: None,
         }
@@ -19432,11 +19506,15 @@ impl RepairPolicy {
     /// Return the effective overhead ratio for a specific group size.
     #[must_use]
     pub fn effective_overhead_for_group(&self, source_block_count: u32) -> f64 {
-        self.autopilot.as_ref().map_or(self.overhead_ratio, |ap| {
-            let candidates: Vec<f64> = (3..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect();
-            ap.choose_overhead_for_group(&candidates, source_block_count)
-                .repair_overhead
-        })
+        self.autopilot.as_ref().map_or_else(
+            || repair_overhead_or_default(self.overhead_ratio),
+            |ap| {
+                let candidates: Vec<f64> =
+                    (3..=10).map(|i| f64::from(i).mul_add(0.01, 1.0)).collect();
+                ap.choose_overhead_for_group(&candidates, source_block_count)
+                    .repair_overhead
+            },
+        )
     }
 
     /// Return the full `RedundancyDecision` when autopilot is engaged, or
@@ -26574,6 +26652,20 @@ mod tests {
     }
 
     #[test]
+    fn posterior_sanitizes_non_finite_public_params() {
+        let mut p = DurabilityPosterior {
+            alpha: f64::NAN,
+            beta: f64::NEG_INFINITY,
+        };
+        assert!(p.expected_corruption_rate().is_finite());
+        assert!(p.variance().is_finite());
+
+        p.observe_blocks(10, 2);
+        assert!(p.alpha.is_finite() && p.alpha > 0.0);
+        assert!(p.beta.is_finite() && p.beta > 0.0);
+    }
+
+    #[test]
     fn posterior_observe_blocks_updates_correctly() {
         let mut p = DurabilityPosterior::default();
         // Scrub 1000 blocks, find 10 corrupt.
@@ -26720,6 +26812,29 @@ mod tests {
     }
 
     #[test]
+    fn autopilot_sanitizes_non_finite_loss_inputs() {
+        let ap = DurabilityAutopilot {
+            posterior: DurabilityPosterior {
+                alpha: f64::NAN,
+                beta: f64::INFINITY,
+            },
+            loss: DurabilityLossModel {
+                corruption_cost: f64::NAN,
+                redundancy_cost: f64::NEG_INFINITY,
+                z_score: f64::NAN,
+            },
+        };
+        let d = ap.choose_overhead(&[f64::NAN, 1.03, 1.05]);
+        assert!(
+            (MIN_REPAIR_OVERHEAD_RATIO..=MAX_REPAIR_OVERHEAD_RATIO).contains(&d.repair_overhead)
+        );
+        assert!(d.expected_loss.is_finite());
+        assert!(d.posterior_mean_corruption_rate.is_finite());
+        assert!(d.posterior_hi_corruption_rate.is_finite());
+        assert!(d.unrecoverable_risk_bound.is_finite());
+    }
+
+    #[test]
     fn risk_bound_monotonically_decreases_with_overhead() {
         let mut ap = DurabilityAutopilot::new();
         ap.observe_scrub(100_000, 50);
@@ -26812,6 +26927,31 @@ mod tests {
         assert!(p.autopilot.is_none());
         assert!((p.effective_overhead() - 1.05).abs() < f64::EPSILON);
         assert!(p.autopilot_decision().is_none());
+    }
+
+    #[test]
+    fn repair_policy_static_overhead_is_sanitized() {
+        let nan_policy = RepairPolicy {
+            overhead_ratio: f64::NAN,
+            ..RepairPolicy::default()
+        };
+        assert!(
+            (nan_policy.effective_overhead() - DEFAULT_REPAIR_OVERHEAD_RATIO).abs() < f64::EPSILON
+        );
+
+        let low_policy = RepairPolicy {
+            overhead_ratio: 0.5,
+            ..RepairPolicy::default()
+        };
+        assert!((low_policy.effective_overhead() - MIN_REPAIR_OVERHEAD_RATIO).abs() < f64::EPSILON);
+
+        let high_policy = RepairPolicy {
+            overhead_ratio: 2.0,
+            ..RepairPolicy::default()
+        };
+        assert!(
+            (high_policy.effective_overhead() - MAX_REPAIR_OVERHEAD_RATIO).abs() < f64::EPSILON
+        );
     }
 
     #[test]
