@@ -870,10 +870,15 @@ impl<W: Write> EvidenceLedger<W> {
 /// Returns successfully parsed records in order.
 #[must_use]
 pub fn parse_evidence_ledger(data: &[u8]) -> Vec<EvidenceRecord> {
-    let text = String::from_utf8_lossy(data);
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str(line).ok())
+    data.split(|byte| *byte == b'\n')
+        .filter_map(|raw_line| {
+            let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+            if raw_line.iter().all(u8::is_ascii_whitespace) {
+                return None;
+            }
+            let line = std::str::from_utf8(raw_line).ok()?;
+            serde_json::from_str(line).ok()
+        })
         .collect()
 }
 
@@ -1600,6 +1605,26 @@ mod tests {
     fn parse_evidence_ledger_all_blank_lines() {
         let records = parse_evidence_ledger(b"\n\n\n");
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn parse_evidence_ledger_skips_invalid_utf8_lines_without_lossy_rewrite() {
+        let invalid =
+            EvidenceRecord::corruption_detected(0, sample_corruption_detail()).with_timestamp(100);
+        let mut invalid_json = invalid.to_json().expect("serialize").into_bytes();
+        let detail_pos = invalid_json
+            .windows(b"checksum_mismatch".len())
+            .position(|window| window == b"checksum_mismatch")
+            .expect("detail string present");
+        invalid_json[detail_pos] = 0xff;
+
+        let valid = EvidenceRecord::repair_succeeded(0, sample_repair_detail()).with_timestamp(200);
+        let mut data = invalid_json;
+        data.push(b'\n');
+        data.extend_from_slice(valid.to_json().expect("serialize").as_bytes());
+
+        let records = parse_evidence_ledger(&data);
+        assert_eq!(records, vec![valid]);
     }
 
     #[test]

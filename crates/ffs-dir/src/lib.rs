@@ -431,6 +431,17 @@ pub fn init_dir_block(
     parent_ino: u32,
     reserved_tail: usize,
 ) -> Result<()> {
+    if self_ino == 0 {
+        return Err(FfsError::Format(
+            "directory self inode cannot be zero".to_owned(),
+        ));
+    }
+    if parent_ino == 0 {
+        return Err(FfsError::Format(
+            "directory parent inode cannot be zero".to_owned(),
+        ));
+    }
+
     let usable_len = validate_reserved_tail(block.len(), reserved_tail)?;
     let min_entries = required_rec_len(1)
         .checked_add(required_rec_len(2))
@@ -757,8 +768,8 @@ mod tests {
         #[test]
         fn proptest_init_dir_block_roundtrip_preserves_inode_numbers(
             geometry in dir_block_geometry_strategy(),
-            self_ino in any::<u32>(),
-            parent_ino in any::<u32>(),
+            self_ino in 1_u32..=u32::MAX,
+            parent_ino in 1_u32..=u32::MAX,
         ) {
             let (block_len, reserved_tail) = geometry;
             let mut block = vec![0u8; block_len];
@@ -1066,6 +1077,19 @@ mod tests {
         let mut block = vec![0u8; 16]; // Too small for . and ..
         let err = init_dir_block(&mut block, 1, 2, 0).unwrap_err();
         assert!(matches!(err, FfsError::Format(_)));
+    }
+
+    #[test]
+    fn init_dir_block_rejects_zero_dot_inodes_without_mutation() {
+        for (self_ino, parent_ino) in [(0, 2), (2, 0)] {
+            let mut block = vec![0xA5; 1024];
+            let before = block.clone();
+
+            let err = init_dir_block(&mut block, self_ino, parent_ino, 0).unwrap_err();
+
+            assert!(matches!(err, FfsError::Format(_)));
+            assert_eq!(block, before);
+        }
     }
 
     #[test]
