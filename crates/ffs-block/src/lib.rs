@@ -47,19 +47,22 @@ fn saturating_fetch_increment(counter: &std::sync::atomic::AtomicU64) -> u64 {
 }
 
 const DEFAULT_BLOCK_ALIGNMENT: usize = 4096;
-const MAX_POWER_OF_TWO_ALIGNMENT: usize = 1_usize << (usize::BITS - 1);
+// AlignedVec over-allocates by alignment - 1, so the public alignment input
+// must stay bounded even when callers pass extreme usize values.
+const MAX_SUPPORTED_ALIGNMENT: usize = 1 << 20;
 
 #[inline]
 fn normalized_alignment(requested: usize) -> usize {
-    if requested <= 1 {
+    let rounded = if requested <= 1 {
         1
     } else if requested.is_power_of_two() {
         requested
     } else {
         requested
             .checked_next_power_of_two()
-            .unwrap_or(MAX_POWER_OF_TWO_ALIGNMENT)
-    }
+            .unwrap_or(MAX_SUPPORTED_ALIGNMENT)
+    };
+    rounded.min(MAX_SUPPORTED_ALIGNMENT)
 }
 
 /// Owned byte buffer whose exposed slice starts at a requested alignment.
@@ -7750,16 +7753,28 @@ write_latency: 0ns, bandwidth_bps: 0, stall_probability: 0.0, stall_duration: \
     }
 
     #[test]
-    fn normalized_alignment_oversized_request_clamps_to_largest_power_of_two() {
+    fn normalized_alignment_oversized_request_clamps_to_supported_max() {
         assert_eq!(
-            normalized_alignment(MAX_POWER_OF_TWO_ALIGNMENT),
-            MAX_POWER_OF_TWO_ALIGNMENT
+            normalized_alignment(MAX_SUPPORTED_ALIGNMENT),
+            MAX_SUPPORTED_ALIGNMENT
         );
         assert_eq!(
-            normalized_alignment(MAX_POWER_OF_TWO_ALIGNMENT + 1),
-            MAX_POWER_OF_TWO_ALIGNMENT
+            normalized_alignment(MAX_SUPPORTED_ALIGNMENT + 1),
+            MAX_SUPPORTED_ALIGNMENT
         );
-        assert_eq!(normalized_alignment(usize::MAX), MAX_POWER_OF_TWO_ALIGNMENT);
+        assert_eq!(normalized_alignment(usize::MAX), MAX_SUPPORTED_ALIGNMENT);
+    }
+
+    #[test]
+    fn aligned_vec_extreme_alignment_is_bounded() {
+        let v = AlignedVec::new(1, usize::MAX);
+        assert_eq!(v.alignment(), MAX_SUPPORTED_ALIGNMENT);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v.as_slice().len(), 1);
+        assert_eq!(
+            (v.as_slice().as_ptr() as usize) % MAX_SUPPORTED_ALIGNMENT,
+            0
+        );
     }
 
     // ── Additional edge-case hardening tests ──────────────────────────
