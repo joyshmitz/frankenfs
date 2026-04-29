@@ -18,9 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use ffs_ondisk::ext4::Ext4GroupDescChecksumKind;
-use ffs_ondisk::{
-    Ext4GroupDesc, Ext4ImageReader, Ext4Superblock, verify_group_desc_checksum,
-};
+use ffs_ondisk::{Ext4GroupDesc, Ext4ImageReader, Ext4Superblock, verify_group_desc_checksum};
 use ffs_types::GroupNumber;
 
 // EXT4_BG_* flag bits — kept private here because they are only meaningful
@@ -216,8 +214,7 @@ fn parse_group_header(rest: &str) -> KernelGroupDesc {
         // The group-descriptor checksum is 16 bits on disk; dumpe2fs prints
         // at most 4 hex digits for this field, so the high half of the parsed
         // u32 is always zero.
-        g.csum = u16::try_from(parse_hex_u32(&after[..end]) & 0xFFFF)
-            .expect("masked to 16 bits");
+        g.csum = u16::try_from(parse_hex_u32(&after[..end]) & 0xFFFF).expect("masked to 16 bits");
     }
 
     if let Some(start) = rest.find('[') {
@@ -281,7 +278,10 @@ fn parse_free_counts(rest: &str) -> (u32, u32, u32) {
 
 fn parse_hex_u32(s: &str) -> u32 {
     let s = s.trim();
-    let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let body = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     u32::from_str_radix(body, 16).expect("hex literal")
 }
 
@@ -289,7 +289,11 @@ fn parse_hex_u32(s: &str) -> u32 {
 /// checksum for 64-byte descriptors. ffs-ondisk always reports `u32`, so
 /// truncate to whatever the kernel printed for an apples-to-apples compare.
 fn truncate_csum_to_desc(value: u32, desc_size: u16) -> u32 {
-    if desc_size >= 64 { value } else { value & 0xFFFF }
+    if desc_size >= 64 {
+        value
+    } else {
+        value & 0xFFFF
+    }
 }
 
 #[derive(Debug)]
@@ -334,31 +338,90 @@ fn compare_image(variant: &ImageVariant) -> Comparison {
             .group_desc_offset(group)
             .expect("group descriptor offset");
         let raw_offset_usize = usize::try_from(raw_offset).expect("offset fits usize");
-        let raw_desc =
-            &bytes[raw_offset_usize..raw_offset_usize + usize::from(desc_size)];
+        let raw_desc = &bytes[raw_offset_usize..raw_offset_usize + usize::from(desc_size)];
 
-        assert_field_eq(variant.tag, kernel.group, "block_bitmap", &ffs.block_bitmap, &kernel.block_bitmap);
-        assert_field_eq(variant.tag, kernel.group, "inode_bitmap", &ffs.inode_bitmap, &kernel.inode_bitmap);
-        assert_field_eq(variant.tag, kernel.group, "inode_table", &ffs.inode_table, &kernel.inode_table);
-        assert_field_eq(variant.tag, kernel.group, "free_blocks_count", &ffs.free_blocks_count, &kernel.free_blocks);
-        assert_field_eq(variant.tag, kernel.group, "free_inodes_count", &ffs.free_inodes_count, &kernel.free_inodes);
-        assert_field_eq(variant.tag, kernel.group, "used_dirs_count", &ffs.used_dirs_count, &kernel.used_dirs);
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "block_bitmap",
+            &ffs.block_bitmap,
+            &kernel.block_bitmap,
+        );
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "inode_bitmap",
+            &ffs.inode_bitmap,
+            &kernel.inode_bitmap,
+        );
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "inode_table",
+            &ffs.inode_table,
+            &kernel.inode_table,
+        );
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "free_blocks_count",
+            &ffs.free_blocks_count,
+            &kernel.free_blocks,
+        );
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "free_inodes_count",
+            &ffs.free_inodes_count,
+            &kernel.free_inodes,
+        );
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "used_dirs_count",
+            &ffs.used_dirs_count,
+            &kernel.used_dirs,
+        );
         // ITABLE_ZEROED, INODE_UNINIT, BLOCK_UNINIT are the only flags
         // dumpe2fs prints; mask the ffs side to the same set.
         let ffs_flag_subset = ffs.flags & (BG_INODE_UNINIT | BG_BLOCK_UNINIT | BG_INODE_ZEROED);
-        assert_field_eq(variant.tag, kernel.group, "flags", &ffs_flag_subset, &kernel.flags);
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "flags",
+            &ffs_flag_subset,
+            &kernel.flags,
+        );
 
         // The bitmap checksum widths differ by descriptor size; only compare
         // truncated values so a 32-byte descriptor doesn't fail the high
         // bits comparison.
         let ffs_block_csum = truncate_csum_to_desc(ffs.block_bitmap_csum, desc_size);
         let ffs_inode_csum = truncate_csum_to_desc(ffs.inode_bitmap_csum, desc_size);
-        assert_field_eq(variant.tag, kernel.group, "block_bitmap_csum", &ffs_block_csum, &kernel.block_bitmap_csum);
-        assert_field_eq(variant.tag, kernel.group, "inode_bitmap_csum", &ffs_inode_csum, &kernel.inode_bitmap_csum);
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "block_bitmap_csum",
+            &ffs_block_csum,
+            &kernel.block_bitmap_csum,
+        );
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "inode_bitmap_csum",
+            &ffs_inode_csum,
+            &kernel.inode_bitmap_csum,
+        );
 
         // Group descriptor checksum: must match dumpe2fs and must verify
         // against the raw bytes via the metadata_csum/gdt_csum routines.
-        assert_field_eq(variant.tag, kernel.group, "checksum", &ffs.checksum, &kernel.csum);
+        assert_field_eq(
+            variant.tag,
+            kernel.group,
+            "checksum",
+            &ffs.checksum,
+            &kernel.csum,
+        );
         if checksum_kind != Ext4GroupDescChecksumKind::None {
             verify_group_desc_checksum(
                 raw_desc,
@@ -438,7 +501,10 @@ fn ext4_group_desc_kernel_reference_matches() {
     // Cross-variant invariants.
     let saw_4k = comparisons.iter().any(|c| c.block_size == 4096);
     let saw_1k = comparisons.iter().any(|c| c.block_size == 1024);
-    assert!(saw_4k && saw_1k, "expected coverage of both 4KiB and 1KiB block sizes");
+    assert!(
+        saw_4k && saw_1k,
+        "expected coverage of both 4KiB and 1KiB block sizes"
+    );
     let saw_metadata_csum = comparisons
         .iter()
         .any(|c| c.descriptor_csum_kind == Ext4GroupDescChecksumKind::MetadataCsum);
@@ -447,7 +513,10 @@ fn ext4_group_desc_kernel_reference_matches() {
         "expected at least one metadata_csum image (default mkfs.ext4 enables it)"
     );
     let saw_64bit_desc = comparisons.iter().any(|c| c.desc_size >= 64);
-    assert!(saw_64bit_desc, "expected at least one 64-byte descriptor variant");
+    assert!(
+        saw_64bit_desc,
+        "expected at least one 64-byte descriptor variant"
+    );
 }
 
 // ── Unit tests for the dumpe2fs parser itself ───────────────────────
@@ -458,9 +527,8 @@ mod parser_unit_tests {
 
     #[test]
     fn parses_group_header_with_multiple_flags() {
-        let g = parse_group_header(
-            "1: (Blocks 32768-65535) csum 0x36a2 [INODE_UNINIT, ITABLE_ZEROED]",
-        );
+        let g =
+            parse_group_header("1: (Blocks 32768-65535) csum 0x36a2 [INODE_UNINIT, ITABLE_ZEROED]");
         assert_eq!(g.group, 1);
         assert_eq!(g.csum, 0x36a2);
         assert_eq!(g.flags, BG_INODE_UNINIT | BG_INODE_ZEROED);
