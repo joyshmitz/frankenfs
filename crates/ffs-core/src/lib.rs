@@ -29862,8 +29862,8 @@ mod tests {
                 0,
                 0,
                 0,
-        )
-        .expect("mknod socket");
+            )
+            .expect("mknod socket");
         assert_eq!(sock.kind, FileType::Socket);
     }
 
@@ -36015,6 +36015,44 @@ mod tests {
     }
 
     #[test]
+    fn btrfs_write_unlink_invalid_nul_name_rejected() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("unlink_nul_src.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create source");
+
+        let err = ops
+            .unlink(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"unlink\0nul.txt"),
+            )
+            .expect_err("unlink with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("unlink_nul_src.txt"),
+            )
+            .expect("source should remain after failed NUL-name unlink");
+        assert_eq!(looked_up.ino, attr.ino);
+    }
+
+    #[test]
     fn btrfs_write_rmdir_empty() {
         let (fs, cx) = open_writable_btrfs();
         let ops: &dyn FsOps = &fs;
@@ -36047,6 +36085,44 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    #[test]
+    fn btrfs_write_rmdir_invalid_nul_name_rejected() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rmdir_nul_src"),
+                0o755,
+                0,
+                0,
+            )
+            .expect("mkdir source");
+
+        let err = ops
+            .rmdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::from_bytes(b"rmdir\0nul"),
+            )
+            .expect_err("rmdir with NUL should fail");
+        assert!(matches!(err, FfsError::Format(_)));
+
+        let looked_up = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("rmdir_nul_src"),
+            )
+            .expect("directory should remain after failed NUL-name rmdir");
+        assert_eq!(looked_up.ino, attr.ino);
     }
 
     #[test]
