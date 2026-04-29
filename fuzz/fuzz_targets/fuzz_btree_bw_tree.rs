@@ -200,7 +200,11 @@ fn consolidate_page(table: &MappingTable, models: &mut [PageModel], cursor: &mut
     require(result.chain_len_before == before);
     if before <= 1 {
         require(result.chain_len_after == before);
-        require(result.entries_count == 0);
+        // The lib reads entries_count from the Base delta when one is
+        // present (e.g., a freshly consolidated page) — see the comment
+        // in MappingTable::consolidate_page. So entries_count tracks
+        // the real model state, not a hard-coded zero.
+        require(result.entries_count == entries_count);
         require(result.cas_attempts == 0);
     } else {
         require(result.chain_len_after == 1);
