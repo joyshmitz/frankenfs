@@ -20,7 +20,7 @@
 
 #![no_main]
 
-use ffs_mvcc::compression::{VersionData, resolve_data_with};
+use ffs_mvcc::compression::{resolve_data_with, VersionData};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_BYTES: usize = 2_048;
@@ -46,7 +46,10 @@ impl<'a> ByteCursor<'a> {
     fn next_bytes(&mut self, n: usize) -> Vec<u8> {
         let n = n.min(MAX_VARIANT_PAYLOAD);
         let end = self.pos.saturating_add(n).min(self.data.len());
-        let v = self.data.get(self.pos..end).map_or_else(Vec::new, <[u8]>::to_vec);
+        let v = self
+            .data
+            .get(self.pos..end)
+            .map_or_else(Vec::new, <[u8]>::to_vec);
         self.pos = end;
         v
     }
@@ -58,24 +61,18 @@ fn build_chain(cursor: &mut ByteCursor<'_>) -> Vec<VersionData> {
     let count = 1 + (usize::from(raw_count) % MAX_CHAIN);
     let mut chain = Vec::with_capacity(count);
 
-    for slot in 0..count {
+    for _ in 0..count {
         let kind = cursor.next_u8() % 6;
         let payload_len = usize::from(cursor.next_u8()) % (MAX_VARIANT_PAYLOAD + 1);
         let payload = cursor.next_bytes(payload_len);
 
         let variant = match kind {
             0 => VersionData::Full(payload),
-            1 => {
-                // Slot 0 must be a base variant — otherwise the chain is
-                // intentionally malformed (one of the cases we *want* to
-                // exercise) but we also want valid chains to dominate the
-                // corpus so libFuzzer can find the success paths.
-                if slot == 0 {
-                    VersionData::Full(payload)
-                } else {
-                    VersionData::Identical
-                }
-            }
+            // Identical at slot 0 is intentionally malformed and should
+            // resolve to None. Later Identical entries must resolve exactly
+            // like their predecessor, including when the predecessor is a
+            // compressed version or another malformed marker.
+            1 => VersionData::Identical,
             2 => VersionData::Zstd(payload), // arbitrary: likely malformed
             3 => VersionData::Brotli(payload), // arbitrary: likely malformed
             4 => {
@@ -153,10 +150,19 @@ fuzz_target!(|data: &[u8]| {
                     "Full at index {i}: resolve must return the inline bytes"
                 );
             }
-            (VersionData::Identical, _) => {
-                // Identical's resolution depends on the predecessor and is
-                // tested separately by walking back; here we only require
-                // the call to not panic, which already happened above.
+            (VersionData::Identical, result) => {
+                if i == 0 {
+                    assert!(
+                        result.is_none(),
+                        "leading Identical at index 0 is malformed and must resolve to None"
+                    );
+                } else {
+                    assert_eq!(
+                        result,
+                        &first[i - 1],
+                        "Identical at index {i} must resolve exactly like its predecessor"
+                    );
+                }
             }
             (VersionData::Zstd(_) | VersionData::Brotli(_), _) => {
                 // Decompression either succeeds (Some) or fails with None;
