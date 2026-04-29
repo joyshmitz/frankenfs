@@ -9,3 +9,6 @@
 # Temporary
 last-touched
 *.tmp
+
+# Beads recovery sidecar backups
+.br_recovery/
