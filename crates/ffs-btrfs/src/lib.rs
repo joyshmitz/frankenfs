@@ -3981,6 +3981,12 @@ pub fn parse_send_stream(data: &[u8]) -> Result<SendStreamParseResult, ffs_types
     }
 
     let version = u32::from_le_bytes([data[13], data[14], data[15], data[16]]);
+    if version != BTRFS_SEND_STREAM_VERSION {
+        return Err(ffs_types::ParseError::InvalidField {
+            field: "send_stream_version",
+            reason: "unsupported btrfs send stream version",
+        });
+    }
     let mut pos = 17;
     let mut commands = Vec::new();
     let mut saw_end = false;
@@ -10488,6 +10494,23 @@ mod tests {
     fn parse_send_stream_rejects_bad_magic() {
         let data = b"not-btrfs-magic\x01\x00\x00\x00";
         assert!(parse_send_stream(data).is_err());
+    }
+
+    #[test]
+    fn parse_send_stream_rejects_unsupported_version() {
+        let mut data = Vec::new();
+        data.extend_from_slice(BTRFS_SEND_STREAM_MAGIC);
+        data.extend_from_slice(&BTRFS_SEND_STREAM_VERSION.saturating_add(1).to_le_bytes());
+        append_send_command(&mut data, SendCommand::End as u16, &[]);
+
+        let err = parse_send_stream(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            ffs_types::ParseError::InvalidField {
+                field: "send_stream_version",
+                ..
+            }
+        ));
     }
 
     #[test]
