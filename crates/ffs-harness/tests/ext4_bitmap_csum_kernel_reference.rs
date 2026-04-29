@@ -27,11 +27,11 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use ffs_ondisk::Ext4ImageReader;
 use ffs_ondisk::ext4::{
     block_bitmap_checksum_value, inode_bitmap_checksum_value, verify_block_bitmap_checksum,
     verify_inode_bitmap_checksum,
 };
-use ffs_ondisk::Ext4ImageReader;
 use ffs_types::{BlockNumber, GroupNumber};
 
 /// `EXT4_BG_INODE_UNINIT` — the inode bitmap is uninitialised; the kernel

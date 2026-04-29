@@ -673,11 +673,11 @@ fn defer_reclaim(delta: Arc<PageDelta>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        chain_length, materialize_from_head, write_lock, BwKey, BwValue, ConsolidationConfig,
-        FfsError, MappingTable, PageDelta, PageId, MAX_CHAIN_DEPTH, MAX_CHAIN_WALK,
+        BwKey, BwValue, ConsolidationConfig, FfsError, MAX_CHAIN_DEPTH, MAX_CHAIN_WALK,
+        MappingTable, PageDelta, PageId, chain_length, materialize_from_head, write_lock,
     };
     use std::collections::BTreeMap;
-    use std::sync::{atomic::Ordering, Arc, Barrier};
+    use std::sync::{Arc, Barrier, atomic::Ordering};
 
     fn start_test_thread<F>(f: F) -> std::thread::JoinHandle<()>
     where

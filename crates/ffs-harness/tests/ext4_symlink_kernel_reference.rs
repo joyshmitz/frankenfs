@@ -85,9 +85,7 @@ fn capture_fast_link_dest(image: &Path, link_name: &str) -> Vec<u8> {
         .lines()
         .find(|l| l.contains("Fast link dest:"))
         .unwrap_or_else(|| {
-            panic!(
-                "debugfs stat {link_name}: no 'Fast link dest:' line in:\n{text}"
-            )
+            panic!("debugfs stat {link_name}: no 'Fast link dest:' line in:\n{text}")
         });
     let start = line
         .find('"')

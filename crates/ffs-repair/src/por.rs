@@ -419,7 +419,16 @@ where
 /// where `f = corruption_fraction`, `l = challenge_count`.
 #[must_use]
 pub fn false_negative_probability(corruption_fraction: f64, challenge_count: u32) -> f64 {
-    (1.0 - corruption_fraction).powf(f64::from(challenge_count))
+    if corruption_fraction.is_nan() {
+        return f64::NAN;
+    }
+
+    let corruption_fraction = corruption_fraction.clamp(0.0, 1.0);
+    if corruption_fraction >= 1.0 {
+        if challenge_count == 0 { 1.0 } else { 0.0 }
+    } else {
+        (1.0 - corruption_fraction).powf(f64::from(challenge_count))
+    }
 }
 
 /// Compute the minimum number of challenges needed for a given
@@ -428,14 +437,22 @@ pub fn false_negative_probability(corruption_fraction: f64, challenge_count: u32
 /// Returns `l` such that `(1-f)^l < 2^{-security_bits}`.
 #[must_use]
 pub fn min_challenges(corruption_fraction: f64, security_bits: u32) -> u32 {
-    if corruption_fraction <= 0.0 || corruption_fraction >= 1.0 {
+    if security_bits == 0 || corruption_fraction.is_nan() || corruption_fraction <= 0.0 {
         return 0;
     }
+
+    if corruption_fraction >= 1.0 {
+        return 1;
+    }
+
     let l = (f64::from(security_bits) * core::f64::consts::LN_2)
         / (1.0 / (1.0 - corruption_fraction)).ln();
+    if !l.is_finite() {
+        return u32::MAX;
+    }
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    // l is always positive and bounded by realistic challenge counts (< 2^31)
-    let result = l.ceil() as u32;
+    // l is positive here and explicitly saturated to the u32 API boundary.
+    let result = l.ceil().min(f64::from(u32::MAX)) as u32;
     result
 }
 
@@ -454,6 +471,14 @@ mod tests {
             .ok()
             .and_then(|i| blocks.get(i))
             .cloned()
+    }
+
+    fn assert_f64_bits_eq(actual: f64, expected: f64) {
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "expected {expected}, got {actual}"
+        );
     }
 
     fn make_blocks(n: usize, block_size: usize) -> Vec<Vec<u8>> {
@@ -733,13 +758,31 @@ mod tests {
     #[test]
     fn min_challenges_boundary_cases() {
         assert_eq!(min_challenges(0.0, 128), 0);
-        assert_eq!(min_challenges(1.0, 128), 0);
+        assert_eq!(min_challenges(1.0, 128), 1);
         // 50% corruption needs very few challenges.
         let n = min_challenges(0.5, 128);
         assert!(
             n < 200,
             "50% corruption should need <200 challenges, got {n}"
         );
+    }
+
+    #[test]
+    fn security_analysis_boundary_fractions_stay_in_probability_domain() {
+        assert_f64_bits_eq(false_negative_probability(-0.25, 128), 1.0);
+        assert_f64_bits_eq(false_negative_probability(0.0, 128), 1.0);
+        assert_f64_bits_eq(false_negative_probability(1.0, 0), 1.0);
+        assert_f64_bits_eq(false_negative_probability(1.0, 1), 0.0);
+        assert_f64_bits_eq(false_negative_probability(1.25, 128), 0.0);
+        assert!(false_negative_probability(f64::NAN, 128).is_nan());
+    }
+
+    #[test]
+    fn min_challenges_full_corruption_needs_single_probe() {
+        assert_eq!(min_challenges(1.0, 0), 0);
+        assert_eq!(min_challenges(1.0, 128), 1);
+        assert_eq!(min_challenges(f64::INFINITY, 128), 1);
+        assert_eq!(min_challenges(f64::NAN, 128), 0);
     }
 
     #[test]

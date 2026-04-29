@@ -100,10 +100,7 @@ fn create_fragmented_extent_image() -> PathBuf {
     for i in 1..=PAD_FILE_COUNT {
         let local = pad_dir.join(format!("pad_{i:02}.bin"));
         std::fs::write(&local, vec![b'P'; PAD_FILE_LEN]).expect("write pad payload");
-        run_debugfs_w(
-            &path,
-            &format!("write {} /pad_{i:02}.bin", local.display()),
-        );
+        run_debugfs_w(&path, &format!("write {} /pad_{i:02}.bin", local.display()));
     }
     // Delete every other padding file so the free list is shredded into
     // 16-KiB holes alternating with 16-KiB live regions.
@@ -158,7 +155,10 @@ fn walk_and_verify(
             stats.leaf_extents += leaves.len();
             Vec::new()
         }
-        ExtentTree::Index(idxs) => idxs.iter().map(|i| (i.leaf_block, root_header.depth)).collect(),
+        ExtentTree::Index(idxs) => idxs
+            .iter()
+            .map(|i| (i.leaf_block, root_header.depth))
+            .collect(),
     };
 
     while let Some((phys, parent_depth)) = frontier.pop() {
@@ -166,13 +166,14 @@ fn walk_and_verify(
             .read_block(image, ffs_types::BlockNumber(phys))
             .expect("read external extent block");
 
-        verify_extent_block_checksum(block, csum_seed, inode_no_u32, generation)
-            .unwrap_or_else(|err| {
+        verify_extent_block_checksum(block, csum_seed, inode_no_u32, generation).unwrap_or_else(
+            |err| {
                 panic!(
                     "extent block at physical {phys} (inode {inode_no_u32}, gen {generation}): \
                      verify_extent_block_checksum failed: {err:?}"
                 );
-            });
+            },
+        );
 
         stats.external_blocks += 1;
         let (child_header, child_tree) =
@@ -181,7 +182,8 @@ fn walk_and_verify(
         // Depth invariant: each level down decrements depth by 1.
         let expected_child_depth = parent_depth.saturating_sub(1);
         assert_eq!(
-            child_header.depth, expected_child_depth,
+            child_header.depth,
+            expected_child_depth,
             "extent block at phys {phys}: depth {child} != expected {expected_child_depth}",
             child = child_header.depth,
         );
