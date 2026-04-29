@@ -31,12 +31,14 @@ use std::process::{Command, Stdio};
 use ffs_ondisk::Ext4ImageReader;
 
 fn has_command(name: &str) -> bool {
-    Command::new(name)
+    matches!(
+        Command::new(name)
         .arg("-V")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok()
+            .status(),
+        Ok(status) if status.success()
+    )
 }
 
 fn ext4_tools_available() -> bool {
@@ -92,6 +94,8 @@ fn capture_blockcount(image: &Path, file: &str) -> u64 {
 
 #[derive(Debug, Clone, Copy)]
 enum CaseKind {
+    /// Empty regular file: zero size and zero charged sectors.
+    EmptyFile,
     /// Regular file with content — staged via `debugfs write`.
     File { content_bytes: usize },
     /// Sparse file: write `prefix_bytes` of content, then `sif size` to extend.
@@ -113,6 +117,12 @@ struct Case {
 
 fn corpus() -> Vec<Case> {
     vec![
+        // Zero-byte regular file: no data or metadata extent blocks should be
+        // charged to i_blocks, distinct from the zero-block fast symlink case.
+        Case {
+            name: "empty_regular_file",
+            kind: CaseKind::EmptyFile,
+        },
         // 1-byte file: smallest allocation that still costs one data block
         // (Blockcount = 8 sectors on 4 KiB FS).
         Case {
@@ -166,11 +176,20 @@ fn corpus() -> Vec<Case> {
 
 fn stage_case(image: &Path, scratch: &Path, case: &Case) {
     match case.kind {
+        CaseKind::EmptyFile => {
+            // `debugfs write` creates regular files, but it refuses an empty
+            // native source file. Seed one byte, deallocate from logical
+            // block 0, then force i_size back to zero so the final inode is a
+            // true empty regular file.
+            let local = scratch.join(format!("{}.bin", case.name));
+            std::fs::write(&local, [0_u8]).expect("write empty-file seed");
+            run_debugfs_w(image, &format!("write {} /{}", local.display(), case.name));
+            run_debugfs_w(image, &format!("punch /{} 0", case.name));
+            run_debugfs_w(image, &format!("sif /{} size 0", case.name));
+        }
         CaseKind::File { content_bytes } => {
             let content = vec![b'F'; content_bytes];
             let local = scratch.join(format!("{}.bin", case.name));
-            // debugfs write requires a non-empty source file. Zero-byte
-            // files are not in our corpus today; `tiny_file` is 1 byte.
             std::fs::write(&local, &content).expect("write content");
             run_debugfs_w(image, &format!("write {} /{}", local.display(), case.name));
         }
@@ -241,6 +260,19 @@ fn ext4_iblocks_kernel_reference_matches_debugfs_blockcount() {
         let (_ino, inode) = reader
             .resolve_path(&image, &path_str)
             .unwrap_or_else(|err| panic!("resolve {path_str}: {err:?}"));
+        if matches!(case.kind, CaseKind::EmptyFile) {
+            assert!(
+                inode.is_regular(),
+                "/{}: empty corpus case should remain a regular file, mode={:o}",
+                case.name,
+                inode.mode,
+            );
+            assert_eq!(
+                inode.size, 0,
+                "/{}: empty file should have i_size 0",
+                case.name
+            );
+        }
         assert_eq!(
             inode.blocks, kernel_blockcount,
             "/{}: ffs Ext4Inode.blocks ({}) != debugfs Blockcount ({})",
