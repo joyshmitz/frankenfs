@@ -1,0 +1,1 @@
+{"timestamp_ns":4000000000,"event_type":"ScrubCycleComplete","block_group":0,"scrub_cycle":{"blocks_scanned":10000,"errors_found":0,"errors_repaired":0,"duration_ms":5000}}

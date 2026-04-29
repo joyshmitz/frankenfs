@@ -1,0 +1,1 @@
+{"timestamp_ns":1000000000,"event_type":"RepairAttempted","block_group":0,"block_range":[100,200],"repair":{"strategy":"parity_reconstruct","target_blocks":10,"result":"in_progress"}}

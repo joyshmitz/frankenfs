@@ -1,0 +1,1 @@
+{"timestamp_ns":3000000000,"event_type":"RepairFailed","block_group":42,"block_range":[500,600],"repair":{"strategy":"copy_from_mirror","target_blocks":100,"result":"failure"}}

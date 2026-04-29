@@ -1,0 +1,3 @@
+{"timestamp_ns":1,"event_type":"CorruptionDetected","block_group":0,"corruption":{"blocks_affected":1,"corruption_kind":"checksum_mismatch","severity":"error","detail":"first"}}
+{"timestamp_ns":2,"event_type":"RepairAttempted","block_group":0,"repair":{"strategy":"parity","target_blocks":1,"result":"in_progress"}}
+{"timestamp_ns":3,"event_type":"RepairSucceeded","block_group":0,"repair":{"strategy":"parity","target_blocks":1,"result":"success"}}

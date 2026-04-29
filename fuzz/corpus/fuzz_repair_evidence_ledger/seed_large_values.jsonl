@@ -1,0 +1,1 @@
+{"timestamp_ns":18446744073709551615,"event_type":"CorruptionDetected","block_group":4294967295,"block_range":[0,18446744073709551615],"corruption":{"blocks_affected":999999,"corruption_kind":"bad_crc","severity":"warning","detail":"max-values"}}

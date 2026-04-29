@@ -1,0 +1,1 @@
+{"timestamp_ns":6000000000,"event_type":"WalRecovery","block_group":0,"wal_recovery":{"entries_replayed":42,"bytes_recovered":8192}}

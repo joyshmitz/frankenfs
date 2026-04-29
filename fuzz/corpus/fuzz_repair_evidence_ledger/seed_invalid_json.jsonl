@@ -1,0 +1,3 @@
+not valid json at all
+{"timestamp_ns":1,"event_type":"CorruptionDetected","block_group":0}
+{incomplete json here

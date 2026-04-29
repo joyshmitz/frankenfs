@@ -1,0 +1,1 @@
+{"timestamp_ns":10000000000,"event_type":"SerializationConflict","block_group":7,"serialization_conflict":{"victim_txn_id":111,"winner_txn_id":222}}

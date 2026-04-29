@@ -1,0 +1,1 @@
+{"timestamp_ns":11000000000,"event_type":"FlushBatch","block_group":0,"flush_batch":{"blocks_flushed":50,"sync_duration_us":1234}}

@@ -1,0 +1,1 @@
+{"timestamp_ns":5000000000,"event_type":"PolicyDecision","block_group":10,"policy":{"previous_overhead":0.05,"new_overhead":0.10,"reason":"error_rate_increase"}}

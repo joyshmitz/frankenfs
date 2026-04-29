@@ -1,0 +1,1 @@
+{"timestamp_ns":9000000000,"event_type":"VersionGc","block_group":0,"version_gc":{"versions_reclaimed":100,"bytes_freed":1048576}}
