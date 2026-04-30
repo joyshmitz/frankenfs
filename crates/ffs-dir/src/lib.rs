@@ -859,6 +859,44 @@ mod tests {
                 prop_assert_eq!(htree_find_leaf(&forward, query), htree_find_leaf(&reversed, query));
             }
         }
+
+        // Metamorphic relation: swap_inode_in_entry is involutive — swapping
+        // to a new inode and back to the original must restore the block
+        // bytes exactly. The corresponding rename/unlink/link sequence the
+        // VFS issues relies on this round-trip; a regression that altered
+        // any other byte of the entry header would silently corrupt the
+        // d_type tag or the rec_len chain.
+        #[test]
+        fn proptest_swap_inode_in_entry_is_involutive(
+            ino_orig in 3_u32..=u32::MAX,
+            ino_new in 3_u32..=u32::MAX,
+            reserved_tail in prop_oneof![Just(0_usize), Just(12_usize), Just(24_usize)],
+            name in valid_dir_name_strategy(255),
+        ) {
+            prop_assume!(ino_orig != ino_new);
+
+            let mut block = vec![0u8; 4096];
+            init_dir_block(&mut block, 2, 2, reserved_tail).unwrap();
+            add_entry(&mut block, ino_orig, &name, Ext4FileType::RegFile, reserved_tail)
+                .unwrap();
+
+            let baseline = block.clone();
+
+            let swapped_once = swap_inode_in_entry(&mut block, &name, ino_new, reserved_tail)
+                .unwrap();
+            prop_assert!(swapped_once, "first swap must report the entry as live");
+            prop_assert_ne!(block.as_slice(), baseline.as_slice(),
+                "swap to a different inode must change at least the inode bytes");
+
+            let swapped_back =
+                swap_inode_in_entry(&mut block, &name, ino_orig, reserved_tail).unwrap();
+            prop_assert!(swapped_back, "second swap must report the entry as live");
+            prop_assert_eq!(
+                block.as_slice(),
+                baseline.as_slice(),
+                "swap-then-swap-back must restore the block byte-for-byte"
+            );
+        }
     }
 
     #[test]
