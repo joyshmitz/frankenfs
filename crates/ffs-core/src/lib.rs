@@ -75,6 +75,7 @@ use tracing::{debug, error, info, trace, warn};
 const LINUX_PATH_MAX: u64 = 4096;
 const LINUX_SYMLINK_TARGET_MAX: u64 = LINUX_PATH_MAX - 1;
 const BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT: usize = 128 * 1024 * 1024;
+const E2COMPR_DECOMPRESSED_BYTE_LIMIT: usize = 128 * 1024 * 1024;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
@@ -7131,9 +7132,10 @@ impl OpenFs {
         cluster_nblocks: u32,
     ) -> Result<Vec<u8>, FfsError> {
         let bs_usize = self.block_size() as usize;
+        let (_, cluster_full_size) = Self::e2compr_cluster_shape(bs_usize, cluster_nblocks)?;
 
         // Gather all non-zero, non-sentinel block pointers from the cluster range.
-        let mut raw_data = Vec::with_capacity(bs_usize * cluster_nblocks as usize);
+        let mut raw_data = Vec::with_capacity(cluster_full_size);
         for i in 0..cluster_nblocks {
             let ptr = self
                 .resolve_indirect_block(cx, scope, inode, cluster_start + i)?
@@ -7173,9 +7175,15 @@ impl OpenFs {
             u32::from_le_bytes([raw_data[8], raw_data[9], raw_data[10], raw_data[11]]) as usize;
         let clen =
             u32::from_le_bytes([raw_data[12], raw_data[13], raw_data[14], raw_data[15]]) as usize;
+        Self::validate_e2compr_cluster_ulen(cluster_start, cluster_full_size, ulen)?;
 
         let data_start = 16 + holemap_nbytes;
-        let data_end = data_start + clen;
+        let data_end = data_start
+            .checked_add(clen)
+            .ok_or_else(|| FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!("e2compr: clen {clen} + header {data_start} overflows usize"),
+            })?;
         if data_end > raw_data.len() {
             return Err(FfsError::Corruption {
                 block: u64::from(cluster_start),
@@ -7214,13 +7222,10 @@ impl OpenFs {
         )
     }
 
-    fn expand_e2compr_holemap(
-        cluster_start: u32,
+    fn e2compr_cluster_shape(
         block_size: usize,
         cluster_nblocks: u32,
-        holemap: &[u8],
-        decompressed: &[u8],
-    ) -> Result<Vec<u8>, FfsError> {
+    ) -> Result<(usize, usize), FfsError> {
         let cluster_nblocks_usize = usize::try_from(cluster_nblocks).map_err(|_| {
             FfsError::InvalidGeometry(format!(
                 "e2compr: cluster block count {cluster_nblocks} does not fit usize"
@@ -7233,6 +7238,34 @@ impl OpenFs {
                     "e2compr: cluster size overflow for {cluster_nblocks} blocks of {block_size} bytes"
                 ))
             })?;
+        Ok((cluster_nblocks_usize, cluster_full_size))
+    }
+
+    fn validate_e2compr_cluster_ulen(
+        cluster_start: u32,
+        cluster_full_size: usize,
+        ulen: usize,
+    ) -> Result<(), FfsError> {
+        if ulen > cluster_full_size {
+            return Err(FfsError::Corruption {
+                block: u64::from(cluster_start),
+                detail: format!(
+                    "e2compr: ulen {ulen} exceeds cluster capacity {cluster_full_size} bytes"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn expand_e2compr_holemap(
+        cluster_start: u32,
+        block_size: usize,
+        cluster_nblocks: u32,
+        holemap: &[u8],
+        decompressed: &[u8],
+    ) -> Result<Vec<u8>, FfsError> {
+        let (cluster_nblocks_usize, cluster_full_size) =
+            Self::e2compr_cluster_shape(block_size, cluster_nblocks)?;
         let mut output = vec![0_u8; cluster_full_size];
         let mut src_off = 0_usize;
 
@@ -7310,6 +7343,14 @@ impl OpenFs {
         ulen: usize,
     ) -> Result<Vec<u8>, FfsError> {
         let codec = E2ComprCodec::from_method_index(method_idx)?;
+        if ulen > E2COMPR_DECOMPRESSED_BYTE_LIMIT {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "e2compr: decompressed target {ulen} exceeds {E2COMPR_DECOMPRESSED_BYTE_LIMIT} byte limit"
+                ),
+            });
+        }
 
         match codec {
             E2ComprCodec::Gzip { .. } => {
@@ -21421,6 +21462,43 @@ mod tests {
     }
 
     #[test]
+    fn e2compr_cluster_ulen_rejects_capacity_excess_before_decode() {
+        let cluster_full_size = 4096 * 4;
+        let err =
+            OpenFs::validate_e2compr_cluster_ulen(9, cluster_full_size, cluster_full_size + 1)
+                .expect_err("ulen larger than full cluster capacity rejects");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption {
+                    block: 9,
+                    ref detail
+                } if detail.contains("e2compr: ulen 16385 exceeds cluster capacity 16384 bytes")
+            ),
+            "unexpected e2compr ulen error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn e2compr_decompress_rejects_absurd_ulen_before_allocation() {
+        let ulen = E2COMPR_DECOMPRESSED_BYTE_LIMIT + 1;
+        let err = OpenFs::e2compr_decompress(20, &[], ulen)
+            .expect_err("absurd gzip target length rejects before allocation");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption {
+                    block: 0,
+                    ref detail
+                } if detail.contains("e2compr: decompressed target 134217729 exceeds 134217728 byte limit")
+            ),
+            "unexpected e2compr limit error: {err:?}"
+        );
+    }
+
+    #[test]
     fn e2compr_holemap_expansion_allows_partial_tail() {
         let expanded = OpenFs::expand_e2compr_holemap(0, 4, 3, &[0b0000_0010], b"abcde")
             .expect("partial decoded tail should expand");
@@ -21536,7 +21614,7 @@ mod tests {
     #[test]
     fn e2compr_decompress_ulen_mismatch() {
         // Compress some data, then request wrong ulen — should still decompress
-        // (ulen is a hint for pre-allocation, not a strict constraint in our impl).
+        // for reasonable hints; absurd ulen values are rejected before allocation.
         use flate2::Compression;
         use flate2::write::ZlibEncoder;
         use std::io::Write;
