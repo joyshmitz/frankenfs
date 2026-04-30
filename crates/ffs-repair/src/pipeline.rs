@@ -1551,8 +1551,11 @@ impl<'a, W: Write> ScrubWithRecovery<'a, W> {
                 decision.overhead_ratio = effective_overhead;
                 decision.risk_bound =
                     autopilot.risk_bound(effective_overhead, group_cfg.source_block_count);
-                decision.expected_loss =
-                    autopilot.expected_loss(effective_overhead, group_cfg.source_block_count);
+                decision.expected_loss = autopilot.expected_loss_for_group(
+                    effective_overhead,
+                    group_cfg.source_block_count,
+                    decision.metadata_group,
+                );
                 warn!(
                     target: "ffs::repair::policy",
                     group,
@@ -4079,6 +4082,71 @@ mod tests {
         assert_eq!(
             refresh_detail.symbols_generated,
             policy_detail.symbols_selected
+        );
+    }
+
+    #[test]
+    fn adaptive_policy_clamp_preserves_metadata_expected_loss() {
+        let device = MemBlockDevice::new(256, 128);
+        let validator = CorruptBlockValidator::new(vec![]);
+        let layout =
+            RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 1).expect("layout");
+        let group_cfg = GroupConfig {
+            layout,
+            source_first_block: BlockNumber(0),
+            source_block_count: 64,
+        };
+        let report = ScrubReport {
+            findings: Vec::new(),
+            blocks_scanned: 64,
+            blocks_corrupt: 64,
+            blocks_io_error: 0,
+        };
+
+        let mut ledger_buf = Vec::new();
+        let mut pipeline = ScrubWithRecovery::new(
+            &device,
+            &validator,
+            test_uuid(),
+            vec![group_cfg],
+            &mut ledger_buf,
+            4,
+        )
+        .with_adaptive_overhead(DurabilityAutopilot::default())
+        .with_metadata_groups([GroupNumber(0)]);
+
+        pipeline
+            .update_adaptive_policy(&report)
+            .expect("adaptive policy update");
+
+        let decision = pipeline
+            .policy_decisions
+            .get(&0)
+            .expect("group policy decision");
+        assert_eq!(decision.symbols_selected, layout.repair_block_count);
+
+        let mut expected_ap = DurabilityAutopilot::default();
+        expected_ap.update_posterior(report.blocks_corrupt, report.blocks_scanned);
+        let effective_overhead =
+            f64::from(layout.repair_block_count) / f64::from(group_cfg.source_block_count);
+        let metadata_loss = expected_ap.expected_loss_for_group(
+            effective_overhead,
+            group_cfg.source_block_count,
+            true,
+        );
+        let base_loss = expected_ap.expected_loss_for_group(
+            effective_overhead,
+            group_cfg.source_block_count,
+            false,
+        );
+
+        assert!(
+            metadata_loss > base_loss,
+            "test setup should expose metadata multiplier after clamping"
+        );
+        assert!(
+            (decision.expected_loss - metadata_loss).abs() < 1e-12,
+            "clamped metadata decision must preserve metadata expected-loss cost"
         );
     }
 

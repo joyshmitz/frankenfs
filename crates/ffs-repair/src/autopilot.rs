@@ -195,6 +195,22 @@ impl DurabilityAutopilot {
         finite_loss(redundancy_cost + corruption_cost)
     }
 
+    /// Expected loss for a data or metadata group at a fixed overhead fraction.
+    #[must_use]
+    pub fn expected_loss_for_group(
+        &self,
+        overhead: f64,
+        source_block_count: u32,
+        metadata_group: bool,
+    ) -> f64 {
+        let loss_cost = if metadata_group {
+            self.metadata_loss_cost()
+        } else {
+            self.data_loss_cost()
+        };
+        self.expected_loss_custom(overhead, source_block_count, loss_cost)
+    }
+
     /// Choose optimal overhead in `[min_overhead, max_overhead]`.
     #[must_use]
     pub fn optimal_overhead(&self, source_block_count: u32) -> f64 {
@@ -204,9 +220,7 @@ impl DurabilityAutopilot {
     /// Choose optimal overhead for metadata-critical groups.
     #[must_use]
     pub fn optimal_overhead_metadata(&self, source_block_count: u32) -> f64 {
-        let metadata_cost = self.data_loss_cost()
-            * finite_nonnegative_or(self.metadata_multiplier, DEFAULT_METADATA_MULTIPLIER).max(1.0);
-        self.optimize_overhead(source_block_count, metadata_cost)
+        self.optimize_overhead(source_block_count, self.metadata_loss_cost())
     }
 
     fn optimize_overhead(&self, source_block_count: u32, loss_cost: f64) -> f64 {
@@ -252,14 +266,8 @@ impl DurabilityAutopilot {
             self.optimal_overhead(source_block_count)
         };
         let risk_bound = self.risk_bound(selected_overhead, source_block_count);
-        let expected_loss = if metadata_group {
-            let metadata_cost = self.data_loss_cost()
-                * finite_nonnegative_or(self.metadata_multiplier, DEFAULT_METADATA_MULTIPLIER)
-                    .max(1.0);
-            self.expected_loss_custom(selected_overhead, source_block_count, metadata_cost)
-        } else {
-            self.expected_loss(selected_overhead, source_block_count)
-        };
+        let expected_loss =
+            self.expected_loss_for_group(selected_overhead, source_block_count, metadata_group);
         let (posterior_alpha, posterior_beta) = self.posterior_params();
 
         OverheadDecision {
@@ -307,6 +315,12 @@ impl DurabilityAutopilot {
     #[must_use]
     fn data_loss_cost(&self) -> f64 {
         finite_nonnegative_or(self.data_loss_cost, DEFAULT_DATA_LOSS_COST)
+    }
+
+    #[must_use]
+    fn metadata_loss_cost(&self) -> f64 {
+        self.data_loss_cost()
+            * finite_nonnegative_or(self.metadata_multiplier, DEFAULT_METADATA_MULTIPLIER).max(1.0)
     }
 }
 
@@ -837,6 +851,34 @@ mod tests {
                 "metadata overhead {metadata} should be higher than base {base} when cost is doubled",
             );
         }
+    }
+
+    #[test]
+    fn fixed_metadata_expected_loss_uses_metadata_multiplier() {
+        let ap = DurabilityAutopilot {
+            alpha: 2.0,
+            beta: 10.0,
+            data_loss_cost: 100.0,
+            storage_cost: 1.0,
+            metadata_multiplier: 3.0,
+            ..DurabilityAutopilot::default()
+        };
+        let overhead = 0.03;
+        let source_blocks = 32;
+
+        let base = ap.expected_loss_for_group(overhead, source_blocks, false);
+        let metadata = ap.expected_loss_for_group(overhead, source_blocks, true);
+        let explicit_metadata =
+            ap.expected_loss_custom(overhead, source_blocks, ap.data_loss_cost() * 3.0);
+
+        assert!(
+            metadata > base,
+            "metadata loss {metadata} should exceed base loss {base}"
+        );
+        assert!(
+            (metadata - explicit_metadata).abs() < 1e-12,
+            "metadata fixed-overhead loss should use metadata multiplier"
+        );
     }
 
     proptest! {
