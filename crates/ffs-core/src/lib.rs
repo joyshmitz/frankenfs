@@ -42199,6 +42199,91 @@ mod tests {
         );
     }
 
+    /// Regression: a corrupted superblock advertising inodes_per_group == 0
+    /// previously caused verify_ext4_integrity to divide by zero and panic
+    /// in the per-inode bitmap-cache loop. The fix emits an "inodes_per_group"
+    /// failure verdict and skips the inode-checksum scan; the function must
+    /// still return Ok with a well-formed report.
+    #[test]
+    fn verify_ext4_integrity_zero_inodes_per_group_returns_failure_verdict() {
+        let Some(mut image) = load_ext4_small_image() else {
+            return;
+        };
+        // Zero out inodes_per_group at superblock offset 0x28..0x2C.
+        let off = ffs_types::EXT4_SUPERBLOCK_OFFSET + 0x28;
+        image[off..off + 4].copy_from_slice(&0_u32.to_le_bytes());
+
+        let report = verify_ext4_integrity(&image, 16)
+            .expect("zero inodes_per_group must not panic the verifier");
+        let ipg_verdict = report
+            .verdicts
+            .iter()
+            .find(|v| v.component == "inodes_per_group");
+        assert!(
+            ipg_verdict.is_some_and(|v| !v.passed),
+            "expected an inodes_per_group failure verdict, got: {:?}",
+            report
+                .verdicts
+                .iter()
+                .map(|v| format!("{}:{}", v.component, v.passed))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            report.failed >= 1,
+            "report.failed must cover the inodes_per_group verdict, got {}",
+            report.failed
+        );
+    }
+
+    /// Regression: a corrupted superblock advertising u32::MAX blocks_count
+    /// previously made `for g in 0..groups_count` push billions of failure
+    /// verdicts, OOM-ing the verifier itself. The fix caps the scan at
+    /// MAX_GROUPS_VERIFIED and emits a single "groups_count" verdict on
+    /// truncation. This pins the cap so a future un-bounding regression
+    /// fails fast rather than allocating gigabytes again.
+    #[test]
+    fn verify_ext4_integrity_excessive_groups_count_is_bounded() {
+        let Some(mut image) = load_ext4_small_image() else {
+            return;
+        };
+        // Set blocks_count to u32::MAX. With default 4 KiB blocks and a
+        // small blocks_per_group (e.g. 8192), groups_count would compute
+        // to ~524288 — well above any sane cap. We rely on the fact that
+        // the cap is far below this value.
+        let off = ffs_types::EXT4_SUPERBLOCK_OFFSET + 0x04;
+        image[off..off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let report = verify_ext4_integrity(&image, 16)
+            .expect("u32::MAX blocks_count must not OOM the verifier");
+        // Either we emitted the explicit "groups_count" cap verdict, or
+        // the underlying parser rejected the corrupted superblock outright.
+        let cap_verdict = report
+            .verdicts
+            .iter()
+            .find(|v| v.component == "groups_count");
+        let group_desc_failures = report
+            .verdicts
+            .iter()
+            .filter(|v| v.component.starts_with("group_desc[") && !v.passed)
+            .count();
+        assert!(
+            cap_verdict.is_some_and(|v| !v.passed) || group_desc_failures > 0,
+            "expected groups_count cap verdict or group_desc failures, got: {:?}",
+            report
+                .verdicts
+                .iter()
+                .map(|v| format!("{}:{}", v.component, v.passed))
+                .collect::<Vec<_>>()
+        );
+        // Bound the verdict count so the cap is actually working: a
+        // pre-fix run produced billions of verdicts.
+        assert!(
+            report.verdicts.len() <= 200_000,
+            "verdict count must be capped, got {}",
+            report.verdicts.len()
+        );
+    }
+
     // ── detect_filesystem_on_device / at_path tests (GreenSnow) ────────
 
     #[test]
