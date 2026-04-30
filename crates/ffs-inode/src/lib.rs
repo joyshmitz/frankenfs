@@ -2933,6 +2933,37 @@ mod tests {
             prop_assert_eq!(&raw[xattr_start..xattr_start + xattr_len], &xattr_data[..],
                 "xattr ibody bytes not preserved");
         }
+
+        /// Metamorphic relation: bumping the inode version `n` times must
+        /// add exactly `n` to the combined u64 (version_hi:version_lo),
+        /// modulo 2^64. Existing unit tests pin specific values (zero,
+        /// u32::MAX, u64::MAX) but no property test exercised the full
+        /// arithmetic chain across the u32 boundary.
+        #[test]
+        fn proptest_bump_inode_version_adds_n(
+            initial_lo in any::<u32>(),
+            initial_hi in any::<u32>(),
+            n in 0_u32..=64,
+        ) {
+            let mut inode = Ext4Inode {
+                mode: 0o100_644, uid: 0, gid: 0, size: 0,
+                links_count: 1, blocks: 0, flags: 0,
+                version: initial_lo, generation: 0,
+                file_acl: 0, atime: 0, ctime: 0, mtime: 0, dtime: 0,
+                atime_extra: 0, ctime_extra: 0, mtime_extra: 0,
+                crtime: 0, crtime_extra: 0, extra_isize: 32,
+                checksum: 0, version_hi: initial_hi, projid: 0,
+                extent_bytes: vec![0u8; 60], xattr_ibody: Vec::new(),
+            };
+
+            let initial = u64::from(initial_lo) | (u64::from(initial_hi) << 32);
+            for _ in 0..n {
+                bump_inode_version(&mut inode);
+            }
+            let after = u64::from(inode.version) | (u64::from(inode.version_hi) << 32);
+            prop_assert_eq!(after, initial.wrapping_add(u64::from(n)),
+                "bump_inode_version called {} times must add {} mod 2^64", n, n);
+        }
     }
 
     // ── Additional edge-case tests ──────────────────────────────────────
