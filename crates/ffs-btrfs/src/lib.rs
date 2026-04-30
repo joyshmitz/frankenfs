@@ -1110,12 +1110,9 @@ pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
         });
     }
     match extent_type {
-        BTRFS_FILE_EXTENT_INLINE => Ok(BtrfsExtentData::Inline {
-            generation,
-            ram_bytes,
-            compression,
-            data: data[FIXED..].to_vec(),
-        }),
+        BTRFS_FILE_EXTENT_INLINE => {
+            parse_inline_extent_data(generation, ram_bytes, compression, &data[FIXED..])
+        }
         BTRFS_FILE_EXTENT_REG | BTRFS_FILE_EXTENT_PREALLOC => {
             // disk_bytenr + disk_num_bytes + extent_offset + num_bytes
             if data.len() < REGULAR_SIZE {
@@ -1178,6 +1175,42 @@ pub fn parse_extent_data(data: &[u8]) -> Result<BtrfsExtentData, ParseError> {
             reason: "unsupported extent type",
         }),
     }
+}
+
+fn parse_inline_extent_data(
+    generation: u64,
+    ram_bytes: u64,
+    compression: u8,
+    inline_data: &[u8],
+) -> Result<BtrfsExtentData, ParseError> {
+    validate_inline_extent_ram_bytes(compression, inline_data.len(), ram_bytes)?;
+    Ok(BtrfsExtentData::Inline {
+        generation,
+        ram_bytes,
+        compression,
+        data: inline_data.to_vec(),
+    })
+}
+
+fn validate_inline_extent_ram_bytes(
+    compression: u8,
+    inline_len: usize,
+    ram_bytes: u64,
+) -> Result<(), ParseError> {
+    if compression != BTRFS_COMPRESS_NONE {
+        return Ok(());
+    }
+    let inline_len = u64::try_from(inline_len).map_err(|_| ParseError::InvalidField {
+        field: "extent_data.inline_len",
+        reason: "does not fit u64",
+    })?;
+    if inline_len != ram_bytes {
+        return Err(ParseError::InvalidField {
+            field: "extent_data.ram_bytes",
+            reason: "uncompressed inline length mismatch",
+        });
+    }
+    Ok(())
 }
 
 /// Walk a btrfs tree from `root_logical` down to all leaves, collecting items.
@@ -7141,6 +7174,50 @@ mod tests {
         assert_eq!(bytes.len(), 21 + data.len());
         let parsed = parse_extent_data(&bytes).expect("round-trip parse");
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn extent_data_inline_uncompressed_rejects_ram_bytes_mismatch() {
+        let mut bytes = BtrfsExtentData::Inline {
+            generation: 0,
+            ram_bytes: 3,
+            compression: BTRFS_COMPRESS_NONE,
+            data: b"abcd".to_vec(),
+        }
+        .to_bytes();
+
+        let err = parse_extent_data(&bytes).expect_err("oversized inline payload rejects");
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "extent_data.ram_bytes",
+                reason: "uncompressed inline length mismatch",
+            }
+        );
+
+        bytes[8..16].copy_from_slice(&5_u64.to_le_bytes());
+        let err = parse_extent_data(&bytes).expect_err("undersized inline payload rejects");
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "extent_data.ram_bytes",
+                reason: "uncompressed inline length mismatch",
+            }
+        );
+    }
+
+    #[test]
+    fn extent_data_inline_compressed_allows_payload_len_different_from_ram_bytes() {
+        let compressed_inline = BtrfsExtentData::Inline {
+            generation: 1,
+            ram_bytes: 4096,
+            compression: BTRFS_COMPRESS_ZLIB,
+            data: b"compressed payload".to_vec(),
+        };
+
+        let parsed =
+            parse_extent_data(&compressed_inline.to_bytes()).expect("parse compressed inline");
+        assert_eq!(parsed, compressed_inline);
     }
 
     #[test]
