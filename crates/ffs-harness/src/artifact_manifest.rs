@@ -506,6 +506,8 @@ pub enum ManifestValidationError {
     EmptyArtifactPath,
     /// Duplicate scenario IDs found.
     DuplicateScenarioId(String),
+    /// Scenario map key and embedded scenario ID disagree.
+    ScenarioIdMismatch { key: String, value: String },
     /// Verdict is inconsistent with scenario outcomes.
     InconsistentVerdict,
 }
@@ -526,6 +528,12 @@ impl std::fmt::Display for ManifestValidationError {
             Self::InvalidScenarioId(id) => write!(f, "invalid scenario_id: {id}"),
             Self::EmptyArtifactPath => write!(f, "artifact path is empty"),
             Self::DuplicateScenarioId(id) => write!(f, "duplicate scenario_id: {id}"),
+            Self::ScenarioIdMismatch { key, value } => {
+                write!(
+                    f,
+                    "scenario map key {key} does not match embedded scenario_id {value}"
+                )
+            }
             Self::InconsistentVerdict => {
                 write!(f, "verdict is PASS but scenarios contain failures")
             }
@@ -568,7 +576,7 @@ pub fn validate_manifest(manifest: &ArtifactManifest) -> Vec<ManifestValidationE
 
     // Scenario ID validation.
     let mut seen_ids = std::collections::HashSet::new();
-    for scenario_id in manifest.scenarios.keys() {
+    for (scenario_id, scenario) in &manifest.scenarios {
         if !is_valid_scenario_id(scenario_id) {
             errors.push(ManifestValidationError::InvalidScenarioId(
                 scenario_id.clone(),
@@ -578,6 +586,17 @@ pub fn validate_manifest(manifest: &ArtifactManifest) -> Vec<ManifestValidationE
             errors.push(ManifestValidationError::DuplicateScenarioId(
                 scenario_id.clone(),
             ));
+        }
+        if scenario.scenario_id != *scenario_id {
+            if !is_valid_scenario_id(&scenario.scenario_id) {
+                errors.push(ManifestValidationError::InvalidScenarioId(
+                    scenario.scenario_id.clone(),
+                ));
+            }
+            errors.push(ManifestValidationError::ScenarioIdMismatch {
+                key: scenario_id.clone(),
+                value: scenario.scenario_id.clone(),
+            });
         }
     }
 
@@ -877,6 +896,46 @@ mod tests {
         assert!(errors.iter().any(
             |e| matches!(e, ManifestValidationError::InvalidScenarioId(id) if id == "bad-id")
         ));
+    }
+
+    #[test]
+    fn embedded_invalid_scenario_id_detected() {
+        let mut manifest = sample_manifest();
+        let scenario = manifest
+            .scenarios
+            .get_mut("cli_mount_runtime_help_contract")
+            .expect("sample scenario should exist");
+        scenario.scenario_id = "BAD".to_owned();
+
+        let errors = validate_manifest(&manifest);
+        assert!(
+            errors.iter().any(
+                |e| matches!(e, ManifestValidationError::InvalidScenarioId(id) if id == "BAD")
+            )
+        );
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::ScenarioIdMismatch { key, value }
+                if key == "cli_mount_runtime_help_contract" && value == "BAD"
+        )));
+    }
+
+    #[test]
+    fn embedded_scenario_id_mismatch_detected() {
+        let mut manifest = sample_manifest();
+        let scenario = manifest
+            .scenarios
+            .get_mut("cli_mount_runtime_help_contract")
+            .expect("sample scenario should exist");
+        scenario.scenario_id = "cli_mount_runtime_other_contract".to_owned();
+
+        let errors = validate_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::ScenarioIdMismatch { key, value }
+                if key == "cli_mount_runtime_help_contract"
+                    && value == "cli_mount_runtime_other_contract"
+        )));
     }
 
     #[test]
@@ -1278,6 +1337,10 @@ mod tests {
             ManifestValidationError::InvalidScenarioId("x".to_owned()),
             ManifestValidationError::EmptyArtifactPath,
             ManifestValidationError::DuplicateScenarioId("dup".to_owned()),
+            ManifestValidationError::ScenarioIdMismatch {
+                key: "test_key_scenario".to_owned(),
+                value: "test_value_scenario".to_owned(),
+            },
             ManifestValidationError::InconsistentVerdict,
         ];
         for err in &errors {
