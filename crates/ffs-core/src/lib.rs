@@ -7670,14 +7670,13 @@ impl OpenFs {
 
             // Read-modify-write the indirect block (read through scope to see staged writes).
             let mut ind_data = self.read_block_with_scope(cx, scope, ind_block_num)?;
-            let off = lb_indirect * 4;
-            if off + 4 > ind_data.len() {
-                return Err(FfsError::Corruption {
-                    block: ind_block_num.0,
-                    detail: "indirect block too small for pointer write".into(),
-                });
-            }
-            ind_data[off..off + 4].copy_from_slice(&phys.to_le_bytes());
+            Self::write_indirect_pointer_slot(
+                &mut ind_data,
+                ind_block_num,
+                lb_indirect,
+                phys,
+                "indirect block too small for pointer write",
+            )?;
             if let Some(tx) = &mut scope.tx {
                 tx.stage_write(ind_block_num, ind_data);
             } else {
@@ -7704,8 +7703,13 @@ impl OpenFs {
             // Write the final pointer in the level-2 block (read through scope).
             let idx2 = lb_dind % ptrs_per_block;
             let mut data = self.read_block_with_scope(cx, scope, level1)?;
-            let off = idx2 * 4;
-            data[off..off + 4].copy_from_slice(&phys.to_le_bytes());
+            Self::write_indirect_pointer_slot(
+                &mut data,
+                level1,
+                idx2,
+                phys,
+                "double-indirect leaf block too small for pointer write",
+            )?;
             if let Some(tx) = &mut scope.tx {
                 tx.stage_write(level1, data);
             } else {
@@ -7733,8 +7737,13 @@ impl OpenFs {
             let idx3 = lb_triple % ptrs_per_block;
 
             let mut data = self.read_block_with_scope(cx, scope, ind_block)?;
-            let off = idx3 * 4;
-            data[off..off + 4].copy_from_slice(&phys.to_le_bytes());
+            Self::write_indirect_pointer_slot(
+                &mut data,
+                ind_block,
+                idx3,
+                phys,
+                "triple-indirect leaf block too small for pointer write",
+            )?;
             if let Some(tx) = &mut scope.tx {
                 tx.stage_write(ind_block, data);
             } else {
@@ -7748,6 +7757,45 @@ impl OpenFs {
         }
     }
 
+    fn indirect_pointer_slot(
+        data: &[u8],
+        block: BlockNumber,
+        index: usize,
+        detail: &str,
+    ) -> Result<std::ops::Range<usize>, FfsError> {
+        let Some(off) = index.checked_mul(4) else {
+            return Err(FfsError::Corruption {
+                block: block.0,
+                detail: detail.to_owned(),
+            });
+        };
+        let Some(end) = off.checked_add(4) else {
+            return Err(FfsError::Corruption {
+                block: block.0,
+                detail: detail.to_owned(),
+            });
+        };
+        if end > data.len() {
+            return Err(FfsError::Corruption {
+                block: block.0,
+                detail: detail.to_owned(),
+            });
+        }
+        Ok(off..end)
+    }
+
+    fn write_indirect_pointer_slot(
+        data: &mut [u8],
+        block: BlockNumber,
+        index: usize,
+        pointer: u32,
+        detail: &str,
+    ) -> Result<(), FfsError> {
+        let slot = Self::indirect_pointer_slot(data, block, index, detail)?;
+        data[slot].copy_from_slice(&pointer.to_le_bytes());
+        Ok(())
+    }
+
     /// Ensure i_block[idx] points to an allocated indirect block.
     /// If zero, allocates a new zero-filled block and stores the pointer.
     fn ensure_indirect_block(
@@ -7758,13 +7806,15 @@ impl OpenFs {
         alloc: &mut Ext4AllocState,
         iblock_idx: usize,
     ) -> Result<(BlockNumber, Vec<BlockNumber>), FfsError> {
-        let off = iblock_idx * 4;
         let raw = &inode.extent_bytes;
-        let current = if off + 4 <= raw.len() {
-            u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]])
-        } else {
-            0
-        };
+        let slot = Self::indirect_pointer_slot(
+            raw,
+            BlockNumber(0),
+            iblock_idx,
+            "inode extent_bytes too small for indirect block pointer",
+        )?;
+        let off = slot.start;
+        let current = u32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
         if current != 0 {
             return Ok((BlockNumber(u64::from(current)), Vec::new()));
         }
@@ -7795,7 +7845,13 @@ impl OpenFs {
                 new_block.0
             ))
         })?;
-        inode.extent_bytes[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
+        Self::write_indirect_pointer_slot(
+            &mut inode.extent_bytes,
+            BlockNumber(0),
+            iblock_idx,
+            ptr,
+            "inode extent_bytes too small for indirect block pointer",
+        )?;
         Ok((new_block, vec![new_block]))
     }
 
@@ -7814,13 +7870,13 @@ impl OpenFs {
         // Read through the active scope so we see any staged writes (e.g., a
         // freshly allocated zero-filled indirect block that hasn't hit disk yet).
         let mut data = self.read_block_with_scope(cx, scope, parent_block)?;
-        let off = index * 4;
-        if off + 4 > data.len() {
-            return Err(FfsError::Corruption {
-                block: parent_block.0,
-                detail: "indirect block too small for pointer".into(),
-            });
-        }
+        let slot = Self::indirect_pointer_slot(
+            &data,
+            parent_block,
+            index,
+            "indirect block too small for pointer",
+        )?;
+        let off = slot.start;
         let current = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
         if current != 0 {
             return Ok((BlockNumber(u64::from(current)), Vec::new()));
@@ -7851,7 +7907,13 @@ impl OpenFs {
                 new_block.0
             ))
         })?;
-        data[off..off + 4].copy_from_slice(&ptr.to_le_bytes());
+        Self::write_indirect_pointer_slot(
+            &mut data,
+            parent_block,
+            index,
+            ptr,
+            "indirect block too small for pointer",
+        )?;
         if let Some(tx) = &mut scope.tx {
             tx.stage_write(parent_block, data);
         } else {
@@ -7872,14 +7934,13 @@ impl OpenFs {
                 "e2compr: direct block pointer write out of range (block >= 12)".into(),
             ));
         }
-        let off = lb * 4;
-        if off + 4 > inode.extent_bytes.len() {
-            return Err(FfsError::Corruption {
-                block: 0,
-                detail: "inode extent_bytes too small for direct block pointer".into(),
-            });
-        }
-        inode.extent_bytes[off..off + 4].copy_from_slice(&phys.to_le_bytes());
+        Self::write_indirect_pointer_slot(
+            &mut inode.extent_bytes,
+            BlockNumber(0),
+            lb,
+            phys,
+            "inode extent_bytes too small for direct block pointer",
+        )?;
         Ok(())
     }
 
@@ -19904,6 +19965,63 @@ mod tests {
         btrfs_img[sb2 + 0x94..sb2 + 0x98].copy_from_slice(&4096_u32.to_le_bytes());
         let btrfs = detect_filesystem(&btrfs_img).expect("detect btrfs");
         assert!(matches!(btrfs, FsFlavor::Btrfs(_)));
+    }
+
+    #[test]
+    fn indirect_pointer_slot_writes_selected_u32() {
+        let mut data = vec![0_u8; 12];
+
+        OpenFs::write_indirect_pointer_slot(
+            &mut data,
+            BlockNumber(42),
+            2,
+            0xA1B2_C3D4,
+            "pointer slot too short",
+        )
+        .expect("write pointer slot");
+
+        assert_eq!(&data[..8], &[0_u8; 8]);
+        assert_eq!(&data[8..12], &0xA1B2_C3D4_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn indirect_pointer_slot_rejects_short_metadata_block() {
+        let mut data = vec![0_u8; 3];
+
+        let err = OpenFs::write_indirect_pointer_slot(
+            &mut data,
+            BlockNumber(77),
+            0,
+            1,
+            "pointer slot too short",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FfsError::Corruption { block: 77, ref detail } if detail == "pointer slot too short"
+        ));
+        assert_eq!(data, vec![0_u8; 3]);
+    }
+
+    #[test]
+    fn indirect_pointer_slot_rejects_offset_arithmetic_overflow() {
+        let mut data = vec![0_u8; 8];
+
+        let err = OpenFs::write_indirect_pointer_slot(
+            &mut data,
+            BlockNumber(99),
+            usize::MAX / 4 + 1,
+            1,
+            "pointer slot offset overflow",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FfsError::Corruption { block: 99, ref detail } if detail == "pointer slot offset overflow"
+        ));
+        assert_eq!(data, vec![0_u8; 8]);
     }
 
     // ── FsOps VFS trait tests ─────────────────────────────────────────
