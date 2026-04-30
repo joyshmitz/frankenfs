@@ -190,8 +190,9 @@ impl SparseFixture {
     /// are relative to the start of the extracted region.
     #[must_use]
     pub fn from_region(data: &[u8], offset: usize, len: usize) -> Self {
-        let end = (offset + len).min(data.len());
-        let region = &data[offset.min(data.len())..end];
+        let start = offset.min(data.len());
+        let end = offset.saturating_add(len).min(data.len());
+        let region = &data[start..end];
         Self::from_bytes(region)
     }
 
@@ -693,6 +694,25 @@ mod tests {
         assert_eq!(fixture.size, 4);
         let materialized = fixture.materialize().expect("materialize");
         assert_eq!(materialized, vec![0xAA, 0xBB, 0xCC, 0]);
+    }
+
+    #[test]
+    fn sparse_fixture_from_region_clamps_overflowing_length() {
+        let data = vec![0xAA, 0xBB, 0, 0xCC];
+        let fixture = SparseFixture::from_region(&data, 1, usize::MAX);
+
+        assert_eq!(fixture.size, 3);
+        let materialized = fixture.materialize().expect("materialize");
+        assert_eq!(materialized, vec![0xBB, 0, 0xCC]);
+    }
+
+    #[test]
+    fn sparse_fixture_from_region_overflow_after_end_returns_empty() {
+        let data = vec![0xAA, 0xBB, 0xCC];
+        let fixture = SparseFixture::from_region(&data, usize::MAX, usize::MAX);
+
+        assert_eq!(fixture.size, 0);
+        assert!(fixture.writes.is_empty());
     }
 
     #[test]
