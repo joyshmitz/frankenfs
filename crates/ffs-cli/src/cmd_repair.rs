@@ -31,8 +31,7 @@ use crate::{
 
 /// Maximum ext4 groups the repair CLI will expand into per-group repair specs.
 ///
-/// This mirrors the integrity verifier's group-scan cap: it is large enough
-/// for 16 PiB at default 4 KiB block geometry, while rejecting corrupt
+/// This mirrors the integrity verifier's group-scan cap and rejects corrupt
 /// superblocks that advertise billions of groups before allocation.
 pub const MAX_EXT4_REPAIR_GROUP_SPECS: u32 = 65_536;
 

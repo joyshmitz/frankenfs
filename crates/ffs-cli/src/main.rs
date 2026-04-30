@@ -731,6 +731,13 @@ struct Ext4GroupInfoOutput {
     flags: Vec<String>,
 }
 
+/// Maximum ext4 groups expanded into detailed `info --groups` output.
+///
+/// The plain superblock summary still reports the raw group count. This cap
+/// protects the optional per-group descriptor expansion from corrupted geometry
+/// that would otherwise allocate or iterate billions of group entries.
+const MAX_EXT4_INFO_GROUPS: u32 = 65_536;
+
 #[derive(Debug, Clone, Serialize)]
 struct BtrfsGroupInfoOutput {
     chunk_index: u32,
@@ -1935,7 +1942,16 @@ fn superblock_info_for(flavor: &FsFlavor) -> SuperblockInfoOutput {
 
 fn build_ext4_group_info(path: &PathBuf, sb: &Ext4Superblock) -> Result<Vec<Ext4GroupInfoOutput>> {
     let groups_count = sb.groups_count();
-    let mut groups = Vec::with_capacity(usize::try_from(groups_count).unwrap_or(0));
+    if groups_count > MAX_EXT4_INFO_GROUPS {
+        bail!(
+            "ext4 info group count {groups_count} exceeds supported info scan cap {MAX_EXT4_INFO_GROUPS}; \
+             superblock geometry is likely corrupt or outside V1 info scope"
+        );
+    }
+
+    let capacity =
+        usize::try_from(groups_count).context("ext4 info group count does not fit this target")?;
+    let mut groups = Vec::with_capacity(capacity);
     let inodes_total = u64::from(sb.inodes_count);
 
     for group in 0..groups_count {
@@ -5829,14 +5845,15 @@ mod tests {
         BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
         BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
-        MountBackgroundScrubConfig, MountCmdOptions, MountMode, MountRuntimeConfig,
-        MountRuntimeMode, RepairCommandOptions, RepairFlags, btrfs_chunk_type_flag_names,
-        build_ext4_group_info, build_fsck_output, build_info_output, build_mount_open_options,
-        choose_btrfs_scrub_block_size, ext4_appears_clean_state, ext4_mount_replay_mode,
-        format_ratio_thousandths, log_mount_runtime_rejected, log_mount_runtime_selected,
-        mount_cmd, mount_operation_id, open_filesystem_for_mount, parse_btrfs_mount_selection,
-        read_ext4_group_desc_from_path, read_ext4_inode_from_path, read_file_region,
-        start_mount_background_scrub, summarize_repair_staleness, unavailable_repair_info,
+        MAX_EXT4_INFO_GROUPS, MountBackgroundScrubConfig, MountCmdOptions, MountMode,
+        MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions, RepairFlags,
+        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
+        build_mount_open_options, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
+        ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
+        log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
+        parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
+        read_file_region, start_mount_background_scrub, summarize_repair_staleness,
+        unavailable_repair_info,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -7624,6 +7641,37 @@ mod tests {
             let groups = build_ext4_group_info(&path, &sb).expect("build ext4 group info");
             assert_eq!(groups.len(), expected_groups);
             assert_eq!(groups[0].group, 0);
+        });
+    }
+
+    #[test]
+    fn build_ext4_group_info_rejects_excessive_group_count_before_allocation() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let mut image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+        let mut blocks_per_group = [0_u8; 4];
+        blocks_per_group.copy_from_slice(&image[sb_off + 0x20..sb_off + 0x24]);
+        let blocks_per_group = u32::from_le_bytes(blocks_per_group);
+        let excessive_blocks = MAX_EXT4_INFO_GROUPS
+            .saturating_add(1)
+            .saturating_mul(blocks_per_group);
+        image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&excessive_blocks.to_le_bytes());
+
+        let sb =
+            super::Ext4Superblock::parse_from_image(&image).expect("parse malformed superblock");
+        assert!(
+            sb.groups_count() > MAX_EXT4_INFO_GROUPS,
+            "test fixture must advertise more groups than the info cap"
+        );
+
+        with_temp_image_path(&image, |path| {
+            let err = build_ext4_group_info(&path, &sb)
+                .expect_err("excessive group count must reject before reading descriptors");
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("exceeds supported info scan cap"),
+                "unexpected error: {message}"
+            );
         });
     }
 
