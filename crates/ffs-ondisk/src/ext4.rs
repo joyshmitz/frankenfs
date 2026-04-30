@@ -3549,6 +3549,13 @@ impl Ext4ImageReader {
         image: &'a [u8],
         block: ffs_types::BlockNumber,
     ) -> Result<&'a [u8], ParseError> {
+        if block.0 >= self.sb.blocks_count {
+            return Err(ParseError::InvalidField {
+                field: "block_number",
+                reason: "block outside filesystem block count",
+            });
+        }
+
         let byte =
             block
                 .0
@@ -6756,6 +6763,42 @@ mod tests {
             .read_block(&image, ffs_types::BlockNumber(0))
             .expect("read block 0");
         assert_eq!(block_data.len(), 4096);
+    }
+
+    #[test]
+    fn image_reader_rejects_block_past_declared_blocks_count() {
+        let block_size = 4096_usize;
+        let declared_blocks = 16_u64;
+        let image_blocks = 32_usize;
+        let mut image = vec![0_u8; block_size * image_blocks];
+
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        let mut sb = [0_u8; EXT4_SUPERBLOCK_SIZE];
+        sb[0x38..0x3A].copy_from_slice(&EXT4_SUPER_MAGIC.to_le_bytes());
+        sb[0x18..0x1C].copy_from_slice(&2_u32.to_le_bytes());
+        sb[0x04..0x08].copy_from_slice(
+            &u32::try_from(declared_blocks)
+                .expect("fixture block count fits")
+                .to_le_bytes(),
+        );
+        image[sb_off..sb_off + EXT4_SUPERBLOCK_SIZE].copy_from_slice(&sb);
+
+        let reader = Ext4ImageReader::new(&image).expect("parse image");
+        let last_declared = reader
+            .read_block(&image, ffs_types::BlockNumber(declared_blocks - 1))
+            .expect("last declared block is readable");
+        assert_eq!(last_declared.len(), block_size);
+
+        let err = reader
+            .read_block(&image, ffs_types::BlockNumber(declared_blocks))
+            .expect_err("first block beyond declared filesystem rejects");
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "block_number",
+                reason: "block outside filesystem block count",
+            }
+        );
     }
 
     // ── Checksum verification tests ─────────────────────────────────────
