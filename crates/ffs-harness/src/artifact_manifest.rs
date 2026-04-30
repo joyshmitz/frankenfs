@@ -381,17 +381,129 @@ pub fn evaluate_retention(
 ///
 /// Returns None if the timestamp cannot be parsed.
 fn manifest_epoch_days(manifest: &ArtifactManifest) -> Option<u32> {
-    // Simple extraction: parse YYYY-MM-DD prefix and compute approximate days.
-    let date_str = manifest.created_at.get(..10)?;
-    let parts: Vec<&str> = date_str.split('-').collect();
-    if parts.len() != 3 {
+    parse_manifest_timestamp_epoch_days(&manifest.created_at)
+}
+
+fn parse_manifest_timestamp_epoch_days(timestamp: &str) -> Option<u32> {
+    let bytes = timestamp.as_bytes();
+    if bytes.len() < 20
+        || bytes.get(4).copied()? != b'-'
+        || bytes.get(7).copied()? != b'-'
+        || bytes.get(10).copied()? != b'T'
+        || bytes.get(13).copied()? != b':'
+        || bytes.get(16).copied()? != b':'
+    {
         return None;
     }
-    let year: u32 = parts[0].parse().ok()?;
-    let month: u32 = parts[1].parse().ok()?;
-    let day: u32 = parts[2].parse().ok()?;
-    // Approximate: 365.25 days/year, 30.44 days/month.
-    Some(year * 365 + month * 30 + day)
+
+    let year = parse_fixed_digits(bytes, 0, 4)?;
+    let month = parse_fixed_digits(bytes, 5, 2)?;
+    let day = parse_fixed_digits(bytes, 8, 2)?;
+    let hour = parse_fixed_digits(bytes, 11, 2)?;
+    let minute = parse_fixed_digits(bytes, 14, 2)?;
+    let second = parse_fixed_digits(bytes, 17, 2)?;
+
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+
+    let timezone_start = if bytes.get(19).copied()? == b'.' {
+        let mut cursor = 20_usize;
+        let first_fractional = bytes.get(cursor)?;
+        if !first_fractional.is_ascii_digit() {
+            return None;
+        }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor = cursor.checked_add(1)?;
+        }
+        cursor
+    } else {
+        19
+    };
+
+    let timezone_offset_seconds = parse_timezone_offset_seconds(bytes, timezone_start)?;
+    let epoch_day = i64::from(epoch_days_from_date(year, month, day)?);
+    let seconds_of_day = i64::from(hour * 3_600 + minute * 60 + second);
+    let utc_seconds_of_day = seconds_of_day - i64::from(timezone_offset_seconds);
+    let normalized_day = epoch_day.checked_add(utc_seconds_of_day.div_euclid(86_400))?;
+
+    u32::try_from(normalized_day).ok()
+}
+
+fn parse_fixed_digits(bytes: &[u8], start: usize, count: usize) -> Option<u32> {
+    let end = start.checked_add(count)?;
+    let digits = bytes.get(start..end)?;
+    let mut value = 0_u32;
+    for &byte in digits {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+    }
+    Some(value)
+}
+
+fn parse_timezone_offset_seconds(bytes: &[u8], start: usize) -> Option<i32> {
+    match bytes.get(start).copied() {
+        Some(b'Z') if start.checked_add(1) == Some(bytes.len()) => Some(0),
+        Some(sign @ (b'+' | b'-')) => {
+            if start.checked_add(6) != Some(bytes.len())
+                || bytes.get(start + 3).copied() != Some(b':')
+            {
+                return None;
+            }
+            let hour = parse_fixed_digits(bytes, start + 1, 2)?;
+            let minute = parse_fixed_digits(bytes, start + 4, 2)?;
+            if hour > 23 || minute > 59 {
+                return None;
+            }
+            let offset = i32::try_from(hour * 3_600 + minute * 60).ok()?;
+            Some(if sign == b'+' { offset } else { -offset })
+        }
+        _ => None,
+    }
+}
+
+fn epoch_days_from_date(year: u32, month: u32, day: u32) -> Option<u32> {
+    if year == 0 || !(1..=12).contains(&month) {
+        return None;
+    }
+
+    let days_in_month = days_in_month(year, month)?;
+    if day == 0 || day > days_in_month {
+        return None;
+    }
+
+    let years_before = year.checked_sub(1)?;
+    let leap_days_before_year = years_before / 4 - years_before / 100 + years_before / 400;
+    let common_days_before_year = years_before.checked_mul(365)?;
+    let days_before_year = common_days_before_year.checked_add(leap_days_before_year)?;
+    days_before_year.checked_add(day_of_year(year, month, day)? - 1)
+}
+
+fn day_of_year(year: u32, month: u32, day: u32) -> Option<u32> {
+    const DAYS_BEFORE_MONTH_COMMON: [u32; 12] =
+        [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let month_index = usize::try_from(month.checked_sub(1)?).ok()?;
+    let mut ordinal = *DAYS_BEFORE_MONTH_COMMON.get(month_index)?;
+    if month > 2 && is_leap_year(year) {
+        ordinal = ordinal.checked_add(1)?;
+    }
+    ordinal.checked_add(day)
+}
+
+fn days_in_month(year: u32, month: u32) -> Option<u32> {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 if is_leap_year(year) => Some(29),
+        2 => Some(28),
+        _ => None,
+    }
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 // ── Redaction policy ─────────────────────────────────────────────────────
@@ -565,7 +677,7 @@ pub fn validate_manifest(manifest: &ArtifactManifest) -> Vec<ManifestValidationE
     if manifest.gate_id.is_empty() {
         errors.push(ManifestValidationError::EmptyGateId);
     }
-    if manifest.created_at.is_empty() || manifest.created_at.len() < 10 {
+    if manifest_epoch_days(manifest).is_none() {
         errors.push(ManifestValidationError::InvalidTimestamp(
             manifest.created_at.clone(),
         ));
@@ -858,13 +970,69 @@ mod tests {
 
     #[test]
     fn invalid_timestamp_fails_validation() {
-        let mut manifest = sample_manifest();
-        manifest.created_at = "bad".to_owned();
-        let errors = validate_manifest(&manifest);
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ManifestValidationError::InvalidTimestamp(_)))
+        for timestamp in [
+            "bad",
+            "2026-03-04",
+            "2026-03-04 12:00:00Z",
+            "2026-13-04T12:00:00Z",
+            "2026-00-04T12:00:00Z",
+            "2026-02-29T12:00:00Z",
+            "2026-04-31T12:00:00Z",
+            "2026-03-04T24:00:00Z",
+            "2026-03-04T12:60:00Z",
+            "2026-03-04T12:00:60Z",
+            "2026-03-04T12:00:00",
+            "2026-03-04T12:00:00+24:00",
+            "2026-03-04T12:00:00+00:60",
+            "2026-03-04T12:00:00.",
+        ] {
+            let mut manifest = sample_manifest();
+            manifest.created_at = timestamp.to_owned();
+            let errors = validate_manifest(&manifest);
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ManifestValidationError::InvalidTimestamp(_))),
+                "{timestamp} should fail timestamp validation"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_timestamp_forms_pass_validation() {
+        for timestamp in [
+            "2026-03-04T12:00:00Z",
+            "2026-03-04T12:00:00.123Z",
+            "2026-03-04T12:00:00+00:00",
+            "2026-03-04T12:00:00.123+00:00",
+            "2026-03-04T12:00:00-05:00",
+            "2024-02-29T23:59:59Z",
+        ] {
+            let mut manifest = sample_manifest();
+            manifest.created_at = timestamp.to_owned();
+            let errors = validate_manifest(&manifest);
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ManifestValidationError::InvalidTimestamp(_))),
+                "{timestamp} should pass timestamp validation"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_offsets_normalize_retention_day() {
+        assert_eq!(
+            parse_manifest_timestamp_epoch_days("2026-03-04T00:30:00+02:00"),
+            parse_manifest_timestamp_epoch_days("2026-03-03T22:30:00Z")
+        );
+        assert_eq!(
+            parse_manifest_timestamp_epoch_days("2026-03-04T23:30:00-02:00"),
+            parse_manifest_timestamp_epoch_days("2026-03-05T01:30:00Z")
+        );
+        assert_eq!(
+            parse_manifest_timestamp_epoch_days("0001-01-01T00:00:00+00:01"),
+            None
         );
     }
 
@@ -1099,8 +1267,7 @@ mod tests {
             max_age_days: 30,
             ..RetentionPolicy::default()
         };
-        // Current epoch: ~2026-03-04 → old manifest is >400 days old.
-        let current_days = 2026 * 365 + 3 * 30 + 4;
+        let current_days = parse_manifest_timestamp_epoch_days("2026-03-04T00:00:00Z").unwrap_or(0);
         let prune = evaluate_retention(&manifests, &policy, current_days);
         assert!(prune.contains(&0), "old manifest should be pruned");
         assert!(!prune.contains(&1), "new manifest should be kept");
@@ -1118,7 +1285,7 @@ mod tests {
             make_manifest("run-2", "gate_a", "2026-03-02T00:00:00Z"),
             make_manifest("run-3", "gate_a", "2026-03-03T00:00:00Z"),
         ];
-        let current_days = 2026 * 365 + 3 * 30 + 4;
+        let current_days = parse_manifest_timestamp_epoch_days("2026-03-04T00:00:00Z").unwrap_or(0);
         let prune = evaluate_retention(&manifests, &policy, current_days);
         assert!(
             prune.contains(&0),
@@ -1143,7 +1310,7 @@ mod tests {
             ..RetentionPolicy::default()
         };
 
-        let current_days = 2026 * 365 + 3 * 30 + 4;
+        let current_days = parse_manifest_timestamp_epoch_days("2026-03-04T00:00:00Z").unwrap_or(0);
         let prune = evaluate_retention(&[old_large, new_a, new_b], &policy, current_days);
 
         assert_eq!(
