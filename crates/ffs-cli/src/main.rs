@@ -5843,12 +5843,12 @@ mod tests {
         load_evidence_records, load_metrics_report_for_test,
     };
     use crate::cmd_repair::{
-        Ext4RepairStaleness, REPAIR_COORDINATION_SCENARIO_REPAIR, RepairCoordinationRecord,
-        RepairCoordinationStatus, btrfs_super_mirror_offsets, build_btrfs_repair_group_spec,
-        build_repair_output, coordinate_repair_write_access, merge_scrub_reports,
-        normalize_btrfs_superblock_as_primary, partition_scrub_range,
-        repair_coordination_record_path, repair_worker_limit, select_btrfs_repair_groups,
-        select_ext4_repair_groups,
+        Ext4RepairStaleness, MAX_EXT4_REPAIR_GROUP_SPECS, REPAIR_COORDINATION_SCENARIO_REPAIR,
+        RepairCoordinationRecord, RepairCoordinationStatus, btrfs_super_mirror_offsets,
+        build_btrfs_repair_group_spec, build_ext4_repair_group_specs, build_repair_output,
+        coordinate_repair_write_access, merge_scrub_reports, normalize_btrfs_superblock_as_primary,
+        partition_scrub_range, repair_coordination_record_path, repair_worker_limit,
+        select_btrfs_repair_groups, select_ext4_repair_groups,
     };
     use clap::Parser;
     use ffs_block::CacheRuntimeMetricsSnapshot;
@@ -7625,6 +7625,35 @@ mod tests {
             assert_eq!(groups.len(), expected_groups);
             assert_eq!(groups[0].group, 0);
         });
+    }
+
+    #[test]
+    fn build_ext4_repair_group_specs_rejects_excessive_group_count_before_allocation() {
+        const EXT4_VALID_FS: u16 = 0x0001;
+        let mut image = build_test_ext4_image_with_state(EXT4_VALID_FS);
+        let sb_off = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+        let mut blocks_per_group = [0_u8; 4];
+        blocks_per_group.copy_from_slice(&image[sb_off + 0x20..sb_off + 0x24]);
+        let blocks_per_group = u32::from_le_bytes(blocks_per_group);
+        let excessive_blocks = MAX_EXT4_REPAIR_GROUP_SPECS
+            .saturating_add(1)
+            .saturating_mul(blocks_per_group);
+        image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&excessive_blocks.to_le_bytes());
+
+        let sb =
+            super::Ext4Superblock::parse_from_image(&image).expect("parse malformed superblock");
+        assert!(
+            sb.groups_count() > MAX_EXT4_REPAIR_GROUP_SPECS,
+            "test fixture must advertise more groups than the repair cap"
+        );
+
+        let err = build_ext4_repair_group_specs(&sb)
+            .expect_err("excessive group count must reject before reserving specs");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("exceeds supported repair scan cap"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

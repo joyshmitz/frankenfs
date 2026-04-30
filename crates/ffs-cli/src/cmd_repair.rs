@@ -29,6 +29,13 @@ use crate::{
     run_ext4_mount_recovery, scrub_validator,
 };
 
+/// Maximum ext4 groups the repair CLI will expand into per-group repair specs.
+///
+/// This mirrors the integrity verifier's group-scan cap: it is large enough
+/// for 16 PiB at default 4 KiB block geometry, while rejecting corrupt
+/// superblocks that advertise billions of groups before allocation.
+pub const MAX_EXT4_REPAIR_GROUP_SPECS: u32 = 65_536;
+
 pub fn repair_cmd(path: &PathBuf, options: RepairCommandOptions) -> Result<()> {
     let flags = options.flags;
     let command_span = info_span!(
@@ -1239,8 +1246,18 @@ pub fn build_ext4_repair_group_spec(
 }
 
 pub fn build_ext4_repair_group_specs(sb: &Ext4Superblock) -> Result<Vec<Ext4RepairGroupSpec>> {
-    let mut specs = Vec::with_capacity(usize::try_from(sb.groups_count()).unwrap_or(usize::MAX));
-    for group in 0..sb.groups_count() {
+    let group_count = sb.groups_count();
+    if group_count > MAX_EXT4_REPAIR_GROUP_SPECS {
+        bail!(
+            "ext4 repair group count {group_count} exceeds supported repair scan cap {MAX_EXT4_REPAIR_GROUP_SPECS}; \
+             superblock geometry is likely corrupt or outside V1 repair scope"
+        );
+    }
+
+    let capacity =
+        usize::try_from(group_count).context("ext4 repair group count does not fit this target")?;
+    let mut specs = Vec::with_capacity(capacity);
+    for group in 0..group_count {
         specs.push(build_ext4_repair_group_spec(sb, group)?);
     }
     Ok(specs)
