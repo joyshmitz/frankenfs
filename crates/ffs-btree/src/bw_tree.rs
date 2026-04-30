@@ -1926,4 +1926,135 @@ mod tests {
         let last = u64::try_from(MAX_CHAIN_DEPTH).expect("fits");
         assert_eq!(state.get(&BwKey(last)).copied(), Some(BwValue(last)));
     }
+
+    // ── Property-based tests (proptest) ────────────────────────────────
+
+    use proptest::prelude::*;
+
+    /// Op stream over a single page: each op either inserts a key/value or
+    /// deletes a key. Keys are bounded so multiple ops legitimately collide.
+    #[derive(Debug, Clone)]
+    enum BwOp {
+        Insert(u64, u64),
+        Delete(u64),
+    }
+
+    fn bw_op_strat() -> impl Strategy<Value = BwOp> {
+        prop_oneof![
+            (0_u64..32, any::<u64>()).prop_map(|(k, v)| BwOp::Insert(k, v)),
+            (0_u64..32).prop_map(BwOp::Delete),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Metamorphic relation: `materialize_page` after a sequence of
+        /// inserts and deletes must equal the canonical BTreeMap state
+        /// produced by replaying the same ops on a model. This pins the
+        /// chain-walk + delta-fold logic in `materialize_from_head`
+        /// against the trivial reference implementation: a regression
+        /// that re-orders deltas, drops a delete, or applies an insert
+        /// twice would diverge from the model on the first such op.
+        #[test]
+        fn proptest_materialize_matches_btreemap_model(
+            ops in proptest::collection::vec(bw_op_strat(), 0..64),
+        ) {
+            let table = MappingTable::with_capacity(1);
+            let page = table.allocate_page().expect("alloc");
+
+            let mut model: BTreeMap<BwKey, BwValue> = BTreeMap::new();
+            for op in &ops {
+                match *op {
+                    BwOp::Insert(k, v) => {
+                        let key = BwKey(k);
+                        let value = BwValue(v);
+                        table.insert(page, key, value).expect("insert");
+                        model.insert(key, value);
+                    }
+                    BwOp::Delete(k) => {
+                        let key = BwKey(k);
+                        table.delete(page, key).expect("delete");
+                        model.remove(&key);
+                    }
+                }
+            }
+
+            let materialized = table.materialize_page(page).expect("materialize");
+            prop_assert_eq!(
+                materialized, model,
+                "materialize_page must match the model BTreeMap after {} ops",
+                ops.len()
+            );
+
+            // Lookup must agree with materialize for every key in the union
+            // of model.keys() and the ops' targeted keys.
+            let mut probed_keys: std::collections::BTreeSet<u64> =
+                ops.iter()
+                    .map(|op| match *op {
+                        BwOp::Insert(k, _) | BwOp::Delete(k) => k,
+                    })
+                    .collect();
+            probed_keys.insert(33);  // a key never touched
+            for k in probed_keys {
+                let key = BwKey(k);
+                let expected = table
+                    .materialize_page(page)
+                    .expect("materialize")
+                    .get(&key)
+                    .copied();
+                let actual = table.lookup(page, key).expect("lookup");
+                prop_assert_eq!(
+                    actual, expected,
+                    "lookup({}) diverges from materialize-then-lookup",
+                    k
+                );
+            }
+        }
+
+        /// Metamorphic relation: `consolidate_page` is idempotent — once a
+        /// page has been consolidated to chain_len=1, calling it again
+        /// must not change observable state (chain_len stays 1, entries
+        /// are preserved, cas_attempts is 0).
+        #[test]
+        fn proptest_consolidate_page_is_idempotent(
+            ops in proptest::collection::vec(bw_op_strat(), 1..32),
+        ) {
+            let table = MappingTable::with_capacity(1);
+            let page = table.allocate_page().expect("alloc");
+
+            for op in &ops {
+                match *op {
+                    BwOp::Insert(k, v) => {
+                        table.insert(page, BwKey(k), BwValue(v)).expect("insert");
+                    }
+                    BwOp::Delete(k) => {
+                        table.delete(page, BwKey(k)).expect("delete");
+                    }
+                }
+            }
+
+            let cfg = ConsolidationConfig {
+                chain_threshold: 0,
+                max_retries: 4,
+            };
+
+            let first = table.consolidate_page(page, &cfg).expect("first consolidate");
+            let after_first = table.materialize_page(page).expect("materialize");
+
+            let second = table.consolidate_page(page, &cfg).expect("second consolidate");
+            let after_second = table.materialize_page(page).expect("materialize");
+
+            prop_assert_eq!(after_first, after_second,
+                "consolidate-twice must preserve materialized state");
+
+            // After the first consolidation chain_len drops to 1; the
+            // second call sees chain_len_before == 1 and skips work.
+            prop_assert_eq!(first.chain_len_after, 1);
+            prop_assert_eq!(second.chain_len_before, 1);
+            prop_assert_eq!(second.chain_len_after, 1);
+            prop_assert_eq!(second.cas_attempts, 0,
+                "second consolidate must not perform any CAS attempts");
+        }
+    }
 }
