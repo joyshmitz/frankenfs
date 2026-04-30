@@ -6600,7 +6600,7 @@ impl OpenFs {
         if inode.is_dir() {
             return Err(FfsError::IsDirectory);
         }
-        let mut buf = vec![0_u8; size as usize];
+        let mut buf = vec![0_u8; ext4_read_buffer_len(inode.size, offset, size)?];
         let n = self.read_file_data(cx, scope, &inode, offset, &mut buf)?;
         buf.truncate(n);
         Ok(buf)
@@ -8642,6 +8642,18 @@ fn dir_entry_file_type(ft: Ext4FileType) -> FileType {
     }
 }
 
+fn ext4_read_buffer_len(file_size: u64, offset: u64, requested: u32) -> ffs_error::Result<usize> {
+    if offset >= file_size || requested == 0 {
+        return Ok(0);
+    }
+
+    let bounded = (file_size - offset).min(u64::from(requested));
+    usize::try_from(bounded).map_err(|_| FfsError::Corruption {
+        block: 0,
+        detail: format!("ext4 read length {bounded} exceeds addressable memory"),
+    })
+}
+
 impl FsOps for Ext4FsOps {
     fn getattr(
         &self,
@@ -8742,7 +8754,7 @@ impl FsOps for Ext4FsOps {
             return Err(FfsError::IsDirectory);
         }
 
-        let mut buf = vec![0_u8; size as usize];
+        let mut buf = vec![0_u8; ext4_read_buffer_len(inode.size, offset, size)?];
         let n = self
             .reader
             .read_inode_data(&self.image, &inode, offset, &mut buf)
@@ -17173,7 +17185,7 @@ impl FsOps for OpenFs {
                     return self.read_ext4_indirect(cx, scope, &inode, offset, size);
                 }
 
-                let mut buf = vec![0_u8; size as usize];
+                let mut buf = vec![0_u8; ext4_read_buffer_len(inode.size, offset, size)?];
                 let n = self.read_file_data(cx, scope, &inode, offset, &mut buf)?;
                 buf.truncate(n);
                 Ok(buf)
@@ -24126,6 +24138,32 @@ mod tests {
     }
 
     #[test]
+    fn read_file_oversized_tail_request_is_capped_before_allocation() {
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let data = fs
+            .read_file(&cx, &RequestScope::empty(), InodeNumber(11), 13, u32::MAX)
+            .unwrap();
+        assert_eq!(&data, b"!");
+    }
+
+    #[test]
+    fn read_file_oversized_eof_request_returns_empty_without_allocation() {
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let data = fs
+            .read_file(&cx, &RequestScope::empty(), InodeNumber(11), 14, u32::MAX)
+            .unwrap();
+        assert!(data.is_empty());
+    }
+
+    #[test]
     fn read_file_rejects_directory() {
         let image = build_ext4_image_with_dir();
         let dev = TestDevice::from_vec(image);
@@ -24298,6 +24336,26 @@ mod tests {
             .read(&cx, &mut RequestScope::empty(), InodeNumber(11), 0, 100)
             .unwrap();
         assert_eq!(&data, b"Hello, extent!");
+    }
+
+    #[test]
+    fn open_fs_fsops_ext4_read_oversized_tail_request_is_capped() {
+        let image = build_ext4_image_with_extents();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let ops: &dyn FsOps = &fs;
+        let data = ops
+            .read(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(11),
+                13,
+                u32::MAX,
+            )
+            .unwrap();
+        assert_eq!(&data, b"!");
     }
 
     #[test]
