@@ -334,7 +334,12 @@ pub fn check_e2e_contract(e2e_content: &str, bare_name: &str) -> bool {
     // 3. Crash-matrix: strip `crash_matrix_NN_` to get the label.
     if let Some(rest) = stripped.strip_prefix("crash_matrix_") {
         // Skip the two-digit point ID and underscore (e.g. "01_").
-        if rest.len() > 3 && rest.as_bytes()[2] == b'_' {
+        let bytes = rest.as_bytes();
+        if bytes.len() > 3
+            && bytes[0].is_ascii_digit()
+            && bytes[1].is_ascii_digit()
+            && bytes[2] == b'_'
+        {
             let label = &rest[3..];
             if e2e_content.contains(label) {
                 return true;
@@ -430,6 +435,27 @@ crash_matrix_label_for_point() {
         assert!(check_e2e_contract(
             e2e_script,
             "ext4_rw_crash_matrix_01_create_alpha_no_fsync"
+        ));
+    }
+
+    #[test]
+    fn check_e2e_contract_rejects_malformed_crash_matrix_point_ids() {
+        let e2e_script = r#"
+crash_matrix_label_for_point() {
+    case "$1" in
+        1) printf 'create_alpha_no_fsync' ;;
+        *) return 1 ;;
+    esac
+}
+"#;
+
+        assert!(!check_e2e_contract(
+            e2e_script,
+            "btrfs_rw_crash_matrix_aa_create_alpha_no_fsync"
+        ));
+        assert!(!check_e2e_contract(
+            e2e_script,
+            "btrfs_rw_crash_matrix_1_create_alpha_no_fsync"
         ));
     }
 
