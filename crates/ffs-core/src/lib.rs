@@ -74,6 +74,7 @@ use tracing::{debug, error, info, trace, warn};
 // VFS types and FsOps trait are in vfs.rs, re-exported above.
 const LINUX_PATH_MAX: u64 = 4096;
 const LINUX_SYMLINK_TARGET_MAX: u64 = LINUX_PATH_MAX - 1;
+const BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT: usize = 128 * 1024 * 1024;
 const FSCRYPT_POLICY_V1_VERSION: u8 = 0;
 const FSCRYPT_POLICY_V1_SIZE: usize = 12;
 const FSCRYPT_CONTEXT_V1_SIZE: usize = 28;
@@ -5236,6 +5237,15 @@ impl OpenFs {
         compression_type: u8,
         uncompressed_size: usize,
     ) -> Result<Vec<u8>, FfsError> {
+        if uncompressed_size > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!(
+                    "btrfs decompressed target {uncompressed_size} exceeds 128MB limit"
+                ),
+            });
+        }
+
         match compression_type {
             1 => {
                 // ZLIB (deflate)
@@ -5651,7 +5661,7 @@ impl OpenFs {
                                 detail: "compressed extent disk_num_bytes exceeds addressable size"
                                     .into(),
                             })?;
-                        if compressed_len > 128 * 1024 * 1024 {
+                        if compressed_len > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
                             return Err(FfsError::Corruption {
                                 block: *disk_bytenr,
                                 detail: "compressed extent disk_num_bytes exceeds 128MB limit"
@@ -5665,7 +5675,7 @@ impl OpenFs {
                                 block: *disk_bytenr,
                                 detail: "compressed extent ram_bytes overflow".into(),
                             })?;
-                        if ram_bytes_usize > 128 * 1024 * 1024 {
+                        if ram_bytes_usize > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
                             return Err(FfsError::Corruption {
                                 block: *disk_bytenr,
                                 detail: "compressed extent ram_bytes exceeds 128MB limit".into(),
@@ -12258,7 +12268,7 @@ impl OpenFs {
                     let compressed_len = usize::try_from(*disk_num_bytes).map_err(|_| {
                         FfsError::InvalidGeometry("compressed extent length overflow".into())
                     })?;
-                    if compressed_len > 128 * 1024 * 1024 {
+                    if compressed_len > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
                         return Err(FfsError::InvalidGeometry(
                             "compressed extent disk_num_bytes exceeds 128MB limit".into(),
                         ));
@@ -12268,7 +12278,7 @@ impl OpenFs {
                     let ram_bytes_usize = usize::try_from(*ram_bytes).map_err(|_| {
                         FfsError::InvalidGeometry("compressed extent ram_bytes overflow".into())
                     })?;
-                    if ram_bytes_usize > 128 * 1024 * 1024 {
+                    if ram_bytes_usize > BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT {
                         return Err(FfsError::InvalidGeometry(
                             "compressed extent ram_bytes exceeds 128MB limit".into(),
                         ));
@@ -25991,6 +26001,23 @@ mod tests {
         let decoded = OpenFs::btrfs_decompress(&framed, 2, payload.len())
             .expect("exact LZO frame should decode");
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn btrfs_decompress_rejects_oversized_target_before_allocation() {
+        let err =
+            OpenFs::btrfs_decompress(b"", 1, BTRFS_COMPRESSED_EXTENT_BYTE_LIMIT.saturating_add(1))
+                .expect_err("oversized decompression target rejects before decoding");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::Corruption { ref detail, .. }
+                    if detail.contains("btrfs decompressed target")
+                        && detail.contains("exceeds 128MB limit")
+            ),
+            "unexpected oversized decompression error: {err:?}"
+        );
     }
 
     #[test]
