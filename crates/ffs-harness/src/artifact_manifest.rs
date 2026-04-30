@@ -901,11 +901,15 @@ mod tests {
     #[test]
     fn embedded_invalid_scenario_id_detected() {
         let mut manifest = sample_manifest();
-        let scenario = manifest
-            .scenarios
-            .get_mut("cli_mount_runtime_help_contract")
-            .expect("sample scenario should exist");
-        scenario.scenario_id = "BAD".to_owned();
+        manifest.scenarios.insert(
+            "cli_mount_runtime_help_contract".to_owned(),
+            ScenarioOutcome {
+                scenario_id: "BAD".to_owned(),
+                outcome: ScenarioResult::Pass,
+                detail: None,
+                duration_secs: 1.5,
+            },
+        );
 
         let errors = validate_manifest(&manifest);
         assert!(
@@ -923,11 +927,15 @@ mod tests {
     #[test]
     fn embedded_scenario_id_mismatch_detected() {
         let mut manifest = sample_manifest();
-        let scenario = manifest
-            .scenarios
-            .get_mut("cli_mount_runtime_help_contract")
-            .expect("sample scenario should exist");
-        scenario.scenario_id = "cli_mount_runtime_other_contract".to_owned();
+        manifest.scenarios.insert(
+            "cli_mount_runtime_help_contract".to_owned(),
+            ScenarioOutcome {
+                scenario_id: "cli_mount_runtime_other_contract".to_owned(),
+                outcome: ScenarioResult::Pass,
+                detail: None,
+                duration_secs: 1.5,
+            },
+        );
 
         let errors = validate_manifest(&manifest);
         assert!(errors.iter().any(|e| matches!(
