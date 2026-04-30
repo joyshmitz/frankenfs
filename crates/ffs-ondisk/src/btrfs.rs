@@ -6,6 +6,7 @@ use ffs_types::{
     read_le_u16, read_le_u32, read_le_u64, trim_nul_padded,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 const BTRFS_HEADER_SIZE: usize = 101;
 const BTRFS_ITEM_SIZE: usize = 25;
@@ -1128,6 +1129,63 @@ pub struct BtrfsKey {
     pub offset: u64,
 }
 
+fn btrfs_key_cmp(lhs: &BtrfsKey, rhs: &BtrfsKey) -> Ordering {
+    lhs.objectid
+        .cmp(&rhs.objectid)
+        .then_with(|| lhs.item_type.cmp(&rhs.item_type))
+        .then_with(|| lhs.offset.cmp(&rhs.offset))
+}
+
+fn validate_next_key(
+    previous: Option<BtrfsKey>,
+    current: BtrfsKey,
+    field: &'static str,
+    reason: &'static str,
+) -> Result<(), ParseError> {
+    if let Some(previous) = previous {
+        if btrfs_key_cmp(&previous, &current) != Ordering::Less {
+            return Err(ParseError::InvalidField { field, reason });
+        }
+    }
+    Ok(())
+}
+
+fn parse_ordered_key(
+    block: &[u8],
+    base: usize,
+    previous_key: &mut Option<BtrfsKey>,
+    field: &'static str,
+    reason: &'static str,
+) -> Result<BtrfsKey, ParseError> {
+    let key = BtrfsKey {
+        objectid: read_le_u64(block, base)?,
+        item_type: block[base + 8],
+        offset: read_le_u64(block, base + 9)?,
+    };
+    validate_next_key(*previous_key, key, field, reason)?;
+    *previous_key = Some(key);
+    Ok(key)
+}
+
+fn checked_item_table_end(
+    nritems: usize,
+    item_size: usize,
+    field: &'static str,
+) -> Result<usize, ParseError> {
+    let item_table_bytes = nritems
+        .checked_mul(item_size)
+        .ok_or(ParseError::InvalidField {
+            field,
+            reason: "overflow",
+        })?;
+    BTRFS_HEADER_SIZE
+        .checked_add(item_table_bytes)
+        .ok_or(ParseError::InvalidField {
+            field,
+            reason: "overflow",
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtrfsHeader {
     pub csum: [u8; 32],
@@ -1246,20 +1304,7 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
     let nritems = usize::try_from(header.nritems)
         .map_err(|_| ParseError::IntegerConversion { field: "nritems" })?;
 
-    let item_table_bytes =
-        nritems
-            .checked_mul(BTRFS_ITEM_SIZE)
-            .ok_or(ParseError::InvalidField {
-                field: "items",
-                reason: "overflow",
-            })?;
-    let items_end =
-        BTRFS_HEADER_SIZE
-            .checked_add(item_table_bytes)
-            .ok_or(ParseError::InvalidField {
-                field: "items",
-                reason: "overflow",
-            })?;
+    let items_end = checked_item_table_end(nritems, BTRFS_ITEM_SIZE, "items")?;
 
     if block.len() < items_end {
         return Err(ParseError::InsufficientData {
@@ -1271,13 +1316,17 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
 
     let mut payload_ranges: Vec<(usize, usize)> = Vec::with_capacity(nritems);
     let mut items = Vec::with_capacity(nritems);
+    let mut previous_key = None;
     for idx in 0..nritems {
         let base = BTRFS_HEADER_SIZE + idx * BTRFS_ITEM_SIZE;
-        let key = BtrfsKey {
-            objectid: read_le_u64(block, base)?,
-            item_type: block[base + 8],
-            offset: read_le_u64(block, base + 9)?,
-        };
+        let key = parse_ordered_key(
+            block,
+            base,
+            &mut previous_key,
+            "item_key",
+            "leaf item keys not strictly increasing",
+        )?;
+
         // On disk, leaf payload offsets are relative to the leaf header. Normalize
         // them to absolute block offsets for callers.
         let raw_data_offset = read_le_u32(block, base + 17)?;
@@ -1364,18 +1413,7 @@ pub fn parse_internal_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsKeyPt
     let nritems = usize::try_from(header.nritems)
         .map_err(|_| ParseError::IntegerConversion { field: "nritems" })?;
 
-    let table_bytes = nritems
-        .checked_mul(BTRFS_KEY_PTR_SIZE)
-        .ok_or(ParseError::InvalidField {
-            field: "key_ptrs",
-            reason: "overflow",
-        })?;
-    let table_end = BTRFS_HEADER_SIZE
-        .checked_add(table_bytes)
-        .ok_or(ParseError::InvalidField {
-            field: "key_ptrs",
-            reason: "overflow",
-        })?;
+    let table_end = checked_item_table_end(nritems, BTRFS_KEY_PTR_SIZE, "key_ptrs")?;
 
     if block.len() < table_end {
         return Err(ParseError::InsufficientData {
@@ -1386,13 +1424,17 @@ pub fn parse_internal_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsKeyPt
     }
 
     let mut ptrs = Vec::with_capacity(nritems);
+    let mut previous_key = None;
     for idx in 0..nritems {
         let base = BTRFS_HEADER_SIZE + idx * BTRFS_KEY_PTR_SIZE;
-        let key = BtrfsKey {
-            objectid: read_le_u64(block, base)?,
-            item_type: block[base + 8],
-            offset: read_le_u64(block, base + 9)?,
-        };
+        let key = parse_ordered_key(
+            block,
+            base,
+            &mut previous_key,
+            "key_ptrs.key",
+            "internal item keys not strictly increasing",
+        )?;
+
         let blockptr = read_le_u64(block, base + 17)?;
         let generation = read_le_u64(block, base + 25)?;
 
@@ -2080,6 +2122,35 @@ mod tests {
         assert_eq!(items[0].data_size, 8);
     }
 
+    #[test]
+    fn parse_leaf_items_rejects_unsorted_keys() {
+        let mut block = make_block(512, 2, 0);
+        let header_size = u32::try_from(BTRFS_HEADER_SIZE).expect("header size fits");
+
+        let b0 = BTRFS_HEADER_SIZE;
+        block[b0..b0 + 8].copy_from_slice(&2_u64.to_le_bytes());
+        block[b0 + 8] = 1;
+        block[b0 + 9..b0 + 17].copy_from_slice(&0_u64.to_le_bytes());
+        block[b0 + 17..b0 + 21].copy_from_slice(&(300_u32 - header_size).to_le_bytes());
+        block[b0 + 21..b0 + 25].copy_from_slice(&4_u32.to_le_bytes());
+
+        let b1 = BTRFS_HEADER_SIZE + BTRFS_ITEM_SIZE;
+        block[b1..b1 + 8].copy_from_slice(&1_u64.to_le_bytes());
+        block[b1 + 8] = 1;
+        block[b1 + 9..b1 + 17].copy_from_slice(&0_u64.to_le_bytes());
+        block[b1 + 17..b1 + 21].copy_from_slice(&(320_u32 - header_size).to_le_bytes());
+        block[b1 + 21..b1 + 25].copy_from_slice(&4_u32.to_le_bytes());
+
+        let err = parse_leaf_items(&block).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "item_key",
+                reason: "leaf item keys not strictly increasing",
+            }
+        );
+    }
+
     /// Helper: build a minimal valid block with a header (zeros except nritems + level).
     fn make_block(size: usize, nritems: u32, level: u8) -> Vec<u8> {
         let mut block = vec![0_u8; size];
@@ -2116,6 +2187,34 @@ mod tests {
         assert_eq!(ptrs[0].generation, 10);
         assert_eq!(ptrs[1].key.objectid, 512);
         assert_eq!(ptrs[1].blockptr, 0x8000);
+    }
+
+    #[test]
+    fn parse_internal_items_rejects_unsorted_keys() {
+        let mut block = make_block(4096, 2, 1);
+
+        let b0 = BTRFS_HEADER_SIZE;
+        block[b0..b0 + 8].copy_from_slice(&2_u64.to_le_bytes());
+        block[b0 + 8] = 1;
+        block[b0 + 9..b0 + 17].copy_from_slice(&0_u64.to_le_bytes());
+        block[b0 + 17..b0 + 25].copy_from_slice(&0x4000_u64.to_le_bytes());
+        block[b0 + 25..b0 + 33].copy_from_slice(&10_u64.to_le_bytes());
+
+        let b1 = BTRFS_HEADER_SIZE + BTRFS_KEY_PTR_SIZE;
+        block[b1..b1 + 8].copy_from_slice(&1_u64.to_le_bytes());
+        block[b1 + 8] = 1;
+        block[b1 + 9..b1 + 17].copy_from_slice(&0_u64.to_le_bytes());
+        block[b1 + 17..b1 + 25].copy_from_slice(&0x8000_u64.to_le_bytes());
+        block[b1 + 25..b1 + 33].copy_from_slice(&10_u64.to_le_bytes());
+
+        let err = parse_internal_items(&block).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "key_ptrs.key",
+                reason: "internal item keys not strictly increasing",
+            }
+        );
     }
 
     #[test]
@@ -3054,7 +3153,6 @@ mod tests {
         fn btrfs_proptest_leaf_items_structured_key_roundtrip(
             n_items in 1_usize..=8,
             bytenr in any::<u64>(),
-            objectids in proptest::collection::vec(any::<u64>(), 8),
             item_types in proptest::collection::vec(any::<u8>(), 8),
             key_offsets in proptest::collection::vec(any::<u64>(), 8),
         ) {
@@ -3073,7 +3171,7 @@ mod tests {
             for i in 0..n_items {
                 let base = BTRFS_HEADER_SIZE + i * BTRFS_ITEM_SIZE;
                 let key = BtrfsKey {
-                    objectid: objectids[i],
+                    objectid: u64::try_from(i).expect("bounded item index fits in u64"),
                     item_type: item_types[i],
                     offset: key_offsets[i],
                 };
@@ -3087,7 +3185,10 @@ mod tests {
             prop_assert_eq!(items.len(), n_items);
 
             for i in 0..n_items {
-                prop_assert_eq!(items[i].key.objectid, objectids[i]);
+                prop_assert_eq!(
+                    items[i].key.objectid,
+                    u64::try_from(i).expect("bounded item index fits in u64")
+                );
                 prop_assert_eq!(items[i].key.item_type, item_types[i]);
                 prop_assert_eq!(items[i].key.offset, key_offsets[i]);
                 prop_assert_eq!(items[i].data_offset, data_offset_abs);
@@ -3100,7 +3201,6 @@ mod tests {
             n_items in 1_usize..=8,
             level in 1_u8..=BTRFS_MAX_LEVEL,
             bytenr in any::<u64>(),
-            objectids in proptest::collection::vec(any::<u64>(), 8),
             item_types in proptest::collection::vec(any::<u8>(), 8),
             key_offsets in proptest::collection::vec(any::<u64>(), 8),
             blockptrs in proptest::collection::vec(1_u64..=u64::MAX, 8),
@@ -3115,7 +3215,7 @@ mod tests {
             for i in 0..n_items {
                 let base = BTRFS_HEADER_SIZE + i * BTRFS_KEY_PTR_SIZE;
                 let key = BtrfsKey {
-                    objectid: objectids[i],
+                    objectid: u64::try_from(i).expect("bounded item index fits in u64"),
                     item_type: item_types[i],
                     offset: key_offsets[i],
                 };
@@ -3130,7 +3230,10 @@ mod tests {
             prop_assert_eq!(ptrs.len(), n_items);
 
             for i in 0..n_items {
-                prop_assert_eq!(ptrs[i].key.objectid, objectids[i]);
+                prop_assert_eq!(
+                    ptrs[i].key.objectid,
+                    u64::try_from(i).expect("bounded item index fits in u64")
+                );
                 prop_assert_eq!(ptrs[i].key.item_type, item_types[i]);
                 prop_assert_eq!(ptrs[i].key.offset, key_offsets[i]);
                 prop_assert_eq!(ptrs[i].blockptr, blockptrs[i]);
