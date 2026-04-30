@@ -2852,6 +2852,19 @@ fn parse_extent_leaf(bytes: &[u8], entries_len: usize) -> Result<Vec<Ext4Extent>
         let start_hi = u64::from(read_le_u16(bytes, base + 6)?);
         let start_lo = u64::from(read_le_u32(bytes, base + 8)?);
         let physical_start = start_lo | (start_hi << 32);
+        let extent = Ext4Extent {
+            logical_block,
+            raw_len,
+            physical_start,
+        };
+        let actual_len = extent.actual_len();
+
+        if actual_len == 0 {
+            return Err(ParseError::InvalidField {
+                field: "extent_entries.ee_len",
+                reason: "extent length must be non-zero",
+            });
+        }
 
         if let Some(prev) = extents.last() {
             let prev_end = u64::from(prev.logical_block) + u64::from(prev.actual_len());
@@ -2863,11 +2876,7 @@ fn parse_extent_leaf(bytes: &[u8], entries_len: usize) -> Result<Vec<Ext4Extent>
             }
         }
 
-        extents.push(Ext4Extent {
-            logical_block,
-            raw_len,
-            physical_start,
-        });
+        extents.push(extent);
     }
     Ok(extents)
 }
@@ -9824,6 +9833,27 @@ mod tests {
         };
         assert!(!ext.is_unwritten());
         assert_eq!(ext.actual_len(), 0);
+    }
+
+    #[test]
+    fn parse_extent_tree_rejects_zero_length_leaf_extent() {
+        let mut buf = [0_u8; 24];
+        buf[0..2].copy_from_slice(&EXT4_EXTENT_MAGIC.to_le_bytes());
+        buf[2..4].copy_from_slice(&1_u16.to_le_bytes());
+        buf[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        buf[6..8].copy_from_slice(&0_u16.to_le_bytes());
+        buf[12..16].copy_from_slice(&7_u32.to_le_bytes());
+        buf[16..18].copy_from_slice(&0_u16.to_le_bytes());
+        buf[20..24].copy_from_slice(&42_u32.to_le_bytes());
+
+        let err = parse_extent_tree(&buf).expect_err("zero-length leaf extent rejects");
+        assert_eq!(
+            err,
+            ParseError::InvalidField {
+                field: "extent_entries.ee_len",
+                reason: "extent length must be non-zero",
+            }
+        );
     }
 
     #[test]
