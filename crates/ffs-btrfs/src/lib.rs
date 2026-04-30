@@ -3054,6 +3054,12 @@ impl BtrfsExtentAllocator {
         required_flags: u64,
         is_metadata: bool,
     ) -> Result<ExtentAllocation, BtrfsMutationError> {
+        if num_bytes == 0 {
+            return Err(BtrfsMutationError::InvalidConfig(
+                "extent size must be non-zero",
+            ));
+        }
+
         // Find a block group with enough free space.
         let bg_start = self
             .block_groups
@@ -3258,6 +3264,12 @@ impl BtrfsExtentAllocator {
         num_bytes: u64,
         is_metadata: bool,
     ) -> Result<(), BtrfsMutationError> {
+        if num_bytes == 0 {
+            return Err(BtrfsMutationError::InvalidConfig(
+                "extent size must be non-zero",
+            ));
+        }
+
         debug!(
             target: "ffs::btrfs::alloc",
             bytenr, size = num_bytes, "free_search"
@@ -7421,6 +7433,53 @@ mod tests {
         let bg = alloc.block_group(0x1_0000).expect("bg");
         assert_eq!(bg.used_bytes, 4096);
         assert_eq!(bg.free_bytes(), 0x10_0000 - 4096);
+    }
+
+    #[test]
+    fn extent_allocator_rejects_zero_byte_allocations_without_side_effects() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+        alloc.add_block_group(0x20_0000, make_meta_bg(0x20_0000, 0x10_0000));
+
+        assert_eq!(
+            alloc.alloc_data(0),
+            Err(BtrfsMutationError::InvalidConfig(
+                "extent size must be non-zero"
+            ))
+        );
+        assert_eq!(
+            alloc.alloc_metadata(0),
+            Err(BtrfsMutationError::InvalidConfig(
+                "extent size must be non-zero"
+            ))
+        );
+
+        let data_bg = alloc.block_group(0x1_0000).expect("data bg");
+        let meta_bg = alloc.block_group(0x20_0000).expect("meta bg");
+        assert_eq!(data_bg.used_bytes, 0);
+        assert_eq!(meta_bg.used_bytes, 0);
+        assert_eq!(alloc.delayed_ref_count(), 0);
+    }
+
+    #[test]
+    fn extent_allocator_rejects_zero_byte_free_without_side_effects() {
+        let mut alloc = BtrfsExtentAllocator::new(1).expect("alloc");
+        alloc.add_block_group(0x1_0000, make_data_bg(0x1_0000, 0x10_0000));
+
+        let existing = alloc.alloc_data(4096).expect("seed alloc");
+        let refs_before = alloc.delayed_ref_count();
+        let used_before = alloc.block_group(0x1_0000).expect("bg").used_bytes;
+
+        assert_eq!(
+            alloc.free_extent(existing.bytenr, 0, false),
+            Err(BtrfsMutationError::InvalidConfig(
+                "extent size must be non-zero"
+            ))
+        );
+
+        let bg = alloc.block_group(0x1_0000).expect("bg");
+        assert_eq!(bg.used_bytes, used_before);
+        assert_eq!(alloc.delayed_ref_count(), refs_before);
     }
 
     #[test]
