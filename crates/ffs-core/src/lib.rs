@@ -4172,6 +4172,28 @@ impl OpenFs {
         let geo = FsGeometry::from_superblock(sb);
         let block_size = sb.block_size;
         // Load group descriptors from disk.
+        // Reject corrupted superblocks whose group_count cannot physically
+        // fit in the underlying byte device: each group requires at least
+        // one descriptor entry plus its own bitmap and inode-table blocks,
+        // so an upper bound on group_count is image_blocks itself.
+        //
+        // A pre-fix Vec::with_capacity(geo.group_count) would happily
+        // allocate 56 B × u32::MAX ≈ 240 GiB and OOM the process before
+        // the first read_group_desc could fail. Detected by
+        // fuzz_openfs_recovery on a 32-byte input that pushed blocks_count
+        // to ~1.7B (53M groups, ~3 GiB allocation) on a 128 KiB image.
+        let device_blocks = if block_size == 0 {
+            0
+        } else {
+            self.dev.len_bytes() / u64::from(block_size)
+        };
+        if u64::from(geo.group_count) > device_blocks {
+            return Err(FfsError::Format(format!(
+                "ext4 superblock advertises {} groups but device only holds {} blocks; \
+                 refusing to allocate group state",
+                geo.group_count, device_blocks
+            )));
+        }
         let mut groups = Vec::with_capacity(geo.group_count as usize);
         let geom = self
             .ext4_geometry
