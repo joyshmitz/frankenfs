@@ -862,6 +862,7 @@ Every step produces a structured evidence record: `RepairAttempted` (with source
 
 For shared storage (multiple hosts accessing the same image), the repair ownership system uses optimistic lease-based coordination:
 
+- V1.x write-side repair is single-host only: `ffs repair` and `ffs fsck --repair` must acquire the per-image coordination record before mutating image data or repair symbols
 - A coordination record (`.<image>.ffs-repair-owner.json`) stores the owning host's UUID, hostname, and lease TTL
 - Hosts attempt to claim ownership before performing write-side repair operations
 - Expired leases can be taken over with deterministic tie-breaking (UUID comparison)

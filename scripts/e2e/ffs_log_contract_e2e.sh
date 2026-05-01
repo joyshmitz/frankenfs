@@ -319,6 +319,30 @@ else
     MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}validate_manifest "
 fi
 
+if grep -q 'pub fn validate_operational_manifest' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}validate_operational_manifest "
+fi
+
+if grep -q 'pub struct OperationalRunContext' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_context "
+fi
+
+if grep -q 'pub struct OperationalScenarioRecord' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_scenario_record "
+fi
+
+if grep -q 'pub enum OperationalOutcomeClass' crates/ffs-harness/src/artifact_manifest.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_outcome_class "
+fi
+
 if grep -q 'pub fn evaluate_retention' crates/ffs-harness/src/artifact_manifest.rs; then
     :
 else
@@ -434,6 +458,24 @@ if grep -qi 'redaction' scripts/e2e/README.md; then
     :
 else
     MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}redaction_policy "
+fi
+
+if grep -q 'validate_operational_manifest' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}operational_validator_docs "
+fi
+
+if grep -q 'Operational Outcome Vocabulary' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}operational_outcome_docs "
+fi
+
+if grep -q 'root_owned_btrfs_testdir_eacces' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}btrfs_eacces_vocab "
 fi
 
 if [ -z "$MISSING_MANIFEST_POLICY_DOCS" ]; then

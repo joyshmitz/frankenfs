@@ -57,6 +57,12 @@ pub struct ArtifactManifest {
     pub environment: EnvironmentFingerprint,
     /// Scenario outcomes indexed by scenario_id.
     pub scenarios: BTreeMap<String, ScenarioOutcome>,
+    /// Run-level operational metadata required for readiness-grade artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operational_context: Option<OperationalRunContext>,
+    /// Per-scenario operational metadata keyed by scenario_id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub operational_scenarios: BTreeMap<String, OperationalScenarioRecord>,
     /// Artifact entries grouped by category.
     pub artifacts: Vec<ArtifactEntry>,
     /// Overall gate verdict.
@@ -121,6 +127,159 @@ pub enum ScenarioResult {
     Pass,
     Fail,
     Skip,
+}
+
+/// Run-level metadata shared by operational E2E and long-running validation
+/// artifacts.
+///
+/// This is stricter than the generic manifest envelope: every readiness-grade
+/// run must record the command, worker identity, FUSE capability, and the
+/// canonical stdout/stderr log paths needed to reproduce the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationalRunContext {
+    /// Exact command line used to run the validation.
+    pub command_line: Vec<String>,
+    /// Host/worker identity for the run.
+    pub worker: WorkerContext,
+    /// FUSE capability observed before executing mount-sensitive scenarios.
+    pub fuse_capability: FuseCapabilityResult,
+    /// Primary stdout log path, relative to the repository root or artifact root.
+    pub stdout_path: String,
+    /// Primary stderr log path, relative to the repository root or artifact root.
+    pub stderr_path: String,
+}
+
+/// Host/worker identity for operational validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerContext {
+    /// Host identifier; redaction may replace this before external sharing.
+    pub host: String,
+    /// Optional worker or RCH target identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+}
+
+/// FUSE capability result vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FuseCapabilityResult {
+    /// `/dev/fuse` and mount prerequisites are usable.
+    Available,
+    /// `/dev/fuse` or required mount tools are absent.
+    Unavailable,
+    /// FUSE exists but the current user cannot access or mount with it.
+    PermissionDenied,
+    /// User or CI configuration intentionally disabled FUSE lanes.
+    DisabledByUser,
+    /// FUSE is not relevant to this run.
+    NotApplicable,
+    /// Capability has not been probed; invalid for readiness-grade artifacts.
+    NotChecked,
+}
+
+/// Filesystem flavor exercised by a scenario.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemFlavor {
+    Ext4,
+    Btrfs,
+    Native,
+    Mixed,
+    NotApplicable,
+}
+
+/// Operational pass/fail/skip/error classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationalOutcomeClass {
+    Pass,
+    Fail,
+    Skip,
+    Error,
+}
+
+/// Cleanup status for temporary images, mounts, and work directories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupStatus {
+    Clean,
+    PreservedArtifacts,
+    Failed,
+    NotRun,
+}
+
+/// Canonical skip reasons that preserve product-vs-host distinction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    FuseUnavailable,
+    FusePermissionDenied,
+    UserDisabled,
+    WorkerDependencyMissing,
+    UnsupportedV1Scope,
+    RootOwnedBtrfsTestdirEacces,
+    NotApplicable,
+}
+
+/// Canonical operational error classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationalErrorClass {
+    ProductFailure,
+    HarnessBug,
+    WorkerDependencyMissing,
+    FusePermissionSkip,
+    RootOwnedBtrfsTestdirEacces,
+    UnsupportedV1Scope,
+    StaleTrackerToolingFailure,
+    UnsafeCleanupFailure,
+    ResourceLimit,
+    HostEnvironmentFailure,
+}
+
+/// Per-scenario operational metadata required for user-readable readiness
+/// artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationalScenarioRecord {
+    /// Must match the manifest scenario map key.
+    pub scenario_id: String,
+    /// Filesystem flavor under test.
+    pub filesystem: FilesystemFlavor,
+    /// SHA-256 or other stable image digest when an image is involved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_hash: Option<String>,
+    /// Mount options used by mounted scenarios.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mount_options: Vec<String>,
+    /// Expected result before execution.
+    pub expected_outcome: ScenarioResult,
+    /// Observed result after execution.
+    pub actual_outcome: ScenarioResult,
+    /// Operational classification, including error for infrastructure or
+    /// harness failures that are not product failures.
+    pub classification: OperationalOutcomeClass,
+    /// Exit status for the scenario command or probe.
+    pub exit_status: i32,
+    /// Scenario-specific stdout path.
+    pub stdout_path: String,
+    /// Scenario-specific stderr path.
+    pub stderr_path: String,
+    /// Evidence ledger paths produced or consumed by the scenario.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ledger_paths: Vec<String>,
+    /// Artifact paths referenced by this scenario.
+    pub artifact_refs: Vec<String>,
+    /// Cleanup result for temporary resources.
+    pub cleanup_status: CleanupStatus,
+    /// Required when classification is fail/error; optional otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<OperationalErrorClass>,
+    /// Required for fail/error and for all skips that need user action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation_hint: Option<String>,
+    /// Required when classification is skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<SkipReason>,
 }
 
 /// A single artifact entry in the manifest.
@@ -616,12 +775,34 @@ pub enum ManifestValidationError {
     InvalidScenarioId(String),
     /// Artifact path is empty.
     EmptyArtifactPath,
+    /// Artifact path is absolute or attempts to traverse upward.
+    MalformedArtifactPath(String),
     /// Duplicate scenario IDs found.
     DuplicateScenarioId(String),
     /// Scenario map key and embedded scenario ID disagree.
     ScenarioIdMismatch { key: String, value: String },
     /// Verdict is inconsistent with scenario outcomes.
     InconsistentVerdict,
+    /// Operational manifest is missing run-level context.
+    MissingOperationalContext,
+    /// Operational command line is empty.
+    EmptyOperationalCommandLine,
+    /// Operational host identity is empty.
+    EmptyOperationalHost,
+    /// Operational FUSE capability was not probed.
+    FuseCapabilityNotChecked,
+    /// Operational scenario metadata is missing for a scenario.
+    MissingOperationalScenario(String),
+    /// Operational scenario key and embedded scenario ID disagree.
+    OperationalScenarioIdMismatch { key: String, value: String },
+    /// Required operational log path is missing.
+    MissingOperationalLogPath { scenario_id: String, field: String },
+    /// Operational scenario has invalid pass/fail/skip/error semantics.
+    InvalidOperationalClassification { scenario_id: String, reason: String },
+    /// Operational artifact reference does not point at a manifest artifact.
+    UnknownArtifactRef { scenario_id: String, path: String },
+    /// Operational cleanup status was not recorded.
+    MissingCleanupStatus(String),
 }
 
 impl std::fmt::Display for ManifestValidationError {
@@ -639,6 +820,9 @@ impl std::fmt::Display for ManifestValidationError {
             Self::EmptyGitCommit => write!(f, "git commit is empty"),
             Self::InvalidScenarioId(id) => write!(f, "invalid scenario_id: {id}"),
             Self::EmptyArtifactPath => write!(f, "artifact path is empty"),
+            Self::MalformedArtifactPath(path) => {
+                write!(f, "artifact path is malformed or unsafe: {path}")
+            }
             Self::DuplicateScenarioId(id) => write!(f, "duplicate scenario_id: {id}"),
             Self::ScenarioIdMismatch { key, value } => {
                 write!(
@@ -648,6 +832,42 @@ impl std::fmt::Display for ManifestValidationError {
             }
             Self::InconsistentVerdict => {
                 write!(f, "verdict is PASS but scenarios contain failures")
+            }
+            Self::MissingOperationalContext => write!(f, "operational context is missing"),
+            Self::EmptyOperationalCommandLine => write!(f, "operational command line is empty"),
+            Self::EmptyOperationalHost => write!(f, "operational host identity is empty"),
+            Self::FuseCapabilityNotChecked => {
+                write!(f, "FUSE capability is not checked for operational manifest")
+            }
+            Self::MissingOperationalScenario(id) => {
+                write!(f, "operational scenario metadata missing for {id}")
+            }
+            Self::OperationalScenarioIdMismatch { key, value } => {
+                write!(
+                    f,
+                    "operational scenario map key {key} does not match embedded scenario_id {value}"
+                )
+            }
+            Self::MissingOperationalLogPath { scenario_id, field } => {
+                write!(f, "operational scenario {scenario_id} missing {field}")
+            }
+            Self::InvalidOperationalClassification {
+                scenario_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "operational scenario {scenario_id} has invalid classification: {reason}"
+                )
+            }
+            Self::UnknownArtifactRef { scenario_id, path } => {
+                write!(
+                    f,
+                    "operational scenario {scenario_id} references unknown artifact {path}"
+                )
+            }
+            Self::MissingCleanupStatus(id) => {
+                write!(f, "operational scenario {id} missing cleanup status")
             }
         }
     }
@@ -716,6 +936,10 @@ pub fn validate_manifest(manifest: &ArtifactManifest) -> Vec<ManifestValidationE
     for artifact in &manifest.artifacts {
         if artifact.path.is_empty() {
             errors.push(ManifestValidationError::EmptyArtifactPath);
+        } else if !is_safe_relative_artifact_path(&artifact.path) {
+            errors.push(ManifestValidationError::MalformedArtifactPath(
+                artifact.path.clone(),
+            ));
         }
     }
 
@@ -739,6 +963,261 @@ pub fn validate_manifest(manifest: &ArtifactManifest) -> Vec<ManifestValidationE
     }
 
     errors
+}
+
+/// Validate the stricter operational schema required for E2E, xfstests, fuzz
+/// smoke, performance, writeback-cache crash, and repair-readiness artifacts.
+///
+/// This deliberately builds on [`validate_manifest`] instead of replacing it:
+/// generic historical manifests can stay lightweight, while readiness-grade
+/// artifacts must carry enough context for a user to reproduce and understand a
+/// pass, fail, skip, or error without reading agent transcripts.
+#[must_use]
+pub fn validate_operational_manifest(manifest: &ArtifactManifest) -> Vec<ManifestValidationError> {
+    let mut errors = validate_manifest(manifest);
+
+    let Some(context) = &manifest.operational_context else {
+        errors.push(ManifestValidationError::MissingOperationalContext);
+        return errors;
+    };
+
+    validate_operational_context(&mut errors, context);
+    validate_operational_scenarios(&mut errors, manifest);
+
+    errors
+}
+
+fn validate_operational_context(
+    errors: &mut Vec<ManifestValidationError>,
+    context: &OperationalRunContext,
+) {
+    if context.command_line.is_empty()
+        || context
+            .command_line
+            .iter()
+            .all(|part| part.trim().is_empty())
+    {
+        errors.push(ManifestValidationError::EmptyOperationalCommandLine);
+    }
+    if context.worker.host.trim().is_empty() {
+        errors.push(ManifestValidationError::EmptyOperationalHost);
+    }
+    if context.fuse_capability == FuseCapabilityResult::NotChecked {
+        errors.push(ManifestValidationError::FuseCapabilityNotChecked);
+    }
+    validate_required_run_log_path(errors, "run", "stdout_path", &context.stdout_path);
+    validate_required_run_log_path(errors, "run", "stderr_path", &context.stderr_path);
+    validate_safe_run_log_path(errors, &context.stdout_path);
+    validate_safe_run_log_path(errors, &context.stderr_path);
+}
+
+fn validate_operational_scenarios(
+    errors: &mut Vec<ManifestValidationError>,
+    manifest: &ArtifactManifest,
+) {
+    let artifact_paths: std::collections::BTreeSet<&str> = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect();
+
+    for (scenario_id, scenario) in &manifest.scenarios {
+        let Some(operational) = manifest.operational_scenarios.get(scenario_id) else {
+            errors.push(ManifestValidationError::MissingOperationalScenario(
+                scenario_id.clone(),
+            ));
+            continue;
+        };
+
+        if operational.scenario_id != *scenario_id {
+            errors.push(ManifestValidationError::OperationalScenarioIdMismatch {
+                key: scenario_id.clone(),
+                value: operational.scenario_id.clone(),
+            });
+        }
+
+        if operational.actual_outcome != scenario.outcome {
+            errors.push(ManifestValidationError::InvalidOperationalClassification {
+                scenario_id: scenario_id.clone(),
+                reason: format!(
+                    "actual_outcome {:?} disagrees with scenario outcome {:?}",
+                    operational.actual_outcome, scenario.outcome
+                ),
+            });
+        }
+
+        validate_required_scenario_log_path(
+            errors,
+            scenario_id,
+            "stdout_path",
+            &operational.stdout_path,
+        );
+        validate_required_scenario_log_path(
+            errors,
+            scenario_id,
+            "stderr_path",
+            &operational.stderr_path,
+        );
+
+        if operational.cleanup_status == CleanupStatus::NotRun {
+            errors.push(ManifestValidationError::MissingCleanupStatus(
+                scenario_id.clone(),
+            ));
+        }
+
+        validate_operational_classification(errors, scenario_id, operational);
+
+        if operational.artifact_refs.is_empty() {
+            errors.push(ManifestValidationError::InvalidOperationalClassification {
+                scenario_id: scenario_id.clone(),
+                reason: "artifact_refs must contain at least one path".to_owned(),
+            });
+        }
+
+        for path in operational
+            .artifact_refs
+            .iter()
+            .chain(operational.ledger_paths.iter())
+            .chain([&operational.stdout_path, &operational.stderr_path])
+        {
+            if !is_safe_relative_artifact_path(path) {
+                errors.push(ManifestValidationError::MalformedArtifactPath(path.clone()));
+            }
+        }
+
+        for artifact_ref in &operational.artifact_refs {
+            if !artifact_paths.contains(artifact_ref.as_str()) {
+                errors.push(ManifestValidationError::UnknownArtifactRef {
+                    scenario_id: scenario_id.clone(),
+                    path: artifact_ref.clone(),
+                });
+            }
+        }
+    }
+
+    for scenario_id in manifest.operational_scenarios.keys() {
+        if !manifest.scenarios.contains_key(scenario_id) {
+            errors.push(ManifestValidationError::MissingOperationalScenario(
+                scenario_id.clone(),
+            ));
+        }
+    }
+}
+
+fn validate_required_run_log_path(
+    errors: &mut Vec<ManifestValidationError>,
+    scenario_id: &str,
+    field: &str,
+    value: &str,
+) {
+    if value.is_empty() {
+        errors.push(ManifestValidationError::MissingOperationalLogPath {
+            scenario_id: scenario_id.to_owned(),
+            field: field.to_owned(),
+        });
+    }
+}
+
+fn validate_safe_run_log_path(errors: &mut Vec<ManifestValidationError>, value: &str) {
+    if !value.is_empty() && !is_safe_relative_artifact_path(value) {
+        errors.push(ManifestValidationError::MalformedArtifactPath(
+            value.to_owned(),
+        ));
+    }
+}
+
+fn validate_required_scenario_log_path(
+    errors: &mut Vec<ManifestValidationError>,
+    scenario_id: &str,
+    field: &str,
+    value: &str,
+) {
+    if value.is_empty() {
+        errors.push(ManifestValidationError::MissingOperationalLogPath {
+            scenario_id: scenario_id.to_owned(),
+            field: field.to_owned(),
+        });
+    }
+}
+
+fn validate_operational_classification(
+    errors: &mut Vec<ManifestValidationError>,
+    scenario_id: &str,
+    operational: &OperationalScenarioRecord,
+) {
+    let expected_class = match operational.actual_outcome {
+        ScenarioResult::Pass => OperationalOutcomeClass::Pass,
+        ScenarioResult::Fail => OperationalOutcomeClass::Fail,
+        ScenarioResult::Skip => OperationalOutcomeClass::Skip,
+    };
+
+    if operational.classification != OperationalOutcomeClass::Error
+        && operational.classification != expected_class
+    {
+        errors.push(ManifestValidationError::InvalidOperationalClassification {
+            scenario_id: scenario_id.to_owned(),
+            reason: format!(
+                "classification {:?} disagrees with actual outcome {:?}",
+                operational.classification, operational.actual_outcome
+            ),
+        });
+    }
+
+    match operational.classification {
+        OperationalOutcomeClass::Pass => {
+            if operational.error_class.is_some() || operational.skip_reason.is_some() {
+                errors.push(ManifestValidationError::InvalidOperationalClassification {
+                    scenario_id: scenario_id.to_owned(),
+                    reason: "passing scenarios cannot carry error_class or skip_reason".to_owned(),
+                });
+            }
+        }
+        OperationalOutcomeClass::Fail | OperationalOutcomeClass::Error => {
+            if operational.error_class.is_none() {
+                errors.push(ManifestValidationError::InvalidOperationalClassification {
+                    scenario_id: scenario_id.to_owned(),
+                    reason: "fail/error scenarios require error_class".to_owned(),
+                });
+            }
+            if operational
+                .remediation_hint
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                errors.push(ManifestValidationError::InvalidOperationalClassification {
+                    scenario_id: scenario_id.to_owned(),
+                    reason: "fail/error scenarios require remediation_hint".to_owned(),
+                });
+            }
+        }
+        OperationalOutcomeClass::Skip => {
+            if operational.skip_reason.is_none() {
+                errors.push(ManifestValidationError::InvalidOperationalClassification {
+                    scenario_id: scenario_id.to_owned(),
+                    reason: "skip scenarios require skip_reason".to_owned(),
+                });
+            }
+            if operational
+                .remediation_hint
+                .as_deref()
+                .is_none_or(str::is_empty)
+                && !matches!(operational.skip_reason, Some(SkipReason::NotApplicable))
+            {
+                errors.push(ManifestValidationError::InvalidOperationalClassification {
+                    scenario_id: scenario_id.to_owned(),
+                    reason: "actionable skip scenarios require remediation_hint".to_owned(),
+                });
+            }
+        }
+    }
+}
+
+fn is_safe_relative_artifact_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
 }
 
 /// Check if a scenario ID matches the canonical pattern.
@@ -780,6 +1259,8 @@ impl ManifestBuilder {
                     cargo_version: None,
                 },
                 scenarios: BTreeMap::new(),
+                operational_context: None,
+                operational_scenarios: BTreeMap::new(),
                 artifacts: Vec::new(),
                 verdict: GateVerdict::Pass,
                 duration_secs: 0.0,
@@ -831,6 +1312,22 @@ impl ManifestBuilder {
                 duration_secs,
             },
         );
+        self
+    }
+
+    /// Set run-level operational context.
+    #[must_use]
+    pub fn operational_context(mut self, context: OperationalRunContext) -> Self {
+        self.manifest.operational_context = Some(context);
+        self
+    }
+
+    /// Add per-scenario operational metadata.
+    #[must_use]
+    pub fn operational_scenario(mut self, record: OperationalScenarioRecord) -> Self {
+        self.manifest
+            .operational_scenarios
+            .insert(record.scenario_id.clone(), record);
         self
     }
 
@@ -1489,6 +1986,216 @@ mod tests {
         assert_eq!(manifest.artifacts.len(), ArtifactCategory::ALL.len());
     }
 
+    // ── Operational readiness schema tests ──────────────────────────
+
+    #[test]
+    fn operational_manifest_with_required_sample_surfaces_passes_validation() {
+        let manifest = sample_operational_manifest();
+        let errors = validate_operational_manifest(&manifest);
+        assert!(
+            errors.is_empty(),
+            "expected operational manifest to validate, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn operational_manifest_requires_context() {
+        let manifest = sample_manifest();
+        let errors = validate_operational_manifest(&manifest);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::MissingOperationalContext))
+        );
+    }
+
+    #[test]
+    fn operational_manifest_rejects_missing_log_paths() {
+        let mut manifest = sample_operational_manifest();
+        manifest
+            .operational_scenarios
+            .get_mut("mounted_ext4_rw")
+            .expect("scenario exists")
+            .stdout_path = String::new();
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::MissingOperationalLogPath { scenario_id, field }
+                if scenario_id == "mounted_ext4_rw" && field == "stdout_path"
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_unsafe_run_log_paths() {
+        let mut manifest = sample_operational_manifest();
+        manifest
+            .operational_context
+            .as_mut()
+            .expect("context exists")
+            .stderr_path = "/tmp/frankenfs/stderr.log".to_owned();
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::MalformedArtifactPath(path)
+                if path == "/tmp/frankenfs/stderr.log"
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_whitespace_run_identity() {
+        let mut manifest = sample_operational_manifest();
+        let context = manifest
+            .operational_context
+            .as_mut()
+            .expect("context exists");
+        context.command_line = vec!["  ".to_owned(), "\t".to_owned()];
+        context.worker.host = "  ".to_owned();
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::EmptyOperationalCommandLine))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ManifestValidationError::EmptyOperationalHost))
+        );
+    }
+
+    #[test]
+    fn operational_manifest_rejects_actual_outcome_drift() {
+        let mut manifest = sample_operational_manifest();
+        manifest
+            .operational_scenarios
+            .get_mut("mounted_ext4_rw")
+            .expect("scenario exists")
+            .actual_outcome = ScenarioResult::Fail;
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::InvalidOperationalClassification { scenario_id, reason }
+                if scenario_id == "mounted_ext4_rw"
+                    && reason.contains("actual_outcome")
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_ambiguous_skip_reason() {
+        let mut manifest = sample_operational_manifest();
+        let record = manifest
+            .operational_scenarios
+            .get_mut("fuse_capability_probe")
+            .expect("scenario exists");
+        record.skip_reason = None;
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::InvalidOperationalClassification { scenario_id, reason }
+                if scenario_id == "fuse_capability_probe"
+                    && reason.contains("skip_reason")
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_fail_without_remediation() {
+        let mut manifest = sample_operational_manifest();
+        let record = manifest
+            .operational_scenarios
+            .get_mut("writeback_crash_matrix")
+            .expect("scenario exists");
+        record.remediation_hint = None;
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::InvalidOperationalClassification { scenario_id, reason }
+                if scenario_id == "writeback_crash_matrix"
+                    && reason.contains("remediation_hint")
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_unknown_artifact_refs() {
+        let mut manifest = sample_operational_manifest();
+        manifest
+            .operational_scenarios
+            .get_mut("perf_baseline_run")
+            .expect("scenario exists")
+            .artifact_refs
+            .push("artifacts/e2e/run/missing.json".to_owned());
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::UnknownArtifactRef { scenario_id, path }
+                if scenario_id == "perf_baseline_run"
+                    && path == "artifacts/e2e/run/missing.json"
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_malformed_artifact_paths() {
+        let mut manifest = sample_operational_manifest();
+        manifest.artifacts.push(ArtifactEntry {
+            path: "../outside.log".to_owned(),
+            category: ArtifactCategory::RawLog,
+            content_type: Some("text/plain".to_owned()),
+            size_bytes: 1,
+            sha256: None,
+            redacted: false,
+            metadata: BTreeMap::new(),
+        });
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::MalformedArtifactPath(path) if path == "../outside.log"
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_missing_cleanup_status() {
+        let mut manifest = sample_operational_manifest();
+        manifest
+            .operational_scenarios
+            .get_mut("xfstests_generic_subset")
+            .expect("scenario exists")
+            .cleanup_status = CleanupStatus::NotRun;
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::MissingCleanupStatus(id)
+                if id == "xfstests_generic_subset"
+        )));
+    }
+
+    #[test]
+    fn operational_outcome_class_rejects_unknown_json_values() {
+        let json = r#"{
+            "scenario_id": "mounted_ext4_rw",
+            "filesystem": "ext4",
+            "image_hash": "sha256:abc",
+            "mount_options": ["rw"],
+            "expected_outcome": "PASS",
+            "actual_outcome": "PASS",
+            "classification": "maybe",
+            "exit_status": 0,
+            "stdout_path": "artifacts/e2e/run/stdout.log",
+            "stderr_path": "artifacts/e2e/run/stderr.log",
+            "ledger_paths": [],
+            "artifact_refs": ["artifacts/e2e/run/stdout.log"],
+            "cleanup_status": "clean"
+        }"#;
+        assert!(serde_json::from_str::<OperationalScenarioRecord>(json).is_err());
+    }
+
     // ── Negative / invariant tests ───────────────────────────────────
 
     #[test]
@@ -1511,12 +2218,35 @@ mod tests {
             ManifestValidationError::EmptyGitCommit,
             ManifestValidationError::InvalidScenarioId("x".to_owned()),
             ManifestValidationError::EmptyArtifactPath,
+            ManifestValidationError::MalformedArtifactPath("../bad.log".to_owned()),
             ManifestValidationError::DuplicateScenarioId("dup".to_owned()),
             ManifestValidationError::ScenarioIdMismatch {
                 key: "test_key_scenario".to_owned(),
                 value: "test_value_scenario".to_owned(),
             },
             ManifestValidationError::InconsistentVerdict,
+            ManifestValidationError::MissingOperationalContext,
+            ManifestValidationError::EmptyOperationalCommandLine,
+            ManifestValidationError::EmptyOperationalHost,
+            ManifestValidationError::FuseCapabilityNotChecked,
+            ManifestValidationError::MissingOperationalScenario("test_scenario_id".to_owned()),
+            ManifestValidationError::OperationalScenarioIdMismatch {
+                key: "test_key_scenario".to_owned(),
+                value: "test_value_scenario".to_owned(),
+            },
+            ManifestValidationError::MissingOperationalLogPath {
+                scenario_id: "test_scenario_id".to_owned(),
+                field: "stdout_path".to_owned(),
+            },
+            ManifestValidationError::InvalidOperationalClassification {
+                scenario_id: "test_scenario_id".to_owned(),
+                reason: "missing remediation".to_owned(),
+            },
+            ManifestValidationError::UnknownArtifactRef {
+                scenario_id: "test_scenario_id".to_owned(),
+                path: "artifacts/e2e/missing.log".to_owned(),
+            },
+            ManifestValidationError::MissingCleanupStatus("test_scenario_id".to_owned()),
         ];
         for err in &errors {
             assert!(!err.to_string().is_empty(), "{err:?} has empty display");
@@ -1524,6 +2254,182 @@ mod tests {
     }
 
     // ── Helper ───────────────────────────────────────────────────────
+
+    struct SampleOperationalCase {
+        scenario_id: &'static str,
+        result: ScenarioResult,
+        classification: OperationalOutcomeClass,
+        filesystem: FilesystemFlavor,
+        primary_artifact: &'static str,
+        skip_reason: Option<SkipReason>,
+        error_class: Option<OperationalErrorClass>,
+        remediation_hint: Option<&'static str>,
+    }
+
+    fn sample_operational_manifest() -> ArtifactManifest {
+        let mut builder = ManifestBuilder::new(
+            "run-operational",
+            "operational_readiness",
+            "2026-03-04T12:00:00Z",
+        )
+        .bead_id("bd-rchk0.4.1")
+        .git_context("abc123", "main", true)
+        .environment(sample_operational_environment())
+        .operational_context(sample_operational_context());
+
+        for case in sample_operational_cases() {
+            builder = add_sample_operational_scenario(builder, &case);
+        }
+
+        builder.duration_secs(6.0).build()
+    }
+
+    fn sample_operational_context() -> OperationalRunContext {
+        OperationalRunContext {
+            command_line: vec![
+                "scripts/e2e/run_gate.sh".to_owned(),
+                "--gate".to_owned(),
+                "operational_readiness".to_owned(),
+            ],
+            worker: WorkerContext {
+                host: "build-host-01".to_owned(),
+                worker_id: Some("rch-worker-a".to_owned()),
+            },
+            fuse_capability: FuseCapabilityResult::PermissionDenied,
+            stdout_path: "artifacts/e2e/run/stdout.log".to_owned(),
+            stderr_path: "artifacts/e2e/run/stderr.log".to_owned(),
+        }
+    }
+
+    fn sample_operational_environment() -> EnvironmentFingerprint {
+        EnvironmentFingerprint {
+            hostname: "build-host-01".to_owned(),
+            cpu_model: "AMD Ryzen 9 5950X".to_owned(),
+            cpu_count: 32,
+            memory_gib: 64,
+            kernel: "Linux 6.17.0".to_owned(),
+            rustc_version: "1.85.0".to_owned(),
+            cargo_version: Some("1.85.0".to_owned()),
+        }
+    }
+
+    fn sample_operational_cases() -> [SampleOperationalCase; 6] {
+        [
+            SampleOperationalCase {
+                scenario_id: "xfstests_generic_subset",
+                result: ScenarioResult::Pass,
+                classification: OperationalOutcomeClass::Pass,
+                filesystem: FilesystemFlavor::Ext4,
+                primary_artifact: "artifacts/e2e/run/xfstests/results.json",
+                skip_reason: None,
+                error_class: None,
+                remediation_hint: None,
+            },
+            SampleOperationalCase {
+                scenario_id: "fuse_capability_probe",
+                result: ScenarioResult::Skip,
+                classification: OperationalOutcomeClass::Skip,
+                filesystem: FilesystemFlavor::NotApplicable,
+                primary_artifact: "artifacts/e2e/run/fuse/capability.json",
+                skip_reason: Some(SkipReason::FusePermissionDenied),
+                error_class: Some(OperationalErrorClass::FusePermissionSkip),
+                remediation_hint: Some("rerun on a worker with /dev/fuse read/write access"),
+            },
+            SampleOperationalCase {
+                scenario_id: "mounted_ext4_rw",
+                result: ScenarioResult::Pass,
+                classification: OperationalOutcomeClass::Pass,
+                filesystem: FilesystemFlavor::Ext4,
+                primary_artifact: "artifacts/e2e/run/mounted/ext4_rw.json",
+                skip_reason: None,
+                error_class: None,
+                remediation_hint: None,
+            },
+            SampleOperationalCase {
+                scenario_id: "fuzz_repair_smoke",
+                result: ScenarioResult::Fail,
+                classification: OperationalOutcomeClass::Error,
+                filesystem: FilesystemFlavor::NotApplicable,
+                primary_artifact: "artifacts/e2e/run/fuzz/repair_smoke.json",
+                skip_reason: None,
+                error_class: Some(OperationalErrorClass::WorkerDependencyMissing),
+                remediation_hint: Some(
+                    "install cargo-fuzz or run the fuzz smoke on the fuzz-capable lane",
+                ),
+            },
+            SampleOperationalCase {
+                scenario_id: "perf_baseline_run",
+                result: ScenarioResult::Pass,
+                classification: OperationalOutcomeClass::Pass,
+                filesystem: FilesystemFlavor::Native,
+                primary_artifact: "artifacts/e2e/run/perf/baseline.json",
+                skip_reason: None,
+                error_class: None,
+                remediation_hint: None,
+            },
+            SampleOperationalCase {
+                scenario_id: "writeback_crash_matrix",
+                result: ScenarioResult::Fail,
+                classification: OperationalOutcomeClass::Fail,
+                filesystem: FilesystemFlavor::Ext4,
+                primary_artifact: "artifacts/e2e/run/writeback/crash_matrix.json",
+                skip_reason: None,
+                error_class: Some(OperationalErrorClass::ProductFailure),
+                remediation_hint: Some(
+                    "open a narrow writeback crash-consistency bead with this artifact",
+                ),
+            },
+        ]
+    }
+
+    fn add_sample_operational_scenario(
+        builder: ManifestBuilder,
+        case: &SampleOperationalCase,
+    ) -> ManifestBuilder {
+        let stdout_path = format!("artifacts/e2e/run/{}/stdout.log", case.scenario_id);
+        let stderr_path = format!("artifacts/e2e/run/{}/stderr.log", case.scenario_id);
+        let ledger_path = format!("artifacts/e2e/run/{}/ledger.jsonl", case.scenario_id);
+
+        builder
+            .scenario(case.scenario_id, case.result, case.remediation_hint, 1.0)
+            .artifact(test_artifact(
+                case.primary_artifact,
+                ArtifactCategory::SummaryReport,
+            ))
+            .artifact(test_artifact(&stdout_path, ArtifactCategory::RawLog))
+            .artifact(test_artifact(&stderr_path, ArtifactCategory::RawLog))
+            .artifact(test_artifact(&ledger_path, ArtifactCategory::ProofArtifact))
+            .operational_scenario(OperationalScenarioRecord {
+                scenario_id: case.scenario_id.to_owned(),
+                filesystem: case.filesystem,
+                image_hash: Some(format!("sha256:{}", case.scenario_id)),
+                mount_options: vec!["rw".to_owned(), "default_permissions".to_owned()],
+                expected_outcome: case.result,
+                actual_outcome: case.result,
+                classification: case.classification,
+                exit_status: i32::from(case.result != ScenarioResult::Pass),
+                stdout_path,
+                stderr_path,
+                ledger_paths: vec![ledger_path],
+                artifact_refs: vec![case.primary_artifact.to_owned()],
+                cleanup_status: CleanupStatus::Clean,
+                error_class: case.error_class,
+                remediation_hint: case.remediation_hint.map(str::to_owned),
+                skip_reason: case.skip_reason,
+            })
+    }
+
+    fn test_artifact(path: &str, category: ArtifactCategory) -> ArtifactEntry {
+        ArtifactEntry {
+            path: path.to_owned(),
+            category,
+            content_type: Some("application/json".to_owned()),
+            size_bytes: 256,
+            sha256: Some(format!("checksum-for-{}", path.replace('/', "-"))),
+            redacted: false,
+            metadata: BTreeMap::new(),
+        }
+    }
 
     fn make_manifest(run_id: &str, gate_id: &str, created_at: &str) -> ArtifactManifest {
         ManifestBuilder::new(run_id, gate_id, created_at)

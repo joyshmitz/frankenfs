@@ -90,8 +90,25 @@ It defines the shared representation for verification outputs across E2E, benchm
 - `schema_version`, `run_id`, `created_at`, `gate_id`, and optional `bead_id`
 - `git_context` and `environment` fingerprints for reproducibility
 - `scenarios` keyed by `scenario_id`
+- `operational_context` for readiness-grade runs: exact command line, host/worker id, FUSE capability result, and primary stdout/stderr log paths
+- `operational_scenarios` keyed by `scenario_id` for expected/actual outcome, pass/fail/skip/error classification, filesystem flavor, image hash, mount options, exit status, stdout/stderr paths, evidence ledger paths, cleanup status, remediation hint, and artifact references
 - `artifacts` with category, content type, size, checksum, redaction flag, and metadata
 - `verdict`, `duration_secs`, and optional retention metadata
+
+Generic historical manifests may use only the base schema. Operational readiness manifests must pass the stricter `validate_operational_manifest` check. That validator rejects missing run context, missing per-scenario metadata, invalid pass/fail/skip/error classification, ambiguous skip reasons, malformed artifact paths, artifact references that do not point at manifest entries, missing stdout/stderr paths, missing cleanup status, and unprobed FUSE capability.
+
+### Operational Outcome Vocabulary
+
+Readiness-grade artifacts use a closed vocabulary so users can distinguish product failures from host and harness conditions:
+
+| Field | Values | Notes |
+|-------|--------|-------|
+| `classification` | `pass`, `fail`, `skip`, `error` | `error` is reserved for harness, worker, or host failures that prevent a product verdict |
+| `skip_reason` | `fuse_unavailable`, `fuse_permission_denied`, `user_disabled`, `worker_dependency_missing`, `unsupported_v1_scope`, `root_owned_btrfs_testdir_eacces`, `not_applicable` | Required for every skip |
+| `error_class` | `product_failure`, `harness_bug`, `worker_dependency_missing`, `fuse_permission_skip`, `root_owned_btrfs_testdir_eacces`, `unsupported_v1_scope`, `stale_tracker_tooling_failure`, `unsafe_cleanup_failure`, `resource_limit`, `host_environment_failure` | Required for fail/error |
+| `cleanup_status` | `clean`, `preserved_artifacts`, `failed`, `not_run` | `not_run` is invalid for operational readiness validation |
+
+Required sample surfaces are covered by the `artifact_manifest` unit tests: xfstests subset reports, FUSE capability probes, mounted ext4/btrfs scenarios, fuzz smoke outputs, performance baselines, and writeback-cache crash matrices.
 
 ### Retention Policy
 
