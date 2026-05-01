@@ -5719,6 +5719,16 @@ fn fuse_rename_directory_into_own_child_reports_einval() {
 }
 
 #[test]
+fn fuse_rename_missing_source_reports_enoent() {
+    with_rw_mount(|mnt| {
+        assert_rename_missing_source_reports_enoent(
+            mnt,
+            "ext4_rw_rename_missing_source_errno_enoent",
+        );
+    });
+}
+
+#[test]
 fn fuse_rename_file_directory_type_mismatch_reports_eisdir_and_enotdir() {
     with_rw_mount(|mnt| {
         assert_rename_file_directory_type_mismatch_contract(
