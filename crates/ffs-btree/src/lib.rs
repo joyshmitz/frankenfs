@@ -288,8 +288,8 @@ pub trait BlockAllocator {
 
 /// Insert a new extent into the tree rooted at `root_bytes`.
 ///
-/// The new extent must not overlap any existing extent. The caller is
-/// responsible for ensuring no overlap before calling insert.
+/// The new extent must not overlap any existing extent. Overlaps are rejected
+/// before the tree is mutated.
 ///
 /// Returns the (possibly modified) root bytes. If the tree needed to grow
 /// in depth, new blocks are allocated via `alloc`.
@@ -303,6 +303,7 @@ pub fn insert(
     let (header, _) = parse_header(root_bytes)?;
     validate_header(&header, ROOT_MAX_ENTRIES)?;
     validate_insert_extent(&extent)?;
+    validate_insert_does_not_overlap(cx, dev, root_bytes, &extent)?;
     trace!(
         logical_start = extent.logical_block,
         len = u32::from(actual_len(extent.raw_len)),
@@ -1173,6 +1174,7 @@ fn validate_header(header: &Ext4ExtentHeader, max_allowed: u16) -> Result<()> {
 fn parse_leaf_entries(data: &[u8], header: &Ext4ExtentHeader) -> Result<Vec<Ext4Extent>> {
     let count = usize::from(header.entries);
     let mut extents = Vec::with_capacity(count);
+    let mut previous_end = None;
     for i in 0..count {
         let off = HEADER_SIZE + i * ENTRY_SIZE;
         if off + ENTRY_SIZE > data.len() {
@@ -1198,6 +1200,19 @@ fn parse_leaf_entries(data: &[u8], header: &Ext4ExtentHeader) -> Result<Vec<Ext4
             });
         }
 
+        if let Some(prev_end) = previous_end {
+            if u64::from(logical_block) < prev_end {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "extent leaf entries not sorted or overlap at entry {i} \
+                         (logical_block {logical_block})"
+                    ),
+                });
+            }
+        }
+        previous_end = Some(u64::from(logical_block) + u64::from(actual_len(raw_len)));
+
         extents.push(Ext4Extent {
             logical_block,
             raw_len,
@@ -1210,6 +1225,7 @@ fn parse_leaf_entries(data: &[u8], header: &Ext4ExtentHeader) -> Result<Vec<Ext4
 fn parse_index_entries(data: &[u8], header: &Ext4ExtentHeader) -> Result<Vec<Ext4ExtentIndex>> {
     let count = usize::from(header.entries);
     let mut indexes = Vec::with_capacity(count);
+    let mut previous_logical = None;
     for i in 0..count {
         let off = HEADER_SIZE + i * ENTRY_SIZE;
         if off + ENTRY_SIZE > data.len() {
@@ -1224,6 +1240,19 @@ fn parse_index_entries(data: &[u8], header: &Ext4ExtentHeader) -> Result<Vec<Ext
             u32::from_le_bytes([data[off + 4], data[off + 5], data[off + 6], data[off + 7]]);
         let leaf_hi = u16::from_le_bytes([data[off + 8], data[off + 9]]);
         let leaf_block = u64::from(leaf_lo) | (u64::from(leaf_hi) << 32);
+
+        if let Some(prev) = previous_logical {
+            if logical_block <= prev {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!(
+                        "extent index entries not strictly sorted at entry {i} \
+                         (logical_block {logical_block}, previous {prev})"
+                    ),
+                });
+            }
+        }
+        previous_logical = Some(logical_block);
 
         indexes.push(Ext4ExtentIndex {
             logical_block,
@@ -1261,6 +1290,32 @@ fn validate_insert_extent(extent: &Ext4Extent) -> Result<()> {
             extent.logical_block
         )));
     }
+    Ok(())
+}
+
+fn extent_logical_range(extent: &Ext4Extent) -> (u64, u64) {
+    let start = u64::from(extent.logical_block);
+    let end = start + u64::from(actual_len(extent.raw_len));
+    (start, end)
+}
+
+fn validate_insert_does_not_overlap(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &[u8; 60],
+    extent: &Ext4Extent,
+) -> Result<()> {
+    let (new_start, new_end) = extent_logical_range(extent);
+    walk(cx, dev, root_bytes, &mut |existing| {
+        let (existing_start, existing_end) = extent_logical_range(existing);
+        if new_start < existing_end && new_end > existing_start {
+            return Err(FfsError::InvalidGeometry(format!(
+                "insert: extent [{new_start}, {new_end}) overlaps existing extent \
+                 [{existing_start}, {existing_end})"
+            )));
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -1633,6 +1688,106 @@ mod tests {
                 hole_len: 1_u64 << 32
             }
         );
+    }
+
+    #[test]
+    fn search_rejects_unsorted_leaf_extents() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let header = Ext4ExtentHeader {
+            magic: EXT4_EXTENT_MAGIC,
+            entries: 2,
+            max_entries: ROOT_MAX_ENTRIES,
+            depth: 0,
+            generation: 0,
+        };
+        write_header(&mut root, &header);
+        write_leaf_entry(
+            &mut root[HEADER_SIZE..HEADER_SIZE + ENTRY_SIZE],
+            &Ext4Extent {
+                logical_block: 10,
+                raw_len: 2,
+                physical_start: 100,
+            },
+        );
+        write_leaf_entry(
+            &mut root[HEADER_SIZE + ENTRY_SIZE..HEADER_SIZE + 2 * ENTRY_SIZE],
+            &Ext4Extent {
+                logical_block: 0,
+                raw_len: 2,
+                physical_start: 200,
+            },
+        );
+
+        let err = search(&cx, &dev, &root, 0).expect_err("unsorted leaf must be rejected");
+        assert_corruption_contains(&err, "not sorted or overlap");
+    }
+
+    #[test]
+    fn search_rejects_overlapping_leaf_extents() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let header = Ext4ExtentHeader {
+            magic: EXT4_EXTENT_MAGIC,
+            entries: 2,
+            max_entries: ROOT_MAX_ENTRIES,
+            depth: 0,
+            generation: 0,
+        };
+        write_header(&mut root, &header);
+        write_leaf_entry(
+            &mut root[HEADER_SIZE..HEADER_SIZE + ENTRY_SIZE],
+            &Ext4Extent {
+                logical_block: 10,
+                raw_len: 10,
+                physical_start: 100,
+            },
+        );
+        write_leaf_entry(
+            &mut root[HEADER_SIZE + ENTRY_SIZE..HEADER_SIZE + 2 * ENTRY_SIZE],
+            &Ext4Extent {
+                logical_block: 15,
+                raw_len: 2,
+                physical_start: 200,
+            },
+        );
+
+        let err = search(&cx, &dev, &root, 15).expect_err("overlapping leaf must be rejected");
+        assert_corruption_contains(&err, "not sorted or overlap");
+    }
+
+    #[test]
+    fn search_rejects_unsorted_index_entries() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let header = Ext4ExtentHeader {
+            magic: EXT4_EXTENT_MAGIC,
+            entries: 2,
+            max_entries: ROOT_MAX_ENTRIES,
+            depth: 1,
+            generation: 0,
+        };
+        write_header(&mut root, &header);
+        write_index_entry(
+            &mut root[HEADER_SIZE..HEADER_SIZE + ENTRY_SIZE],
+            &Ext4ExtentIndex {
+                logical_block: 10,
+                leaf_block: 100,
+            },
+        );
+        write_index_entry(
+            &mut root[HEADER_SIZE + ENTRY_SIZE..HEADER_SIZE + 2 * ENTRY_SIZE],
+            &Ext4ExtentIndex {
+                logical_block: 10,
+                leaf_block: 101,
+            },
+        );
+
+        let err = search(&cx, &dev, &root, 10).expect_err("duplicate index key must be rejected");
+        assert_corruption_contains(&err, "not strictly sorted");
     }
 
     #[test]
@@ -2674,6 +2829,47 @@ Hole { hole_len: 90 }
             search(&cx, &dev, &root, 7).unwrap(),
             SearchResult::Hole { .. }
         ));
+    }
+
+    #[test]
+    fn insert_rejects_overlapping_extent_without_mutating_root() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut root = make_root();
+        let mut alloc = SeqAllocator::new(100);
+
+        let ext = Ext4Extent {
+            logical_block: 10,
+            raw_len: 10,
+            physical_start: 999,
+        };
+        insert(&cx, &dev, &mut root, ext, &mut alloc).unwrap();
+        let before = root;
+        let next_before = alloc.next;
+
+        let overlap = Ext4Extent {
+            logical_block: 15,
+            raw_len: 2,
+            physical_start: 2000,
+        };
+        let err = insert(&cx, &dev, &mut root, overlap, &mut alloc).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, FfsError::InvalidGeometry(_)) && msg.contains("overlaps"),
+            "error should identify the rejected overlap: {msg}"
+        );
+        assert_eq!(root, before, "failed insert must leave the root unchanged");
+        assert_eq!(
+            alloc.next, next_before,
+            "failed insert must not allocate blocks"
+        );
+        assert_eq!(
+            search(&cx, &dev, &root, 15).unwrap(),
+            SearchResult::Found {
+                extent: ext,
+                offset_in_extent: 5,
+            }
+        );
     }
 
     #[test]
