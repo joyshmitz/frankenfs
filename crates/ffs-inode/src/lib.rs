@@ -42,6 +42,10 @@ pub fn locate_inode(
     geo: &FsGeometry,
     groups: &[GroupStats],
 ) -> Option<InodeLocation> {
+    if ino.0 == 0 || geo.inodes_per_group == 0 || geo.block_size == 0 || geo.inode_size == 0 {
+        return None;
+    }
+
     let group = ffs_types::inode_to_group(ino, geo.inodes_per_group);
     let gidx = group.0 as usize;
     if gidx >= groups.len() {
@@ -963,6 +967,20 @@ mod tests {
     }
 
     #[test]
+    fn read_inode_zero_returns_corruption() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let geo = make_geometry();
+        let groups = make_groups(&geo);
+
+        let err = read_inode(&cx, &dev, &geo, &groups, InodeNumber(0)).unwrap_err();
+        assert!(
+            matches!(err, FfsError::Corruption { ref detail, .. } if detail == "inode 0 out of range"),
+            "unexpected error for inode zero: {err:?}"
+        );
+    }
+
+    #[test]
     fn create_directory_inode() {
         let cx = test_cx();
         let dev = MemBlockDevice::new(4096);
@@ -1127,6 +1145,9 @@ mod tests {
         let groups = make_groups(&geo);
 
         // Inode 0 is invalid (ext4 inodes are 1-based).
+        let result = locate_inode(InodeNumber(0), &geo, &groups);
+        assert!(result.is_none());
+
         // Inode way beyond total → group index out of range.
         let result = locate_inode(InodeNumber(100_000), &geo, &groups);
         assert!(result.is_none());
@@ -2993,13 +3014,31 @@ mod tests {
     }
 
     #[test]
-    fn locate_inode_zero_returns_some() {
-        // Inode 0 is unconventional but locate_inode should not panic.
+    fn locate_inode_zero_is_invalid() {
         let geo = make_geometry();
         let groups = make_groups(&geo);
         let result = locate_inode(InodeNumber(0), &geo, &groups);
-        // Should produce a valid location (inode 0 maps to group 0, index within group).
-        let _ = result;
+        assert!(
+            result.is_none(),
+            "inode 0 must not alias the first inode table entry"
+        );
+    }
+
+    #[test]
+    fn locate_inode_rejects_zero_geometry() {
+        let mut geo = make_geometry();
+        let groups = make_groups(&geo);
+
+        geo.inodes_per_group = 0;
+        assert!(locate_inode(InodeNumber(1), &geo, &groups).is_none());
+
+        geo = make_geometry();
+        geo.block_size = 0;
+        assert!(locate_inode(InodeNumber(1), &geo, &groups).is_none());
+
+        geo = make_geometry();
+        geo.inode_size = 0;
+        assert!(locate_inode(InodeNumber(1), &geo, &groups).is_none());
     }
 
     #[test]
