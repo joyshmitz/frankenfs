@@ -31,10 +31,10 @@
 
 ### DISC-004: btrfs Delayed Refs Full Semantics
 - **Reference:** Linux kernel queues all reference updates via delayed refs
-- **Our impl:** Simplified delayed ref handling without full queueing
-- **Impact:** Reference counting order may differ during heavy writes
-- **Resolution:** INVESTIGATING — `bd-rchk2` must either prove the current bounded queue/refcount model with executable heavy-write evidence, implement missing delayed-ref lifecycle behavior, or split/accept a narrower divergence.
-- **Tests affected:** btrfs_delayed_ref_* tests
+- **Our impl:** V1 uses an explicit `DelayedRefQueue` + `BtrfsRef` model with bounded batch flushing into materialized extent refcounts instead of cloning the full kernel delayed-ref machinery
+- **Impact:** Internal queue shape and scheduling differ from Linux, but supported allocator/transaction operations must be refcount-equivalent, retry-safe, and failure-atomic
+- **Resolution:** ACCEPTED — V1 scoped model. Evidence includes deterministic queue/refcount tests, two 1000-case delayed-ref properties, 10,000-reference stress coverage, transaction failure nonvisibility, `delayed_ref_queue_failed_flush_is_atomic_for_refcounts`, and `delayed_ref_queue_insert_overflow_is_atomic` for retry-safe failed batches.
+- **Tests affected:** `property_delayed_refs_seed_*`, `delayed_ref_queue_*`, `flush_delayed_refs_*`, `btrfs_tx_adversarial_delayed_ref_failure_leaves_no_visible_records`
 - **Review date:** 2026-05-01
 
 ### DISC-005: FUSE Protocol Version

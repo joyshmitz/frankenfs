@@ -2573,29 +2573,35 @@ impl DelayedRefQueue {
 
         let started = std::time::Instant::now();
         let mut flushed = 0usize;
-        let mut to_prune = Vec::new();
+        let mut selected = Vec::new();
         let extent_keys: Vec<ExtentKey> = self.refs.keys().copied().collect();
+        let mut candidate_refcounts = refcounts.clone();
 
         for extent in extent_keys {
             if flushed >= limit {
                 break;
             }
 
-            let Some(entries) = self.refs.get_mut(&extent) else {
+            let Some(entries) = self.refs.get(&extent) else {
                 continue;
             };
 
             let remaining_budget = limit - flushed;
             let take_n = remaining_budget.min(entries.len());
-            let batch: Vec<DelayedRef> = entries.iter().copied().take(take_n).collect();
 
-            for entry in batch {
+            for entry in entries.iter().copied().take(take_n) {
                 match entry.action {
                     RefAction::Insert => {
-                        let counter = refcounts.entry(entry.extent).or_insert(0);
-                        *counter = counter.saturating_add(1);
+                        let counter = candidate_refcounts.entry(entry.extent).or_insert(0);
+                        let next =
+                            counter
+                                .checked_add(1)
+                                .ok_or(BtrfsMutationError::BrokenInvariant(
+                                    "delayed ref insert overflow",
+                                ))?;
+                        *counter = next;
                     }
-                    RefAction::Delete => match refcounts.entry(entry.extent) {
+                    RefAction::Delete => match candidate_refcounts.entry(entry.extent) {
                         std::collections::btree_map::Entry::Occupied(mut occ) => {
                             let current = *occ.get();
                             if current == 0 {
@@ -2619,8 +2625,16 @@ impl DelayedRefQueue {
                 }
             }
 
-            entries.drain(..take_n);
+            selected.push((extent, take_n));
             flushed = flushed.saturating_add(take_n);
+        }
+
+        let mut to_prune = Vec::new();
+        for (extent, take_n) in selected {
+            let Some(entries) = self.refs.get_mut(&extent) else {
+                continue;
+            };
+            entries.drain(..take_n);
             self.pending_count = self.pending_count.saturating_sub(take_n);
 
             if entries.is_empty() {
@@ -2631,6 +2645,7 @@ impl DelayedRefQueue {
         for extent in to_prune {
             self.refs.remove(&extent);
         }
+        *refcounts = candidate_refcounts;
 
         debug!(
             target: "ffs::btrfs::alloc",
@@ -9904,6 +9919,68 @@ mod tests {
         assert_eq!(queue.pending_count(), 1);
         assert_eq!(queue.pending_for(&key).len(), 1);
         assert!(refcounts.is_empty());
+    }
+
+    #[test]
+    fn delayed_ref_queue_failed_flush_is_atomic_for_refcounts() {
+        let inserted = ExtentKey {
+            bytenr: 0x3000,
+            num_bytes: 4096,
+        };
+        let missing_delete = ExtentKey {
+            bytenr: 0x7000,
+            num_bytes: 4096,
+        };
+        let mut queue = DelayedRefQueue::new();
+        let mut refcounts = BTreeMap::new();
+
+        queue.queue(inserted, delayed_data_ref(4), RefAction::Insert);
+        queue.queue(missing_delete, delayed_data_ref(5), RefAction::Delete);
+        let err = queue
+            .flush(2, &mut refcounts)
+            .expect_err("delete without refcount");
+
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("delayed ref delete without prior refcount")
+        );
+        assert!(
+            refcounts.is_empty(),
+            "failed batch must not materialize earlier successful refs"
+        );
+        assert_eq!(queue.pending_count(), 2);
+        assert_eq!(queue.pending_for(&inserted).len(), 1);
+        assert_eq!(queue.pending_for(&missing_delete).len(), 1);
+
+        refcounts.insert(missing_delete, 1);
+        let flushed = queue.flush(2, &mut refcounts).expect("retry flush");
+        assert_eq!(flushed, 2);
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(refcounts.get(&inserted), Some(&1));
+        assert!(!refcounts.contains_key(&missing_delete));
+    }
+
+    #[test]
+    fn delayed_ref_queue_insert_overflow_is_atomic() {
+        let key = ExtentKey {
+            bytenr: 0x3000,
+            num_bytes: 4096,
+        };
+        let mut queue = DelayedRefQueue::new();
+        let mut refcounts = BTreeMap::from([(key, u64::MAX)]);
+
+        queue.queue(key, delayed_data_ref(4), RefAction::Insert);
+        let err = queue
+            .flush(1, &mut refcounts)
+            .expect_err("refcount overflow");
+
+        assert_eq!(
+            err,
+            BtrfsMutationError::BrokenInvariant("delayed ref insert overflow")
+        );
+        assert_eq!(refcounts.get(&key), Some(&u64::MAX));
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_for(&key).len(), 1);
     }
 
     #[test]

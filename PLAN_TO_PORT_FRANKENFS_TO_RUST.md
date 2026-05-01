@@ -51,7 +51,7 @@ required to keep the project status honest and to move from feature parity towar
 operational readiness.
 
 - [x] `bd-rchk1` docs/status reconciliation: keep README, feature parity, spec, conformance notes, discrepancy notes, xfstests notes, and tracker wording explicit about tracked parity versus runtime readiness.
-- [ ] `bd-rchk2` btrfs delayed refs: resolve `DISC-004` with executable evidence, or narrow it into accepted/split follow-up work.
+- [x] `bd-rchk2` btrfs delayed refs: resolve `DISC-004` with executable evidence, or narrow it into accepted/split follow-up work.
 - [ ] `bd-rchk3` xfstests baseline: run a fresh dated baseline, capture commands/artifacts, and turn real failures into beads.
 - [ ] `bd-rchk4` mounted FUSE CI: make critical mounted ext4/btrfs paths run in a permissioned CI or RCH workflow, with visible skip diagnostics when local FUSE permissions are absent.
 - [ ] `bd-rchk5` performance baselines: re-measure representative throughput/latency targets against current code and record environment metadata.
