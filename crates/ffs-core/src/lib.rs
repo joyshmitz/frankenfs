@@ -13697,6 +13697,17 @@ impl OpenFs {
         let child = self.btrfs_lookup_dir_entry(&alloc, parent_oid, name)?;
         let child_is_dir = child.file_type == BTRFS_FT_DIR;
         Self::btrfs_require_inode_ref_name(&alloc, child.child_objectid, parent_oid, name)?;
+        if parent_oid == new_parent_oid && name == new_name {
+            return Ok(());
+        }
+        if child_is_dir
+            && parent_oid != new_parent_oid
+            && Self::btrfs_directory_is_descendant_of(&alloc, new_parent_oid, child.child_objectid)?
+        {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(
+                libc::EINVAL,
+            )));
+        }
         Self::btrfs_preflight_dir_entry_insert(
             &alloc,
             new_parent_oid,
@@ -15420,6 +15431,15 @@ impl OpenFs {
     /// Returns `None` if no INODE_REF is found (e.g. root directory).
     #[allow(clippy::unused_self)]
     fn btrfs_lookup_parent(&self, alloc: &BtrfsAllocState, objectid: u64) -> Option<u64> {
+        Self::btrfs_lookup_parent_checked(alloc, objectid)
+            .ok()
+            .flatten()
+    }
+
+    fn btrfs_lookup_parent_checked(
+        alloc: &BtrfsAllocState,
+        objectid: u64,
+    ) -> ffs_error::Result<Option<u64>> {
         let start = BtrfsKey {
             objectid,
             item_type: BTRFS_ITEM_INODE_REF,
@@ -15430,11 +15450,53 @@ impl OpenFs {
             item_type: BTRFS_ITEM_INODE_REF,
             offset: u64::MAX,
         };
-        alloc
+        let items = alloc
             .fs_tree
             .range(&start, &end)
-            .ok()
-            .and_then(|items| items.first().map(|(k, _)| k.offset))
+            .map_err(|e| btrfs_mutation_to_ffs(&e))?;
+        let Some((key, payload)) = items.first() else {
+            return Ok(None);
+        };
+        if Self::btrfs_parse_inode_ref_payload(payload)?.is_empty() {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!("empty INODE_REF payload for objectid {objectid}"),
+            });
+        }
+        Ok(Some(key.offset))
+    }
+
+    fn btrfs_directory_is_descendant_of(
+        alloc: &BtrfsAllocState,
+        candidate: u64,
+        ancestor: u64,
+    ) -> ffs_error::Result<bool> {
+        const MAX_PARENT_DEPTH: usize = 4096;
+
+        let mut current = candidate;
+        let mut visited = BTreeSet::new();
+        for _ in 0..MAX_PARENT_DEPTH {
+            if current == ancestor {
+                return Ok(true);
+            }
+            if !visited.insert(current) {
+                return Err(FfsError::Corruption {
+                    block: 0,
+                    detail: format!("cycle in btrfs parent chain at objectid {current}"),
+                });
+            }
+            let Some(parent) = Self::btrfs_lookup_parent_checked(alloc, current)? else {
+                return Ok(false);
+            };
+            current = parent;
+        }
+
+        Err(FfsError::Corruption {
+            block: 0,
+            detail: format!(
+                "btrfs parent chain exceeded depth {MAX_PARENT_DEPTH} from objectid {candidate}"
+            ),
+        })
     }
 
     /// Update mtime and ctime of a btrfs inode.
@@ -36644,6 +36706,132 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found.ino, attr.ino);
+    }
+
+    #[test]
+    fn btrfs_write_rename_same_name_is_noop() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let attr = ops
+            .create(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("same.txt"),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create same-name source");
+
+        ops.rename(
+            &cx,
+            &mut RequestScope::empty(),
+            InodeNumber(1),
+            OsStr::new("same.txt"),
+            InodeNumber(1),
+            OsStr::new("same.txt"),
+        )
+        .expect("same-name rename is a successful no-op");
+
+        let found = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("same.txt"),
+            )
+            .expect("same-name entry remains");
+        assert_eq!(found.ino, attr.ino);
+    }
+
+    #[test]
+    fn btrfs_write_rename_missing_same_name_returns_enoent() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("missing.txt"),
+                InodeNumber(1),
+                OsStr::new("missing.txt"),
+            )
+            .expect_err("same-name rename still requires an existing source");
+        assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    #[test]
+    fn btrfs_write_rename_directory_into_own_child_returns_einval() {
+        let (fs, cx) = open_writable_btrfs();
+        let ops: &dyn FsOps = &fs;
+
+        let dir = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("cycle-dir"),
+                0o755,
+                0,
+                0,
+            )
+            .expect("mkdir source dir");
+        let child = ops
+            .mkdir(
+                &cx,
+                &mut RequestScope::empty(),
+                dir.ino,
+                OsStr::new("child"),
+                0o755,
+                0,
+                0,
+            )
+            .expect("mkdir child dir");
+
+        let err = ops
+            .rename(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("cycle-dir"),
+                child.ino,
+                OsStr::new("moved"),
+            )
+            .expect_err("btrfs must reject moving a directory below itself");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+
+        let dir_after = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(1),
+                OsStr::new("cycle-dir"),
+            )
+            .expect("source dir remains in root");
+        assert_eq!(dir_after.ino, dir.ino);
+        let child_after = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                dir.ino,
+                OsStr::new("child"),
+            )
+            .expect("child remains under source dir");
+        assert_eq!(child_after.ino, child.ino);
+        assert!(
+            ops.lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                child.ino,
+                OsStr::new("moved"),
+            )
+            .is_err(),
+            "failed descendant rename must not create destination entry"
+        );
     }
 
     #[test]

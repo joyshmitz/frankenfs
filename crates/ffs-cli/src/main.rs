@@ -6534,20 +6534,12 @@ mod tests {
         );
         let snapshot_root_ref = build_test_btrfs_root_ref("snap-home", ROOT_DIR_OBJECTID, 2);
 
+        // Btrfs leaf item keys must be strictly increasing by
+        // `(objectid, item_type, offset)`.
         write_btrfs_leaf_item(
             &mut image,
             root_leaf_offset,
             0,
-            subvol_id,
-            BTRFS_ITEM_ROOT_ITEM,
-            0,
-            SUBVOL_ROOT_ITEM_OFFSET,
-            u32::try_from(subvol_root_item.len()).expect("subvolume root item size should fit"),
-        );
-        write_btrfs_leaf_item(
-            &mut image,
-            root_leaf_offset,
-            1,
             BTRFS_FS_TREE_OBJECTID,
             ffs_btrfs::BTRFS_ITEM_ROOT_REF,
             subvol_id,
@@ -6557,22 +6549,32 @@ mod tests {
         write_btrfs_leaf_item(
             &mut image,
             root_leaf_offset,
-            2,
-            snapshot_id,
-            BTRFS_ITEM_ROOT_ITEM,
-            0,
-            SNAPSHOT_ROOT_ITEM_OFFSET,
-            u32::try_from(snapshot_root_item.len()).expect("snapshot root item size should fit"),
-        );
-        write_btrfs_leaf_item(
-            &mut image,
-            root_leaf_offset,
-            3,
+            1,
             BTRFS_FS_TREE_OBJECTID,
             ffs_btrfs::BTRFS_ITEM_ROOT_REF,
             snapshot_id,
             SNAPSHOT_ROOT_REF_OFFSET,
             u32::try_from(snapshot_root_ref.len()).expect("snapshot root ref size should fit"),
+        );
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf_offset,
+            2,
+            subvol_id,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            SUBVOL_ROOT_ITEM_OFFSET,
+            u32::try_from(subvol_root_item.len()).expect("subvolume root item size should fit"),
+        );
+        write_btrfs_leaf_item(
+            &mut image,
+            root_leaf_offset,
+            3,
+            snapshot_id,
+            BTRFS_ITEM_ROOT_ITEM,
+            0,
+            SNAPSHOT_ROOT_ITEM_OFFSET,
+            u32::try_from(snapshot_root_item.len()).expect("snapshot root item size should fit"),
         );
 
         let subvol_root_item_start =

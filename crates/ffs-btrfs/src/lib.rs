@@ -4242,6 +4242,23 @@ mod tests {
         block[base + 21..base + 25].copy_from_slice(&data_sz.to_le_bytes());
     }
 
+    fn write_leaf_item_payload(
+        block: &mut [u8],
+        idx: usize,
+        objectid: u64,
+        item_type: u8,
+        data_off: u32,
+        payload: &[u8],
+    ) {
+        let data_sz = u32::try_from(payload.len()).expect("test item payload length fits u32");
+        write_leaf_item(block, idx, objectid, item_type, data_off, data_sz);
+        let data_start = usize::try_from(data_off).expect("test data offset fits usize");
+        let data_end = data_start
+            .checked_add(payload.len())
+            .expect("test item payload end fits usize");
+        block[data_start..data_end].copy_from_slice(payload);
+    }
+
     /// Write an internal key-pointer entry at the given index.
     fn write_key_ptr(
         block: &mut [u8],
@@ -8050,34 +8067,49 @@ mod tests {
         leaf[inode_off as usize..(inode_off + 160) as usize].copy_from_slice(&inode_payload);
 
         // Inode 256 EXTENT_DATA at offset 0 (inline, 21 + 11 = 32 bytes)
-        let inline_payload = {
-            let mut p = vec![0_u8; 32];
-            p[20] = BTRFS_FILE_EXTENT_INLINE;
-            p[21..32].copy_from_slice(b"hello world");
-            p
-        };
+        let inline_payload = BtrfsExtentData::Inline {
+            generation: 0,
+            ram_bytes: 11,
+            compression: BTRFS_COMPRESS_NONE,
+            data: b"hello world".to_vec(),
+        }
+        .to_bytes();
         let ext0_off = 3000_u32;
-        write_leaf_item(&mut leaf, 1, 256, BTRFS_ITEM_EXTENT_DATA, ext0_off, 32);
+        write_leaf_item_payload(
+            &mut leaf,
+            1,
+            256,
+            BTRFS_ITEM_EXTENT_DATA,
+            ext0_off,
+            &inline_payload,
+        );
         // Set key offset to 0 (file offset)
         let base1 = HEADER_SIZE + ITEM_SIZE;
         leaf[base1 + 9..base1 + 17].copy_from_slice(&0_u64.to_le_bytes());
-        leaf[ext0_off as usize..(ext0_off + 32) as usize].copy_from_slice(&inline_payload);
 
         // Inode 256 EXTENT_DATA at offset 4096 (regular, 53 bytes)
-        let reg_payload = {
-            let mut p = vec![0_u8; 53];
-            p[20] = BTRFS_FILE_EXTENT_REG;
-            p[21..29].copy_from_slice(&0x10_000_u64.to_le_bytes()); // disk_bytenr
-            p[29..37].copy_from_slice(&4096_u64.to_le_bytes()); // disk_num_bytes
-            p[37..45].copy_from_slice(&0_u64.to_le_bytes()); // offset
-            p[45..53].copy_from_slice(&4096_u64.to_le_bytes()); // num_bytes
-            p
-        };
+        let reg_payload = BtrfsExtentData::Regular {
+            generation: 0,
+            ram_bytes: 4096,
+            extent_type: BTRFS_FILE_EXTENT_REG,
+            compression: BTRFS_COMPRESS_NONE,
+            disk_bytenr: 0x10_000,
+            disk_num_bytes: 4096,
+            extent_offset: 0,
+            num_bytes: 4096,
+        }
+        .to_bytes();
         let ext1_off = 3040_u32;
-        write_leaf_item(&mut leaf, 2, 256, BTRFS_ITEM_EXTENT_DATA, ext1_off, 53);
+        write_leaf_item_payload(
+            &mut leaf,
+            2,
+            256,
+            BTRFS_ITEM_EXTENT_DATA,
+            ext1_off,
+            &reg_payload,
+        );
         let base2 = HEADER_SIZE + 2 * ITEM_SIZE;
         leaf[base2 + 9..base2 + 17].copy_from_slice(&4096_u64.to_le_bytes());
-        leaf[ext1_off as usize..(ext1_off + 53) as usize].copy_from_slice(&reg_payload);
 
         // Inode 257 INODE_ITEM (unrelated)
         let ext2_off = 3400_u32;

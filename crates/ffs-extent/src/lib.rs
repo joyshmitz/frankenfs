@@ -1589,7 +1589,8 @@ ExtentMapping { logical_start: 5, physical_start: 134, count: 2, unwritten: true
         let result = map_logical_to_physical(&cx, &dev, &root, 0, 1);
         match result.expect_err("expected Corruption for zero-length extent") {
             FfsError::Corruption { detail, .. } => {
-                assert!(detail.contains("leaf extent with zero length"));
+                assert!(detail.contains("extent_entries.ee_len"));
+                assert!(detail.contains("extent length must be non-zero"));
             }
             other => assert!(
                 matches!(other, FfsError::Corruption { .. }),
