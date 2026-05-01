@@ -158,29 +158,120 @@ impl MountRuntimeConfig {
 struct MountBackgroundScrubConfig {
     enabled: bool,
     explicit: bool,
+    repair_writes_enabled: bool,
     interval_secs: u64,
     ledger_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MountAccessMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+impl MountAccessMode {
+    const fn from_read_write(read_write: bool) -> Self {
+        if read_write {
+            Self::ReadWrite
+        } else {
+            Self::ReadOnly
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MountBackgroundScrubMode {
+    Auto,
+    Enabled,
+    Disabled,
+    Conflicting,
+}
+
+impl MountBackgroundScrubMode {
+    const fn from_cli(background_scrub: bool, no_background_scrub: bool) -> Self {
+        match (background_scrub, no_background_scrub) {
+            (true, true) => Self::Conflicting,
+            (true, false) => Self::Enabled,
+            (false, true) => Self::Disabled,
+            (false, false) => Self::Auto,
+        }
+    }
+
+    const fn explicit(self) -> bool {
+        matches!(self, Self::Enabled | Self::Disabled | Self::Conflicting)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MountBackgroundRepairMode {
+    Disabled,
+    Enabled,
+}
+
+impl MountBackgroundRepairMode {
+    const fn from_cli(background_repair: bool) -> Self {
+        if background_repair {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+
+    const fn enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MountBackgroundScrubRequest {
+    access: MountAccessMode,
+    scrub: MountBackgroundScrubMode,
+    repair: MountBackgroundRepairMode,
+}
+
+impl MountBackgroundScrubRequest {
+    const fn new(
+        access_mode: MountAccessMode,
+        scrub_mode: MountBackgroundScrubMode,
+        repair_mode: MountBackgroundRepairMode,
+    ) -> Self {
+        Self {
+            access: access_mode,
+            scrub: scrub_mode,
+            repair: repair_mode,
+        }
+    }
+}
+
 impl MountBackgroundScrubConfig {
     fn resolve(
-        read_write: bool,
-        background_scrub: bool,
-        no_background_scrub: bool,
+        request: MountBackgroundScrubRequest,
         interval_secs: Option<u64>,
         ledger_path: Option<PathBuf>,
     ) -> Result<Self> {
-        if background_scrub && no_background_scrub {
+        if request.scrub == MountBackgroundScrubMode::Conflicting {
             bail!("--background-scrub and --no-background-scrub are mutually exclusive");
         }
-        let explicit = background_scrub || no_background_scrub;
-        let enabled = if background_scrub {
-            true
-        } else if no_background_scrub {
-            false
-        } else {
-            !read_write
+        let background_repair = request.repair.enabled();
+        if background_repair && request.scrub == MountBackgroundScrubMode::Disabled {
+            bail!("--background-repair cannot be combined with --no-background-scrub");
+        }
+        if background_repair && request.access == MountAccessMode::ReadWrite {
+            bail!(
+                "--background-repair currently requires a client read-only mount; omit --rw so repair writes cannot race mounted write traffic"
+            );
+        }
+        if background_repair && ledger_path.is_none() {
+            bail!("--background-repair requires --background-scrub-ledger for durable evidence");
+        }
+
+        let explicit = request.scrub.explicit() || background_repair;
+        let enabled = match request.scrub {
+            MountBackgroundScrubMode::Enabled => true,
+            MountBackgroundScrubMode::Auto => request.access == MountAccessMode::ReadOnly,
+            MountBackgroundScrubMode::Disabled | MountBackgroundScrubMode::Conflicting => false,
         };
+        let enabled = enabled || background_repair;
         if !enabled && interval_secs.is_some() {
             bail!("--background-scrub-interval-secs requires background scrub to be enabled");
         }
@@ -191,6 +282,7 @@ impl MountBackgroundScrubConfig {
         Ok(Self {
             enabled,
             explicit,
+            repair_writes_enabled: background_repair,
             interval_secs: interval_secs.unwrap_or(DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS),
             ledger_path,
         })
@@ -416,6 +508,13 @@ enum Command {
         /// Append background scrub evidence records to this JSONL file.
         #[arg(long = "background-scrub-ledger")]
         background_scrub_ledger: Option<PathBuf>,
+        /// Allow mounted background scrub to repair blocks and refresh repair symbols.
+        ///
+        /// This is an explicit backing-image mutation permission for client
+        /// read-only mounts. It requires `--background-scrub-ledger` so every
+        /// automatic repair attempt has a durable evidence trail.
+        #[arg(long = "background-repair", conflicts_with = "no_background_scrub")]
+        background_repair: bool,
         /// Enable native MVCC mode (allows repair symbols, version store, BLAKE3).
         ///
         /// By default FrankenFS mounts in compatibility mode where only standard
@@ -1416,6 +1515,7 @@ fn run() -> Result<()> {
             no_background_scrub,
             background_scrub_interval_secs,
             background_scrub_ledger,
+            background_repair,
             native,
             ext4_data_err_abort,
             ext4_nojournal_checksum,
@@ -1424,9 +1524,11 @@ fn run() -> Result<()> {
         } => {
             let btrfs_mount_selection = parse_btrfs_mount_selection(subvol, snapshot)?;
             let background_scrub = MountBackgroundScrubConfig::resolve(
-                rw,
-                background_scrub,
-                no_background_scrub,
+                MountBackgroundScrubRequest::new(
+                    MountAccessMode::from_read_write(rw),
+                    MountBackgroundScrubMode::from_cli(background_scrub, no_background_scrub),
+                    MountBackgroundRepairMode::from_cli(background_repair),
+                ),
                 background_scrub_interval_secs,
                 background_scrub_ledger,
             )?;
@@ -4331,15 +4433,56 @@ fn open_mount_background_scrub_ledger(
     }
 }
 
+fn ensure_mount_background_repair_write_access(image_path: &Path) -> Result<()> {
+    StdOpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image_path)
+        .map(drop)
+        .with_context(|| {
+            format!(
+                "background repair requires writable backing image access: {}",
+                image_path.display()
+            )
+        })
+}
+
+fn mount_background_repair_symbol_count(
+    groups: &[GroupConfig],
+    repair_writes_enabled: bool,
+) -> u32 {
+    if !repair_writes_enabled {
+        return 0;
+    }
+    groups
+        .iter()
+        .map(|group| group.layout.repair_block_count)
+        .max()
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MountBackgroundScrubThreadConfig<'a> {
+    interval: Duration,
+    ledger_path: Option<&'a Path>,
+    repair_writes_enabled: bool,
+    operation_id: &'a str,
+    scenario_id: &'a str,
+}
+
 fn run_mount_background_scrub_daemon(
     cx: &Cx,
     image_path: &Path,
     plan: MountBackgroundScrubPlan,
-    interval: Duration,
-    ledger_path: Option<&Path>,
-    operation_id: &str,
-    scenario_id: &str,
+    config: MountBackgroundScrubThreadConfig<'_>,
 ) -> Result<ScrubDaemonMetrics> {
+    let interval = config.interval;
+    let operation_id = config.operation_id;
+    let scenario_id = config.scenario_id;
+    let repair_writes_enabled = config.repair_writes_enabled;
+    if repair_writes_enabled {
+        ensure_mount_background_repair_write_access(image_path)?;
+    }
     let byte_dev = FileByteDevice::open(image_path).with_context(|| {
         format!(
             "failed to open image for background scrub: {}",
@@ -4353,16 +4496,18 @@ fn run_mount_background_scrub_daemon(
         )
     })?;
     let validator = scrub_validator(&plan.flavor, plan.block_size);
-    let ledger = open_mount_background_scrub_ledger(ledger_path)?;
+    let ledger = open_mount_background_scrub_ledger(config.ledger_path)?;
+    let repair_symbol_count =
+        mount_background_repair_symbol_count(&plan.groups, repair_writes_enabled);
     let pipeline = ScrubWithRecovery::new(
         &block_dev,
         validator.as_ref(),
         plan.fs_uuid,
         plan.groups,
         ledger,
-        0,
+        repair_symbol_count,
     )
-    .with_repair_writes_enabled(false);
+    .with_repair_writes_enabled(repair_writes_enabled);
     let mut daemon = ScrubDaemon::new(
         pipeline,
         ScrubDaemonConfig {
@@ -4376,7 +4521,7 @@ fn run_mount_background_scrub_daemon(
         operation_id,
         scenario_id,
         interval_secs = interval.as_secs(),
-        repair_writes_enabled = false,
+        repair_writes_enabled,
         "mount_background_scrub_thread_start"
     );
 
@@ -4420,6 +4565,12 @@ fn start_mount_background_scrub(
 
     let group_count = plan.groups.len();
     let block_size = plan.block_size;
+    let repair_writes_enabled = config.repair_writes_enabled;
+    let repair_symbol_count =
+        mount_background_repair_symbol_count(&plan.groups, repair_writes_enabled);
+    if repair_writes_enabled {
+        ensure_mount_background_repair_write_access(image_path)?;
+    }
     let interval = Duration::from_secs(config.interval_secs);
     let thread_cx = Cx::for_request();
     let guard_cx = thread_cx.clone();
@@ -4436,21 +4587,29 @@ fn start_mount_background_scrub(
         groups = group_count,
         block_size,
         interval_secs = config.interval_secs,
-        repair_writes_enabled = false,
+        repair_writes_enabled,
+        repair_symbol_count,
         "mount_background_scrub_start"
     );
 
     let handle = std::thread::Builder::new()
-        .name("ffs-mount-scrub".to_owned())
+        .name(if repair_writes_enabled {
+            "ffs-mount-repair".to_owned()
+        } else {
+            "ffs-mount-scrub".to_owned()
+        })
         .spawn(move || {
             run_mount_background_scrub_daemon(
                 &thread_cx,
                 &image_path,
                 plan,
-                interval,
-                ledger_path.as_deref(),
-                &thread_operation_id,
-                &thread_scenario_id,
+                MountBackgroundScrubThreadConfig {
+                    interval,
+                    ledger_path: ledger_path.as_deref(),
+                    repair_writes_enabled,
+                    operation_id: &thread_operation_id,
+                    scenario_id: &thread_scenario_id,
+                },
             )
         })
         .context("failed to spawn mount background scrub daemon")?;
@@ -4485,7 +4644,8 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
         managed_unmount_timeout_secs = requested_runtime.managed_unmount_timeout_secs,
         allow_other = options.allow_other,
         auto_unmount,
-        read_write = options.read_write
+        read_write = options.read_write,
+        background_repair = options.background_scrub.repair_writes_enabled
     );
     let _command_guard = command_span.enter();
     let started = Instant::now();
@@ -5845,15 +6005,16 @@ mod tests {
         BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_INODE_ITEM, BTRFS_ITEM_ROOT_ITEM, BtrfsInodeItem,
         BtrfsMountSelection, Cli, Command, DumpCommand, Ext4DataErrPolicy, Ext4JournalReplayMode,
         FsckCommandOptions, FsckFlags, InfoCommandOptions, InfoSections, LogFormat,
-        MAX_EXT4_INFO_GROUPS, MountBackgroundScrubConfig, MountCmdOptions, MountMode,
-        MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions, RepairFlags,
-        btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output, build_info_output,
-        build_mount_open_options, choose_btrfs_scrub_block_size, ext4_appears_clean_state,
-        ext4_mount_replay_mode, format_ratio_thousandths, log_mount_runtime_rejected,
-        log_mount_runtime_selected, mount_cmd, mount_operation_id, open_filesystem_for_mount,
-        parse_btrfs_mount_selection, read_ext4_group_desc_from_path, read_ext4_inode_from_path,
-        read_file_region, start_mount_background_scrub, summarize_repair_staleness,
-        unavailable_repair_info,
+        MAX_EXT4_INFO_GROUPS, MountAccessMode, MountBackgroundRepairMode,
+        MountBackgroundScrubConfig, MountBackgroundScrubMode, MountBackgroundScrubRequest,
+        MountCmdOptions, MountMode, MountRuntimeConfig, MountRuntimeMode, RepairCommandOptions,
+        RepairFlags, btrfs_chunk_type_flag_names, build_ext4_group_info, build_fsck_output,
+        build_info_output, build_mount_open_options, choose_btrfs_scrub_block_size,
+        ext4_appears_clean_state, ext4_mount_replay_mode, format_ratio_thousandths,
+        log_mount_runtime_rejected, log_mount_runtime_selected, mount_cmd, mount_operation_id,
+        open_filesystem_for_mount, parse_btrfs_mount_selection, read_ext4_group_desc_from_path,
+        read_ext4_inode_from_path, read_file_region, start_mount_background_scrub,
+        summarize_repair_staleness, unavailable_repair_info,
     };
     use crate::cmd_evidence::{
         EvidenceHistogramBucket, EvidenceHistogramSnapshot, EvidenceMvccRuntimeMetricsSnapshot,
@@ -5884,6 +6045,7 @@ mod tests {
         MountBackgroundScrubConfig {
             enabled: false,
             explicit: true,
+            repair_writes_enabled: false,
             interval_secs: super::DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS,
             ledger_path: None,
         }
@@ -7869,10 +8031,19 @@ mod tests {
 
     #[test]
     fn mount_background_scrub_defaults_to_read_only_auto() {
-        let cfg = MountBackgroundScrubConfig::resolve(false, false, false, None, None)
-            .expect("read-only default should resolve");
+        let cfg = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadOnly,
+                MountBackgroundScrubMode::Auto,
+                MountBackgroundRepairMode::Disabled,
+            ),
+            None,
+            None,
+        )
+        .expect("read-only default should resolve");
         assert!(cfg.enabled);
         assert!(!cfg.explicit);
+        assert!(!cfg.repair_writes_enabled);
         assert_eq!(
             cfg.interval_secs,
             super::DEFAULT_MOUNT_BACKGROUND_SCRUB_INTERVAL_SECS
@@ -7882,32 +8053,52 @@ mod tests {
 
     #[test]
     fn mount_background_scrub_defaults_off_for_read_write() {
-        let cfg = MountBackgroundScrubConfig::resolve(true, false, false, None, None)
-            .expect("read-write default should resolve");
+        let cfg = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadWrite,
+                MountBackgroundScrubMode::Auto,
+                MountBackgroundRepairMode::Disabled,
+            ),
+            None,
+            None,
+        )
+        .expect("read-write default should resolve");
         assert!(!cfg.enabled);
         assert!(!cfg.explicit);
+        assert!(!cfg.repair_writes_enabled);
     }
 
     #[test]
     fn mount_background_scrub_flag_forces_read_write_detection() {
         let cfg = MountBackgroundScrubConfig::resolve(
-            true,
-            true,
-            false,
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadWrite,
+                MountBackgroundScrubMode::Enabled,
+                MountBackgroundRepairMode::Disabled,
+            ),
             Some(11),
             Some(PathBuf::from("/tmp/ffs-scrub.jsonl")),
         )
         .expect("explicit background scrub should resolve");
         assert!(cfg.enabled);
         assert!(cfg.explicit);
+        assert!(!cfg.repair_writes_enabled);
         assert_eq!(cfg.interval_secs, 11);
         assert_eq!(cfg.ledger_path, Some(PathBuf::from("/tmp/ffs-scrub.jsonl")));
     }
 
     #[test]
     fn mount_background_scrub_rejects_disabled_interval() {
-        let err = MountBackgroundScrubConfig::resolve(false, false, true, Some(3), None)
-            .expect_err("disabled scrub cannot accept an interval");
+        let err = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadOnly,
+                MountBackgroundScrubMode::Disabled,
+                MountBackgroundRepairMode::Disabled,
+            ),
+            Some(3),
+            None,
+        )
+        .expect_err("disabled scrub cannot accept an interval");
         assert!(
             err.to_string()
                 .contains("--background-scrub-interval-secs requires background scrub")
@@ -7916,8 +8107,16 @@ mod tests {
 
     #[test]
     fn mount_background_scrub_rejects_read_write_interval_without_opt_in() {
-        let err = MountBackgroundScrubConfig::resolve(true, false, false, Some(3), None)
-            .expect_err("read-write mount requires explicit scrub opt-in for interval");
+        let err = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadWrite,
+                MountBackgroundScrubMode::Auto,
+                MountBackgroundRepairMode::Disabled,
+            ),
+            Some(3),
+            None,
+        )
+        .expect_err("read-write mount requires explicit scrub opt-in for interval");
         assert!(
             err.to_string()
                 .contains("--background-scrub-interval-secs requires background scrub")
@@ -7927,9 +8126,11 @@ mod tests {
     #[test]
     fn mount_background_scrub_rejects_read_write_ledger_without_opt_in() {
         let err = MountBackgroundScrubConfig::resolve(
-            true,
-            false,
-            false,
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadWrite,
+                MountBackgroundScrubMode::Auto,
+                MountBackgroundRepairMode::Disabled,
+            ),
             None,
             Some(PathBuf::from("/tmp/scrub.jsonl")),
         )
@@ -7937,6 +8138,82 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("--background-scrub-ledger requires background scrub")
+        );
+    }
+
+    #[test]
+    fn mount_background_repair_implies_scrub_for_read_only_mount() {
+        let cfg = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadOnly,
+                MountBackgroundScrubMode::Auto,
+                MountBackgroundRepairMode::Enabled,
+            ),
+            Some(7),
+            Some(PathBuf::from("/tmp/ffs-repair.jsonl")),
+        )
+        .expect("background repair should imply scrub");
+        assert!(cfg.enabled);
+        assert!(cfg.explicit);
+        assert!(cfg.repair_writes_enabled);
+        assert_eq!(cfg.interval_secs, 7);
+        assert_eq!(
+            cfg.ledger_path,
+            Some(PathBuf::from("/tmp/ffs-repair.jsonl"))
+        );
+    }
+
+    #[test]
+    fn mount_background_repair_rejects_missing_ledger() {
+        let err = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadOnly,
+                MountBackgroundScrubMode::Auto,
+                MountBackgroundRepairMode::Enabled,
+            ),
+            None,
+            None,
+        )
+        .expect_err("background repair needs durable evidence");
+        assert!(
+            err.to_string()
+                .contains("--background-repair requires --background-scrub-ledger")
+        );
+    }
+
+    #[test]
+    fn mount_background_repair_rejects_no_background_scrub() {
+        let err = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadOnly,
+                MountBackgroundScrubMode::Disabled,
+                MountBackgroundRepairMode::Enabled,
+            ),
+            None,
+            Some(PathBuf::from("/tmp/ffs-repair.jsonl")),
+        )
+        .expect_err("background repair cannot disable scrub");
+        assert!(
+            err.to_string()
+                .contains("--background-repair cannot be combined")
+        );
+    }
+
+    #[test]
+    fn mount_background_repair_rejects_read_write_mount() {
+        let err = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadWrite,
+                MountBackgroundScrubMode::Auto,
+                MountBackgroundRepairMode::Enabled,
+            ),
+            None,
+            Some(PathBuf::from("/tmp/ffs-repair.jsonl")),
+        )
+        .expect_err("background repair must not race mounted writes");
+        assert!(
+            err.to_string()
+                .contains("--background-repair currently requires a client read-only mount")
         );
     }
 
@@ -7949,8 +8226,16 @@ mod tests {
             let open_fs =
                 super::OpenFs::open_with_options(&cx, &path, &super::OpenOptions::default())
                     .expect("test ext4 image should open");
-            let cfg = MountBackgroundScrubConfig::resolve(false, true, false, Some(1), None)
-                .expect("background scrub config should resolve");
+            let cfg = MountBackgroundScrubConfig::resolve(
+                MountBackgroundScrubRequest::new(
+                    MountAccessMode::ReadOnly,
+                    MountBackgroundScrubMode::Enabled,
+                    MountBackgroundRepairMode::Disabled,
+                ),
+                Some(1),
+                None,
+            )
+            .expect("background scrub config should resolve");
             let mut guard = start_mount_background_scrub(
                 &path,
                 &open_fs,
@@ -9306,6 +9591,7 @@ mod tests {
                 no_background_scrub,
                 background_scrub_interval_secs,
                 background_scrub_ledger,
+                background_repair,
                 native,
                 ..
             } => {
@@ -9322,6 +9608,7 @@ mod tests {
                     background_scrub_ledger,
                     Some(PathBuf::from("/tmp/scrub.jsonl"))
                 );
+                assert!(!background_repair);
                 assert!(!native);
             }
             other => assert!(
@@ -9348,6 +9635,7 @@ mod tests {
                 no_background_scrub,
                 background_scrub_interval_secs,
                 background_scrub_ledger,
+                background_repair,
                 native,
                 ..
             } => {
@@ -9361,7 +9649,40 @@ mod tests {
                 assert!(!no_background_scrub);
                 assert_eq!(background_scrub_interval_secs, None);
                 assert_eq!(background_scrub_ledger, None);
+                assert!(!background_repair);
                 assert!(!native);
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn cli_parses_mount_background_repair_flag() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "mount",
+            "--background-repair",
+            "--background-scrub-ledger",
+            "/tmp/repair.jsonl",
+            "/tmp/fs.img",
+            "/tmp/mnt",
+        ])
+        .expect("mount command with background repair should parse");
+
+        match cli.command {
+            Command::Mount {
+                background_repair,
+                background_scrub_ledger,
+                ..
+            } => {
+                assert!(background_repair);
+                assert_eq!(
+                    background_scrub_ledger,
+                    Some(PathBuf::from("/tmp/repair.jsonl"))
+                );
             }
             other => assert!(
                 matches!(other, Command::Mount { .. }),

@@ -4,9 +4,11 @@
 
 > **Status note (2026-05-01):** The architecture map describes the implemented
 > crate topology and target boundaries. Current reality-check bridge work outside
-> the tracked parity denominator is recorded in `bd-rchk1` through `bd-rchk7`;
-> in particular, mounted self-healing policy (`bd-rchk6`) must reconcile target
-> automatic repair language with the current detection-only mounted scrub path.
+> the tracked parity denominator is recorded in `bd-rchk1` through `bd-rchk7`.
+> Mounted self-healing now has an explicit repair-enabled read-only mount mode
+> (`--background-repair --background-scrub-ledger <jsonl>`); read-write mounted
+> automatic repair remains scoped out until repair writeback is serialized with
+> client write traffic.
 
 ---
 

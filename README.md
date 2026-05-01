@@ -32,7 +32,7 @@
 | What | How | Why it matters |
 |------|-----|----------------|
 | **Block-level MVCC** | Version chains per block, snapshot isolation, adaptive conflict policy (Strict/SafeMerge/Adaptive with expected-loss decision model) | Concurrent readers + writers without the JBD2 global lock. Safe-merge proofs allow non-conflicting concurrent writes to the same block. |
-| **RaptorQ self-healing** | Fountain-coded repair symbols (RFC 6330), Bayesian durability autopilot, adaptive refresh (age + block-count hybrid trigger), scrub-and-recover pipeline | Corruption can be detected and repaired via the `ffs repair` / `ffs fsck` CLI path today; `ffs mount` now owns a detection-only `ScrubDaemon` lifecycle for read-only mounts by default, with explicit `--background-scrub` / `--no-background-scrub` controls. Stale-window SLO monitoring. |
+| **RaptorQ self-healing** | Fountain-coded repair symbols (RFC 6330), Bayesian durability autopilot, adaptive refresh (age + block-count hybrid trigger), scrub-and-recover pipeline | Corruption can be detected and repaired via the `ffs repair` / `ffs fsck` CLI path today; `ffs mount` now owns the `ScrubDaemon` lifecycle for read-only mounts by default and can run real automatic repair when explicitly started with `--background-repair --background-scrub-ledger <jsonl>`. Stale-window SLO monitoring. |
 | **Writeback-cache readiness** | Epoch-based commit barriers with per-inode deferred visibility, 12-scenario crash consistency proof | Future FUSE writeback-cache enablement without violating MVCC snapshot isolation or durability guarantees. |
 | **Memory safety** | `#![forbid(unsafe_code)]` at every crate root, Rust 2024 edition | Eliminates the buffer overflows and use-after-free bugs that plague kernel C filesystem code. |
 | **Userspace FUSE** | Runs as a normal process via FUSE | Debug with standard tools. No kernel module loading. No reboot-on-crash. |
@@ -270,7 +270,7 @@ For multi-threaded workloads, `ShardedMvccStore` partitions version chains acros
 
 ## Deep Dive: Self-Healing Durability
 
-FrankenFS can detect corruption during scrub cycles and recover corrupted data from fountain-coded repair symbols through the explicit `ffs repair` / `ffs fsck --repair` paths. The `ffs mount` path also owns a detection-only background scrub lifecycle for read-only mounts, so mount-time monitoring can surface corruption without mutating image data or repair-symbol state.
+FrankenFS can detect corruption during scrub cycles and recover corrupted data from fountain-coded repair symbols through the explicit `ffs repair` / `ffs fsck --repair` paths. The `ffs mount` path also owns the background scrub lifecycle for read-only mounts: by default it remains detection-only, and `--background-repair --background-scrub-ledger <jsonl>` explicitly grants the daemon permission to write recovered blocks and refreshed repair symbols while recording a durable evidence trail.
 
 ### RaptorQ Fountain Codes (RFC 6330)
 
@@ -835,7 +835,7 @@ Each inode includes a CRC32c checksum (`i_checksum_lo` + `i_checksum_hi`) comput
 
 ## Deep Dive: Background Scrub Pipeline
 
-The scrub pipeline (`ffs-repair::pipeline`) scans block integrity, emits evidence for detected corruption, and orchestrates recovery when it is run in repair-enabled mode. Mount-time background scrub uses the same pipeline in detection-only mode, leaving block repair and repair-symbol refresh to explicit `ffs repair` / `ffs fsck --repair` operations.
+The scrub pipeline (`ffs-repair::pipeline`) scans block integrity, emits evidence for detected corruption, and orchestrates recovery when it is run in repair-enabled mode. Mount-time background scrub uses the same pipeline in detection-only mode by default; adding `--background-repair --background-scrub-ledger <jsonl>` turns on the pipeline's real recovery/writeback path for client read-only mounts, including repair-symbol refresh after successful recovery. Read-write mounts still reject this flag until mounted write traffic and repair writeback share a single serialization point.
 
 ### Scrub Cycle
 
@@ -1226,6 +1226,9 @@ cargo run -p ffs-cli -- dump dir 2 <image-path> --json
 # Mount an ext4 or btrfs image via FUSE (default read-only)
 cargo run -p ffs-cli -- mount <image-path> <mountpoint>
 
+# Enable automatic mounted repair for a client read-only mount
+cargo run -p ffs-cli -- mount <image-path> <mountpoint> --background-repair --background-scrub-ledger repair.jsonl
+
 # Enable experimental read-write mode
 cargo run -p ffs-cli -- mount <image-path> <mountpoint> --rw
 
@@ -1349,7 +1352,7 @@ These items sit outside the tracked 97-row parity denominator and are the curren
 | `bd-rchk3` | xfstests | Fresh 2026-05-01 subset/regression gate recorded; real execution is blocked by unbuilt xfstests helpers and a dpkg lock blocking `xfslibs-dev`/`libaio-dev` install |
 | `bd-rchk4` | Mounted FUSE CI | Ensure critical mounted ext4/btrfs paths run in a permissioned CI or RCH workflow instead of silently soft-skipping |
 | `bd-rchk5` | Performance | Re-measure representative throughput/latency targets and record environment metadata |
-| `bd-rchk6` | Mounted self-healing | Decide and implement, or explicitly scope, automatic mounted repair versus detection-only scrub |
+| `bd-rchk6` | Mounted self-healing | Automatic mounted repair is implemented for explicit client read-only `--background-repair` mounts; read-write automatic repair remains intentionally blocked until repair writeback is serialized with mounted write traffic |
 | `bd-rchk7` | Fuzz/conformance | Replace remaining open-ended corpus notes with completed fixtures or narrow beads |
 
 See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [PLAN_TO_PORT_FRANKENFS_TO_RUST.md](PLAN_TO_PORT_FRANKENFS_TO_RUST.md) for the 9-phase roadmap.
@@ -1386,7 +1389,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 - **Runtime is still early-stage.** Full tracked parity means the current V1 matrix is implemented and tested; it does not mean operational hardening, performance tuning, or future-scope features are finished. Mount/write paths should still be treated as experimental in operational environments.
 - **Kernel FUSE writeback-cache mode is intentionally unsupported in V1.x.** The epoch barrier design is implemented and crash-tested, but `writeback_cache` is not enabled in mount options. `flush` is a non-durability lifecycle hook; `fsync` / `fsyncdir` are the explicit durability boundaries.
 - **Default CLI mount path does not enable optional backpressure/per-core scheduling hooks.** `ffs-cli mount` currently uses the standard `ffs-fuse` mount path without wiring `BackpressureGate` controls.
-- **Mount background scrub is detection-only in V1.x.** `ffs mount` starts `ffs-repair::ScrubDaemon` automatically for default read-only mounts, owns cancellation through the mount lifecycle, and joins the worker on shutdown. Read-write mounts keep the daemon disabled by default; `--background-scrub` can opt into detection-only monitoring, `--no-background-scrub` disables the read-only default, and `--background-scrub-ledger` records evidence JSONL. RaptorQ symbol writes and block repair remain explicit `ffs repair` / `ffs fsck --repair` operations.
+- **Mount background scrub is detection-only by default, with explicit automatic repair available.** `ffs mount` starts `ffs-repair::ScrubDaemon` automatically for default read-only mounts, owns cancellation through the mount lifecycle, and joins the worker on shutdown. Read-write mounts keep the daemon disabled by default; `--background-scrub` can opt into detection-only monitoring, `--no-background-scrub` disables the read-only default, and `--background-scrub-ledger` records evidence JSONL. `--background-repair --background-scrub-ledger <jsonl>` enables real block recovery and repair-symbol refresh for client read-only mounts after checking writable backing-image access. `--background-repair` is rejected with `--rw` until repair writeback is serialized through the mounted write path.
 - **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.
 - **Legacy reference corpus is not included.** The Linux kernel ext4/btrfs source used for behavioral extraction (~205K lines) is gitignored due to size. The extracted behavioral contracts are fully captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md). For the original source, see `git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git` at tag v6.19.
 
