@@ -658,11 +658,12 @@ pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32
     let mut reserved = Vec::new();
     // s_first_ino is 1-based. Reserved are [1, first_inode).
     // Bitmap indices are 0-based: [0, first_inode - 1).
-    let limit = geo.first_inode.saturating_sub(1);
+    let limit = geo
+        .first_inode
+        .saturating_sub(1)
+        .min(geo.inodes_in_group(group));
     for i in 0..limit {
-        if i < geo.inodes_per_group {
-            reserved.push(i);
-        }
+        reserved.push(i);
     }
     reserved
 }
@@ -1460,6 +1461,11 @@ fn try_alloc_inode_in_group(
         return Ok(None);
     }
 
+    let inodes_in_group = geo.inodes_in_group(group);
+    if inodes_in_group == 0 {
+        return Ok(None);
+    }
+
     let gs = &groups[gidx];
     if gs.free_inodes == 0 {
         return Ok(None);
@@ -1474,15 +1480,22 @@ fn try_alloc_inode_in_group(
         bitmap_set(&mut bitmap, r);
     }
 
-    let found = bitmap_find_free(&bitmap, geo.inodes_per_group, 0);
+    let found = bitmap_find_free(&bitmap, inodes_in_group, 0);
     if let Some(idx) = found {
+        // Compute absolute inode number: group * inodes_per_group + idx + 1.
+        let ino = u64::from(group.0) * u64::from(geo.inodes_per_group) + u64::from(idx) + 1;
+        if ino > u64::from(geo.total_inodes) {
+            return Err(FfsError::Corruption {
+                block: 0,
+                detail: format!("allocated inode {ino} exceeds total inode count"),
+            });
+        }
+
         bitmap_set(&mut bitmap, idx);
         dev.write_block(cx, gs.inode_bitmap_block, &bitmap)?;
 
         groups[gidx].free_inodes = groups[gidx].free_inodes.saturating_sub(1);
 
-        // Compute absolute inode number: group * inodes_per_group + idx + 1.
-        let ino = u64::from(group.0) * u64::from(geo.inodes_per_group) + u64::from(idx) + 1;
         Ok(Some(InodeAlloc {
             ino: InodeNumber(ino),
             group,
@@ -1582,6 +1595,12 @@ pub fn free_inode(
         block: 0,
         detail: "inode number 0 is invalid".into(),
     })?;
+    if ino.0 > u64::from(geo.total_inodes) {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("inode {} exceeds total inode count", ino.0),
+        });
+    }
     let group_idx_u64 = ino_zero / u64::from(geo.inodes_per_group);
     let group_idx = u32::try_from(group_idx_u64).map_err(|_| FfsError::Corruption {
         block: 0,
@@ -1595,6 +1614,16 @@ pub fn free_inode(
         return Err(FfsError::Corruption {
             block: 0,
             detail: format!("free_inode: group {group_idx} out of range"),
+        });
+    }
+    let inodes_in_group = geo.inodes_in_group(GroupNumber(group_idx));
+    if bit_idx >= inodes_in_group {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!(
+                "inode {} is outside group {group_idx} inode capacity",
+                ino.0
+            ),
         });
     }
 
@@ -2009,6 +2038,71 @@ mod tests {
 
         let result = alloc_inode(&cx, &dev, &geo, &mut groups, GroupNumber(0), false);
         assert!(matches!(result, Err(FfsError::NoSpace)));
+    }
+
+    #[test]
+    fn alloc_inode_allows_last_real_inode_in_short_final_group() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut geo = make_geometry();
+        geo.total_inodes = geo.inodes_per_group + 2;
+        let mut groups = make_groups(&geo);
+        for group in &mut groups {
+            group.free_inodes = 0;
+        }
+        groups[1].free_inodes = 1;
+
+        let mut bitmap = vec![0u8; 4096];
+        bitmap_set(&mut bitmap, 0);
+        dev.write_block(&cx, groups[1].inode_bitmap_block, &bitmap)
+            .unwrap();
+
+        let result = alloc_inode(&cx, &dev, &geo, &mut groups, GroupNumber(1), false).unwrap();
+        assert_eq!(result.group, GroupNumber(1));
+        assert_eq!(result.ino, InodeNumber(u64::from(geo.total_inodes)));
+    }
+
+    #[test]
+    fn alloc_inode_rejects_bits_past_short_final_group() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut geo = make_geometry();
+        geo.total_inodes = geo.inodes_per_group + 2;
+        let mut groups = make_groups(&geo);
+        for group in &mut groups {
+            group.free_inodes = 0;
+        }
+        groups[1].free_inodes = 1;
+
+        let mut bitmap = vec![0u8; 4096];
+        bitmap_set(&mut bitmap, 0);
+        bitmap_set(&mut bitmap, 1);
+        dev.write_block(&cx, groups[1].inode_bitmap_block, &bitmap)
+            .unwrap();
+
+        let result = alloc_inode(&cx, &dev, &geo, &mut groups, GroupNumber(1), false);
+        assert!(matches!(result, Err(FfsError::NoSpace)));
+    }
+
+    #[test]
+    fn free_inode_rejects_inode_past_total_count() {
+        let cx = test_cx();
+        let dev = MemBlockDevice::new(4096);
+        let mut geo = make_geometry();
+        geo.total_inodes = geo.inodes_per_group + 2;
+        let mut groups = make_groups(&geo);
+
+        let result = free_inode(
+            &cx,
+            &dev,
+            &geo,
+            &mut groups,
+            InodeNumber(u64::from(geo.total_inodes) + 1),
+        );
+        assert!(
+            matches!(result, Err(FfsError::Corruption { .. })),
+            "freeing an inode past s_inodes_count must be rejected"
+        );
     }
 
     #[test]
