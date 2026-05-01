@@ -3,12 +3,46 @@
 Initial baseline analysis for the curated xfstests subset against FrankenFS
 FUSE mount. Established 2026-03-18.
 
-> **Freshness note (2026-05-01):** This file is still the historical failure
-> taxonomy, not a fresh pass/fail baseline for the current tree. `bd-rchk3`
-> tracks rebuilding/running the xfstests subset and replacing this note with
-> dated command output and artifact paths. `bd-rchk4` tracks the permissioned
-> mounted-FUSE runner needed so critical mount-path coverage cannot silently rely
-> on local FUSE permissions.
+> **Freshness note (2026-05-01):** The curated subset was re-materialized and
+> regression-gated on the current tree, but a real pass/fail execution remains
+> blocked by the local xfstests checkout/tooling environment. The wrapper
+> selected all 11 tests, then `./check -n ...` stopped before execution because
+> `ltp/fsstress` is not built. Rebuilding xfstests stopped at missing
+> `<xfs/xfs.h>` (`xfslibs-dev`), and installing that dependency is currently
+> blocked by an existing `apt-get upgrade -y` process holding the dpkg frontend
+> lock. Treat the table below as the last executable taxonomy plus the dated
+> 2026-05-01 environment-blocked baseline attempt.
+
+## Fresh Baseline Attempt - 2026-05-01
+
+| Item | Result |
+|------|--------|
+| Commit | `8c0c969` (`main`) |
+| Host/kernel | `thinkstation1`, Linux `6.17.0-14-generic` |
+| Rust | `rustc 1.97.0-nightly (37d85e592 2026-04-28)` |
+| FUSE/tools preflight | `/dev/fuse` present, `fusermount3 3.17.4`, `mkfs.ext4`, `debugfs`, `xfs_io`, and `xfs_freeze` present |
+| xfstests checkout | `third_party/xfstests-dev/check` present |
+| Wrapper command | `XFSTESTS_MODE=auto XFSTESTS_DRY_RUN=1 XFSTESTS_STRICT=0 ./scripts/e2e/ffs_xfstests_e2e.sh` |
+| Wrapper artifacts | `artifacts/e2e/20260501_000535_ffs_xfstests_e2e/xfstests/{selected_tests.txt,summary.json,results.json,junit.xml,check.log}` |
+| Selected subset | 11 tests: 7 generic, 4 ext4 |
+| Wrapper outcome | `status=skipped`, `mode=run`, `dry_run=1`, `check_rc=1` |
+| Current counts | passed 0, failed 0, skipped 0, not_run 11 |
+| Immediate blocker | `check.log`: `fsstress not found or executable` |
+| xfstests build command | `make -C third_party/xfstests-dev` |
+| Build blocker | `FATAL ERROR: cannot find a valid <xfs/xfs.h> header file. Run "make install-dev" from the xfsprogs source.` |
+| Package install blocker | `sudo apt-get install -y xfslibs-dev libaio-dev` could not acquire `/var/lib/dpkg/lock-frontend`; lock held by PID `1500480` running `apt-get upgrade -y` |
+| Regression gate command | `XFSTESTS_RESULTS_JSON=artifacts/e2e/20260501_000535_ffs_xfstests_e2e/xfstests/results.json XFSTESTS_STRICT=0 ./scripts/e2e/ffs_xfstests_regression_gate.sh` |
+| Regression gate artifacts | `artifacts/e2e/20260501_000725_ffs_xfstests_regression_gate/regression_gate/gate_report.json` |
+| Regression gate outcome | PASS: compared 11 tests, unchanged 3, new passes 0, regressions 0 |
+
+**Classification:** environment/tooling blocked, not a product failure. No
+FrankenFS pass/fail signal was produced because xfstests stopped before running
+the selected cases.
+
+**Next required run:** after the package lock clears, install `xfslibs-dev` and
+`libaio-dev`, rerun `make -C third_party/xfstests-dev`, provide a non-destructive
+`local.config`/loop-image setup for `TEST_DEV` and `SCRATCH_DEV`, then rerun the
+wrapper with `XFSTESTS_DRY_RUN=0`.
 
 ## Status Summary
 

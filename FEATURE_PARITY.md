@@ -344,7 +344,7 @@ project can honestly claim operational readiness beyond the current V1 contract.
 |------|------|--------|
 | `bd-rchk1` | Docs/status reconciliation | Complete: canonical docs separate tracked parity from runtime readiness |
 | `bd-rchk2` | btrfs delayed-reference semantics | Complete: `DISC-004` accepted as a scoped V1 model with retry-safe failed-flush and overflow coverage |
-| `bd-rchk3` | xfstests baseline | Open: run a fresh dated baseline and classify failures |
+| `bd-rchk3` | xfstests baseline | In progress: 2026-05-01 subset/regression gate recorded; real execution blocked by unbuilt xfstests helpers and a dpkg lock blocking `xfslibs-dev`/`libaio-dev` install |
 | `bd-rchk4` | CI-compatible mounted FUSE coverage | Open: make critical mounted-path tests run in a permissioned environment with explicit skip diagnostics |
 | `bd-rchk5` | Performance baselines | Open: re-measure throughput/latency claims against current code |
 | `bd-rchk6` | Mounted self-healing lifecycle | Open: align spec/README/code on automatic repair versus detection-only scrub |

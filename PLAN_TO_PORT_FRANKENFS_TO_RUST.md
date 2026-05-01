@@ -52,7 +52,7 @@ operational readiness.
 
 - [x] `bd-rchk1` docs/status reconciliation: keep README, feature parity, spec, conformance notes, discrepancy notes, xfstests notes, and tracker wording explicit about tracked parity versus runtime readiness.
 - [x] `bd-rchk2` btrfs delayed refs: resolve `DISC-004` with executable evidence, or narrow it into accepted/split follow-up work.
-- [ ] `bd-rchk3` xfstests baseline: run a fresh dated baseline, capture commands/artifacts, and turn real failures into beads.
+- [ ] `bd-rchk3` xfstests baseline: run a fresh dated baseline, capture commands/artifacts, and turn real failures into beads. 2026-05-01 status: subset/regression gate is documented, but real execution is blocked by unbuilt xfstests helpers and the current dpkg lock blocking `xfslibs-dev`/`libaio-dev` install.
 - [ ] `bd-rchk4` mounted FUSE CI: make critical mounted ext4/btrfs paths run in a permissioned CI or RCH workflow, with visible skip diagnostics when local FUSE permissions are absent.
 - [ ] `bd-rchk5` performance baselines: re-measure representative throughput/latency targets against current code and record environment metadata.
 - [ ] `bd-rchk6` mounted self-healing lifecycle: decide and implement automatic mounted repair, or explicitly narrow V1.x to detection-only scrub plus explicit repair commands.
