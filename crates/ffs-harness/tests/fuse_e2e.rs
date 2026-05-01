@@ -5709,6 +5709,16 @@ fn fuse_rename_same_name_is_noop() {
 }
 
 #[test]
+fn fuse_rename_directory_into_own_child_reports_einval() {
+    with_rw_mount(|mnt| {
+        assert_rename_directory_into_own_child_reports_einval(
+            mnt,
+            "ext4_rw_rename_directory_into_own_child_errno_einval",
+        );
+    });
+}
+
+#[test]
 fn fuse_rename_file_directory_type_mismatch_reports_eisdir_and_enotdir() {
     with_rw_mount(|mnt| {
         assert_rename_file_directory_type_mismatch_contract(
