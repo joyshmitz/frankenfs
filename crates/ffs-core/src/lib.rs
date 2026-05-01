@@ -5108,6 +5108,49 @@ impl OpenFs {
         })
     }
 
+    fn btrfs_checked_chunk_available(chunk_end: u64, logical: u64) -> Result<u64, FfsError> {
+        let available = chunk_end
+            .checked_sub(logical)
+            .ok_or_else(|| FfsError::Corruption {
+                block: logical,
+                detail: "btrfs chunk end precedes logical bytenr".into(),
+            })?;
+        if available == 0 {
+            return Err(FfsError::Corruption {
+                block: logical,
+                detail: "btrfs chunk contains no bytes at logical bytenr".into(),
+            });
+        }
+        Ok(available)
+    }
+
+    fn btrfs_checked_physical_offset(base: u64, pos: usize) -> Result<u64, FfsError> {
+        let delta = u64::try_from(pos).map_err(|_| FfsError::Corruption {
+            block: base,
+            detail: "btrfs physical position does not fit u64".into(),
+        })?;
+        base.checked_add(delta).ok_or_else(|| FfsError::Corruption {
+            block: base,
+            detail: "btrfs physical address overflow".into(),
+        })
+    }
+
+    fn btrfs_checked_physical_span(base: u64, len: usize) -> Result<(), FfsError> {
+        if len == 0 {
+            return Ok(());
+        }
+        Self::btrfs_checked_physical_offset(base, len - 1).map(|_| ())
+    }
+
+    fn btrfs_checked_logical_advance(logical: u64, amount: u64) -> Result<u64, FfsError> {
+        logical
+            .checked_add(amount)
+            .ok_or_else(|| FfsError::Corruption {
+                block: logical,
+                detail: "btrfs logical address overflow".into(),
+            })
+    }
+
     #[expect(clippy::cast_possible_truncation)]
     fn btrfs_write_logical(&self, cx: &Cx, mut logical: u64, data: &[u8]) -> Result<(), FfsError> {
         let ctx = self
@@ -5134,16 +5177,17 @@ impl OpenFs {
                 })?;
 
             let chunk_end = self.btrfs_logical_chunk_end(logical)?;
-            let available_in_chunk = chunk_end.saturating_sub(logical);
+            let available_in_chunk = Self::btrfs_checked_chunk_available(chunk_end, logical)?;
             let to_write = (data_remaining.len() as u64).min(available_in_chunk);
             let to_write_usize = to_write as usize;
 
             let physical_offset = mapping.physical;
+            Self::btrfs_checked_physical_span(physical_offset, to_write_usize)?;
 
             // Handle unaligned start/end via read-modify-write.
             let mut pos = 0_usize;
             while pos < to_write_usize {
-                let current_phys = physical_offset.saturating_add(pos as u64);
+                let current_phys = Self::btrfs_checked_physical_offset(physical_offset, pos)?;
                 let block_num = BlockNumber(current_phys / block_size);
                 let block_offset = (current_phys % block_size) as usize;
                 let chunk_in_block = (to_write_usize - pos).min(bs_usize - block_offset);
@@ -5161,7 +5205,7 @@ impl OpenFs {
                 pos += chunk_in_block;
             }
 
-            logical = logical.saturating_add(to_write);
+            logical = Self::btrfs_checked_logical_advance(logical, to_write)?;
             data_remaining = &data_remaining[to_write_usize..];
         }
 
@@ -5198,16 +5242,17 @@ impl OpenFs {
                 })?;
 
             let chunk_end = self.btrfs_logical_chunk_end(logical)?;
-            let available_in_chunk = chunk_end.saturating_sub(logical);
+            let available_in_chunk = Self::btrfs_checked_chunk_available(chunk_end, logical)?;
             let to_read = (out.len() as u64).min(available_in_chunk);
             let to_read_usize = to_read as usize;
 
             let physical_offset = mapping.physical;
+            Self::btrfs_checked_physical_span(physical_offset, to_read_usize)?;
 
             // Handle unaligned start/end via block reads.
             let mut pos = 0_usize;
             while pos < to_read_usize {
-                let current_phys = physical_offset.saturating_add(pos as u64);
+                let current_phys = Self::btrfs_checked_physical_offset(physical_offset, pos)?;
                 let block_num = BlockNumber(current_phys / block_size);
                 let block_offset = (current_phys % block_size) as usize;
                 let chunk_in_block = (to_read_usize - pos).min(bs_usize - block_offset);
@@ -5219,7 +5264,7 @@ impl OpenFs {
                 pos += chunk_in_block;
             }
 
-            logical = logical.saturating_add(to_read);
+            logical = Self::btrfs_checked_logical_advance(logical, to_read)?;
             let next_out = &mut out[to_read_usize..];
             out = next_out;
         }
@@ -5549,7 +5594,12 @@ impl OpenFs {
                             block: 0,
                             detail: "inline extent length overflow".into(),
                         })?;
-                    let extent_end = logical_start.saturating_add(extent_len);
+                    let extent_end = (*logical_start).checked_add(extent_len).ok_or_else(|| {
+                        FfsError::Corruption {
+                            block: *logical_start,
+                            detail: "inline extent logical range overflow".into(),
+                        }
+                    })?;
                     let overlap_start = (*logical_start).max(offset);
                     let overlap_end = extent_end.min(read_end);
                     if overlap_start >= overlap_end {
@@ -5598,7 +5648,12 @@ impl OpenFs {
                     num_bytes,
                     ..
                 } => {
-                    let extent_end = logical_start.saturating_add(*num_bytes);
+                    let extent_end = (*logical_start).checked_add(*num_bytes).ok_or_else(|| {
+                        FfsError::Corruption {
+                            block: *logical_start,
+                            detail: "regular extent logical range overflow".into(),
+                        }
+                    })?;
                     let overlap_start = (*logical_start).max(offset);
                     let overlap_end = extent_end.min(read_end);
                     if overlap_start >= overlap_end {
@@ -25769,6 +25824,47 @@ mod tests {
         let ctx = fs.btrfs_context().unwrap();
         assert_eq!(ctx.nodesize, 4096);
         assert_eq!(ctx.chunks.len(), 1);
+    }
+
+    #[test]
+    fn btrfs_read_logical_rejects_physical_offset_overflow_before_io() {
+        let image = build_btrfs_fsops_image();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open btrfs image");
+        fs.btrfs_context.as_mut().expect("btrfs context").chunks[0].stripes[0].offset =
+            u64::MAX - 1;
+
+        let mut out = vec![0_u8; 4];
+        let err = fs
+            .btrfs_read_logical_into(&cx, 0, &mut out)
+            .expect_err("overflowing physical span should fail before block I/O");
+
+        assert!(
+            matches!(&err, FfsError::Corruption { detail, .. } if detail == "btrfs physical address overflow"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn btrfs_write_logical_rejects_physical_offset_overflow_before_io() {
+        let image = build_btrfs_fsops_image();
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open btrfs image");
+        fs.btrfs_context.as_mut().expect("btrfs context").chunks[0].stripes[0].offset =
+            u64::MAX - 1;
+
+        let err = fs
+            .btrfs_write_logical(&cx, 0, &[1, 2, 3, 4])
+            .expect_err("overflowing physical span should fail before block I/O");
+
+        assert!(
+            matches!(&err, FfsError::Corruption { detail, .. } if detail == "btrfs physical address overflow"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
