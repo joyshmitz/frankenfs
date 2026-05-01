@@ -164,6 +164,9 @@ inode/data and `st_nlink` remains 2.
 Mounted-path btrfs rename refusal coverage now also freezes exact `EISDIR` for
 file-over-directory overwrites and exact `ENOTDIR` for directory-over-file
 overwrites, with no root-entry, source-child, or file-byte drift.
+Mounted-path btrfs rename refusal coverage now also freezes exact `ENOTEMPTY`
+for rename-over-nonempty-directory attempts, with no root-entry, child-entry,
+or child-file drift after the rejected overwrite.
 Mounted-path btrfs cross-parent directory rename coverage now also freezes
 parent `st_nlink` accounting: moving a child directory decrements the source
 parent, increments the destination parent, and preserves the moved inode.
