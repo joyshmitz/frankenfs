@@ -44,6 +44,20 @@ Status legend: `[ ]` not started, `[~]` in progress, `[x]` complete.
 - [x] OQ4 closure (`bd-h6nz.6.4`): reject kernel FUSE `writeback_cache` mode for V1.x, define flush-vs-fsync durability boundaries explicitly, and bind the decision to structured sync log contracts plus deterministic E2E contract checks
 - [x] OQ5 closure (`bd-h6nz.6.5`): keep V1.x write-side repair single-host only, require a persistent per-image coordination record (`.<image>.ffs-repair-owner.json`), and bind the decision to CLI coordination tests plus log-contract E2E checks
 
+### 0.1.1 Reality-Check Bridge Backlog (2026-05-01)
+
+These items are outside the 97-row tracked V1 parity denominator, but they are
+required to keep the project status honest and to move from feature parity toward
+operational readiness.
+
+- [x] `bd-rchk1` docs/status reconciliation: keep README, feature parity, spec, conformance notes, discrepancy notes, xfstests notes, and tracker wording explicit about tracked parity versus runtime readiness.
+- [ ] `bd-rchk2` btrfs delayed refs: resolve `DISC-004` with executable evidence, or narrow it into accepted/split follow-up work.
+- [ ] `bd-rchk3` xfstests baseline: run a fresh dated baseline, capture commands/artifacts, and turn real failures into beads.
+- [ ] `bd-rchk4` mounted FUSE CI: make critical mounted ext4/btrfs paths run in a permissioned CI or RCH workflow, with visible skip diagnostics when local FUSE permissions are absent.
+- [ ] `bd-rchk5` performance baselines: re-measure representative throughput/latency targets against current code and record environment metadata.
+- [ ] `bd-rchk6` mounted self-healing lifecycle: decide and implement automatic mounted repair, or explicitly narrow V1.x to detection-only scrub plus explicit repair commands.
+- [ ] `bd-rchk7` fuzz/conformance expansion: replace remaining open-ended corpus expansion notes with completed fixtures or narrow beads.
+
 ### 0.2 `ffs-types` (Canonical Newtypes + Shared Parsing Primitives)
 
 - [x] Decide inode ID strategy: canonical `InodeNumber(u64)` in shared APIs, with format-boundary wrappers `Ext4InodeNumber(u32)` and `BtrfsObjectId(u64)` plus explicit conversion helpers/tests in `crates/ffs-types/src/lib.rs`
@@ -109,6 +123,12 @@ novel capabilities shared across both filesystems:
 2. **RaptorQ self-healing** -- fountain-code repair symbols are maintained per
    block group so that single- or multi-block corruption can be repaired
    automatically without external backups.
+
+Mounted automatic repair is the remaining policy/runtime reconciliation point:
+the current mounted scrub path is detection-only, while explicit write-side
+repair is available through `ffs repair` / `ffs fsck --repair`. `bd-rchk6`
+tracks either implementing automatic mounted repair or narrowing the V1.x
+mounted contract consistently.
 
 ### 1.1 Deliverable Summary
 

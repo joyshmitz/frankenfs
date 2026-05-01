@@ -33,6 +33,8 @@ This section records *current* (not historical) drift between this spec and the 
 - **ParseError -> FfsError context drift:** The crate boundary is now explicit: `ffs-ondisk` returns `ParseError` (pure parsing + checksum verification), while user-facing layers return `FfsError` and convert at the orchestration boundary (`ffs-core`). However, the conversion still lacks a structured context object (structure + offsets + inode/group) for actionable diagnostics. Track: `bd-2fy`.
 - **Missing normative traits (integration points):** Spec §8/§9/§14 define normative traits (repair manager, scrub progress, semantics ops) that are not yet fully present as explicit contracts in code (`crates/ffs-repair` now ships scrub/recovery pipelines and evidence wiring, and `crates/ffs-fuse` ships production mount scaffolding). Resolution: promote the remaining behavior to explicit trait contracts in the owning crates without creating dependency cycles, then migrate call sites to those contracts. Tracks: `bd-2l4`, `bd-3bf`, `bd-hv6`.
 - **Engine terminology drift:** This spec frequently uses `FrankenFsEngine` as the orchestration name. In current code, the active FUSE runtime path is `ffs-fuse -> ffs-core::FsOps` (currently `OpenFs`). Treat `FrankenFsEngine` mentions as conceptual/utility naming unless a section explicitly requires that concrete type. Track: `bd-vyt6`.
+- **Tracked parity vs runtime readiness:** `FEATURE_PARITY.md` now reports 97/97 tracked V1 rows complete. That is a denominator-scoped feature claim, not a production-readiness claim. Reality-check bridge items outside the parity denominator are tracked by `bd-rchk1` through `bd-rchk7` (docs/status, `DISC-004`, xfstests baseline, mounted FUSE CI, performance baselines, mounted self-healing lifecycle, and fuzz/conformance expansion).
+- **Mounted self-healing current behavior:** Sections that describe transparent online RaptorQ recovery remain target-state normative language. The current V1.x mounted runtime starts detection-only scrub for default read-only mounts and keeps repair-symbol writes/block repair as explicit `ffs repair` or `ffs fsck --repair` operations. `bd-rchk6` is the required reconciliation bead: either implement automatic mounted repair with tests and policy controls, or explicitly narrow the V1.x mounted contract everywhere this spec currently overstates it.
 
 ### 0.1.2 Audit Checklist (Mechanical)
 
@@ -120,6 +122,11 @@ RaptorQ is not optional. It is the **default substrate for block durability**:
 5. **Scrub is always running.** Region-scoped background task cycling through groups. Respects Cx cancellation and Budget.
 
 A block write that never triggers repair symbol refresh for its group is a spec-conformance bug.
+
+> **Current implementation boundary:** the CLI/offline repair path implements
+> write-side repair operations; the mounted background scrub path is
+> detection-only until `bd-rchk6` closes. Do not cite this subsection as proof
+> that automatic mounted repair is currently production-ready.
 
 ### 0.5 Table of Contents
 

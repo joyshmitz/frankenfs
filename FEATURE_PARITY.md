@@ -24,6 +24,11 @@
 > rejection. Unsupported operations that are intentionally part of the V1
 > surface therefore remain compatible with 100% tracked parity when their
 > rejection behavior is itself implemented and validated.
+>
+> **Boundary rule:** this table measures the tracked V1 feature denominator.
+> It does not certify production readiness, current xfstests pass rate,
+> performance targets, or every future hardening task. Those operational bridge
+> items are tracked separately in Section 4.
 
 ## 2. Tracked Capability Matrix
 
@@ -329,6 +334,22 @@ Legend: `✅` implemented.
 
 No blocking gaps in the tracked V1 parity matrix.
 
-## 4. Update Rule
+## 4. Operational Bridge Items Outside the Parity Denominator
+
+These items do not reduce the 97/97 tracked feature count because they are not
+additional rows in the current denominator. They are still required before this
+project can honestly claim operational readiness beyond the current V1 contract.
+
+| Bead | Area | Status |
+|------|------|--------|
+| `bd-rchk1` | Docs/status reconciliation | Complete: canonical docs separate tracked parity from runtime readiness |
+| `bd-rchk2` | btrfs delayed-reference semantics | Open: resolve `DISC-004` with implementation evidence or scoped divergence |
+| `bd-rchk3` | xfstests baseline | Open: run a fresh dated baseline and classify failures |
+| `bd-rchk4` | CI-compatible mounted FUSE coverage | Open: make critical mounted-path tests run in a permissioned environment with explicit skip diagnostics |
+| `bd-rchk5` | Performance baselines | Open: re-measure throughput/latency claims against current code |
+| `bd-rchk6` | Mounted self-healing lifecycle | Open: align spec/README/code on automatic repair versus detection-only scrub |
+| `bd-rchk7` | Fuzz/conformance expansion | Open: close or bead remaining open-ended corpus expansion notes |
+
+## 5. Update Rule
 
 Any change touching compatibility behavior MUST update this file in the same patch.

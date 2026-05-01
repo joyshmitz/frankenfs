@@ -2,6 +2,12 @@
 
 > 21-crate Cargo workspace architecture (19 core crates + 2 legacy/reference wrappers) for a memory-safe, FUSE-based Rust reimplementation of ext4 and btrfs with block-level MVCC and RaptorQ self-healing.
 
+> **Status note (2026-05-01):** The architecture map describes the implemented
+> crate topology and target boundaries. Current reality-check bridge work outside
+> the tracked parity denominator is recorded in `bd-rchk1` through `bd-rchk7`;
+> in particular, mounted self-healing policy (`bd-rchk6`) must reconcile target
+> automatic repair language with the current detection-only mounted scrub path.
+
 ---
 
 ## 1. Crate Map

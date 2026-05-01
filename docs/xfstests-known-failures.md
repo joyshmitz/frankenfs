@@ -3,6 +3,13 @@
 Initial baseline analysis for the curated xfstests subset against FrankenFS
 FUSE mount. Established 2026-03-18.
 
+> **Freshness note (2026-05-01):** This file is still the historical failure
+> taxonomy, not a fresh pass/fail baseline for the current tree. `bd-rchk3`
+> tracks rebuilding/running the xfstests subset and replacing this note with
+> dated command output and artifact paths. `bd-rchk4` tracks the permissioned
+> mounted-FUSE runner needed so critical mount-path coverage cannot silently rely
+> on local FUSE permissions.
+
 ## Status Summary
 
 | Test | Expected | Disposition | Root Cause Category |
@@ -155,15 +162,16 @@ Completed 2026-03-18. All 8 known failures investigated (100%).
 | ext4/013 | wont_fix | No | — | Requires raw device access (debugfs -w) |
 
 **Actionable items for future work:**
-1. Build xfstests-dev and validate generic/112 (likely_pass)
-2. Revisit ext4/001 only after identifying whether Linux forwards `FS_IOC_FIEMAP` to FUSE userspace at all
-3. Set up SCRATCH_DEV loop device infrastructure (unblocks ext4/003)
-4. Validate whether Linux forwards `EXT4_IOC_SETFLAGS` to FUSE userspace, ideally with a standalone libfuse reproducer (ext4/005)
+1. `bd-rchk3`: build xfstests-dev and validate generic/112 (likely_pass)
+2. `bd-rchk3`: rerun the passable subset and update this document with dated results
+3. `bd-rchk4`: revisit ext4/001 only after identifying whether Linux forwards `FS_IOC_FIEMAP` to FUSE userspace at all
+4. `bd-rchk3`: set up SCRATCH_DEV loop device infrastructure (unblocks ext4/003)
+5. `bd-rchk4`: validate whether Linux forwards `EXT4_IOC_SETFLAGS` to FUSE userspace, ideally with a standalone libfuse reproducer (ext4/005)
 
 ### Next Steps
 
-1. Install xfstests build dependencies and compile
-2. Create proper TEST_DEV/SCRATCH_DEV loop device setup
-3. Run passable subset (generic/001, generic/013, generic/035) to validate
-4. Validate generic/112 (reclassified as likely_pass)
-5. Update baseline with actual results
+1. `bd-rchk3`: install xfstests build dependencies and compile
+2. `bd-rchk3`: create proper TEST_DEV/SCRATCH_DEV loop device setup
+3. `bd-rchk3`: run passable subset (generic/001, generic/013, generic/035) to validate
+4. `bd-rchk3`: validate generic/112 (reclassified as likely_pass)
+5. `bd-rchk3`: update baseline with actual results

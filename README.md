@@ -1306,7 +1306,7 @@ cargo test --workspace
 
 ## Project Status
 
-FrankenFS is in **early development**. The tracked V1 parity matrix is complete (100%), meaning every item in [FEATURE_PARITY.md](FEATURE_PARITY.md)'s current denominator has an implemented and tested contract. Ongoing work is focused on operational hardening of three major subsystems that already reached verification-gate maturity:
+FrankenFS is in **early development**. The tracked V1 parity matrix is complete (100%), meaning every item in [FEATURE_PARITY.md](FEATURE_PARITY.md)'s current denominator has an implemented and tested contract. That is a feature-matrix claim, not a production-readiness claim: runtime hardening, fresh xfstests validation, CI-mounted coverage, performance baselines, and mounted self-healing policy still have their own bridge work tracked below. Ongoing work is focused on operational hardening of three major subsystems that already reached verification-gate maturity:
 
 | Subsystem | Status | Key metric |
 |-----------|--------|------------|
@@ -1336,15 +1336,21 @@ Rows in the btrfs experimental RW contract can still say `partially supported` o
 - **Writeback-cache:** Epoch-based commit barriers with per-inode staged/visible/durable tracking, deferred visibility for MVCC isolation, 12-scenario crash consistency proof, benchmark framework for barrier overhead measurement
 - **Observability:** Evidence ledger (23 event types, 5 presets), contention metrics (EMA conflict/merge/abort rates), policy-switch detection, structured logging across all subsystems
 - **CLI:** `inspect`, `mvcc-stats`, `info`, `dump`, `fsck`, `repair`, `mount`, `scrub`, `parity`, `evidence`, `mkfs`
-- **Testing:** 3,591+ tests across 21 crates, including property-based tests, crash matrices, 120-writer stress tests, and verification gates
+- **Testing:** 5,368+ `#[test]` / `proptest!` entries across 21 crates as of 2026-05-01, including property-based tests, crash matrices, 120-writer stress tests, and verification gates
 
 ### What's Next
 
-- Hot-path profiling and optimization (MVCC version chain pruning, extent tree caching, ARC hit rate)
-- xfstests conformance baseline and root cause analysis
-- CI-compatible FUSE E2E test runner
-- Fuzz corpus expansion for WAL/MVCC/extent paths
-- btrfs operational hardening for multi-device/subvolume paths and broader write-side coverage
+These items sit outside the tracked 97-row parity denominator and are the current reality-check bridge backlog:
+
+| Bead | Area | Current target |
+|------|------|----------------|
+| `bd-rchk1` | Docs/status reconciliation | Keep canonical docs explicit that tracked parity is complete while operational readiness work remains |
+| `bd-rchk2` | btrfs delayed refs | Resolve `DISC-004` with implementation evidence or a narrower accepted divergence |
+| `bd-rchk3` | xfstests | Run and publish a fresh dated baseline, then split real failures into follow-up beads |
+| `bd-rchk4` | Mounted FUSE CI | Ensure critical mounted ext4/btrfs paths run in a permissioned CI or RCH workflow instead of silently soft-skipping |
+| `bd-rchk5` | Performance | Re-measure representative throughput/latency targets and record environment metadata |
+| `bd-rchk6` | Mounted self-healing | Decide and implement, or explicitly scope, automatic mounted repair versus detection-only scrub |
+| `bd-rchk7` | Fuzz/conformance | Replace remaining open-ended corpus notes with completed fixtures or narrow beads |
 
 See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [PLAN_TO_PORT_FRANKENFS_TO_RUST.md](PLAN_TO_PORT_FRANKENFS_TO_RUST.md) for the 9-phase roadmap.
 

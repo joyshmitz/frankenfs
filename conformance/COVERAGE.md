@@ -80,7 +80,7 @@ None. All identified on-disk structures have conformance fixtures.
 ## Next Actions
 
 - [x] Add ext4_mmp_block.json fixture - DONE
-- [ ] Consider additional edge cases (malformed structures, boundary conditions)
+- [ ] Consider additional edge cases (malformed structures, boundary conditions) — tracked by `bd-rchk7`; split any concrete remaining parser/mutation surface into a narrow fixture or fuzz bead instead of leaving this as open-ended prose.
 - [x] Add ext4 superblock adversarial corpus entries for fuzzing - DONE
 - [x] Add ext4 inline-data adversarial corpus entries for fuzzing - DONE
 - [x] Add ext4 inode checksum adversarial corpus entries for fuzzing - DONE
@@ -113,8 +113,8 @@ None. All identified on-disk structures have conformance fixtures.
 - [x] Add btrfs COW internal-split success coverage - DONE
 - [x] Add btrfs COW left-borrow delete success coverage - DONE
 - [x] Add btrfs COW parent-rewrite update success coverage - DONE
-- [ ] Continue targeted adversarial corpus expansion for remaining mutation surfaces
+- [ ] Continue targeted adversarial corpus expansion for remaining mutation surfaces — tracked by `bd-rchk7`; close this only with executable fixture additions or linked follow-up beads for each remaining surface.
 
 ---
 
-*Last updated: 2026-04-18*
+*Last updated: 2026-05-01*

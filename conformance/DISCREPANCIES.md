@@ -33,9 +33,9 @@
 - **Reference:** Linux kernel queues all reference updates via delayed refs
 - **Our impl:** Simplified delayed ref handling without full queueing
 - **Impact:** Reference counting order may differ during heavy writes
-- **Resolution:** INVESTIGATING — may need improvement for correctness
+- **Resolution:** INVESTIGATING — `bd-rchk2` must either prove the current bounded queue/refcount model with executable heavy-write evidence, implement missing delayed-ref lifecycle behavior, or split/accept a narrower divergence.
 - **Tests affected:** btrfs_delayed_ref_* tests
-- **Review date:** 2026-04-01
+- **Review date:** 2026-05-01
 
 ### DISC-005: FUSE Protocol Version
 - **Reference:** Latest FUSE protocol supports up to 7.40
