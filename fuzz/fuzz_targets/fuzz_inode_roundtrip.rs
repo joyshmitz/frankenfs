@@ -118,66 +118,108 @@ fn build_synthetic_inode(
     let extra_isize = choose_extra_isize(cursor, inode_size);
     let xattr_capacity = inode_size.saturating_sub(128 + usize::from(extra_isize));
 
+    // The parser reads each extra-area field only when both
+    //   extra_end = 128 + extra_isize
+    // covers the field's tail AND inode_size is large enough. The
+    // serializer writes them when only inode_size is large enough — so
+    // an extra_isize too small to "advertise" a given field rounds the
+    // serialized value back to zero on parse. Build the synthetic shape
+    // to match the parser's read condition so the round-trip is
+    // bijective for any valid (inode_size, extra_isize) pair.
+    let extra_end: usize = 128 + usize::from(extra_isize);
+    let advertise = |needed_end: usize| -> bool { extra_end >= needed_end && inode_size >= needed_end };
+
     let atime = cursor.next_u32();
     let ctime = cursor.next_u32();
     let mtime = cursor.next_u32();
     let dtime = cursor.next_u32();
-    let crtime = if inode_size >= 0x98 {
+    let crtime = if advertise(0x94) {
         cursor.next_u32()
     } else {
         0
     };
 
+    // On disk, `blocks` and `file_acl` are split as lo (u32) + hi (u16) —
+    // a 48-bit representation that drops bits 48..63 on serialize. Mask
+    // the synthesized values down to 48 bits so the round-trip is
+    // bijective regardless of the cursor-derived high bytes.
+    const ON_DISK_48BIT_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
     Ext4Inode {
         mode: mode_bits | (u16::from(cursor.next_u8()) & 0o777),
         uid: cursor.next_u32(),
         gid: cursor.next_u32(),
         size: cursor.next_u64(),
         links_count: cursor.next_u16(),
-        blocks: cursor.next_u64(),
+        blocks: cursor.next_u64() & ON_DISK_48BIT_MASK,
         flags: cursor.next_u32(),
         version: cursor.next_u32(),
         generation: cursor.next_u32(),
-        file_acl: cursor.next_u64(),
+        file_acl: cursor.next_u64() & ON_DISK_48BIT_MASK,
         atime,
         ctime,
         mtime,
         dtime,
-        atime_extra: if inode_size >= 0x90 {
+        atime_extra: if advertise(0x90) {
             expected_encode_extra_timestamp(cursor.next_u64(), cursor.next_u32())
         } else {
             0
         },
-        ctime_extra: if inode_size >= 0x88 {
+        ctime_extra: if advertise(0x88) {
             expected_encode_extra_timestamp(cursor.next_u64(), cursor.next_u32())
         } else {
             0
         },
-        mtime_extra: if inode_size >= 0x8C {
+        mtime_extra: if advertise(0x8C) {
             expected_encode_extra_timestamp(cursor.next_u64(), cursor.next_u32())
         } else {
             0
         },
         crtime,
-        crtime_extra: if inode_size >= 0x98 {
+        crtime_extra: if advertise(0x98) {
             expected_encode_extra_timestamp(cursor.next_u64(), cursor.next_u32())
         } else {
             0
         },
         extra_isize,
-        checksum: cursor.next_u32(),
-        version_hi: if inode_size >= 0x9C {
+        // Match serialize_inode's behavior: it leaves the checksum slot
+        // untouched (the production path writes it via
+        // compute_and_set_checksum in a separate step), so the round-trip
+        // through fuzz_serialize_inode reads back zero. Pin checksum to 0
+        // here so verify_roundtrip stays bijective.
+        checksum: { let _ = cursor.next_u32(); 0 },
+        version_hi: if advertise(0x9C) {
             cursor.next_u32()
         } else {
             0
         },
-        projid: if inode_size >= 0xA0 {
+        projid: if advertise(0xA0) {
             cursor.next_u32()
         } else {
             0
         },
-        extent_bytes: cursor.take_vec(MAX_EXTENT_BYTES),
-        xattr_ibody: cursor.take_vec(xattr_capacity),
+        // Ext4Inode::parse_from_bytes always returns extent_bytes as a
+        // fixed 60-byte Vec (the i_block area). Match that shape exactly
+        // so verify_roundtrip's serialize→parse cycle is bijective: a
+        // shorter Vec here would silently round-trip back to 60 bytes
+        // and trip the `parsed != inode` abort.
+        extent_bytes: {
+            let mut v = cursor.take_vec(MAX_EXTENT_BYTES);
+            v.resize(MAX_EXTENT_BYTES, 0);
+            v
+        },
+        // The on-disk xattr_ibody fills the inode tail from
+        // (128 + extra_isize) to inode_size, but only when
+        // extra_isize > 0 — Ext4Inode::parse_from_bytes returns an
+        // empty Vec when extra_isize == 0 (treating the tail as
+        // unused). Match that semantic precisely so the round-trip
+        // is bijective regardless of the extra_isize choice.
+        xattr_ibody: if extra_isize > 0 {
+            let mut v = cursor.take_vec(xattr_capacity);
+            v.resize(xattr_capacity, 0);
+            v
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -197,8 +239,46 @@ fn verify_roundtrip(inode: &Ext4Inode, inode_size: usize) {
 }
 
 fn verify_raw_bytes(raw: &[u8]) {
-    if let Ok(parsed) = Ext4Inode::parse_from_bytes(raw) {
-        let inode_size = if raw.len() >= 256 { 256 } else { 128 };
+    if let Ok(mut parsed) = Ext4Inode::parse_from_bytes(raw) {
+        // Choose inode_size to keep the round-trip bijective. The
+        // serializer writes the extra area only when inode_size > 128,
+        // and writes xattr_ibody only inside the [128 + extra_isize,
+        // inode_size) window. If we picked inode_size = 128 but the
+        // parsed inode has extra_isize > 0 or non-empty xattr_ibody,
+        // serialize would silently drop those fields and the second
+        // parse would observe extra_isize = 0 — diverging from the
+        // first parse and tripping the abort.
+        let needs_extra_area =
+            parsed.extra_isize > 0 || !parsed.xattr_ibody.is_empty();
+        let inode_size: usize = if needs_extra_area || raw.len() >= 256 {
+            256
+        } else {
+            128
+        };
+        // parse_from_bytes returns xattr_ibody empty whenever extra_isize
+        // is zero, regardless of inode_size; otherwise it reads
+        // bytes[xattr_start..] to end-of-buffer, which after a
+        // 256-byte serialize+parse always produces (inode_size -
+        // xattr_start) bytes. Match that exact contract: empty Vec when
+        // extra_isize == 0, fixed (inode_size - xattr_start) length
+        // otherwise (truncating overflow from raw > 256, padding short
+        // data with zeros).
+        if parsed.extra_isize == 0 {
+            parsed.xattr_ibody.clear();
+        } else {
+            let xattr_start: usize = 128 + usize::from(parsed.extra_isize);
+            let max_xattr: usize = inode_size.saturating_sub(xattr_start);
+            parsed.xattr_ibody.resize(max_xattr, 0);
+        }
+        // serialize_inode deliberately leaves the checksum_lo/checksum_hi
+        // bytes (offsets 0x7C and 0x82) untouched — they are written by
+        // compute_and_set_checksum in the caller's context, which the
+        // bare fuzz_serialize_inode path does not invoke. Zero out the
+        // parsed checksum so the round-trip is bijective: a non-zero
+        // value here came from the raw input, gets dropped during
+        // serialize, and reads back as zero — a guaranteed mismatch
+        // otherwise.
+        parsed.checksum = 0;
         verify_roundtrip(&parsed, inode_size);
     }
 }
