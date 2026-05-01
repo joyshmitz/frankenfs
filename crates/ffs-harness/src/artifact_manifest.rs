@@ -1173,6 +1173,14 @@ fn validate_operational_classification(
             }
         }
         OperationalOutcomeClass::Fail | OperationalOutcomeClass::Error => {
+            if operational.classification == OperationalOutcomeClass::Error
+                && operational.actual_outcome != ScenarioResult::Fail
+            {
+                errors.push(ManifestValidationError::InvalidOperationalClassification {
+                    scenario_id: scenario_id.to_owned(),
+                    reason: "error scenarios must use FAIL actual_outcome".to_owned(),
+                });
+            }
             if operational.error_class.is_none() {
                 errors.push(ManifestValidationError::InvalidOperationalClassification {
                     scenario_id: scenario_id.to_owned(),
@@ -2117,6 +2125,34 @@ mod tests {
             ManifestValidationError::InvalidOperationalClassification { scenario_id, reason }
                 if scenario_id == "writeback_crash_matrix"
                     && reason.contains("remediation_hint")
+        )));
+    }
+
+    #[test]
+    fn operational_manifest_rejects_error_without_fail_outcome() {
+        let mut manifest = sample_operational_manifest();
+        let scenario = manifest
+            .operational_scenarios
+            .get_mut("fuzz_repair_smoke")
+            .expect("scenario exists");
+        scenario.classification = OperationalOutcomeClass::Error;
+        scenario.actual_outcome = ScenarioResult::Skip;
+        scenario.error_class = Some(OperationalErrorClass::HarnessBug);
+        scenario.remediation_hint = Some("fix harness".to_owned());
+        scenario.skip_reason = None;
+
+        manifest
+            .scenarios
+            .get_mut("fuzz_repair_smoke")
+            .expect("scenario exists")
+            .outcome = ScenarioResult::Skip;
+
+        let errors = validate_operational_manifest(&manifest);
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ManifestValidationError::InvalidOperationalClassification { scenario_id, reason }
+                if scenario_id == "fuzz_repair_smoke"
+                    && reason.contains("FAIL actual_outcome")
         )));
     }
 

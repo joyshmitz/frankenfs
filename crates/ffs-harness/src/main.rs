@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use ffs_harness::{
     ParityReport,
+    artifact_manifest::{ArtifactManifest, validate_operational_manifest},
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region, validate_btrfs_fixture,
     validate_ext4_fixture,
@@ -66,6 +67,7 @@ fn run() -> Result<()> {
         Some("run-crash-replay") => run_crash_replay(&args[1..]),
         Some("run-fsx-stress") => run_fsx_stress_cmd(&args[1..]),
         Some("xfstests-report") => xfstests_report(&args[1..]),
+        Some("validate-operational-manifest") => validate_operational_manifest_cmd(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
             print_usage();
             Ok(())
@@ -261,6 +263,40 @@ fn emit_baseline_comparison_if_present(
     Ok(())
 }
 
+fn validate_operational_manifest_cmd(args: &[String]) -> Result<()> {
+    let manifest_path = Path::new(
+        args.first()
+            .context("usage: ffs-harness validate-operational-manifest <manifest.json>")?,
+    );
+    if args.len() != 1 {
+        bail!("usage: ffs-harness validate-operational-manifest <manifest.json>");
+    }
+
+    let manifest_text = fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest: ArtifactManifest = serde_json::from_str(&manifest_text)
+        .with_context(|| format!("invalid manifest json {}", manifest_path.display()))?;
+    let errors = validate_operational_manifest(&manifest);
+    if !errors.is_empty() {
+        for error in &errors {
+            eprintln!("manifest validation error: {error}");
+        }
+        bail!(
+            "operational manifest validation failed with {} error(s)",
+            errors.len()
+        );
+    }
+
+    println!(
+        "operational manifest valid: run_id={} gate_id={} scenarios={} artifacts={}",
+        manifest.run_id,
+        manifest.gate_id,
+        manifest.scenarios.len(),
+        manifest.artifacts.len()
+    );
+    Ok(())
+}
+
 fn generate_fixture(args: &[String]) -> Result<()> {
     if args.is_empty() {
         bail!(
@@ -432,6 +468,7 @@ fn print_usage() {
     println!(
         "  ffs-harness xfstests-report --selected FILE --results-json FILE --junit-xml FILE [--check-log FILE --check-rc N --dry-run 0|1] [--allowlist-json FILE] [--baseline-json FILE] [--uniform-status STATUS --uniform-note NOTE]"
     );
+    println!("  ffs-harness validate-operational-manifest <manifest.json>");
     println!();
     println!("FIXTURE GENERATION:");
     println!("  Extracts sparse JSON fixtures from real filesystem images.");
@@ -458,4 +495,7 @@ fn print_usage() {
     );
     println!("  ffs-harness run-crash-replay --count 500 --out artifacts/crash_replay");
     println!("  ffs-harness run-fsx-stress --ops 100000 --seed 123 --out artifacts/fsx");
+    println!(
+        "  ffs-harness validate-operational-manifest artifacts/e2e/run/operational_manifest.json"
+    );
 }

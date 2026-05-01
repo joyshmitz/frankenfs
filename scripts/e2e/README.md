@@ -97,6 +97,23 @@ It defines the shared representation for verification outputs across E2E, benchm
 
 Generic historical manifests may use only the base schema. Operational readiness manifests must pass the stricter `validate_operational_manifest` check. That validator rejects missing run context, missing per-scenario metadata, invalid pass/fail/skip/error classification, ambiguous skip reasons, malformed artifact paths, artifact references that do not point at manifest entries, missing stdout/stderr paths, missing cleanup status, and unprobed FUSE capability.
 
+Shared runner helpers live in `crates/ffs-harness/src/verification_runner.rs`.
+Domain-specific scripts should keep shell focused on orchestration and use the
+Rust helpers for command redaction, log path generation, pass/fail/skip/error
+classification, FUSE capability classification, partial-artifact preservation,
+and final manifest validation. Shell scripts can validate a generated manifest
+with:
+
+```bash
+e2e_validate_operational_manifest "$E2E_LOG_DIR/operational_manifest.json"
+```
+
+or directly:
+
+```bash
+cargo run -p ffs-harness -- validate-operational-manifest "$manifest_path"
+```
+
 ### Operational Outcome Vocabulary
 
 Readiness-grade artifacts use a closed vocabulary so users can distinguish product failures from host and harness conditions:

@@ -343,6 +343,36 @@ else
     MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_outcome_class "
 fi
 
+if grep -q 'pub fn build_operational_manifest' crates/ffs-harness/src/verification_runner.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_runner_builder "
+fi
+
+if grep -q 'pub fn classify_operational_observation' crates/ffs-harness/src/verification_runner.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_classification_mapping "
+fi
+
+if grep -q 'pub fn validate_operational_gate_contract' crates/ffs-harness/src/verification_runner.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_runner_validator "
+fi
+
+if grep -q 'validate-operational-manifest' crates/ffs-harness/src/main.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_manifest_cli "
+fi
+
+if grep -q 'e2e_validate_operational_manifest' scripts/e2e/lib.sh; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_manifest_shell_hook "
+fi
+
 if grep -q 'pub fn evaluate_retention' crates/ffs-harness/src/artifact_manifest.rs; then
     :
 else
@@ -464,6 +494,18 @@ if grep -q 'validate_operational_manifest' scripts/e2e/README.md; then
     :
 else
     MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}operational_validator_docs "
+fi
+
+if grep -q 'validate-operational-manifest' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}operational_cli_docs "
+fi
+
+if grep -q 'command redaction' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}runner_redaction_docs "
 fi
 
 if grep -q 'Operational Outcome Vocabulary' scripts/e2e/README.md; then

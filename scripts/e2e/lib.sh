@@ -225,6 +225,36 @@ e2e_validate_scenario_catalog() {
 }
 
 #######################################
+# Validate a readiness-grade operational artifact manifest.
+# Uses the Rust schema validator so shell orchestration cannot drift from the
+# canonical manifest contract.
+# Arguments:
+#   $1 - Manifest path
+#######################################
+e2e_validate_operational_manifest() {
+    local manifest_path="$1"
+
+    e2e_step "Operational Artifact Manifest Validation"
+
+    if [[ ! -f "$manifest_path" ]]; then
+        e2e_fail "Operational manifest missing: $manifest_path"
+    fi
+
+    local harness_cmd=()
+    if [[ -n "${FFS_HARNESS_BIN:-}" ]]; then
+        harness_cmd=("$FFS_HARNESS_BIN")
+    else
+        harness_cmd=(cargo run -p ffs-harness --)
+    fi
+
+    if ! e2e_run "${harness_cmd[@]}" validate-operational-manifest "$manifest_path"; then
+        e2e_fail "Operational manifest validation failed: $manifest_path"
+    fi
+
+    e2e_log "Operational manifest validation passed: $manifest_path"
+}
+
+#######################################
 # Run a command and log output
 # Arguments:
 #   $* - Command to run

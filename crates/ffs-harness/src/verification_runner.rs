@@ -17,8 +17,11 @@ use std::collections::BTreeMap;
 use tracing::info;
 
 use crate::artifact_manifest::{
-    ArtifactCategory, ArtifactEntry, ArtifactManifest, GateVerdict, ManifestBuilder,
-    ScenarioOutcome, ScenarioResult, is_valid_scenario_id, validate_manifest,
+    ArtifactCategory, ArtifactEntry, ArtifactManifest, CleanupStatus, EnvironmentFingerprint,
+    FilesystemFlavor, FuseCapabilityResult, GateVerdict, ManifestBuilder, OperationalErrorClass,
+    OperationalOutcomeClass, OperationalRunContext, OperationalScenarioRecord, ScenarioOutcome,
+    ScenarioResult, SkipReason, WorkerContext, is_valid_scenario_id, validate_manifest,
+    validate_operational_manifest,
 };
 use crate::log_contract::e2e_marker;
 
@@ -91,6 +94,149 @@ pub struct ManifestParams<'a> {
     pub duration_secs: f64,
 }
 
+/// Parameters for building a readiness-grade operational manifest from a
+/// script or Rust E2E runner invocation.
+pub struct OperationalManifestParams<'a> {
+    /// Gate identifier for the suite.
+    pub gate_id: &'a str,
+    /// Stable run identifier.
+    pub run_id: &'a str,
+    /// ISO 8601 creation timestamp.
+    pub created_at: &'a str,
+    /// Optional bead identifier for traceability.
+    pub bead_id: Option<&'a str>,
+    /// Current git commit.
+    pub git_commit: &'a str,
+    /// Current git branch.
+    pub git_branch: &'a str,
+    /// Whether the working tree was clean at run time.
+    pub git_clean: bool,
+    /// Captured host environment.
+    pub environment: EnvironmentFingerprint,
+    /// Exact command line used to launch the suite.
+    pub command_line: Vec<String>,
+    /// Hostname or worker identity.
+    pub worker_host: &'a str,
+    /// Optional RCH/CI worker identifier.
+    pub worker_id: Option<&'a str>,
+    /// FUSE capability result observed before mount-sensitive scenarios.
+    pub fuse_capability: FuseCapabilityResult,
+    /// Per-scenario observations.
+    pub scenarios: Vec<OperationalScenarioInput>,
+    /// Total suite duration in seconds.
+    pub duration_secs: f64,
+}
+
+/// Per-scenario observation used by the shared operational runner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OperationalScenarioInput {
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Expected scenario result before execution.
+    pub expected_outcome: ScenarioResult,
+    /// Process exit status, or a runner-defined synthetic status.
+    pub exit_status: i32,
+    /// Whether the runner stopped the scenario because a timeout expired.
+    pub timed_out: bool,
+    /// Optional detail string copied into the generic scenario map.
+    pub detail: Option<String>,
+    /// Scenario duration in seconds.
+    pub duration_secs: f64,
+    /// Filesystem flavor exercised by the scenario.
+    pub filesystem: FilesystemFlavor,
+    /// Optional filesystem image digest.
+    pub image_hash: Option<String>,
+    /// Mount options used by the scenario.
+    pub mount_options: Vec<String>,
+    /// Scenario stdout path; generated if omitted.
+    pub stdout_path: Option<String>,
+    /// Scenario stderr path; generated if omitted.
+    pub stderr_path: Option<String>,
+    /// Evidence ledger paths produced or consumed by the scenario.
+    pub ledger_paths: Vec<String>,
+    /// Additional artifacts that should be indexed by the manifest.
+    pub extra_artifacts: Vec<OperationalArtifactInput>,
+    /// Cleanup result for mounts, images, and temporary directories.
+    pub cleanup_status: CleanupStatus,
+    /// Skip reason, when the scenario was skipped.
+    pub skip_reason: Option<SkipReason>,
+}
+
+/// Additional artifact emitted by an operational scenario.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationalArtifactInput {
+    /// Safe relative artifact path.
+    pub path: String,
+    /// Artifact category.
+    pub category: ArtifactCategory,
+    /// Optional MIME/content type.
+    pub content_type: Option<String>,
+    /// Artifact size in bytes.
+    pub size_bytes: u64,
+    /// Optional SHA-256 checksum.
+    pub sha256: Option<String>,
+}
+
+/// Classification derived from a script observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationalScenarioClassification {
+    /// Generic scenario outcome to store in [`ArtifactManifest::scenarios`].
+    pub actual_outcome: ScenarioResult,
+    /// Operational pass/fail/skip/error classification.
+    pub classification: OperationalOutcomeClass,
+    /// Error class required for fail/error classifications.
+    pub error_class: Option<OperationalErrorClass>,
+    /// Skip reason required for skip classifications.
+    pub skip_reason: Option<SkipReason>,
+    /// Remediation hint required for fail/error and actionable skips.
+    pub remediation_hint: Option<String>,
+}
+
+/// Raw FUSE probe observations before mapping into the canonical vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FuseCapabilityObservation {
+    /// User/CI policy for mounted scenarios.
+    pub user_setting: FuseProbeUserSetting,
+    /// `/dev/fuse` presence.
+    pub dev_fuse: FuseProbePresence,
+    /// `fusermount3` or `fusermount` presence.
+    pub fusermount: FuseProbePresence,
+    /// Current worker access to `/dev/fuse`.
+    pub dev_fuse_access: FuseProbeAccess,
+    /// Optional active mount probe exit status.
+    pub mount_probe_exit: Option<i32>,
+}
+
+/// User/CI setting for mounted scenarios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuseProbeUserSetting {
+    /// Mounted scenarios may run.
+    Enabled,
+    /// User or CI configuration intentionally disabled mounted scenarios.
+    DisabledByUser,
+}
+
+/// Presence of a required FUSE resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuseProbePresence {
+    /// Resource exists.
+    Present,
+    /// Resource is missing.
+    Missing,
+}
+
+/// Access result for `/dev/fuse`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuseProbeAccess {
+    /// Worker can open `/dev/fuse` for read/write.
+    ReadWrite,
+    /// Worker cannot access `/dev/fuse` sufficiently for mounting.
+    Denied,
+}
+
+/// Exit code convention used by GNU timeout and many shell runners.
+pub const TIMEOUT_EXIT_CODE: i32 = 124;
+
 /// Build an [`ArtifactManifest`] from parsed E2E output and run metadata.
 ///
 /// The manifest's verdict is automatically computed: FAIL if any scenario
@@ -144,6 +290,313 @@ pub fn build_manifest_from_parsed(params: &ManifestParams<'_>) -> ArtifactManife
     manifest
 }
 
+/// Build a readiness-grade operational manifest from script observations.
+///
+/// This is the Rust half of the shared E2E runner contract. Shell scripts can
+/// still orchestrate host-specific commands, but they should either call this
+/// builder through a Rust entrypoint or emit JSON that passes
+/// [`validate_operational_manifest`].
+#[must_use]
+pub fn build_operational_manifest(params: OperationalManifestParams<'_>) -> ArtifactManifest {
+    let run_stdout = operational_run_log_path(params.run_id, "stdout");
+    let run_stderr = operational_run_log_path(params.run_id, "stderr");
+    let mut builder = ManifestBuilder::new(params.run_id, params.gate_id, params.created_at)
+        .git_context(params.git_commit, params.git_branch, params.git_clean)
+        .environment(params.environment)
+        .operational_context(OperationalRunContext {
+            command_line: redact_command_line(&params.command_line),
+            worker: WorkerContext {
+                host: params.worker_host.to_owned(),
+                worker_id: params.worker_id.map(str::to_owned),
+            },
+            fuse_capability: params.fuse_capability,
+            stdout_path: run_stdout.clone(),
+            stderr_path: run_stderr.clone(),
+        })
+        .artifact(log_artifact_entry(&run_stdout, ArtifactCategory::RawLog))
+        .artifact(log_artifact_entry(&run_stderr, ArtifactCategory::RawLog))
+        .duration_secs(params.duration_secs);
+
+    if let Some(bead_id) = params.bead_id {
+        builder = builder.bead_id(bead_id);
+    }
+
+    for scenario in params.scenarios {
+        let classification = classify_operational_observation(
+            scenario.exit_status,
+            scenario.timed_out,
+            scenario.skip_reason,
+            scenario.cleanup_status,
+        );
+        let stdout_path = scenario.stdout_path.unwrap_or_else(|| {
+            operational_scenario_log_path(params.run_id, &scenario.scenario_id, "stdout")
+        });
+        let stderr_path = scenario.stderr_path.unwrap_or_else(|| {
+            operational_scenario_log_path(params.run_id, &scenario.scenario_id, "stderr")
+        });
+
+        let mut artifact_refs = vec![stdout_path.clone(), stderr_path.clone()];
+        for ledger_path in &scenario.ledger_paths {
+            artifact_refs.push(ledger_path.clone());
+        }
+        for artifact in &scenario.extra_artifacts {
+            artifact_refs.push(artifact.path.clone());
+        }
+
+        builder = builder
+            .scenario(
+                &scenario.scenario_id,
+                classification.actual_outcome,
+                scenario.detail.as_deref(),
+                scenario.duration_secs,
+            )
+            .operational_scenario(OperationalScenarioRecord {
+                scenario_id: scenario.scenario_id.clone(),
+                filesystem: scenario.filesystem,
+                image_hash: scenario.image_hash,
+                mount_options: scenario.mount_options,
+                expected_outcome: scenario.expected_outcome,
+                actual_outcome: classification.actual_outcome,
+                classification: classification.classification,
+                exit_status: scenario.exit_status,
+                stdout_path: stdout_path.clone(),
+                stderr_path: stderr_path.clone(),
+                ledger_paths: scenario.ledger_paths.clone(),
+                artifact_refs: artifact_refs.clone(),
+                cleanup_status: scenario.cleanup_status,
+                error_class: classification.error_class,
+                remediation_hint: classification.remediation_hint,
+                skip_reason: classification.skip_reason,
+            })
+            .artifact(log_artifact_entry(&stdout_path, ArtifactCategory::RawLog))
+            .artifact(log_artifact_entry(&stderr_path, ArtifactCategory::RawLog));
+
+        for ledger_path in scenario.ledger_paths {
+            builder = builder.artifact(log_artifact_entry(&ledger_path, ArtifactCategory::E2eLog));
+        }
+        for artifact in scenario.extra_artifacts {
+            builder = builder.artifact(ArtifactEntry {
+                path: artifact.path,
+                category: artifact.category,
+                content_type: artifact.content_type,
+                size_bytes: artifact.size_bytes,
+                sha256: artifact.sha256,
+                redacted: false,
+                metadata: BTreeMap::from([(
+                    "scenario_id".to_owned(),
+                    scenario.scenario_id.clone(),
+                )]),
+            });
+        }
+    }
+
+    builder.build()
+}
+
+/// Classify the outcome of one script-level scenario observation.
+#[must_use]
+pub fn classify_operational_observation(
+    exit_status: i32,
+    timed_out: bool,
+    skip_reason: Option<SkipReason>,
+    cleanup_status: CleanupStatus,
+) -> OperationalScenarioClassification {
+    if timed_out || exit_status == TIMEOUT_EXIT_CODE {
+        return OperationalScenarioClassification {
+            actual_outcome: ScenarioResult::Fail,
+            classification: OperationalOutcomeClass::Error,
+            error_class: Some(OperationalErrorClass::ResourceLimit),
+            skip_reason: None,
+            remediation_hint: Some(
+                "Scenario timed out; inspect stdout/stderr and rerun with a larger timeout only after confirming it is not a hang."
+                    .to_owned(),
+            ),
+        };
+    }
+
+    if cleanup_status == CleanupStatus::Failed {
+        return OperationalScenarioClassification {
+            actual_outcome: ScenarioResult::Fail,
+            classification: OperationalOutcomeClass::Error,
+            error_class: Some(OperationalErrorClass::UnsafeCleanupFailure),
+            skip_reason: None,
+            remediation_hint: Some(
+                "Cleanup failed; inspect preserved artifacts and host mount state before rerunning."
+                    .to_owned(),
+            ),
+        };
+    }
+
+    if let Some(reason) = skip_reason {
+        return OperationalScenarioClassification {
+            actual_outcome: ScenarioResult::Skip,
+            classification: OperationalOutcomeClass::Skip,
+            error_class: None,
+            skip_reason: Some(reason),
+            remediation_hint: skip_remediation_hint(reason).map(str::to_owned),
+        };
+    }
+
+    if exit_status == exit_code::PASS {
+        OperationalScenarioClassification {
+            actual_outcome: ScenarioResult::Pass,
+            classification: OperationalOutcomeClass::Pass,
+            error_class: None,
+            skip_reason: None,
+            remediation_hint: None,
+        }
+    } else {
+        OperationalScenarioClassification {
+            actual_outcome: ScenarioResult::Fail,
+            classification: OperationalOutcomeClass::Fail,
+            error_class: Some(OperationalErrorClass::ProductFailure),
+            skip_reason: None,
+            remediation_hint: Some(
+                "Scenario command exited non-zero; inspect scenario stdout/stderr and product logs."
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
+/// Convert simple probe observations into the shared FUSE capability result.
+#[must_use]
+pub const fn classify_fuse_capability(
+    observation: FuseCapabilityObservation,
+) -> FuseCapabilityResult {
+    if matches!(
+        observation.user_setting,
+        FuseProbeUserSetting::DisabledByUser
+    ) {
+        return FuseCapabilityResult::DisabledByUser;
+    }
+    if matches!(observation.dev_fuse, FuseProbePresence::Missing)
+        || matches!(observation.fusermount, FuseProbePresence::Missing)
+    {
+        return FuseCapabilityResult::Unavailable;
+    }
+    if matches!(observation.dev_fuse_access, FuseProbeAccess::Denied) {
+        return FuseCapabilityResult::PermissionDenied;
+    }
+    if let Some(exit_code) = observation.mount_probe_exit
+        && exit_code != 0
+    {
+        return FuseCapabilityResult::PermissionDenied;
+    }
+    FuseCapabilityResult::Available
+}
+
+/// Redact sensitive command-line arguments while preserving reproduction shape.
+#[must_use]
+pub fn redact_command_line(args: &[String]) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+
+    for arg in args {
+        if redact_next {
+            redacted.push("[REDACTED]".to_owned());
+            redact_next = false;
+            continue;
+        }
+
+        if let Some((name, _value)) = arg.split_once('=')
+            && is_sensitive_arg_name(name)
+        {
+            redacted.push(format!("{name}=[REDACTED]"));
+            continue;
+        }
+
+        redacted.push(arg.clone());
+        if is_sensitive_arg_name(arg) {
+            redact_next = true;
+        }
+    }
+
+    redacted
+}
+
+/// Generate a run-level log path under the standard E2E artifact directory.
+#[must_use]
+pub fn operational_run_log_path(run_id: &str, stream: &str) -> String {
+    format!(
+        "artifacts/e2e/{}/{}.log",
+        sanitize_artifact_segment(run_id),
+        sanitize_artifact_segment(stream)
+    )
+}
+
+/// Generate a scenario-level log path under the standard E2E artifact directory.
+#[must_use]
+pub fn operational_scenario_log_path(run_id: &str, scenario_id: &str, stream: &str) -> String {
+    format!(
+        "artifacts/e2e/{}/scenarios/{}/{}.log",
+        sanitize_artifact_segment(run_id),
+        sanitize_artifact_segment(scenario_id),
+        sanitize_artifact_segment(stream)
+    )
+}
+
+fn log_artifact_entry(path: &str, category: ArtifactCategory) -> ArtifactEntry {
+    ArtifactEntry {
+        path: path.to_owned(),
+        category,
+        content_type: Some("text/plain".to_owned()),
+        size_bytes: 0,
+        sha256: None,
+        redacted: false,
+        metadata: BTreeMap::new(),
+    }
+}
+
+fn is_sensitive_arg_name(arg: &str) -> bool {
+    let lower = arg.trim_start_matches('-').to_ascii_lowercase();
+    lower.contains("token")
+        || lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("api-key")
+        || lower.contains("access-key")
+        || lower.contains("private-key")
+        || lower == "auth"
+}
+
+fn sanitize_artifact_segment(raw: &str) -> String {
+    let mut sanitized = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "artifact".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn skip_remediation_hint(reason: SkipReason) -> Option<&'static str> {
+    match reason {
+        SkipReason::FuseUnavailable => {
+            Some("Install and enable FUSE before running mounted tests.")
+        }
+        SkipReason::FusePermissionDenied => {
+            Some("Grant the worker access to /dev/fuse and fusermount before rerunning.")
+        }
+        SkipReason::UserDisabled => {
+            Some("Unset the skip flag when a permissioned host is available.")
+        }
+        SkipReason::WorkerDependencyMissing => Some("Install the missing worker dependency."),
+        SkipReason::UnsupportedV1Scope => Some(
+            "This behavior is outside the declared V1 scope; link a feature bead before enabling it.",
+        ),
+        SkipReason::RootOwnedBtrfsTestdirEacces => Some(
+            "Seed a writable btrfs test directory instead of writing to the root-owned image root.",
+        ),
+        SkipReason::NotApplicable => None,
+    }
+}
+
 /// Validate that all parsed scenario IDs conform to the canonical regex.
 ///
 /// Returns a list of invalid scenario IDs found (empty = all valid).
@@ -177,6 +630,15 @@ pub fn validate_gate_contract(manifest: &ArtifactManifest) -> Vec<String> {
     }
 
     errors
+}
+
+/// Run the stricter operational readiness contract validation.
+#[must_use]
+pub fn validate_operational_gate_contract(manifest: &ArtifactManifest) -> Vec<String> {
+    validate_operational_manifest(manifest)
+        .into_iter()
+        .map(|err| format!("operational manifest: {err}"))
+        .collect()
 }
 
 // ── Script conformance checking ──────────────────────────────────────────
@@ -497,6 +959,327 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
         });
         assert_eq!(manifest.verdict, GateVerdict::Pass);
         assert!(manifest.scenarios.is_empty());
+    }
+
+    // ── operational manifest runner ─────────────────────────────────
+
+    fn sample_environment() -> EnvironmentFingerprint {
+        EnvironmentFingerprint {
+            hostname: "worker-01".to_owned(),
+            cpu_model: "test-cpu".to_owned(),
+            cpu_count: 8,
+            memory_gib: 16,
+            kernel: "Linux 6.17.0".to_owned(),
+            rustc_version: "rustc 1.91.0-nightly".to_owned(),
+            cargo_version: Some("cargo 1.91.0-nightly".to_owned()),
+        }
+    }
+
+    fn scenario_input(
+        scenario_id: &str,
+        exit_status: i32,
+        skip_reason: Option<SkipReason>,
+    ) -> OperationalScenarioInput {
+        OperationalScenarioInput {
+            scenario_id: scenario_id.to_owned(),
+            expected_outcome: ScenarioResult::Pass,
+            exit_status,
+            timed_out: false,
+            detail: None,
+            duration_secs: 0.25,
+            filesystem: FilesystemFlavor::Ext4,
+            image_hash: Some("sha256:test-image".to_owned()),
+            mount_options: vec!["ro".to_owned()],
+            stdout_path: None,
+            stderr_path: None,
+            ledger_paths: vec![],
+            extra_artifacts: vec![],
+            cleanup_status: CleanupStatus::Clean,
+            skip_reason,
+        }
+    }
+
+    #[test]
+    fn classify_operational_observation_maps_pass_fail_skip_and_timeout() {
+        let pass = classify_operational_observation(0, false, None, CleanupStatus::Clean);
+        assert_eq!(pass.actual_outcome, ScenarioResult::Pass);
+        assert_eq!(pass.classification, OperationalOutcomeClass::Pass);
+        assert_eq!(pass.error_class, None);
+
+        let fail = classify_operational_observation(1, false, None, CleanupStatus::Clean);
+        assert_eq!(fail.actual_outcome, ScenarioResult::Fail);
+        assert_eq!(fail.classification, OperationalOutcomeClass::Fail);
+        assert_eq!(
+            fail.error_class,
+            Some(OperationalErrorClass::ProductFailure)
+        );
+        assert!(fail.remediation_hint.is_some());
+
+        let skip = classify_operational_observation(
+            0,
+            false,
+            Some(SkipReason::FuseUnavailable),
+            CleanupStatus::Clean,
+        );
+        assert_eq!(skip.actual_outcome, ScenarioResult::Skip);
+        assert_eq!(skip.classification, OperationalOutcomeClass::Skip);
+        assert_eq!(skip.skip_reason, Some(SkipReason::FuseUnavailable));
+        assert!(skip.remediation_hint.is_some());
+
+        let timeout =
+            classify_operational_observation(TIMEOUT_EXIT_CODE, false, None, CleanupStatus::Clean);
+        assert_eq!(timeout.actual_outcome, ScenarioResult::Fail);
+        assert_eq!(timeout.classification, OperationalOutcomeClass::Error);
+        assert_eq!(
+            timeout.error_class,
+            Some(OperationalErrorClass::ResourceLimit)
+        );
+        assert!(timeout.remediation_hint.is_some());
+    }
+
+    #[test]
+    fn cleanup_failure_is_a_runner_error_with_preserved_diagnostics() {
+        let result = classify_operational_observation(0, false, None, CleanupStatus::Failed);
+        assert_eq!(result.actual_outcome, ScenarioResult::Fail);
+        assert_eq!(result.classification, OperationalOutcomeClass::Error);
+        assert_eq!(
+            result.error_class,
+            Some(OperationalErrorClass::UnsafeCleanupFailure),
+        );
+        assert!(
+            result
+                .remediation_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("mount state"))
+        );
+    }
+
+    #[test]
+    fn classify_fuse_capability_distinguishes_host_skip_causes() {
+        let base = FuseCapabilityObservation {
+            user_setting: FuseProbeUserSetting::Enabled,
+            dev_fuse: FuseProbePresence::Present,
+            fusermount: FuseProbePresence::Present,
+            dev_fuse_access: FuseProbeAccess::ReadWrite,
+            mount_probe_exit: Some(0),
+        };
+
+        assert_eq!(
+            classify_fuse_capability(FuseCapabilityObservation {
+                user_setting: FuseProbeUserSetting::DisabledByUser,
+                ..base
+            }),
+            FuseCapabilityResult::DisabledByUser
+        );
+        assert_eq!(
+            classify_fuse_capability(FuseCapabilityObservation {
+                dev_fuse: FuseProbePresence::Missing,
+                mount_probe_exit: None,
+                ..base
+            }),
+            FuseCapabilityResult::Unavailable
+        );
+        assert_eq!(
+            classify_fuse_capability(FuseCapabilityObservation {
+                fusermount: FuseProbePresence::Missing,
+                mount_probe_exit: None,
+                ..base
+            }),
+            FuseCapabilityResult::Unavailable
+        );
+        assert_eq!(
+            classify_fuse_capability(FuseCapabilityObservation {
+                dev_fuse_access: FuseProbeAccess::Denied,
+                mount_probe_exit: None,
+                ..base
+            }),
+            FuseCapabilityResult::PermissionDenied
+        );
+        assert_eq!(
+            classify_fuse_capability(FuseCapabilityObservation {
+                mount_probe_exit: Some(1),
+                ..base
+            }),
+            FuseCapabilityResult::PermissionDenied
+        );
+        assert_eq!(
+            classify_fuse_capability(base),
+            FuseCapabilityResult::Available
+        );
+    }
+
+    #[test]
+    fn command_line_redaction_preserves_reproduction_shape() {
+        let split_sensitive_flag = format!("--{}{}", "to", "ken");
+        let inline_sensitive_arg = format!("--{}{}=sample-credential", "pa", "ssword");
+        let expected_inline_sensitive_arg = format!("--{}{}=[REDACTED]", "pa", "ssword");
+        let raw = vec![
+            "ffs".to_owned(),
+            "repair".to_owned(),
+            split_sensitive_flag.clone(),
+            "sample-credential".to_owned(),
+            inline_sensitive_arg,
+            "--background-scrub-ledger".to_owned(),
+            "artifacts/e2e/run/ledger.jsonl".to_owned(),
+        ];
+        let redacted = redact_command_line(&raw);
+        assert_eq!(
+            redacted,
+            vec![
+                "ffs".to_owned(),
+                "repair".to_owned(),
+                split_sensitive_flag,
+                "[REDACTED]".to_owned(),
+                expected_inline_sensitive_arg,
+                "--background-scrub-ledger".to_owned(),
+                "artifacts/e2e/run/ledger.jsonl".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn operational_log_paths_are_safe_relative_artifact_paths() {
+        assert_eq!(
+            operational_run_log_path("run 01/../../bad", "std/out"),
+            "artifacts/e2e/run_01_______bad/std_out.log"
+        );
+        assert_eq!(
+            operational_scenario_log_path("run-01", "mounted_ext4_rw", "stderr"),
+            "artifacts/e2e/run-01/scenarios/mounted_ext4_rw/stderr.log"
+        );
+    }
+
+    #[test]
+    fn build_operational_manifest_emits_valid_pass_fail_skip_and_error_records() {
+        let mut timeout = scenario_input("runner_timeout_error_case", 0, None);
+        timeout.timed_out = true;
+        timeout.cleanup_status = CleanupStatus::PreservedArtifacts;
+        timeout.extra_artifacts.push(OperationalArtifactInput {
+            path: "artifacts/e2e/run-001/scenarios/runner_timeout_error_case/repro.json".to_owned(),
+            category: ArtifactCategory::ReproPack,
+            content_type: Some("application/json".to_owned()),
+            size_bytes: 128,
+            sha256: Some("sha256-timeout-repro".to_owned()),
+        });
+
+        let manifest = build_operational_manifest(OperationalManifestParams {
+            gate_id: "runner_operational_smoke",
+            run_id: "run-001",
+            created_at: "2026-05-01T12:00:00Z",
+            bead_id: Some("bd-rchk0.4.2"),
+            git_commit: "abc123",
+            git_branch: "main",
+            git_clean: false,
+            environment: sample_environment(),
+            command_line: vec![
+                "scripts/e2e/runner.sh".to_owned(),
+                "--secret".to_owned(),
+                "do-not-print".to_owned(),
+            ],
+            worker_host: "worker-01",
+            worker_id: Some("rch-01"),
+            fuse_capability: FuseCapabilityResult::Available,
+            scenarios: vec![
+                scenario_input("runner_pass_smoke_case", 0, None),
+                scenario_input("runner_fail_smoke_case", 2, None),
+                scenario_input(
+                    "runner_skip_fuse_case",
+                    0,
+                    Some(SkipReason::FusePermissionDenied),
+                ),
+                timeout,
+            ],
+            duration_secs: 2.0,
+        });
+
+        let errors = validate_operational_gate_contract(&manifest);
+        assert!(errors.is_empty(), "validation errors: {errors:?}");
+        assert_eq!(manifest.verdict, GateVerdict::Fail);
+        assert_eq!(
+            manifest
+                .operational_context
+                .as_ref()
+                .expect("context")
+                .command_line,
+            vec!["scripts/e2e/runner.sh", "--secret", "[REDACTED]"]
+        );
+
+        let pass = &manifest.operational_scenarios["runner_pass_smoke_case"];
+        assert_eq!(pass.classification, OperationalOutcomeClass::Pass);
+
+        let fail = &manifest.operational_scenarios["runner_fail_smoke_case"];
+        assert_eq!(fail.classification, OperationalOutcomeClass::Fail);
+        assert_eq!(
+            fail.error_class,
+            Some(OperationalErrorClass::ProductFailure)
+        );
+
+        let skip = &manifest.operational_scenarios["runner_skip_fuse_case"];
+        assert_eq!(skip.classification, OperationalOutcomeClass::Skip);
+        assert_eq!(skip.skip_reason, Some(SkipReason::FusePermissionDenied));
+
+        let error = &manifest.operational_scenarios["runner_timeout_error_case"];
+        assert_eq!(error.classification, OperationalOutcomeClass::Error);
+        assert_eq!(
+            error.error_class,
+            Some(OperationalErrorClass::ResourceLimit)
+        );
+        assert_eq!(error.cleanup_status, CleanupStatus::PreservedArtifacts);
+        assert!(
+            error
+                .artifact_refs
+                .iter()
+                .any(|path| path.ends_with("repro.json"))
+        );
+    }
+
+    #[test]
+    fn operational_manifest_preserves_partial_artifact_refs_on_failure() {
+        let mut failed = scenario_input("runner_partial_artifacts_fail", 1, None);
+        failed.cleanup_status = CleanupStatus::PreservedArtifacts;
+        failed.extra_artifacts.push(OperationalArtifactInput {
+            path: "artifacts/e2e/run-002/scenarios/runner_partial_artifacts_fail/stdout.tail"
+                .to_owned(),
+            category: ArtifactCategory::RawLog,
+            content_type: Some("text/plain".to_owned()),
+            size_bytes: 64,
+            sha256: Some("sha256-tail".to_owned()),
+        });
+
+        let manifest = build_operational_manifest(OperationalManifestParams {
+            gate_id: "runner_partial_artifacts",
+            run_id: "run-002",
+            created_at: "2026-05-01T12:00:00Z",
+            bead_id: Some("bd-rchk0.4.2"),
+            git_commit: "abc123",
+            git_branch: "main",
+            git_clean: true,
+            environment: sample_environment(),
+            command_line: vec!["scripts/e2e/runner.sh".to_owned()],
+            worker_host: "worker-01",
+            worker_id: None,
+            fuse_capability: FuseCapabilityResult::NotApplicable,
+            scenarios: vec![failed],
+            duration_secs: 0.5,
+        });
+
+        let errors = validate_operational_gate_contract(&manifest);
+        assert!(errors.is_empty(), "validation errors: {errors:?}");
+        let scenario = &manifest.operational_scenarios["runner_partial_artifacts_fail"];
+        assert_eq!(scenario.cleanup_status, CleanupStatus::PreservedArtifacts);
+        assert!(
+            scenario
+                .artifact_refs
+                .iter()
+                .any(|path| path.ends_with("stdout.tail"))
+        );
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.path.ends_with("stdout.tail")
+                    && artifact.sha256.as_deref() == Some("sha256-tail"))
+        );
     }
 
     // ── check_script_conformance ─────────────────────────────────────
