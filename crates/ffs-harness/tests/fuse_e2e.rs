@@ -9980,6 +9980,83 @@ fn assert_rename_missing_source_reports_enoent(mnt: &Path, scenario_id: &str) {
     emit_scenario_result(scenario_id, "PASS", Some("errno=ENOENT_no_drift"));
 }
 
+fn assert_rename_directory_into_own_child_reports_einval(mnt: &Path, scenario_id: &str) {
+    let source_dir = mnt.join("rename_cycle_source");
+    let child_dir = source_dir.join("child");
+    let target = child_dir.join("moved");
+    let witness = source_dir.join("witness.txt");
+    fs::create_dir(&source_dir).expect("create rename cycle source directory");
+    fs::create_dir(&child_dir).expect("create rename cycle child directory");
+    fs::write(&witness, b"rename cycle witness\n").expect("write rename cycle witness");
+
+    let root_entries_before = snapshot_directory_entries(mnt);
+    let source_entries_before = snapshot_directory_entries(&source_dir);
+    let child_entries_before = snapshot_directory_entries(&child_dir);
+    let witness_before = snapshot_file_state(&witness);
+    let source_ino_before = fs::metadata(&source_dir)
+        .expect("stat source before rejected cycle rename")
+        .ino();
+    let child_ino_before = fs::metadata(&child_dir)
+        .expect("stat child before rejected cycle rename")
+        .ino();
+
+    let err = fs::rename(&source_dir, &target)
+        .expect_err("rename directory beneath its own child should fail");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::EINVAL),
+        "rename directory beneath its own child should surface exact EINVAL: {err}"
+    );
+    assert!(
+        fs::metadata(&source_dir)
+            .expect("stat source after rejected cycle rename")
+            .is_dir(),
+        "rejected cycle rename must leave the source directory in place"
+    );
+    assert!(
+        fs::metadata(&child_dir)
+            .expect("stat child after rejected cycle rename")
+            .is_dir(),
+        "rejected cycle rename must leave the child directory in place"
+    );
+    assert!(
+        fs::symlink_metadata(&target).is_err(),
+        "rejected cycle rename must not create the nested destination entry"
+    );
+    assert_eq!(
+        snapshot_directory_entries(mnt),
+        root_entries_before,
+        "rejected cycle rename must not change root entries"
+    );
+    assert_eq!(
+        snapshot_directory_entries(&source_dir),
+        source_entries_before,
+        "rejected cycle rename must not change source directory entries"
+    );
+    assert_eq!(
+        snapshot_directory_entries(&child_dir),
+        child_entries_before,
+        "rejected cycle rename must not change child directory entries"
+    );
+    assert_file_state_unchanged(&witness, &witness_before, "rejected cycle rename witness");
+    assert_eq!(
+        fs::metadata(&source_dir)
+            .expect("stat source inode after rejected cycle rename")
+            .ino(),
+        source_ino_before,
+        "rejected cycle rename must preserve the source inode binding"
+    );
+    assert_eq!(
+        fs::metadata(&child_dir)
+            .expect("stat child inode after rejected cycle rename")
+            .ino(),
+        child_ino_before,
+        "rejected cycle rename must preserve the child inode binding"
+    );
+
+    emit_scenario_result(scenario_id, "PASS", Some("errno=EINVAL_no_drift"));
+}
+
 fn assert_rename_file_directory_type_mismatch_contract(mnt: &Path, scenario_id: &str) {
     assert_rename_file_over_directory_rejected_with_eisdir(mnt);
     assert_rename_directory_over_file_rejected_with_enotdir(mnt);
@@ -14770,6 +14847,16 @@ fn btrfs_fuse_rename_missing_source_reports_enoent() {
         assert_rename_missing_source_reports_enoent(
             mnt,
             "btrfs_rw_rename_missing_source_errno_enoent",
+        );
+    });
+}
+
+#[test]
+fn btrfs_fuse_rename_directory_into_own_child_reports_einval() {
+    with_btrfs_rw_mount(|mnt| {
+        assert_rename_directory_into_own_child_reports_einval(
+            mnt,
+            "btrfs_rw_rename_directory_into_own_child_errno_einval",
         );
     });
 }
