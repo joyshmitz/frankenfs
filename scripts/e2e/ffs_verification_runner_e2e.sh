@@ -12,6 +12,7 @@
 # 8. Retry semantics function is available in lib.sh
 # 9. Existing E2E scripts pass conformance check
 # 10. Permissioned FUSE lane artifacts and docs are wired
+# 11. Mounted ext4/btrfs scenario matrix artifacts are wired
 #
 # Usage: ./scripts/e2e/ffs_verification_runner_e2e.sh
 #
@@ -282,6 +283,83 @@ if [[ $FUSE_LANE_DOCS -eq 6 ]]; then
     scenario_result "permissioned_fuse_lane_docs" "PASS" "Permissioned lane docs present"
 else
     scenario_result "permissioned_fuse_lane_docs" "FAIL" "Only ${FUSE_LANE_DOCS}/6 documentation markers found"
+fi
+
+#######################################
+# Scenario 13: Mounted scenario matrix artifacts
+#######################################
+e2e_step "Scenario 13: Mounted scenario matrix artifacts"
+
+MOUNTED_MATRIX_FEATURES=0
+for feature in \
+    "MOUNTED_MATRIX_JSON" \
+    "mounted_scenario_matrix.json" \
+    "emit_mounted_matrix" \
+    "record_matrix_result" \
+    'SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${outcome}' \
+    "bd-rchk4.3" \
+    "operation_sequence" \
+    "expected_outcome" \
+    "artifact_paths"; do
+    if grep -q -- "$feature" "$FUSE_PROD_SH"; then
+        MOUNTED_MATRIX_FEATURES=$((MOUNTED_MATRIX_FEATURES + 1))
+    fi
+done
+
+if [[ $MOUNTED_MATRIX_FEATURES -eq 9 ]]; then
+    scenario_result "mounted_scenario_matrix_artifacts" "PASS" "All 9 mounted matrix hooks present"
+else
+    scenario_result "mounted_scenario_matrix_artifacts" "FAIL" "Only ${MOUNTED_MATRIX_FEATURES}/9 mounted matrix hooks found"
+fi
+
+#######################################
+# Scenario 14: Btrfs mounted production rows
+#######################################
+e2e_step "Scenario 14: Btrfs mounted production rows"
+
+BTRFS_MOUNTED_ROWS=0
+for feature in \
+    "Phase 7: btrfs mounted read-only smoke" \
+    "btrfs_ro_mount_start" \
+    "btrfs_ro_stat_root" \
+    "btrfs_ro_list_root" \
+    "btrfs_ro_mount_stop" \
+    'FFS_RUN_BTRFS_LANE_PROBE="${FFS_RUN_BTRFS_LANE_PROBE:-1}"'; do
+    if grep -q -- "$feature" "$FUSE_PROD_SH"; then
+        BTRFS_MOUNTED_ROWS=$((BTRFS_MOUNTED_ROWS + 1))
+    fi
+done
+
+if [[ $BTRFS_MOUNTED_ROWS -eq 6 ]]; then
+    scenario_result "mounted_btrfs_production_rows" "PASS" "Btrfs mounted smoke rows present"
+else
+    scenario_result "mounted_btrfs_production_rows" "FAIL" "Only ${BTRFS_MOUNTED_ROWS}/6 btrfs mounted rows found"
+fi
+
+#######################################
+# Scenario 15: Scenario catalog covers production FUSE matrix
+#######################################
+e2e_step "Scenario 15: Scenario catalog covers production FUSE matrix"
+
+CATALOG_MATRIX_ROWS=0
+for feature in \
+    "ffs_fuse_production" \
+    "fuse_prod_fuse_lane_ext4_mount_unmount_probe" \
+    "fuse_prod_fuse_lane_btrfs_mount_unmount_probe" \
+    "fuse_prod_btrfs_ro_mount_start" \
+    "fuse_prod_btrfs_ro_stat_root" \
+    "fuse_prod_btrfs_ro_list_root" \
+    "fuse_prod_btrfs_fixture_missing" \
+    "fuse_prod_xattr_tools_unavailable"; do
+    if grep -q -- "$feature" "scripts/e2e/scenario_catalog.json"; then
+        CATALOG_MATRIX_ROWS=$((CATALOG_MATRIX_ROWS + 1))
+    fi
+done
+
+if [[ $CATALOG_MATRIX_ROWS -eq 8 ]]; then
+    scenario_result "catalog_production_fuse_matrix" "PASS" "Production FUSE matrix catalog rows present"
+else
+    scenario_result "catalog_production_fuse_matrix" "FAIL" "Only ${CATALOG_MATRIX_ROWS}/8 catalog rows found"
 fi
 
 #######################################

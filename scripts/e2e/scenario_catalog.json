@@ -94,6 +94,64 @@
       ]
     },
     {
+      "suite_id": "ffs_fuse_production",
+      "script": "scripts/e2e/ffs_fuse_production.sh",
+      "required_categories": [
+        "happy",
+        "edge"
+      ],
+      "scenarios": [
+        {
+          "id_pattern": "^fuse_prod_[a-z0-9_]+$",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${outcome}"
+        },
+        {
+          "id": "fuse_prod_fuse_lane_ext4_mount_unmount_probe",
+          "category": "happy",
+          "status": "active",
+          "evidence": "fuse_lane_ext4_mount_unmount_probe"
+        },
+        {
+          "id": "fuse_prod_fuse_lane_btrfs_mount_unmount_probe",
+          "category": "happy",
+          "status": "active",
+          "evidence": "fuse_lane_btrfs_mount_unmount_probe"
+        },
+        {
+          "id": "fuse_prod_btrfs_ro_mount_start",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_mount_start"
+        },
+        {
+          "id": "fuse_prod_btrfs_ro_stat_root",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_stat_root"
+        },
+        {
+          "id": "fuse_prod_btrfs_ro_list_root",
+          "category": "happy",
+          "status": "active",
+          "evidence": "btrfs_ro_list_root"
+        },
+        {
+          "id": "fuse_prod_btrfs_fixture_missing",
+          "category": "edge",
+          "status": "active",
+          "evidence": "btrfs_fixture_missing"
+        },
+        {
+          "id": "fuse_prod_xattr_tools_unavailable",
+          "category": "edge",
+          "status": "active",
+          "evidence": "xattr_tools_unavailable"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_taxonomy",
       "script": "scripts/e2e/ffs_benchmark_taxonomy_e2e.sh",
       "required_categories": [

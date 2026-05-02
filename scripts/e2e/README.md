@@ -169,16 +169,23 @@ The runner emits these shared QA artifacts under
 |----------|---------|
 | `fuse_capability.json` | Structured host capability result, skip reason, failure kind, remediation hint, and mount/unmount probe checks |
 | `fuse_permissioned_lane.json` | Worker identity, kernel, fusermount version, mount options, stdout/stderr paths, cleanup status, and artifact index |
+| `mounted_scenario_matrix.json` | Per-scenario ext4/btrfs mount matrix with filesystem flavor, mount options, operation sequence, expected/actual outcome, duration, and artifact references |
 | `junit.xml` | CI-readable suite status, including permissioned-lane probe cases |
 | `run.log` | Full command transcript and diagnostics |
 | `mount_*.log` | Per-mount stdout/stderr from `ffs-cli mount` |
 
-`FFS_RUN_BTRFS_LANE_PROBE=1` makes the production runner perform an actual
-minimal btrfs mount/unmount after fixture creation. `FFS_REQUIRE_BTRFS_LANE_PROBE=1`
-turns a missing btrfs fixture/toolchain into a hard lane failure. If the lane
-loses `/dev/fuse` access, fusermount, kernel support, or mount permissions, the
-runner records `fuse_capability.json` and skips/fails with the canonical
-`skip_reason` / `failure_kind` instead of silently passing.
+`FFS_RUN_BTRFS_LANE_PROBE=1` is the default for the production runner and makes
+the lane perform an actual minimal btrfs mount/unmount after fixture creation.
+`FFS_REQUIRE_BTRFS_LANE_PROBE=1` turns a missing btrfs fixture/toolchain into a
+hard lane failure. If the lane loses `/dev/fuse` access, fusermount, kernel
+support, or mount permissions, the runner records `fuse_capability.json` and
+skips/fails with the canonical `skip_reason` / `failure_kind` instead of
+silently passing.
+
+Every recorded production FUSE case also emits a
+`SCENARIO_RESULT|scenario_id=...|outcome=...` line and is materialized into
+`mounted_scenario_matrix.json`, which is the durable evidence artifact for the
+critical ext4 and btrfs mounted scenario matrix.
 
 ### Operational Outcome Vocabulary
 
@@ -236,8 +243,8 @@ The production FUSE runtime suite exercises:
 3. Xattr operations (`set`, `get`, `list`, `remove`) for runtime surface validation
 4. SIGTERM shutdown durability verification with remount validation
 5. Throughput/latency baseline capture to `perf_baseline.json`
-6. Optional btrfs inspect smoke when `mkfs.btrfs` is available
-7. JUnit report generation at `artifacts/e2e/<timestamp>_ffs_fuse_production/junit.xml`
+6. Btrfs inspect plus read-only mount/stat/list/unmount smoke when `mkfs.btrfs` is available
+7. JUnit and mounted matrix artifact generation under `artifacts/e2e/<timestamp>_ffs_fuse_production/`
 
 The write-back E2E suite exercises:
 

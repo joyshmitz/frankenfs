@@ -21,7 +21,7 @@ export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export FFS_USE_RCH="${FFS_USE_RCH:-1}"
 export FFS_AUTO_UNMOUNT="${FFS_AUTO_UNMOUNT:-0}"
 export FFS_ALLOW_OTHER="${FFS_ALLOW_OTHER:-0}"
-export FFS_RUN_BTRFS_LANE_PROBE="${FFS_RUN_BTRFS_LANE_PROBE:-0}"
+export FFS_RUN_BTRFS_LANE_PROBE="${FFS_RUN_BTRFS_LANE_PROBE:-1}"
 export FFS_REQUIRE_BTRFS_LANE_PROBE="${FFS_REQUIRE_BTRFS_LANE_PROBE:-0}"
 FFS_CLI_BIN="${FFS_CLI_BIN:-$REPO_ROOT/target/release/ffs-cli}"
 
@@ -52,8 +52,11 @@ FUSE_LANE_BTRFS_DETAIL="not_requested"
 
 JUNIT_FILE="$E2E_LOG_DIR/junit.xml"
 PERF_BASELINE_JSON="$E2E_LOG_DIR/perf_baseline.json"
+MOUNTED_MATRIX_TSV="$E2E_LOG_DIR/mounted_scenario_matrix.tsv"
+MOUNTED_MATRIX_JSON="$E2E_LOG_DIR/mounted_scenario_matrix.json"
 export E2E_LOG_DIR E2E_LOG_FILE
 export FUSE_CAPABILITY_JSON FUSE_PERMISSIONED_LANE_JSON JUNIT_FILE PERF_BASELINE_JSON
+export MOUNTED_MATRIX_TSV MOUNTED_MATRIX_JSON
 export FUSE_LANE_EXT4_IMAGE FUSE_LANE_EXT4_MOUNT_POINT FUSE_LANE_EXT4_MOUNT_LOG
 export FUSE_LANE_EXT4_MOUNT_EXIT FUSE_LANE_EXT4_UNMOUNT_EXIT FUSE_LANE_EXT4_CLEANUP_STATUS FUSE_LANE_EXT4_DETAIL
 export FUSE_LANE_BTRFS_IMAGE FUSE_LANE_BTRFS_MOUNT_POINT FUSE_LANE_BTRFS_MOUNT_LOG
@@ -62,6 +65,7 @@ declare -a TEST_NAMES=()
 declare -a TEST_STATUSES=()
 declare -a TEST_DURATIONS_MS=()
 declare -a TEST_MESSAGES=()
+: >"$MOUNTED_MATRIX_TSV"
 
 timestamp_ms() {
     date +%s%3N
@@ -77,6 +81,119 @@ xml_escape() {
     printf '%s' "$raw"
 }
 
+scenario_id_for_test_name() {
+    local test_name="$1"
+    local normalized
+    normalized="$(printf '%s' "$test_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//')"
+    printf 'fuse_prod_%s' "$normalized"
+}
+
+outcome_for_status() {
+    local status="$1"
+    case "$status" in
+        pass) printf 'PASS' ;;
+        fail) printf 'FAIL' ;;
+        skipped) printf 'SKIP' ;;
+        *) printf 'ERROR' ;;
+    esac
+}
+
+matrix_context_for_test() {
+    local test_name="$1"
+    local filesystem="ext4"
+    local mount_options="rw"
+    local operation_sequence="$test_name"
+    local expected_outcome="PASS"
+    local artifact_paths="${CURRENT_MOUNT_LOG:-}"
+
+    case "$test_name" in
+        *btrfs*)
+            filesystem="btrfs"
+            ;;
+    esac
+    case "$test_name" in
+        btrfs_fixture_missing|xattr_tools_unavailable)
+            expected_outcome="SKIP"
+            artifact_paths=""
+            ;;
+    esac
+
+    case "$test_name" in
+        *ro*|btrfs_inspect_json|fuse_lane_*_mount_unmount_probe)
+            mount_options="ro"
+            ;;
+        *rw*|concurrency_*|xattr_*|signal_*|perf_*)
+            mount_options="rw"
+            ;;
+    esac
+
+    case "$test_name" in
+        fuse_lane_*_mount_unmount_probe)
+            operation_sequence="mount,lookup,unmount,capability_probe"
+            ;;
+        mount_*_start|*_mount_start|btrfs_ro_mount_start)
+            operation_sequence="mount"
+            ;;
+        *_mount_stop|btrfs_ro_mount_stop)
+            operation_sequence="unmount,cleanup_check"
+            ;;
+        *probe_readme|btrfs_ro_stat_root|btrfs_ro_list_root)
+            operation_sequence="lookup,read,stat,directory_iteration"
+            ;;
+        xattr_*)
+            operation_sequence="xattr_set,xattr_get,xattr_list,xattr_remove"
+            ;;
+        concurrency_*)
+            operation_sequence="concurrent_read,concurrent_write,verify"
+            ;;
+        signal_*)
+            operation_sequence="write,fsync,sigterm,remount,verify"
+            ;;
+        perf_*)
+            operation_sequence="write,fsync,stat,measure"
+            ;;
+        btrfs_inspect_json)
+            operation_sequence="inspect_json"
+            artifact_paths="${E2E_LOG_DIR}/btrfs_inspect.json"
+            ;;
+    esac
+
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$filesystem" "$mount_options" "$operation_sequence" "$expected_outcome" "$artifact_paths"
+}
+
+record_matrix_result() {
+    local name="$1"
+    local status="$2"
+    local duration_ms="$3"
+    local message="${4:-}"
+    local scenario_id outcome context filesystem mount_options operation_sequence expected_outcome artifact_paths
+
+    scenario_id="$(scenario_id_for_test_name "$name")"
+    outcome="$(outcome_for_status "$status")"
+    context="$(matrix_context_for_test "$name")"
+    IFS=$'\t' read -r filesystem mount_options operation_sequence expected_outcome artifact_paths <<<"$context"
+    if [[ "$status" == "skipped" ]]; then
+        expected_outcome="SKIP"
+    fi
+    message="${message//$'\t'/ }"
+    message="${message//$'\n'/ }"
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$scenario_id" \
+        "$name" \
+        "$filesystem" \
+        "$mount_options" \
+        "$operation_sequence" \
+        "$expected_outcome" \
+        "$outcome" \
+        "$duration_ms" \
+        "$message" \
+        "$artifact_paths" >>"$MOUNTED_MATRIX_TSV"
+
+    e2e_log "SCENARIO_RESULT|scenario_id=${scenario_id}|outcome=${outcome}|duration_ms=${duration_ms}|detail=${message}"
+}
+
 record_test() {
     local name="$1"
     local status="$2"
@@ -89,6 +206,7 @@ record_test() {
     TEST_MESSAGES+=("$message")
 
     e2e_log "[$(date -Iseconds)] TEST: $name STATUS: $status DURATION: ${duration_ms}ms"
+    record_matrix_result "$name" "$status" "$duration_ms" "$message"
     if [[ -n "$message" ]]; then
         e2e_log "  detail: $message"
     fi
@@ -132,10 +250,136 @@ emit_junit() {
     e2e_log "JUnit report: $JUNIT_FILE"
 }
 
+emit_mounted_matrix() {
+    if [[ -z "${MOUNTED_MATRIX_JSON:-}" ]]; then
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        {
+            printf '{\n'
+            printf '  "schema_version": 1,\n'
+            printf '  "bead_id": "bd-rchk4.3",\n'
+            printf '  "detail": "python3 unavailable before structured mounted matrix emission",\n'
+            printf '  "run_log": "%s",\n' "${E2E_LOG_FILE:-}"
+            printf '  "matrix_tsv": "%s"\n' "${MOUNTED_MATRIX_TSV:-}"
+            printf '}\n'
+        } >"$MOUNTED_MATRIX_JSON"
+        e2e_log "Mounted scenario matrix: $MOUNTED_MATRIX_JSON"
+        return 0
+    fi
+
+    python3 - "$MOUNTED_MATRIX_TSV" "$MOUNTED_MATRIX_JSON" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import time
+
+tsv_path = pathlib.Path(sys.argv[1])
+out_path = pathlib.Path(sys.argv[2])
+
+def env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default)
+
+def split_csv(raw: str) -> list[str]:
+    return [part for part in raw.split(",") if part]
+
+def artifact_entry(path: str) -> dict:
+    if not path:
+        return {"path": "", "exists": False, "size_bytes": 0}
+    candidate = pathlib.Path(path)
+    try:
+        stat = candidate.stat()
+        exists = True
+        size = stat.st_size
+    except OSError:
+        exists = False
+        size = 0
+    return {"path": path, "exists": exists, "size_bytes": size}
+
+summary = {"PASS": 0, "FAIL": 0, "SKIP": 0, "ERROR": 0}
+scenarios = []
+if tsv_path.exists():
+    for line_number, line in enumerate(tsv_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line:
+            continue
+        fields = line.split("\t")
+        if len(fields) != 10:
+            scenarios.append(
+                {
+                    "scenario_id": f"fuse_prod_malformed_row_{line_number}",
+                    "test_name": "malformed_matrix_row",
+                    "filesystem": "unknown",
+                    "mount_options": [],
+                    "operation_sequence": ["parse_matrix_row"],
+                    "expected_outcome": "ERROR",
+                    "actual_outcome": "ERROR",
+                    "duration_ms": 0,
+                    "detail": f"expected 10 TSV fields, found {len(fields)}",
+                    "artifact_paths": [],
+                    "artifacts": [],
+                }
+            )
+            summary["ERROR"] += 1
+            continue
+
+        (
+            scenario_id,
+            test_name,
+            filesystem,
+            mount_options,
+            operation_sequence,
+            expected_outcome,
+            actual_outcome,
+            duration_ms,
+            detail,
+            artifact_paths,
+        ) = fields
+        outcome = actual_outcome if actual_outcome in summary else "ERROR"
+        summary[outcome] += 1
+        paths = split_csv(artifact_paths)
+        scenarios.append(
+            {
+                "scenario_id": scenario_id,
+                "test_name": test_name,
+                "filesystem": filesystem,
+                "mount_options": split_csv(mount_options),
+                "operation_sequence": split_csv(operation_sequence),
+                "expected_outcome": expected_outcome,
+                "actual_outcome": actual_outcome,
+                "duration_ms": int(duration_ms) if duration_ms.isdigit() else 0,
+                "detail": detail,
+                "artifact_paths": paths,
+                "artifacts": [artifact_entry(path) for path in paths],
+            }
+        )
+
+matrix = {
+    "schema_version": 1,
+    "bead_id": "bd-rchk4.3",
+    "created_at_unix": int(time.time()),
+    "run_id": pathlib.Path(env("E2E_LOG_DIR", "unknown")).name,
+    "fuse_capability_report": env("FUSE_CAPABILITY_JSON"),
+    "permissioned_lane_summary": env("FUSE_PERMISSIONED_LANE_JSON"),
+    "junit": env("JUNIT_FILE"),
+    "run_log": env("E2E_LOG_FILE"),
+    "scenario_count": len(scenarios),
+    "summary": summary,
+    "scenarios": scenarios,
+}
+
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(matrix, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    e2e_log "Mounted scenario matrix: $MOUNTED_MATRIX_JSON"
+}
+
 skip_suite() {
     local reason="$1"
     record_test "suite" "skipped" 0 "$reason"
     emit_junit
+    emit_mounted_matrix || true
     if declare -F emit_permissioned_lane_summary >/dev/null; then
         emit_permissioned_lane_summary "skipped" "$reason"
     fi
@@ -148,6 +392,7 @@ fail_suite() {
     local detail="$3"
     record_test "$test_name" "fail" "$duration_ms" "$detail"
     emit_junit
+    emit_mounted_matrix || true
     if declare -F emit_permissioned_lane_summary >/dev/null; then
         emit_permissioned_lane_summary "failed" "$detail"
     fi
@@ -766,8 +1011,14 @@ run_optional_btrfs_smoke() {
         return
     fi
 
-    e2e_step "Phase 7: optional btrfs inspect smoke"
+    local mount_ro="$E2E_TEMP_DIR/mnt_fuse_prod_btrfs_ro"
+
+    e2e_step "Phase 7: btrfs mounted read-only smoke"
     run_case_shell "btrfs_inspect_json" "r='${E2E_LOG_DIR}/btrfs_inspect.json'; '$FFS_CLI_BIN' inspect '$WORK_BTRFS_IMAGE' --json > \"\$r\"; test -s \"\$r\""
+    run_case "btrfs_ro_mount_start" start_mount ro "$WORK_BTRFS_IMAGE" "$mount_ro" 20
+    run_case_shell "btrfs_ro_stat_root" "stat '$mount_ro' >/dev/null"
+    run_case_shell "btrfs_ro_list_root" "find '$mount_ro' -maxdepth 1 -mindepth 0 >/dev/null"
+    run_case "btrfs_ro_mount_stop" stop_mount "$mount_ro"
 }
 
 ensure_mount_capability
@@ -788,5 +1039,6 @@ run_optional_btrfs_smoke
 log_system_state "System snapshot after runtime probes"
 
 emit_junit
+emit_mounted_matrix
 emit_permissioned_lane_summary "passed" "production FUSE runtime suite completed"
 e2e_pass
