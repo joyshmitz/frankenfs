@@ -11,6 +11,7 @@
 # 7. Structured logging markers are present
 # 8. Retry semantics function is available in lib.sh
 # 9. Existing E2E scripts pass conformance check
+# 10. Permissioned FUSE lane artifacts and docs are wired
 #
 # Usage: ./scripts/e2e/ffs_verification_runner_e2e.sh
 #
@@ -52,6 +53,8 @@ e2e_init "ffs_verification_runner"
 RUNNER_SRC="crates/ffs-harness/src/verification_runner.rs"
 LIB_SH="scripts/e2e/lib.sh"
 GATE_SH="scripts/e2e/run_gate.sh"
+FUSE_PROD_SH="scripts/e2e/ffs_fuse_production.sh"
+E2E_README="scripts/e2e/README.md"
 
 #######################################
 # Scenario 1: verification_runner module exists
@@ -207,6 +210,78 @@ if [[ $EXIT_CODE_PATTERNS -eq 2 ]]; then
     scenario_result "exit_code_conventions" "PASS" "Exit code constants defined"
 else
     scenario_result "exit_code_conventions" "FAIL" "Only ${EXIT_CODE_PATTERNS}/2 exit code constants found"
+fi
+
+#######################################
+# Scenario 10: Permissioned FUSE lane artifacts
+#######################################
+e2e_step "Scenario 10: Permissioned FUSE lane artifacts"
+
+FUSE_LANE_FEATURES=0
+for feature in \
+    "FUSE_CAPABILITY_JSON" \
+    "fuse_permissioned_lane.json" \
+    "e2e_probe_fuse_capability" \
+    "--require-mount-probe" \
+    "--mount-probe-exit" \
+    "--unmount-probe-exit" \
+    "emit_permissioned_lane_summary" \
+    "fusermount_version" \
+    "qa_artifacts"; do
+    if grep -q -- "$feature" "$FUSE_PROD_SH"; then
+        FUSE_LANE_FEATURES=$((FUSE_LANE_FEATURES + 1))
+    fi
+done
+
+if [[ $FUSE_LANE_FEATURES -eq 9 ]]; then
+    scenario_result "permissioned_fuse_lane_artifacts" "PASS" "All 9 FUSE lane artifact hooks present"
+else
+    scenario_result "permissioned_fuse_lane_artifacts" "FAIL" "Only ${FUSE_LANE_FEATURES}/9 FUSE lane hooks found"
+fi
+
+#######################################
+# Scenario 11: Permissioned btrfs lane controls
+#######################################
+e2e_step "Scenario 11: Permissioned btrfs lane controls"
+
+BTRFS_LANE_FEATURES=0
+for feature in \
+    "FFS_RUN_BTRFS_LANE_PROBE" \
+    "FFS_REQUIRE_BTRFS_LANE_PROBE" \
+    "fuse_lane_btrfs_mount_unmount_probe"; do
+    if grep -q "$feature" "$FUSE_PROD_SH"; then
+        BTRFS_LANE_FEATURES=$((BTRFS_LANE_FEATURES + 1))
+    fi
+done
+
+if [[ $BTRFS_LANE_FEATURES -eq 3 ]]; then
+    scenario_result "permissioned_btrfs_lane_controls" "PASS" "Btrfs lane controls present"
+else
+    scenario_result "permissioned_btrfs_lane_controls" "FAIL" "Only ${BTRFS_LANE_FEATURES}/3 btrfs lane controls found"
+fi
+
+#######################################
+# Scenario 12: Permissioned lane documentation
+#######################################
+e2e_step "Scenario 12: Permissioned lane documentation"
+
+FUSE_LANE_DOCS=0
+for feature in \
+    "Permissioned FUSE Lane" \
+    "FFS_RUN_BTRFS_LANE_PROBE=1" \
+    "FFS_REQUIRE_BTRFS_LANE_PROBE=1" \
+    "rch exec" \
+    "fuse_capability.json" \
+    "fuse_permissioned_lane.json"; do
+    if grep -q "$feature" "$E2E_README"; then
+        FUSE_LANE_DOCS=$((FUSE_LANE_DOCS + 1))
+    fi
+done
+
+if [[ $FUSE_LANE_DOCS -eq 6 ]]; then
+    scenario_result "permissioned_fuse_lane_docs" "PASS" "Permissioned lane docs present"
+else
+    scenario_result "permissioned_fuse_lane_docs" "FAIL" "Only ${FUSE_LANE_DOCS}/6 documentation markers found"
 fi
 
 #######################################

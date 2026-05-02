@@ -285,6 +285,37 @@ e2e_probe_fuse_capability() {
 }
 
 #######################################
+# Read a top-level string field from a structured FUSE capability report.
+# This intentionally avoids jq/python so skip-path classification works on
+# minimal workers where the probe artifact is the primary diagnostic.
+# Arguments:
+#   $1 - Report JSON path
+#   $2 - Top-level field name
+#######################################
+e2e_fuse_capability_field() {
+    local report_path="$1"
+    local field="$2"
+
+    if [[ ! -f "$report_path" ]]; then
+        return 1
+    fi
+
+    sed -nE \
+        "s/^[[:space:]]*\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\\1/p" \
+        "$report_path" | head -n 1
+}
+
+#######################################
+# Return success when a FUSE capability report proves the lane is available.
+# Arguments:
+#   $1 - Report JSON path
+#######################################
+e2e_fuse_capability_available() {
+    local report_path="$1"
+    [[ "$(e2e_fuse_capability_field "$report_path" result)" == "available" ]]
+}
+
+#######################################
 # Run a command and log output
 # Arguments:
 #   $* - Command to run

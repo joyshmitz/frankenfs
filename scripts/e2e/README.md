@@ -135,6 +135,51 @@ capability state, mount/unmount probe exits, and the btrfs
 capabilities must produce a skip/error artifact with a remediation hint, not a
 silent success.
 
+### Permissioned FUSE Lane
+
+The durable mounted-test lane is the production FUSE runner on a Linux worker
+with `/dev/fuse`, `fusermount3` or `fusermount`, `mountpoint`, `e2fsprogs`, and
+`btrfs-progs` installed. The lane must run on the same host where mount
+attempts occur; offloading only `cargo build` is not enough to prove mount
+permissions.
+
+Local permissioned worker command:
+
+```bash
+FFS_USE_RCH=0 \
+FFS_RUN_BTRFS_LANE_PROBE=1 \
+FFS_REQUIRE_BTRFS_LANE_PROBE=1 \
+./scripts/e2e/ffs_fuse_production.sh
+```
+
+RCH worker command, for workers configured with FUSE access:
+
+```bash
+rch exec -- bash -lc 'cd /data/projects/frankenfs && \
+  FFS_USE_RCH=0 \
+  FFS_RUN_BTRFS_LANE_PROBE=1 \
+  FFS_REQUIRE_BTRFS_LANE_PROBE=1 \
+  ./scripts/e2e/ffs_fuse_production.sh'
+```
+
+The runner emits these shared QA artifacts under
+`artifacts/e2e/<timestamp>_ffs_fuse_production/`:
+
+| Artifact | Purpose |
+|----------|---------|
+| `fuse_capability.json` | Structured host capability result, skip reason, failure kind, remediation hint, and mount/unmount probe checks |
+| `fuse_permissioned_lane.json` | Worker identity, kernel, fusermount version, mount options, stdout/stderr paths, cleanup status, and artifact index |
+| `junit.xml` | CI-readable suite status, including permissioned-lane probe cases |
+| `run.log` | Full command transcript and diagnostics |
+| `mount_*.log` | Per-mount stdout/stderr from `ffs-cli mount` |
+
+`FFS_RUN_BTRFS_LANE_PROBE=1` makes the production runner perform an actual
+minimal btrfs mount/unmount after fixture creation. `FFS_REQUIRE_BTRFS_LANE_PROBE=1`
+turns a missing btrfs fixture/toolchain into a hard lane failure. If the lane
+loses `/dev/fuse` access, fusermount, kernel support, or mount permissions, the
+runner records `fuse_capability.json` and skips/fails with the canonical
+`skip_reason` / `failure_kind` instead of silently passing.
+
 ### Operational Outcome Vocabulary
 
 Readiness-grade artifacts use a closed vocabulary so users can distinguish product failures from host and harness conditions:
@@ -296,6 +341,8 @@ The current suites still emit their native logs/reports directly. The shared art
 | `CRASH_MATRIX_POINTS` | `10` | For `ffs_btrfs_rw_smoke.sh`: fixed deterministic crash-point matrix cardinality (must remain 10) |
 | `FFS_REPAIR_LOCAL_ARTIFACT_FALLBACK` | `0` | For `ffs_repair_recovery_smoke.sh`: if `1`, re-run repair test locally when rch offload does not materialize artifact files |
 | `FFS_USE_RCH` | `1` | For `ffs_degradation_stress.sh`, `ffs_fuse_production.sh`, `ffs_btrfs_rw_smoke.sh`, `ffs_ext4_ro_roundtrip.sh`, and `ffs_ext4_rw_smoke.sh`: offload cargo commands via `rch exec -- cargo ...` when available |
+| `FFS_RUN_BTRFS_LANE_PROBE` | `0` | For `ffs_fuse_production.sh`: if `1`, attempt a minimal btrfs mount/unmount in the permissioned-lane probe |
+| `FFS_REQUIRE_BTRFS_LANE_PROBE` | `0` | For `ffs_fuse_production.sh`: if `1`, fail the permissioned lane when btrfs fixture generation or btrfs mount/unmount probing cannot run |
 | `FFS_RUN_MOUNT_STRESS` | `0` | For `ffs_degradation_stress.sh`: if `1`, attempt optional live FUSE mount pressure probe |
 | `DEGRADATION_STRESS_DURATION_SECS` | `20` | Duration for host `stress-ng` probe in `ffs_degradation_stress.sh` |
 | `DEGRADATION_STRESS_CPU_WORKERS` | `4` | CPU workers for host `stress-ng` probe in `ffs_degradation_stress.sh` |

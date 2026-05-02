@@ -1351,7 +1351,7 @@ These items sit outside the tracked 97-row parity denominator and are the curren
 | `bd-rchk1` | Docs/status reconciliation | Keep canonical docs explicit that tracked parity is complete while operational readiness work remains |
 | `bd-rchk2` | btrfs delayed refs | Complete: `DISC-004` accepted as a scoped V1 model with retry-safe failed-flush and overflow coverage |
 | `bd-rchk3` | xfstests | Fresh 2026-05-01 subset/regression gate recorded; real execution is blocked by unbuilt xfstests helpers and a dpkg lock blocking `xfslibs-dev`/`libaio-dev` install |
-| `bd-rchk4` | Mounted FUSE CI | Ensure critical mounted ext4/btrfs paths run in a permissioned CI or RCH workflow instead of silently soft-skipping |
+| `bd-rchk4` | Mounted FUSE CI | Use the permissioned lane documented in `scripts/e2e/README.md` to run critical mounted ext4/btrfs paths with structured capability and cleanup artifacts |
 | `bd-rchk5` | Performance | Re-measure representative throughput/latency targets and record environment metadata |
 | `bd-rchk6` | Mounted self-healing | Automatic mounted repair is implemented for explicit client read-only `--background-repair` mounts; read-write automatic repair remains intentionally blocked until repair writeback is serialized with mounted write traffic |
 | `bd-rchk7` | Fuzz/conformance | Replace remaining open-ended corpus notes with completed fixtures or narrow beads |

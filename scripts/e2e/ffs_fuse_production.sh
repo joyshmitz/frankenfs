@@ -20,6 +20,9 @@ export RUST_LOG="${RUST_LOG:-ffs=trace,fuser=debug}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export FFS_USE_RCH="${FFS_USE_RCH:-1}"
 export FFS_AUTO_UNMOUNT="${FFS_AUTO_UNMOUNT:-0}"
+export FFS_ALLOW_OTHER="${FFS_ALLOW_OTHER:-0}"
+export FFS_RUN_BTRFS_LANE_PROBE="${FFS_RUN_BTRFS_LANE_PROBE:-0}"
+export FFS_REQUIRE_BTRFS_LANE_PROBE="${FFS_REQUIRE_BTRFS_LANE_PROBE:-0}"
 FFS_CLI_BIN="${FFS_CLI_BIN:-$REPO_ROOT/target/release/ffs-cli}"
 
 e2e_init "ffs_fuse_production"
@@ -30,9 +33,31 @@ CURRENT_MOUNT_LOG=""
 CURRENT_MOUNT_POINT=""
 WORK_EXT4_IMAGE=""
 WORK_BTRFS_IMAGE=""
+FUSE_CAPABILITY_JSON="$E2E_LOG_DIR/fuse_capability.json"
+FUSE_PERMISSIONED_LANE_JSON="$E2E_LOG_DIR/fuse_permissioned_lane.json"
+FUSE_LANE_EXT4_IMAGE=""
+FUSE_LANE_EXT4_MOUNT_POINT=""
+FUSE_LANE_EXT4_MOUNT_LOG=""
+FUSE_LANE_EXT4_MOUNT_EXIT=""
+FUSE_LANE_EXT4_UNMOUNT_EXIT=""
+FUSE_LANE_EXT4_CLEANUP_STATUS="not_run"
+FUSE_LANE_EXT4_DETAIL="not_run"
+FUSE_LANE_BTRFS_IMAGE=""
+FUSE_LANE_BTRFS_MOUNT_POINT=""
+FUSE_LANE_BTRFS_MOUNT_LOG=""
+FUSE_LANE_BTRFS_MOUNT_EXIT=""
+FUSE_LANE_BTRFS_UNMOUNT_EXIT=""
+FUSE_LANE_BTRFS_CLEANUP_STATUS="not_run"
+FUSE_LANE_BTRFS_DETAIL="not_requested"
 
 JUNIT_FILE="$E2E_LOG_DIR/junit.xml"
 PERF_BASELINE_JSON="$E2E_LOG_DIR/perf_baseline.json"
+export E2E_LOG_DIR E2E_LOG_FILE
+export FUSE_CAPABILITY_JSON FUSE_PERMISSIONED_LANE_JSON JUNIT_FILE PERF_BASELINE_JSON
+export FUSE_LANE_EXT4_IMAGE FUSE_LANE_EXT4_MOUNT_POINT FUSE_LANE_EXT4_MOUNT_LOG
+export FUSE_LANE_EXT4_MOUNT_EXIT FUSE_LANE_EXT4_UNMOUNT_EXIT FUSE_LANE_EXT4_CLEANUP_STATUS FUSE_LANE_EXT4_DETAIL
+export FUSE_LANE_BTRFS_IMAGE FUSE_LANE_BTRFS_MOUNT_POINT FUSE_LANE_BTRFS_MOUNT_LOG
+export FUSE_LANE_BTRFS_MOUNT_EXIT FUSE_LANE_BTRFS_UNMOUNT_EXIT FUSE_LANE_BTRFS_CLEANUP_STATUS FUSE_LANE_BTRFS_DETAIL
 declare -a TEST_NAMES=()
 declare -a TEST_STATUSES=()
 declare -a TEST_DURATIONS_MS=()
@@ -111,6 +136,9 @@ skip_suite() {
     local reason="$1"
     record_test "suite" "skipped" 0 "$reason"
     emit_junit
+    if declare -F emit_permissioned_lane_summary >/dev/null; then
+        emit_permissioned_lane_summary "skipped" "$reason"
+    fi
     e2e_skip "$reason"
 }
 
@@ -120,6 +148,9 @@ fail_suite() {
     local detail="$3"
     record_test "$test_name" "fail" "$duration_ms" "$detail"
     emit_junit
+    if declare -F emit_permissioned_lane_summary >/dev/null; then
+        emit_permissioned_lane_summary "failed" "$detail"
+    fi
     e2e_fail "$test_name failed: $detail"
 }
 
@@ -166,18 +197,181 @@ log_system_state() {
     fi
 }
 
+emit_permissioned_lane_summary() {
+    local outcome="${1:-unknown}"
+    local detail="${2:-}"
+
+    if [[ -z "${FUSE_PERMISSIONED_LANE_JSON:-}" ]]; then
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        {
+            printf '{\n'
+            printf '  "schema_version": 1,\n'
+            printf '  "bead_id": "bd-rchk4.2",\n'
+            printf '  "outcome": "%s",\n' "$outcome"
+            printf '  "detail": "python3 unavailable before structured summary",\n'
+            printf '  "run_log": "%s",\n' "${E2E_LOG_FILE:-}"
+            printf '  "capability_report": "%s"\n' "${FUSE_CAPABILITY_JSON:-}"
+            printf '}\n'
+        } >"$FUSE_PERMISSIONED_LANE_JSON"
+        e2e_log "Permissioned FUSE lane summary: $FUSE_PERMISSIONED_LANE_JSON"
+        return 0
+    fi
+
+    local capability_result capability_skip_reason capability_failure_kind
+    capability_result=""
+    capability_skip_reason=""
+    capability_failure_kind=""
+    if [[ -f "${FUSE_CAPABILITY_JSON:-}" ]]; then
+        capability_result="$(e2e_fuse_capability_field "$FUSE_CAPABILITY_JSON" result || true)"
+        capability_skip_reason="$(e2e_fuse_capability_field "$FUSE_CAPABILITY_JSON" skip_reason || true)"
+        capability_failure_kind="$(e2e_fuse_capability_field "$FUSE_CAPABILITY_JSON" failure_kind || true)"
+    fi
+
+    local worker_id fusermount_version dev_fuse_stat
+    worker_id="${RCH_WORKER_ID:-${RCH_WORKER:-${FFS_WORKER_ID:-${CI_RUNNER_NAME:-}}}}"
+    if command -v fusermount3 >/dev/null 2>&1; then
+        fusermount_version="$(fusermount3 --version 2>&1 | head -n 1)"
+    elif command -v fusermount >/dev/null 2>&1; then
+        fusermount_version="$(fusermount --version 2>&1 | head -n 1)"
+    else
+        fusermount_version="missing"
+    fi
+    dev_fuse_stat="$(ls -l /dev/fuse 2>/dev/null || printf 'missing')"
+
+    FUSE_LANE_OUTCOME="$outcome" \
+    FUSE_LANE_DETAIL="$detail" \
+    FUSE_LANE_WORKER_ID="$worker_id" \
+    FUSE_LANE_FUSERMOUNT_VERSION="$fusermount_version" \
+    FUSE_LANE_DEV_FUSE_STAT="$dev_fuse_stat" \
+    FUSE_LANE_CAPABILITY_RESULT="$capability_result" \
+    FUSE_LANE_CAPABILITY_SKIP_REASON="$capability_skip_reason" \
+    FUSE_LANE_CAPABILITY_FAILURE_KIND="$capability_failure_kind" \
+    python3 - "$FUSE_PERMISSIONED_LANE_JSON" <<'PY'
+import json
+import os
+import pathlib
+import socket
+import subprocess
+import sys
+import time
+
+out_path = pathlib.Path(sys.argv[1])
+
+def env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default)
+
+def path_entry(path: str, category: str) -> dict:
+    if not path:
+        return {"path": "", "category": category, "exists": False, "size_bytes": 0}
+    p = pathlib.Path(path)
+    try:
+        size = p.stat().st_size
+        exists = True
+    except OSError:
+        size = 0
+        exists = False
+    return {
+        "path": path,
+        "category": category,
+        "exists": exists,
+        "size_bytes": size,
+    }
+
+def command_output(args: list[str], fallback: str) -> str:
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return fallback
+
+allow_other = env("FFS_ALLOW_OTHER", "0") == "1"
+summary = {
+    "schema_version": 1,
+    "bead_id": "bd-rchk4.2",
+    "created_at_unix": int(time.time()),
+    "run_id": pathlib.Path(env("E2E_LOG_DIR", "unknown")).name,
+    "outcome": env("FUSE_LANE_OUTCOME", "unknown"),
+    "detail": env("FUSE_LANE_DETAIL"),
+    "worker": {
+        "host": socket.gethostname(),
+        "worker_id": env("FUSE_LANE_WORKER_ID") or None,
+        "uid": os.getuid(),
+        "gid": os.getgid(),
+    },
+    "kernel": {
+        "uname": command_output(["uname", "-a"], "unknown"),
+    },
+    "fuse": {
+        "capability_report": env("FUSE_CAPABILITY_JSON"),
+        "capability_result": env("FUSE_LANE_CAPABILITY_RESULT") or None,
+        "skip_reason": env("FUSE_LANE_CAPABILITY_SKIP_REASON") or None,
+        "failure_kind": env("FUSE_LANE_CAPABILITY_FAILURE_KIND") or None,
+        "fusermount_version": env("FUSE_LANE_FUSERMOUNT_VERSION"),
+        "dev_fuse": env("FUSE_LANE_DEV_FUSE_STAT"),
+    },
+    "mount_options": {
+        "read_only": [],
+        "read_write": ["--rw"],
+        "allow_other_enabled": allow_other,
+        "allow_other_flag": ["--allow-other"] if allow_other else [],
+        "auto_unmount": env("FFS_AUTO_UNMOUNT", "0"),
+    },
+    "scenarios": {
+        "ext4_minimal_mount_unmount": {
+            "filesystem": "ext4",
+            "image": env("FUSE_LANE_EXT4_IMAGE"),
+            "mount_point": env("FUSE_LANE_EXT4_MOUNT_POINT"),
+            "stdout_stderr_path": env("FUSE_LANE_EXT4_MOUNT_LOG"),
+            "mount_exit": env("FUSE_LANE_EXT4_MOUNT_EXIT") or None,
+            "unmount_exit": env("FUSE_LANE_EXT4_UNMOUNT_EXIT") or None,
+            "cleanup_status": env("FUSE_LANE_EXT4_CLEANUP_STATUS", "not_run"),
+            "detail": env("FUSE_LANE_EXT4_DETAIL"),
+        },
+        "btrfs_minimal_mount_unmount": {
+            "filesystem": "btrfs",
+            "image": env("FUSE_LANE_BTRFS_IMAGE"),
+            "mount_point": env("FUSE_LANE_BTRFS_MOUNT_POINT"),
+            "stdout_stderr_path": env("FUSE_LANE_BTRFS_MOUNT_LOG"),
+            "mount_exit": env("FUSE_LANE_BTRFS_MOUNT_EXIT") or None,
+            "unmount_exit": env("FUSE_LANE_BTRFS_UNMOUNT_EXIT") or None,
+            "cleanup_status": env("FUSE_LANE_BTRFS_CLEANUP_STATUS", "not_run"),
+            "detail": env("FUSE_LANE_BTRFS_DETAIL"),
+        },
+    },
+    "qa_artifacts": [
+        path_entry(env("E2E_LOG_FILE"), "run_log"),
+        path_entry(env("FUSE_CAPABILITY_JSON"), "fuse_capability"),
+        path_entry(env("JUNIT_FILE"), "junit"),
+        path_entry(env("PERF_BASELINE_JSON"), "performance_baseline"),
+        path_entry(env("FUSE_LANE_EXT4_MOUNT_LOG"), "ext4_mount_log"),
+        path_entry(env("FUSE_LANE_BTRFS_MOUNT_LOG"), "btrfs_mount_log"),
+    ],
+}
+
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    e2e_log "Permissioned FUSE lane summary: $FUSE_PERMISSIONED_LANE_JSON"
+}
+
 ensure_mount_capability() {
     if [[ "${SKIP_MOUNT:-0}" == "1" ]]; then
+        e2e_probe_fuse_capability "$FUSE_CAPABILITY_JSON" --user-disabled
         skip_suite "mount tests skipped (SKIP_MOUNT=1)"
     fi
     if ! command -v python3 >/dev/null 2>&1; then
         skip_suite "python3 is required for concurrency and perf probes"
     fi
-    if [[ ! -e /dev/fuse ]]; then
-        skip_suite "/dev/fuse not available"
-    fi
-    if [[ ! -r /dev/fuse ]] || [[ ! -w /dev/fuse ]]; then
-        skip_suite "/dev/fuse is not readable/writable"
+
+    e2e_probe_fuse_capability "$FUSE_CAPABILITY_JSON"
+    if ! e2e_fuse_capability_available "$FUSE_CAPABILITY_JSON"; then
+        local result skip_reason failure_kind
+        result="$(e2e_fuse_capability_field "$FUSE_CAPABILITY_JSON" result || true)"
+        skip_reason="$(e2e_fuse_capability_field "$FUSE_CAPABILITY_JSON" skip_reason || true)"
+        failure_kind="$(e2e_fuse_capability_field "$FUSE_CAPABILITY_JSON" failure_kind || true)"
+        skip_suite "FUSE capability probe result=${result:-unknown} skip_reason=${skip_reason:-not_reported} failure_kind=${failure_kind:-not_reported}; report=$FUSE_CAPABILITY_JSON"
     fi
     if ! command -v mountpoint >/dev/null 2>&1; then
         skip_suite "mountpoint utility not found"
@@ -333,6 +527,67 @@ prepare_fixtures() {
     else
         e2e_log "mkfs.btrfs not found; btrfs fixture generation skipped"
     fi
+}
+
+run_permissioned_fuse_lane_probe() {
+    local mount_ext4="$E2E_TEMP_DIR/mnt_fuse_lane_ext4"
+
+    e2e_step "Phase 1b: permissioned FUSE lane probe"
+    FUSE_LANE_EXT4_IMAGE="$WORK_EXT4_IMAGE"
+    FUSE_LANE_EXT4_MOUNT_POINT="$mount_ext4"
+
+    start_mount ro "$WORK_EXT4_IMAGE" "$mount_ext4" 20
+    FUSE_LANE_EXT4_MOUNT_EXIT=0
+    FUSE_LANE_EXT4_MOUNT_LOG="$CURRENT_MOUNT_LOG"
+    FUSE_LANE_EXT4_DETAIL="minimal read-only ext4 mount became ready"
+    stop_mount "$mount_ext4"
+    if mountpoint -q "$mount_ext4" 2>/dev/null; then
+        FUSE_LANE_EXT4_UNMOUNT_EXIT=1
+        FUSE_LANE_EXT4_CLEANUP_STATUS="failed"
+        fail_suite "fuse_lane_ext4_unmount_probe" 0 "ext4 permissioned-lane probe left mountpoint mounted"
+    fi
+    FUSE_LANE_EXT4_UNMOUNT_EXIT=0
+    FUSE_LANE_EXT4_CLEANUP_STATUS="clean"
+    record_test "fuse_lane_ext4_mount_unmount_probe" "pass" 0 "structured FUSE lane probe passed"
+
+    if [[ "${FFS_RUN_BTRFS_LANE_PROBE}" == "1" ]]; then
+        if [[ -z "$WORK_BTRFS_IMAGE" ]] || [[ ! -f "$WORK_BTRFS_IMAGE" ]]; then
+            FUSE_LANE_BTRFS_DETAIL="btrfs fixture unavailable; install btrfs-progs or provide a fixture before requiring this probe"
+            record_test "fuse_lane_btrfs_mount_unmount_probe" "skipped" 0 "$FUSE_LANE_BTRFS_DETAIL"
+            if [[ "${FFS_REQUIRE_BTRFS_LANE_PROBE}" == "1" ]]; then
+                fail_suite "fuse_lane_btrfs_mount_unmount_probe" 0 "$FUSE_LANE_BTRFS_DETAIL"
+            fi
+        else
+            local mount_btrfs="$E2E_TEMP_DIR/mnt_fuse_lane_btrfs"
+            FUSE_LANE_BTRFS_IMAGE="$WORK_BTRFS_IMAGE"
+            FUSE_LANE_BTRFS_MOUNT_POINT="$mount_btrfs"
+            start_mount ro "$WORK_BTRFS_IMAGE" "$mount_btrfs" 20
+            FUSE_LANE_BTRFS_MOUNT_EXIT=0
+            FUSE_LANE_BTRFS_MOUNT_LOG="$CURRENT_MOUNT_LOG"
+            FUSE_LANE_BTRFS_DETAIL="minimal read-only btrfs mount became ready"
+            stop_mount "$mount_btrfs"
+            if mountpoint -q "$mount_btrfs" 2>/dev/null; then
+                FUSE_LANE_BTRFS_UNMOUNT_EXIT=1
+                FUSE_LANE_BTRFS_CLEANUP_STATUS="failed"
+                fail_suite "fuse_lane_btrfs_unmount_probe" 0 "btrfs permissioned-lane probe left mountpoint mounted"
+            fi
+            FUSE_LANE_BTRFS_UNMOUNT_EXIT=0
+            FUSE_LANE_BTRFS_CLEANUP_STATUS="clean"
+            record_test "fuse_lane_btrfs_mount_unmount_probe" "pass" 0 "structured btrfs FUSE lane probe passed"
+        fi
+    else
+        FUSE_LANE_BTRFS_DETAIL="not requested in this run; set FFS_RUN_BTRFS_LANE_PROBE=1 for the documented permissioned lane"
+        record_test "fuse_lane_btrfs_mount_unmount_probe" "skipped" 0 "$FUSE_LANE_BTRFS_DETAIL"
+    fi
+
+    e2e_probe_fuse_capability "$FUSE_CAPABILITY_JSON" \
+        --require-mount-probe \
+        --mount-probe-exit "${FUSE_LANE_EXT4_MOUNT_EXIT:-0}" \
+        --unmount-probe-exit "${FUSE_LANE_EXT4_UNMOUNT_EXIT:-0}"
+    if ! e2e_fuse_capability_available "$FUSE_CAPABILITY_JSON"; then
+        fail_suite "fuse_lane_capability_probe" 0 "post-mount FUSE capability report did not classify lane as available"
+    fi
+    emit_permissioned_lane_summary "ready" "ext4 mount/unmount probe passed; btrfs probe status recorded"
 }
 
 run_mount_lifecycle_tests() {
@@ -522,6 +777,7 @@ run_cargo build -p ffs-cli --release
 e2e_assert_file "$FFS_CLI_BIN"
 
 prepare_fixtures
+run_permissioned_fuse_lane_probe
 log_system_state "System snapshot before runtime probes"
 run_mount_lifecycle_tests
 run_concurrent_access_tests
@@ -532,4 +788,5 @@ run_optional_btrfs_smoke
 log_system_state "System snapshot after runtime probes"
 
 emit_junit
+emit_permissioned_lane_summary "passed" "production FUSE runtime suite completed"
 e2e_pass
