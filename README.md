@@ -1360,6 +1360,65 @@ See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [P
 
 ---
 
+## Operational Readiness SLOs
+
+Tracked parity answers whether each V1 capability has an implemented contract.
+Operational readiness answers whether a user can trust the mounted runtime in a
+specific environment with enough evidence to distinguish product behavior from
+host, harness, or future-scope limits. Until every required gate below is
+green, mount and write paths remain experimental even when individual feature
+rows are complete.
+
+### Required Artifacts
+
+Every readiness-grade mount or write run must preserve these artifacts under
+the suite artifact directory:
+
+| Artifact | Required for | Contract |
+|----------|--------------|----------|
+| `fuse_capability.json` | all mounted gates | Host capability result, `skip_reason`, `failure_kind`, remediation hint, and mount/unmount probe exits |
+| `fuse_permissioned_lane.json` | permissioned mounted gates | Worker identity, kernel, fusermount version, mount options, stdout/stderr paths, and cleanup status |
+| `mounted_scenario_matrix.json` | production mounted matrix | Filesystem flavor, mount options, operation sequence, expected outcome, actual outcome, duration, detail, and artifact references |
+| `junit.xml` and `run.log` | all E2E suites | CI-readable verdict and full command transcript |
+| `mount_*.log` | every mounted scenario | Raw `ffs-cli mount` stdout/stderr for postmortem debugging |
+| operational manifest JSON | readiness report consumers | `pass`/`fail`/`skip`/`error` records using the shared artifact schema |
+
+### Readiness Gates
+
+| SLO ID | User-facing claim guarded by the SLO | Minimum validation before claim can improve | Blocking or proof beads |
+|--------|--------------------------------------|---------------------------------------------|-------------------------|
+| `mount.ro.ext4` | ext4 images can be mounted read-only for inspection workflows | `fuse_prod_fuse_lane_ext4_mount_unmount_probe`, `fuse_prod_mount_ro_start`, `fuse_prod_mount_ro_probe_readme`, `fuse_prod_mount_ro_stop`, and clean artifacts listed above | `bd-rchk4.1`, `bd-rchk4.2`, `bd-rchk4.3` |
+| `mount.ro.btrfs` | btrfs images can be mounted read-only for inspection workflows | `fuse_prod_fuse_lane_btrfs_mount_unmount_probe`, `fuse_prod_btrfs_ro_mount_start`, `fuse_prod_btrfs_ro_stat_root`, `fuse_prod_btrfs_ro_list_root`, `fuse_prod_btrfs_ro_mount_stop`, and clean artifacts listed above | `bd-rchk4.2`, `bd-rchk4.3` |
+| `mount.rw.ext4` | ext4 `--rw` can handle representative write workflows | Mounted create/write/read/stat, xattr, sync, clean unmount, and read-only remount verification; exact scenario expansion is owned by `bd-rchk0.3.2` | `bd-rchk0.3.2`, `bd-rchk0.1.1`, `bd-rchk0.3.4` |
+| `mount.rw.btrfs` | btrfs `--rw` can handle representative write workflows under the experimental contract | Mounted core mutations, fsync/fsyncdir, crash-point reopen checks, and explicit unsupported-path classifications; exact scenario expansion is owned by `bd-rchk0.3.2` | `bd-rchk0.3.2`, `bd-rchk0.1.1`, `bd-rchk0.3.4` |
+| `durability.sync` | `fsync` and `fsyncdir` are the durability boundaries users can reason about | Logs classify `flush` as non-durable, `fsync`/`fsyncdir` as durable boundaries, and crash/reopen checks preserve fsync-backed data | `bd-rchk0.1.1`, `bd-rchk0.3.2` |
+| `repair.ro.auto` | read-only mounted automatic repair is operator-usable when explicitly enabled | `--background-repair --background-scrub-ledger <jsonl>` produces a repair ledger, verifies recovered reads, and keeps read-only mount mutation rules explicit | `bd-rchk6`, `bd-rchk7.3` |
+| `repair.rw.writeback` | repair writeback can safely coexist with client writes | No user-facing upgrade until repair mutation is serialized through the mounted write path with unit and E2E evidence | `bd-rchk0.1.1`, `bd-rchk0.1.2`, `bd-rchk0.1.3` |
+| `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Remains unsupported until the epoch-barrier acceptance gate, opt-in wiring, crash matrix, and docs are complete | `bd-rchk0.2.1`, `bd-rchk0.2.2`, `bd-rchk0.2.3` |
+| `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
+| `performance.baseline` | performance claims are current for representative workloads | Fresh dated throughput/latency artifacts with host/runtime metadata; no readiness wording may imply performance tuning is complete before this lands | `bd-rchk5`, `bd-rchk5.1`, `bd-rchk5.3` |
+
+### Allowed Deferrals and Non-Goals
+
+- Local developer machines may skip mounted gates when `/dev/fuse`,
+  `fusermount3`, kernel FUSE support, namespace permissions, or helper packages
+  are missing. Permissioned CI/RCH lanes that promise mounted coverage must fail
+  closed once `bd-rchk4.4` lands.
+- Full xfstests execution is a separate gate (`bd-rchk3`). The SLOs above may
+  use a curated mounted matrix before the full xfstests environment is ready,
+  but they must not imply a current xfstests pass rate.
+- Performance readiness is explicitly delegated to `bd-rchk5`; correctness
+  gates cannot silently upgrade throughput or latency claims.
+- Kernel FUSE `writeback_cache` remains unsupported until the dedicated
+  writeback-cache beads close. The current mount path must not enable it.
+- Read-write mounted automatic repair remains blocked until repair writeback is
+  serialized with normal mounted writes. Read-only explicit repair and
+  detection-only scrub are the only current mounted repair modes.
+- These SLOs do not authorize production use of irreplaceable data. They define
+  the evidence required before the README can reduce experimental caveats.
+
+---
+
 ## V1 Filesystem Scope
 
 **ext4:** Single-device images with block sizes 1K/2K/4K. Requires `FILETYPE` feature flag (`EXTENTS` optional — indirect block addressing is supported). FUSE mount defaults to read-only; `--rw` is available but still experimental. All known incompat feature flags are accepted at mount time. `COMPRESSION` now includes ext4 e2compr read/write support for the implemented gzip/LZO/"none" method-table paths, with rare legacy codecs still rejected deterministically. `JOURNAL_DEV` images are detected as standalone journal devices; data filesystems that reference an external journal support paired-open replay via `--external-journal`, with UUID/block-size validation and fail-fast errors when required recovery cannot be performed safely. `ENCRYPT` shows filenames as raw bytes (nokey mode). `CASEFOLD` provides case-insensitive directory lookup. `INLINE_DATA` reads data from inode block area + system.data xattr.

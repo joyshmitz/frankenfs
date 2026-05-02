@@ -15,6 +15,7 @@
 #  11. Artifact-manifest unit tests run and stay wired into ffs-harness
 #  12. Artifact-manifest schema/retention/redaction API surface stays exposed
 #  13. Artifact-manifest policy is explicitly documented for operators
+#  14. Operational readiness SLOs are documented with beads, artifacts, and scenario IDs
 #
 # Scenario IDs:
 #   log_contract_builds_clean         - cargo check + test pass for log_contract
@@ -30,6 +31,7 @@
 #   log_contract_artifact_manifest_validation_tests - artifact manifest unit tests run
 #   log_contract_artifact_manifest_schema_surface - manifest schema API remains exported
 #   log_contract_artifact_manifest_policy_documented - docs state manifest retention/redaction policy
+#   log_contract_operational_readiness_slos_documented - README states mount/write SLOs and proof beads
 #
 # Usage:
 #   scripts/e2e/ffs_log_contract_e2e.sh
@@ -560,6 +562,37 @@ if [ -z "$MISSING_MANIFEST_POLICY_DOCS" ]; then
     log_scenario "log_contract_artifact_manifest_policy_documented" "PASS"
 else
     log_scenario "log_contract_artifact_manifest_policy_documented" "FAIL" "missing=${MISSING_MANIFEST_POLICY_DOCS}"
+fi
+
+# ── Scenario: log_contract_operational_readiness_slos_documented ─────
+
+echo "=== Scenario: log_contract_operational_readiness_slos_documented ==="
+MISSING_READINESS_SLOS=""
+
+for required_text in \
+    "Operational Readiness SLOs" \
+    "mounted_scenario_matrix.json" \
+    "fuse_prod_fuse_lane_ext4_mount_unmount_probe" \
+    "fuse_prod_btrfs_ro_mount_start" \
+    "bd-rchk0.3.2" \
+    "bd-rchk0.1.1" \
+    "bd-rchk0.1.2" \
+    "bd-rchk0.3.4" \
+    "bd-rchk4.4" \
+    "bd-rchk5" \
+    "writeback_cache" \
+    "read-write mounted automatic repair remains blocked"; do
+    if grep -Fq "$required_text" README.md; then
+        :
+    else
+        MISSING_READINESS_SLOS="${MISSING_READINESS_SLOS}${required_text} "
+    fi
+done
+
+if [ -z "$MISSING_READINESS_SLOS" ]; then
+    log_scenario "log_contract_operational_readiness_slos_documented" "PASS"
+else
+    log_scenario "log_contract_operational_readiness_slos_documented" "FAIL" "missing=${MISSING_READINESS_SLOS}"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────

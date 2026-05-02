@@ -316,6 +316,12 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=log_contract_artifact_manifest_policy_documented|outcome=PASS"
+        },
+        {
+          "id": "log_contract_operational_readiness_slos_documented",
+          "category": "happy",
+          "status": "active",
+          "evidence": "log_contract_operational_readiness_slos_documented"
         }
       ]
     },
