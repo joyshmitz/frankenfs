@@ -114,6 +114,27 @@ or directly:
 cargo run -p ffs-harness -- validate-operational-manifest "$manifest_path"
 ```
 
+Mounted scripts should emit a FUSE capability artifact before they decide to
+run or skip mount-sensitive scenarios:
+
+```bash
+e2e_probe_fuse_capability "$E2E_LOG_DIR/fuse_capability.json" --require-mount-probe
+```
+
+The underlying CLI is also available for local diagnostics:
+
+```bash
+cargo run -p ffs-harness -- fuse-capability-probe --out artifacts/e2e/fuse_capability.json
+```
+
+The report includes `result`, `skip_reason`, `failure_kind`,
+`remediation_hint`, and per-check rows for `/dev/fuse`, `fusermount3` or
+`fusermount`, kernel FUSE support, `/dev/fuse` read/write access, namespace or
+capability state, mount/unmount probe exits, and the btrfs
+`DefaultPermissions` root-owned testdir `EACCES` case. Missing or denied host
+capabilities must produce a skip/error artifact with a remediation hint, not a
+silent success.
+
 ### Operational Outcome Vocabulary
 
 Readiness-grade artifacts use a closed vocabulary so users can distinguish product failures from host and harness conditions:

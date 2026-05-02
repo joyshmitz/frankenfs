@@ -361,16 +361,40 @@ else
     MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_runner_validator "
 fi
 
+if grep -q 'pub struct FuseCapabilityProbeReport' crates/ffs-harness/src/verification_runner.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}fuse_capability_report "
+fi
+
+if grep -q 'pub fn build_fuse_capability_probe_report' crates/ffs-harness/src/verification_runner.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}fuse_capability_report_builder "
+fi
+
 if grep -q 'validate-operational-manifest' crates/ffs-harness/src/main.rs; then
     :
 else
     MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_manifest_cli "
 fi
 
+if grep -q 'fuse-capability-probe' crates/ffs-harness/src/main.rs; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}fuse_capability_cli "
+fi
+
 if grep -q 'e2e_validate_operational_manifest' scripts/e2e/lib.sh; then
     :
 else
     MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}operational_manifest_shell_hook "
+fi
+
+if grep -q 'e2e_probe_fuse_capability' scripts/e2e/lib.sh; then
+    :
+else
+    MISSING_MANIFEST_FIELDS="${MISSING_MANIFEST_FIELDS}fuse_capability_shell_hook "
 fi
 
 if grep -q 'pub fn evaluate_retention' crates/ffs-harness/src/artifact_manifest.rs; then
@@ -506,6 +530,18 @@ if grep -q 'command redaction' scripts/e2e/README.md; then
     :
 else
     MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}runner_redaction_docs "
+fi
+
+if grep -q 'fuse-capability-probe' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}fuse_capability_probe_docs "
+fi
+
+if grep -q 'failure_kind' scripts/e2e/README.md; then
+    :
+else
+    MISSING_MANIFEST_POLICY_DOCS="${MISSING_MANIFEST_POLICY_DOCS}fuse_failure_kind_docs "
 fi
 
 if grep -q 'Operational Outcome Vocabulary' scripts/e2e/README.md; then

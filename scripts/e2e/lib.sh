@@ -255,6 +255,36 @@ e2e_validate_operational_manifest() {
 }
 
 #######################################
+# Emit a structured FUSE capability report artifact.
+# Arguments:
+#   $1 - Output JSON path
+#   $@ - Optional ffs-harness fuse-capability-probe flags
+#######################################
+e2e_probe_fuse_capability() {
+    if [[ $# -lt 1 ]]; then
+        e2e_fail "e2e_probe_fuse_capability requires an output path"
+    fi
+
+    local report_path="$1"
+    shift
+
+    e2e_step "FUSE Capability Probe"
+
+    local harness_cmd=()
+    if [[ -n "${FFS_HARNESS_BIN:-}" ]]; then
+        harness_cmd=("$FFS_HARNESS_BIN")
+    else
+        harness_cmd=(cargo run -p ffs-harness --)
+    fi
+
+    if ! e2e_run "${harness_cmd[@]}" fuse-capability-probe --out "$report_path" "$@"; then
+        e2e_fail "FUSE capability probe failed to emit report: $report_path"
+    fi
+
+    e2e_log "FUSE capability report: $report_path"
+}
+
+#######################################
 # Run a command and log output
 # Arguments:
 #   $* - Command to run

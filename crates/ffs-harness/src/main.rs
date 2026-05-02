@@ -7,6 +7,7 @@ use ffs_harness::{
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region, validate_btrfs_fixture,
     validate_ext4_fixture,
+    verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     xfstests::{
         XfstestsStatus, apply_allowlist, compare_against_baseline, load_allowlist, load_baseline,
         load_selected_tests, parse_check_output, summarize_uniform, write_junit_xml,
@@ -68,6 +69,7 @@ fn run() -> Result<()> {
         Some("run-fsx-stress") => run_fsx_stress_cmd(&args[1..]),
         Some("xfstests-report") => xfstests_report(&args[1..]),
         Some("validate-operational-manifest") => validate_operational_manifest_cmd(&args[1..]),
+        Some("fuse-capability-probe") => fuse_capability_probe_cmd(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
             print_usage();
             Ok(())
@@ -297,6 +299,68 @@ fn validate_operational_manifest_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn fuse_capability_probe_cmd(args: &[String]) -> Result<()> {
+    let mut out_path: Option<String> = None;
+    let mut options = FuseHostProbeOptions::default();
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--user-disabled" => options.user_disabled = true,
+            "--default-permissions-eacces" => options.default_permissions_eacces = true,
+            "--require-mount-probe" => options.mount_probe_required = true,
+            "--mount-probe-exit" => {
+                i += 1;
+                options.mount_probe_exit = Some(parse_i32_arg(args.get(i), "--mount-probe-exit")?);
+            }
+            "--unmount-probe-exit" => {
+                i += 1;
+                options.unmount_probe_exit =
+                    Some(parse_i32_arg(args.get(i), "--unmount-probe-exit")?);
+            }
+            "--help" | "-h" => {
+                print_fuse_capability_probe_usage();
+                return Ok(());
+            }
+            other => bail!("unknown fuse-capability-probe argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report = probe_host_fuse_capability(options);
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "fuse capability report written: {} result={:?}",
+            path.display(),
+            report.result
+        );
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
+fn parse_i32_arg(value: Option<&String>, flag: &str) -> Result<i32> {
+    value
+        .with_context(|| format!("{flag} requires an integer"))?
+        .parse()
+        .with_context(|| format!("invalid integer for {flag}"))
+}
+
 fn generate_fixture(args: &[String]) -> Result<()> {
     if args.is_empty() {
         bail!(
@@ -469,6 +533,9 @@ fn print_usage() {
         "  ffs-harness xfstests-report --selected FILE --results-json FILE --junit-xml FILE [--check-log FILE --check-rc N --dry-run 0|1] [--allowlist-json FILE] [--baseline-json FILE] [--uniform-status STATUS --uniform-note NOTE]"
     );
     println!("  ffs-harness validate-operational-manifest <manifest.json>");
+    println!(
+        "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
+    );
     println!();
     println!("FIXTURE GENERATION:");
     println!("  Extracts sparse JSON fixtures from real filesystem images.");
@@ -497,5 +564,20 @@ fn print_usage() {
     println!("  ffs-harness run-fsx-stress --ops 100000 --seed 123 --out artifacts/fsx");
     println!(
         "  ffs-harness validate-operational-manifest artifacts/e2e/run/operational_manifest.json"
+    );
+    println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
+}
+
+fn print_fuse_capability_probe_usage() {
+    println!("Usage: ffs-harness fuse-capability-probe [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --out FILE                         Write JSON report to FILE");
+    println!("  --require-mount-probe              Treat missing mount probe exit as not checked");
+    println!("  --mount-probe-exit N               Exit code from an actual mount probe");
+    println!("  --unmount-probe-exit N             Exit code from an actual unmount probe");
+    println!("  --user-disabled                    Classify FUSE lanes as intentionally disabled");
+    println!(
+        "  --default-permissions-eacces       Classify btrfs DefaultPermissions root-owned EACCES"
     );
 }

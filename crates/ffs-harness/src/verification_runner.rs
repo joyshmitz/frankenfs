@@ -13,6 +13,11 @@
 //! requirements.
 
 use std::collections::BTreeMap;
+use std::env;
+use std::fs;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
 
 use tracing::info;
 
@@ -208,7 +213,8 @@ pub struct FuseCapabilityObservation {
 }
 
 /// User/CI setting for mounted scenarios.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FuseProbeUserSetting {
     /// Mounted scenarios may run.
     Enabled,
@@ -217,7 +223,8 @@ pub enum FuseProbeUserSetting {
 }
 
 /// Presence of a required FUSE resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FuseProbePresence {
     /// Resource exists.
     Present,
@@ -226,7 +233,8 @@ pub enum FuseProbePresence {
 }
 
 /// Access result for `/dev/fuse`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FuseProbeAccess {
     /// Worker can open `/dev/fuse` for read/write.
     ReadWrite,
@@ -234,8 +242,122 @@ pub enum FuseProbeAccess {
     Denied,
 }
 
+/// Kernel/module state for FUSE probing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FuseProbeKernelModule {
+    /// Kernel advertises FUSE support.
+    Available,
+    /// Kernel does not advertise FUSE support.
+    Unavailable,
+    /// Probe could not determine kernel support.
+    Unknown,
+}
+
+/// User namespace or capability state for FUSE probing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FuseProbeUserNamespace {
+    /// User/capability state should permit mount attempts.
+    Available,
+    /// User/capability state denies mount attempts.
+    Denied,
+    /// Probe could not determine user/capability state.
+    Unknown,
+}
+
+/// DefaultPermissions-specific observation from a mounted btrfs workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FuseDefaultPermissionsObservation {
+    /// No DefaultPermissions issue was observed.
+    NotObserved,
+    /// A root-owned writable scenario hit EACCES before userspace handlers.
+    RootOwnedBtrfsTestdirEacces,
+}
+
+/// Detailed failure kind for structured FUSE capability artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FuseCapabilityFailureKind {
+    UserDisabled,
+    DevFuseMissing,
+    DevFuseAccessDenied,
+    FusermountMissing,
+    KernelModuleUnavailable,
+    UserNamespaceOrCapabilityDenied,
+    MountProbeNotRun,
+    MountProbeFailed,
+    UnmountProbeFailed,
+    DefaultPermissionsEacces,
+}
+
+/// Per-check status in a FUSE capability report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FuseCapabilityCheckStatus {
+    Pass,
+    Fail,
+    NotRun,
+}
+
+/// One check within a structured FUSE capability report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FuseCapabilityCheck {
+    pub name: String,
+    pub status: FuseCapabilityCheckStatus,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation_hint: Option<String>,
+}
+
+/// Synthetic or host-observed inputs for the FUSE capability report builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FuseCapabilityProbeInput {
+    pub user_setting: FuseProbeUserSetting,
+    pub dev_fuse: FuseProbePresence,
+    pub fusermount: FuseProbePresence,
+    pub kernel_module: FuseProbeKernelModule,
+    pub dev_fuse_access: FuseProbeAccess,
+    pub user_namespace: FuseProbeUserNamespace,
+    pub mount_probe_exit: Option<i32>,
+    pub unmount_probe_exit: Option<i32>,
+    pub default_permissions: FuseDefaultPermissionsObservation,
+    pub mount_probe_required: bool,
+}
+
+/// Options for probing the current host from the harness CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FuseHostProbeOptions {
+    pub user_disabled: bool,
+    pub mount_probe_exit: Option<i32>,
+    pub unmount_probe_exit: Option<i32>,
+    pub default_permissions_eacces: bool,
+    pub mount_probe_required: bool,
+}
+
+/// Structured FUSE capability artifact emitted before mount-sensitive gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FuseCapabilityProbeReport {
+    pub schema_version: u32,
+    pub scenario_id: String,
+    pub result: FuseCapabilityResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<SkipReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<FuseCapabilityFailureKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation_hint: Option<String>,
+    pub checks: Vec<FuseCapabilityCheck>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
 /// Exit code convention used by GNU timeout and many shell runners.
 pub const TIMEOUT_EXIT_CODE: i32 = 124;
+
+/// FUSE capability report schema version.
+pub const FUSE_CAPABILITY_REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Build an [`ArtifactManifest`] from parsed E2E output and run metadata.
 ///
@@ -486,6 +608,81 @@ pub const fn classify_fuse_capability(
     FuseCapabilityResult::Available
 }
 
+/// Probe the current host enough to emit a structured FUSE capability artifact.
+///
+/// This does not create or mount a filesystem by itself. Mount-sensitive E2E
+/// scripts should pass the observed mount and unmount probe exit codes through
+/// [`FuseHostProbeOptions`] so the resulting artifact proves the full boundary.
+#[must_use]
+pub fn probe_host_fuse_capability(options: FuseHostProbeOptions) -> FuseCapabilityProbeReport {
+    let dev_fuse_path = Path::new("/dev/fuse");
+    let dev_fuse = if dev_fuse_path.exists() {
+        FuseProbePresence::Present
+    } else {
+        FuseProbePresence::Missing
+    };
+    let dev_fuse_access = if dev_fuse == FuseProbePresence::Present
+        && fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dev_fuse_path)
+            .is_ok()
+    {
+        FuseProbeAccess::ReadWrite
+    } else {
+        FuseProbeAccess::Denied
+    };
+
+    let input = FuseCapabilityProbeInput {
+        user_setting: if options.user_disabled {
+            FuseProbeUserSetting::DisabledByUser
+        } else {
+            FuseProbeUserSetting::Enabled
+        },
+        dev_fuse,
+        fusermount: if find_program(&["fusermount3", "fusermount"]).is_some() {
+            FuseProbePresence::Present
+        } else {
+            FuseProbePresence::Missing
+        },
+        kernel_module: probe_fuse_kernel_module(),
+        dev_fuse_access,
+        user_namespace: FuseProbeUserNamespace::Unknown,
+        mount_probe_exit: options.mount_probe_exit,
+        unmount_probe_exit: options.unmount_probe_exit,
+        default_permissions: if options.default_permissions_eacces {
+            FuseDefaultPermissionsObservation::RootOwnedBtrfsTestdirEacces
+        } else {
+            FuseDefaultPermissionsObservation::NotObserved
+        },
+        mount_probe_required: options.mount_probe_required,
+    };
+
+    build_fuse_capability_probe_report(input)
+}
+
+/// Build a structured FUSE capability report from synthetic or observed inputs.
+#[must_use]
+pub fn build_fuse_capability_probe_report(
+    input: FuseCapabilityProbeInput,
+) -> FuseCapabilityProbeReport {
+    let decision = fuse_capability_decision(&input);
+
+    FuseCapabilityProbeReport {
+        schema_version: FUSE_CAPABILITY_REPORT_SCHEMA_VERSION,
+        scenario_id: "fuse_capability_probe".to_owned(),
+        result: decision.result,
+        skip_reason: decision.skip_reason,
+        failure_kind: decision.failure_kind,
+        remediation_hint: decision.remediation_hint,
+        checks: fuse_capability_checks(&input),
+        metadata: BTreeMap::from([(
+            "mount_probe_required".to_owned(),
+            input.mount_probe_required.to_string(),
+        )]),
+    }
+}
+
 /// Redact sensitive command-line arguments while preserving reproduction shape.
 #[must_use]
 pub fn redact_command_line(args: &[String]) -> Vec<String> {
@@ -534,6 +731,367 @@ pub fn operational_scenario_log_path(run_id: &str, scenario_id: &str, stream: &s
         sanitize_artifact_segment(scenario_id),
         sanitize_artifact_segment(stream)
     )
+}
+
+struct FuseCapabilityDecision {
+    result: FuseCapabilityResult,
+    skip_reason: Option<SkipReason>,
+    failure_kind: Option<FuseCapabilityFailureKind>,
+    remediation_hint: Option<String>,
+}
+
+fn fuse_capability_checks(input: &FuseCapabilityProbeInput) -> Vec<FuseCapabilityCheck> {
+    vec![
+        user_enabled_check(input.user_setting),
+        dev_fuse_presence_check(input.dev_fuse),
+        fusermount_presence_check(input.fusermount),
+        kernel_module_check(input.kernel_module),
+        dev_fuse_access_check(input.dev_fuse_access),
+        user_namespace_check(input.user_namespace),
+        exit_probe_check(
+            "mount_probe",
+            input.mount_probe_exit,
+            input.mount_probe_required,
+            "mount probe completed successfully",
+            "mount probe failed",
+            "run a real mount probe and pass its exit code into the capability report",
+        ),
+        exit_probe_check(
+            "unmount_probe",
+            input.unmount_probe_exit,
+            input.mount_probe_required,
+            "unmount probe completed successfully",
+            "unmount probe failed",
+            "run a real unmount probe and pass its exit code into the capability report",
+        ),
+        default_permissions_check(input.default_permissions),
+    ]
+}
+
+fn user_enabled_check(setting: FuseProbeUserSetting) -> FuseCapabilityCheck {
+    capability_check(
+        "user_enabled",
+        if setting == FuseProbeUserSetting::Enabled {
+            FuseCapabilityCheckStatus::Pass
+        } else {
+            FuseCapabilityCheckStatus::Fail
+        },
+        match setting {
+            FuseProbeUserSetting::Enabled => "FUSE lanes are enabled for this run",
+            FuseProbeUserSetting::DisabledByUser => {
+                "FUSE lanes were disabled by user or CI configuration"
+            }
+        },
+        disabled_by_user_remediation(setting).map(str::to_owned),
+    )
+}
+
+fn dev_fuse_presence_check(presence: FuseProbePresence) -> FuseCapabilityCheck {
+    capability_check(
+        "dev_fuse_present",
+        presence_status(presence),
+        match presence {
+            FuseProbePresence::Present => "/dev/fuse exists",
+            FuseProbePresence::Missing => "/dev/fuse is missing",
+        },
+        missing_presence_remediation(presence, "enable the FUSE kernel device").map(str::to_owned),
+    )
+}
+
+fn fusermount_presence_check(presence: FuseProbePresence) -> FuseCapabilityCheck {
+    capability_check(
+        "fusermount_present",
+        presence_status(presence),
+        match presence {
+            FuseProbePresence::Present => "fusermount3 or fusermount is available",
+            FuseProbePresence::Missing => "fusermount3/fusermount is missing",
+        },
+        missing_presence_remediation(presence, "install fuse3 or fuse userspace tools")
+            .map(str::to_owned),
+    )
+}
+
+fn kernel_module_check(module: FuseProbeKernelModule) -> FuseCapabilityCheck {
+    capability_check(
+        "kernel_module_available",
+        match module {
+            FuseProbeKernelModule::Available => FuseCapabilityCheckStatus::Pass,
+            FuseProbeKernelModule::Unavailable => FuseCapabilityCheckStatus::Fail,
+            FuseProbeKernelModule::Unknown => FuseCapabilityCheckStatus::NotRun,
+        },
+        match module {
+            FuseProbeKernelModule::Available => "kernel advertises FUSE support",
+            FuseProbeKernelModule::Unavailable => "kernel does not advertise FUSE support",
+            FuseProbeKernelModule::Unknown => "kernel FUSE support could not be determined",
+        },
+        (module == FuseProbeKernelModule::Unavailable)
+            .then_some("load the fuse kernel module or use a kernel with FUSE support")
+            .map(str::to_owned),
+    )
+}
+
+fn dev_fuse_access_check(access: FuseProbeAccess) -> FuseCapabilityCheck {
+    capability_check(
+        "dev_fuse_access",
+        match access {
+            FuseProbeAccess::ReadWrite => FuseCapabilityCheckStatus::Pass,
+            FuseProbeAccess::Denied => FuseCapabilityCheckStatus::Fail,
+        },
+        match access {
+            FuseProbeAccess::ReadWrite => "current process can open /dev/fuse read/write",
+            FuseProbeAccess::Denied => "current process cannot open /dev/fuse read/write",
+        },
+        (access == FuseProbeAccess::Denied)
+            .then_some("grant the worker read/write access to /dev/fuse")
+            .map(str::to_owned),
+    )
+}
+
+fn user_namespace_check(namespace: FuseProbeUserNamespace) -> FuseCapabilityCheck {
+    capability_check(
+        "user_namespace_or_capability",
+        match namespace {
+            FuseProbeUserNamespace::Available => FuseCapabilityCheckStatus::Pass,
+            FuseProbeUserNamespace::Denied => FuseCapabilityCheckStatus::Fail,
+            FuseProbeUserNamespace::Unknown => FuseCapabilityCheckStatus::NotRun,
+        },
+        match namespace {
+            FuseProbeUserNamespace::Available => {
+                "user namespace/capability state permits mount attempts"
+            }
+            FuseProbeUserNamespace::Denied => "user namespace/capability state denies mounts",
+            FuseProbeUserNamespace::Unknown => "user namespace/capability state was not probed",
+        },
+        (namespace == FuseProbeUserNamespace::Denied)
+            .then_some("run on a worker whose namespace and capabilities allow FUSE mounts")
+            .map(str::to_owned),
+    )
+}
+
+fn default_permissions_check(
+    observation: FuseDefaultPermissionsObservation,
+) -> FuseCapabilityCheck {
+    capability_check(
+        "default_permissions_workspace",
+        match observation {
+            FuseDefaultPermissionsObservation::NotObserved => FuseCapabilityCheckStatus::Pass,
+            FuseDefaultPermissionsObservation::RootOwnedBtrfsTestdirEacces => {
+                FuseCapabilityCheckStatus::Fail
+            }
+        },
+        match observation {
+            FuseDefaultPermissionsObservation::NotObserved => {
+                "no DefaultPermissions/EACCES workspace issue observed"
+            }
+            FuseDefaultPermissionsObservation::RootOwnedBtrfsTestdirEacces => {
+                "root-owned btrfs testdir hit EACCES before userspace handlers"
+            }
+        },
+        (observation == FuseDefaultPermissionsObservation::RootOwnedBtrfsTestdirEacces)
+            .then_some("seed a writable btrfs workspace directory inside the image")
+            .map(str::to_owned),
+    )
+}
+
+fn fuse_capability_decision(input: &FuseCapabilityProbeInput) -> FuseCapabilityDecision {
+    if input.user_setting == FuseProbeUserSetting::DisabledByUser {
+        return fuse_failure(
+            FuseCapabilityResult::DisabledByUser,
+            SkipReason::UserDisabled,
+            FuseCapabilityFailureKind::UserDisabled,
+            "FUSE lanes were disabled by user or CI configuration.",
+        );
+    }
+    if input.dev_fuse == FuseProbePresence::Missing {
+        return fuse_failure(
+            FuseCapabilityResult::Unavailable,
+            SkipReason::FuseUnavailable,
+            FuseCapabilityFailureKind::DevFuseMissing,
+            "Enable /dev/fuse or use a worker with the FUSE kernel device.",
+        );
+    }
+    if input.fusermount == FuseProbePresence::Missing {
+        return fuse_failure(
+            FuseCapabilityResult::Unavailable,
+            SkipReason::WorkerDependencyMissing,
+            FuseCapabilityFailureKind::FusermountMissing,
+            "Install fusermount3 or fusermount before running mounted tests.",
+        );
+    }
+    if input.kernel_module == FuseProbeKernelModule::Unavailable {
+        return fuse_failure(
+            FuseCapabilityResult::Unavailable,
+            SkipReason::FuseUnavailable,
+            FuseCapabilityFailureKind::KernelModuleUnavailable,
+            "Load the fuse kernel module or use a kernel with FUSE support.",
+        );
+    }
+    if input.dev_fuse_access == FuseProbeAccess::Denied {
+        return fuse_failure(
+            FuseCapabilityResult::PermissionDenied,
+            SkipReason::FusePermissionDenied,
+            FuseCapabilityFailureKind::DevFuseAccessDenied,
+            "Grant the worker read/write access to /dev/fuse.",
+        );
+    }
+    if input.user_namespace == FuseProbeUserNamespace::Denied {
+        return fuse_failure(
+            FuseCapabilityResult::PermissionDenied,
+            SkipReason::FusePermissionDenied,
+            FuseCapabilityFailureKind::UserNamespaceOrCapabilityDenied,
+            "Run on a worker whose namespace and capabilities allow FUSE mounts.",
+        );
+    }
+    if input.mount_probe_required && input.mount_probe_exit.is_none() {
+        return FuseCapabilityDecision {
+            result: FuseCapabilityResult::NotChecked,
+            skip_reason: None,
+            failure_kind: Some(FuseCapabilityFailureKind::MountProbeNotRun),
+            remediation_hint: Some(
+                "Run a real mount/unmount probe before classifying this lane as ready.".to_owned(),
+            ),
+        };
+    }
+    if input.mount_probe_exit.is_some_and(|exit| exit != 0) {
+        return fuse_failure(
+            FuseCapabilityResult::PermissionDenied,
+            SkipReason::FusePermissionDenied,
+            FuseCapabilityFailureKind::MountProbeFailed,
+            "Inspect the mount probe log and rerun on a permissioned FUSE worker.",
+        );
+    }
+    if input.unmount_probe_exit.is_some_and(|exit| exit != 0) {
+        return fuse_failure(
+            FuseCapabilityResult::PermissionDenied,
+            SkipReason::FusePermissionDenied,
+            FuseCapabilityFailureKind::UnmountProbeFailed,
+            "Inspect the unmount log and clean the mountpoint before rerunning.",
+        );
+    }
+    if input.default_permissions == FuseDefaultPermissionsObservation::RootOwnedBtrfsTestdirEacces {
+        return fuse_failure(
+            FuseCapabilityResult::PermissionDenied,
+            SkipReason::RootOwnedBtrfsTestdirEacces,
+            FuseCapabilityFailureKind::DefaultPermissionsEacces,
+            "Seed a writable btrfs workspace directory inside the image.",
+        );
+    }
+
+    FuseCapabilityDecision {
+        result: FuseCapabilityResult::Available,
+        skip_reason: None,
+        failure_kind: None,
+        remediation_hint: None,
+    }
+}
+
+fn fuse_failure(
+    result: FuseCapabilityResult,
+    skip_reason: SkipReason,
+    failure_kind: FuseCapabilityFailureKind,
+    remediation_hint: &str,
+) -> FuseCapabilityDecision {
+    FuseCapabilityDecision {
+        result,
+        skip_reason: Some(skip_reason),
+        failure_kind: Some(failure_kind),
+        remediation_hint: Some(remediation_hint.to_owned()),
+    }
+}
+
+fn capability_check(
+    name: &str,
+    status: FuseCapabilityCheckStatus,
+    detail: &str,
+    remediation_hint: Option<String>,
+) -> FuseCapabilityCheck {
+    FuseCapabilityCheck {
+        name: name.to_owned(),
+        status,
+        detail: detail.to_owned(),
+        remediation_hint,
+    }
+}
+
+fn presence_status(presence: FuseProbePresence) -> FuseCapabilityCheckStatus {
+    match presence {
+        FuseProbePresence::Present => FuseCapabilityCheckStatus::Pass,
+        FuseProbePresence::Missing => FuseCapabilityCheckStatus::Fail,
+    }
+}
+
+fn missing_presence_remediation(
+    presence: FuseProbePresence,
+    remediation: &'static str,
+) -> Option<&'static str> {
+    (presence == FuseProbePresence::Missing).then_some(remediation)
+}
+
+fn disabled_by_user_remediation(setting: FuseProbeUserSetting) -> Option<&'static str> {
+    (setting == FuseProbeUserSetting::DisabledByUser)
+        .then_some("unset the mount skip flag when a permissioned host is available")
+}
+
+fn exit_probe_check(
+    name: &str,
+    exit_code: Option<i32>,
+    required: bool,
+    pass_detail: &str,
+    fail_detail: &str,
+    not_run_remediation: &str,
+) -> FuseCapabilityCheck {
+    match exit_code {
+        Some(0) => capability_check(name, FuseCapabilityCheckStatus::Pass, pass_detail, None),
+        Some(code) => capability_check(
+            name,
+            FuseCapabilityCheckStatus::Fail,
+            &format!("{fail_detail}: exit {code}"),
+            Some("inspect the probe stdout/stderr artifact".to_owned()),
+        ),
+        None if required => capability_check(
+            name,
+            FuseCapabilityCheckStatus::Fail,
+            "probe was required but did not run",
+            Some(not_run_remediation.to_owned()),
+        ),
+        None => capability_check(
+            name,
+            FuseCapabilityCheckStatus::NotRun,
+            "probe was not run",
+            Some(not_run_remediation.to_owned()),
+        ),
+    }
+}
+
+fn probe_fuse_kernel_module() -> FuseProbeKernelModule {
+    if Path::new("/sys/module/fuse").exists() {
+        return FuseProbeKernelModule::Available;
+    }
+
+    fs::read_to_string("/proc/filesystems").map_or(FuseProbeKernelModule::Unknown, |filesystems| {
+        if filesystems.lines().any(|line| {
+            line.split_whitespace()
+                .next_back()
+                .is_some_and(|name| name == "fuse" || name == "fuseblk")
+        }) {
+            FuseProbeKernelModule::Available
+        } else {
+            FuseProbeKernelModule::Unavailable
+        }
+    })
+}
+
+fn find_program(candidates: &[&str]) -> Option<String> {
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        for candidate in candidates {
+            let path = dir.join(candidate);
+            if path.is_file() {
+                return Some(path.display().to_string());
+            }
+        }
+    }
+    None
 }
 
 fn log_artifact_entry(path: &str, category: ArtifactCategory) -> ArtifactEntry {
@@ -999,6 +1557,21 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
         }
     }
 
+    fn base_fuse_probe_input() -> FuseCapabilityProbeInput {
+        FuseCapabilityProbeInput {
+            user_setting: FuseProbeUserSetting::Enabled,
+            dev_fuse: FuseProbePresence::Present,
+            fusermount: FuseProbePresence::Present,
+            kernel_module: FuseProbeKernelModule::Available,
+            dev_fuse_access: FuseProbeAccess::ReadWrite,
+            user_namespace: FuseProbeUserNamespace::Available,
+            mount_probe_exit: Some(0),
+            unmount_probe_exit: Some(0),
+            default_permissions: FuseDefaultPermissionsObservation::NotObserved,
+            mount_probe_required: true,
+        }
+    }
+
     #[test]
     fn classify_operational_observation_maps_pass_fail_skip_and_timeout() {
         let pass = classify_operational_observation(0, false, None, CleanupStatus::Clean);
@@ -1106,6 +1679,172 @@ SCENARIO_RESULT|scenario_id=another_test|bad_field
             classify_fuse_capability(base),
             FuseCapabilityResult::Available
         );
+    }
+
+    #[test]
+    fn fuse_capability_report_classifies_missing_dev_fuse() {
+        let report = build_fuse_capability_probe_report(FuseCapabilityProbeInput {
+            dev_fuse: FuseProbePresence::Missing,
+            dev_fuse_access: FuseProbeAccess::Denied,
+            mount_probe_exit: None,
+            unmount_probe_exit: None,
+            ..base_fuse_probe_input()
+        });
+
+        assert_eq!(report.result, FuseCapabilityResult::Unavailable);
+        assert_eq!(report.skip_reason, Some(SkipReason::FuseUnavailable));
+        assert_eq!(
+            report.failure_kind,
+            Some(FuseCapabilityFailureKind::DevFuseMissing)
+        );
+        assert!(report.remediation_hint.is_some());
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "dev_fuse_present"
+                    && check.status == FuseCapabilityCheckStatus::Fail)
+        );
+    }
+
+    #[test]
+    fn fuse_capability_report_classifies_missing_fusermount() {
+        let report = build_fuse_capability_probe_report(FuseCapabilityProbeInput {
+            fusermount: FuseProbePresence::Missing,
+            ..base_fuse_probe_input()
+        });
+
+        assert_eq!(report.result, FuseCapabilityResult::Unavailable);
+        assert_eq!(
+            report.skip_reason,
+            Some(SkipReason::WorkerDependencyMissing)
+        );
+        assert_eq!(
+            report.failure_kind,
+            Some(FuseCapabilityFailureKind::FusermountMissing)
+        );
+    }
+
+    #[test]
+    fn fuse_capability_report_classifies_kernel_module_unavailable() {
+        let report = build_fuse_capability_probe_report(FuseCapabilityProbeInput {
+            kernel_module: FuseProbeKernelModule::Unavailable,
+            ..base_fuse_probe_input()
+        });
+
+        assert_eq!(report.result, FuseCapabilityResult::Unavailable);
+        assert_eq!(report.skip_reason, Some(SkipReason::FuseUnavailable));
+        assert_eq!(
+            report.failure_kind,
+            Some(FuseCapabilityFailureKind::KernelModuleUnavailable)
+        );
+    }
+
+    #[test]
+    fn fuse_capability_report_classifies_user_namespace_denial() {
+        let report = build_fuse_capability_probe_report(FuseCapabilityProbeInput {
+            user_namespace: FuseProbeUserNamespace::Denied,
+            ..base_fuse_probe_input()
+        });
+
+        assert_eq!(report.result, FuseCapabilityResult::PermissionDenied);
+        assert_eq!(report.skip_reason, Some(SkipReason::FusePermissionDenied));
+        assert_eq!(
+            report.failure_kind,
+            Some(FuseCapabilityFailureKind::UserNamespaceOrCapabilityDenied)
+        );
+    }
+
+    #[test]
+    fn fuse_capability_report_requires_mount_probe_when_requested() {
+        let report = build_fuse_capability_probe_report(FuseCapabilityProbeInput {
+            mount_probe_exit: None,
+            unmount_probe_exit: None,
+            mount_probe_required: true,
+            ..base_fuse_probe_input()
+        });
+
+        assert_eq!(report.result, FuseCapabilityResult::NotChecked);
+        assert_eq!(report.skip_reason, None);
+        assert_eq!(
+            report.failure_kind,
+            Some(FuseCapabilityFailureKind::MountProbeNotRun)
+        );
+        assert!(
+            report.checks.iter().any(|check| check.name == "mount_probe"
+                && check.status == FuseCapabilityCheckStatus::Fail)
+        );
+    }
+
+    #[test]
+    fn fuse_capability_report_classifies_mount_success() {
+        let report = build_fuse_capability_probe_report(base_fuse_probe_input());
+
+        assert_eq!(report.result, FuseCapabilityResult::Available);
+        assert_eq!(report.skip_reason, None);
+        assert_eq!(report.failure_kind, None);
+        assert!(
+            report.checks.iter().any(|check| check.name == "mount_probe"
+                && check.status == FuseCapabilityCheckStatus::Pass)
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "unmount_probe"
+                    && check.status == FuseCapabilityCheckStatus::Pass)
+        );
+    }
+
+    #[test]
+    fn fuse_capability_report_classifies_unmount_failure() {
+        let report = build_fuse_capability_probe_report(FuseCapabilityProbeInput {
+            unmount_probe_exit: Some(1),
+            ..base_fuse_probe_input()
+        });
+
+        assert_eq!(report.result, FuseCapabilityResult::PermissionDenied);
+        assert_eq!(report.skip_reason, Some(SkipReason::FusePermissionDenied));
+        assert_eq!(
+            report.failure_kind,
+            Some(FuseCapabilityFailureKind::UnmountProbeFailed)
+        );
+    }
+
+    #[test]
+    fn fuse_capability_report_classifies_default_permissions_eacces() {
+        let report = build_fuse_capability_probe_report(FuseCapabilityProbeInput {
+            default_permissions: FuseDefaultPermissionsObservation::RootOwnedBtrfsTestdirEacces,
+            ..base_fuse_probe_input()
+        });
+
+        assert_eq!(report.result, FuseCapabilityResult::PermissionDenied);
+        assert_eq!(
+            report.skip_reason,
+            Some(SkipReason::RootOwnedBtrfsTestdirEacces)
+        );
+        assert_eq!(
+            report.failure_kind,
+            Some(FuseCapabilityFailureKind::DefaultPermissionsEacces)
+        );
+        assert!(
+            report
+                .remediation_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("writable btrfs workspace"))
+        );
+    }
+
+    #[test]
+    fn fuse_capability_report_serializes_machine_readable_artifact() {
+        let report = build_fuse_capability_probe_report(base_fuse_probe_input());
+        let json = serde_json::to_string(&report).expect("serialize report");
+        let parsed: FuseCapabilityProbeReport =
+            serde_json::from_str(&json).expect("deserialize report");
+
+        assert_eq!(parsed, report);
+        assert_eq!(parsed.scenario_id, "fuse_capability_probe");
+        assert_eq!(parsed.schema_version, FUSE_CAPABILITY_REPORT_SCHEMA_VERSION);
     }
 
     #[test]
