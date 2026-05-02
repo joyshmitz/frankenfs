@@ -759,7 +759,17 @@ pub fn run_fail_fast_matrix(seed: u64, num_commits: usize) -> CrashMatrixReport 
                     }
                     (data, crash_at)
                 }
-                _ => unreachable!(),
+                // Exhaustive — these crash classes are deliberately excluded
+                // from corruption_classes above (they don't produce
+                // corruption/truncation under FailFast). Listing them here
+                // turns "added a new CrashPoint variant" from a runtime
+                // panic into a compile error.
+                CrashPoint::CrashBeforeRecordVisible
+                | CrashPoint::CrashAfterSyncBeforeCommitSeqPublish
+                | CrashPoint::RepeatedCrashReplay => panic!(
+                    "run_fail_fast_matrix: CrashPoint::{crash_point} is not a corruption class \
+                     and must not appear in corruption_classes",
+                ),
             };
 
             let engine = WalReplayEngine::new(TailPolicy::FailFast);
