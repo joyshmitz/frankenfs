@@ -35894,6 +35894,43 @@ mod tests {
         assert!(fs.is_writable());
     }
 
+    /// Regression: a corrupted ext4 superblock advertising blocks_count
+    /// near u32::MAX previously made `enable_writes` allocate
+    /// Vec::with_capacity(group_count) ≈ 56 B × 53M = ~3 GiB before the
+    /// first read_group_desc could fail, OOM-ing the process. The fix
+    /// (commit f7597e2) rejects with FfsError::Format when group_count
+    /// exceeds the device's physical block capacity. This test pins the
+    /// guard at the unit-test level so future regressions surface
+    /// immediately rather than only under fuzz.
+    #[test]
+    fn enable_writes_rejects_corrupted_blocks_count() {
+        let mut image = build_ext4_image(2);
+        let sb_off = EXT4_SUPERBLOCK_OFFSET;
+        // Set blocks_count_lo to 0x66002074 (~1.7B blocks). Combined with
+        // blocks_per_group from build_ext4_image (= the original
+        // blocks_count = 32), this synthesises group_count ≈ 53 million
+        // groups — far more than the 32-block 128 KiB image can hold.
+        image[sb_off + 0x04..sb_off + 0x08].copy_from_slice(&0x6600_2074_u32.to_le_bytes());
+
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default())
+            .expect("open should succeed even with inflated blocks_count");
+        let err = fs
+            .enable_writes(&cx)
+            .expect_err("enable_writes must reject the inflated group_count");
+
+        match err {
+            FfsError::Format(msg) => {
+                assert!(
+                    msg.contains("groups") && msg.contains("blocks"),
+                    "expected Format error mentioning groups vs blocks, got: {msg}"
+                );
+            }
+            other => panic!("expected FfsError::Format, got {other:?}"),
+        }
+    }
+
     #[test]
     fn btrfs_largest_contiguous_free_run_uses_allocator_gaps() {
         let (fs, cx) = open_writable_btrfs();
