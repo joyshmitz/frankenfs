@@ -2985,6 +2985,101 @@ mod tests {
             prop_assert_eq!(after, initial.wrapping_add(u64::from(n)),
                 "bump_inode_version called {} times must add {} mod 2^64", n, n);
         }
+
+        /// Bijection contract: `serialize_inode` followed by
+        /// `Ext4Inode::parse_from_bytes` must round-trip an inode that
+        /// already has the on-disk shape (extent_bytes = 60, xattr_ibody
+        /// matches extra_isize, blocks/file_acl masked to 48 bits,
+        /// extra-area fields zero unless extra_isize advertises them,
+        /// checksum = 0). This pins the exact contract that the
+        /// fuzz_inode_roundtrip harness oracle reconciliation
+        /// (commits 0fed288 + 45dc836) was tightening — running it
+        /// inside ffs-inode's own test suite catches drift faster than
+        /// the cross-crate fuzz path.
+        #[test]
+        fn proptest_serialize_parse_bijection_at_inode_size_256(
+            // Restrict to regular files and directories — only those modes
+            // round-trip the high 32 bits of size. Symlinks and special
+            // files store size in the low 32 bits only (the parser at
+            // ext4.rs:2310 explicitly gates size_hi on is_reg || is_dir),
+            // so a symlink with size > u32::MAX is a corruption that the
+            // serialize/parse round-trip cannot recover from.
+            mode_bits in 0_u16..=1,
+            uid in any::<u32>(),
+            gid in any::<u32>(),
+            size in any::<u64>(),
+            blocks_lo in any::<u32>(),
+            blocks_hi in any::<u16>(),
+            file_acl_lo in any::<u32>(),
+            file_acl_hi in any::<u16>(),
+            generation in any::<u32>(),
+            atime in any::<u32>(),
+            ctime in any::<u32>(),
+            mtime in any::<u32>(),
+            extra_isize_choice in prop_oneof![Just(0_u16), Just(28), Just(32), Just(64), Just(128)],
+        ) {
+            let kind = if mode_bits == 0 {
+                file_type::S_IFREG
+            } else {
+                file_type::S_IFDIR
+            };
+
+            let blocks: u64 = u64::from(blocks_lo) | (u64::from(blocks_hi) << 32);
+            let file_acl: u64 = u64::from(file_acl_lo) | (u64::from(file_acl_hi) << 32);
+            let inode_size: usize = 256;
+            let extra_isize = extra_isize_choice;
+            let extra_end: usize = 128 + usize::from(extra_isize);
+            let advertise = |needed_end: usize| -> bool {
+                extra_end >= needed_end && inode_size >= needed_end
+            };
+            let xattr_start: usize = 128 + usize::from(extra_isize);
+            let xattr_capacity: usize = inode_size.saturating_sub(xattr_start);
+
+            let inode = Ext4Inode {
+                mode: kind | 0o644,
+                uid,
+                gid,
+                size,
+                links_count: 1,
+                blocks,
+                flags: 0,
+                version: 0,
+                generation,
+                file_acl,
+                atime,
+                ctime,
+                mtime,
+                dtime: 0,
+                atime_extra: if advertise(0x90) { 0xC0FFEE } else { 0 },
+                ctime_extra: if advertise(0x88) { 0xCAFE_BABE } else { 0 },
+                mtime_extra: if advertise(0x8C) { 0xDEAD_BEEF } else { 0 },
+                crtime: if advertise(0x94) { 1_700_000_000 } else { 0 },
+                crtime_extra: if advertise(0x98) { 0xFADE_F00D } else { 0 },
+                extra_isize,
+                checksum: 0,
+                version_hi: if advertise(0x9C) { 0x1234_5678 } else { 0 },
+                projid: if advertise(0xA0) { 0xABCD_0123 } else { 0 },
+                extent_bytes: vec![0_u8; 60],
+                xattr_ibody: if extra_isize > 0 {
+                    vec![0_u8; xattr_capacity]
+                } else {
+                    Vec::new()
+                },
+            };
+
+            let raw = serialize_inode(&inode, inode_size);
+            prop_assert_eq!(raw.len(), inode_size,
+                "serialize_inode must produce exactly inode_size bytes");
+
+            let parsed = ffs_ondisk::Ext4Inode::parse_from_bytes(&raw)
+                .expect("parse must succeed on serializer output");
+            prop_assert_eq!(&parsed, &inode,
+                "serialize→parse round-trip must be bijective for shape-conforming inodes");
+
+            let raw_again = serialize_inode(&parsed, inode_size);
+            prop_assert_eq!(raw_again, raw,
+                "parse→serialize must produce identical bytes");
+        }
     }
 
     // ── Additional edge-case tests ──────────────────────────────────────
