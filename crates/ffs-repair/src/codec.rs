@@ -530,6 +530,54 @@ mod tests {
         }
     }
 
+    /// Pin the upfront repair-symbol length-validation guard added in the
+    /// fab3ff1 fix: a malformed repair symbol whose payload differs from
+    /// device.block_size must surface a fast RepairFailed error rather than
+    /// pushing the InactivationDecoder through pathological work.
+    #[test]
+    fn decode_rejects_malformed_repair_symbol_length() {
+        let cx = Cx::for_testing();
+        let k = 4;
+        let block_size = 64;
+        let device = setup_device(k, block_size);
+        let uuid = test_uuid();
+        let group = GroupNumber(0);
+
+        let encoded = encode_group(&cx, &device, &uuid, group, BlockNumber(0), k, 2)
+            .expect("encode should succeed");
+
+        // Truncate the first repair symbol's payload to a wrong length.
+        let mut repair_data: Vec<(u32, Vec<u8>)> = encoded
+            .repair_symbols
+            .iter()
+            .map(|s| (s.esi, s.data.clone()))
+            .collect();
+        repair_data[0].1.truncate(8);  // 8 bytes instead of block_size=64
+
+        let corrupt = [0_u32];
+        let result = decode_group(
+            &cx,
+            &device,
+            &uuid,
+            group,
+            BlockNumber(0),
+            k,
+            &corrupt,
+            &repair_data,
+        );
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FfsError::RepairFailed(msg) => {
+                assert!(
+                    msg.contains("malformed") || msg.contains("payload length"),
+                    "expected RepairFailed about malformed payload, got: {msg}"
+                );
+            }
+            other => panic!("expected RepairFailed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn encode_different_groups_produce_different_symbols() {
         let cx = Cx::for_testing();
