@@ -217,8 +217,20 @@ fuzz_target!(|data: &[u8]| {
 
     let mut corrupt_set = BTreeSet::new();
     let corrupt_count = cursor.next_index(source_block_count + 1);
-    while corrupt_set.len() < corrupt_count {
+    // Bound the loop iterations: when corrupt_count == source_block_count
+    // the harness needs every distinct index in [0, k). With cursor
+    // exhausted the next_index helper returns 0 forever, so an unbounded
+    // loop spins indefinitely (libFuzzer reports a 60+s timeout). Cap
+    // the attempts at 8 × source_block_count — more than enough to
+    // collect every distinct index when the cursor still has entropy,
+    // but a hard exit when the cursor is exhausted. Decode_group below
+    // tolerates an under-filled corrupt set: it just decodes fewer
+    // blocks than corrupt_count requested.
+    let max_attempts = source_block_count.saturating_mul(8).max(16);
+    let mut attempts = 0_usize;
+    while corrupt_set.len() < corrupt_count && attempts < max_attempts {
         corrupt_set.insert(cursor.next_index(source_block_count) as u32);
+        attempts += 1;
     }
     let corrupt_indices: Vec<u32> = corrupt_set.into_iter().collect();
 

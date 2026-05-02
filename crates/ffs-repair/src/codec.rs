@@ -175,6 +175,24 @@ pub fn decode_group(
             group.0
         )));
     }
+    // Feasibility check: a corrupt block can only be reconstructed if at
+    // least one repair symbol contributes erasure-correcting information
+    // for the missing slots. With more corrupt blocks than available repair
+    // symbols, decode is mathematically hopeless and pushing the
+    // InactivationDecoder through a guaranteed-failure case wastes 60+s
+    // of CPU on inputs where libFuzzer mutated the symbol list down to
+    // zero. Surface a fast, named error instead. (The decoder still does
+    // its full constraint solve on the borderline case where the count
+    // matches exactly; only the strictly-impossible case is short-circuited.)
+    if corrupt_set.len() > repair_symbols.len() {
+        return Err(FfsError::RepairFailed(format!(
+            "decode_group: group {} has {} corrupt blocks but only {} repair symbols available; \
+             insufficient redundancy",
+            group.0,
+            corrupt_set.len(),
+            repair_symbols.len(),
+        )));
+    }
     for i in 0..source_block_count {
         if corrupt_set.contains(&i) {
             continue;
@@ -190,7 +208,22 @@ pub fn decode_group(
     }
 
     // Add repair symbols with their equations.
+    //
+    // Every repair symbol payload MUST be exactly block_size bytes — that is
+    // the encode-side contract. Feeding a shorter or longer payload to the
+    // InactivationDecoder pushes the inactivation step into pathological
+    // work (60+s on tiny inputs in fuzz_repair_codec_roundtrip). Reject
+    // malformed lengths up-front so the caller gets a fast, named error
+    // instead of a wallclock hang.
     for (esi, data) in repair_symbols {
+        if data.len() != block_size {
+            return Err(FfsError::RepairFailed(format!(
+                "decode_group: repair symbol esi={esi} for group {} has payload length {} \
+                 but device block_size is {block_size}; refusing to decode malformed symbol",
+                group.0,
+                data.len(),
+            )));
+        }
         let (cols, coefs) = decoder.repair_equation(*esi);
         received.push(ReceivedSymbol::repair(*esi, cols, coefs, data.clone()));
     }
