@@ -919,4 +919,109 @@ mod tests {
             "expected Format error, got {err:?}"
         );
     }
+
+    // ── Property-based tests (proptest) ──────────────────────────────────
+
+    use proptest::prelude::*;
+
+    /// Strategy: generate 1..16 monotonically-increasing commits with
+    /// 0..4 writes each, payload bytes free.
+    fn monotonic_commits_strat() -> impl Strategy<Value = Vec<WalCommit>> {
+        proptest::collection::vec(
+            (
+                1_u64..=64,   // seq delta from previous
+                any::<u64>(), // txn_id
+                proptest::collection::vec(
+                    (any::<u64>(), proptest::collection::vec(any::<u8>(), 0..16)),
+                    0..4,
+                ),
+            ),
+            1..16,
+        )
+        .prop_map(|raw| {
+            let mut seq: u64 = 0;
+            raw.into_iter()
+                .map(|(delta, txn, blocks)| {
+                    seq = seq.saturating_add(delta);
+                    WalCommit {
+                        commit_seq: CommitSeq(seq),
+                        txn_id: TxnId(txn),
+                        writes: blocks
+                            .into_iter()
+                            .map(|(b, data)| WalWrite {
+                                block: BlockNumber(b),
+                                data,
+                            })
+                            .collect(),
+                    }
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Property: replaying any monotonic, well-formed commit sequence
+        /// under TruncateToLastGood produces ReplayOutcome::Clean and
+        /// applies every commit exactly once.
+        #[test]
+        fn proptest_clean_monotonic_replay_applies_every_commit(
+            commits in monotonic_commits_strat(),
+        ) {
+            let data = encode_commits(&commits);
+            let engine = WalReplayEngine::new(TailPolicy::TruncateToLastGood);
+            let mut applied = Vec::new();
+            let report = engine
+                .replay(&data, 0, |c| applied.push(c.clone()))
+                .expect("clean replay must not fail");
+            prop_assert_eq!(report.outcome, ReplayOutcome::Clean);
+            prop_assert_eq!(report.commits_replayed, commits.len() as u64);
+            prop_assert_eq!(applied.len(), commits.len());
+            // Every commit's seq matches what we encoded, in order.
+            for (orig, app) in commits.iter().zip(applied.iter()) {
+                prop_assert_eq!(orig.commit_seq, app.commit_seq);
+                prop_assert_eq!(orig.txn_id, app.txn_id);
+                prop_assert_eq!(orig.writes.len(), app.writes.len());
+            }
+            // versions_replayed = sum of all write counts.
+            let total_writes: u64 = commits.iter().map(|c| c.writes.len() as u64).sum();
+            prop_assert_eq!(report.versions_replayed, total_writes);
+        }
+
+        /// Property: skip_up_to_seq filters apply but never affects
+        /// outcome classification on a clean stream — every commit with
+        /// seq > skip_up_to_seq is applied; those with seq <= are
+        /// silently skipped. The outcome stays Clean and records_discarded
+        /// stays zero.
+        #[test]
+        fn proptest_skip_up_to_seq_filters_apply_only(
+            commits in monotonic_commits_strat(),
+            skip_idx_seed in 0_usize..16,
+        ) {
+            let data = encode_commits(&commits);
+            let last_seq = commits.last().expect("commits non-empty").commit_seq.0;
+            // Choose a skip cutoff between 0 and last_seq+10 so we exercise
+            // both the "skip none" and "skip all" boundaries.
+            let skip = (skip_idx_seed as u64).saturating_mul(7) % (last_seq + 11);
+            let engine = WalReplayEngine::new(TailPolicy::TruncateToLastGood);
+            let mut applied = Vec::new();
+            let report = engine
+                .replay(&data, skip, |c| applied.push(c.commit_seq.0))
+                .expect("clean replay must not fail");
+            prop_assert_eq!(report.outcome, ReplayOutcome::Clean);
+            prop_assert_eq!(report.records_discarded, 0);
+            // Applied commits must all have seq > skip.
+            for seq in &applied {
+                prop_assert!(*seq > skip,
+                    "applied commit seq {} must be > skip {}", seq, skip);
+            }
+            // Count of applied commits = count of commits with seq > skip.
+            let expected: usize = commits
+                .iter()
+                .filter(|c| c.commit_seq.0 > skip)
+                .count();
+            prop_assert_eq!(applied.len(), expected);
+        }
+    }
 }
