@@ -2331,4 +2331,67 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Property: any sequence of N successful commits must survive
+    /// reopen with `replayed_commits == N` and `replayed_versions ==
+    /// total writes`. Pins the WAL durability contract — a regression
+    /// that lost a commit (e.g. an off-by-one on the last record) would
+    /// surface here regardless of the specific block/data shapes.
+    ///
+    /// Deterministic LCG sweep — no proptest dep needed since persist.rs
+    /// already imports tempfile but not proptest.
+    #[test]
+    fn commit_persists_n_writes_survive_reopen_for_varied_n() {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || -> u64 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state
+        };
+
+        let cx = test_cx();
+        for _ in 0..16 {
+            let n_commits = 1 + (next() as usize) % 12; // 1..12 commits
+            let tmp = NamedTempFile::new().expect("create temp file");
+            let path = tmp.path().to_path_buf();
+            std::fs::remove_file(&path).ok();
+
+            let mut total_writes: usize = 0;
+            {
+                let store = PersistentMvccStore::open(&cx, &path).expect("open");
+                for c in 0..n_commits {
+                    let writes_in_commit = 1 + (next() as usize) % 4; // 1..4 writes
+                    let mut txn = store.begin();
+                    for w in 0..writes_in_commit {
+                        let block = ((c * 100 + w) as u64).wrapping_mul(31);
+                        let data: Vec<u8> = (0..16)
+                            .map(|i| ((next() as u8).wrapping_add(i)))
+                            .collect();
+                        txn.stage_write(BlockNumber(block), data);
+                    }
+                    store.commit(txn).expect("commit");
+                    total_writes += writes_in_commit;
+                }
+                let stats = store.wal_stats();
+                assert_eq!(stats.commits_written, n_commits as u64);
+            }
+
+            // Reopen: every commit's data must be replayed.
+            {
+                let store = PersistentMvccStore::open(&cx, &path).expect("reopen");
+                let stats = store.wal_stats();
+                assert_eq!(
+                    stats.replayed_commits, n_commits as u64,
+                    "n={}: replayed_commits {} != expected {}",
+                    n_commits, stats.replayed_commits, n_commits
+                );
+                assert_eq!(
+                    stats.replayed_versions, total_writes as u64,
+                    "n={}: replayed_versions {} != expected {}",
+                    n_commits, stats.replayed_versions, total_writes
+                );
+            }
+
+            std::fs::remove_file(&path).ok();
+        }
+    }
 }
