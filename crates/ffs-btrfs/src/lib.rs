@@ -10489,6 +10489,84 @@ mod tests {
         assert_eq!(diffs[3].change_type, SnapshotChangeType::Added);
     }
 
+    /// Property: diff(snapshot, snapshot) is always empty for any snapshot
+    /// shape. ffs-btrfs has 181 unit tests but no property-based coverage
+    /// of snapshot_diff_by_generation; pin the self-diff invariant here
+    /// so a regression that flagged identical inode sets as Added or
+    /// Modified would surface immediately.
+    ///
+    /// Implementation: deterministic LCG-driven sweep over (inode_count,
+    /// generation_distribution) shapes — no proptest dependency required.
+    #[test]
+    fn snapshot_diff_self_diff_is_always_empty() {
+        // Linear congruential generator (Numerical Recipes constants) for
+        // reproducible per-iteration entropy.
+        let mut state: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let mut next = || -> u64 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state
+        };
+
+        for _ in 0..256 {
+            let entry_count =
+                usize::try_from(next() % 16).expect("value reduced modulo 16 fits in usize");
+            let entries: Vec<BtrfsLeafEntry> = (0..entry_count)
+                .map(|i| {
+                    // Mix unique objectid (256 + i) so every entry collides
+                    // exactly once with itself, with varied generations.
+                    let objectid = 256 + i as u64;
+                    let generation = next() % 1000;
+                    make_inode_entry(objectid, generation)
+                })
+                .collect();
+            let diffs = snapshot_diff_by_generation(&entries, &entries);
+            assert!(
+                diffs.is_empty(),
+                "self-diff over {entry_count} entries must be empty, got {diffs:?}"
+            );
+        }
+    }
+
+    /// Property: diff(empty, snapshot) reports every inode in snapshot as
+    /// Added. Pins the symmetry of the Added/Deleted classification.
+    #[test]
+    fn snapshot_diff_empty_to_snapshot_reports_all_added() {
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || -> u64 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state
+        };
+
+        for _ in 0..64 {
+            let entry_count =
+                1 + usize::try_from(next() % 12).expect("value reduced modulo 12 fits in usize");
+            let entries: Vec<BtrfsLeafEntry> = (0..entry_count)
+                .map(|i| make_inode_entry(256 + i as u64, next() % 1000))
+                .collect();
+            let added = snapshot_diff_by_generation(&[], &entries);
+            assert_eq!(added.len(), entry_count);
+            assert!(
+                added
+                    .iter()
+                    .all(|d| d.change_type == SnapshotChangeType::Added),
+                "every diff entry must be Added when older is empty"
+            );
+            // Sorted by inode (snapshot_diff_by_generation contract).
+            for window in added.windows(2) {
+                assert!(window[0].inode < window[1].inode);
+            }
+
+            let deleted = snapshot_diff_by_generation(&entries, &[]);
+            assert_eq!(deleted.len(), entry_count);
+            assert!(
+                deleted
+                    .iter()
+                    .all(|d| d.change_type == SnapshotChangeType::Deleted),
+                "every diff entry must be Deleted when newer is empty"
+            );
+        }
+    }
+
     #[test]
     fn representative_subvolume_snapshot_enumeration_exact_golden_contract() {
         assert_eq!(
