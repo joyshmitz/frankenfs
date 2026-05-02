@@ -581,7 +581,7 @@ for required_text in \
     "bd-rchk4.4" \
     "bd-rchk5" \
     "writeback_cache" \
-    "read-write mounted automatic repair remains blocked"; do
+    "Read-write mounted automatic repair remains blocked"; do
     if grep -Fq "$required_text" README.md; then
         :
     else
