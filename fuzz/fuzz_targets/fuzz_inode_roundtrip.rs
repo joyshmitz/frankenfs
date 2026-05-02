@@ -255,6 +255,17 @@ fn verify_raw_bytes(raw: &[u8]) {
         } else {
             128
         };
+        // The kernel/parser invariant is `extra_isize <= inode_size - 128`,
+        // so a parsed extra_isize > 128 (read from raw > 256 with garbage
+        // at offset 0x80) cannot be re-parsed at inode_size=256 — the
+        // re-parse hits the "extra_isize extends beyond inode boundary"
+        // rejection and the second parse aborts before equality even
+        // gets a chance. Clamp to the chosen inode_size.
+        let max_extra_isize = u16::try_from(inode_size.saturating_sub(128))
+            .unwrap_or(u16::MAX);
+        if parsed.extra_isize > max_extra_isize {
+            parsed.extra_isize = max_extra_isize;
+        }
         // parse_from_bytes returns xattr_ibody empty whenever extra_isize
         // is zero, regardless of inode_size; otherwise it reads
         // bytes[xattr_start..] to end-of-buffer, which after a
