@@ -42872,6 +42872,37 @@ mod tests {
         );
     }
 
+    /// Profiling probe: run verify_ext4_integrity on the exact image
+    /// the fuzz_verify_ext4_integrity timeout artifact reproduces, with
+    /// a 5-second wall-time budget. Without ASAN (unit tests) this
+    /// should complete in well under a second; if it ever exceeds 5s
+    /// we have a real per-iteration regression, not a fuzz-instrumentation
+    /// artifact.
+    #[test]
+    fn verify_ext4_integrity_per_inode_cost_under_5s() {
+        let mut image = build_ext4_image(2);
+        let sb = ffs_types::EXT4_SUPERBLOCK_OFFSET;
+        // Replicate the timeout-artifact mutations:
+        //   log_block_size → 0   (block_size = 1024)
+        //   blocks_count_lo → 46
+        // (Full sequence in the timeout artifact applies several rounds;
+        // these are the net effects on the superblock fields.)
+        image[sb + 0x18..sb + 0x1C].copy_from_slice(&0_u32.to_le_bytes());
+        image[sb + 0x04..sb + 0x08].copy_from_slice(&46_u32.to_le_bytes());
+
+        let start = std::time::Instant::now();
+        let report = verify_ext4_integrity(&image, 0).expect("verify must complete");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "verify_ext4_integrity took {:?} on the timeout-artifact shape; \
+             investigate per-iteration cost. report.failed={} verdicts={}",
+            elapsed,
+            report.failed,
+            report.verdicts.len(),
+        );
+    }
+
     /// Regression: a corrupted superblock advertising u32::MAX blocks_count
     /// previously made `for g in 0..groups_count` push billions of failure
     /// verdicts, OOM-ing the verifier itself. The fix caps the scan at
