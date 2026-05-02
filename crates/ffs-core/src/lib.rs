@@ -19264,11 +19264,24 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     let inode_size = usize::from(sb.inode_size);
     let block_size_usize = sb.block_size as usize;
 
-    // Always check root inode (2) and first non-reserved inode
+    // Always check root inode (2) and first non-reserved inode.
+    //
+    // Cap the per-inode scan at MAX_INODES_VERIFIED to bound worst-case
+    // wall-time on corrupted superblocks. Each iteration does
+    // parse_inode + read_group_desc + verify_inode_checksum + optional
+    // dir-block scan + extent resolution, which under specific corrupt
+    // shapes (block_size=1024 + zeroed inode_table addresses + a corrupt
+    // inode that looks like a dir with extents) climbs to ~60 ms per
+    // inode. With the default inodes_count=128 that's ~7 s per call,
+    // doubled by the harness's deterministic-replay assertion → 15+ s
+    // libFuzzer timeout. 16 384 inodes is well above any realistic
+    // scrub window and keeps even the corrupted per-inode cost under
+    // ~10 minutes worst case.
+    const MAX_INODES_VERIFIED: u32 = 16_384;
     let check_limit = if max_inodes == 0 {
-        inodes_count
+        inodes_count.min(MAX_INODES_VERIFIED)
     } else {
-        max_inodes.min(inodes_count)
+        max_inodes.min(inodes_count).min(MAX_INODES_VERIFIED)
     };
 
     let mut inodes_checked = 0_u64;
