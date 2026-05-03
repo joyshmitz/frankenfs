@@ -75,18 +75,50 @@ const REQUIRED_LONG_RUN_RECORD_FIELDS: [&str; 10] = [
     "reproduction_command",
 ];
 
+const REQUIRED_STOP_PRECEDENCE: [CampaignStopReason; 9] = [
+    CampaignStopReason::ResourceBudgetExceeded,
+    CampaignStopReason::Timeout,
+    CampaignStopReason::InfrastructureError,
+    CampaignStopReason::FailureThresholdExceeded,
+    CampaignStopReason::FlakeThresholdExceeded,
+    CampaignStopReason::HostCapabilitySkip,
+    CampaignStopReason::StaleBaseline,
+    CampaignStopReason::Inconclusive,
+    CampaignStopReason::Completed,
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SoakCanaryCampaignManifest {
     pub schema_version: u32,
     pub manifest_id: String,
     pub shared_qa_schema_version: u32,
     pub artifact_root_template: String,
+    pub classification_policy: CampaignClassificationPolicy,
     pub allowed_capabilities: Vec<String>,
     pub artifact_consumers: Vec<String>,
     pub required_environment_fields: Vec<String>,
     pub required_log_fields: Vec<String>,
     pub profiles: Vec<CampaignProfile>,
     pub workloads: Vec<CampaignWorkload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignClassificationPolicy {
+    pub stale_baseline_max_age_hours: u64,
+    pub stop_condition_precedence: Vec<CampaignStopReason>,
+    pub known_flake_quarantines: Vec<KnownFlakeQuarantine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownFlakeQuarantine {
+    pub quarantine_id: String,
+    pub workload_id: String,
+    pub signature: String,
+    pub owner: String,
+    pub expires_at: String,
+    pub user_risk_rationale: String,
+    pub reproduction_pack: String,
+    pub release_gate_impact: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +304,68 @@ impl CampaignOutcomeClass {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CampaignStopReason {
+    ResourceBudgetExceeded,
+    Timeout,
+    InfrastructureError,
+    FailureThresholdExceeded,
+    FlakeThresholdExceeded,
+    HostCapabilitySkip,
+    StaleBaseline,
+    Inconclusive,
+    Completed,
+}
+
+impl CampaignStopReason {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ResourceBudgetExceeded => "resource_budget_exceeded",
+            Self::Timeout => "timeout",
+            Self::InfrastructureError => "infrastructure_error",
+            Self::FailureThresholdExceeded => "failure_threshold_exceeded",
+            Self::FlakeThresholdExceeded => "flake_threshold_exceeded",
+            Self::HostCapabilitySkip => "host_capability_skip",
+            Self::StaleBaseline => "stale_baseline",
+            Self::Inconclusive => "inconclusive",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CampaignRootCauseClass {
+    CleanPass,
+    ProductRegression,
+    HostCapabilitySkip,
+    InfrastructureError,
+    Timeout,
+    ResourceExhaustion,
+    KnownQuarantinedFlake,
+    NewRecurringFlake,
+    Inconclusive,
+}
+
+impl CampaignRootCauseClass {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CleanPass => "clean_pass",
+            Self::ProductRegression => "product_regression",
+            Self::HostCapabilitySkip => "host_capability_skip",
+            Self::InfrastructureError => "infrastructure_error",
+            Self::Timeout => "timeout",
+            Self::ResourceExhaustion => "resource_exhaustion",
+            Self::KnownQuarantinedFlake => "known_quarantined_flake",
+            Self::NewRecurringFlake => "new_recurring_flake",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CampaignFailureEvaluation {
     pub profile_id: CampaignProfileId,
@@ -279,6 +373,30 @@ pub struct CampaignFailureEvaluation {
     pub outcome: CampaignOutcomeClass,
     pub threshold_summary: String,
     pub follow_up_bead: String,
+    pub repro_artifacts_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignRunObservation {
+    pub stats: CampaignObservationStats,
+    pub elapsed_seconds: u64,
+    pub baseline_age_hours: u64,
+    pub host_capability_missing: bool,
+    pub infrastructure_error: bool,
+    pub timeout: bool,
+    pub recurring_flake_signature: Option<String>,
+    pub resource_usage: CampaignResourceUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignStopEvaluation {
+    pub profile_id: CampaignProfileId,
+    pub workload_id: String,
+    pub stop_reason: CampaignStopReason,
+    pub classification: CampaignRootCauseClass,
+    pub follow_up_bead: String,
+    pub quarantine_id: Option<String>,
+    pub release_gate_impact: String,
     pub repro_artifacts_required: bool,
 }
 
@@ -321,8 +439,10 @@ pub struct SoakCanaryCampaignReport {
     pub required_environment_fields: Vec<String>,
     pub required_log_fields: Vec<String>,
     pub artifact_consumers: Vec<String>,
+    pub stop_condition_precedence: Vec<CampaignStopReason>,
     pub command_expansions: Vec<CampaignCommandExpansion>,
     pub failure_evaluations: Vec<CampaignFailureEvaluation>,
+    pub root_cause_samples: Vec<CampaignStopEvaluation>,
     pub heartbeat_summaries: Vec<String>,
     pub sample_outcome_counts: BTreeMap<String, usize>,
     pub sample_artifact_manifest_errors: Vec<String>,
@@ -346,6 +466,7 @@ pub fn validate_soak_canary_campaign_manifest(
 
     let command_expansions = expand_campaign_commands(manifest, artifact_root);
     let failure_evaluations = sample_failure_evaluations(manifest);
+    let root_cause_samples = sample_root_cause_evaluations(manifest);
     let heartbeat_summaries = sample_heartbeat_summaries(manifest);
     let sample_artifact_manifest =
         build_soak_canary_sample_artifact_manifest(manifest, artifact_root, &failure_evaluations);
@@ -374,8 +495,13 @@ pub fn validate_soak_canary_campaign_manifest(
         required_environment_fields: manifest.required_environment_fields.clone(),
         required_log_fields: manifest.required_log_fields.clone(),
         artifact_consumers: manifest.artifact_consumers.clone(),
+        stop_condition_precedence: manifest
+            .classification_policy
+            .stop_condition_precedence
+            .clone(),
         command_expansions,
         failure_evaluations,
+        root_cause_samples,
         heartbeat_summaries,
         sample_outcome_counts: sample_outcome_counts(),
         sample_artifact_manifest_errors,
@@ -473,6 +599,125 @@ pub fn evaluate_failure_threshold(
 }
 
 #[must_use]
+pub fn evaluate_stop_condition(
+    policy: &CampaignClassificationPolicy,
+    profile: &CampaignProfile,
+    workload: &CampaignWorkload,
+    observation: &CampaignRunObservation,
+) -> CampaignStopEvaluation {
+    let stop_reason = classify_stop_reason(policy, profile, workload, observation);
+    let matching_quarantine = observation
+        .recurring_flake_signature
+        .as_deref()
+        .and_then(|signature| find_known_quarantine(policy, &workload.workload_id, signature));
+    let classification = classify_root_cause(stop_reason, matching_quarantine);
+    let threshold = &workload.failure_threshold;
+    let follow_up_bead = matching_quarantine.map_or_else(
+        || threshold.follow_up_bead.clone(),
+        |quarantine| quarantine.quarantine_id.clone(),
+    );
+    let release_gate_impact = matching_quarantine.map_or_else(
+        || release_gate_impact_for(classification).to_owned(),
+        |quarantine| quarantine.release_gate_impact.clone(),
+    );
+
+    CampaignStopEvaluation {
+        profile_id: profile.profile_id,
+        workload_id: workload.workload_id.clone(),
+        stop_reason,
+        classification,
+        follow_up_bead,
+        quarantine_id: matching_quarantine.map(|quarantine| quarantine.quarantine_id.clone()),
+        release_gate_impact,
+        repro_artifacts_required: threshold.preserve_repro_artifacts,
+    }
+}
+
+fn classify_stop_reason(
+    policy: &CampaignClassificationPolicy,
+    profile: &CampaignProfile,
+    workload: &CampaignWorkload,
+    observation: &CampaignRunObservation,
+) -> CampaignStopReason {
+    let limits = &profile.resource_limits;
+    let threshold = &workload.failure_threshold;
+    let max_errors = profile.max_errors.min(threshold.max_errors);
+    let max_failures = profile.max_failures.min(threshold.max_failures);
+    let max_flakes = profile.max_flakes.min(threshold.max_flakes);
+
+    if observation.resource_usage.cpu_percent > limits.max_cpu_percent
+        || observation.resource_usage.memory_mib > limits.max_memory_mib
+        || observation.resource_usage.artifact_mib > limits.max_artifact_mib
+    {
+        CampaignStopReason::ResourceBudgetExceeded
+    } else if observation.timeout || observation.elapsed_seconds > limits.max_wall_seconds {
+        CampaignStopReason::Timeout
+    } else if observation.infrastructure_error || observation.stats.errors > max_errors {
+        CampaignStopReason::InfrastructureError
+    } else if observation.stats.failures > max_failures {
+        CampaignStopReason::FailureThresholdExceeded
+    } else if observation.stats.flakes > max_flakes {
+        CampaignStopReason::FlakeThresholdExceeded
+    } else if observation.host_capability_missing && observation.stats.skips > 0 {
+        CampaignStopReason::HostCapabilitySkip
+    } else if observation.baseline_age_hours > policy.stale_baseline_max_age_hours {
+        CampaignStopReason::StaleBaseline
+    } else if observation.stats.passes > 0 {
+        CampaignStopReason::Completed
+    } else {
+        CampaignStopReason::Inconclusive
+    }
+}
+
+fn classify_root_cause(
+    stop_reason: CampaignStopReason,
+    matching_quarantine: Option<&KnownFlakeQuarantine>,
+) -> CampaignRootCauseClass {
+    match stop_reason {
+        CampaignStopReason::ResourceBudgetExceeded => CampaignRootCauseClass::ResourceExhaustion,
+        CampaignStopReason::Timeout => CampaignRootCauseClass::Timeout,
+        CampaignStopReason::InfrastructureError => CampaignRootCauseClass::InfrastructureError,
+        CampaignStopReason::FailureThresholdExceeded => CampaignRootCauseClass::ProductRegression,
+        CampaignStopReason::FlakeThresholdExceeded => {
+            if matching_quarantine.is_some() {
+                CampaignRootCauseClass::KnownQuarantinedFlake
+            } else {
+                CampaignRootCauseClass::NewRecurringFlake
+            }
+        }
+        CampaignStopReason::HostCapabilitySkip => CampaignRootCauseClass::HostCapabilitySkip,
+        CampaignStopReason::Completed => CampaignRootCauseClass::CleanPass,
+        CampaignStopReason::StaleBaseline | CampaignStopReason::Inconclusive => {
+            CampaignRootCauseClass::Inconclusive
+        }
+    }
+}
+
+fn find_known_quarantine<'a>(
+    policy: &'a CampaignClassificationPolicy,
+    workload_id: &str,
+    signature: &str,
+) -> Option<&'a KnownFlakeQuarantine> {
+    policy.known_flake_quarantines.iter().find(|quarantine| {
+        quarantine.workload_id == workload_id && quarantine.signature == signature
+    })
+}
+
+fn release_gate_impact_for(classification: CampaignRootCauseClass) -> &'static str {
+    match classification {
+        CampaignRootCauseClass::CleanPass => "eligible",
+        CampaignRootCauseClass::HostCapabilitySkip => "skip_lane_with_host_blocker",
+        CampaignRootCauseClass::KnownQuarantinedFlake => "quarantine_with_expiry",
+        CampaignRootCauseClass::Inconclusive => "downgrade_until_fresh_evidence",
+        CampaignRootCauseClass::ProductRegression
+        | CampaignRootCauseClass::InfrastructureError
+        | CampaignRootCauseClass::Timeout
+        | CampaignRootCauseClass::ResourceExhaustion
+        | CampaignRootCauseClass::NewRecurringFlake => "block_release_gate",
+    }
+}
+
+#[must_use]
 pub fn render_heartbeat_summary(heartbeat: &CampaignHeartbeat) -> String {
     format!(
         "HEARTBEAT|campaign_id={}|profile_id={}|heartbeat_index={}|elapsed_seconds={}|iteration={}|pass={}|fail={}|skip={}|error={}|flake={}|active_workloads={}|cpu_percent={}|memory_mib={}|artifact_mib={}",
@@ -499,6 +744,7 @@ pub fn build_soak_canary_sample_artifact_manifest(
     artifact_root: &str,
     failure_evaluations: &[CampaignFailureEvaluation],
 ) -> ArtifactManifest {
+    let root_cause_samples = sample_root_cause_evaluations(manifest);
     let mut builder = ManifestBuilder::new(
         "soak_canary_campaign_dry_run",
         "soak_canary_campaigns",
@@ -632,6 +878,37 @@ pub fn build_soak_canary_sample_artifact_manifest(
         });
     }
 
+    for evaluation in &root_cause_samples {
+        builder = builder.artifact(ArtifactEntry {
+            path: format!(
+                "{artifact_root}/{}/{}_{}_root_cause.json",
+                evaluation.profile_id.label(),
+                evaluation.workload_id,
+                evaluation.classification.label()
+            ),
+            category: ArtifactCategory::ProofArtifact,
+            content_type: Some("application/json".to_owned()),
+            size_bytes: 0,
+            sha256: None,
+            redacted: false,
+            metadata: BTreeMap::from([
+                ("workload_id".to_owned(), evaluation.workload_id.clone()),
+                (
+                    "stop_reason".to_owned(),
+                    evaluation.stop_reason.label().to_owned(),
+                ),
+                (
+                    "classification".to_owned(),
+                    evaluation.classification.label().to_owned(),
+                ),
+                (
+                    "release_gate_impact".to_owned(),
+                    evaluation.release_gate_impact.clone(),
+                ),
+            ]),
+        });
+    }
+
     builder.duration_secs(30.0).build()
 }
 
@@ -656,6 +933,13 @@ pub fn render_soak_canary_campaign_markdown(report: &SoakCanaryCampaignReport) -
         "- consumers: `{}`",
         report.artifact_consumers.join(", ")
     );
+    let precedence = report
+        .stop_condition_precedence
+        .iter()
+        .map(|reason| reason.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "- stop precedence: `{precedence}`");
     let _ = writeln!(out);
     let _ = writeln!(out, "## Heartbeats");
     for line in &report.heartbeat_summaries {
@@ -672,6 +956,19 @@ pub fn render_soak_canary_campaign_markdown(report: &SoakCanaryCampaignReport) -
             evaluation.outcome.label(),
             evaluation.threshold_summary,
             evaluation.follow_up_bead
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Root Cause Samples");
+    for evaluation in &report.root_cause_samples {
+        let _ = writeln!(
+            out,
+            "- `{}` `{}` -> `{}`/`{}` release-gate `{}`",
+            evaluation.profile_id.label(),
+            evaluation.workload_id,
+            evaluation.stop_reason.label(),
+            evaluation.classification.label(),
+            evaluation.release_gate_impact
         );
     }
     out
@@ -701,6 +998,7 @@ fn validate_manifest_shape(manifest: &SoakCanaryCampaignManifest, errors: &mut V
         &manifest.artifact_root_template,
         errors,
     );
+    validate_classification_policy(&manifest.classification_policy, errors);
     validate_required_fields(
         "required_environment_fields",
         &manifest.required_environment_fields,
@@ -733,6 +1031,73 @@ fn validate_manifest_shape(manifest: &SoakCanaryCampaignManifest, errors: &mut V
         .collect::<BTreeSet<_>>();
     let profile_ids = validate_profiles(&manifest.profiles, &allowed, errors);
     validate_workloads(&manifest.workloads, &profile_ids, &allowed, errors);
+}
+
+fn validate_classification_policy(policy: &CampaignClassificationPolicy, errors: &mut Vec<String>) {
+    if policy.stale_baseline_max_age_hours == 0 {
+        errors
+            .push("classification_policy stale_baseline_max_age_hours must be positive".to_owned());
+    }
+
+    let observed = policy
+        .stop_condition_precedence
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for reason in REQUIRED_STOP_PRECEDENCE {
+        if !observed.contains(&reason) {
+            errors.push(format!(
+                "classification_policy stop_condition_precedence missing {}",
+                reason.label()
+            ));
+        }
+    }
+
+    let mut quarantines = BTreeSet::new();
+    for quarantine in &policy.known_flake_quarantines {
+        validate_nonempty(
+            "known_flake_quarantine.quarantine_id",
+            &quarantine.quarantine_id,
+            errors,
+        );
+        validate_nonempty(
+            "known_flake_quarantine.workload_id",
+            &quarantine.workload_id,
+            errors,
+        );
+        validate_nonempty(
+            "known_flake_quarantine.signature",
+            &quarantine.signature,
+            errors,
+        );
+        validate_nonempty("known_flake_quarantine.owner", &quarantine.owner, errors);
+        validate_nonempty(
+            "known_flake_quarantine.expires_at",
+            &quarantine.expires_at,
+            errors,
+        );
+        validate_nonempty(
+            "known_flake_quarantine.user_risk_rationale",
+            &quarantine.user_risk_rationale,
+            errors,
+        );
+        validate_nonempty(
+            "known_flake_quarantine.reproduction_pack",
+            &quarantine.reproduction_pack,
+            errors,
+        );
+        validate_nonempty(
+            "known_flake_quarantine.release_gate_impact",
+            &quarantine.release_gate_impact,
+            errors,
+        );
+        if !quarantines.insert(quarantine.quarantine_id.as_str()) {
+            errors.push(format!(
+                "duplicate known_flake_quarantine {}",
+                quarantine.quarantine_id
+            ));
+        }
+    }
 }
 
 fn validate_profiles(
@@ -1134,6 +1499,153 @@ fn sample_heartbeat_summaries(manifest: &SoakCanaryCampaignManifest) -> Vec<Stri
     })]
 }
 
+fn sample_root_cause_evaluations(
+    manifest: &SoakCanaryCampaignManifest,
+) -> Vec<CampaignStopEvaluation> {
+    let Some(profile) = manifest
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == CampaignProfileId::Smoke)
+    else {
+        return Vec::new();
+    };
+    let Some(workload) = manifest.workloads.first() else {
+        return Vec::new();
+    };
+
+    let base_usage = CampaignResourceUsage {
+        cpu_percent: 10,
+        memory_mib: 128,
+        artifact_mib: 4,
+    };
+    let cases = [
+        CampaignRunObservation {
+            stats: CampaignObservationStats {
+                passes: 1,
+                ..CampaignObservationStats::default()
+            },
+            elapsed_seconds: profile.duration_seconds,
+            baseline_age_hours: 0,
+            host_capability_missing: false,
+            infrastructure_error: false,
+            timeout: false,
+            recurring_flake_signature: None,
+            resource_usage: base_usage,
+        },
+        CampaignRunObservation {
+            stats: CampaignObservationStats {
+                failures: profile.max_failures.saturating_add(1),
+                ..CampaignObservationStats::default()
+            },
+            elapsed_seconds: profile.duration_seconds,
+            baseline_age_hours: 0,
+            host_capability_missing: false,
+            infrastructure_error: false,
+            timeout: false,
+            recurring_flake_signature: None,
+            resource_usage: base_usage,
+        },
+        CampaignRunObservation {
+            stats: CampaignObservationStats {
+                skips: 1,
+                ..CampaignObservationStats::default()
+            },
+            elapsed_seconds: profile.duration_seconds,
+            baseline_age_hours: 0,
+            host_capability_missing: true,
+            infrastructure_error: false,
+            timeout: false,
+            recurring_flake_signature: None,
+            resource_usage: base_usage,
+        },
+        CampaignRunObservation {
+            stats: CampaignObservationStats::default(),
+            elapsed_seconds: profile.duration_seconds,
+            baseline_age_hours: 0,
+            host_capability_missing: false,
+            infrastructure_error: true,
+            timeout: false,
+            recurring_flake_signature: None,
+            resource_usage: base_usage,
+        },
+        CampaignRunObservation {
+            stats: CampaignObservationStats::default(),
+            elapsed_seconds: profile.resource_limits.max_wall_seconds.saturating_add(1),
+            baseline_age_hours: 0,
+            host_capability_missing: false,
+            infrastructure_error: false,
+            timeout: true,
+            recurring_flake_signature: None,
+            resource_usage: base_usage,
+        },
+        CampaignRunObservation {
+            stats: CampaignObservationStats::default(),
+            elapsed_seconds: profile.duration_seconds,
+            baseline_age_hours: 0,
+            host_capability_missing: false,
+            infrastructure_error: false,
+            timeout: false,
+            recurring_flake_signature: None,
+            resource_usage: CampaignResourceUsage {
+                cpu_percent: profile.resource_limits.max_cpu_percent.saturating_add(1),
+                memory_mib: base_usage.memory_mib,
+                artifact_mib: base_usage.artifact_mib,
+            },
+        },
+        CampaignRunObservation {
+            stats: CampaignObservationStats {
+                flakes: profile.max_flakes.saturating_add(1),
+                ..CampaignObservationStats::default()
+            },
+            elapsed_seconds: profile.duration_seconds,
+            baseline_age_hours: 0,
+            host_capability_missing: false,
+            infrastructure_error: false,
+            timeout: false,
+            recurring_flake_signature: Some("known_fuse_mount_retry_jitter".to_owned()),
+            resource_usage: base_usage,
+        },
+        CampaignRunObservation {
+            stats: CampaignObservationStats {
+                flakes: profile.max_flakes.saturating_add(1),
+                ..CampaignObservationStats::default()
+            },
+            elapsed_seconds: profile.duration_seconds,
+            baseline_age_hours: 0,
+            host_capability_missing: false,
+            infrastructure_error: false,
+            timeout: false,
+            recurring_flake_signature: Some("new_unclassified_flake".to_owned()),
+            resource_usage: base_usage,
+        },
+        CampaignRunObservation {
+            stats: CampaignObservationStats::default(),
+            elapsed_seconds: profile.duration_seconds,
+            baseline_age_hours: manifest
+                .classification_policy
+                .stale_baseline_max_age_hours
+                .saturating_add(1),
+            host_capability_missing: false,
+            infrastructure_error: false,
+            timeout: false,
+            recurring_flake_signature: None,
+            resource_usage: base_usage,
+        },
+    ];
+
+    cases
+        .iter()
+        .map(|observation| {
+            evaluate_stop_condition(
+                &manifest.classification_policy,
+                profile,
+                workload,
+                observation,
+            )
+        })
+        .collect()
+}
+
 fn sample_outcome_counts() -> BTreeMap<String, usize> {
     BTreeMap::from([
         (CampaignOutcomeClass::Pass.label().to_owned(), 1),
@@ -1164,6 +1676,27 @@ mod tests {
         assert_eq!(report.profile_count, 4);
         assert!(report.workload_count >= 7);
         assert_eq!(report.sample_artifact_manifest_errors, Vec::<String>::new());
+        assert_eq!(
+            report.stop_condition_precedence.len(),
+            REQUIRED_STOP_PRECEDENCE.len()
+        );
+        let root_classes = report
+            .root_cause_samples
+            .iter()
+            .map(|row| row.classification)
+            .collect::<BTreeSet<_>>();
+        for required in [
+            CampaignRootCauseClass::ProductRegression,
+            CampaignRootCauseClass::HostCapabilitySkip,
+            CampaignRootCauseClass::InfrastructureError,
+            CampaignRootCauseClass::Timeout,
+            CampaignRootCauseClass::ResourceExhaustion,
+            CampaignRootCauseClass::KnownQuarantinedFlake,
+            CampaignRootCauseClass::NewRecurringFlake,
+            CampaignRootCauseClass::Inconclusive,
+        ] {
+            assert!(root_classes.contains(&required), "{root_classes:?}");
+        }
         assert!(report.command_expansions.iter().any(|row| row.profile_id
             == CampaignProfileId::Smoke
             && (row.command.contains("--profile smoke")
@@ -1304,6 +1837,159 @@ mod tests {
     }
 
     #[test]
+    fn stop_condition_precedence_classifies_resource_budget_first() {
+        let manifest = sample_manifest();
+        let profile = &manifest.profiles[0];
+        let workload = &manifest.workloads[0];
+        let evaluation = evaluate_stop_condition(
+            &manifest.classification_policy,
+            profile,
+            workload,
+            &CampaignRunObservation {
+                stats: CampaignObservationStats {
+                    failures: profile.max_failures + 1,
+                    ..CampaignObservationStats::default()
+                },
+                elapsed_seconds: profile.duration_seconds,
+                baseline_age_hours: 0,
+                host_capability_missing: false,
+                infrastructure_error: false,
+                timeout: false,
+                recurring_flake_signature: None,
+                resource_usage: CampaignResourceUsage {
+                    cpu_percent: profile.resource_limits.max_cpu_percent + 1,
+                    memory_mib: 1,
+                    artifact_mib: 1,
+                },
+            },
+        );
+
+        assert_eq!(
+            evaluation.stop_reason,
+            CampaignStopReason::ResourceBudgetExceeded
+        );
+        assert_eq!(
+            evaluation.classification,
+            CampaignRootCauseClass::ResourceExhaustion
+        );
+        assert_eq!(evaluation.release_gate_impact, "block_release_gate");
+    }
+
+    #[test]
+    fn classifies_stale_baseline_and_known_vs_new_flakes() {
+        let manifest = sample_manifest();
+        let profile = &manifest.profiles[0];
+        let workload = &manifest.workloads[0];
+        let resource_usage = CampaignResourceUsage {
+            cpu_percent: 1,
+            memory_mib: 1,
+            artifact_mib: 1,
+        };
+
+        let stale = evaluate_stop_condition(
+            &manifest.classification_policy,
+            profile,
+            workload,
+            &CampaignRunObservation {
+                stats: CampaignObservationStats::default(),
+                elapsed_seconds: profile.duration_seconds,
+                baseline_age_hours: manifest.classification_policy.stale_baseline_max_age_hours + 1,
+                host_capability_missing: false,
+                infrastructure_error: false,
+                timeout: false,
+                recurring_flake_signature: None,
+                resource_usage,
+            },
+        );
+        assert_eq!(stale.stop_reason, CampaignStopReason::StaleBaseline);
+        assert_eq!(stale.classification, CampaignRootCauseClass::Inconclusive);
+
+        let known = evaluate_stop_condition(
+            &manifest.classification_policy,
+            profile,
+            workload,
+            &CampaignRunObservation {
+                stats: CampaignObservationStats {
+                    flakes: profile.max_flakes + 1,
+                    ..CampaignObservationStats::default()
+                },
+                elapsed_seconds: profile.duration_seconds,
+                baseline_age_hours: 0,
+                host_capability_missing: false,
+                infrastructure_error: false,
+                timeout: false,
+                recurring_flake_signature: Some("known_fuse_mount_retry_jitter".to_owned()),
+                resource_usage,
+            },
+        );
+        assert_eq!(
+            known.classification,
+            CampaignRootCauseClass::KnownQuarantinedFlake
+        );
+        assert_eq!(
+            known.quarantine_id.as_deref(),
+            Some("soak_known_fuse_mount_retry_jitter")
+        );
+
+        let new_flake = evaluate_stop_condition(
+            &manifest.classification_policy,
+            profile,
+            workload,
+            &CampaignRunObservation {
+                stats: CampaignObservationStats {
+                    flakes: profile.max_flakes + 1,
+                    ..CampaignObservationStats::default()
+                },
+                elapsed_seconds: profile.duration_seconds,
+                baseline_age_hours: 0,
+                host_capability_missing: false,
+                infrastructure_error: false,
+                timeout: false,
+                recurring_flake_signature: Some("unclassified".to_owned()),
+                resource_usage,
+            },
+        );
+        assert_eq!(
+            new_flake.classification,
+            CampaignRootCauseClass::NewRecurringFlake
+        );
+        assert_eq!(new_flake.release_gate_impact, "block_release_gate");
+    }
+
+    #[test]
+    fn rejects_incomplete_classification_policy() {
+        let mut manifest = sample_manifest();
+        manifest.classification_policy.stale_baseline_max_age_hours = 0;
+        manifest
+            .classification_policy
+            .stop_condition_precedence
+            .retain(|reason| *reason != CampaignStopReason::Timeout);
+        manifest.classification_policy.known_flake_quarantines[0]
+            .reproduction_pack
+            .clear();
+
+        let report = validate_soak_canary_campaign_manifest(&manifest, "artifacts/soak");
+        assert!(!report.valid);
+        assert!(
+            report.errors.iter().any(|error| {
+                error.contains("classification_policy stale_baseline_max_age_hours")
+            })
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("stop_condition_precedence missing timeout") })
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("known_flake_quarantine.reproduction_pack") })
+        );
+    }
+
+    #[test]
     fn heartbeat_summary_contains_required_log_vocabulary() {
         let heartbeat = CampaignHeartbeat {
             campaign_id: "campaign-1".to_owned(),
@@ -1396,6 +2082,12 @@ mod tests {
                 .metadata
                 .get("release_gate_feature")
                 .is_some_and(|value| value == "operational.soak_canary")
+        }));
+        assert!(artifact.artifacts.iter().any(|entry| {
+            entry
+                .metadata
+                .get("classification")
+                .is_some_and(|value| value == "resource_exhaustion")
         }));
     }
 

@@ -19,6 +19,32 @@
     "operational_readiness_report"
   ],
   "artifact_root_template": "artifacts/soak/{profile}",
+  "classification_policy": {
+    "known_flake_quarantines": [
+      {
+        "expires_at": "2026-06-01T00:00:00Z",
+        "owner": "bd-t21em",
+        "quarantine_id": "soak_known_fuse_mount_retry_jitter",
+        "release_gate_impact": "quarantine_with_expiry",
+        "reproduction_pack": "artifacts/soak/quarantine/fuse_mount_retry_jitter_repro.json",
+        "signature": "known_fuse_mount_retry_jitter",
+        "user_risk_rationale": "Observed as bounded mount negotiation jitter on permissioned hosts; does not hide product data-loss failures.",
+        "workload_id": "soak_mount_cycle_ext4_ro"
+      }
+    ],
+    "stale_baseline_max_age_hours": 168,
+    "stop_condition_precedence": [
+      "resource_budget_exceeded",
+      "timeout",
+      "infrastructure_error",
+      "failure_threshold_exceeded",
+      "flake_threshold_exceeded",
+      "host_capability_skip",
+      "stale_baseline",
+      "inconclusive",
+      "completed"
+    ]
+  },
   "manifest_id": "bd-rchk0.5.9-soak-canary-campaigns-v1",
   "profiles": [
     {

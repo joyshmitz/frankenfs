@@ -45,6 +45,8 @@ BAD_FLAKE_JSON="$E2E_LOG_DIR/soak_canary_bad_flake.json"
 BAD_RESOURCE_JSON="$E2E_LOG_DIR/soak_canary_bad_resource.json"
 BAD_COMMAND_JSON="$E2E_LOG_DIR/soak_canary_bad_command.json"
 BAD_CONSUMER_JSON="$E2E_LOG_DIR/soak_canary_bad_consumer.json"
+BAD_POLICY_JSON="$E2E_LOG_DIR/soak_canary_bad_policy.json"
+BAD_QUARANTINE_JSON="$E2E_LOG_DIR/soak_canary_bad_quarantine.json"
 BAD_RAW="$E2E_LOG_DIR/soak_canary_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/soak_canary_unit_tests.log"
 
@@ -87,6 +89,34 @@ if report["workload_count"] < 7:
     raise SystemExit("expected representative workload coverage")
 if sorted(report["long_profile_ids"]) != ["canary", "nightly", "stress"]:
     raise SystemExit(f"unexpected long profiles: {report['long_profile_ids']}")
+required_stop = {
+    "resource_budget_exceeded",
+    "timeout",
+    "infrastructure_error",
+    "failure_threshold_exceeded",
+    "flake_threshold_exceeded",
+    "host_capability_skip",
+    "stale_baseline",
+    "inconclusive",
+    "completed",
+}
+if set(report["stop_condition_precedence"]) != required_stop:
+    raise SystemExit(f"unexpected stop precedence: {report['stop_condition_precedence']}")
+required_classes = {
+    "product_regression",
+    "host_capability_skip",
+    "infrastructure_error",
+    "timeout",
+    "resource_exhaustion",
+    "known_quarantined_flake",
+    "new_recurring_flake",
+    "inconclusive",
+}
+observed_classes = {row["classification"] for row in report["root_cause_samples"]}
+if not required_classes.issubset(observed_classes):
+    raise SystemExit(f"missing root-cause classes: {required_classes - observed_classes}")
+if not any(row.get("quarantine_id") == "soak_known_fuse_mount_retry_jitter" for row in report["root_cause_samples"]):
+    raise SystemExit("known flake quarantine was not surfaced")
 for field in ["kernel", "fuse_capability", "toolchain", "git_sha", "resource_usage", "cleanup_status", "reproduction_command"]:
     if field not in report["required_environment_fields"] and field not in report["required_log_fields"]:
         raise SystemExit(f"missing required field {field}")
@@ -112,6 +142,8 @@ if not any(row.get("proof_bundle_lane") == "soak_canary_campaigns" for row in me
     raise SystemExit("missing proof-bundle lane metadata")
 if not any(row.get("release_gate_feature") == "operational.soak_canary" for row in metadata):
     raise SystemExit("missing release-gate metadata")
+if not any(row.get("classification") == "resource_exhaustion" for row in metadata):
+    raise SystemExit("missing root-cause artifact metadata")
 if "HEARTBEAT|" not in summary or "bd-t21em" not in summary:
     raise SystemExit("summary missing heartbeat or follow-up bead")
 PY
@@ -122,12 +154,12 @@ else
 fi
 
 e2e_step "Scenario 4: invalid campaign variants fail closed"
-python3 - "$MANIFEST_JSON" "$BAD_DURATION_JSON" "$BAD_LOG_JSON" "$BAD_FLAKE_JSON" "$BAD_RESOURCE_JSON" "$BAD_COMMAND_JSON" "$BAD_CONSUMER_JSON" <<'PY'
+python3 - "$MANIFEST_JSON" "$BAD_DURATION_JSON" "$BAD_LOG_JSON" "$BAD_FLAKE_JSON" "$BAD_RESOURCE_JSON" "$BAD_COMMAND_JSON" "$BAD_CONSUMER_JSON" "$BAD_POLICY_JSON" "$BAD_QUARANTINE_JSON" <<'PY'
 import json
 import pathlib
 import sys
 
-source, bad_duration, bad_log, bad_flake, bad_resource, bad_command, bad_consumer = map(pathlib.Path, sys.argv[1:])
+source, bad_duration, bad_log, bad_flake, bad_resource, bad_command, bad_consumer, bad_policy, bad_quarantine = map(pathlib.Path, sys.argv[1:])
 base = json.loads(source.read_text(encoding="utf-8"))
 
 duration = json.loads(json.dumps(base))
@@ -155,10 +187,22 @@ bad_command.write_text(json.dumps(command, indent=2, sort_keys=True) + "\n", enc
 consumer = json.loads(json.dumps(base))
 consumer["artifact_consumers"] = ["operator_proof_bundle"]
 bad_consumer.write_text(json.dumps(consumer, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+policy = json.loads(json.dumps(base))
+policy["classification_policy"]["stale_baseline_max_age_hours"] = 0
+policy["classification_policy"]["stop_condition_precedence"] = [
+    reason for reason in policy["classification_policy"]["stop_condition_precedence"]
+    if reason != "timeout"
+]
+bad_policy.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+quarantine = json.loads(json.dumps(base))
+quarantine["classification_policy"]["known_flake_quarantines"][0]["reproduction_pack"] = ""
+bad_quarantine.write_text(json.dumps(quarantine, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
 invalid_failures=0
-for bad in "$BAD_DURATION_JSON" "$BAD_LOG_JSON" "$BAD_FLAKE_JSON" "$BAD_RESOURCE_JSON" "$BAD_COMMAND_JSON" "$BAD_CONSUMER_JSON"; do
+for bad in "$BAD_DURATION_JSON" "$BAD_LOG_JSON" "$BAD_FLAKE_JSON" "$BAD_RESOURCE_JSON" "$BAD_COMMAND_JSON" "$BAD_CONSUMER_JSON" "$BAD_POLICY_JSON" "$BAD_QUARANTINE_JSON"; do
     if cargo run --quiet -p ffs-harness -- validate-soak-canary-campaigns \
         --manifest "$bad" \
         --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json" >"$BAD_RAW" 2>&1; then
@@ -171,7 +215,7 @@ for bad in "$BAD_DURATION_JSON" "$BAD_LOG_JSON" "$BAD_FLAKE_JSON" "$BAD_RESOURCE
 done
 
 if ((invalid_failures == 0)); then
-    scenario_result "soak_canary_invalid_variants_rejected" "PASS" "bad duration/log/flake/resource/command/consumer rejected"
+    scenario_result "soak_canary_invalid_variants_rejected" "PASS" "bad duration/log/flake/resource/command/consumer/policy/quarantine rejected"
 else
     scenario_result "soak_canary_invalid_variants_rejected" "FAIL" "invalid_failures=${invalid_failures}"
 fi
