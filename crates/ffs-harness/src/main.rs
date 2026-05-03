@@ -4,6 +4,9 @@ use anyhow::{Context, Result, bail};
 use ffs_harness::{
     ParityReport,
     artifact_manifest::{ArtifactManifest, validate_operational_manifest},
+    deferred_parity_audit::{
+        DeferredParityAuditConfig, fail_on_audit_errors, run_deferred_parity_audit,
+    },
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region,
     open_ended_inventory::validate_current_inventory,
@@ -72,6 +75,7 @@ fn run() -> Result<()> {
         Some("validate-operational-manifest") => validate_operational_manifest_cmd(&args[1..]),
         Some("fuse-capability-probe") => fuse_capability_probe_cmd(&args[1..]),
         Some("validate-open-ended-inventory") => validate_open_ended_inventory_cmd(&args[1..]),
+        Some("validate-deferred-parity-audit") => validate_deferred_parity_audit_cmd(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
             print_usage();
             Ok(())
@@ -343,6 +347,67 @@ fn validate_open_ended_inventory_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_deferred_parity_audit_cmd(args: &[String]) -> Result<()> {
+    let mut config = DeferredParityAuditConfig::default();
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--issues" => {
+                i += 1;
+                config.issues_jsonl =
+                    Path::new(args.get(i).context("--issues requires a path")?).to_path_buf();
+            }
+            "--report" => {
+                i += 1;
+                config.report_markdown =
+                    Path::new(args.get(i).context("--report requires a path")?).to_path_buf();
+            }
+            "--doc" => {
+                i += 1;
+                config
+                    .docs
+                    .push(Path::new(args.get(i).context("--doc requires a path")?).to_path_buf());
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_deferred_parity_audit_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-deferred-parity-audit argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report = run_deferred_parity_audit(&config)?;
+    fail_on_audit_errors(&report)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "deferred parity audit report written: {} rows={} findings={}",
+            path.display(),
+            report.registry_row_count,
+            report.detected_gap_count
+        );
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
 fn fuse_capability_probe_cmd(args: &[String]) -> Result<()> {
     let mut out_path: Option<String> = None;
     let mut options = FuseHostProbeOptions::default();
@@ -581,6 +646,9 @@ fn print_usage() {
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
+    println!(
+        "  ffs-harness validate-deferred-parity-audit [--issues FILE] [--report FILE] [--doc FILE] [--out FILE]"
+    );
     println!();
     println!("FIXTURE GENERATION:");
     println!("  Extracts sparse JSON fixtures from real filesystem images.");
@@ -614,6 +682,9 @@ fn print_usage() {
     println!(
         "  ffs-harness validate-open-ended-inventory --out artifacts/conformance/open_ended_inventory.json"
     );
+    println!(
+        "  ffs-harness validate-deferred-parity-audit --out artifacts/parity/deferred_parity_audit.json"
+    );
 }
 
 fn print_fuse_capability_probe_usage() {
@@ -634,5 +705,15 @@ fn print_open_ended_inventory_usage() {
     println!("Usage: ffs-harness validate-open-ended-inventory [OPTIONS]");
     println!();
     println!("Options:");
+    println!("  --out FILE                         Write JSON report to FILE");
+}
+
+fn print_deferred_parity_audit_usage() {
+    println!("Usage: ffs-harness validate-deferred-parity-audit [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --issues FILE                      Read bead JSONL from FILE");
+    println!("  --report FILE                      Read audit registry markdown from FILE");
+    println!("  --doc FILE                         Check a public status doc; repeatable");
     println!("  --out FILE                         Write JSON report to FILE");
 }
