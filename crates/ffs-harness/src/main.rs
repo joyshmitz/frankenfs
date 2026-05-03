@@ -62,6 +62,11 @@ use ffs_harness::{
         build_performance_sample_artifact_manifest, fail_on_performance_baseline_manifest_errors,
         load_performance_baseline_manifest, validate_performance_baseline_manifest,
     },
+    performance_delta_closeout::{
+        DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG, fail_on_performance_delta_closeout_errors,
+        load_performance_delta_closeout_config, render_performance_delta_closeout_markdown,
+        run_performance_delta_closeout,
+    },
     proof_bundle::{
         ProofBundleValidationConfig, fail_on_proof_bundle_errors, render_proof_bundle_markdown,
         validate_proof_bundle,
@@ -181,6 +186,7 @@ fn run() -> Result<()> {
         Some("validate-performance-baseline-manifest") => {
             validate_performance_baseline_manifest_cmd(&args[1..])
         }
+        Some("performance-delta-closeout") => performance_delta_closeout_cmd(&args[1..]),
         Some("validate-adversarial-threat-model") => {
             validate_adversarial_threat_model_cmd(&args[1..])
         }
@@ -245,6 +251,15 @@ struct PerformanceManifestCmdArgs {
     artifact_root: String,
     out_path: Option<String>,
     artifact_out_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct PerformanceDeltaCloseoutCmdArgs {
+    config_path: String,
+    issues_path: Option<String>,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
 }
 
 #[derive(Debug)]
@@ -1008,6 +1023,99 @@ fn parse_performance_manifest_cmd_args(
         artifact_root,
         out_path,
         artifact_out_path,
+    }))
+}
+
+fn performance_delta_closeout_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_performance_delta_closeout_cmd_args(args)? else {
+        return Ok(());
+    };
+    let mut config = load_performance_delta_closeout_config(Path::new(&cmd_args.config_path))?;
+    if let Some(issues_path) = cmd_args.issues_path {
+        config.issues_path = issues_path;
+    }
+    let report = run_performance_delta_closeout(&config)?;
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_performance_delta_closeout_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "performance delta closeout written: {} valid={} rows={} followups={}",
+            path,
+            report.valid,
+            report.row_count,
+            report.follow_up_beads.len()
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        let summary = render_performance_delta_closeout_markdown(&report);
+        write_text_file(Path::new(&path), &format!("{summary}\n"))?;
+        println!("performance delta closeout summary written: {path}");
+    }
+
+    fail_on_performance_delta_closeout_errors(&report)
+}
+
+fn parse_performance_delta_closeout_cmd_args(
+    args: &[String],
+) -> Result<Option<PerformanceDeltaCloseoutCmdArgs>> {
+    let mut config_path = DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG.to_owned();
+    let mut issues_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" => {
+                i += 1;
+                args.get(i)
+                    .context("--config requires a path")?
+                    .clone_into(&mut config_path);
+            }
+            "--issues" => {
+                i += 1;
+                issues_path = Some(args.get(i).context("--issues requires a path")?.to_owned());
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_performance_delta_closeout_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown performance-delta-closeout argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(PerformanceDeltaCloseoutCmdArgs {
+        config_path,
+        issues_path,
+        out_path,
+        summary_out_path,
+        format,
     }))
 }
 
@@ -2617,6 +2725,7 @@ fn print_usage() {
         "  ffs-harness evaluate-release-gates --bundle FILE --policy FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--wording-out FILE]"
     );
     print_performance_baseline_manifest_usage_summary();
+    print_performance_delta_closeout_usage_summary();
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
     print_repair_confidence_lab_usage_summary();
@@ -2699,6 +2808,7 @@ fn print_usage_examples() {
         "  ffs-harness evaluate-release-gates --bundle artifacts/proof/bundle/manifest.json --policy artifacts/proof/release_gate_policy.json --out artifacts/proof/release_gate.json --wording-out artifacts/proof/release_gate_wording.tsv"
     );
     print_performance_baseline_manifest_example();
+    print_performance_delta_closeout_example();
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
     print_repair_confidence_lab_example();
@@ -2722,6 +2832,18 @@ fn print_performance_baseline_manifest_usage_summary() {
 fn print_performance_baseline_manifest_example() {
     println!(
         "  ffs-harness validate-performance-baseline-manifest --manifest benchmarks/performance_baseline_manifest.json --out artifacts/performance/manifest_report.json --artifact-out artifacts/performance/sample_artifact_manifest.json"
+    );
+}
+
+fn print_performance_delta_closeout_usage_summary() {
+    println!(
+        "  ffs-harness performance-delta-closeout [--config FILE] [--issues FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_performance_delta_closeout_example() {
+    println!(
+        "  ffs-harness performance-delta-closeout --config benchmarks/performance_delta_closeout.json --out artifacts/performance/delta_closeout.json --summary-out artifacts/performance/delta_closeout.md"
     );
 }
 
@@ -2938,6 +3060,17 @@ fn print_performance_manifest_usage() {
     println!("  --artifact-root DIR                Root for dry-run expanded artifacts");
     println!("  --out FILE                         Write validation report JSON");
     println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
+}
+
+fn print_performance_delta_closeout_usage() {
+    println!("Usage: ffs-harness performance-delta-closeout [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --config FILE                      Read performance delta closeout JSON");
+    println!("  --issues FILE                      Override bead JSONL path from config");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write selected-format closeout report");
+    println!("  --summary-out FILE                 Write Markdown closeout summary");
 }
 
 fn print_adversarial_threat_model_usage() {

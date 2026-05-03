@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "closeout_id": "bd-rchk5.4-performance-delta-closeout-v1",
+  "source_bead_id": "bd-rchk5.4",
+  "generated_at": "2026-05-03T21:35:00Z",
+  "issues_path": ".beads/issues.jsonl",
+  "reference_baselines": [
+    "benchmarks/baselines/history/20260218.json",
+    "benchmarks/baselines/history/20260219.json",
+    "benchmarks/baselines/history/20260406.json"
+  ],
+  "current_baselines": [
+    "benchmarks/baselines/history/20260503-bd-rchk5-2-arc-seq.json",
+    "benchmarks/baselines/history/20260503-bd-rchk5-2-arc-mixed.json",
+    "benchmarks/baselines/history/20260503-sharded-arc-hot64.json",
+    "benchmarks/baselines/history/20260503-sharded-s3fifo-hot64.json",
+    "benchmarks/baselines/history/20260503-bd-rchk5-2-metadata-parse.json",
+    "benchmarks/baselines/history/20260503-bd-rchk5-2-mvcc4.json",
+    "benchmarks/baselines/history/20260503-bd-rchk5-2-raptorq-encode.json",
+    "benchmarks/baselines/history/20260503-bd-rchk5-2-refresh-staleness.json",
+    "benchmarks/baselines/history/20260503-bd-rchk5-2-wal-commit.json",
+    "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-warm-pending.json"
+  ],
+  "comparison_artifacts": [
+    "benchmarks/baselines/history/20260503-bd-rchk5-3-mount-sudo-comparison.json"
+  ],
+  "policy": {
+    "p99_warn_percent": 10.0,
+    "p99_fail_percent": 50.0,
+    "throughput_fail_percent": -25.0,
+    "missing_reference_follow_up_bead": "bd-rchk5.8"
+  },
+  "follow_up_overrides": [
+    {
+      "operation": "mount_cold",
+      "classification": "regression",
+      "source_contains": "mount-sudo-comparison",
+      "follow_up_bead": "bd-rchk5.5"
+    },
+    {
+      "operation": "mount_warm",
+      "classification": "regression",
+      "source_contains": "mount-sudo-comparison",
+      "follow_up_bead": "bd-rchk5.6"
+    },
+    {
+      "operation": "mount_recovery",
+      "classification": "regression",
+      "source_contains": "mount-sudo-comparison",
+      "follow_up_bead": "bd-rchk5.7"
+    },
+    {
+      "operation": "mount_warm",
+      "classification": "pending_capability",
+      "source_contains": "pending",
+      "follow_up_bead": "bd-9vzzk"
+    }
+  ],
+  "unmeasured_claims": [
+    {
+      "claim_id": "long_campaign_writeback_cache_smoke",
+      "operation": "long_campaign_writeback_cache_smoke",
+      "reason": "Long-campaign writeback-cache performance remains deferred until soak stop conditions and flake root-cause classification are implemented.",
+      "follow_up_bead": "bd-t21em",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-soak-canary-campaigns --manifest benchmarks/soak_canary_campaign_manifest.json"
+    }
+  ]
+}
