@@ -50,6 +50,8 @@ BAD_MISSING_LOG="$E2E_LOG_DIR/bad_missing_log.json"
 BAD_UNSAFE_MUTATION="$E2E_LOG_DIR/bad_unsafe_mutation.json"
 BAD_EXPERIMENTAL_NO_FOLLOWUP="$E2E_LOG_DIR/bad_experimental_no_followup.json"
 BAD_MISSING_ARTIFACTS="$E2E_LOG_DIR/bad_missing_artifacts.json"
+BAD_CALIBRATION_CLASS="$E2E_LOG_DIR/bad_calibration_class.json"
+BAD_CALIBRATION_LEDGER="$E2E_LOG_DIR/bad_calibration_ledger.json"
 BAD_RAW="$E2E_LOG_DIR/repair_confidence_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/repair_confidence_lab_unit_tests.log"
 
@@ -98,6 +100,37 @@ if report["mutation_allowed_count"] != 1:
     raise SystemExit("exactly one scenario should allow mutation")
 if report["mutation_refused_count"] < 2:
     raise SystemExit("expected at least two explicit mutation refusals")
+if report["calibration_case_count"] != 9:
+    raise SystemExit(f"expected 9 calibration cases, got {report['calibration_case_count']}")
+required_calibration = {
+    "recoverable_single_block",
+    "recoverable_multi_block_within_budget",
+    "unrecoverable_beyond_budget",
+    "stale_symbols",
+    "insufficient_symbols",
+    "ledger_tamper",
+    "wrong_image_ledger",
+    "hostile_path",
+    "verification_failure",
+}
+observed_calibration = {row["corruption_class"] for row in report["calibration_reports"]}
+if observed_calibration != required_calibration:
+    raise SystemExit(f"unexpected calibration classes: {observed_calibration}")
+required_refusals = {
+    "beyond_symbol_budget",
+    "stale_symbols",
+    "insufficient_symbols",
+    "ledger_tamper",
+    "wrong_image_ledger",
+    "hostile_path",
+}
+observed_refusals = {
+    row.get("refusal_reason")
+    for row in report["calibration_reports"]
+    if row.get("refusal_reason")
+}
+if not required_refusals.issubset(observed_refusals):
+    raise SystemExit(f"missing refusal reasons: {required_refusals - observed_refusals}")
 
 decisions = {row["scenario_id"]: row for row in report["scenario_reports"]}
 mutating = decisions["repair_mutate_verified_single_block"]
@@ -123,6 +156,16 @@ for row in decisions.values():
         raise SystemExit(f"missing reproduction command in log for {row['scenario_id']}")
 if "verification_failed_refused" not in summary:
     raise SystemExit("summary missing verification refusal")
+calibration = {row["corpus_id"]: row for row in report["calibration_reports"]}
+if calibration["cal_recoverable_multi_block"]["observed_outcome"] != "mutating_repair_verified":
+    raise SystemExit("multi-block calibration did not reach mutating verified outcome")
+if calibration["cal_wrong_image_ledger"]["refusal_reason"] != "wrong_image_ledger":
+    raise SystemExit("wrong-image ledger refusal not preserved")
+for row in calibration.values():
+    if "REPAIR_CONFIDENCE_CALIBRATION" not in row["log_line"]:
+        raise SystemExit(f"missing calibration log marker for {row['corpus_id']}")
+    if "ledger_row_ids=" not in row["log_line"]:
+        raise SystemExit(f"missing ledger row ids for {row['corpus_id']}")
 PY
 then
     scenario_result "repair_confidence_decision_coverage" "PASS" "decision report covers all safety outcomes"
@@ -131,12 +174,12 @@ else
 fi
 
 e2e_step "Scenario 4: invalid repair confidence variants fail closed"
-python3 - "$SPEC_JSON" "$BAD_MISSING_LOG" "$BAD_UNSAFE_MUTATION" "$BAD_EXPERIMENTAL_NO_FOLLOWUP" "$BAD_MISSING_ARTIFACTS" <<'PY'
+python3 - "$SPEC_JSON" "$BAD_MISSING_LOG" "$BAD_UNSAFE_MUTATION" "$BAD_EXPERIMENTAL_NO_FOLLOWUP" "$BAD_MISSING_ARTIFACTS" "$BAD_CALIBRATION_CLASS" "$BAD_CALIBRATION_LEDGER" <<'PY'
 import json
 import pathlib
 import sys
 
-source, missing_log, unsafe_mutation, no_followup, missing_artifacts = map(pathlib.Path, sys.argv[1:])
+source, missing_log, unsafe_mutation, no_followup, missing_artifacts, bad_calibration_class, bad_calibration_ledger = map(pathlib.Path, sys.argv[1:])
 base = json.loads(source.read_text(encoding="utf-8"))
 
 variant = json.loads(json.dumps(base))
@@ -161,10 +204,23 @@ no_followup.write_text(json.dumps(variant, indent=2, sort_keys=True) + "\n", enc
 variant = json.loads(json.dumps(base))
 variant["scenarios"][0]["expected_artifacts"] = []
 missing_artifacts.write_text(json.dumps(variant, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+variant = json.loads(json.dumps(base))
+variant["calibration_corpus"] = [
+    row for row in variant["calibration_corpus"]
+    if row["corruption_class"] != "wrong_image_ledger"
+]
+bad_calibration_class.write_text(json.dumps(variant, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+variant = json.loads(json.dumps(base))
+for row in variant["calibration_corpus"]:
+    if row["corpus_id"] == "cal_wrong_image_ledger":
+        row["ledger_expectation"]["require_image_hash_match"] = True
+bad_calibration_ledger.write_text(json.dumps(variant, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
 invalid_failures=0
-for bad in "$BAD_MISSING_LOG" "$BAD_UNSAFE_MUTATION" "$BAD_EXPERIMENTAL_NO_FOLLOWUP" "$BAD_MISSING_ARTIFACTS"; do
+for bad in "$BAD_MISSING_LOG" "$BAD_UNSAFE_MUTATION" "$BAD_EXPERIMENTAL_NO_FOLLOWUP" "$BAD_MISSING_ARTIFACTS" "$BAD_CALIBRATION_CLASS" "$BAD_CALIBRATION_LEDGER"; do
     if cargo run --quiet -p ffs-harness -- validate-repair-confidence-lab \
         --spec "$bad" \
         --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json" >"$BAD_RAW" 2>&1; then
@@ -177,7 +233,7 @@ for bad in "$BAD_MISSING_LOG" "$BAD_UNSAFE_MUTATION" "$BAD_EXPERIMENTAL_NO_FOLLO
 done
 
 if ((invalid_failures == 0)); then
-    scenario_result "repair_confidence_invalid_variants_rejected" "PASS" "bad log/outcome/follow-up/artifact variants rejected"
+    scenario_result "repair_confidence_invalid_variants_rejected" "PASS" "bad log/outcome/follow-up/artifact/calibration variants rejected"
 else
     scenario_result "repair_confidence_invalid_variants_rejected" "FAIL" "invalid_failures=${invalid_failures}"
 fi

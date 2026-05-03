@@ -50,6 +50,27 @@ const REQUIRED_OUTCOMES: [RepairConfidenceOutcome; 5] = [
     RepairConfidenceOutcome::FailedVerification,
 ];
 
+const REQUIRED_CALIBRATION_CLASSES: [&str; 9] = [
+    "recoverable_single_block",
+    "recoverable_multi_block_within_budget",
+    "unrecoverable_beyond_budget",
+    "stale_symbols",
+    "insufficient_symbols",
+    "ledger_tamper",
+    "wrong_image_ledger",
+    "hostile_path",
+    "verification_failure",
+];
+
+const REQUIRED_REFUSAL_REASONS: [&str; 6] = [
+    "beyond_symbol_budget",
+    "stale_symbols",
+    "insufficient_symbols",
+    "ledger_tamper",
+    "wrong_image_ledger",
+    "hostile_path",
+];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepairConfidenceLabSpec {
     pub schema_version: u32,
@@ -57,6 +78,7 @@ pub struct RepairConfidenceLabSpec {
     pub bead_id: String,
     pub thresholds: Vec<MutationSafetyThreshold>,
     pub scenarios: Vec<RepairConfidenceScenario>,
+    pub calibration_corpus: Vec<RepairCalibrationCase>,
     pub required_log_fields: Vec<String>,
     pub release_gate_consumers: Vec<String>,
     pub docs_claims: Vec<String>,
@@ -193,6 +215,65 @@ pub struct ExpectedRepairLog {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepairCalibrationCase {
+    pub corpus_id: String,
+    pub seed: u64,
+    pub corruption_class: String,
+    pub expected_recoverability: CalibrationRecoverability,
+    pub expected_outcome: RepairConfidenceOutcome,
+    pub threshold_id: String,
+    pub original_image_hash: String,
+    pub corrupted_image_hash: String,
+    pub corruption_manifest_hash: String,
+    pub repair_symbol_budget: RepairSymbolBudget,
+    pub decoder_parameters: RepairDecoderParameters,
+    pub confidence_inputs: RepairConfidenceInputs,
+    pub ledger_expectation: CalibrationLedgerExpectation,
+    pub cleanup_status: String,
+    pub artifact_path: String,
+    pub reproduction_command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationRecoverability {
+    Recoverable,
+    Refuse,
+    VerificationFailure,
+}
+
+impl CalibrationRecoverability {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Recoverable => "recoverable",
+            Self::Refuse => "refuse",
+            Self::VerificationFailure => "verification_failure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairDecoderParameters {
+    pub codec: String,
+    pub data_symbols: u32,
+    pub repair_symbols: u32,
+    pub symbol_size_bytes: u32,
+    pub max_decode_iterations: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalibrationLedgerExpectation {
+    pub ledger_id: String,
+    pub expected_rows: u32,
+    pub require_image_hash_match: bool,
+    pub require_symbol_generation_match: bool,
+    pub allow_tamper: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepairConfidenceLabReport {
     pub schema_version: u32,
     pub lab_id: String,
@@ -204,10 +285,15 @@ pub struct RepairConfidenceLabReport {
     pub decision_counts: BTreeMap<String, usize>,
     pub mutation_allowed_count: usize,
     pub mutation_refused_count: usize,
+    pub calibration_case_count: usize,
+    pub calibration_outcome_counts: BTreeMap<String, usize>,
+    pub missing_required_calibration_classes: Vec<String>,
+    pub missing_required_refusal_reasons: Vec<String>,
     pub missing_required_outcomes: Vec<String>,
     pub missing_required_log_fields: Vec<String>,
     pub missing_docs_claims: Vec<String>,
     pub scenario_reports: Vec<RepairConfidenceScenarioReport>,
+    pub calibration_reports: Vec<RepairCalibrationCaseReport>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -231,6 +317,24 @@ pub struct RepairConfidenceScenarioReport {
     pub reproduction_command: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepairCalibrationCaseReport {
+    pub corpus_id: String,
+    pub seed: u64,
+    pub corruption_class: String,
+    pub expected_recoverability: CalibrationRecoverability,
+    pub expected_outcome: RepairConfidenceOutcome,
+    pub confidence_score: f64,
+    pub threshold_decision: String,
+    pub observed_outcome: RepairConfidenceOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_reason: Option<String>,
+    pub ledger_row_ids: String,
+    pub artifact_path: String,
+    pub log_line: String,
+    pub reproduction_command: String,
+}
+
 pub fn load_repair_confidence_lab_spec(path: &Path) -> Result<RepairConfidenceLabSpec> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("failed to read repair confidence lab {}", path.display()))?;
@@ -245,7 +349,9 @@ pub fn validate_repair_confidence_lab(spec: &RepairConfidenceLabSpec) -> RepairC
     let mut by_outcome = BTreeMap::<String, usize>::new();
     let mut by_phase = BTreeMap::<String, usize>::new();
     let mut decision_counts = BTreeMap::<String, usize>::new();
+    let mut calibration_outcome_counts = BTreeMap::<String, usize>::new();
     let mut scenario_reports = Vec::new();
+    let mut calibration_reports = Vec::new();
     let mut mutation_allowed_count = 0usize;
     let mut mutation_refused_count = 0usize;
 
@@ -261,6 +367,8 @@ pub fn validate_repair_confidence_lab(spec: &RepairConfidenceLabSpec) -> RepairC
 
     let mut observed_outcomes = BTreeSet::new();
     let mut scenario_ids = BTreeMap::<&str, usize>::new();
+    let mut observed_calibration_classes = BTreeSet::new();
+    let mut observed_refusal_reasons = BTreeSet::new();
 
     for scenario in &spec.scenarios {
         *scenario_ids
@@ -295,9 +403,34 @@ pub fn validate_repair_confidence_lab(spec: &RepairConfidenceLabSpec) -> RepairC
         scenario_reports.push(report);
     }
 
+    let mut corpus_ids = BTreeMap::<&str, usize>::new();
+    for case in &spec.calibration_corpus {
+        *corpus_ids.entry(case.corpus_id.as_str()).or_default() += 1;
+        observed_calibration_classes.insert(case.corruption_class.as_str());
+        if let Some(refusal_reason) = case.refusal_reason.as_deref() {
+            observed_refusal_reasons.insert(refusal_reason);
+        }
+        let report = evaluate_calibration_case(case, thresholds.get(case.threshold_id.as_str()));
+        *calibration_outcome_counts
+            .entry(report.observed_outcome.label().to_owned())
+            .or_default() += 1;
+        validate_calibration_case(
+            case,
+            thresholds.get(case.threshold_id.as_str()),
+            &report,
+            &mut errors,
+        );
+        calibration_reports.push(report);
+    }
+
     for (scenario_id, count) in scenario_ids {
         if count > 1 {
             errors.push(format!("duplicate scenario_id {scenario_id}"));
+        }
+    }
+    for (corpus_id, count) in corpus_ids {
+        if count > 1 {
+            errors.push(format!("duplicate calibration corpus_id {corpus_id}"));
         }
     }
 
@@ -310,6 +443,30 @@ pub fn validate_repair_confidence_lab(spec: &RepairConfidenceLabSpec) -> RepairC
         errors.push(format!(
             "missing required repair confidence outcomes: {}",
             missing_required_outcomes.join(", ")
+        ));
+    }
+
+    let missing_required_calibration_classes = REQUIRED_CALIBRATION_CLASSES
+        .iter()
+        .filter(|class| !observed_calibration_classes.contains(**class))
+        .map(|class| (*class).to_owned())
+        .collect::<Vec<_>>();
+    if !missing_required_calibration_classes.is_empty() {
+        errors.push(format!(
+            "missing required calibration classes: {}",
+            missing_required_calibration_classes.join(", ")
+        ));
+    }
+
+    let missing_required_refusal_reasons = REQUIRED_REFUSAL_REASONS
+        .iter()
+        .filter(|reason| !observed_refusal_reasons.contains(**reason))
+        .map(|reason| (*reason).to_owned())
+        .collect::<Vec<_>>();
+    if !missing_required_refusal_reasons.is_empty() {
+        errors.push(format!(
+            "missing required calibration refusal reasons: {}",
+            missing_required_refusal_reasons.join(", ")
         ));
     }
 
@@ -358,10 +515,15 @@ pub fn validate_repair_confidence_lab(spec: &RepairConfidenceLabSpec) -> RepairC
         decision_counts,
         mutation_allowed_count,
         mutation_refused_count,
+        calibration_case_count: spec.calibration_corpus.len(),
+        calibration_outcome_counts,
+        missing_required_calibration_classes,
+        missing_required_refusal_reasons,
         missing_required_outcomes,
         missing_required_log_fields,
         missing_docs_claims,
         scenario_reports,
+        calibration_reports,
         errors,
         warnings,
     }
@@ -396,9 +558,19 @@ pub fn render_repair_confidence_lab_markdown(report: &RepairConfidenceLabReport)
     render_counts(&mut out, "Outcome Coverage", &report.by_outcome);
     render_counts(&mut out, "Phase Coverage", &report.by_phase);
     render_counts(&mut out, "Decision Coverage", &report.decision_counts);
+    render_counts(
+        &mut out,
+        "Calibration Outcome Coverage",
+        &report.calibration_outcome_counts,
+    );
     let _ = writeln!(out, "## Scenario Decisions");
     for scenario in &report.scenario_reports {
         let _ = writeln!(out, "- `{}`", scenario.log_line);
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Calibration Corpus");
+    for case in &report.calibration_reports {
+        let _ = writeln!(out, "- `{}`", case.log_line);
     }
     out
 }
@@ -425,6 +597,9 @@ fn validate_header(spec: &RepairConfidenceLabSpec, errors: &mut Vec<String>) {
     }
     if spec.scenarios.is_empty() {
         errors.push("scenarios must not be empty".to_owned());
+    }
+    if spec.calibration_corpus.is_empty() {
+        errors.push("calibration_corpus must not be empty".to_owned());
     }
 }
 
@@ -520,6 +695,156 @@ fn validate_scenario(
     validate_candidate_plan(scenario, errors);
     validate_ledger(scenario, errors);
     validate_outcome_contract(scenario, report, errors, warnings);
+}
+
+fn validate_calibration_case(
+    case: &RepairCalibrationCase,
+    threshold: Option<&&MutationSafetyThreshold>,
+    report: &RepairCalibrationCaseReport,
+    errors: &mut Vec<String>,
+) {
+    validate_stable_id("calibration.corpus_id", &case.corpus_id, errors);
+    validate_nonempty(
+        "calibration.corruption_class",
+        &case.corruption_class,
+        errors,
+    );
+    validate_nonempty("calibration.threshold_id", &case.threshold_id, errors);
+    validate_nonempty(
+        "calibration.original_image_hash",
+        &case.original_image_hash,
+        errors,
+    );
+    validate_nonempty(
+        "calibration.corrupted_image_hash",
+        &case.corrupted_image_hash,
+        errors,
+    );
+    validate_nonempty(
+        "calibration.corruption_manifest_hash",
+        &case.corruption_manifest_hash,
+        errors,
+    );
+    validate_nonempty("calibration.cleanup_status", &case.cleanup_status, errors);
+    validate_nonempty("calibration.artifact_path", &case.artifact_path, errors);
+    validate_nonempty(
+        "calibration.reproduction_command",
+        &case.reproduction_command,
+        errors,
+    );
+    if threshold.is_none() {
+        errors.push(format!(
+            "calibration {} references unknown threshold {}",
+            case.corpus_id, case.threshold_id
+        ));
+    }
+    validate_calibration_budget(case, errors);
+    validate_confidence_input_values(
+        &format!("calibration {}", case.corpus_id),
+        &case.confidence_inputs,
+        errors,
+    );
+    validate_decoder_parameters(case, errors);
+    validate_ledger_expectation(case, errors);
+    validate_calibration_outcome(case, report, errors);
+}
+
+fn validate_calibration_budget(case: &RepairCalibrationCase, errors: &mut Vec<String>) {
+    let budget = &case.repair_symbol_budget;
+    if budget.repair_symbols_required == 0 {
+        errors.push(format!(
+            "calibration {} repair_symbols_required must be positive",
+            case.corpus_id
+        ));
+    }
+    if case.expected_recoverability == CalibrationRecoverability::Recoverable
+        && budget.repair_symbols_available < budget.repair_symbols_required
+    {
+        errors.push(format!(
+            "calibration {} recoverable case must have enough symbols",
+            case.corpus_id
+        ));
+    }
+}
+
+fn validate_decoder_parameters(case: &RepairCalibrationCase, errors: &mut Vec<String>) {
+    let decoder = &case.decoder_parameters;
+    validate_nonempty("decoder.codec", &decoder.codec, errors);
+    if decoder.data_symbols == 0
+        || decoder.repair_symbols == 0
+        || decoder.symbol_size_bytes == 0
+        || decoder.max_decode_iterations == 0
+    {
+        errors.push(format!(
+            "calibration {} decoder parameters must be positive",
+            case.corpus_id
+        ));
+    }
+    if decoder.data_symbols != case.repair_symbol_budget.data_symbols {
+        errors.push(format!(
+            "calibration {} decoder data_symbols must match repair budget",
+            case.corpus_id
+        ));
+    }
+}
+
+fn validate_ledger_expectation(case: &RepairCalibrationCase, errors: &mut Vec<String>) {
+    let ledger = &case.ledger_expectation;
+    validate_stable_id("ledger.ledger_id", &ledger.ledger_id, errors);
+    if ledger.expected_rows == 0 {
+        errors.push(format!(
+            "calibration {} ledger expectation must require rows",
+            case.corpus_id
+        ));
+    }
+    if case.corruption_class == "wrong_image_ledger" && ledger.require_image_hash_match {
+        errors.push(format!(
+            "calibration {} wrong-image ledger must require mismatch refusal",
+            case.corpus_id
+        ));
+    }
+    if case.corruption_class == "ledger_tamper" && !ledger.allow_tamper {
+        errors.push(format!(
+            "calibration {} ledger tamper case must model tamper evidence",
+            case.corpus_id
+        ));
+    }
+}
+
+fn validate_calibration_outcome(
+    case: &RepairCalibrationCase,
+    report: &RepairCalibrationCaseReport,
+    errors: &mut Vec<String>,
+) {
+    if report.observed_outcome != case.expected_outcome {
+        errors.push(format!(
+            "calibration {} expected {:?} but observed {:?}",
+            case.corpus_id, case.expected_outcome, report.observed_outcome
+        ));
+    }
+    match case.expected_recoverability {
+        CalibrationRecoverability::Recoverable => {
+            if case.refusal_reason.is_some() {
+                errors.push(format!(
+                    "calibration {} recoverable case must not declare refusal_reason",
+                    case.corpus_id
+                ));
+            }
+        }
+        CalibrationRecoverability::Refuse | CalibrationRecoverability::VerificationFailure => {
+            validate_optional_nonempty(
+                "calibration.refusal_reason",
+                case.refusal_reason.as_deref(),
+                errors,
+            );
+            if report.refusal_reason.is_none() {
+                errors.push(format!(
+                    "calibration {} refused case must report refusal_reason",
+                    case.corpus_id
+                ));
+            }
+        }
+    }
 }
 
 fn validate_outcome_contract(
@@ -662,11 +987,16 @@ fn validate_symbol_budget(scenario: &RepairConfidenceScenario, errors: &mut Vec<
 
 fn validate_confidence_inputs(scenario: &RepairConfidenceScenario, errors: &mut Vec<String>) {
     let inputs = &scenario.confidence_inputs;
+    validate_confidence_input_values(&scenario.scenario_id, inputs, errors);
+}
+
+fn validate_confidence_input_values(
+    owner: &str,
+    inputs: &RepairConfidenceInputs,
+    errors: &mut Vec<String>,
+) {
     if inputs.required_symbols == 0 {
-        errors.push(format!(
-            "scenario {} required_symbols must be positive",
-            scenario.scenario_id
-        ));
+        errors.push(format!("{owner} required_symbols must be positive",));
     }
     validate_ratio(
         "confidence_inputs.ledger_integrity_score",
@@ -811,6 +1141,109 @@ fn evaluate_scenario(
         refusal_reason,
         log_line,
         reproduction_command: scenario.reproduction_command.clone(),
+    }
+}
+
+#[must_use]
+fn evaluate_calibration_case(
+    case: &RepairCalibrationCase,
+    threshold: Option<&&MutationSafetyThreshold>,
+) -> RepairCalibrationCaseReport {
+    let symbol_coverage = ratio(
+        case.repair_symbol_budget.repair_symbols_available,
+        case.repair_symbol_budget.repair_symbols_required,
+    );
+    let recovery_ratio = ratio(
+        case.confidence_inputs.recovered_symbols,
+        case.confidence_inputs.required_symbols,
+    );
+    let verification_score = if case.confidence_inputs.verification_passed {
+        1.0
+    } else {
+        0.0
+    };
+    let confidence_score = recovery_ratio
+        .min(symbol_coverage)
+        .min(case.confidence_inputs.ledger_integrity_score)
+        .min(1.0 - case.confidence_inputs.residual_risk)
+        .min(verification_score);
+
+    let passes_threshold = threshold.is_some_and(|threshold| {
+        confidence_score >= threshold.min_confidence_score
+            && symbol_coverage >= threshold.min_symbol_coverage
+            && case.confidence_inputs.ledger_integrity_score >= threshold.min_ledger_integrity
+            && case.confidence_inputs.residual_risk <= threshold.max_residual_risk
+    });
+
+    let (observed_outcome, threshold_decision, refusal_reason) = match case.expected_recoverability
+    {
+        CalibrationRecoverability::Recoverable if passes_threshold => {
+            if threshold.is_some_and(|threshold| threshold.allows_mutation) {
+                (
+                    RepairConfidenceOutcome::MutatingRepairVerified,
+                    "calibration_mutation_ready".to_owned(),
+                    None,
+                )
+            } else {
+                (
+                    RepairConfidenceOutcome::DryRunSuccess,
+                    "calibration_dry_run_ready".to_owned(),
+                    None,
+                )
+            }
+        }
+        CalibrationRecoverability::Recoverable => (
+            RepairConfidenceOutcome::UnsafeToRepair,
+            "calibration_threshold_failed".to_owned(),
+            Some("threshold_failed".to_owned()),
+        ),
+        CalibrationRecoverability::Refuse => (
+            RepairConfidenceOutcome::UnsafeToRepair,
+            "calibration_refused".to_owned(),
+            case.refusal_reason.clone(),
+        ),
+        CalibrationRecoverability::VerificationFailure => (
+            RepairConfidenceOutcome::FailedVerification,
+            "calibration_verification_failed".to_owned(),
+            case.refusal_reason.clone(),
+        ),
+    };
+
+    let ledger_row_ids = (1..=case.ledger_expectation.expected_rows)
+        .map(|row| format!("{}:{row}", case.ledger_expectation.ledger_id))
+        .collect::<Vec<_>>()
+        .join(",");
+    let log_line = format!(
+        "REPAIR_CONFIDENCE_CALIBRATION|corpus_id={}|seed={}|corruption_class={}|expected_recoverability={}|expected_outcome={}|observed_outcome={}|confidence_score={:.4}|threshold_decision={}|refusal_reason={}|ledger_row_ids={}|artifact_path={}|cleanup_status={}|reproduction_command={}",
+        case.corpus_id,
+        case.seed,
+        case.corruption_class,
+        case.expected_recoverability.label(),
+        case.expected_outcome.label(),
+        observed_outcome.label(),
+        confidence_score,
+        threshold_decision,
+        refusal_reason.as_deref().unwrap_or("none"),
+        ledger_row_ids,
+        case.artifact_path,
+        case.cleanup_status,
+        case.reproduction_command
+    );
+
+    RepairCalibrationCaseReport {
+        corpus_id: case.corpus_id.clone(),
+        seed: case.seed,
+        corruption_class: case.corruption_class.clone(),
+        expected_recoverability: case.expected_recoverability,
+        expected_outcome: case.expected_outcome,
+        confidence_score,
+        threshold_decision,
+        observed_outcome,
+        refusal_reason,
+        ledger_row_ids,
+        artifact_path: case.artifact_path.clone(),
+        log_line,
+        reproduction_command: case.reproduction_command.clone(),
     }
 }
 
@@ -961,10 +1394,97 @@ mod tests {
         let report = validate_repair_confidence_lab(&spec);
         assert!(report.valid, "{:#?}", report.errors);
         assert_eq!(report.scenario_count, 5);
+        assert_eq!(report.calibration_case_count, 9);
         assert!(report.mutation_allowed_count >= 1);
         assert!(report.mutation_refused_count >= 2);
         assert!(report.missing_required_outcomes.is_empty());
+        assert!(report.missing_required_calibration_classes.is_empty());
+        assert!(report.missing_required_refusal_reasons.is_empty());
         assert!(report.missing_required_log_fields.is_empty());
+    }
+
+    #[test]
+    fn calibration_corpus_covers_recovery_refusal_and_verification() {
+        let spec = checked_in_spec();
+        let report = validate_repair_confidence_lab(&spec);
+        let reports = report
+            .calibration_reports
+            .iter()
+            .map(|case| (case.corpus_id.as_str(), case))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            reports["cal_recoverable_single_block"].observed_outcome,
+            RepairConfidenceOutcome::DryRunSuccess
+        );
+        assert_eq!(
+            reports["cal_recoverable_multi_block"].observed_outcome,
+            RepairConfidenceOutcome::MutatingRepairVerified
+        );
+        assert_eq!(
+            reports["cal_unrecoverable_beyond_budget"]
+                .refusal_reason
+                .as_deref(),
+            Some("beyond_symbol_budget")
+        );
+        assert_eq!(
+            reports["cal_wrong_image_ledger"].refusal_reason.as_deref(),
+            Some("wrong_image_ledger")
+        );
+        assert_eq!(
+            reports["cal_verification_failure"].observed_outcome,
+            RepairConfidenceOutcome::FailedVerification
+        );
+        assert!(reports.values().all(|case| {
+            case.log_line.contains("REPAIR_CONFIDENCE_CALIBRATION")
+                && case.log_line.contains("ledger_row_ids=")
+                && case.log_line.contains("reproduction_command=")
+        }));
+    }
+
+    #[test]
+    fn calibration_rejects_missing_required_class_and_refusal_reason() {
+        let mut spec = checked_in_spec();
+        spec.calibration_corpus
+            .retain(|case| case.corruption_class != "wrong_image_ledger");
+        let report = report_for(spec);
+        assert!(!report.valid);
+        assert!(
+            report
+                .missing_required_calibration_classes
+                .contains(&"wrong_image_ledger".to_owned())
+        );
+        assert!(
+            report
+                .missing_required_refusal_reasons
+                .contains(&"wrong_image_ledger".to_owned())
+        );
+    }
+
+    #[test]
+    fn calibration_rejects_bad_decoder_and_ledger_expectation() {
+        let mut spec = checked_in_spec();
+        let case = spec
+            .calibration_corpus
+            .iter_mut()
+            .find(|case| case.corpus_id == "cal_wrong_image_ledger")
+            .expect("fixture includes wrong-image calibration case");
+        case.decoder_parameters.data_symbols = 99;
+        case.ledger_expectation.require_image_hash_match = true;
+        let report = report_for(spec);
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("decoder data_symbols"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("wrong-image ledger"))
+        );
     }
 
     #[test]

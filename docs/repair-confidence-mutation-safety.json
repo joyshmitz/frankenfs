@@ -416,6 +416,393 @@
       "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select repair_failed_verification_hash_mismatch"
     }
   ],
+  "calibration_corpus": [
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/recoverable-single-block.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.99,
+        "recovered_symbols": 3,
+        "required_symbols": 3,
+        "residual_risk": 0.02,
+        "verification_passed": true
+      },
+      "corrupted_image_hash": "sha256:calcorruptsingle00000000000000000000000000000000000000000000000001",
+      "corruption_class": "recoverable_single_block",
+      "corruption_manifest_hash": "sha256:calmanifestsingle00000000000000000000000000000000000000000000001",
+      "corpus_id": "cal_recoverable_single_block",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 8,
+        "max_decode_iterations": 32,
+        "repair_symbols": 3,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "dry_run_success",
+      "expected_recoverability": "recoverable",
+      "ledger_expectation": {
+        "allow_tamper": false,
+        "expected_rows": 4,
+        "ledger_id": "ledger_cal_recoverable_single",
+        "require_image_hash_match": true,
+        "require_symbol_generation_match": true
+      },
+      "original_image_hash": "sha256:caloriginalsingle000000000000000000000000000000000000000000000001",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 0,
+        "data_symbols": 8,
+        "erasures": 1,
+        "repair_symbols_available": 3,
+        "repair_symbols_required": 3
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_recoverable_single_block",
+      "seed": 53001,
+      "threshold_id": "dry_run_gate"
+    },
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/recoverable-multi-block.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.995,
+        "recovered_symbols": 6,
+        "required_symbols": 6,
+        "residual_risk": 0.01,
+        "verification_passed": true
+      },
+      "corrupted_image_hash": "sha256:calcorruptmulti0000000000000000000000000000000000000000000000001",
+      "corruption_class": "recoverable_multi_block_within_budget",
+      "corruption_manifest_hash": "sha256:calmanifestmulti0000000000000000000000000000000000000000000001",
+      "corpus_id": "cal_recoverable_multi_block",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 16,
+        "max_decode_iterations": 64,
+        "repair_symbols": 6,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "mutating_repair_verified",
+      "expected_recoverability": "recoverable",
+      "ledger_expectation": {
+        "allow_tamper": false,
+        "expected_rows": 6,
+        "ledger_id": "ledger_cal_recoverable_multi",
+        "require_image_hash_match": true,
+        "require_symbol_generation_match": true
+      },
+      "original_image_hash": "sha256:caloriginalmulti000000000000000000000000000000000000000000000001",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 0,
+        "data_symbols": 16,
+        "erasures": 3,
+        "repair_symbols_available": 6,
+        "repair_symbols_required": 6
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_recoverable_multi_block",
+      "seed": 53002,
+      "threshold_id": "mutation_safety_gate"
+    },
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/unrecoverable-beyond-budget.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.95,
+        "recovered_symbols": 2,
+        "required_symbols": 7,
+        "residual_risk": 0.8,
+        "verification_passed": true
+      },
+      "corrupted_image_hash": "sha256:calcorruptbeyond000000000000000000000000000000000000000000000001",
+      "corruption_class": "unrecoverable_beyond_budget",
+      "corruption_manifest_hash": "sha256:calmanifestbeyond000000000000000000000000000000000000000000001",
+      "corpus_id": "cal_unrecoverable_beyond_budget",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 16,
+        "max_decode_iterations": 64,
+        "repair_symbols": 2,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "unsafe_to_repair",
+      "expected_recoverability": "refuse",
+      "ledger_expectation": {
+        "allow_tamper": false,
+        "expected_rows": 3,
+        "ledger_id": "ledger_cal_beyond_budget",
+        "require_image_hash_match": true,
+        "require_symbol_generation_match": true
+      },
+      "original_image_hash": "sha256:caloriginalbeyond00000000000000000000000000000000000000000000001",
+      "refusal_reason": "beyond_symbol_budget",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 0,
+        "data_symbols": 16,
+        "erasures": 9,
+        "repair_symbols_available": 2,
+        "repair_symbols_required": 7
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_unrecoverable_beyond_budget",
+      "seed": 53003,
+      "threshold_id": "experimental_refusal_calibration_gate"
+    },
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/stale-symbols.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.9,
+        "recovered_symbols": 4,
+        "required_symbols": 4,
+        "residual_risk": 0.35,
+        "verification_passed": true
+      },
+      "corrupted_image_hash": "sha256:calcorruptstale000000000000000000000000000000000000000000000001",
+      "corruption_class": "stale_symbols",
+      "corruption_manifest_hash": "sha256:calmanifeststale000000000000000000000000000000000000000000001",
+      "corpus_id": "cal_stale_symbols",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 8,
+        "max_decode_iterations": 32,
+        "repair_symbols": 4,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "unsafe_to_repair",
+      "expected_recoverability": "refuse",
+      "ledger_expectation": {
+        "allow_tamper": false,
+        "expected_rows": 4,
+        "ledger_id": "ledger_cal_stale_symbols",
+        "require_image_hash_match": true,
+        "require_symbol_generation_match": false
+      },
+      "original_image_hash": "sha256:caloriginalstale000000000000000000000000000000000000000000000001",
+      "refusal_reason": "stale_symbols",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 0,
+        "data_symbols": 8,
+        "erasures": 1,
+        "repair_symbols_available": 4,
+        "repair_symbols_required": 4
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_stale_symbols",
+      "seed": 53004,
+      "threshold_id": "experimental_refusal_calibration_gate"
+    },
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/insufficient-symbols.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.98,
+        "recovered_symbols": 1,
+        "required_symbols": 4,
+        "residual_risk": 0.7,
+        "verification_passed": true
+      },
+      "corrupted_image_hash": "sha256:calcorruptinsufficient000000000000000000000000000000000000000001",
+      "corruption_class": "insufficient_symbols",
+      "corruption_manifest_hash": "sha256:calmanifestinsufficient000000000000000000000000000000000000001",
+      "corpus_id": "cal_insufficient_symbols",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 8,
+        "max_decode_iterations": 32,
+        "repair_symbols": 1,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "unsafe_to_repair",
+      "expected_recoverability": "refuse",
+      "ledger_expectation": {
+        "allow_tamper": false,
+        "expected_rows": 2,
+        "ledger_id": "ledger_cal_insufficient",
+        "require_image_hash_match": true,
+        "require_symbol_generation_match": true
+      },
+      "original_image_hash": "sha256:caloriginalinsufficient000000000000000000000000000000000000000001",
+      "refusal_reason": "insufficient_symbols",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 0,
+        "data_symbols": 8,
+        "erasures": 4,
+        "repair_symbols_available": 1,
+        "repair_symbols_required": 4
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_insufficient_symbols",
+      "seed": 53005,
+      "threshold_id": "experimental_refusal_calibration_gate"
+    },
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/ledger-tamper.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.2,
+        "recovered_symbols": 4,
+        "required_symbols": 4,
+        "residual_risk": 0.9,
+        "verification_passed": true
+      },
+      "corrupted_image_hash": "sha256:calcorrupttamper000000000000000000000000000000000000000000000001",
+      "corruption_class": "ledger_tamper",
+      "corruption_manifest_hash": "sha256:calmanifesttamper000000000000000000000000000000000000000000001",
+      "corpus_id": "cal_ledger_tamper",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 8,
+        "max_decode_iterations": 32,
+        "repair_symbols": 4,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "unsafe_to_repair",
+      "expected_recoverability": "refuse",
+      "ledger_expectation": {
+        "allow_tamper": true,
+        "expected_rows": 5,
+        "ledger_id": "ledger_cal_tamper",
+        "require_image_hash_match": true,
+        "require_symbol_generation_match": true
+      },
+      "original_image_hash": "sha256:caloriginaltamper000000000000000000000000000000000000000000000001",
+      "refusal_reason": "ledger_tamper",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 1,
+        "data_symbols": 8,
+        "erasures": 1,
+        "repair_symbols_available": 4,
+        "repair_symbols_required": 4
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_ledger_tamper",
+      "seed": 53006,
+      "threshold_id": "experimental_refusal_calibration_gate"
+    },
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/wrong-image-ledger.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.4,
+        "recovered_symbols": 4,
+        "required_symbols": 4,
+        "residual_risk": 0.85,
+        "verification_passed": true
+      },
+      "corrupted_image_hash": "sha256:calcorruptwrongimage000000000000000000000000000000000000000001",
+      "corruption_class": "wrong_image_ledger",
+      "corruption_manifest_hash": "sha256:calmanifestwrongimage000000000000000000000000000000000000001",
+      "corpus_id": "cal_wrong_image_ledger",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 8,
+        "max_decode_iterations": 32,
+        "repair_symbols": 4,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "unsafe_to_repair",
+      "expected_recoverability": "refuse",
+      "ledger_expectation": {
+        "allow_tamper": false,
+        "expected_rows": 4,
+        "ledger_id": "ledger_cal_wrong_image",
+        "require_image_hash_match": false,
+        "require_symbol_generation_match": true
+      },
+      "original_image_hash": "sha256:caloriginalwrongimage000000000000000000000000000000000000000001",
+      "refusal_reason": "wrong_image_ledger",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 1,
+        "data_symbols": 8,
+        "erasures": 1,
+        "repair_symbols_available": 4,
+        "repair_symbols_required": 4
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_wrong_image_ledger",
+      "seed": 53007,
+      "threshold_id": "experimental_refusal_calibration_gate"
+    },
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/hostile-path.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.99,
+        "recovered_symbols": 4,
+        "required_symbols": 4,
+        "residual_risk": 0.03,
+        "verification_passed": true
+      },
+      "corrupted_image_hash": "sha256:calcorrupthostile000000000000000000000000000000000000000000000001",
+      "corruption_class": "hostile_path",
+      "corruption_manifest_hash": "sha256:calmanifesthostile000000000000000000000000000000000000000000001",
+      "corpus_id": "cal_hostile_path",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 8,
+        "max_decode_iterations": 32,
+        "repair_symbols": 4,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "unsafe_to_repair",
+      "expected_recoverability": "refuse",
+      "ledger_expectation": {
+        "allow_tamper": false,
+        "expected_rows": 4,
+        "ledger_id": "ledger_cal_hostile_path",
+        "require_image_hash_match": true,
+        "require_symbol_generation_match": true
+      },
+      "original_image_hash": "sha256:caloriginalhostile000000000000000000000000000000000000000000000001",
+      "refusal_reason": "hostile_path",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 1,
+        "data_symbols": 8,
+        "erasures": 1,
+        "repair_symbols_available": 4,
+        "repair_symbols_required": 4
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_hostile_path",
+      "seed": 53008,
+      "threshold_id": "experimental_refusal_calibration_gate"
+    },
+    {
+      "artifact_path": "artifacts/repair-confidence/calibration/verification-failure.json",
+      "cleanup_status": "clean",
+      "confidence_inputs": {
+        "ledger_integrity_score": 0.995,
+        "recovered_symbols": 4,
+        "required_symbols": 4,
+        "residual_risk": 0.01,
+        "verification_passed": false
+      },
+      "corrupted_image_hash": "sha256:calcorruptverifyfail000000000000000000000000000000000000000001",
+      "corruption_class": "verification_failure",
+      "corruption_manifest_hash": "sha256:calmanifestverifyfail000000000000000000000000000000000000001",
+      "corpus_id": "cal_verification_failure",
+      "decoder_parameters": {
+        "codec": "raptorq",
+        "data_symbols": 8,
+        "max_decode_iterations": 32,
+        "repair_symbols": 4,
+        "symbol_size_bytes": 4096
+      },
+      "expected_outcome": "failed_verification",
+      "expected_recoverability": "verification_failure",
+      "ledger_expectation": {
+        "allow_tamper": false,
+        "expected_rows": 5,
+        "ledger_id": "ledger_cal_verification_failure",
+        "require_image_hash_match": true,
+        "require_symbol_generation_match": true
+      },
+      "original_image_hash": "sha256:caloriginalverifyfail000000000000000000000000000000000000000001",
+      "refusal_reason": "verification_failed",
+      "repair_symbol_budget": {
+        "adversarial_mutations": 1,
+        "data_symbols": 8,
+        "erasures": 1,
+        "repair_symbols_available": 4,
+        "repair_symbols_required": 4
+      },
+      "reproduction_command": "cargo run -p ffs-harness -- validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --select cal_verification_failure",
+      "seed": 53009,
+      "threshold_id": "verification_failure_gate"
+    }
+  ],
   "required_log_fields": [
     "scenario_id",
     "corruption_class",
