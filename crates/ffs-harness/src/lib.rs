@@ -21,6 +21,7 @@ pub mod mounted_recovery_matrix;
 pub mod mounted_write_matrix;
 pub mod open_ended_inventory;
 pub mod operational_readiness_report;
+pub mod operator_recovery_drill;
 pub mod oq_decision_matrix;
 pub mod perf_comparison;
 pub mod perf_regression;

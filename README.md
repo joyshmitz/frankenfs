@@ -1397,6 +1397,7 @@ the suite artifact directory:
 | operational manifest JSON | readiness report consumers | `pass`/`fail`/`skip`/`error` records using the shared artifact schema |
 | `soak_canary_campaign_report.json` | endurance and canary gates | Campaign profile, workload IDs, seeds, heartbeat summaries, resource caps, pass/fail/skip/error/flake classification, and reproduction links |
 | `repair_writeback_serialization_report.json` and `repair_writeback_route_artifact.json` | `repair.rw.writeback` gate | State-machine, lease, MVCC epoch, fsync/fsyncdir, stale-symbol, cancellation, failure, route, stale-snapshot rejection, and writeback-cache-disabled proof for read-write mounted repair |
+| `operator_recovery_drill_report.json` | automatic repair operator workflow | Detection-only, dry-run, verified opt-in mutation, unsafe-refusal, rollback, verification, cleanup, and proof-bundle lane evidence |
 
 ### Readiness Gates
 

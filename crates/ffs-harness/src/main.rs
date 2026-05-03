@@ -50,6 +50,11 @@ use ffs_harness::{
         OperationalReadinessReportConfig, build_operational_readiness_report,
         render_operational_readiness_markdown,
     },
+    operator_recovery_drill::{
+        DEFAULT_OPERATOR_RECOVERY_DRILL_PATH, fail_on_operator_recovery_drill_errors,
+        load_operator_recovery_drill_spec, render_operator_recovery_drill_markdown,
+        validate_operator_recovery_drill,
+    },
     performance_baseline_manifest::{
         build_performance_sample_artifact_manifest, fail_on_performance_baseline_manifest_errors,
         load_performance_baseline_manifest, validate_performance_baseline_manifest,
@@ -183,6 +188,9 @@ fn run() -> Result<()> {
         }
         Some("validate-soak-canary-campaigns") => validate_soak_canary_campaigns_cmd(&args[1..]),
         Some("validate-repair-confidence-lab") => validate_repair_confidence_lab_cmd(&args[1..]),
+        Some("validate-operator-recovery-drill") => {
+            validate_operator_recovery_drill_cmd(&args[1..])
+        }
         Some("validate-repair-writeback-serialization") => {
             validate_repair_writeback_serialization_cmd(&args[1..])
         }
@@ -263,6 +271,14 @@ struct RepairWritebackSerializationCmdArgs {
 
 #[derive(Debug)]
 struct RepairConfidenceLabCmdArgs {
+    spec_path: String,
+    out_path: Option<String>,
+    summary_out_path: Option<String>,
+    format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct OperatorRecoveryDrillCmdArgs {
     spec_path: String,
     out_path: Option<String>,
     summary_out_path: Option<String>,
@@ -1296,6 +1312,97 @@ fn parse_repair_confidence_lab_cmd_args(
     }
 
     Ok(Some(RepairConfidenceLabCmdArgs {
+        spec_path,
+        out_path,
+        summary_out_path,
+        format,
+    }))
+}
+
+fn validate_operator_recovery_drill_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_operator_recovery_drill_cmd_args(args)? else {
+        return Ok(());
+    };
+    let spec = load_operator_recovery_drill_spec(Path::new(&cmd_args.spec_path))?;
+    let report = validate_operator_recovery_drill(&spec);
+    let output = match cmd_args.format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&report)?,
+        ProofBundleFormat::Markdown => render_operator_recovery_drill_markdown(&report),
+    };
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "operator recovery drill report written: {} valid={} scenarios={} mutation_allowed={} mutation_refused={}",
+            path,
+            report.valid,
+            report.scenario_count,
+            report.mutation_allowed_count,
+            report.mutation_refused_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.summary_out_path {
+        write_text_file(
+            Path::new(&path),
+            &render_operator_recovery_drill_markdown(&report),
+        )?;
+        println!("operator recovery drill summary written: {path}");
+    }
+
+    fail_on_operator_recovery_drill_errors(&report)
+}
+
+fn parse_operator_recovery_drill_cmd_args(
+    args: &[String],
+) -> Result<Option<OperatorRecoveryDrillCmdArgs>> {
+    let mut spec_path = DEFAULT_OPERATOR_RECOVERY_DRILL_PATH.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut summary_out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--spec" => {
+                i += 1;
+                args.get(i)
+                    .context("--spec requires a path")?
+                    .clone_into(&mut spec_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--summary-out" => {
+                i += 1;
+                summary_out_path = Some(
+                    args.get(i)
+                        .context("--summary-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--select" => {
+                i += 1;
+                let _ = args.get(i).context("--select requires a scenario id")?;
+            }
+            "--help" | "-h" => {
+                print_operator_recovery_drill_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-operator-recovery-drill argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(OperatorRecoveryDrillCmdArgs {
         spec_path,
         out_path,
         summary_out_path,
@@ -2398,6 +2505,7 @@ fn print_usage() {
     print_adversarial_threat_model_usage_summary();
     print_soak_canary_campaign_usage_summary();
     print_repair_confidence_lab_usage_summary();
+    print_operator_recovery_drill_usage_summary();
     print_repair_writeback_serialization_usage_summary();
     print_workload_corpus_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
@@ -2476,6 +2584,7 @@ fn print_usage_examples() {
     print_adversarial_threat_model_example();
     print_soak_canary_campaign_example();
     print_repair_confidence_lab_example();
+    print_operator_recovery_drill_example();
     print_repair_writeback_serialization_example();
     print_workload_corpus_example();
     println!(
@@ -2531,6 +2640,18 @@ fn print_repair_confidence_lab_usage_summary() {
 fn print_repair_confidence_lab_example() {
     println!(
         "  ffs-harness validate-repair-confidence-lab --spec docs/repair-confidence-mutation-safety.json --out artifacts/repair-confidence/lab_report.json --summary-out artifacts/repair-confidence/lab_summary.md"
+    );
+}
+
+fn print_operator_recovery_drill_usage_summary() {
+    println!(
+        "  ffs-harness validate-operator-recovery-drill [--spec FILE] [--format json|markdown] [--out FILE] [--summary-out FILE]"
+    );
+}
+
+fn print_operator_recovery_drill_example() {
+    println!(
+        "  ffs-harness validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --out artifacts/operator-recovery/drill_report.json --summary-out artifacts/operator-recovery/drill_summary.md"
     );
 }
 
@@ -2721,6 +2842,19 @@ fn print_repair_confidence_lab_usage() {
     println!("  --summary-out FILE                 Write Markdown lab summary");
     println!(
         "  --select SCENARIO_ID               Accepted by repro commands; validates the lab envelope"
+    );
+}
+
+fn print_operator_recovery_drill_usage() {
+    println!("Usage: ffs-harness validate-operator-recovery-drill [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --spec FILE                        Read operator recovery drill JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report");
+    println!("  --summary-out FILE                 Write Markdown drill summary");
+    println!(
+        "  --select SCENARIO_ID               Accepted by repro commands; validates the drill envelope"
     );
 }
 

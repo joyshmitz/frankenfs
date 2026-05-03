@@ -40,6 +40,33 @@ Suspicion of corruption (bad read, mount failure, etc.)
 │           Expected: 0 corrupted blocks
 ```
 
+## Operator Recovery Drills
+
+The checked-in drill contract is:
+
+```bash
+cargo run -p ffs-harness -- validate-operator-recovery-drill \
+  --spec docs/operator-recovery-drill.json \
+  --out artifacts/operator-recovery/drill_report.json \
+  --summary-out artifacts/operator-recovery/drill_summary.md
+```
+
+Use it before changing public repair wording or accepting a recovery proof
+bundle. The drill validates four operator paths:
+
+| Drill | Mutation | Required outcome |
+|-------|----------|------------------|
+| detection-only drill | No | Scrub and evidence capture preserve exact commands, hashes, manifest, warnings, and cleanup state |
+| dry-run drill | No | Repair plan renders with rollback available, but no recovered block is written |
+| verified mutating drill | Explicit opt-in only | Dry-run, approval, rollback, threshold, mutation, scrub, reopen, and cleanup all pass |
+| refused unsafe drill | No | Blocking preflight or low confidence refuses mutation before image writes |
+
+Each scenario emits `OPERATOR_RECOVERY_DRILL` with the command transcript,
+image hashes, corruption manifest, confidence threshold, repair plan, operator
+warnings, post-repair verification, rollback/refusal outcome, cleanup status,
+proof-bundle lane, and reproduction command. A missing field is a failed drill,
+not a documentation gap to paper over.
+
 ## Section 1: Detection — Run Scrub
 
 ```bash

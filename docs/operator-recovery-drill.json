@@ -1,0 +1,540 @@
+{
+  "schema_version": 1,
+  "drill_id": "operator_recovery_drill_v1",
+  "bead_id": "bd-rchk0.5.8",
+  "proof_bundle_lane": "operator_recovery_drill",
+  "release_gate_consumers": [
+    "proof_bundle",
+    "release_gate",
+    "operational_readiness_report"
+  ],
+  "required_log_fields": [
+    "exact_commands",
+    "image_hashes",
+    "corruption_manifest",
+    "confidence_threshold",
+    "repair_plan",
+    "operator_warnings",
+    "post_repair_verification",
+    "rollback_or_refusal_outcome",
+    "cleanup_status",
+    "reproduction_command"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "operator_detect_only_metadata_mismatch",
+      "title": "Detect metadata mismatch and preserve evidence without mutation",
+      "phase": "detect",
+      "expected_outcome": "detection_only",
+      "preflight_checks": [
+        {
+          "check_id": "image_readable",
+          "description": "Image can be opened read-only for scrub.",
+          "passed": true,
+          "blocks_mutation": true,
+          "remediation": "fix image path or permissions before recovery"
+        },
+        {
+          "check_id": "repair_symbols_available",
+          "description": "No repair symbols are available for this metadata mismatch.",
+          "passed": false,
+          "blocks_mutation": false,
+          "remediation": "record detection-only evidence and escalate if metadata is critical"
+        }
+      ],
+      "commands": [
+        {
+          "command_id": "run_scrub",
+          "command": "ffs scrub /tmp/frankenfs-drill/detect.img --json",
+          "purpose": "detect corruption and classify affected blocks",
+          "side_effect": "read_only"
+        },
+        {
+          "command_id": "capture_evidence",
+          "command": "ffs evidence /tmp/frankenfs-drill/detect-ledger.jsonl --preset repair-failures --json",
+          "purpose": "capture existing detection and repair ledger rows",
+          "side_effect": "read_only"
+        }
+      ],
+      "image_hashes": {
+        "original_image_hash": "sha256:detectoriginal0000000000000000000000000000000000000000000000000001",
+        "pre_repair_hash": "sha256:detectpre00000000000000000000000000000000000000000000000000000001"
+      },
+      "corruption_manifest": {
+        "manifest_id": "manifest_detect_metadata_mismatch",
+        "path": "artifacts/operator-recovery/detect/manifest.json",
+        "sha256": "sha256:detectmanifest00000000000000000000000000000000000000000000000001",
+        "corruption_class": "metadata_digest_mismatch"
+      },
+      "confidence_threshold": {
+        "threshold_id": "detection_only_gate",
+        "confidence_score": 0.0,
+        "residual_risk": 1.0,
+        "mutation_allowed_by_threshold": false
+      },
+      "repair_plan": {
+        "plan_id": "plan_detect_metadata_mismatch",
+        "dry_run_validated": false,
+        "mutation_requested": false,
+        "rollback_available": false,
+        "operator_approval_required": false,
+        "plan_steps": [
+          "record scrub evidence",
+          "preserve ledger rows",
+          "do not mutate image"
+        ],
+        "refusal_reason": "detection_only"
+      },
+      "operator_warnings": [
+        "No mutation is proposed for this drill.",
+        "Metadata corruption requires a separate confidence artifact before repair."
+      ],
+      "verification": {
+        "verification_id": "verify_detect_only_not_run",
+        "status": "not_run",
+        "post_repair_scrub_clean": false,
+        "reopened_image": false,
+        "summary_path": "artifacts/operator-recovery/detect/summary.json"
+      },
+      "rollback": {
+        "rollback_available": false,
+        "rollback_artifact": "",
+        "rollback_or_refusal_outcome": "detect_only_not_mutated"
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/operator-recovery/detect/manifest.json",
+          "kind": "corruption_manifest",
+          "required": true,
+          "consumers": [
+            "proof_bundle",
+            "release_gate"
+          ]
+        },
+        {
+          "path": "artifacts/operator-recovery/detect/evidence-ledger.jsonl",
+          "kind": "evidence_ledger",
+          "required": true,
+          "consumers": [
+            "proof_bundle",
+            "operational_readiness_report"
+          ]
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "OPERATOR_RECOVERY_DRILL",
+          "required_fields": [
+            "exact_commands",
+            "image_hashes",
+            "corruption_manifest",
+            "confidence_threshold",
+            "repair_plan",
+            "operator_warnings",
+            "post_repair_verification",
+            "rollback_or_refusal_outcome",
+            "cleanup_status",
+            "reproduction_command"
+          ]
+        }
+      ],
+      "cleanup": {
+        "cleanup_status": "not_required",
+        "temp_paths_removed": true,
+        "mount_unmounted": true
+      },
+      "proof_bundle_lane": "operator_recovery_drill",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_detect_only_metadata_mismatch"
+    },
+    {
+      "scenario_id": "operator_dry_run_single_block_recoverable",
+      "title": "Dry-run a recoverable single-block repair plan",
+      "phase": "dry_run",
+      "expected_outcome": "dry_run_success",
+      "preflight_checks": [
+        {
+          "check_id": "image_backup_created",
+          "description": "A pre-repair backup or snapshot exists.",
+          "passed": true,
+          "blocks_mutation": true,
+          "remediation": "create backup before any mutation"
+        },
+        {
+          "check_id": "ledger_identity_matches",
+          "description": "Repair ledger image hash matches the target image.",
+          "passed": true,
+          "blocks_mutation": true,
+          "remediation": "rerun scrub with the target image ledger"
+        }
+      ],
+      "commands": [
+        {
+          "command_id": "run_scrub",
+          "command": "ffs scrub /tmp/frankenfs-drill/dry-run.img --json",
+          "purpose": "classify corruption before planning",
+          "side_effect": "read_only"
+        },
+        {
+          "command_id": "dry_run_repair",
+          "command": "ffs repair /tmp/frankenfs-drill/dry-run.img --dry-run --json",
+          "purpose": "render repair plan without writing recovered blocks",
+          "side_effect": "dry_run"
+        }
+      ],
+      "image_hashes": {
+        "original_image_hash": "sha256:dryrunoriginal00000000000000000000000000000000000000000000000001",
+        "pre_repair_hash": "sha256:dryrunpre000000000000000000000000000000000000000000000000000001"
+      },
+      "corruption_manifest": {
+        "manifest_id": "manifest_dry_run_single_block",
+        "path": "artifacts/operator-recovery/dry-run/manifest.json",
+        "sha256": "sha256:dryrunmanifest0000000000000000000000000000000000000000000000001",
+        "corruption_class": "single_block_erasure"
+      },
+      "confidence_threshold": {
+        "threshold_id": "dry_run_gate",
+        "confidence_score": 0.98,
+        "residual_risk": 0.02,
+        "mutation_allowed_by_threshold": false
+      },
+      "repair_plan": {
+        "plan_id": "plan_dry_run_single_block",
+        "dry_run_validated": true,
+        "mutation_requested": false,
+        "rollback_available": true,
+        "operator_approval_required": false,
+        "plan_steps": [
+          "verify ledger identity",
+          "decode replacement block",
+          "render mutation plan without writing"
+        ],
+        "refusal_reason": "dry_run_only"
+      },
+      "operator_warnings": [
+        "Dry-run validated the plan but did not mutate the image.",
+        "Mutation still requires explicit operator approval."
+      ],
+      "verification": {
+        "verification_id": "verify_dry_run_plan",
+        "status": "dry_run_verified",
+        "post_repair_scrub_clean": false,
+        "reopened_image": false,
+        "summary_path": "artifacts/operator-recovery/dry-run/summary.json"
+      },
+      "rollback": {
+        "rollback_available": true,
+        "rollback_artifact": "artifacts/operator-recovery/dry-run/pre-repair.snapshot",
+        "rollback_or_refusal_outcome": "dry_run_not_mutated"
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/operator-recovery/dry-run/plan.json",
+          "kind": "dry_run_plan",
+          "required": true,
+          "consumers": [
+            "proof_bundle",
+            "release_gate"
+          ]
+        },
+        {
+          "path": "artifacts/operator-recovery/dry-run/summary.json",
+          "kind": "operator_summary",
+          "required": true,
+          "consumers": [
+            "proof_bundle",
+            "operational_readiness_report"
+          ]
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "OPERATOR_RECOVERY_DRILL",
+          "required_fields": [
+            "exact_commands",
+            "image_hashes",
+            "corruption_manifest",
+            "confidence_threshold",
+            "repair_plan",
+            "operator_warnings",
+            "post_repair_verification",
+            "rollback_or_refusal_outcome",
+            "cleanup_status",
+            "reproduction_command"
+          ]
+        }
+      ],
+      "cleanup": {
+        "cleanup_status": "complete",
+        "temp_paths_removed": true,
+        "mount_unmounted": true
+      },
+      "proof_bundle_lane": "operator_recovery_drill",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_dry_run_single_block_recoverable"
+    },
+    {
+      "scenario_id": "operator_mutate_verified_single_block",
+      "title": "Mutate a verified repair after dry-run, approval, and rollback preflight",
+      "phase": "mutate",
+      "expected_outcome": "mutating_repair_verified",
+      "preflight_checks": [
+        {
+          "check_id": "image_backup_created",
+          "description": "A pre-repair snapshot is available for rollback.",
+          "passed": true,
+          "blocks_mutation": true,
+          "remediation": "create backup before any mutation"
+        },
+        {
+          "check_id": "operator_approval_recorded",
+          "description": "Operator explicitly opted into mutation after dry-run review.",
+          "passed": true,
+          "blocks_mutation": true,
+          "remediation": "rerun in dry-run mode and record explicit approval"
+        },
+        {
+          "check_id": "confidence_threshold_passed",
+          "description": "Mutation threshold passes with bounded residual risk.",
+          "passed": true,
+          "blocks_mutation": true,
+          "remediation": "keep the plan dry-run-only until confidence is calibrated"
+        }
+      ],
+      "commands": [
+        {
+          "command_id": "dry_run_repair",
+          "command": "ffs repair /tmp/frankenfs-drill/mutate.img --dry-run --json",
+          "purpose": "show exact writes before mutation",
+          "side_effect": "dry_run"
+        },
+        {
+          "command_id": "mutate_repair",
+          "command": "ffs repair /tmp/frankenfs-drill/mutate.img --apply --ledger /tmp/frankenfs-drill/mutate-ledger.jsonl --json",
+          "purpose": "apply the verified repair plan after approval",
+          "side_effect": "mutating"
+        },
+        {
+          "command_id": "post_repair_scrub",
+          "command": "ffs scrub /tmp/frankenfs-drill/mutate.img --json",
+          "purpose": "verify no corruption remains after mutation",
+          "side_effect": "verification"
+        }
+      ],
+      "image_hashes": {
+        "original_image_hash": "sha256:mutateoriginal00000000000000000000000000000000000000000000000001",
+        "pre_repair_hash": "sha256:mutatepre000000000000000000000000000000000000000000000000000001",
+        "post_repair_hash": "sha256:mutatepost00000000000000000000000000000000000000000000000000001"
+      },
+      "corruption_manifest": {
+        "manifest_id": "manifest_mutate_single_block",
+        "path": "artifacts/operator-recovery/mutate/manifest.json",
+        "sha256": "sha256:mutatemanifest0000000000000000000000000000000000000000000000001",
+        "corruption_class": "single_block_erasure"
+      },
+      "confidence_threshold": {
+        "threshold_id": "mutation_safety_gate",
+        "confidence_score": 0.995,
+        "residual_risk": 0.005,
+        "mutation_allowed_by_threshold": true
+      },
+      "repair_plan": {
+        "plan_id": "plan_mutate_single_block",
+        "dry_run_validated": true,
+        "mutation_requested": true,
+        "rollback_available": true,
+        "operator_approval_required": true,
+        "plan_steps": [
+          "verify ledger identity",
+          "write recovered block through repair path",
+          "rerun scrub",
+          "reopen image read-only"
+        ]
+      },
+      "operator_warnings": [
+        "Mutation is opt-in and requires the pre-repair snapshot.",
+        "If post-repair verification fails, restore from the rollback artifact."
+      ],
+      "verification": {
+        "verification_id": "verify_mutate_single_block",
+        "status": "passed",
+        "post_repair_scrub_clean": true,
+        "reopened_image": true,
+        "summary_path": "artifacts/operator-recovery/mutate/post-verify.json"
+      },
+      "rollback": {
+        "rollback_available": true,
+        "rollback_artifact": "artifacts/operator-recovery/mutate/pre-repair.snapshot",
+        "rollback_or_refusal_outcome": "rollback_checkpoint_retained_after_verified_mutation"
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/operator-recovery/mutate/plan.json",
+          "kind": "mutating_repair_plan",
+          "required": true,
+          "consumers": [
+            "proof_bundle",
+            "release_gate"
+          ]
+        },
+        {
+          "path": "artifacts/operator-recovery/mutate/post-verify.json",
+          "kind": "verification_report",
+          "required": true,
+          "consumers": [
+            "proof_bundle",
+            "operational_readiness_report"
+          ]
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "OPERATOR_RECOVERY_DRILL",
+          "required_fields": [
+            "exact_commands",
+            "image_hashes",
+            "corruption_manifest",
+            "confidence_threshold",
+            "repair_plan",
+            "operator_warnings",
+            "post_repair_verification",
+            "rollback_or_refusal_outcome",
+            "cleanup_status",
+            "reproduction_command"
+          ]
+        }
+      ],
+      "cleanup": {
+        "cleanup_status": "complete",
+        "temp_paths_removed": true,
+        "mount_unmounted": true
+      },
+      "proof_bundle_lane": "operator_recovery_drill",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_mutate_verified_single_block"
+    },
+    {
+      "scenario_id": "operator_refuse_low_confidence_multi_block",
+      "title": "Refuse an unsafe multi-block repair even when mutation is requested",
+      "phase": "refuse",
+      "expected_outcome": "unsafe_refused",
+      "preflight_checks": [
+        {
+          "check_id": "image_backup_created",
+          "description": "A pre-repair snapshot is available.",
+          "passed": true,
+          "blocks_mutation": true,
+          "remediation": "create backup before any mutation"
+        },
+        {
+          "check_id": "confidence_threshold_passed",
+          "description": "Multi-block repair does not meet the mutation-safety threshold.",
+          "passed": false,
+          "blocks_mutation": true,
+          "remediation": "keep detection-only evidence and create a calibration follow-up"
+        }
+      ],
+      "commands": [
+        {
+          "command_id": "run_scrub",
+          "command": "ffs scrub /tmp/frankenfs-drill/refuse.img --json",
+          "purpose": "classify corruption before planning",
+          "side_effect": "read_only"
+        },
+        {
+          "command_id": "refuse_repair",
+          "command": "ffs repair /tmp/frankenfs-drill/refuse.img --apply --json",
+          "purpose": "prove unsafe mutation is refused before image writes",
+          "side_effect": "dry_run"
+        }
+      ],
+      "image_hashes": {
+        "original_image_hash": "sha256:refuseoriginal00000000000000000000000000000000000000000000000001",
+        "pre_repair_hash": "sha256:refusepre000000000000000000000000000000000000000000000000000001"
+      },
+      "corruption_manifest": {
+        "manifest_id": "manifest_refuse_multi_block",
+        "path": "artifacts/operator-recovery/refuse/manifest.json",
+        "sha256": "sha256:refusemanifest0000000000000000000000000000000000000000000000001",
+        "corruption_class": "multi_block_uncalibrated_erasure"
+      },
+      "confidence_threshold": {
+        "threshold_id": "mutation_safety_gate",
+        "confidence_score": 0.61,
+        "residual_risk": 0.24,
+        "mutation_allowed_by_threshold": false
+      },
+      "repair_plan": {
+        "plan_id": "plan_refuse_multi_block",
+        "dry_run_validated": true,
+        "mutation_requested": true,
+        "rollback_available": true,
+        "operator_approval_required": true,
+        "plan_steps": [
+          "classify multi-block corruption",
+          "compare threshold evidence",
+          "refuse mutation before writing"
+        ],
+        "refusal_reason": "confidence_threshold_failed"
+      },
+      "operator_warnings": [
+        "Requested mutation is refused because residual risk exceeds the gate.",
+        "Use the manifest and ledger rows as calibration evidence before retrying."
+      ],
+      "verification": {
+        "verification_id": "verify_refuse_no_mutation",
+        "status": "refused",
+        "post_repair_scrub_clean": false,
+        "reopened_image": true,
+        "summary_path": "artifacts/operator-recovery/refuse/refusal.json"
+      },
+      "rollback": {
+        "rollback_available": true,
+        "rollback_artifact": "artifacts/operator-recovery/refuse/pre-repair.snapshot",
+        "rollback_or_refusal_outcome": "refused_before_mutation"
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/operator-recovery/refuse/refusal.json",
+          "kind": "refusal_report",
+          "required": true,
+          "consumers": [
+            "proof_bundle",
+            "release_gate"
+          ]
+        },
+        {
+          "path": "artifacts/operator-recovery/refuse/manifest.json",
+          "kind": "corruption_manifest",
+          "required": true,
+          "consumers": [
+            "proof_bundle",
+            "operational_readiness_report"
+          ]
+        }
+      ],
+      "expected_logs": [
+        {
+          "marker": "OPERATOR_RECOVERY_DRILL",
+          "required_fields": [
+            "exact_commands",
+            "image_hashes",
+            "corruption_manifest",
+            "confidence_threshold",
+            "repair_plan",
+            "operator_warnings",
+            "post_repair_verification",
+            "rollback_or_refusal_outcome",
+            "cleanup_status",
+            "reproduction_command"
+          ]
+        }
+      ],
+      "cleanup": {
+        "cleanup_status": "refused_before_mutation",
+        "temp_paths_removed": true,
+        "mount_unmounted": true
+      },
+      "proof_bundle_lane": "operator_recovery_drill",
+      "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --select operator_refuse_low_confidence_multi_block"
+    }
+  ],
+  "reproduction_command": "cargo run -p ffs-harness -- validate-operator-recovery-drill --spec docs/operator-recovery-drill.json --out artifacts/operator-recovery/drill_report.json --summary-out artifacts/operator-recovery/drill_summary.md"
+}

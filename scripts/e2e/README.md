@@ -174,6 +174,34 @@ Public wording must keep these states distinct:
 
 Thresholds chosen without enough evidence must be marked `experimental: true` and must link a follow-up bead. Non-experimental mutation thresholds require an evidence artifact and fail closed when any precondition is missing.
 
+## Operator Recovery Drill Contract
+
+The operator recovery drill contract lives in:
+
+- `docs/operator-recovery-drill.json`
+
+Validate it with:
+
+```bash
+cargo run -p ffs-harness -- validate-operator-recovery-drill \
+  --spec docs/operator-recovery-drill.json \
+  --out artifacts/operator-recovery/drill_report.json \
+  --summary-out artifacts/operator-recovery/drill_summary.md
+```
+
+Every drill scenario must preserve exact commands, image hashes, corruption
+manifest, confidence threshold, repair plan, operator warnings, post-repair
+verification, rollback or refusal outcome, cleanup status, proof-bundle lane,
+and reproduction command. The validator requires coverage for a detection-only
+drill, a successful dry-run drill, a verified opt-in mutating drill, and a
+refused unsafe drill.
+
+The `operator_recovery_drill` proof-bundle lane is the user-facing workflow
+evidence. It does not replace the repair confidence lab; it consumes that style
+of threshold evidence and proves the operator path fails closed before image
+mutation when any preflight, confidence, rollback, or verification requirement
+is missing.
+
 ## Crash Replay Refinement Contract
 
 The crash replay refinement smoke is:
