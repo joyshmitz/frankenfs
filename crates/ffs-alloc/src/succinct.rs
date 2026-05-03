@@ -472,58 +472,54 @@ fn popcount_range(bitmap: &[u8], bit_start: u32, count: u32) -> u32 {
     }
     let mut total = 0_u32;
     let end = bit_start + count;
+    let mut cursor = bit_start;
 
-    // Process byte-aligned portions.
-    let first_byte = (bit_start / 8) as usize;
-    let first_bit_in_byte = bit_start % 8;
-
+    let first_bit_in_byte = cursor % 8;
     if first_bit_in_byte != 0 {
         // Partial first byte.
-        let byte = bitmap[first_byte];
-        let bits_in_first = (8 - first_bit_in_byte).min(count);
+        let byte = bitmap[(cursor / 8) as usize];
+        let bits_in_first = (8 - first_bit_in_byte).min(end - cursor);
         let mask = ((1_u16 << bits_in_first) - 1) << first_bit_in_byte;
         #[expect(clippy::cast_possible_truncation)]
         let masked = (byte & mask as u8).count_ones();
         total += masked;
 
-        let next_start = bit_start + bits_in_first;
-        if next_start >= end {
+        cursor += bits_in_first;
+        if cursor >= end {
             return total;
-        }
-
-        // Full bytes in the middle.
-        let full_start = (next_start / 8) as usize;
-        let full_end = (end / 8) as usize;
-        for &byte in &bitmap[full_start..full_end] {
-            total += byte.count_ones();
-        }
-
-        // Partial last byte.
-        let remainder = end % 8;
-        if remainder > 0 && full_end < bitmap.len() {
-            let byte = bitmap[full_end];
-            let mask = (1_u16 << remainder) - 1;
-            #[expect(clippy::cast_possible_truncation)]
-            let masked = (byte & mask as u8).count_ones();
-            total += masked;
-        }
-    } else {
-        // Aligned start.
-        let full_end = (end / 8) as usize;
-        for &byte in &bitmap[first_byte..full_end] {
-            total += byte.count_ones();
-        }
-
-        let remainder = end % 8;
-        if remainder > 0 && full_end < bitmap.len() {
-            let byte = bitmap[full_end];
-            let mask = (1_u16 << remainder) - 1;
-            #[expect(clippy::cast_possible_truncation)]
-            let masked = (byte & mask as u8).count_ones();
-            total += masked;
         }
     }
 
+    // Full bytes in the middle.
+    let full_start = (cursor / 8) as usize;
+    let full_end = (end / 8) as usize;
+    total += popcount_full_bytes(&bitmap[full_start..full_end]);
+
+    // Partial last byte.
+    let remainder = end % 8;
+    if remainder > 0 && full_end < bitmap.len() {
+        let byte = bitmap[full_end];
+        let mask = (1_u16 << remainder) - 1;
+        #[expect(clippy::cast_possible_truncation)]
+        let masked = (byte & mask as u8).count_ones();
+        total += masked;
+    }
+
+    total
+}
+
+fn popcount_full_bytes(bytes: &[u8]) -> u32 {
+    let mut total = 0_u32;
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        total += word.count_ones();
+    }
+    for &byte in chunks.remainder() {
+        total += byte.count_ones();
+    }
     total
 }
 
