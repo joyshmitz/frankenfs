@@ -50,6 +50,20 @@ pub struct XfstestsCase {
     pub allowlist_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_row_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_risk_category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_operation_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comparison: Vec<String>,
 }
@@ -66,7 +80,18 @@ pub struct XfstestsRun {
     pub not_run: usize,
     pub planned: usize,
     pub pass_rate: f64,
+    pub policy_summary: XfstestsPolicySummary,
     pub tests: Vec<XfstestsCase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct XfstestsPolicySummary {
+    pub by_allowlist_status: BTreeMap<String, usize>,
+    pub by_classification: BTreeMap<String, usize>,
+    pub by_expected_outcome: BTreeMap<String, usize>,
+    pub by_user_risk_category: BTreeMap<String, usize>,
+    pub by_operation_class: BTreeMap<String, usize>,
+    pub not_run_by_classification: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -745,6 +770,13 @@ pub fn parse_check_output(
             output_snippet: None,
             allowlist_status: None,
             failure_reason: None,
+            policy_row_id: None,
+            classification: None,
+            expected_outcome: None,
+            user_risk_category: None,
+            expected_operation_class: None,
+            required_capabilities: Vec::new(),
+            tracker_id: None,
             comparison: Vec::new(),
         })
         .collect();
@@ -813,6 +845,13 @@ pub fn summarize_uniform(
             output_snippet: note.map(ToOwned::to_owned),
             allowlist_status: None,
             failure_reason: None,
+            policy_row_id: None,
+            classification: None,
+            expected_outcome: None,
+            user_risk_category: None,
+            expected_operation_class: None,
+            required_capabilities: Vec::new(),
+            tracker_id: None,
             comparison: Vec::new(),
         })
         .collect();
@@ -828,8 +867,16 @@ pub fn apply_allowlist(run: &mut XfstestsRun, allowlist: &[XfstestsAllowlistEntr
         if let Some(entry) = by_test.get(case.id.as_str()) {
             case.allowlist_status = Some(entry.status.clone());
             case.failure_reason = Some(entry.failure_reason.clone());
+            case.policy_row_id = entry.policy_row_id.clone();
+            case.classification = entry.classification.clone();
+            case.expected_outcome = entry.expected_outcome.clone();
+            case.user_risk_category = entry.user_risk_category.clone();
+            case.expected_operation_class = entry.expected_operation_class.clone();
+            case.required_capabilities = entry.required_capabilities.clone();
+            case.tracker_id = entry.tracker_id.clone();
         }
     }
+    refresh_policy_summary(run);
 }
 
 pub fn compare_against_baseline(
@@ -966,7 +1013,52 @@ fn summarize_run(
         not_run,
         planned,
         pass_rate,
+        policy_summary: XfstestsPolicySummary::default(),
         tests,
+    }
+}
+
+fn refresh_policy_summary(run: &mut XfstestsRun) {
+    let mut summary = XfstestsPolicySummary::default();
+
+    for case in &run.tests {
+        bump_count_if_present(
+            &mut summary.by_allowlist_status,
+            case.allowlist_status.as_deref(),
+        );
+        bump_count_if_present(
+            &mut summary.by_classification,
+            case.classification.as_deref(),
+        );
+        bump_count_if_present(
+            &mut summary.by_expected_outcome,
+            case.expected_outcome.as_deref(),
+        );
+        bump_count_if_present(
+            &mut summary.by_user_risk_category,
+            case.user_risk_category.as_deref(),
+        );
+        bump_count_if_present(
+            &mut summary.by_operation_class,
+            case.expected_operation_class.as_deref(),
+        );
+
+        if case.status == XfstestsStatus::NotRun
+            && let Some(classification) = case.classification.as_ref()
+        {
+            *summary
+                .not_run_by_classification
+                .entry(classification.clone())
+                .or_default() += 1;
+        }
+    }
+
+    run.policy_summary = summary;
+}
+
+fn bump_count_if_present(counts: &mut BTreeMap<String, usize>, value: Option<&str>) {
+    if let Some(value) = value {
+        *counts.entry(value.to_owned()).or_default() += 1;
     }
 }
 
@@ -1144,6 +1236,8 @@ generic/001  2s ... pass\n";
             test_id: "generic/001".to_owned(),
             failure_reason: "requires unsupported ioctl".to_owned(),
             status: "known_fail".to_owned(),
+            classification: Some("expected_failure".to_owned()),
+            expected_outcome: Some("expected_failure".to_owned()),
             ..XfstestsAllowlistEntry::default()
         }];
 
@@ -1153,6 +1247,62 @@ generic/001  2s ... pass\n";
         assert_eq!(
             run.tests[0].failure_reason.as_deref(),
             Some("requires unsupported ioctl")
+        );
+        assert_eq!(
+            run.tests[0].classification.as_deref(),
+            Some("expected_failure")
+        );
+        assert_eq!(
+            run.tests[0].expected_outcome.as_deref(),
+            Some("expected_failure")
+        );
+        assert_eq!(
+            run.policy_summary.by_classification.get("expected_failure"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn policy_summary_separates_not_run_rows_by_classification() {
+        let selected = vec!["generic/003".to_owned(), "generic/030".to_owned()];
+        let mut run = summarize_uniform(&selected, XfstestsStatus::NotRun, Some("blocked"));
+        let mut environment = valid_policy_entry("generic/003");
+        environment.status = "likely_pass".to_owned();
+        environment.classification = Some("environment_blocked".to_owned());
+        environment.expected_outcome = Some("environment_blocked".to_owned());
+        environment.user_risk_category = Some("host_environment".to_owned());
+        environment.expected_operation_class = Some("host_capability_skip".to_owned());
+
+        let mut product = valid_policy_entry("generic/030");
+        product.status = "known_fail".to_owned();
+        product.classification = Some("product_actionable".to_owned());
+        product.expected_outcome = Some("product_actionable_failure".to_owned());
+        product.user_risk_category = Some("data_integrity".to_owned());
+        product.expected_operation_class = Some("rw_file_lifecycle".to_owned());
+
+        apply_allowlist(&mut run, &[environment, product]);
+
+        assert_eq!(
+            run.policy_summary
+                .not_run_by_classification
+                .get("environment_blocked"),
+            Some(&1)
+        );
+        assert_eq!(
+            run.policy_summary
+                .not_run_by_classification
+                .get("product_actionable"),
+            Some(&1)
+        );
+        assert_eq!(
+            run.policy_summary
+                .by_expected_outcome
+                .get("product_actionable_failure"),
+            Some(&1)
+        );
+        assert_eq!(
+            run.tests[0].required_capabilities,
+            vec!["fuse_mount".to_owned()]
         );
     }
 
@@ -1481,6 +1631,13 @@ generic/001  2s ... pass\n";
                     output_snippet: None,
                     allowlist_status: None,
                     failure_reason: None,
+                    policy_row_id: None,
+                    classification: None,
+                    expected_outcome: None,
+                    user_risk_category: None,
+                    expected_operation_class: None,
+                    required_capabilities: Vec::new(),
+                    tracker_id: None,
                     comparison: Vec::new(),
                 },
                 XfstestsCase {
@@ -1490,9 +1647,17 @@ generic/001  2s ... pass\n";
                     output_snippet: None,
                     allowlist_status: None,
                     failure_reason: None,
+                    policy_row_id: None,
+                    classification: None,
+                    expected_outcome: None,
+                    user_risk_category: None,
+                    expected_operation_class: None,
+                    required_capabilities: Vec::new(),
+                    tracker_id: None,
                     comparison: Vec::new(),
                 },
             ],
+            policy_summary: XfstestsPolicySummary::default(),
         };
         let baseline = vec![
             XfstestsBaselineEntry {
