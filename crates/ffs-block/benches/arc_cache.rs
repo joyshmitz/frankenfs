@@ -3,7 +3,9 @@
 
 use asupersync::Cx;
 use criterion::{Criterion, criterion_group};
-use ffs_block::{ArcCache, ArcWritePolicy, BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice};
+use ffs_block::{
+    ArcCache, ArcWritePolicy, BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice, ShardedArcCache,
+};
 use ffs_error::Result;
 use ffs_types::{BlockNumber, ByteOffset};
 use parking_lot::Mutex;
@@ -84,6 +86,17 @@ fn make_writeback_cache(
     let mem = MemByteDevice::new(block_size as usize * block_count);
     let dev = ByteBlockDevice::new(mem, block_size).expect("device");
     ArcCache::new_with_policy(dev, capacity, ArcWritePolicy::WriteBack).expect("cache")
+}
+
+fn make_sharded_cache(
+    block_size: u32,
+    block_count: usize,
+    capacity: usize,
+    shard_count: usize,
+) -> ShardedArcCache<ByteBlockDevice<MemByteDevice>> {
+    let byte_len = usize::try_from(block_size).expect("block size fits usize") * block_count;
+    let dev = ByteBlockDevice::new(MemByteDevice::new(byte_len), block_size).expect("device");
+    ShardedArcCache::new(dev, capacity, shard_count).expect("sharded cache")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -497,6 +510,63 @@ fn bench_concurrent_hot_read_64threads(c: &mut Criterion) {
     });
 }
 
+fn bench_sharded_concurrent_hot_read_64threads(c: &mut Criterion) {
+    const THREADS: usize = 64;
+    const OPS_PER_THREAD: usize = 2_048;
+    const HOT_BLOCKS: usize = 256;
+    const BLOCK_COUNT: usize = 4_096;
+    const CAPACITY: usize = 512;
+    const SHARDS: usize = 64;
+
+    let cx = Cx::for_testing();
+    let cache = StdArc::new(make_sharded_cache(
+        BLOCK_SIZE_4K,
+        BLOCK_COUNT,
+        CAPACITY,
+        SHARDS,
+    ));
+    for block in 0..HOT_BLOCKS {
+        let block = BlockNumber(block as u64);
+        let buf = cache.read_block(&cx, block).expect("warm hot block");
+        black_box(buf.as_slice()[0]);
+    }
+
+    let bench_label = format!(
+        "block_cache_sharded_{}_concurrent_hot_read_64threads",
+        policy_label()
+    );
+    c.bench_function(&bench_label, |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for iter in 0..iters {
+                let barrier = StdArc::new(Barrier::new(THREADS));
+                let started = Instant::now();
+                thread::scope(|scope| {
+                    for thread_id in 0..THREADS {
+                        let cache = StdArc::clone(&cache);
+                        let barrier = StdArc::clone(&barrier);
+                        scope.spawn(move || {
+                            let cx = Cx::for_testing();
+                            barrier.wait();
+                            for op in 0..OPS_PER_THREAD {
+                                let mixed = op
+                                    .wrapping_mul(37)
+                                    .wrapping_add(thread_id.wrapping_mul(13))
+                                    .wrapping_add(iter as usize);
+                                let block = BlockNumber((mixed % HOT_BLOCKS) as u64);
+                                let buf = cache.read_block(&cx, block).expect("hot read");
+                                black_box(buf.as_slice()[0]);
+                            }
+                        });
+                    }
+                });
+                elapsed += started.elapsed();
+            }
+            elapsed
+        });
+    });
+}
+
 // ── Benchmarks ──────────────────────────────────────────────────────────
 
 fn bench_cache_hit(c: &mut Criterion) {
@@ -676,6 +746,7 @@ criterion_group!(
     bench_workload_compile_like,
     bench_workload_database_like,
     bench_concurrent_hot_read_64threads,
+    bench_sharded_concurrent_hot_read_64threads,
 );
 
 fn main() {
