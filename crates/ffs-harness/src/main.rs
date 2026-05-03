@@ -13,6 +13,11 @@ use ffs_harness::{
         run_ambition_evidence_matrix,
     },
     artifact_manifest::{ArtifactManifest, validate_operational_manifest},
+    cross_oracle_arbitration::{
+        DEFAULT_CROSS_ORACLE_ARBITRATION_REPORT, fail_on_cross_oracle_arbitration_errors,
+        load_cross_oracle_arbitration_report, render_cross_oracle_arbitration_markdown,
+        validate_cross_oracle_arbitration_report,
+    },
     deferred_parity_audit::{
         DeferredParityAuditConfig, fail_on_audit_errors, run_deferred_parity_audit,
     },
@@ -158,6 +163,9 @@ fn run() -> Result<()> {
         Some("validate-invariant-oracle") => validate_invariant_oracle_cmd(&args[1..]),
         Some("validate-mounted-differential-oracle") => {
             validate_mounted_differential_oracle_cmd(&args[1..])
+        }
+        Some("validate-cross-oracle-arbitration") => {
+            validate_cross_oracle_arbitration_cmd(&args[1..])
         }
         Some("validate-soak-canary-campaigns") => validate_soak_canary_campaigns_cmd(&args[1..]),
         Some("validate-repair-writeback-serialization") => {
@@ -592,6 +600,58 @@ fn validate_mounted_differential_oracle_cmd(args: &[String]) -> Result<()> {
     }
 
     fail_on_mounted_differential_oracle_errors(&validation)
+}
+
+fn validate_cross_oracle_arbitration_cmd(args: &[String]) -> Result<()> {
+    let mut report_path = DEFAULT_CROSS_ORACLE_ARBITRATION_REPORT.to_owned();
+    let mut out_path: Option<String> = None;
+    let mut format = ProofBundleFormat::Json;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--report" => {
+                i += 1;
+                args.get(i)
+                    .context("--report requires a path")?
+                    .clone_into(&mut report_path);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--format" => {
+                i += 1;
+                format =
+                    parse_proof_bundle_format(args.get(i).context("--format requires a value")?)?;
+            }
+            "--help" | "-h" => {
+                print_cross_oracle_arbitration_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-cross-oracle-arbitration argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report = load_cross_oracle_arbitration_report(Path::new(&report_path))?;
+    let validation = validate_cross_oracle_arbitration_report(&report);
+    let output = match format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&validation)?,
+        ProofBundleFormat::Markdown => render_cross_oracle_arbitration_markdown(&validation),
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "cross-oracle arbitration report written: {} valid={} arbitrations={} fail_closed={}",
+            path, validation.valid, validation.arbitration_count, validation.fail_closed_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    fail_on_cross_oracle_arbitration_errors(&validation)
 }
 
 fn evaluate_release_gates_cmd(args: &[String]) -> Result<()> {
@@ -2033,6 +2093,9 @@ fn print_usage() {
         "  ffs-harness validate-mounted-differential-oracle [--report FILE] [--format json|markdown] [--out FILE]"
     );
     println!(
+        "  ffs-harness validate-cross-oracle-arbitration [--report FILE] [--format json|markdown] [--out FILE]"
+    );
+    println!(
         "  ffs-harness evaluate-release-gates --bundle FILE --policy FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--wording-out FILE]"
     );
     print_performance_baseline_manifest_usage_summary();
@@ -2101,6 +2164,9 @@ fn print_usage_examples() {
     );
     println!(
         "  ffs-harness validate-mounted-differential-oracle --report artifacts/e2e/mounted_differential_oracle/report.json --out artifacts/e2e/mounted_differential_oracle/validation.json"
+    );
+    println!(
+        "  ffs-harness validate-cross-oracle-arbitration --report artifacts/e2e/cross_oracle_arbitration/report.json --out artifacts/e2e/cross_oracle_arbitration/validation.json"
     );
     println!(
         "  ffs-harness evaluate-release-gates --bundle artifacts/proof/bundle/manifest.json --policy artifacts/proof/release_gate_policy.json --out artifacts/proof/release_gate.json --wording-out artifacts/proof/release_gate_wording.tsv"
@@ -2332,6 +2398,15 @@ fn print_mounted_differential_oracle_usage() {
     println!();
     println!("Options:");
     println!("  --report FILE                      Read mounted differential report JSON");
+    println!("  --format json|markdown             Output format (default: json)");
+    println!("  --out FILE                         Write validation report to FILE");
+}
+
+fn print_cross_oracle_arbitration_usage() {
+    println!("Usage: ffs-harness validate-cross-oracle-arbitration [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --report FILE                      Read cross-oracle arbitration JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write validation report to FILE");
 }

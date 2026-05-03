@@ -951,6 +951,59 @@
       ]
     },
     {
+      "suite_id": "ffs_cross_oracle_arbitration",
+      "script": "scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh",
+      "required_categories": [
+        "happy",
+        "edge",
+        "error"
+      ],
+      "scenarios": [
+        {
+          "id": "cross_oracle_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cross_oracle_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "cross_oracle_fixture_conflicts_generated",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cross_oracle_fixture_conflicts_generated|outcome=PASS"
+        },
+        {
+          "id": "cross_oracle_fixture_conflicts_classified",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cross_oracle_fixture_conflicts_classified|outcome=PASS"
+        },
+        {
+          "id": "cross_oracle_output_preserves_claims",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cross_oracle_output_preserves_claims|outcome=PASS"
+        },
+        {
+          "id": "cross_oracle_unresolved_claim_fails_closed",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cross_oracle_unresolved_claim_fails_closed|outcome=PASS"
+        },
+        {
+          "id": "cross_oracle_stale_missing_evidence_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cross_oracle_stale_missing_evidence_rejected|outcome=PASS"
+        },
+        {
+          "id": "cross_oracle_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=cross_oracle_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_proof_overhead_budget",
       "script": "scripts/e2e/ffs_proof_overhead_budget_e2e.sh",
       "required_categories": [

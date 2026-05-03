@@ -53,6 +53,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 # Run mounted differential oracle allowlist/host-skip validation smoke
 ./scripts/e2e/ffs_mounted_differential_oracle_e2e.sh
 
+# Run cross-oracle disagreement arbitration validation smoke
+./scripts/e2e/ffs_cross_oracle_arbitration_e2e.sh
+
 # Run performance baseline manifest dry-run validation
 ./scripts/e2e/ffs_performance_manifest_e2e.sh
 
@@ -182,6 +185,20 @@ provenance, shared kernel/FrankenFS images or mountpoints, unsupported-scope row
 without an owner or non-goal, and host skips that blur `/dev/fuse`,
 `fusermount`, kernel mount permission, `mkfs` helper, or btrfs
 `DefaultPermissions` setup failures into product failures.
+
+Cross-oracle arbitration artifacts are validated with:
+
+```bash
+cargo run -p ffs-harness -- validate-cross-oracle-arbitration \
+  --report artifacts/e2e/cross_oracle_arbitration/report.json \
+  --out artifacts/e2e/cross_oracle_arbitration/validation.json
+```
+
+The validator rejects stale or missing oracle evidence under product-bug
+classifications, missing controlling artifacts, missing arbitration log fields,
+and unresolved conflicts that affect mounted writes, mutating repair,
+writeback-cache, background scrub mutation, or data-integrity claims without a
+fail-closed release-gate impact.
 
 ### Operational Readiness Report
 
@@ -716,6 +733,15 @@ The invariant oracle suite exercises:
 5. Expected invariant failure reporting with failure class, violated invariant, operation index, state hashes, expected/observed invariant result, and minimized trace prefix
 6. Fail-closed validation for unexpected production/model mismatches
 7. Unit coverage for schema parsing, deterministic replay, false-positive guards, expected failures, minimization, classification, consumer validation, and Markdown rendering
+
+The cross-oracle arbitration suite exercises:
+
+1. `validate-cross-oracle-arbitration` CLI wiring and module export
+2. Fixture conflicts across invariant traces, mounted differential artifacts, repair confidence artifacts, crash replay survivors, and release-gate rows
+3. Output preservation for classification, controlling artifact paths, blocked public claims, remediation ids, and reproduction commands
+4. Fail-closed validation for unresolved high-risk mounted write, mutating repair, writeback-cache, background scrub mutation, and data-integrity claims
+5. Fail-closed validation for stale or missing oracle evidence that is not routed through a gap-aware classification
+6. Unit coverage for every disagreement category: model bug, kernel baseline issue, FrankenFS product bug, harness bug, fixture bug, unsupported scope, host capability gap, repair oracle gap, and inconclusive conflict
 
 The performance manifest suite exercises:
 
