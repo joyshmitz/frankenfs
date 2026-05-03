@@ -8,24 +8,32 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-pub const MATRIX_SCHEMA_VERSION: u32 = 2;
+pub const MATRIX_SCHEMA_VERSION: u32 = 3;
 pub const DEFAULT_MATRIX_PATH: &str = "tests/workload-matrix/mounted_write_workload_matrix.json";
 const DEFAULT_MATRIX_JSON: &str =
     include_str!("../../../tests/workload-matrix/mounted_write_workload_matrix.json");
 
 const REQUIRED_FILESYSTEMS: [&str; 2] = ["ext4", "btrfs"];
-const REQUIRED_OPERATIONS: [&str; 11] = [
+const REQUIRED_OPERATIONS: [&str; 19] = [
     "create",
     "mkdir",
     "unlink",
     "rmdir",
     "rename",
     "write_readback",
-    "chmod",
+    "setattr",
     "hardlink",
     "symlink",
     "xattr_set_get",
+    "xattr_create",
+    "xattr_replace",
+    "xattr_list_get",
     "fallocate_keep_size",
+    "fallocate_zero_range",
+    "fallocate_punch_hole",
+    "read_only_write_erofs",
+    "rw_repair_rejected_before_serialization",
+    "host_capability_skip",
 ];
 const REQUIRED_FSYNC_PATTERNS: [&str; 4] = ["every_write", "metadata_only", "final_only", "none"];
 const REQUIRED_RESULT_FORMATS: [&str; 2] = ["json", "csv"];
@@ -87,6 +95,41 @@ const REQUIRED_MULTI_HANDLE_RESULT_FIELDS: [&str; 6] = [
 ];
 
 const REQUIRED_MULTI_HANDLE_RESULT_ARTIFACTS: [&str; 1] = ["mounted_multihandle_results.json"];
+
+const REQUIRED_SCENARIO_PROOF_CLASSES: [&str; 5] = [
+    "positive",
+    "refusal",
+    "crash_reopen",
+    "no_partial_mutation",
+    "host_skip",
+];
+
+const ALLOWED_SCENARIO_PROOF_CLASSES: [&str; 5] = [
+    "positive",
+    "refusal",
+    "crash_reopen",
+    "no_partial_mutation",
+    "host_skip",
+];
+
+const ALLOWED_ERROR_CLASSES: [&str; 6] = [
+    "none",
+    "EACCES",
+    "EOPNOTSUPP",
+    "EPERM",
+    "EROFS",
+    "HOST_CAPABILITY_SKIP",
+];
+
+const REQUIRED_SCENARIO_PROOF_ARTIFACTS: [&str; 7] = [
+    "scenario_id",
+    "image_fixture_hash",
+    "operation_trace_path",
+    "expected_survivor_set",
+    "expected_error_class",
+    "reopen_state",
+    "cleanup_status",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountedWriteMatrix {
@@ -175,7 +218,20 @@ pub struct MountedWriteScenario {
     pub mount_flags: Vec<String>,
     pub fs_specific_options: Vec<String>,
     pub workload: WorkloadSpec,
+    pub proof: ScenarioProof,
     pub expected_outcome: ExpectedOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScenarioProof {
+    pub scenario_class: String,
+    pub image_fixture_hash: String,
+    pub expected_survivor_set: SurvivorSet,
+    pub expected_error_class: String,
+    pub required_cleanup: String,
+    pub reopen: ReopenExpectation,
+    pub artifact_requirements: Vec<String>,
+    pub remediation_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +263,9 @@ pub struct MountedWriteMatrixReport {
     pub output_formats: Vec<String>,
     pub max_concurrency: u32,
     pub write_sizes: Vec<u64>,
+    pub scenario_classes: Vec<String>,
+    pub expected_error_classes: Vec<String>,
+    pub no_partial_mutation_scenarios: usize,
     pub multi_handle_scenario_count: usize,
     pub multi_handle_kinds: Vec<String>,
     pub multi_handle_filesystems: Vec<String>,
@@ -242,6 +301,9 @@ pub fn validate_mounted_write_matrix(matrix: &MountedWriteMatrix) -> MountedWrit
     let mut operation_kinds = BTreeSet::new();
     let mut fsync_patterns = BTreeSet::new();
     let mut write_sizes = BTreeSet::new();
+    let mut scenario_classes = BTreeSet::new();
+    let mut expected_error_classes = BTreeSet::new();
+    let mut no_partial_mutation_scenarios = 0_usize;
     let mut max_concurrency = 0_u32;
 
     validate_top_level(matrix, &mut errors);
@@ -255,6 +317,9 @@ pub fn validate_mounted_write_matrix(matrix: &MountedWriteMatrix) -> MountedWrit
             &mut operation_kinds,
             &mut fsync_patterns,
             &mut write_sizes,
+            &mut scenario_classes,
+            &mut expected_error_classes,
+            &mut no_partial_mutation_scenarios,
             &mut max_concurrency,
             &mut errors,
         );
@@ -265,6 +330,7 @@ pub fn validate_mounted_write_matrix(matrix: &MountedWriteMatrix) -> MountedWrit
         &operation_kinds,
         &fsync_patterns,
         &write_sizes,
+        &scenario_classes,
         max_concurrency,
         &mut errors,
     );
@@ -304,6 +370,9 @@ pub fn validate_mounted_write_matrix(matrix: &MountedWriteMatrix) -> MountedWrit
         output_formats: matrix.results_contract.formats.clone(),
         max_concurrency,
         write_sizes: write_sizes.into_iter().collect(),
+        scenario_classes: scenario_classes.into_iter().collect(),
+        expected_error_classes: expected_error_classes.into_iter().collect(),
+        no_partial_mutation_scenarios,
         multi_handle_scenario_count: matrix.multi_handle_scenarios.len(),
         multi_handle_kinds: multi_handle_kinds.into_iter().collect(),
         multi_handle_filesystems: multi_handle_filesystems.into_iter().collect(),
@@ -346,6 +415,13 @@ fn validate_result_contract(contract: &ResultsContract, errors: &mut Vec<String>
         "actual_outcome",
         "stdout_path",
         "stderr_path",
+        "scenario_class",
+        "image_fixture_hash",
+        "expected_survivor_set",
+        "expected_error_class",
+        "reopen_state",
+        "artifact_paths",
+        "remediation_id",
     ] {
         if !contract
             .required_fields
@@ -393,6 +469,9 @@ fn validate_scenario(
     operation_kinds: &mut BTreeSet<String>,
     fsync_patterns: &mut BTreeSet<String>,
     write_sizes: &mut BTreeSet<u64>,
+    scenario_classes: &mut BTreeSet<String>,
+    expected_error_classes: &mut BTreeSet<String>,
+    no_partial_mutation_scenarios: &mut usize,
     max_concurrency: &mut u32,
     errors: &mut Vec<String>,
 ) {
@@ -436,6 +515,13 @@ fn validate_scenario(
         fsync_patterns,
         write_sizes,
         max_concurrency,
+        errors,
+    );
+    validate_scenario_proof(
+        scenario,
+        scenario_classes,
+        expected_error_classes,
+        no_partial_mutation_scenarios,
         errors,
     );
     validate_expected_outcome(scenario, errors);
@@ -533,6 +619,131 @@ fn validate_expected_outcome(scenario: &MountedWriteScenario, errors: &mut Vec<S
             ));
         }
     }
+    if scenario.proof.expected_error_class != "none"
+        && !["skip", "unsupported_rejected"].contains(&outcome.outcome_class.as_str())
+    {
+        errors.push(format!(
+            "scenario {} declares expected_error_class {} but outcome_class {} is not skip or unsupported_rejected",
+            scenario.scenario_id, scenario.proof.expected_error_class, outcome.outcome_class
+        ));
+    }
+    if scenario.proof.scenario_class == "host_skip" && outcome.outcome_class != "skip" {
+        errors.push(format!(
+            "scenario {} host_skip proof class must expect skip",
+            scenario.scenario_id
+        ));
+    }
+}
+
+fn validate_scenario_proof(
+    scenario: &MountedWriteScenario,
+    scenario_classes: &mut BTreeSet<String>,
+    expected_error_classes: &mut BTreeSet<String>,
+    no_partial_mutation_scenarios: &mut usize,
+    errors: &mut Vec<String>,
+) {
+    let proof = &scenario.proof;
+    if !ALLOWED_SCENARIO_PROOF_CLASSES.contains(&proof.scenario_class.as_str()) {
+        errors.push(format!(
+            "scenario {} has unsupported proof scenario_class {}",
+            scenario.scenario_id, proof.scenario_class
+        ));
+    }
+    scenario_classes.insert(proof.scenario_class.clone());
+    if !is_sha256_fixture_hash(&proof.image_fixture_hash) {
+        errors.push(format!(
+            "scenario {} image_fixture_hash must be sha256:<64 lowercase hex chars>",
+            scenario.scenario_id
+        ));
+    }
+    if !ALLOWED_ERROR_CLASSES.contains(&proof.expected_error_class.as_str()) {
+        errors.push(format!(
+            "scenario {} has unsupported expected_error_class {}",
+            scenario.scenario_id, proof.expected_error_class
+        ));
+    }
+    expected_error_classes.insert(proof.expected_error_class.clone());
+    if !ALLOWED_CLEANUP_POLICIES.contains(&proof.required_cleanup.as_str()) {
+        errors.push(format!(
+            "scenario {} has unsupported required_cleanup {}",
+            scenario.scenario_id, proof.required_cleanup
+        ));
+    }
+    if !ALLOWED_REOPEN_KINDS.contains(&proof.reopen.kind.as_str()) {
+        errors.push(format!(
+            "scenario {} has unsupported proof reopen.kind {}",
+            scenario.scenario_id, proof.reopen.kind
+        ));
+    }
+    if proof.reopen.expected_state.trim().is_empty() {
+        errors.push(format!(
+            "scenario {} missing proof reopen.expected_state",
+            scenario.scenario_id
+        ));
+    }
+    if proof.expected_survivor_set.present_paths.is_empty()
+        && proof.expected_survivor_set.absent_paths.is_empty()
+    {
+        errors.push(format!(
+            "scenario {} proof expected_survivor_set must declare at least one present or absent path",
+            scenario.scenario_id
+        ));
+    }
+    for required in REQUIRED_SCENARIO_PROOF_ARTIFACTS {
+        if !proof
+            .artifact_requirements
+            .iter()
+            .any(|requirement| requirement == required)
+        {
+            errors.push(format!(
+                "scenario {} proof artifact_requirements missing {}",
+                scenario.scenario_id, required
+            ));
+        }
+    }
+    if proof.scenario_class == "refusal" || proof.scenario_class == "no_partial_mutation" {
+        *no_partial_mutation_scenarios += 1;
+        if proof.expected_error_class == "none" {
+            errors.push(format!(
+                "scenario {} refusal/no_partial_mutation proof must declare a concrete expected_error_class",
+                scenario.scenario_id
+            ));
+        }
+        if !scenario.workload.no_partial_mutation || !scenario.expected_outcome.no_partial_mutation
+        {
+            errors.push(format!(
+                "scenario {} refusal/no_partial_mutation proof must set no_partial_mutation in workload and outcome",
+                scenario.scenario_id
+            ));
+        }
+        if !proof.remediation_id.starts_with("bd-") {
+            errors.push(format!(
+                "scenario {} refusal/no_partial_mutation proof needs remediation_id starting with bd-",
+                scenario.scenario_id
+            ));
+        }
+    }
+    if proof.scenario_class == "host_skip" {
+        if proof.expected_error_class != "HOST_CAPABILITY_SKIP" {
+            errors.push(format!(
+                "scenario {} host_skip proof must use HOST_CAPABILITY_SKIP expected_error_class",
+                scenario.scenario_id
+            ));
+        }
+        if proof.remediation_id.trim().is_empty() {
+            errors.push(format!(
+                "scenario {} host_skip proof must declare remediation_id",
+                scenario.scenario_id
+            ));
+        }
+    }
+}
+
+fn is_sha256_fixture_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn validate_coverage(
@@ -540,6 +751,7 @@ fn validate_coverage(
     operation_kinds: &BTreeSet<String>,
     fsync_patterns: &BTreeSet<String>,
     write_sizes: &BTreeSet<u64>,
+    scenario_classes: &BTreeSet<String>,
     max_concurrency: u32,
     errors: &mut Vec<String>,
 ) {
@@ -568,6 +780,11 @@ fn validate_coverage(
     for required in [4096_u64, 65_536, 1_048_576] {
         if !write_sizes.contains(&required) {
             errors.push(format!("matrix missing write size {required}"));
+        }
+    }
+    for required in REQUIRED_SCENARIO_PROOF_CLASSES {
+        if !scenario_classes.contains(required) {
+            errors.push(format!("matrix missing scenario proof class {required}"));
         }
     }
     if max_concurrency < 4 {

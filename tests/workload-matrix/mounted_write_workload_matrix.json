@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "bead_id": "bd-rchk0.3.2",
   "runner": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
   "results_contract": {
@@ -18,6 +18,13 @@
       "stderr_path",
       "cleanup_status",
       "skip_reason",
+      "scenario_class",
+      "image_fixture_hash",
+      "expected_survivor_set",
+      "expected_error_class",
+      "reopen_state",
+      "artifact_paths",
+      "remediation_id",
       "handle_ids",
       "operation_trace",
       "expected_visibility",
@@ -46,6 +53,31 @@
         "unsupported_operations": [],
         "no_partial_mutation": false
       },
+      "proof": {
+        "scenario_class": "positive",
+        "image_fixture_hash": "sha256:cbafdfc4a06b4b309780722a018cc7f4f80ececa02a68a6e379e0c4468da38a6",
+        "expected_survivor_set": {
+          "present_paths": ["/"],
+          "absent_paths": ["/data.bin", "/data.renamed"],
+          "xattr_state": []
+        },
+        "expected_error_class": "none",
+        "required_cleanup": "teardown_image",
+        "reopen": {
+          "kind": "close_open",
+          "expected_state": "rename is visible before unlink cleanup; after cleanup both old and renamed file paths are absent"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": ""
+      },
       "expected_outcome": {
         "outcome_class": "pass",
         "detail": "small synchronous writes survive readback and rename before unlink cleanup",
@@ -60,12 +92,37 @@
       "mount_flags": ["rw", "default_permissions"],
       "fs_specific_options": ["dir_index", "extent"],
       "workload": {
-        "operation_sequence": ["mkdir", "create", "write_readback", "hardlink", "symlink", "chmod", "rmdir"],
+        "operation_sequence": ["mkdir", "create", "write_readback", "hardlink", "symlink", "setattr", "rmdir"],
         "write_sizes": [65536],
         "fsync_pattern": "metadata_only",
         "concurrency": 4,
         "unsupported_operations": [],
         "no_partial_mutation": false
+      },
+      "proof": {
+        "scenario_class": "positive",
+        "image_fixture_hash": "sha256:c8da8ea08e5b77bb230e67b2a1de1ee909851dace7271478384c4fb82b513b29",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin", "/data.link", "/data.symlink"],
+          "absent_paths": ["/dir"],
+          "xattr_state": []
+        },
+        "expected_error_class": "none",
+        "required_cleanup": "teardown_image",
+        "reopen": {
+          "kind": "close_open",
+          "expected_state": "fresh open observes link, symlink, and setattr results after directory cleanup"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": ""
       },
       "expected_outcome": {
         "outcome_class": "pass",
@@ -88,6 +145,31 @@
         "unsupported_operations": [],
         "no_partial_mutation": false
       },
+      "proof": {
+        "scenario_class": "crash_reopen",
+        "image_fixture_hash": "sha256:6242b4c648f5e358923f7b04cf4925b1a45862ead8764157a9095d9129e666fe",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin"],
+          "absent_paths": [],
+          "xattr_state": ["user.ffs_matrix=mounted"]
+        },
+        "expected_error_class": "none",
+        "required_cleanup": "preserve_artifacts_on_failure",
+        "reopen": {
+          "kind": "image_reopen",
+          "expected_state": "image reopen preserves sparse size, final fsync data boundary, and user.ffs_matrix xattr"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": ""
+      },
       "expected_outcome": {
         "outcome_class": "pass",
         "detail": "sparse preallocation, truncate growth, xattrs, and final fsync are visible after readback",
@@ -108,6 +190,31 @@
         "concurrency": 1,
         "unsupported_operations": ["mknod_block_device"],
         "no_partial_mutation": true
+      },
+      "proof": {
+        "scenario_class": "no_partial_mutation",
+        "image_fixture_hash": "sha256:b34eaab4fc4ce0432fa0fd013c84aa6bb21a9d80301a66634a0697d92fdaf6e9",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin"],
+          "absent_paths": ["/blocked-device"],
+          "xattr_state": []
+        },
+        "expected_error_class": "EOPNOTSUPP",
+        "required_cleanup": "preserve_artifacts_on_failure",
+        "reopen": {
+          "kind": "image_reopen",
+          "expected_state": "image reopen confirms rejected mknod created no device node and preserved preexisting file bytes"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": "bd-rchk0.3.4"
       },
       "expected_outcome": {
         "outcome_class": "unsupported_rejected",
@@ -130,6 +237,31 @@
         "unsupported_operations": [],
         "no_partial_mutation": false
       },
+      "proof": {
+        "scenario_class": "positive",
+        "image_fixture_hash": "sha256:35895b220be586d47063c2962308e408255442d32ef73dacc6f64011667e458e",
+        "expected_survivor_set": {
+          "present_paths": ["/"],
+          "absent_paths": ["/data.bin", "/data.renamed"],
+          "xattr_state": []
+        },
+        "expected_error_class": "none",
+        "required_cleanup": "teardown_image",
+        "reopen": {
+          "kind": "close_open",
+          "expected_state": "btrfs rename is visible before unlink cleanup; after cleanup old and renamed paths are absent"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": ""
+      },
       "expected_outcome": {
         "outcome_class": "pass",
         "detail": "btrfs mounted write/readback and rename follow the same durability envelope as ext4",
@@ -144,12 +276,37 @@
       "mount_flags": ["rw", "default_permissions"],
       "fs_specific_options": ["subvolume_root", "single_device"],
       "workload": {
-        "operation_sequence": ["mkdir", "create", "write_readback", "hardlink", "symlink", "chmod", "rmdir"],
+        "operation_sequence": ["mkdir", "create", "write_readback", "hardlink", "symlink", "setattr", "rmdir"],
         "write_sizes": [65536],
         "fsync_pattern": "metadata_only",
         "concurrency": 4,
         "unsupported_operations": [],
         "no_partial_mutation": false
+      },
+      "proof": {
+        "scenario_class": "positive",
+        "image_fixture_hash": "sha256:64a649157727535e07f2aa5664f8534dd427f25369b22f8aa6265bdd23c2d2f2",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin", "/data.link", "/data.symlink"],
+          "absent_paths": ["/dir"],
+          "xattr_state": []
+        },
+        "expected_error_class": "none",
+        "required_cleanup": "teardown_image",
+        "reopen": {
+          "kind": "close_open",
+          "expected_state": "fresh btrfs open observes link, symlink, and setattr results after directory cleanup"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": ""
       },
       "expected_outcome": {
         "outcome_class": "pass",
@@ -172,6 +329,31 @@
         "unsupported_operations": [],
         "no_partial_mutation": false
       },
+      "proof": {
+        "scenario_class": "crash_reopen",
+        "image_fixture_hash": "sha256:07505bd6b040e3c21550fd9ad436c29384e8c10a0f4b097cc180053926f75e06",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin"],
+          "absent_paths": [],
+          "xattr_state": ["user.ffs_matrix=mounted"]
+        },
+        "expected_error_class": "none",
+        "required_cleanup": "preserve_artifacts_on_failure",
+        "reopen": {
+          "kind": "image_reopen",
+          "expected_state": "btrfs image reopen preserves sparse extent state, final fsync data boundary, and user.ffs_matrix xattr"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": ""
+      },
       "expected_outcome": {
         "outcome_class": "pass",
         "detail": "btrfs sparse write path keeps extents and xattr visibility coherent",
@@ -192,6 +374,31 @@
         "concurrency": 1,
         "unsupported_operations": ["root_owned_write_eacces"],
         "no_partial_mutation": true
+      },
+      "proof": {
+        "scenario_class": "refusal",
+        "image_fixture_hash": "sha256:81cda625c15b99612a544337bfa0e382ac5302fe41345fc7d870c212b6c4bd40",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin"],
+          "absent_paths": ["/root-owned-probe"],
+          "xattr_state": []
+        },
+        "expected_error_class": "EACCES",
+        "required_cleanup": "preserve_artifacts_on_failure",
+        "reopen": {
+          "kind": "image_reopen",
+          "expected_state": "image reopen confirms denied root-owned write left no probe file and preserved existing data"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": "bd-rchk0.3.4"
       },
       "expected_outcome": {
         "outcome_class": "unsupported_rejected",
