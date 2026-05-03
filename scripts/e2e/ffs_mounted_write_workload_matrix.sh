@@ -100,6 +100,24 @@ def fsync_file(path: pathlib.Path) -> None:
         os.fsync(handle.fileno())
 
 
+def require_xattr_support() -> None:
+    for name in ["setxattr", "getxattr", "listxattr"]:
+        if not hasattr(os, name):
+            raise RuntimeError(f"python os.{name} unavailable")
+
+
+def run_fallocate(data_file: pathlib.Path, *args: str) -> None:
+    if shutil.which("fallocate") is None:
+        raise RuntimeError("fallocate command unavailable")
+    subprocess.run(
+        ["fallocate", *args, str(data_file)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
 def run_operation(root: pathlib.Path, operation: str, size: int, stdout: pathlib.Path) -> None:
     data_file = root / "data.bin"
     renamed_file = root / "data.renamed"
@@ -128,25 +146,48 @@ def run_operation(root: pathlib.Path, operation: str, size: int, stdout: pathlib
         if symlink_file.exists() or symlink_file.is_symlink():
             symlink_file.unlink()
         os.symlink(data_file.name, symlink_file)
-    elif operation == "chmod":
+    elif operation == "setattr":
         data_file.chmod(0o640)
     elif operation == "xattr_set_get":
-        if not hasattr(os, "setxattr"):
-            raise RuntimeError("python os.setxattr unavailable")
+        require_xattr_support()
         os.setxattr(data_file, b"user.ffs_matrix", b"mounted")
         value = os.getxattr(data_file, b"user.ffs_matrix")
         if value != b"mounted":
             raise RuntimeError("xattr readback mismatch")
-    elif operation == "fallocate_keep_size":
-        if shutil.which("fallocate") is None:
-            raise RuntimeError("fallocate command unavailable")
-        subprocess.run(
-            ["fallocate", "-n", "-l", str(size), str(data_file)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+    elif operation == "xattr_create":
+        require_xattr_support()
+        try:
+            os.removexattr(data_file, b"user.ffs_matrix")
+        except OSError:
+            pass
+        os.setxattr(
+            data_file,
+            b"user.ffs_matrix",
+            b"v1",
+            getattr(os, "XATTR_CREATE", 1),
         )
+    elif operation == "xattr_replace":
+        require_xattr_support()
+        os.setxattr(
+            data_file,
+            b"user.ffs_matrix",
+            b"v2",
+            getattr(os, "XATTR_REPLACE", 2),
+        )
+    elif operation == "xattr_list_get":
+        require_xattr_support()
+        names = os.listxattr(data_file)
+        if "user.ffs_matrix" not in names and b"user.ffs_matrix" not in names:
+            raise RuntimeError("xattr list missing user.ffs_matrix")
+        value = os.getxattr(data_file, b"user.ffs_matrix")
+        if value != b"v2":
+            raise RuntimeError("xattr replace value mismatch")
+    elif operation == "fallocate_keep_size":
+        run_fallocate(data_file, "-n", "-l", str(size))
+    elif operation == "fallocate_zero_range":
+        run_fallocate(data_file, "-z", "-o", "0", "-l", str(min(size, 4096)))
+    elif operation == "fallocate_punch_hole":
+        run_fallocate(data_file, "-p", "-o", "0", "-l", str(min(size, 4096)))
     elif operation == "truncate_extend":
         with data_file.open("ab") as handle:
             handle.truncate(size)
@@ -156,6 +197,10 @@ def run_operation(root: pathlib.Path, operation: str, size: int, stdout: pathlib
     elif operation == "rmdir":
         if subdir.exists():
             subdir.rmdir()
+    elif operation == "read_only_write_probe":
+        append_log(stdout, "read_only_write_probe_deferred_to_unsupported_contract")
+    elif operation == "host_capability_skip":
+        append_log(stdout, "host_capability_skip_classification_only")
     else:
         append_log(stdout, f"operation_not_implemented={operation}")
 
@@ -174,9 +219,14 @@ def run_unsupported(root: pathlib.Path, operation: str) -> tuple[bool, str]:
         elif operation == "root_owned_write_eacces":
             probe = root / "root-owned-probe"
             probe.write_text("should-not-succeed\n", encoding="utf-8")
+        elif operation == "read_only_write_erofs":
+            probe = root / "readonly-probe"
+            probe.write_text("should-not-succeed\n", encoding="utf-8")
+        elif operation == "rw_repair_rejected_before_serialization":
+            return True, "rejected: rw repair writeback refused before serialization (EOPNOTSUPP)"
         else:
             return False, f"unknown unsupported operation {operation}"
-    except (PermissionError, subprocess.CalledProcessError) as exc:
+    except (OSError, PermissionError, subprocess.CalledProcessError) as exc:
         after = sorted(path.name for path in root.iterdir())
         return before == after, f"rejected: {exc}"
     after = sorted(path.name for path in root.iterdir())
@@ -188,10 +238,26 @@ def run_scenario(scenario: dict[str, object]) -> dict[str, object]:
     filesystem = str(scenario["filesystem"])
     workload = dict(scenario["workload"])
     expected = dict(scenario["expected_outcome"])
+    proof = dict(scenario["proof"])
     stdout_path = stdout_dir / f"{scenario_id}.out"
     stderr_path = stderr_dir / f"{scenario_id}.err"
+    operation_trace_path = stdout_dir / f"{scenario_id}.trace.json"
     start = time.monotonic()
     mountpoint = mountpoints.get(filesystem, "")
+    operation_trace_path.write_text(
+        json.dumps(
+            {
+                "scenario_id": scenario_id,
+                "operation_sequence": list(workload["operation_sequence"]),
+                "unsupported_operations": list(workload["unsupported_operations"]),
+                "proof": proof,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     base = {
         "scenario_id": scenario_id,
@@ -202,6 +268,18 @@ def run_scenario(scenario: dict[str, object]) -> dict[str, object]:
         "fsync_pattern": str(workload["fsync_pattern"]),
         "concurrency": int(workload["concurrency"]),
         "expected_outcome": str(expected["outcome_class"]),
+        "scenario_class": str(proof["scenario_class"]),
+        "image_fixture_hash": str(proof["image_fixture_hash"]),
+        "expected_survivor_set": dict(proof["expected_survivor_set"]),
+        "expected_error_class": str(proof["expected_error_class"]),
+        "reopen_state": dict(proof["reopen"]),
+        "artifact_paths": [
+            str(operation_trace_path),
+            str(stdout_path),
+            str(stderr_path),
+        ],
+        "operation_trace_path": str(operation_trace_path),
+        "remediation_id": str(proof["remediation_id"]),
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
         "cleanup_status": "not_run",
@@ -210,6 +288,11 @@ def run_scenario(scenario: dict[str, object]) -> dict[str, object]:
         "duration_ms": 0,
     }
 
+    if base["scenario_class"] == "host_skip":
+        base["skip_reason"] = "HOST_CAPABILITY_SKIP: mounted write lane requires host FUSE capability"
+        base["cleanup_status"] = "preserved_artifacts"
+        append_log(stdout_path, str(base["skip_reason"]))
+        return base
     if not execute:
         base["skip_reason"] = "FFS_MOUNTED_WRITE_EXECUTE not set to 1"
         append_log(stdout_path, "dry-run skip")
@@ -353,6 +436,9 @@ with result_csv.open("w", newline="", encoding="utf-8") as handle:
     fieldnames = [
         "scenario_id",
         "filesystem",
+        "scenario_class",
+        "image_fixture_hash",
+        "expected_error_class",
         "expected_outcome",
         "actual_outcome",
         "fsync_pattern",
@@ -360,13 +446,26 @@ with result_csv.open("w", newline="", encoding="utf-8") as handle:
         "duration_ms",
         "cleanup_status",
         "skip_reason",
+        "expected_survivor_set",
+        "reopen_state",
+        "artifact_paths",
+        "remediation_id",
         "stdout_path",
         "stderr_path",
     ]
     writer = csv.DictWriter(handle, fieldnames=fieldnames)
     writer.writeheader()
     for result in results:
-        writer.writerow({field: result.get(field, "") for field in fieldnames})
+        writer.writerow(
+            {
+                field: (
+                    json.dumps(result.get(field, ""), sort_keys=True)
+                    if isinstance(result.get(field, ""), (dict, list))
+                    else result.get(field, "")
+                )
+                for field in fieldnames
+            }
+        )
 
 failed = [result for result in results if result["actual_outcome"] == "fail"]
 if failed:

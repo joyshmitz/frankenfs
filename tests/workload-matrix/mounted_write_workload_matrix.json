@@ -406,6 +406,236 @@
         "no_partial_mutation": true,
         "follow_up_bead": "bd-rchk0.3.4"
       }
+    },
+    {
+      "scenario_id": "mounted_write_ext4_xattr_modes",
+      "filesystem": "ext4",
+      "image_setup": "fresh ext4 image with user_xattr enabled and empty user.ffs_matrix namespace",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["user_xattr", "extent"],
+      "workload": {
+        "operation_sequence": ["create", "xattr_create", "xattr_replace", "xattr_list_get", "fsync"],
+        "write_sizes": [4096],
+        "fsync_pattern": "final_only",
+        "concurrency": 1,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "proof": {
+        "scenario_class": "positive",
+        "image_fixture_hash": "sha256:52428b3f5c6d43213a4d86baa5294dae30545c520da2287ed6561547629a4d3e",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin"],
+          "absent_paths": [],
+          "xattr_state": ["user.ffs_matrix=v2"]
+        },
+        "expected_error_class": "none",
+        "required_cleanup": "teardown_image",
+        "reopen": {
+          "kind": "close_open",
+          "expected_state": "fresh open observes user.ffs_matrix after create, replace, list, and get checks"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": ""
+      },
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "xattr create, replace, list, and get semantics preserve the final user.ffs_matrix value",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_btrfs_supported_fallocate_modes",
+      "filesystem": "btrfs",
+      "image_setup": "fresh single-device btrfs image with writable regular file extent state",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device", "csum", "extent_data"],
+      "workload": {
+        "operation_sequence": ["create", "fallocate_keep_size", "fallocate_zero_range", "fallocate_punch_hole", "fsync"],
+        "write_sizes": [1048576],
+        "fsync_pattern": "final_only",
+        "concurrency": 1,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "proof": {
+        "scenario_class": "crash_reopen",
+        "image_fixture_hash": "sha256:441743fa8730c38bbdc586bfaa7a563d115cfd3c1e66f0349727550073763ac4",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin"],
+          "absent_paths": [],
+          "xattr_state": []
+        },
+        "expected_error_class": "none",
+        "required_cleanup": "preserve_artifacts_on_failure",
+        "reopen": {
+          "kind": "image_reopen",
+          "expected_state": "image reopen preserves file identity after keep-size prealloc, zero-range, punch-hole, and fsync"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": ""
+      },
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "supported fallocate modes mutate only the requested file ranges and remain visible after reopen",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_ext4_read_only_rejection",
+      "filesystem": "ext4",
+      "image_setup": "fresh ext4 image mounted read-only with default_permissions",
+      "mount_flags": ["ro", "default_permissions"],
+      "fs_specific_options": ["read_only_contract", "extent"],
+      "workload": {
+        "operation_sequence": ["read_only_write_probe"],
+        "write_sizes": [4096],
+        "fsync_pattern": "none",
+        "concurrency": 1,
+        "unsupported_operations": ["read_only_write_erofs"],
+        "no_partial_mutation": true
+      },
+      "proof": {
+        "scenario_class": "no_partial_mutation",
+        "image_fixture_hash": "sha256:3325835af5b18dcd88b46f7b5b82bd73849f3ce29c5840281ef13d80d7e6c350",
+        "expected_survivor_set": {
+          "present_paths": ["/"],
+          "absent_paths": ["/readonly-probe"],
+          "xattr_state": []
+        },
+        "expected_error_class": "EROFS",
+        "required_cleanup": "preserve_artifacts_on_failure",
+        "reopen": {
+          "kind": "image_reopen",
+          "expected_state": "image reopen confirms read-only write probe produced no file and preserved the fixture root"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": "bd-rchk0.3.4"
+      },
+      "expected_outcome": {
+        "outcome_class": "unsupported_rejected",
+        "detail": "read-only mounted write is rejected with EROFS and creates no partial probe path",
+        "no_partial_mutation": true,
+        "follow_up_bead": "bd-rchk0.3.4"
+      }
+    },
+    {
+      "scenario_id": "mounted_write_btrfs_rw_repair_rejection",
+      "filesystem": "btrfs",
+      "image_setup": "btrfs image with repair-write route disabled before serialization",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["repair_writeback_disabled", "single_device"],
+      "workload": {
+        "operation_sequence": ["create"],
+        "write_sizes": [4096],
+        "fsync_pattern": "none",
+        "concurrency": 1,
+        "unsupported_operations": ["rw_repair_rejected_before_serialization"],
+        "no_partial_mutation": true
+      },
+      "proof": {
+        "scenario_class": "refusal",
+        "image_fixture_hash": "sha256:eab3d03fb33659f666cb8c821333e7526afcf728e04128475d007edbb99ce51b",
+        "expected_survivor_set": {
+          "present_paths": ["/data.bin"],
+          "absent_paths": ["/repair-writeback-probe"],
+          "xattr_state": []
+        },
+        "expected_error_class": "EOPNOTSUPP",
+        "required_cleanup": "preserve_artifacts_on_failure",
+        "reopen": {
+          "kind": "image_reopen",
+          "expected_state": "image reopen confirms repair-write refusal happened before serialization and preserved preexisting data"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": "bd-rchk0.1.1"
+      },
+      "expected_outcome": {
+        "outcome_class": "unsupported_rejected",
+        "detail": "read-write repair serialization path refuses unsupported mutation before any repair writeback probe is created",
+        "no_partial_mutation": true,
+        "follow_up_bead": "bd-rchk0.1.1"
+      }
+    },
+    {
+      "scenario_id": "mounted_write_ext4_host_capability_skip",
+      "filesystem": "ext4",
+      "image_setup": "host capability probe lane for FUSE mount prerequisites",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["requires_fuse_device", "requires_user_mount_permission"],
+      "workload": {
+        "operation_sequence": ["host_capability_skip"],
+        "write_sizes": [1],
+        "fsync_pattern": "none",
+        "concurrency": 1,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "proof": {
+        "scenario_class": "host_skip",
+        "image_fixture_hash": "sha256:e0a6c04b10a3ae2b6e2cd6e95cdd4b8b7eb9180eac9e3a36ca987754cc609bba",
+        "expected_survivor_set": {
+          "present_paths": ["/"],
+          "absent_paths": [],
+          "xattr_state": []
+        },
+        "expected_error_class": "HOST_CAPABILITY_SKIP",
+        "required_cleanup": "preserve_artifacts_always",
+        "reopen": {
+          "kind": "none",
+          "expected_state": "host capability skip records missing FUSE prerequisites without claiming product pass or failure"
+        },
+        "artifact_requirements": [
+          "scenario_id",
+          "image_fixture_hash",
+          "operation_trace_path",
+          "expected_survivor_set",
+          "expected_error_class",
+          "reopen_state",
+          "cleanup_status"
+        ],
+        "remediation_id": "host-capability-mounted-write-lane"
+      },
+      "expected_outcome": {
+        "outcome_class": "skip",
+        "detail": "missing host mount capability is classified as HOST_CAPABILITY_SKIP with preserved diagnostics",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
     }
   ],
   "multi_handle_scenarios": [
