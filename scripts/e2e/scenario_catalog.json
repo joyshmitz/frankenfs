@@ -191,6 +191,47 @@
       ]
     },
     {
+      "suite_id": "ffs_performance_manifest",
+      "script": "scripts/e2e/ffs_performance_manifest_e2e.sh",
+      "required_categories": [
+        "happy",
+        "error",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "performance_manifest_cli_wired",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_manifest_cli_wired|outcome=PASS"
+        },
+        {
+          "id": "performance_manifest_validates",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_manifest_validates|outcome=PASS"
+        },
+        {
+          "id": "performance_manifest_dry_run_expands",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_manifest_dry_run_expands|outcome=PASS"
+        },
+        {
+          "id": "performance_manifest_invalid_variants_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_manifest_invalid_variants_rejected|outcome=PASS"
+        },
+        {
+          "id": "performance_manifest_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=performance_manifest_unit_tests|outcome=PASS"
+        }
+      ]
+    },
+    {
       "suite_id": "ffs_benchmark_expansion",
       "script": "scripts/e2e/ffs_benchmark_expansion_e2e.sh",
       "required_categories": [

@@ -5,6 +5,23 @@ and which artifacts must accompany every published baseline. It is
 versioned (see "Manifest version" below) so future runs can be compared
 apples-to-apples against this contract.
 
+The machine-readable source of truth is
+[`benchmarks/performance_baseline_manifest.json`](../../benchmarks/performance_baseline_manifest.json).
+Validate it without running heavyweight benchmarks:
+
+```bash
+cargo run -p ffs-harness -- validate-performance-baseline-manifest \
+  --manifest benchmarks/performance_baseline_manifest.json \
+  --artifact-root artifacts/performance/dry-run \
+  --out artifacts/performance/manifest_report.json \
+  --artifact-out artifacts/performance/sample_artifact_manifest.json
+```
+
+The validator expands every command template, checks workload ids,
+capability names, thresholds, metric units, environment fields, aggregatable
+artifact fields, and emits a sample shared QA artifact manifest compatible with
+the operational artifact schema from `bd-rchk0.4.1`.
+
 ## Manifest version
 
 `v1` — initial baseline contract. Increment for any change to the

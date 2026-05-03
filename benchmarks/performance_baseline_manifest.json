@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "manifest_id": "bd-rchk5.1-performance-baseline-v1",
+  "shared_qa_schema_version": 1,
+  "profile": "release-perf",
+  "artifact_root_template": "artifacts/performance/{git_sha}/{timestamp}",
+  "allowed_capabilities": [
+    "benchmark_host",
+    "cargo_bench",
+    "criterion",
+    "fuse",
+    "mkfs_btrfs",
+    "mkfs_ext4",
+    "perf_events",
+    "rch",
+    "python3"
+  ],
+  "required_environment_fields": [
+    "manifest_version",
+    "git_sha",
+    "built_with",
+    "os",
+    "cpu_model",
+    "cpu_cores_logical",
+    "cpu_cores_physical",
+    "ram_total_gb",
+    "storage_class",
+    "governor",
+    "mitigations",
+    "capabilities.fuse"
+  ],
+  "required_log_fields": [
+    "workload_id",
+    "command",
+    "profile",
+    "artifact_path",
+    "metric_unit",
+    "comparison_target",
+    "warn_percent",
+    "fail_percent",
+    "max_cv",
+    "environment_manifest",
+    "reproduction_command"
+  ],
+  "workloads": [
+    {
+      "workload_id": "block_io_direct_sequential_4k_read",
+      "workstream": "block_io",
+      "description": "Direct 4 KiB sequential read path through the block cache harness.",
+      "command_template": "cargo bench -p ffs-block --profile {profile} --bench arc_cache -- block_cache_arc_sequential_scan",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "dataset": "synth_64mib_4k_seq",
+      "image_size_mib": 64,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "nanoseconds",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 12.0,
+        "fail_percent": 25.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].median_ns"
+      }
+    },
+    {
+      "workload_id": "arc_cache_warm_read_latency",
+      "workstream": "arc_cache",
+      "description": "Warm-cache read latency with working set inside ARC capacity.",
+      "command_template": "cargo bench -p ffs-block --profile {profile} --bench arc_cache -- block_cache_arc_mixed_seq70_hot30",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "dataset": "arc_256kib_hotset",
+      "image_size_mib": 64,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "nanoseconds",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 12.0,
+        "fail_percent": 25.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].p95_ns"
+      }
+    },
+    {
+      "workload_id": "mvcc_optimistic_commit_no_conflict",
+      "workstream": "mvcc",
+      "description": "Optimistic MVCC commit path without writer conflict.",
+      "command_template": "cargo bench -p ffs-mvcc --profile {profile} --bench wal_throughput -- wal_commit_4k_sync",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "dataset": "mvcc_1k_block_append_only",
+      "image_size_mib": 16,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "ops_per_sec",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 20.0,
+        "fail_percent": 40.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].throughput_ops_sec"
+      }
+    },
+    {
+      "workload_id": "mvcc_conflict_detection_rate",
+      "workstream": "mvcc",
+      "description": "Concurrent hot-block writer conflict detection rate.",
+      "command_template": "cargo bench -p ffs-mvcc --profile {profile} --bench wal_throughput -- mvcc_contention_4writers",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "dataset": "mvcc_hot_block_4writers",
+      "image_size_mib": 16,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "ops_per_sec",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 20.0,
+        "fail_percent": 40.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].throughput_ops_sec"
+      }
+    },
+    {
+      "workload_id": "repair_lrc_encode_throughput",
+      "workstream": "repair_scrub",
+      "description": "LRC repair-symbol encode throughput for scrub groups.",
+      "command_template": "cargo bench -p ffs-repair --profile {profile} --bench scrub_codec -- raptorq_encode_group_16blocks",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "dataset": "repair_group_16blocks_global_parity",
+      "image_size_mib": 32,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "mb_per_sec",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 10.0,
+        "fail_percent": 20.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].throughput_mb_sec"
+      }
+    },
+    {
+      "workload_id": "repair_symbol_refresh_staleness_latency",
+      "workstream": "repair_scrub",
+      "description": "Rolling repair-symbol refresh latency across block groups.",
+      "command_template": "cargo bench -p ffs-repair --profile {profile} --bench scrub_codec -- repair_symbol_refresh_staleness_latency",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "dataset": "repair_refresh_block_group_matrix",
+      "image_size_mib": 32,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "milliseconds",
+      "comparison_target": "missing_dataset_followup",
+      "missing_data_note": "No current bench covers rolling repair-symbol refresh staleness; file a measurement bead before claiming this row.",
+      "threshold": {
+        "warn_percent": 10.0,
+        "fail_percent": 20.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].p95_ms"
+      }
+    },
+    {
+      "workload_id": "cli_metadata_parse_conformance",
+      "workstream": "cli_inspect",
+      "description": "Harness metadata parse over conformance fixtures.",
+      "command_template": "cargo bench -p ffs-harness --profile {profile} --bench metadata_parse -- metadata_parse",
+      "required_capabilities": ["cargo_bench", "criterion", "rch"],
+      "dataset": "conformance_fixtures_metadata",
+      "image_size_mib": 64,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "microseconds",
+      "comparison_target": "previous_baseline_same_manifest_same_host_profile",
+      "threshold": {
+        "warn_percent": 10.0,
+        "fail_percent": 20.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].p95_us"
+      }
+    },
+    {
+      "workload_id": "fuse_metadata_readdir_1k",
+      "workstream": "fuse_mount",
+      "description": "Mounted metadata-only readdir over a 1k-entry directory.",
+      "command_template": "scripts/mount_benchmark_probe.sh --bin target/{profile}/ffs-cli --image datasets/ext4_1k_readdir.img --mount-root {artifact_dir}/mnt --mode warm",
+      "required_capabilities": ["benchmark_host", "fuse", "mkfs_ext4", "python3"],
+      "dataset": "ext4_1k_entry_directory",
+      "image_size_mib": 64,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "milliseconds",
+      "comparison_target": "host_capability_or_previous_baseline",
+      "threshold": {
+        "warn_percent": 25.0,
+        "fail_percent": 50.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].p95_ms"
+      }
+    },
+    {
+      "workload_id": "fuse_sequential_read_4k",
+      "workstream": "fuse_mount",
+      "description": "Mounted sequential 4 KiB read path over a 16 MiB file.",
+      "command_template": "scripts/mount_benchmark_probe.sh --bin target/{profile}/ffs-cli --image datasets/ext4_16mib_read.img --mount-root {artifact_dir}/mnt --mode cold",
+      "required_capabilities": ["benchmark_host", "fuse", "mkfs_ext4", "python3"],
+      "dataset": "ext4_16mib_sequential_read",
+      "image_size_mib": 64,
+      "warmup_runs": 10,
+      "measured_runs": 30,
+      "metric_unit": "mb_per_sec",
+      "comparison_target": "host_capability_or_previous_baseline",
+      "threshold": {
+        "warn_percent": 25.0,
+        "fail_percent": 50.0,
+        "max_cv": 0.1
+      },
+      "output_artifact": {
+        "path_template": "results/{workload_id}.json",
+        "category": "benchmark_baseline",
+        "content_type": "application/json",
+        "aggregate_key": "rows[].throughput_mb_sec"
+      }
+    }
+  ]
+}

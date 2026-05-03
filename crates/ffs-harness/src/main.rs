@@ -26,6 +26,10 @@ use ffs_harness::{
         OperationalReadinessReportConfig, build_operational_readiness_report,
         render_operational_readiness_markdown,
     },
+    performance_baseline_manifest::{
+        build_performance_sample_artifact_manifest, fail_on_performance_baseline_manifest_errors,
+        load_performance_baseline_manifest, validate_performance_baseline_manifest,
+    },
     proof_bundle::{
         ProofBundleValidationConfig, fail_on_proof_bundle_errors, render_proof_bundle_markdown,
         validate_proof_bundle,
@@ -110,6 +114,9 @@ fn run() -> Result<()> {
         Some("validate-proof-overhead-budget") => validate_proof_overhead_budget_cmd(&args[1..]),
         Some("validate-proof-bundle") => validate_proof_bundle_cmd(&args[1..]),
         Some("evaluate-release-gates") => evaluate_release_gates_cmd(&args[1..]),
+        Some("validate-performance-baseline-manifest") => {
+            validate_performance_baseline_manifest_cmd(&args[1..])
+        }
         Some("operational-readiness-report") => operational_readiness_report_cmd(&args[1..]),
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("validate-mounted-recovery-matrix") => {
@@ -147,6 +154,14 @@ struct ReleaseGateCmdArgs {
     out_path: Option<String>,
     wording_out_path: Option<String>,
     format: ProofBundleFormat,
+}
+
+#[derive(Debug)]
+struct PerformanceManifestCmdArgs {
+    manifest_path: String,
+    artifact_root: String,
+    out_path: Option<String>,
+    artifact_out_path: Option<String>,
 }
 
 fn operational_readiness_report_cmd(args: &[String]) -> Result<()> {
@@ -450,6 +465,92 @@ fn release_gate_wording(report: &ffs_harness::release_gate::ReleaseGateEvaluatio
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn validate_performance_baseline_manifest_cmd(args: &[String]) -> Result<()> {
+    let Some(cmd_args) = parse_performance_manifest_cmd_args(args)? else {
+        return Ok(());
+    };
+    let manifest = load_performance_baseline_manifest(Path::new(&cmd_args.manifest_path))?;
+    let report = validate_performance_baseline_manifest(&manifest, &cmd_args.artifact_root);
+    let output = serde_json::to_string_pretty(&report)?;
+
+    if let Some(path) = cmd_args.out_path {
+        write_text_file(Path::new(&path), &format!("{output}\n"))?;
+        println!(
+            "performance baseline manifest report written: {} valid={} workloads={}",
+            path, report.valid, report.workload_count
+        );
+    } else {
+        println!("{output}");
+    }
+
+    if let Some(path) = cmd_args.artifact_out_path {
+        let artifact_manifest =
+            build_performance_sample_artifact_manifest(&manifest, &cmd_args.artifact_root);
+        write_text_file(
+            Path::new(&path),
+            &format!("{}\n", serde_json::to_string_pretty(&artifact_manifest)?),
+        )?;
+        println!("performance baseline sample artifact manifest written: {path}");
+    }
+
+    fail_on_performance_baseline_manifest_errors(&report)
+}
+
+fn parse_performance_manifest_cmd_args(
+    args: &[String],
+) -> Result<Option<PerformanceManifestCmdArgs>> {
+    let mut manifest_path: Option<String> = None;
+    let mut artifact_root = "artifacts/performance/dry-run".to_owned();
+    let mut out_path: Option<String> = None;
+    let mut artifact_out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                manifest_path = Some(
+                    args.get(i)
+                        .context("--manifest requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--artifact-root" => {
+                i += 1;
+                args.get(i)
+                    .context("--artifact-root requires a path")?
+                    .clone_into(&mut artifact_root);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--artifact-out" => {
+                i += 1;
+                artifact_out_path = Some(
+                    args.get(i)
+                        .context("--artifact-out requires a path")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_performance_manifest_usage();
+                return Ok(None);
+            }
+            other => bail!("unknown validate-performance-baseline-manifest argument: {other}"),
+        }
+        i += 1;
+    }
+
+    Ok(Some(PerformanceManifestCmdArgs {
+        manifest_path: manifest_path
+            .context("--manifest is required for performance manifest validation")?,
+        artifact_root,
+        out_path,
+        artifact_out_path,
+    }))
 }
 
 fn validate_proof_overhead_budget_cmd(args: &[String]) -> Result<()> {
@@ -1252,6 +1353,7 @@ fn print_usage() {
     println!(
         "  ffs-harness evaluate-release-gates --bundle FILE --policy FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--wording-out FILE]"
     );
+    print_performance_baseline_manifest_usage_summary();
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-recovery-matrix [--matrix FILE] [--out FILE]");
     println!();
@@ -1305,11 +1407,24 @@ fn print_usage() {
     println!(
         "  ffs-harness evaluate-release-gates --bundle artifacts/proof/bundle/manifest.json --policy artifacts/proof/release_gate_policy.json --out artifacts/proof/release_gate.json --wording-out artifacts/proof/release_gate_wording.tsv"
     );
+    print_performance_baseline_manifest_example();
     println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
     );
     println!(
         "  ffs-harness validate-mounted-recovery-matrix --out artifacts/e2e/mounted_recovery_matrix.json"
+    );
+}
+
+fn print_performance_baseline_manifest_usage_summary() {
+    println!(
+        "  ffs-harness validate-performance-baseline-manifest --manifest FILE [--artifact-root DIR] [--out FILE] [--artifact-out FILE]"
+    );
+}
+
+fn print_performance_baseline_manifest_example() {
+    println!(
+        "  ffs-harness validate-performance-baseline-manifest --manifest benchmarks/performance_baseline_manifest.json --out artifacts/performance/manifest_report.json --artifact-out artifacts/performance/sample_artifact_manifest.json"
     );
 }
 
@@ -1396,6 +1511,16 @@ fn print_release_gate_usage() {
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write release-gate report to FILE");
     println!("  --wording-out FILE                 Write generated docs-safe wording TSV");
+}
+
+fn print_performance_manifest_usage() {
+    println!("Usage: ffs-harness validate-performance-baseline-manifest [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Read performance baseline manifest JSON");
+    println!("  --artifact-root DIR                Root for dry-run expanded artifacts");
+    println!("  --out FILE                         Write validation report JSON");
+    println!("  --artifact-out FILE                Write sample shared QA artifact manifest JSON");
 }
 
 fn print_mounted_write_matrix_usage() {

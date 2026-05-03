@@ -20,6 +20,7 @@ pub mod oq_decision_matrix;
 pub mod perf_comparison;
 pub mod perf_regression;
 pub mod perf_triage;
+pub mod performance_baseline_manifest;
 pub mod proof_bundle;
 pub mod proof_overhead_budget;
 pub mod release_gate;

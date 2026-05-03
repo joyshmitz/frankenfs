@@ -46,6 +46,9 @@ End-to-end smoke tests for FrankenFS that exercise user-facing workflows.
 
 # Run release-gate policy evaluator smoke
 ./scripts/e2e/ffs_release_gate_e2e.sh
+
+# Run performance baseline manifest dry-run validation
+./scripts/e2e/ffs_performance_manifest_e2e.sh
 ```
 
 ## Scenario Catalog Contract
@@ -324,6 +327,38 @@ It builds a sample bundle with every required lane, validates it, writes
 JSON/Markdown inspection artifacts, rejects hash drift, stale SHA, and missing
 artifact links, then runs the module unit tests.
 
+## Performance Baseline Manifest
+
+The performance baseline manifest is the executable contract for benchmark
+evidence. It lists representative workloads, command templates, required host
+capabilities, datasets, run counts, metric units, thresholds, output artifact
+paths, aggregate fields, required environment fields, and required structured
+log fields.
+
+Validate the checked-in manifest without running heavyweight benchmarks:
+
+```bash
+cargo run -p ffs-harness -- validate-performance-baseline-manifest \
+  --manifest benchmarks/performance_baseline_manifest.json \
+  --artifact-root artifacts/performance/dry-run \
+  --out artifacts/performance/manifest_report.json \
+  --artifact-out artifacts/performance/sample_artifact_manifest.json
+```
+
+The validator expands command templates, rejects unknown capabilities, invalid
+metric units, missing thresholds, missing environment fields, and
+non-aggregatable artifact fields, then writes a sample shared QA artifact
+manifest that downstream baseline runs can reuse.
+
+The E2E smoke is:
+
+```bash
+./scripts/e2e/ffs_performance_manifest_e2e.sh
+```
+
+It validates the checked-in manifest, checks dry-run command and artifact
+expansion, rejects malformed manifest variants, and runs the module unit tests.
+
 ## Release Gate Evaluation
 
 Release gates are executable policy files that consume a validated proof bundle
@@ -473,6 +508,15 @@ The release gate suite exercises:
 4. Fail-closed validation for missing evidence, stale evidence, and threshold failures
 5. Required log fields for downgrade findings, remediation ids, docs wording ids, and reproduction commands
 6. Unit coverage for feature-state transitions, kill switches, capability skips, explicit deferrals, and hand-edit-resistant wording
+
+The performance manifest suite exercises:
+
+1. `validate-performance-baseline-manifest` CLI wiring and module export
+2. Checked-in workload manifest validation without running heavy benchmarks
+3. Dry-run command expansion for cargo bench and mounted FUSE probe workloads
+4. Sample shared QA artifact manifest emission for benchmark baseline/report outputs
+5. Fail-closed validation for unknown capabilities, missing environment fields, invalid metric units, and non-aggregatable artifact fields
+6. Unit coverage for workload ids, thresholds, capability vocabulary, metric units, artifact aggregation, and shared QA schema mapping
 
 The btrfs read-only smoke suite exercises:
 
