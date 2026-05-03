@@ -45,6 +45,9 @@ BAD_UNIT_JSON="$E2E_LOG_DIR/performance_manifest_bad_unit.json"
 BAD_TARGET_JSON="$E2E_LOG_DIR/performance_manifest_bad_target_dir.json"
 BAD_RAW_LOG_JSON="$E2E_LOG_DIR/performance_manifest_bad_raw_log.json"
 BAD_FIXTURE_JSON="$E2E_LOG_DIR/performance_manifest_bad_fixture.json"
+BAD_CLAIM_JSON="$E2E_LOG_DIR/performance_manifest_bad_claim_policy.json"
+BAD_STATS_JSON="$E2E_LOG_DIR/performance_manifest_bad_statistical_summary.json"
+BAD_AUTHORITATIVE_JSON="$E2E_LOG_DIR/performance_manifest_bad_authoritative_claim.json"
 BAD_RAW="$E2E_LOG_DIR/performance_manifest_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/performance_manifest_unit_tests.log"
 
@@ -85,7 +88,20 @@ if report["workload_count"] < 8:
     raise SystemExit("expected representative workload coverage")
 if report["missing_required_workload_kinds"]:
     raise SystemExit(f"missing workload kinds: {report['missing_required_workload_kinds']}")
-required_classes = {"pass", "warn", "fail", "noisy", "stale", "missing"}
+required_classes = {
+    "pass",
+    "warn",
+    "fail",
+    "noisy",
+    "stale",
+    "missing",
+    "missing_baseline",
+    "environment_mismatch",
+    "budget_exceeded",
+    "instrumentation_overhead_exceeded",
+    "degraded_but_accepted",
+    "blocked",
+}
 classes = set(report["fixture_classification_counts"])
 if not required_classes <= classes:
     raise SystemExit(f"missing fixture classifications: {required_classes - classes}")
@@ -107,17 +123,33 @@ if not any(
 for row in report["fixture_evidence_reports"]:
     for field in (
         "workload_id",
+        "claim_tier_before",
+        "claim_tier_after",
+        "evidence_authority",
         "baseline_id",
+        "baseline_artifact_hash",
         "current_artifact_id",
         "current_artifact_hash",
         "environment_fingerprint",
+        "environment_matches_claim_lane",
         "metric_unit",
         "observed_value",
         "threshold",
+        "freshness_window_days",
+        "overhead_budget",
+        "runtime_seconds",
+        "memory_mib",
+        "instrumentation_overhead_percent",
+        "statistical_summary",
         "noise_decision",
         "stale_decision",
+        "budget_decision",
+        "overhead_decision",
         "comparison_verdict",
         "public_claim_state",
+        "release_claim_effect",
+        "docs_wording_id",
+        "output_path",
         "raw_stdout_path",
         "raw_stderr_path",
         "reproduction_command",
@@ -129,6 +161,40 @@ for row in report["fixture_evidence_reports"]:
             raise SystemExit(f"quarantined row overclaims public state: {row}")
         if not row["follow_up_bead"].startswith("bd-"):
             raise SystemExit(f"quarantined row missing follow-up bead: {row}")
+    if row["comparison_verdict"] in {
+        "missing_baseline",
+        "environment_mismatch",
+        "budget_exceeded",
+        "instrumentation_overhead_exceeded",
+    } and row["public_claim_state"] not in {"unknown", "experimental"}:
+        raise SystemExit(f"budget/evidence failure overclaims public state: {row}")
+    if row["claim_tier_after"] in {"measured_authoritative", "regression_free"}:
+        if row["evidence_authority"] != "authoritative":
+            raise SystemExit(f"authoritative claim lacks authoritative evidence: {row}")
+        if row["stale_decision"] != "fresh":
+            raise SystemExit(f"authoritative claim is stale: {row}")
+        if row["budget_decision"] != "budget_within_limit":
+            raise SystemExit(f"authoritative claim exceeded runtime/memory budget: {row}")
+        if row["overhead_decision"] != "instrumentation_overhead_within_limit":
+            raise SystemExit(f"authoritative claim exceeded instrumentation budget: {row}")
+if not any(
+    row["fixture_id"] == "fixture_pass_core"
+    and row["claim_tier_after"] == "regression_free"
+    for row in report["fixture_evidence_reports"]
+):
+    raise SystemExit("missing regression-free claim mapping")
+if not any(
+    row["comparison_verdict"] == "degraded_but_accepted"
+    and row["claim_tier_after"] == "degraded_but_accepted"
+    for row in report["fixture_evidence_reports"]
+):
+    raise SystemExit("missing degraded-but-accepted claim mapping")
+if not any(
+    row["comparison_verdict"] == "blocked"
+    and row["claim_tier_after"] == "blocked"
+    for row in report["fixture_evidence_reports"]
+):
+    raise SystemExit("missing blocked claim mapping")
 if artifact["gate_id"] != "performance_baseline_manifest":
     raise SystemExit("wrong artifact gate_id")
 if artifact.get("bead_id") != "bd-rchk5.1":
@@ -144,14 +210,26 @@ else
 fi
 
 e2e_step "Scenario 4: invalid manifest variants fail closed"
-python3 - "$MANIFEST_JSON" "$BAD_CAP_JSON" "$BAD_ENV_JSON" "$BAD_ARTIFACT_JSON" "$BAD_UNIT_JSON" "$BAD_TARGET_JSON" "$BAD_RAW_LOG_JSON" "$BAD_FIXTURE_JSON" <<'PY'
+python3 - "$MANIFEST_JSON" "$BAD_CAP_JSON" "$BAD_ENV_JSON" "$BAD_ARTIFACT_JSON" "$BAD_UNIT_JSON" "$BAD_TARGET_JSON" "$BAD_RAW_LOG_JSON" "$BAD_FIXTURE_JSON" "$BAD_CLAIM_JSON" "$BAD_STATS_JSON" "$BAD_AUTHORITATIVE_JSON" <<'PY'
 from __future__ import annotations
 
 import json
 import pathlib
 import sys
 
-source, bad_cap, bad_env, bad_artifact, bad_unit, bad_target, bad_raw_log, bad_fixture = map(pathlib.Path, sys.argv[1:])
+(
+    source,
+    bad_cap,
+    bad_env,
+    bad_artifact,
+    bad_unit,
+    bad_target,
+    bad_raw_log,
+    bad_fixture,
+    bad_claim,
+    bad_stats,
+    bad_authoritative,
+) = map(pathlib.Path, sys.argv[1:])
 base = json.loads(source.read_text(encoding="utf-8"))
 
 cap = json.loads(json.dumps(base))
@@ -184,10 +262,23 @@ for workload in fixture["workloads"]:
     if workload["workload_id"] == "mvcc_conflict_detection_rate":
         workload["quarantine_policy"]["follow_up_bead"] = ""
 bad_fixture.write_text(json.dumps(fixture, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+claim = json.loads(json.dumps(base))
+claim["workloads"][0]["claim_policy"]["clean_claim_tier"] = "measured_authoritative"
+claim["workloads"][0]["claim_policy"]["release_claim_effect"] = "local_claim"
+bad_claim.write_text(json.dumps(claim, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+stats = json.loads(json.dumps(base))
+del stats["fixture_evidence"][0]["statistical_summary"]
+bad_stats.write_text(json.dumps(stats, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+authoritative = json.loads(json.dumps(base))
+authoritative["fixture_evidence"][0]["evidence_authority"] = "local"
+bad_authoritative.write_text(json.dumps(authoritative, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
 invalid_failures=0
-for bad in "$BAD_CAP_JSON" "$BAD_ENV_JSON" "$BAD_ARTIFACT_JSON" "$BAD_UNIT_JSON" "$BAD_TARGET_JSON" "$BAD_RAW_LOG_JSON" "$BAD_FIXTURE_JSON"; do
+for bad in "$BAD_CAP_JSON" "$BAD_ENV_JSON" "$BAD_ARTIFACT_JSON" "$BAD_UNIT_JSON" "$BAD_TARGET_JSON" "$BAD_RAW_LOG_JSON" "$BAD_FIXTURE_JSON" "$BAD_CLAIM_JSON" "$BAD_STATS_JSON" "$BAD_AUTHORITATIVE_JSON"; do
     if cargo run --quiet -p ffs-harness -- validate-performance-baseline-manifest \
         --manifest "$bad" \
         --out "$E2E_LOG_DIR/$(basename "$bad" .json).report.json" >"$BAD_RAW" 2>&1; then
@@ -200,7 +291,7 @@ for bad in "$BAD_CAP_JSON" "$BAD_ENV_JSON" "$BAD_ARTIFACT_JSON" "$BAD_UNIT_JSON"
 done
 
 if ((invalid_failures == 0)); then
-    scenario_result "performance_manifest_invalid_variants_rejected" "PASS" "bad capability/env/artifact/unit rejected"
+    scenario_result "performance_manifest_invalid_variants_rejected" "PASS" "bad capability/env/artifact/unit/claim/budget variants rejected"
 else
     scenario_result "performance_manifest_invalid_variants_rejected" "FAIL" "invalid_failures=${invalid_failures}"
 fi

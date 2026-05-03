@@ -80,9 +80,36 @@ public performance wording. Each workload row now records:
 
 The checked-in manifest also carries fixture evidence rows that exercise the
 policy without running heavy benchmarks. They cover `pass`, `warn`, `fail`,
-`noisy`, `stale`, and `missing`. Any `fail`, `noisy`, `stale`, or `missing`
-row must keep public claims at `unknown` or `experimental` and must link an
-owning follow-up bead.
+`noisy`, `stale`, `missing`, `missing_baseline`, `environment_mismatch`,
+`budget_exceeded`, `instrumentation_overhead_exceeded`,
+`degraded_but_accepted`, and `blocked`. Any stale, noisy, missing,
+environment-mismatched, budget-exceeded, overhead-exceeded, or regressed row
+must fail closed and link an owning follow-up bead.
+
+## Claim tiers and budget enforcement
+
+`bd-hol07` connects benchmark evidence to public claim tiers. Each workload
+records a `claim_policy`:
+
+- `clean_claim_tier` — the strongest state that fresh, comparable,
+  within-budget evidence can support: `unknown`, `experimental`,
+  `fixture_smoke_only`, `measured_local`, `measured_authoritative`,
+  `regression_free`, `degraded_but_accepted`, or `blocked`.
+- `freshness_window_days` — the maximum age of the controlling baseline before
+  the row becomes stale for claim purposes.
+- `overhead_budget` — maximum runtime seconds, memory MiB, and
+  instrumentation overhead percentage for the proof itself.
+- `release_claim_effect` — the release/docs wording category the row may
+  influence.
+- `docs_wording_id` — stable wording id for README, FEATURE_PARITY, and
+  release-gate consumers.
+
+Any claim stronger than `experimental` must be fresh, environment-comparable,
+within runtime/memory budget, within instrumentation overhead budget, and backed
+by authoritative evidence when the target tier is `measured_authoritative` or
+`regression_free`. Budget or overhead failures cannot support stronger wording;
+they downgrade to `unknown`/`experimental` or `blocked` and keep the owning bead
+visible.
 
 ## Required environment-field schema
 
@@ -158,6 +185,27 @@ baselines/<git_sha>/<timestamp>/
       "p95_ns": 14000,
       "p99_ns": 15800,
       "cv": 0.04,
+      "baseline_id": "baseline-20260503",
+      "baseline_artifact_hash": "sha256:<64 hex chars>",
+      "current_artifact_id": "current-<git-sha>",
+      "current_artifact_hash": "sha256:<64 hex chars>",
+      "environment_fingerprint": "env:<host>:<fuse-mode>:release-perf",
+      "claim_tier_before": "experimental",
+      "claim_tier_after": "measured_authoritative",
+      "release_claim_effect": "authoritative_claim",
+      "docs_wording_id": "perf.block_io.authoritative",
+      "freshness_window_days": 14,
+      "overhead_budget": {
+        "max_runtime_seconds": 300.0,
+        "max_memory_mib": 4096,
+        "max_instrumentation_overhead_percent": 5.0
+      },
+      "runtime_seconds": 120.0,
+      "memory_mib": 1024,
+      "instrumentation_overhead_percent": 2.0,
+      "comparison_verdict": "pass",
+      "budget_decision": "budget_within_limit",
+      "overhead_decision": "instrumentation_overhead_within_limit",
       "skipped": false,
       "skip_reason": null
     }

@@ -42,9 +42,12 @@ const REQUIRED_ENVIRONMENT_FIELDS: [&str; 21] = [
     "capabilities.fuse",
 ];
 
-const REQUIRED_LOG_FIELDS: [&str; 24] = [
+const REQUIRED_LOG_FIELDS: [&str; 38] = [
     "workload_id",
+    "claim_tier_before",
+    "claim_tier_after",
     "baseline_id",
+    "baseline_artifact_hash",
     "current_artifact_id",
     "current_artifact_hash",
     "environment_fingerprint",
@@ -58,14 +61,25 @@ const REQUIRED_LOG_FIELDS: [&str; 24] = [
     "warn_percent",
     "fail_percent",
     "max_cv",
+    "freshness_window_days",
+    "overhead_budget",
+    "runtime_seconds",
+    "memory_mib",
+    "instrumentation_overhead_percent",
     "stale_baseline_expiry_days",
     "noise_decision",
     "stale_decision",
+    "budget_decision",
+    "overhead_decision",
     "comparison_verdict",
     "public_claim_state",
+    "release_claim_effect",
+    "docs_wording_id",
+    "statistical_summary",
     "raw_stdout_path",
     "raw_stderr_path",
     "environment_manifest",
+    "output_path",
     "reproduction_command",
 ];
 
@@ -77,13 +91,19 @@ const REQUIRED_WORKLOAD_KINDS: [PerformanceWorkloadKind; 5] = [
     PerformanceWorkloadKind::LongCampaignObservation,
 ];
 
-const REQUIRED_FIXTURE_CLASSIFICATIONS: [PerformanceEvidenceClassification; 6] = [
+const REQUIRED_FIXTURE_CLASSIFICATIONS: [PerformanceEvidenceClassification; 12] = [
     PerformanceEvidenceClassification::Pass,
     PerformanceEvidenceClassification::Warn,
     PerformanceEvidenceClassification::Fail,
     PerformanceEvidenceClassification::Noisy,
     PerformanceEvidenceClassification::Stale,
     PerformanceEvidenceClassification::Missing,
+    PerformanceEvidenceClassification::MissingBaseline,
+    PerformanceEvidenceClassification::EnvironmentMismatch,
+    PerformanceEvidenceClassification::BudgetExceeded,
+    PerformanceEvidenceClassification::InstrumentationOverheadExceeded,
+    PerformanceEvidenceClassification::DegradedAccepted,
+    PerformanceEvidenceClassification::Blocked,
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,6 +145,7 @@ pub struct PerformanceWorkload {
     pub threshold: PerformanceThreshold,
     pub required_raw_logs: Vec<String>,
     pub quarantine_policy: PerformanceQuarantinePolicy,
+    pub claim_policy: PerformanceClaimPolicy,
     pub output_artifact: PerformanceOutputArtifact,
 }
 
@@ -191,7 +212,7 @@ pub enum PerformancePublicClaimState {
 impl PerformancePublicClaimState {
     #[must_use]
     pub const fn is_safe_quarantine_claim(self) -> bool {
-        matches!(self, Self::Unknown | Self::Experimental)
+        matches!(self, Self::Unknown | Self::Experimental | Self::Blocked)
     }
 
     #[must_use]
@@ -205,6 +226,76 @@ impl PerformancePublicClaimState {
             Self::RegressionFree => "regression_free",
             Self::DegradedButAccepted => "degraded_but_accepted",
             Self::Blocked => "blocked",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_stronger_than_experimental(self) -> bool {
+        matches!(
+            self,
+            Self::FixtureSmokeOnly
+                | Self::MeasuredLocal
+                | Self::MeasuredAuthoritative
+                | Self::RegressionFree
+                | Self::DegradedButAccepted
+        )
+    }
+
+    #[must_use]
+    pub const fn requires_authoritative_evidence(self) -> bool {
+        matches!(self, Self::MeasuredAuthoritative | Self::RegressionFree)
+    }
+
+    #[must_use]
+    pub const fn capped_at_measured_local(self) -> Self {
+        match self {
+            Self::MeasuredAuthoritative | Self::RegressionFree => Self::MeasuredLocal,
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceClaimPolicy {
+    pub clean_claim_tier: PerformancePublicClaimState,
+    pub freshness_window_days: u32,
+    pub overhead_budget: PerformanceOverheadBudget,
+    pub release_claim_effect: PerformanceReleaseClaimEffect,
+    pub docs_wording_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceOverheadBudget {
+    pub max_runtime_seconds: f64,
+    pub max_memory_mib: u64,
+    pub max_instrumentation_overhead_percent: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceReleaseClaimEffect {
+    NoPublicUpgrade,
+    ExperimentalOnly,
+    FixtureSmokeClaim,
+    LocalClaim,
+    AuthoritativeClaim,
+    RegressionFreeClaim,
+    DowngradeToExperimental,
+    BlockRelease,
+}
+
+impl PerformanceReleaseClaimEffect {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NoPublicUpgrade => "no_public_upgrade",
+            Self::ExperimentalOnly => "experimental_only",
+            Self::FixtureSmokeClaim => "fixture_smoke_claim",
+            Self::LocalClaim => "local_claim",
+            Self::AuthoritativeClaim => "authoritative_claim",
+            Self::RegressionFreeClaim => "regression_free_claim",
+            Self::DowngradeToExperimental => "downgrade_to_experimental",
+            Self::BlockRelease => "block_release",
         }
     }
 }
@@ -248,6 +339,13 @@ pub enum PerformanceEvidenceClassification {
     Noisy,
     Stale,
     Missing,
+    MissingBaseline,
+    EnvironmentMismatch,
+    BudgetExceeded,
+    InstrumentationOverheadExceeded,
+    #[serde(rename = "degraded_but_accepted")]
+    DegradedAccepted,
+    Blocked,
 }
 
 impl PerformanceEvidenceClassification {
@@ -260,12 +358,33 @@ impl PerformanceEvidenceClassification {
             Self::Noisy => "noisy",
             Self::Stale => "stale",
             Self::Missing => "missing",
+            Self::MissingBaseline => "missing_baseline",
+            Self::EnvironmentMismatch => "environment_mismatch",
+            Self::BudgetExceeded => "budget_exceeded",
+            Self::InstrumentationOverheadExceeded => "instrumentation_overhead_exceeded",
+            Self::DegradedAccepted => "degraded_but_accepted",
+            Self::Blocked => "blocked",
         }
     }
 
     #[must_use]
     pub const fn needs_quarantine(self) -> bool {
-        matches!(self, Self::Fail | Self::Noisy | Self::Stale | Self::Missing)
+        matches!(
+            self,
+            Self::Fail
+                | Self::Noisy
+                | Self::Stale
+                | Self::Missing
+                | Self::MissingBaseline
+                | Self::EnvironmentMismatch
+                | Self::BudgetExceeded
+                | Self::InstrumentationOverheadExceeded
+        )
+    }
+
+    #[must_use]
+    pub const fn requires_follow_up(self) -> bool {
+        matches!(self, Self::Blocked) || self.needs_quarantine()
     }
 }
 
@@ -276,19 +395,50 @@ pub enum PerformanceMeasurementState {
     Missing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceEvidenceAuthority {
+    FixtureSmoke,
+    Local,
+    Authoritative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceStatisticalSummary {
+    pub sample_count: u32,
+    pub median: f64,
+    pub p95: f64,
+    pub p99: f64,
+    pub coefficient_of_variation: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PerformanceFixtureEvidence {
     pub fixture_id: String,
     pub workload_id: String,
+    pub claim_tier_before: PerformancePublicClaimState,
+    pub evidence_authority: PerformanceEvidenceAuthority,
     pub measurement_state: PerformanceMeasurementState,
     pub baseline_id: String,
+    pub baseline_artifact_hash: String,
     pub current_artifact_id: String,
     pub current_artifact_hash: String,
     pub environment_fingerprint: String,
+    pub environment_matches_claim_lane: bool,
     pub baseline_age_days: u32,
     pub observed_value: f64,
     pub delta_percent: f64,
     pub coefficient_of_variation: f64,
+    pub statistical_summary: PerformanceStatisticalSummary,
+    pub runtime_seconds: f64,
+    pub memory_mib: u64,
+    pub instrumentation_overhead_percent: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_degradation_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    pub docs_wording_id: String,
+    pub output_path: String,
     pub raw_stdout_path: String,
     pub raw_stderr_path: String,
     pub reproduction_command: String,
@@ -320,21 +470,37 @@ pub struct PerformanceCommandExpansion {
 pub struct PerformanceEvidenceReport {
     pub fixture_id: String,
     pub workload_id: String,
+    pub claim_tier_before: PerformancePublicClaimState,
+    pub claim_tier_after: PerformancePublicClaimState,
+    pub evidence_authority: PerformanceEvidenceAuthority,
     pub baseline_id: String,
+    pub baseline_artifact_hash: String,
     pub current_artifact_id: String,
     pub current_artifact_hash: String,
     pub environment_fingerprint: String,
+    pub environment_matches_claim_lane: bool,
     pub metric_unit: String,
     pub observed_value: f64,
     pub threshold: PerformanceThreshold,
     pub baseline_age_days: u32,
+    pub freshness_window_days: u32,
+    pub overhead_budget: PerformanceOverheadBudget,
+    pub runtime_seconds: f64,
+    pub memory_mib: u64,
+    pub instrumentation_overhead_percent: f64,
+    pub statistical_summary: PerformanceStatisticalSummary,
     pub stale_baseline_expiry_days: u32,
     pub coefficient_of_variation: f64,
     pub noise_decision: String,
     pub stale_decision: String,
+    pub budget_decision: String,
+    pub overhead_decision: String,
     pub comparison_verdict: PerformanceEvidenceClassification,
     pub public_claim_state: PerformancePublicClaimState,
+    pub release_claim_effect: PerformanceReleaseClaimEffect,
+    pub docs_wording_id: String,
     pub follow_up_bead: String,
+    pub output_path: String,
     pub raw_stdout_path: String,
     pub raw_stderr_path: String,
     pub reproduction_command: String,
@@ -523,6 +689,10 @@ pub fn build_performance_sample_artifact_manifest(
                 ("comparison_target".to_owned(), expansion.comparison_target),
                 ("target_dir".to_owned(), expansion.target_dir),
                 ("workload_kind".to_owned(), expansion.workload_kind),
+                (
+                    "claim_policy".to_owned(),
+                    "validated_by_performance_manifest_report".to_owned(),
+                ),
             ]),
         });
     }
@@ -668,6 +838,7 @@ fn validate_workload(
     }
     validate_required_raw_logs(workload, errors);
     validate_quarantine_policy(workload, errors);
+    validate_claim_policy(workload, errors);
     validate_artifact(workload, errors);
 }
 
@@ -738,6 +909,78 @@ fn validate_quarantine_policy(workload: &PerformanceWorkload, errors: &mut Vec<S
     if workload.quarantine_policy.follow_up_bead.trim().is_empty() {
         errors.push(format!(
             "workload {} quarantine policy must link follow_up_bead",
+            workload.workload_id
+        ));
+    }
+}
+
+fn validate_claim_policy(workload: &PerformanceWorkload, errors: &mut Vec<String>) {
+    let policy = &workload.claim_policy;
+    validate_nonempty(
+        "claim_policy.docs_wording_id",
+        &policy.docs_wording_id,
+        errors,
+    );
+    if policy.freshness_window_days == 0 {
+        errors.push(format!(
+            "workload {} claim freshness_window_days must be positive",
+            workload.workload_id
+        ));
+    }
+    if policy.freshness_window_days > workload.quarantine_policy.stale_baseline_expiry_days {
+        errors.push(format!(
+            "workload {} claim freshness_window_days must not exceed stale_baseline_expiry_days",
+            workload.workload_id
+        ));
+    }
+    if policy.overhead_budget.max_runtime_seconds <= 0.0
+        || policy.overhead_budget.max_memory_mib == 0
+        || policy.overhead_budget.max_instrumentation_overhead_percent <= 0.0
+    {
+        errors.push(format!(
+            "workload {} claim overhead_budget values must be positive",
+            workload.workload_id
+        ));
+    }
+    if policy.clean_claim_tier.requires_authoritative_evidence()
+        && !matches!(
+            policy.release_claim_effect,
+            PerformanceReleaseClaimEffect::AuthoritativeClaim
+                | PerformanceReleaseClaimEffect::RegressionFreeClaim
+        )
+    {
+        errors.push(format!(
+            "workload {} authoritative claim tiers require authoritative release_claim_effect",
+            workload.workload_id
+        ));
+    }
+    if policy.clean_claim_tier == PerformancePublicClaimState::MeasuredLocal
+        && !matches!(
+            policy.release_claim_effect,
+            PerformanceReleaseClaimEffect::LocalClaim
+                | PerformanceReleaseClaimEffect::AuthoritativeClaim
+                | PerformanceReleaseClaimEffect::RegressionFreeClaim
+        )
+    {
+        errors.push(format!(
+            "workload {} measured-local claim tier requires local or stronger release_claim_effect",
+            workload.workload_id
+        ));
+    }
+    if policy.clean_claim_tier == PerformancePublicClaimState::FixtureSmokeOnly
+        && policy.release_claim_effect != PerformanceReleaseClaimEffect::FixtureSmokeClaim
+    {
+        errors.push(format!(
+            "workload {} fixture-smoke claim tier requires fixture_smoke_claim release effect",
+            workload.workload_id
+        ));
+    }
+    if policy.clean_claim_tier.is_safe_quarantine_claim()
+        && policy.release_claim_effect != PerformanceReleaseClaimEffect::ExperimentalOnly
+        && policy.release_claim_effect != PerformanceReleaseClaimEffect::NoPublicUpgrade
+    {
+        errors.push(format!(
+            "workload {} experimental/unknown clean claim tier must not publish stronger release wording",
             workload.workload_id
         ));
     }
@@ -827,6 +1070,11 @@ fn validate_fixture_evidence(
             continue;
         };
         validate_nonempty("baseline_id", &fixture.baseline_id, errors);
+        validate_nonempty(
+            "baseline_artifact_hash",
+            &fixture.baseline_artifact_hash,
+            errors,
+        );
         validate_nonempty("current_artifact_id", &fixture.current_artifact_id, errors);
         validate_nonempty(
             "current_artifact_hash",
@@ -845,6 +1093,20 @@ fn validate_fixture_evidence(
             &fixture.reproduction_command,
             errors,
         );
+        validate_nonempty("docs_wording_id", &fixture.docs_wording_id, errors);
+        validate_nonempty("output_path", &fixture.output_path, errors);
+        if !is_sha256_ref(&fixture.baseline_artifact_hash) {
+            errors.push(format!(
+                "fixture {} baseline_artifact_hash must be sha256:<64 hex chars>",
+                fixture.fixture_id
+            ));
+        }
+        if !is_sha256_ref(&fixture.current_artifact_hash) {
+            errors.push(format!(
+                "fixture {} current_artifact_hash must be sha256:<64 hex chars>",
+                fixture.fixture_id
+            ));
+        }
         if fixture.measurement_state == PerformanceMeasurementState::Measured
             && fixture.observed_value <= 0.0
         {
@@ -859,12 +1121,33 @@ fn validate_fixture_evidence(
                 fixture.fixture_id
             ));
         }
+        validate_statistical_summary(fixture, workload, errors);
+        if fixture.runtime_seconds < 0.0 {
+            errors.push(format!(
+                "fixture {} runtime_seconds must be non-negative",
+                fixture.fixture_id
+            ));
+        }
+        if fixture.instrumentation_overhead_percent < 0.0 {
+            errors.push(format!(
+                "fixture {} instrumentation_overhead_percent must be non-negative",
+                fixture.fixture_id
+            ));
+        }
 
         let classification = classify_fixture_evidence(workload, fixture);
-        if classification.needs_quarantine() {
+        let public_claim_state = public_claim_state_for_classification(workload, classification);
+        validate_public_claim_state(
+            workload,
+            fixture,
+            classification,
+            public_claim_state,
+            errors,
+        );
+        if classification.requires_follow_up() {
             if workload.quarantine_policy.follow_up_bead.trim().is_empty() {
                 errors.push(format!(
-                    "fixture {} quarantines workload {} without follow_up_bead",
+                    "fixture {} requires follow-up for workload {} without follow_up_bead",
                     fixture.fixture_id, workload.workload_id
                 ));
             }
@@ -872,6 +1155,7 @@ fn validate_fixture_evidence(
                 .quarantine_policy
                 .claim_when_quarantined
                 .is_safe_quarantine_claim()
+                && classification.needs_quarantine()
             {
                 errors.push(format!(
                     "fixture {} quarantined workload {} would overclaim public performance state",
@@ -883,37 +1167,69 @@ fn validate_fixture_evidence(
         reports.push(PerformanceEvidenceReport {
             fixture_id: fixture.fixture_id.clone(),
             workload_id: fixture.workload_id.clone(),
+            claim_tier_before: fixture.claim_tier_before,
+            claim_tier_after: public_claim_state,
+            evidence_authority: fixture.evidence_authority,
             baseline_id: fixture.baseline_id.clone(),
+            baseline_artifact_hash: fixture.baseline_artifact_hash.clone(),
             current_artifact_id: fixture.current_artifact_id.clone(),
             current_artifact_hash: fixture.current_artifact_hash.clone(),
             environment_fingerprint: fixture.environment_fingerprint.clone(),
+            environment_matches_claim_lane: fixture.environment_matches_claim_lane,
             metric_unit: workload.metric_unit.label().to_owned(),
             observed_value: fixture.observed_value,
             threshold: workload.threshold,
             baseline_age_days: fixture.baseline_age_days,
+            freshness_window_days: workload.claim_policy.freshness_window_days,
+            overhead_budget: workload.claim_policy.overhead_budget,
+            runtime_seconds: fixture.runtime_seconds,
+            memory_mib: fixture.memory_mib,
+            instrumentation_overhead_percent: fixture.instrumentation_overhead_percent,
+            statistical_summary: fixture.statistical_summary,
             stale_baseline_expiry_days: workload.quarantine_policy.stale_baseline_expiry_days,
             coefficient_of_variation: fixture.coefficient_of_variation,
-            noise_decision: if fixture.coefficient_of_variation > workload.threshold.max_cv {
+            noise_decision: if fixture.statistical_summary.coefficient_of_variation
+                > workload.threshold.max_cv
+            {
                 "quarantine_noisy"
             } else {
                 "noise_within_budget"
             }
             .to_owned(),
             stale_decision: if fixture.baseline_age_days
-                > workload.quarantine_policy.stale_baseline_expiry_days
+                > workload.claim_policy.freshness_window_days
             {
                 "quarantine_stale"
             } else {
                 "fresh"
             }
             .to_owned(),
-            comparison_verdict: classification,
-            public_claim_state: if classification.needs_quarantine() {
-                workload.quarantine_policy.claim_when_quarantined
+            budget_decision: if fixture.runtime_seconds
+                > workload.claim_policy.overhead_budget.max_runtime_seconds
+                || fixture.memory_mib > workload.claim_policy.overhead_budget.max_memory_mib
+            {
+                "budget_exceeded"
             } else {
-                PerformancePublicClaimState::MeasuredLocal
-            },
+                "budget_within_limit"
+            }
+            .to_owned(),
+            overhead_decision: if fixture.instrumentation_overhead_percent
+                > workload
+                    .claim_policy
+                    .overhead_budget
+                    .max_instrumentation_overhead_percent
+            {
+                "instrumentation_overhead_exceeded"
+            } else {
+                "instrumentation_overhead_within_limit"
+            }
+            .to_owned(),
+            comparison_verdict: classification,
+            public_claim_state,
+            release_claim_effect: workload.claim_policy.release_claim_effect,
+            docs_wording_id: fixture.docs_wording_id.clone(),
             follow_up_bead: workload.quarantine_policy.follow_up_bead.clone(),
+            output_path: fixture.output_path.clone(),
             raw_stdout_path: fixture.raw_stdout_path.clone(),
             raw_stderr_path: fixture.raw_stderr_path.clone(),
             reproduction_command: fixture.reproduction_command.clone(),
@@ -923,25 +1239,157 @@ fn validate_fixture_evidence(
     reports
 }
 
+fn validate_statistical_summary(
+    fixture: &PerformanceFixtureEvidence,
+    workload: &PerformanceWorkload,
+    errors: &mut Vec<String>,
+) {
+    let summary = fixture.statistical_summary;
+    if fixture.measurement_state == PerformanceMeasurementState::Measured {
+        if summary.sample_count < workload.measured_runs {
+            errors.push(format!(
+                "fixture {} statistical_summary.sample_count must cover measured_runs",
+                fixture.fixture_id
+            ));
+        }
+        if summary.median <= 0.0 || summary.p95 <= 0.0 || summary.p99 <= 0.0 {
+            errors.push(format!(
+                "fixture {} statistical_summary percentiles must be positive",
+                fixture.fixture_id
+            ));
+        }
+        if summary.p95 < summary.median || summary.p99 < summary.p95 {
+            errors.push(format!(
+                "fixture {} statistical_summary must satisfy median <= p95 <= p99",
+                fixture.fixture_id
+            ));
+        }
+    }
+    if summary.coefficient_of_variation < 0.0 {
+        errors.push(format!(
+            "fixture {} statistical_summary coefficient_of_variation must be non-negative",
+            fixture.fixture_id
+        ));
+    }
+    if (summary.coefficient_of_variation - fixture.coefficient_of_variation).abs() > f64::EPSILON {
+        errors.push(format!(
+            "fixture {} statistical_summary cv must match coefficient_of_variation",
+            fixture.fixture_id
+        ));
+    }
+}
+
 fn classify_fixture_evidence(
     workload: &PerformanceWorkload,
     fixture: &PerformanceFixtureEvidence,
 ) -> PerformanceEvidenceClassification {
+    if fixture.blocked_reason.is_some() {
+        return PerformanceEvidenceClassification::Blocked;
+    }
     if fixture.measurement_state == PerformanceMeasurementState::Missing {
         return PerformanceEvidenceClassification::Missing;
     }
-    if fixture.baseline_age_days > workload.quarantine_policy.stale_baseline_expiry_days {
+    if fixture.baseline_id == "missing-baseline"
+        || fixture.baseline_artifact_hash
+            == "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    {
+        return PerformanceEvidenceClassification::MissingBaseline;
+    }
+    if !fixture.environment_matches_claim_lane {
+        return PerformanceEvidenceClassification::EnvironmentMismatch;
+    }
+    if fixture.baseline_age_days > workload.claim_policy.freshness_window_days {
         return PerformanceEvidenceClassification::Stale;
     }
-    if fixture.coefficient_of_variation > workload.threshold.max_cv {
+    if fixture.statistical_summary.coefficient_of_variation > workload.threshold.max_cv {
         return PerformanceEvidenceClassification::Noisy;
     }
+    if fixture.instrumentation_overhead_percent
+        > workload
+            .claim_policy
+            .overhead_budget
+            .max_instrumentation_overhead_percent
+    {
+        return PerformanceEvidenceClassification::InstrumentationOverheadExceeded;
+    }
+    if fixture.runtime_seconds > workload.claim_policy.overhead_budget.max_runtime_seconds
+        || fixture.memory_mib > workload.claim_policy.overhead_budget.max_memory_mib
+    {
+        return PerformanceEvidenceClassification::BudgetExceeded;
+    }
     if fixture.delta_percent > workload.threshold.fail_percent {
-        PerformanceEvidenceClassification::Fail
+        if fixture.accepted_degradation_reason.is_some() {
+            PerformanceEvidenceClassification::DegradedAccepted
+        } else {
+            PerformanceEvidenceClassification::Fail
+        }
     } else if fixture.delta_percent > workload.threshold.warn_percent {
         PerformanceEvidenceClassification::Warn
     } else {
         PerformanceEvidenceClassification::Pass
+    }
+}
+
+fn public_claim_state_for_classification(
+    workload: &PerformanceWorkload,
+    classification: PerformanceEvidenceClassification,
+) -> PerformancePublicClaimState {
+    match classification {
+        PerformanceEvidenceClassification::Pass => workload.claim_policy.clean_claim_tier,
+        PerformanceEvidenceClassification::Warn => workload
+            .claim_policy
+            .clean_claim_tier
+            .capped_at_measured_local(),
+        PerformanceEvidenceClassification::DegradedAccepted => {
+            PerformancePublicClaimState::DegradedButAccepted
+        }
+        PerformanceEvidenceClassification::Blocked => PerformancePublicClaimState::Blocked,
+        _ => workload.quarantine_policy.claim_when_quarantined,
+    }
+}
+
+fn validate_public_claim_state(
+    workload: &PerformanceWorkload,
+    fixture: &PerformanceFixtureEvidence,
+    classification: PerformanceEvidenceClassification,
+    public_claim_state: PerformancePublicClaimState,
+    errors: &mut Vec<String>,
+) {
+    if public_claim_state.is_stronger_than_experimental()
+        && !matches!(
+            classification,
+            PerformanceEvidenceClassification::Pass
+                | PerformanceEvidenceClassification::Warn
+                | PerformanceEvidenceClassification::DegradedAccepted
+        )
+    {
+        errors.push(format!(
+            "fixture {} public performance claim stronger than experimental must fail closed for {:?}",
+            fixture.fixture_id, classification
+        ));
+    }
+    if public_claim_state.requires_authoritative_evidence()
+        && fixture.evidence_authority != PerformanceEvidenceAuthority::Authoritative
+    {
+        errors.push(format!(
+            "fixture {} public performance claim stronger than experimental must cite fresh authoritative evidence",
+            fixture.fixture_id
+        ));
+    }
+    if public_claim_state.requires_authoritative_evidence()
+        && (fixture.baseline_age_days > workload.claim_policy.freshness_window_days
+            || fixture.runtime_seconds > workload.claim_policy.overhead_budget.max_runtime_seconds
+            || fixture.memory_mib > workload.claim_policy.overhead_budget.max_memory_mib
+            || fixture.instrumentation_overhead_percent
+                > workload
+                    .claim_policy
+                    .overhead_budget
+                    .max_instrumentation_overhead_percent)
+    {
+        errors.push(format!(
+            "fixture {} authoritative performance claim must be fresh and within budget",
+            fixture.fixture_id
+        ));
     }
 }
 
@@ -1032,7 +1480,20 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec!["fail", "missing", "noisy", "pass", "stale", "warn"]
+            vec![
+                "blocked",
+                "budget_exceeded",
+                "degraded_but_accepted",
+                "environment_mismatch",
+                "fail",
+                "instrumentation_overhead_exceeded",
+                "missing",
+                "missing_baseline",
+                "noisy",
+                "pass",
+                "stale",
+                "warn"
+            ]
         );
         assert!(
             report
@@ -1205,6 +1666,30 @@ mod tests {
             by_fixture["fixture_missing_long_campaign"].comparison_verdict,
             PerformanceEvidenceClassification::Missing
         );
+        assert_eq!(
+            by_fixture["fixture_missing_baseline_arc"].comparison_verdict,
+            PerformanceEvidenceClassification::MissingBaseline
+        );
+        assert_eq!(
+            by_fixture["fixture_environment_mismatch_fuse_read"].comparison_verdict,
+            PerformanceEvidenceClassification::EnvironmentMismatch
+        );
+        assert_eq!(
+            by_fixture["fixture_budget_exceeded_mvcc"].comparison_verdict,
+            PerformanceEvidenceClassification::BudgetExceeded
+        );
+        assert_eq!(
+            by_fixture["fixture_overhead_exceeded_repair_refresh"].comparison_verdict,
+            PerformanceEvidenceClassification::InstrumentationOverheadExceeded
+        );
+        assert_eq!(
+            by_fixture["fixture_degraded_accepted_fuse"].comparison_verdict,
+            PerformanceEvidenceClassification::DegradedAccepted
+        );
+        assert_eq!(
+            by_fixture["fixture_blocked_core"].comparison_verdict,
+            PerformanceEvidenceClassification::Blocked
+        );
     }
 
     #[test]
@@ -1258,6 +1743,94 @@ mod tests {
             error
                 .contains("quarantined performance evidence may only claim unknown or experimental")
         }));
+    }
+
+    #[test]
+    fn claim_tiers_and_budget_decisions_are_reported() {
+        let manifest = sample_manifest();
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        let by_fixture = report
+            .fixture_evidence_reports
+            .iter()
+            .map(|row| (row.fixture_id.as_str(), row))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            by_fixture["fixture_pass_core"].claim_tier_after,
+            PerformancePublicClaimState::RegressionFree
+        );
+        assert_eq!(
+            by_fixture["fixture_warn_cli"].claim_tier_after,
+            PerformancePublicClaimState::MeasuredLocal
+        );
+        assert_eq!(
+            by_fixture["fixture_degraded_accepted_fuse"].claim_tier_after,
+            PerformancePublicClaimState::DegradedButAccepted
+        );
+        assert_eq!(
+            by_fixture["fixture_blocked_core"].claim_tier_after,
+            PerformancePublicClaimState::Blocked
+        );
+        assert_eq!(
+            by_fixture["fixture_budget_exceeded_mvcc"].budget_decision,
+            "budget_exceeded"
+        );
+        assert_eq!(
+            by_fixture["fixture_overhead_exceeded_repair_refresh"].overhead_decision,
+            "instrumentation_overhead_exceeded"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_claim_policy_during_parse() {
+        let mut value = json!(sample_manifest());
+        value["workloads"][0]
+            .as_object_mut()
+            .expect("workload object")
+            .remove("claim_policy");
+        let parsed = serde_json::from_value::<PerformanceBaselineManifest>(value);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_claim_budget() {
+        let mut manifest = sample_manifest();
+        manifest.workloads[0]
+            .claim_policy
+            .overhead_budget
+            .max_runtime_seconds = 0.0;
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("claim overhead_budget values must be positive"))
+        );
+    }
+
+    #[test]
+    fn rejects_missing_statistical_summary_during_parse() {
+        let mut value = json!(sample_manifest());
+        value["fixture_evidence"][0]
+            .as_object_mut()
+            .expect("fixture object")
+            .remove("statistical_summary");
+        let parsed = serde_json::from_value::<PerformanceBaselineManifest>(value);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn rejects_authoritative_claim_without_authoritative_evidence() {
+        let mut manifest = sample_manifest();
+        manifest.fixture_evidence[0].evidence_authority = PerformanceEvidenceAuthority::Local;
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("must cite fresh authoritative evidence") })
+        );
     }
 
     #[test]

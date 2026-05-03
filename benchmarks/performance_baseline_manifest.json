@@ -40,7 +40,10 @@
   ],
   "required_log_fields": [
     "workload_id",
+    "claim_tier_before",
+    "claim_tier_after",
     "baseline_id",
+    "baseline_artifact_hash",
     "current_artifact_id",
     "current_artifact_hash",
     "environment_fingerprint",
@@ -54,14 +57,25 @@
     "warn_percent",
     "fail_percent",
     "max_cv",
+    "freshness_window_days",
+    "overhead_budget",
+    "runtime_seconds",
+    "memory_mib",
+    "instrumentation_overhead_percent",
     "stale_baseline_expiry_days",
     "noise_decision",
     "stale_decision",
+    "budget_decision",
+    "overhead_decision",
     "comparison_verdict",
     "public_claim_state",
+    "release_claim_effect",
+    "docs_wording_id",
+    "statistical_summary",
     "raw_stdout_path",
     "raw_stderr_path",
     "environment_manifest",
+    "output_path",
     "reproduction_command"
   ],
   "workloads": [
@@ -93,6 +107,17 @@
         "stale_baseline_expiry_days": 14,
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.2"
+      },
+      "claim_policy": {
+        "clean_claim_tier": "regression_free",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 300.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "regression_free_claim",
+        "docs_wording_id": "perf.block_io.regression_free"
       },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
@@ -130,6 +155,17 @@
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.2"
       },
+      "claim_policy": {
+        "clean_claim_tier": "measured_authoritative",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 300.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "authoritative_claim",
+        "docs_wording_id": "perf.arc.authoritative"
+      },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
         "category": "benchmark_baseline",
@@ -165,6 +201,17 @@
         "stale_baseline_expiry_days": 14,
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.2"
+      },
+      "claim_policy": {
+        "clean_claim_tier": "measured_local",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 300.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "local_claim",
+        "docs_wording_id": "perf.mvcc.local"
       },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
@@ -202,6 +249,17 @@
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.2"
       },
+      "claim_policy": {
+        "clean_claim_tier": "measured_authoritative",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 300.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "authoritative_claim",
+        "docs_wording_id": "perf.mvcc.conflict.authoritative"
+      },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
         "category": "benchmark_baseline",
@@ -237,6 +295,17 @@
         "stale_baseline_expiry_days": 14,
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.2"
+      },
+      "claim_policy": {
+        "clean_claim_tier": "measured_authoritative",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 360.0,
+          "max_memory_mib": 8192,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "authoritative_claim",
+        "docs_wording_id": "perf.repair.authoritative"
       },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
@@ -275,6 +344,17 @@
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.2"
       },
+      "claim_policy": {
+        "clean_claim_tier": "experimental",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 360.0,
+          "max_memory_mib": 8192,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "experimental_only",
+        "docs_wording_id": "perf.repair.refresh.experimental"
+      },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
         "category": "benchmark_baseline",
@@ -310,6 +390,17 @@
         "stale_baseline_expiry_days": 14,
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.2"
+      },
+      "claim_policy": {
+        "clean_claim_tier": "measured_local",
+        "freshness_window_days": 14,
+        "overhead_budget": {
+          "max_runtime_seconds": 300.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 5.0
+        },
+        "release_claim_effect": "local_claim",
+        "docs_wording_id": "perf.cli.local"
       },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
@@ -347,6 +438,17 @@
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.3"
       },
+      "claim_policy": {
+        "clean_claim_tier": "measured_authoritative",
+        "freshness_window_days": 7,
+        "overhead_budget": {
+          "max_runtime_seconds": 420.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 7.5
+        },
+        "release_claim_effect": "authoritative_claim",
+        "docs_wording_id": "perf.fuse.readdir.authoritative"
+      },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
         "category": "benchmark_baseline",
@@ -382,6 +484,17 @@
         "stale_baseline_expiry_days": 7,
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-rchk5.3"
+      },
+      "claim_policy": {
+        "clean_claim_tier": "measured_authoritative",
+        "freshness_window_days": 7,
+        "overhead_budget": {
+          "max_runtime_seconds": 420.0,
+          "max_memory_mib": 4096,
+          "max_instrumentation_overhead_percent": 7.5
+        },
+        "release_claim_effect": "authoritative_claim",
+        "docs_wording_id": "perf.fuse.read.authoritative"
       },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
@@ -420,6 +533,17 @@
         "claim_when_quarantined": "experimental",
         "follow_up_bead": "bd-t21em"
       },
+      "claim_policy": {
+        "clean_claim_tier": "fixture_smoke_only",
+        "freshness_window_days": 3,
+        "overhead_budget": {
+          "max_runtime_seconds": 900.0,
+          "max_memory_mib": 8192,
+          "max_instrumentation_overhead_percent": 10.0
+        },
+        "release_claim_effect": "fixture_smoke_claim",
+        "docs_wording_id": "perf.long_campaign.fixture_smoke"
+      },
       "output_artifact": {
         "path_template": "results/{workload_id}.json",
         "category": "benchmark_report",
@@ -432,15 +556,31 @@
     {
       "fixture_id": "fixture_pass_core",
       "workload_id": "block_io_direct_sequential_4k_read",
+      "claim_tier_before": "experimental",
+      "evidence_authority": "authoritative",
       "measurement_state": "measured",
       "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:abababababababababababababababababababababababababababababababab",
       "current_artifact_id": "current-pass-core",
       "current_artifact_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "environment_fingerprint": "env:reference-threadripper:fuse-off:release-perf",
+      "environment_matches_claim_lane": true,
       "baseline_age_days": 2,
       "observed_value": 102.0,
       "delta_percent": 4.0,
       "coefficient_of_variation": 0.04,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 102.0,
+        "p95": 118.0,
+        "p99": 126.0,
+        "coefficient_of_variation": 0.04
+      },
+      "runtime_seconds": 120.0,
+      "memory_mib": 1024,
+      "instrumentation_overhead_percent": 2.0,
+      "docs_wording_id": "perf.block_io.regression_free",
+      "output_path": "results/block_io_direct_sequential_4k_read.json",
       "raw_stdout_path": "raw/pass_core.stdout",
       "raw_stderr_path": "raw/pass_core.stderr",
       "reproduction_command": "cargo bench -p ffs-block --profile release-perf --bench arc_cache -- block_cache_arc_sequential_scan"
@@ -448,15 +588,31 @@
     {
       "fixture_id": "fixture_warn_cli",
       "workload_id": "cli_metadata_parse_conformance",
+      "claim_tier_before": "measured_authoritative",
+      "evidence_authority": "local",
       "measurement_state": "measured",
       "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc",
       "current_artifact_id": "current-warn-cli",
       "current_artifact_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "environment_fingerprint": "env:reference-threadripper:fuse-off:release-perf",
+      "environment_matches_claim_lane": true,
       "baseline_age_days": 2,
       "observed_value": 112.0,
       "delta_percent": 15.0,
       "coefficient_of_variation": 0.05,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 112.0,
+        "p95": 130.0,
+        "p99": 144.0,
+        "coefficient_of_variation": 0.05
+      },
+      "runtime_seconds": 90.0,
+      "memory_mib": 1024,
+      "instrumentation_overhead_percent": 2.5,
+      "docs_wording_id": "perf.cli.local",
+      "output_path": "results/cli_metadata_parse_conformance.json",
       "raw_stdout_path": "raw/warn_cli.stdout",
       "raw_stderr_path": "raw/warn_cli.stderr",
       "reproduction_command": "cargo bench -p ffs-harness --profile release-perf --bench metadata_parse -- metadata_parse"
@@ -464,15 +620,31 @@
     {
       "fixture_id": "fixture_fail_mvcc",
       "workload_id": "mvcc_conflict_detection_rate",
+      "claim_tier_before": "measured_authoritative",
+      "evidence_authority": "authoritative",
       "measurement_state": "measured",
       "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
       "current_artifact_id": "current-fail-mvcc",
       "current_artifact_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "environment_fingerprint": "env:reference-threadripper:fuse-off:release-perf",
+      "environment_matches_claim_lane": true,
       "baseline_age_days": 2,
       "observed_value": 70.0,
       "delta_percent": 45.0,
       "coefficient_of_variation": 0.05,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 70.0,
+        "p95": 85.0,
+        "p99": 92.0,
+        "coefficient_of_variation": 0.05
+      },
+      "runtime_seconds": 130.0,
+      "memory_mib": 1536,
+      "instrumentation_overhead_percent": 2.0,
+      "docs_wording_id": "perf.mvcc.conflict.authoritative",
+      "output_path": "results/mvcc_conflict_detection_rate.json",
       "raw_stdout_path": "raw/fail_mvcc.stdout",
       "raw_stderr_path": "raw/fail_mvcc.stderr",
       "reproduction_command": "cargo bench -p ffs-mvcc --profile release-perf --bench wal_throughput -- mvcc_contention_4writers"
@@ -480,15 +652,31 @@
     {
       "fixture_id": "fixture_noisy_repair",
       "workload_id": "repair_lrc_encode_throughput",
+      "claim_tier_before": "measured_authoritative",
+      "evidence_authority": "authoritative",
       "measurement_state": "measured",
       "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:dededededededededededededededededededededededededededededededede",
       "current_artifact_id": "current-noisy-repair",
       "current_artifact_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       "environment_fingerprint": "env:reference-threadripper:fuse-off:release-perf",
+      "environment_matches_claim_lane": true,
       "baseline_age_days": 2,
       "observed_value": 96.0,
       "delta_percent": 6.0,
       "coefficient_of_variation": 0.22,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 96.0,
+        "p95": 160.0,
+        "p99": 190.0,
+        "coefficient_of_variation": 0.22
+      },
+      "runtime_seconds": 150.0,
+      "memory_mib": 2048,
+      "instrumentation_overhead_percent": 2.0,
+      "docs_wording_id": "perf.repair.authoritative",
+      "output_path": "results/repair_lrc_encode_throughput.json",
       "raw_stdout_path": "raw/noisy_repair.stdout",
       "raw_stderr_path": "raw/noisy_repair.stderr",
       "reproduction_command": "cargo bench -p ffs-repair --profile release-perf --bench scrub_codec -- raptorq_encode_group_16blocks"
@@ -496,15 +684,31 @@
     {
       "fixture_id": "fixture_stale_fuse",
       "workload_id": "fuse_metadata_readdir_1k",
+      "claim_tier_before": "measured_authoritative",
+      "evidence_authority": "authoritative",
       "measurement_state": "measured",
       "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
       "current_artifact_id": "current-stale-fuse",
       "current_artifact_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "environment_fingerprint": "env:reference-threadripper:fuse-on:release-perf",
+      "environment_matches_claim_lane": true,
       "baseline_age_days": 30,
       "observed_value": 101.0,
       "delta_percent": 3.0,
       "coefficient_of_variation": 0.05,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 101.0,
+        "p95": 118.0,
+        "p99": 130.0,
+        "coefficient_of_variation": 0.05
+      },
+      "runtime_seconds": 160.0,
+      "memory_mib": 2048,
+      "instrumentation_overhead_percent": 3.0,
+      "docs_wording_id": "perf.fuse.readdir.authoritative",
+      "output_path": "results/fuse_metadata_readdir_1k.json",
       "raw_stdout_path": "raw/stale_fuse.stdout",
       "raw_stderr_path": "raw/stale_fuse.stderr",
       "reproduction_command": "scripts/mount_benchmark_probe.sh --bin target/release-perf/ffs-cli --image datasets/ext4_1k_readdir.img --mount-root artifacts/performance/dry-run/mnt --mode warm"
@@ -512,18 +716,228 @@
     {
       "fixture_id": "fixture_missing_long_campaign",
       "workload_id": "long_campaign_writeback_cache_smoke",
+      "claim_tier_before": "fixture_smoke_only",
+      "evidence_authority": "fixture_smoke",
       "measurement_state": "missing",
       "baseline_id": "missing-baseline",
+      "baseline_artifact_hash": "sha256:1212121212121212121212121212121212121212121212121212121212121212",
       "current_artifact_id": "missing-current-artifact",
-      "current_artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "current_artifact_hash": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
       "environment_fingerprint": "env:local-unprivileged:fuse-unknown:release-perf",
+      "environment_matches_claim_lane": true,
       "baseline_age_days": 0,
       "observed_value": 0.0,
       "delta_percent": 0.0,
       "coefficient_of_variation": 0.0,
+      "statistical_summary": {
+        "sample_count": 0,
+        "median": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "coefficient_of_variation": 0.0
+      },
+      "runtime_seconds": 0.0,
+      "memory_mib": 0,
+      "instrumentation_overhead_percent": 0.0,
+      "docs_wording_id": "perf.long_campaign.fixture_smoke",
+      "output_path": "results/long_campaign_writeback_cache_smoke.json",
       "raw_stdout_path": "raw/missing_long_campaign.stdout",
       "raw_stderr_path": "raw/missing_long_campaign.stderr",
       "reproduction_command": "PERF_PROFILE=release-perf scripts/e2e/ffs_soak_canary_campaign_e2e.sh --dry-run"
+    },
+    {
+      "fixture_id": "fixture_missing_baseline_arc",
+      "workload_id": "arc_cache_warm_read_latency",
+      "claim_tier_before": "measured_authoritative",
+      "evidence_authority": "authoritative",
+      "measurement_state": "measured",
+      "baseline_id": "missing-baseline",
+      "baseline_artifact_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "current_artifact_id": "current-missing-baseline-arc",
+      "current_artifact_hash": "sha256:1414141414141414141414141414141414141414141414141414141414141414",
+      "environment_fingerprint": "env:reference-threadripper:fuse-off:release-perf",
+      "environment_matches_claim_lane": true,
+      "baseline_age_days": 0,
+      "observed_value": 104.0,
+      "delta_percent": 0.0,
+      "coefficient_of_variation": 0.04,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 104.0,
+        "p95": 121.0,
+        "p99": 130.0,
+        "coefficient_of_variation": 0.04
+      },
+      "runtime_seconds": 110.0,
+      "memory_mib": 1024,
+      "instrumentation_overhead_percent": 2.0,
+      "docs_wording_id": "perf.arc.authoritative",
+      "output_path": "results/arc_cache_warm_read_latency.json",
+      "raw_stdout_path": "raw/missing_baseline_arc.stdout",
+      "raw_stderr_path": "raw/missing_baseline_arc.stderr",
+      "reproduction_command": "cargo bench -p ffs-block --profile release-perf --bench arc_cache -- block_cache_arc_mixed_seq70_hot30"
+    },
+    {
+      "fixture_id": "fixture_environment_mismatch_fuse_read",
+      "workload_id": "fuse_sequential_read_4k",
+      "claim_tier_before": "measured_authoritative",
+      "evidence_authority": "local",
+      "measurement_state": "measured",
+      "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:1515151515151515151515151515151515151515151515151515151515151515",
+      "current_artifact_id": "current-env-mismatch-fuse-read",
+      "current_artifact_hash": "sha256:1616161616161616161616161616161616161616161616161616161616161616",
+      "environment_fingerprint": "env:local-unprivileged:fuse-off:debug",
+      "environment_matches_claim_lane": false,
+      "baseline_age_days": 2,
+      "observed_value": 98.0,
+      "delta_percent": 2.0,
+      "coefficient_of_variation": 0.05,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 98.0,
+        "p95": 115.0,
+        "p99": 125.0,
+        "coefficient_of_variation": 0.05
+      },
+      "runtime_seconds": 160.0,
+      "memory_mib": 2048,
+      "instrumentation_overhead_percent": 3.0,
+      "docs_wording_id": "perf.fuse.read.authoritative",
+      "output_path": "results/fuse_sequential_read_4k.json",
+      "raw_stdout_path": "raw/environment_mismatch_fuse_read.stdout",
+      "raw_stderr_path": "raw/environment_mismatch_fuse_read.stderr",
+      "reproduction_command": "scripts/mount_benchmark_probe.sh --bin target/release-perf/ffs-cli --image datasets/ext4_16mib_read.img --mount-root artifacts/performance/dry-run/mnt --mode cold"
+    },
+    {
+      "fixture_id": "fixture_budget_exceeded_mvcc",
+      "workload_id": "mvcc_optimistic_commit_no_conflict",
+      "claim_tier_before": "measured_local",
+      "evidence_authority": "local",
+      "measurement_state": "measured",
+      "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:1717171717171717171717171717171717171717171717171717171717171717",
+      "current_artifact_id": "current-budget-exceeded-mvcc",
+      "current_artifact_hash": "sha256:1818181818181818181818181818181818181818181818181818181818181818",
+      "environment_fingerprint": "env:reference-threadripper:fuse-off:release-perf",
+      "environment_matches_claim_lane": true,
+      "baseline_age_days": 2,
+      "observed_value": 105.0,
+      "delta_percent": 3.0,
+      "coefficient_of_variation": 0.05,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 105.0,
+        "p95": 124.0,
+        "p99": 136.0,
+        "coefficient_of_variation": 0.05
+      },
+      "runtime_seconds": 420.0,
+      "memory_mib": 5120,
+      "instrumentation_overhead_percent": 2.0,
+      "docs_wording_id": "perf.mvcc.local",
+      "output_path": "results/mvcc_optimistic_commit_no_conflict.json",
+      "raw_stdout_path": "raw/budget_exceeded_mvcc.stdout",
+      "raw_stderr_path": "raw/budget_exceeded_mvcc.stderr",
+      "reproduction_command": "cargo bench -p ffs-mvcc --profile release-perf --bench wal_throughput -- wal_commit_4k_sync"
+    },
+    {
+      "fixture_id": "fixture_overhead_exceeded_repair_refresh",
+      "workload_id": "repair_symbol_refresh_staleness_latency",
+      "claim_tier_before": "experimental",
+      "evidence_authority": "local",
+      "measurement_state": "measured",
+      "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:1919191919191919191919191919191919191919191919191919191919191919",
+      "current_artifact_id": "current-overhead-exceeded-repair-refresh",
+      "current_artifact_hash": "sha256:2020202020202020202020202020202020202020202020202020202020202020",
+      "environment_fingerprint": "env:reference-threadripper:fuse-off:release-perf",
+      "environment_matches_claim_lane": true,
+      "baseline_age_days": 2,
+      "observed_value": 107.0,
+      "delta_percent": 4.0,
+      "coefficient_of_variation": 0.05,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 107.0,
+        "p95": 129.0,
+        "p99": 141.0,
+        "coefficient_of_variation": 0.05
+      },
+      "runtime_seconds": 150.0,
+      "memory_mib": 2048,
+      "instrumentation_overhead_percent": 8.0,
+      "docs_wording_id": "perf.repair.refresh.experimental",
+      "output_path": "results/repair_symbol_refresh_staleness_latency.json",
+      "raw_stdout_path": "raw/overhead_exceeded_repair_refresh.stdout",
+      "raw_stderr_path": "raw/overhead_exceeded_repair_refresh.stderr",
+      "reproduction_command": "cargo bench -p ffs-repair --profile release-perf --bench scrub_codec -- repair_symbol_refresh_staleness_latency"
+    },
+    {
+      "fixture_id": "fixture_degraded_accepted_fuse",
+      "workload_id": "fuse_metadata_readdir_1k",
+      "claim_tier_before": "measured_authoritative",
+      "evidence_authority": "authoritative",
+      "measurement_state": "measured",
+      "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+      "current_artifact_id": "current-degraded-accepted-fuse",
+      "current_artifact_hash": "sha256:2323232323232323232323232323232323232323232323232323232323232323",
+      "environment_fingerprint": "env:reference-threadripper:fuse-on:release-perf",
+      "environment_matches_claim_lane": true,
+      "baseline_age_days": 2,
+      "observed_value": 60.0,
+      "delta_percent": 55.0,
+      "coefficient_of_variation": 0.05,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 60.0,
+        "p95": 78.0,
+        "p99": 92.0,
+        "coefficient_of_variation": 0.05
+      },
+      "runtime_seconds": 200.0,
+      "memory_mib": 2048,
+      "instrumentation_overhead_percent": 3.0,
+      "accepted_degradation_reason": "Reference kernel comparison is slower on this permissioned lane but remains inside the explicit degraded acceptance envelope.",
+      "docs_wording_id": "perf.fuse.readdir.authoritative",
+      "output_path": "results/fuse_metadata_readdir_1k.degraded.json",
+      "raw_stdout_path": "raw/degraded_accepted_fuse.stdout",
+      "raw_stderr_path": "raw/degraded_accepted_fuse.stderr",
+      "reproduction_command": "scripts/mount_benchmark_probe.sh --bin target/release-perf/ffs-cli --image datasets/ext4_1k_readdir.img --mount-root artifacts/performance/dry-run/mnt --mode warm"
+    },
+    {
+      "fixture_id": "fixture_blocked_core",
+      "workload_id": "block_io_direct_sequential_4k_read",
+      "claim_tier_before": "regression_free",
+      "evidence_authority": "authoritative",
+      "measurement_state": "measured",
+      "baseline_id": "baseline-20260406",
+      "baseline_artifact_hash": "sha256:2424242424242424242424242424242424242424242424242424242424242424",
+      "current_artifact_id": "current-blocked-core",
+      "current_artifact_hash": "sha256:2525252525252525252525252525252525252525252525252525252525252525",
+      "environment_fingerprint": "env:reference-threadripper:fuse-off:release-perf",
+      "environment_matches_claim_lane": true,
+      "baseline_age_days": 2,
+      "observed_value": 101.0,
+      "delta_percent": 2.0,
+      "coefficient_of_variation": 0.04,
+      "statistical_summary": {
+        "sample_count": 30,
+        "median": 101.0,
+        "p95": 119.0,
+        "p99": 127.0,
+        "coefficient_of_variation": 0.04
+      },
+      "runtime_seconds": 120.0,
+      "memory_mib": 1024,
+      "instrumentation_overhead_percent": 2.0,
+      "blocked_reason": "Release gate is waiting for authoritative artifact signature before public regression-free wording can be restored.",
+      "docs_wording_id": "perf.block_io.regression_free",
+      "output_path": "results/block_io_direct_sequential_4k_read.blocked.json",
+      "raw_stdout_path": "raw/blocked_core.stdout",
+      "raw_stderr_path": "raw/blocked_core.stderr",
+      "reproduction_command": "cargo bench -p ffs-block --profile release-perf --bench arc_cache -- block_cache_arc_sequential_scan"
     }
   ]
 }
