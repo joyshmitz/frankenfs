@@ -53,7 +53,7 @@ fn bench_per_core_should_steal(c: &mut Criterion) {
     // Create imbalanced load: core 0 gets all requests, others idle.
     if let Some(m) = dispatcher.core_metrics(0) {
         for _ in 0..10_000 {
-            m.record_request();
+            m.begin_request();
         }
     }
 
