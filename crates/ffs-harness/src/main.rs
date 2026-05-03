@@ -3,6 +3,10 @@
 use anyhow::{Context, Result, bail};
 use ffs_harness::{
     ParityReport,
+    ambition_evidence_matrix::{
+        AmbitionEvidenceMatrixConfig, fail_on_ambition_evidence_matrix_errors,
+        run_ambition_evidence_matrix,
+    },
     artifact_manifest::{ArtifactManifest, validate_operational_manifest},
     deferred_parity_audit::{
         DeferredParityAuditConfig, fail_on_audit_errors, run_deferred_parity_audit,
@@ -80,6 +84,9 @@ fn run() -> Result<()> {
         Some("fuse-capability-probe") => fuse_capability_probe_cmd(&args[1..]),
         Some("validate-open-ended-inventory") => validate_open_ended_inventory_cmd(&args[1..]),
         Some("validate-deferred-parity-audit") => validate_deferred_parity_audit_cmd(&args[1..]),
+        Some("validate-ambition-evidence-matrix") => {
+            validate_ambition_evidence_matrix_cmd(&args[1..])
+        }
         Some("validate-mounted-write-matrix") => validate_mounted_write_matrix_cmd(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
             print_usage();
@@ -413,6 +420,59 @@ fn validate_deferred_parity_audit_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_ambition_evidence_matrix_cmd(args: &[String]) -> Result<()> {
+    let mut config = AmbitionEvidenceMatrixConfig::default();
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--issues" => {
+                i += 1;
+                config.issues_jsonl =
+                    Path::new(args.get(i).context("--issues requires a path")?).to_path_buf();
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_ambition_evidence_matrix_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-ambition-evidence-matrix argument: {other}"),
+        }
+        i += 1;
+    }
+
+    if let Some(path) = &out_path {
+        config.generated_artifact_paths = vec![path.clone()];
+    }
+
+    let report = run_ambition_evidence_matrix(&config)?;
+    fail_on_ambition_evidence_matrix_errors(&report)?;
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "ambition evidence matrix report written: {} rows={}",
+            path.display(),
+            report.row_count
+        );
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
 fn validate_mounted_write_matrix_cmd(args: &[String]) -> Result<()> {
     let mut matrix_path = DEFAULT_MATRIX_PATH.to_owned();
     let mut out_path: Option<String> = None;
@@ -705,6 +765,7 @@ fn print_usage() {
     println!(
         "  ffs-harness validate-deferred-parity-audit [--issues FILE] [--report FILE] [--doc FILE] [--out FILE]"
     );
+    println!("  ffs-harness validate-ambition-evidence-matrix [--issues FILE] [--out FILE]");
     println!("  ffs-harness validate-mounted-write-matrix [--matrix FILE] [--out FILE]");
     println!();
     println!("FIXTURE GENERATION:");
@@ -743,6 +804,9 @@ fn print_usage() {
         "  ffs-harness validate-deferred-parity-audit --out artifacts/parity/deferred_parity_audit.json"
     );
     println!(
+        "  ffs-harness validate-ambition-evidence-matrix --out artifacts/ambition/evidence_matrix.json"
+    );
+    println!(
         "  ffs-harness validate-mounted-write-matrix --out artifacts/e2e/mounted_write_matrix.json"
     );
 }
@@ -775,6 +839,14 @@ fn print_deferred_parity_audit_usage() {
     println!("  --issues FILE                      Read bead JSONL from FILE");
     println!("  --report FILE                      Read audit registry markdown from FILE");
     println!("  --doc FILE                         Check a public status doc; repeatable");
+    println!("  --out FILE                         Write JSON report to FILE");
+}
+
+fn print_ambition_evidence_matrix_usage() {
+    println!("Usage: ffs-harness validate-ambition-evidence-matrix [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --issues FILE                      Read bead JSONL from FILE");
     println!("  --out FILE                         Write JSON report to FILE");
 }
 

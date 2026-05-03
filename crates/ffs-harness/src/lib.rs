@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod ambition_evidence_matrix;
 pub mod artifact_manifest;
 pub mod benchmark_taxonomy;
 pub mod btrfs_capability_drift;
