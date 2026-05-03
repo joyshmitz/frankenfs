@@ -50,6 +50,8 @@ BAD_STATS_JSON="$E2E_LOG_DIR/performance_manifest_bad_statistical_summary.json"
 BAD_AUTHORITATIVE_JSON="$E2E_LOG_DIR/performance_manifest_bad_authoritative_claim.json"
 BAD_RAW="$E2E_LOG_DIR/performance_manifest_bad.raw"
 UNIT_LOG="$E2E_LOG_DIR/performance_manifest_unit_tests.log"
+MOUNT_PROBE_JSON="$E2E_LOG_DIR/mount_benchmark_probe_input_error.json"
+MOUNT_PROBE_RAW="$E2E_LOG_DIR/mount_benchmark_probe_input_error.raw"
 
 e2e_step "Scenario 1: performance manifest module and CLI are wired"
 if grep -q "pub mod performance_baseline_manifest" crates/ffs-harness/src/lib.rs \
@@ -207,6 +209,55 @@ then
     scenario_result "performance_manifest_dry_run_expands" "PASS" "commands and shared QA artifact verified"
 else
     scenario_result "performance_manifest_dry_run_expands" "FAIL" "dry-run expansion contract failed"
+fi
+
+e2e_step "Scenario 3b: mounted benchmark probe emits structured failure artifacts"
+set +e
+scripts/mount_benchmark_probe.sh \
+    --bin "$E2E_TEMP_DIR/missing-ffs-cli" \
+    --image "$E2E_TEMP_DIR/missing.ext4" \
+    --mount-root "$E2E_TEMP_DIR/mount-benchmark" \
+    --mode warm \
+    --out-json "$MOUNT_PROBE_JSON" >"$MOUNT_PROBE_RAW" 2>&1
+MOUNT_PROBE_RC=$?
+set -e
+
+if python3 - "$MOUNT_PROBE_JSON" "$MOUNT_PROBE_RC" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+rc = int(sys.argv[2])
+
+if rc != 2:
+    raise SystemExit(f"expected input-error exit 2, got {rc}")
+if report["schema_version"] != 1:
+    raise SystemExit("wrong schema_version")
+if report["probe_id"] != "mount_benchmark_probe":
+    raise SystemExit("wrong probe_id")
+if report["outcome"] != "error" or report["classification"] != "input_error":
+    raise SystemExit(f"wrong outcome/classification: {report}")
+if report["mode"] != "warm":
+    raise SystemExit("mode was not preserved")
+if report["kernel_fuse_mode"] != "permissioned_required":
+    raise SystemExit("missing FUSE lane classification")
+if "fuse" not in report["required_capabilities"]:
+    raise SystemExit("missing FUSE required capability")
+if report["mount_options"]["writeback_cache"] != "disabled":
+    raise SystemExit("writeback-cache policy missing")
+if report["attempts"]:
+    raise SystemExit("input validation error should not create mount attempts")
+if "ffs-cli binary is not executable" not in report["reason"]:
+    raise SystemExit("input-error reason was not preserved")
+PY
+then
+    scenario_result "performance_mount_probe_structured_failure" "PASS" "mount benchmark probe writes structured input-error artifact"
+else
+    cat "$MOUNT_PROBE_RAW"
+    scenario_result "performance_mount_probe_structured_failure" "FAIL" "mount benchmark probe structured failure contract failed"
 fi
 
 e2e_step "Scenario 4: invalid manifest variants fail closed"
