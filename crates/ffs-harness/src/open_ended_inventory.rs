@@ -2,7 +2,10 @@
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 const INVENTORY_MARKDOWN: &str =
     include_str!("../../../docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md");
@@ -335,11 +338,750 @@ fn validate_linkage(row: &OpenEndedInventoryRow, errors: &mut Vec<String>) {
     }
 }
 
+pub const SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_SOURCE_SCOPE_MANIFEST_PATH: &str =
+    "tests/source-scope-manifest/source_scope_manifest.json";
+const DEFAULT_SOURCE_SCOPE_MANIFEST_JSON: &str =
+    include_str!("../../../tests/source-scope-manifest/source_scope_manifest.json");
+
+const REQUIRED_SOURCE_FAMILIES: [&str; 10] = [
+    "readme_status_docs",
+    "feature_parity_doc",
+    "conformance_docs",
+    "fixture_manifests",
+    "tests",
+    "fuzz_corpus_notes",
+    "harness_scripts",
+    "mounted_lane_docs",
+    "repair_docs",
+    "performance_xfstests_notes",
+];
+
+const ALLOWED_RISK_CATEGORIES: [&str; 9] = [
+    "data_safety",
+    "parser",
+    "mounted_path",
+    "repair",
+    "fuzz",
+    "conformance",
+    "performance",
+    "observability",
+    "docs_only",
+];
+
+const ALLOWED_SOURCE_STATUSES: [&str; 4] = ["active", "deferred", "sunset", "non_applicable"];
+
+const ALLOWED_FRESHNESS_STATES: [&str; 3] = ["fresh", "stale", "exempt"];
+const NOTE_MATCH_TOKENS: [&str; 5] = ["TODO", "FIXME", "NOTE", "non-goal", "bd-"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceScopeManifest {
+    pub schema_version: u32,
+    pub manifest_id: String,
+    pub bead_id: String,
+    pub sources: Vec<SourceScopeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceScopeEntry {
+    pub id: String,
+    pub source_family: String,
+    pub included_globs: Vec<String>,
+    pub excluded_globs: Vec<String>,
+    pub risk_category: String,
+    pub owner: String,
+    pub status: String,
+    pub expected_proof_types: Vec<String>,
+    pub freshness_ttl_days: u32,
+    pub freshness_state: String,
+    #[serde(default)]
+    pub source_hash: String,
+    #[serde(default)]
+    pub non_applicability_rationale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceScopeManifestReport {
+    pub schema_version: u32,
+    pub manifest_id: String,
+    pub bead_id: String,
+    pub source_count: usize,
+    pub source_families: Vec<String>,
+    pub non_applicable_families: Vec<String>,
+    pub stale_sources: Vec<String>,
+    pub valid: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceScopeScanReport {
+    pub schema_version: u32,
+    pub manifest_id: String,
+    pub bead_id: String,
+    pub workspace_root: String,
+    pub source_count: usize,
+    pub source_manifest_version: u32,
+    pub scanned_sources: Vec<SourceScopeScanEntry>,
+    pub stale_sources: Vec<String>,
+    pub output_path: String,
+    pub reproduction_command: String,
+    pub valid: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceScopeScanEntry {
+    pub id: String,
+    pub source_family: String,
+    pub included_globs: Vec<String>,
+    pub excluded_globs: Vec<String>,
+    pub inclusion_decision: String,
+    pub exclusion_reason: String,
+    pub file_or_directory_hash: String,
+    pub matched_note_count: usize,
+    pub linked_bead_or_artifact_count: usize,
+    pub stale_allowance: String,
+    pub output_path: String,
+    pub reproduction_command: String,
+    pub matched_paths: Vec<SourceScopePathDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceScopePathDecision {
+    pub source_path: String,
+    pub source_glob: String,
+    pub inclusion_decision: String,
+    pub exclusion_reason: String,
+    pub file_hash: String,
+    pub matched_note_count: usize,
+    pub linked_bead_or_artifact_count: usize,
+}
+
+pub fn parse_source_scope_manifest(text: &str) -> Result<SourceScopeManifest> {
+    serde_json::from_str(text)
+        .map_err(|err| anyhow::anyhow!("failed to parse source scope manifest JSON: {err}"))
+}
+
+pub fn load_source_scope_manifest(path: impl AsRef<Path>) -> Result<SourceScopeManifest> {
+    let path = path.as_ref();
+    let text = fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to read source scope manifest {}: {err}",
+            path.display()
+        )
+    })?;
+    parse_source_scope_manifest(&text)
+}
+
+pub fn validate_default_source_scope_manifest() -> Result<SourceScopeManifestReport> {
+    let manifest = parse_source_scope_manifest(DEFAULT_SOURCE_SCOPE_MANIFEST_JSON)?;
+    let report = validate_source_scope_manifest(&manifest);
+    if !report.valid {
+        bail!(
+            "source scope manifest failed with {} error(s): {}",
+            report.errors.len(),
+            report.errors.join("; ")
+        );
+    }
+    Ok(report)
+}
+
+#[must_use]
+pub fn scan_source_scope_manifest(
+    manifest: &SourceScopeManifest,
+    workspace_root: &Path,
+    output_path: Option<&Path>,
+    reproduction_command: &str,
+) -> SourceScopeScanReport {
+    let manifest_report = validate_source_scope_manifest(manifest);
+    let mut errors = manifest_report.errors.clone();
+    let workspace_files = match collect_workspace_files(workspace_root) {
+        Ok(files) => files,
+        Err(err) => {
+            errors.push(err.to_string());
+            Vec::new()
+        }
+    };
+    let output_path =
+        output_path.map_or_else(|| "<stdout>".to_owned(), |path| path.display().to_string());
+
+    let scanned_sources = manifest
+        .sources
+        .iter()
+        .map(|entry| {
+            scan_source_scope_entry(
+                entry,
+                workspace_root,
+                &workspace_files,
+                &output_path,
+                reproduction_command,
+                &mut errors,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    SourceScopeScanReport {
+        schema_version: SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION,
+        manifest_id: manifest.manifest_id.clone(),
+        bead_id: manifest.bead_id.clone(),
+        workspace_root: workspace_root.display().to_string(),
+        source_count: manifest.sources.len(),
+        source_manifest_version: manifest.schema_version,
+        scanned_sources,
+        stale_sources: manifest_report.stale_sources,
+        output_path,
+        reproduction_command: reproduction_command.to_owned(),
+        valid: errors.is_empty(),
+        errors,
+    }
+}
+
+#[must_use]
+pub fn validate_source_scope_manifest(manifest: &SourceScopeManifest) -> SourceScopeManifestReport {
+    let mut errors = Vec::new();
+    let mut ids = BTreeSet::new();
+    let mut families_seen = BTreeSet::new();
+    let mut non_applicable_families = BTreeSet::new();
+    let mut stale_sources = Vec::new();
+
+    validate_source_manifest_top_level(manifest, &mut errors);
+
+    for entry in &manifest.sources {
+        validate_source_scope_entry(
+            entry,
+            &mut ids,
+            &mut families_seen,
+            &mut non_applicable_families,
+            &mut stale_sources,
+            &mut errors,
+        );
+    }
+
+    validate_source_family_coverage(&families_seen, &non_applicable_families, &mut errors);
+
+    SourceScopeManifestReport {
+        schema_version: manifest.schema_version,
+        manifest_id: manifest.manifest_id.clone(),
+        bead_id: manifest.bead_id.clone(),
+        source_count: manifest.sources.len(),
+        source_families: families_seen.into_iter().collect(),
+        non_applicable_families: non_applicable_families.into_iter().collect(),
+        stale_sources,
+        valid: errors.is_empty(),
+        errors,
+    }
+}
+
+fn validate_source_manifest_top_level(manifest: &SourceScopeManifest, errors: &mut Vec<String>) {
+    if manifest.schema_version != SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION {
+        errors.push(format!(
+            "source scope manifest schema_version must be {SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION}, got {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.manifest_id.trim().is_empty() {
+        errors.push("source scope manifest missing manifest_id".to_owned());
+    }
+    if !manifest.bead_id.starts_with("bd-") {
+        errors.push(format!(
+            "source scope manifest bead_id must look like bd-..., got `{}`",
+            manifest.bead_id
+        ));
+    }
+    if manifest.sources.is_empty() {
+        errors.push("source scope manifest must declare at least one source".to_owned());
+    }
+}
+
+fn validate_source_scope_entry(
+    entry: &SourceScopeEntry,
+    ids: &mut BTreeSet<String>,
+    families_seen: &mut BTreeSet<String>,
+    non_applicable_families: &mut BTreeSet<String>,
+    stale_sources: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) {
+    if !ids.insert(entry.id.clone()) {
+        errors.push(format!("duplicate source scope entry id `{}`", entry.id));
+    }
+    if entry.id.trim().is_empty() {
+        errors.push("source scope entry has empty id".to_owned());
+    }
+
+    if REQUIRED_SOURCE_FAMILIES.contains(&entry.source_family.as_str()) {
+        families_seen.insert(entry.source_family.clone());
+    } else {
+        errors.push(format!(
+            "source `{}` has unsupported source_family `{}`",
+            entry.id, entry.source_family
+        ));
+    }
+
+    let has_rationale = !entry.non_applicability_rationale.trim().is_empty();
+    if has_rationale {
+        non_applicable_families.insert(entry.source_family.clone());
+    }
+
+    if entry.included_globs.is_empty() && !has_rationale {
+        errors.push(format!(
+            "source `{}` must declare included_globs unless non_applicability_rationale is set",
+            entry.id
+        ));
+    }
+    for glob in &entry.included_globs {
+        if glob.trim().is_empty() {
+            errors.push(format!("source `{}` has empty included glob", entry.id));
+        }
+    }
+    for glob in &entry.excluded_globs {
+        if glob.trim().is_empty() {
+            errors.push(format!("source `{}` has empty excluded glob", entry.id));
+        }
+    }
+
+    if !ALLOWED_RISK_CATEGORIES.contains(&entry.risk_category.as_str()) {
+        errors.push(format!(
+            "source `{}` has unsupported risk_category `{}`",
+            entry.id, entry.risk_category
+        ));
+    }
+
+    if entry.owner.trim().is_empty() {
+        errors.push(format!("source `{}` missing owner", entry.id));
+    }
+    if !ALLOWED_SOURCE_STATUSES.contains(&entry.status.as_str()) {
+        errors.push(format!(
+            "source `{}` has unsupported status `{}`",
+            entry.id, entry.status
+        ));
+    }
+    if entry.status == "non_applicable" && !has_rationale {
+        errors.push(format!(
+            "source `{}` status non_applicable requires non_applicability_rationale",
+            entry.id
+        ));
+    }
+
+    if entry.expected_proof_types.is_empty() && !has_rationale {
+        errors.push(format!(
+            "source `{}` must declare at least one expected_proof_type",
+            entry.id
+        ));
+    }
+    for proof in &entry.expected_proof_types {
+        if !PROOF_TYPES.contains(&proof.as_str()) {
+            errors.push(format!(
+                "source `{}` references unsupported proof type `{}`",
+                entry.id, proof
+            ));
+        }
+    }
+
+    if entry.freshness_ttl_days == 0 && entry.freshness_state != "exempt" {
+        errors.push(format!(
+            "source `{}` freshness_ttl_days must be positive unless freshness_state is exempt",
+            entry.id
+        ));
+    }
+    if !ALLOWED_FRESHNESS_STATES.contains(&entry.freshness_state.as_str()) {
+        errors.push(format!(
+            "source `{}` has unsupported freshness_state `{}`",
+            entry.id, entry.freshness_state
+        ));
+    }
+    if entry.freshness_state == "stale" {
+        stale_sources.push(entry.id.clone());
+    }
+
+    if !entry.source_hash.is_empty() && !is_valid_source_hash(&entry.source_hash) {
+        errors.push(format!(
+            "source `{}` has malformed source_hash `{}` (expected sha256:<64-hex>)",
+            entry.id, entry.source_hash
+        ));
+    }
+    if entry.freshness_state == "stale" && entry.source_hash.is_empty() {
+        errors.push(format!(
+            "source `{}` freshness_state stale requires source_hash",
+            entry.id
+        ));
+    }
+
+    validate_source_exclusion_policy(entry, errors);
+}
+
+fn validate_source_family_coverage(
+    families_seen: &BTreeSet<String>,
+    non_applicable_families: &BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    for required in REQUIRED_SOURCE_FAMILIES {
+        if !families_seen.contains(required) {
+            errors.push(format!(
+                "source scope manifest missing required family `{required}`; declare it with non_applicability_rationale if intentionally excluded"
+            ));
+        }
+    }
+    for family in non_applicable_families {
+        if !REQUIRED_SOURCE_FAMILIES.contains(&family.as_str()) {
+            errors.push(format!(
+                "non_applicability rationale provided for non-required family `{family}`"
+            ));
+        }
+    }
+}
+
+fn is_valid_source_hash(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    suffix.len() == 64 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn validate_source_exclusion_policy(entry: &SourceScopeEntry, errors: &mut Vec<String>) {
+    let excluded = entry.excluded_globs.join("\n");
+    let missing_target_paths = !excluded.contains("target") && !excluded.contains(".rch-target");
+    match entry.source_family.as_str() {
+        "readme_status_docs"
+            if !excluded.contains("_generated") || !excluded.contains("_drafts") =>
+        {
+            errors.push(format!(
+                "source `{}` must exclude generated status docs and drafts",
+                entry.id
+            ));
+        }
+        "tests" => validate_tests_exclusions(entry, &excluded, missing_target_paths, errors),
+        "conformance_docs" if missing_target_paths => {
+            errors.push(format!(
+                "source `{}` must exclude build target paths from conformance source scope",
+                entry.id
+            ));
+        }
+        "harness_scripts" if !excluded.contains("_artifacts") => {
+            errors.push(format!(
+                "source `{}` must exclude generated e2e artifact directories",
+                entry.id
+            ));
+        }
+        _ => {}
+    }
+}
+
+fn validate_tests_exclusions(
+    entry: &SourceScopeEntry,
+    excluded: &str,
+    missing_target_paths: bool,
+    errors: &mut Vec<String>,
+) {
+    if !excluded.contains("vendor") {
+        errors.push(format!(
+            "source `{}` must exclude vendor paths from test source scope",
+            entry.id
+        ));
+    }
+    if missing_target_paths {
+        errors.push(format!(
+            "source `{}` must exclude build target paths from test source scope",
+            entry.id
+        ));
+    }
+}
+
+fn scan_source_scope_entry(
+    entry: &SourceScopeEntry,
+    workspace_root: &Path,
+    workspace_files: &[PathBuf],
+    output_path: &str,
+    reproduction_command: &str,
+    errors: &mut Vec<String>,
+) -> SourceScopeScanEntry {
+    let stale_allowance = format_stale_allowance(entry);
+    if !entry.non_applicability_rationale.trim().is_empty() {
+        return non_applicable_scan_entry(
+            entry,
+            output_path,
+            reproduction_command,
+            stale_allowance,
+        );
+    }
+
+    let matched_paths = collect_matched_paths(entry, workspace_root, workspace_files, errors);
+    let included_paths: Vec<&SourceScopePathDecision> = matched_paths
+        .iter()
+        .filter(|path| path.inclusion_decision == "included")
+        .collect();
+    if included_paths.is_empty() {
+        errors.push(format!(
+            "source `{}` matched no files for included_globs {:?}",
+            entry.id, entry.included_globs
+        ));
+    }
+
+    let matched_note_count = included_paths
+        .iter()
+        .map(|path| path.matched_note_count)
+        .sum();
+    let linked_bead_or_artifact_count = included_paths
+        .iter()
+        .map(|path| path.linked_bead_or_artifact_count)
+        .sum();
+    let file_or_directory_hash = directory_hash(&included_paths);
+    let inclusion_decision = if included_paths.is_empty() {
+        "missing"
+    } else {
+        "included"
+    };
+
+    SourceScopeScanEntry {
+        id: entry.id.clone(),
+        source_family: entry.source_family.clone(),
+        included_globs: entry.included_globs.clone(),
+        excluded_globs: entry.excluded_globs.clone(),
+        inclusion_decision: inclusion_decision.to_owned(),
+        exclusion_reason: String::new(),
+        file_or_directory_hash,
+        matched_note_count,
+        linked_bead_or_artifact_count,
+        stale_allowance,
+        output_path: output_path.to_owned(),
+        reproduction_command: reproduction_command.to_owned(),
+        matched_paths,
+    }
+}
+
+fn format_stale_allowance(entry: &SourceScopeEntry) -> String {
+    format!(
+        "freshness_state={} ttl_days={} source_hash={}",
+        entry.freshness_state,
+        entry.freshness_ttl_days,
+        if entry.source_hash.is_empty() {
+            "<none>"
+        } else {
+            entry.source_hash.as_str()
+        }
+    )
+}
+
+fn non_applicable_scan_entry(
+    entry: &SourceScopeEntry,
+    output_path: &str,
+    reproduction_command: &str,
+    stale_allowance: String,
+) -> SourceScopeScanEntry {
+    SourceScopeScanEntry {
+        id: entry.id.clone(),
+        source_family: entry.source_family.clone(),
+        included_globs: entry.included_globs.clone(),
+        excluded_globs: entry.excluded_globs.clone(),
+        inclusion_decision: "non_applicable".to_owned(),
+        exclusion_reason: entry.non_applicability_rationale.clone(),
+        file_or_directory_hash: String::new(),
+        matched_note_count: 0,
+        linked_bead_or_artifact_count: 0,
+        stale_allowance,
+        output_path: output_path.to_owned(),
+        reproduction_command: reproduction_command.to_owned(),
+        matched_paths: Vec::new(),
+    }
+}
+
+fn collect_matched_paths(
+    entry: &SourceScopeEntry,
+    workspace_root: &Path,
+    workspace_files: &[PathBuf],
+    errors: &mut Vec<String>,
+) -> Vec<SourceScopePathDecision> {
+    let mut matched_paths = Vec::new();
+    for relative_path in workspace_files {
+        let relative = normalize_path(relative_path);
+        let Some(included_glob) = entry
+            .included_globs
+            .iter()
+            .find(|glob| glob_matches(glob, &relative))
+        else {
+            continue;
+        };
+        let excluded_glob = entry
+            .excluded_globs
+            .iter()
+            .find(|glob| glob_matches(glob, &relative));
+        let full_path = workspace_root.join(relative_path);
+        let file_hash = hash_file(&full_path).unwrap_or_else(|err| {
+            errors.push(format!("failed to hash source path `{relative}`: {err}"));
+            String::new()
+        });
+        let text = fs::read_to_string(&full_path).unwrap_or_default();
+        let matched_note_count = count_note_matches(&text);
+        let linked_bead_or_artifact_count = count_linked_beads_or_artifacts(&text);
+
+        let (inclusion_decision, exclusion_reason) = excluded_glob.map_or_else(
+            || ("included".to_owned(), String::new()),
+            |glob| {
+                (
+                    "excluded".to_owned(),
+                    format!("matched excluded_glob `{glob}`"),
+                )
+            },
+        );
+        matched_paths.push(SourceScopePathDecision {
+            source_path: relative,
+            source_glob: included_glob.clone(),
+            inclusion_decision,
+            exclusion_reason,
+            file_hash,
+            matched_note_count,
+            linked_bead_or_artifact_count,
+        });
+    }
+    matched_paths
+}
+
+fn collect_workspace_files(workspace_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_workspace_files_from(workspace_root, workspace_root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_workspace_files_from(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(current).map_err(|err| {
+        anyhow::anyhow!("failed to read workspace path {}: {err}", current.display())
+    })? {
+        let entry = entry.map_err(|err| {
+            anyhow::anyhow!(
+                "failed to read workspace entry under {}: {err}",
+                current.display()
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|err| {
+            anyhow::anyhow!(
+                "failed to inspect workspace entry {}: {err}",
+                path.display()
+            )
+        })?;
+        if file_type.is_dir() {
+            if should_skip_walk_dir(root, &path) {
+                continue;
+            }
+            collect_workspace_files_from(root, &path, files)?;
+        } else if file_type.is_file() {
+            let relative = path.strip_prefix(root).map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to relativize workspace entry {}: {err}",
+                    path.display()
+                )
+            })?;
+            files.push(relative.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_walk_dir(root: &Path, path: &Path) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    matches!(
+        normalize_path(relative).as_str(),
+        ".git" | "target" | ".rch-target" | "data/tmp"
+    ) || normalize_path(relative).starts_with("data/tmp/")
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    let pattern_segments = pattern.split('/').collect::<Vec<_>>();
+    let path_segments = path.split('/').collect::<Vec<_>>();
+    glob_segments_match(&pattern_segments, &path_segments)
+}
+
+fn glob_segments_match(pattern: &[&str], path: &[&str]) -> bool {
+    if pattern.is_empty() {
+        return path.is_empty();
+    }
+    if pattern[0] == "**" {
+        return glob_segments_match(&pattern[1..], path)
+            || (!path.is_empty() && glob_segments_match(pattern, &path[1..]));
+    }
+    !path.is_empty()
+        && glob_segment_match(pattern[0], path[0])
+        && glob_segments_match(&pattern[1..], &path[1..])
+}
+
+fn glob_segment_match(pattern: &str, segment: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    if parts.len() == 1 {
+        return pattern == segment;
+    }
+
+    let mut remainder = segment;
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if index == 0 {
+            let Some(stripped) = remainder.strip_prefix(part) else {
+                return false;
+            };
+            remainder = stripped;
+        } else if let Some(position) = remainder.find(part) {
+            remainder = &remainder[position + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    pattern.ends_with('*') || remainder.is_empty()
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)
+        .map_err(|err| anyhow::anyhow!("failed to read {} for hashing: {err}", path.display()))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+fn directory_hash(paths: &[&SourceScopePathDecision]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut hasher = Sha256::new();
+    for path in paths {
+        hasher.update(path.source_path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(path.file_hash.as_bytes());
+        hasher.update(b"\0");
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn count_note_matches(text: &str) -> usize {
+    NOTE_MATCH_TOKENS
+        .iter()
+        .map(|token| text.matches(token).count())
+        .sum()
+}
+
+fn count_linked_beads_or_artifacts(text: &str) -> usize {
+    text.matches("bd-").count() + text.matches("artifact").count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         DECISIONS, INVENTORY_MARKDOWN, PROOF_TYPES, analyze_inventory, validate_current_inventory,
     };
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
 
     #[test]
     fn current_inventory_has_valid_rows_and_vocabularies() {
@@ -424,5 +1166,495 @@ mod tests {
     #[test]
     fn inventory_document_names_the_acceptance_bead() {
         assert!(INVENTORY_MARKDOWN.contains("bd-rchk7.1"));
+    }
+
+    use super::{
+        DEFAULT_SOURCE_SCOPE_MANIFEST_JSON, REQUIRED_SOURCE_FAMILIES,
+        SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION, SourceScopeManifest, parse_source_scope_manifest,
+        scan_source_scope_manifest, validate_default_source_scope_manifest,
+        validate_source_scope_manifest,
+    };
+
+    fn fixture_manifest() -> SourceScopeManifest {
+        parse_source_scope_manifest(DEFAULT_SOURCE_SCOPE_MANIFEST_JSON)
+            .expect("default source scope manifest parses")
+    }
+
+    fn write_sample_file(root: &Path, path: &str, text: &str) -> anyhow::Result<()> {
+        let path = root.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, text)?;
+        Ok(())
+    }
+
+    fn populate_source_scope_workspace(root: &Path) -> anyhow::Result<()> {
+        for (path, text) in [
+            ("README.md", "NOTE bd-rchk7.1 artifact coverage\n"),
+            ("FEATURE_PARITY.md", "bd-rchk7.1 artifact coverage\n"),
+            (
+                "docs/reports/CONFORMANCE_SAMPLE.md",
+                "NOTE conformance bd-rchk7.1 artifact\n",
+            ),
+            (
+                "tests/fixtures/sample.json",
+                "{\"note\":\"bd-rchk7.1 artifact\"}\n",
+            ),
+            (
+                "crates/ffs-harness/src/sample.rs",
+                "// NOTE bd-rchk7.1 artifact\n",
+            ),
+            (
+                "tests/fuzz_corpus/README.md",
+                "TODO fuzz bd-rchk7.1 artifact\n",
+            ),
+            (
+                "scripts/e2e/sample.sh",
+                "# NOTE mounted-e2e bd-rchk7.1 artifact\n",
+            ),
+            (
+                "docs/mounted/README.md",
+                "NOTE mounted path bd-rchk7.1 artifact\n",
+            ),
+            ("docs/repair/README.md", "NOTE repair bd-rchk7.1 artifact\n"),
+            (
+                "docs/performance/README.md",
+                "NOTE xfstests perf bd-rchk7.1 artifact\n",
+            ),
+        ] {
+            write_sample_file(root, path, text)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn default_source_scope_manifest_validates_required_families() {
+        let report = validate_default_source_scope_manifest().expect("default manifest validates");
+        assert_eq!(report.schema_version, SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION);
+        assert_eq!(report.bead_id, "bd-lm0g9");
+        assert_eq!(report.source_count, REQUIRED_SOURCE_FAMILIES.len());
+        for family in REQUIRED_SOURCE_FAMILIES {
+            assert!(
+                report.source_families.iter().any(|f| f == family),
+                "missing required family {family}"
+            );
+        }
+        assert!(report.stale_sources.is_empty());
+    }
+
+    #[test]
+    fn missing_required_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "tests");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `tests`"))
+        );
+    }
+
+    #[test]
+    fn missing_repair_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "repair_docs");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `repair_docs`"))
+        );
+    }
+
+    #[test]
+    fn missing_fuzz_corpus_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "fuzz_corpus_notes");
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `fuzz_corpus_notes`"))
+        );
+    }
+
+    #[test]
+    fn duplicate_source_id_is_rejected() {
+        let mut manifest = fixture_manifest();
+        let duplicate_id = manifest.sources[0].id.clone();
+        manifest.sources[1].id = duplicate_id;
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("duplicate source scope entry id"))
+        );
+    }
+
+    #[test]
+    fn invalid_risk_category_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].risk_category = "vibes".to_owned();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported risk_category"))
+        );
+    }
+
+    #[test]
+    fn unsupported_proof_type_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].expected_proof_types = vec!["telepathy".to_owned()];
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported proof type"))
+        );
+    }
+
+    #[test]
+    fn empty_included_globs_without_rationale_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].included_globs.clear();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must declare included_globs"))
+        );
+    }
+
+    #[test]
+    fn non_applicability_rationale_allows_empty_globs() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].included_globs.clear();
+        manifest.sources[0].expected_proof_types.clear();
+        manifest.sources[0].non_applicability_rationale =
+            "intentionally absent: status sourced from beads".to_owned();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report.valid,
+            "non-applicability path should pass: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn missing_owner_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].owner = String::new();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing owner"))
+        );
+    }
+
+    #[test]
+    fn invalid_status_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].status = "spelunking".to_owned();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported status"))
+        );
+    }
+
+    #[test]
+    fn non_applicable_status_requires_rationale() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].status = "non_applicable".to_owned();
+        manifest.sources[0].non_applicability_rationale = String::new();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("non_applicable requires non_applicability_rationale"))
+        );
+    }
+
+    #[test]
+    fn stale_freshness_state_is_surfaced() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].freshness_state = "stale".to_owned();
+        manifest.sources[0].source_hash =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(report.valid, "stale state alone should not fail validation");
+        assert!(
+            report
+                .stale_sources
+                .iter()
+                .any(|id| id == &manifest.sources[0].id)
+        );
+    }
+
+    #[test]
+    fn invalid_freshness_state_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].freshness_state = "ancient".to_owned();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported freshness_state"))
+        );
+    }
+
+    #[test]
+    fn zero_ttl_without_exempt_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].freshness_ttl_days = 0;
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("freshness_ttl_days must be positive"))
+        );
+    }
+
+    #[test]
+    fn malformed_source_hash_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].source_hash = "sha1:not-the-right-format".to_owned();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("malformed source_hash"))
+        );
+    }
+
+    #[test]
+    fn stale_freshness_state_requires_source_hash() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].freshness_state = "stale".to_owned();
+        manifest.sources[0].source_hash = String::new();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("stale requires source_hash"))
+        );
+    }
+
+    #[test]
+    fn well_formed_sha256_hash_is_accepted() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].source_hash =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report.valid,
+            "well-formed sha256 should pass: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn empty_sources_list_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources.clear();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("at least one source"))
+        );
+    }
+
+    #[test]
+    fn unsupported_source_family_is_rejected() {
+        let mut manifest = fixture_manifest();
+        manifest.sources[0].source_family = "blog_drafts".to_owned();
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("unsupported source_family"))
+        );
+    }
+
+    #[test]
+    fn required_generated_and_vendor_exclusions_are_validated() {
+        let mut manifest = fixture_manifest();
+        let tests = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "tests")
+            .expect("tests source exists");
+        tests.excluded_globs.retain(|glob| !glob.contains("vendor"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("must exclude vendor paths"))
+        );
+
+        let mut manifest = fixture_manifest();
+        let readme = manifest
+            .sources
+            .iter_mut()
+            .find(|entry| entry.source_family == "readme_status_docs")
+            .expect("readme status source exists");
+        readme
+            .excluded_globs
+            .retain(|glob| !glob.contains("_generated"));
+        let report = validate_source_scope_manifest(&manifest);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("generated status docs"))
+        );
+    }
+
+    #[test]
+    fn source_scope_scan_logs_workspace_hashes_and_counts() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        let report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            Some(Path::new("artifacts/source_scope_scan.json")),
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(report.valid, "scan should validate: {:?}", report.errors);
+        assert_eq!(report.source_count, REQUIRED_SOURCE_FAMILIES.len());
+        assert_eq!(
+            report.source_manifest_version,
+            SOURCE_SCOPE_MANIFEST_SCHEMA_VERSION
+        );
+        assert_eq!(report.output_path, "artifacts/source_scope_scan.json");
+        for source in &report.scanned_sources {
+            assert_eq!(source.inclusion_decision, "included");
+            assert!(
+                source.file_or_directory_hash.starts_with("sha256:"),
+                "source {} missing aggregate hash",
+                source.id
+            );
+            assert!(
+                source.matched_note_count > 0,
+                "source {} should count open-ended note tokens",
+                source.id
+            );
+            assert!(
+                source.linked_bead_or_artifact_count > 0,
+                "source {} should count linked beads/artifacts",
+                source.id
+            );
+            assert!(source.output_path.ends_with("source_scope_scan.json"));
+            assert!(
+                source
+                    .reproduction_command
+                    .contains("validate-source-scope")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_logs_excluded_generated_paths() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        write_sample_file(
+            temp.path(),
+            "docs/status/_generated/ignored.md",
+            "NOTE generated bd-rchk7.1 artifact\n",
+        )?;
+        let report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        let readme = report
+            .scanned_sources
+            .iter()
+            .find(|source| source.source_family == "readme_status_docs")
+            .expect("readme status source scanned");
+        assert!(
+            readme.matched_paths.iter().any(|path| {
+                path.source_path == "docs/status/_generated/ignored.md"
+                    && path.inclusion_decision == "excluded"
+                    && path.exclusion_reason.contains("excluded_glob")
+                    && path.file_hash.starts_with("sha256:")
+            }),
+            "generated status path should be logged as excluded"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_reports_precise_removed_family() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        populate_source_scope_workspace(temp.path())?;
+        let mut manifest = fixture_manifest();
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != "feature_parity_doc");
+        let report = scan_source_scope_manifest(
+            &manifest,
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("missing required family `feature_parity_doc`"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_scope_scan_rejects_unmatched_required_source() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let report = scan_source_scope_manifest(
+            &fixture_manifest(),
+            temp.path(),
+            None,
+            "cargo run -p ffs-harness -- validate-source-scope-manifest",
+        );
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|err| err.contains("source `readme_status_docs` matched no files"))
+        );
+        Ok(())
     }
 }

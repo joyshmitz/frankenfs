@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "manifest_id": "open_ended_inventory_source_scope_v1",
+  "bead_id": "bd-lm0g9",
+  "sources": [
+    {
+      "id": "readme_status_docs",
+      "source_family": "readme_status_docs",
+      "included_globs": ["README.md", "docs/status/**/*.md"],
+      "excluded_globs": ["docs/status/_generated/**", "docs/status/**/_drafts/**"],
+      "risk_category": "docs_only",
+      "owner": "release",
+      "status": "active",
+      "expected_proof_types": ["docs-non-goal"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "feature_parity_doc",
+      "source_family": "feature_parity_doc",
+      "included_globs": ["FEATURE_PARITY.md"],
+      "excluded_globs": [],
+      "risk_category": "docs_only",
+      "owner": "release",
+      "status": "active",
+      "expected_proof_types": ["docs-non-goal"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "conformance_docs",
+      "source_family": "conformance_docs",
+      "included_globs": [
+        "docs/reports/CONFORMANCE_*.md",
+        "docs/reports/FUZZ_AND_CONFORMANCE_INVENTORY.md",
+        "docs/conformance/**/*.md"
+      ],
+      "excluded_globs": ["target/**", "**/.rch-target/**"],
+      "risk_category": "conformance",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["golden-fixture", "parser-unit", "property-test"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "fixture_manifests",
+      "source_family": "fixture_manifests",
+      "included_globs": [
+        "tests/fixtures/**/*.json",
+        "tests/workload-matrix/**/*.json",
+        "tests/workload-corpus/**/*.json",
+        "tests/source-scope-manifest/**/*.json"
+      ],
+      "excluded_globs": ["tests/fixtures/_archive/**"],
+      "risk_category": "conformance",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["golden-fixture", "corpus-seed"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "tests",
+      "source_family": "tests",
+      "included_globs": [
+        "crates/*/src/**/*.rs",
+        "crates/*/tests/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "excluded_globs": [
+        "target/**",
+        "**/.rch-target/**",
+        "vendor/**"
+      ],
+      "risk_category": "data_safety",
+      "owner": "core",
+      "status": "active",
+      "expected_proof_types": ["parser-unit", "property-test", "mounted-e2e"],
+      "freshness_ttl_days": 7,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "fuzz_corpus_notes",
+      "source_family": "fuzz_corpus_notes",
+      "included_globs": [
+        "tests/fuzz_corpus/**/*.md",
+        "tests/fuzz_corpus/**/*.toml",
+        "fuzz/**/*.md"
+      ],
+      "excluded_globs": ["tests/fuzz_corpus/_seeds/**"],
+      "risk_category": "fuzz",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["corpus-seed", "long-campaign"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "harness_scripts",
+      "source_family": "harness_scripts",
+      "included_globs": [
+        "scripts/e2e/**/*.sh",
+        "scripts/e2e/**/*.py",
+        "scripts/e2e/**/*.json"
+      ],
+      "excluded_globs": ["scripts/e2e/_artifacts/**"],
+      "risk_category": "observability",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["mounted-e2e", "long-campaign"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "mounted_lane_docs",
+      "source_family": "mounted_lane_docs",
+      "included_globs": [
+        "docs/mount-runtime-modes.md",
+        "docs/design-writeback-cache*.md",
+        "docs/generation-policy.md",
+        "docs/mounted/**/*.md",
+        "crates/ffs-fuse/README*.md"
+      ],
+      "excluded_globs": [],
+      "risk_category": "mounted_path",
+      "owner": "fuse",
+      "status": "active",
+      "expected_proof_types": ["mounted-e2e", "docs-non-goal"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "repair_docs",
+      "source_family": "repair_docs",
+      "included_globs": [
+        "docs/repair/**/*.md",
+        "docs/repair-confidence-mutation-safety.json",
+        "crates/ffs-repair/README*.md"
+      ],
+      "excluded_globs": [],
+      "risk_category": "repair",
+      "owner": "repair",
+      "status": "active",
+      "expected_proof_types": ["mounted-e2e", "long-campaign", "security-audit"],
+      "freshness_ttl_days": 30,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    },
+    {
+      "id": "performance_xfstests_notes",
+      "source_family": "performance_xfstests_notes",
+      "included_globs": [
+        "docs/performance/**/*.md",
+        "scripts/e2e/xfstests*.json",
+        "scripts/e2e/xfstests*.list",
+        "scripts/e2e/ffs_xfstests_e2e.sh"
+      ],
+      "excluded_globs": [],
+      "risk_category": "performance",
+      "owner": "harness",
+      "status": "active",
+      "expected_proof_types": ["long-campaign", "golden-fixture"],
+      "freshness_ttl_days": 14,
+      "freshness_state": "fresh",
+      "source_hash": "",
+      "non_applicability_rationale": ""
+    }
+  ]
+}

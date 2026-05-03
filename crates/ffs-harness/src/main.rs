@@ -45,7 +45,10 @@ use ffs_harness::{
         DEFAULT_MATRIX_PATH, fail_on_mounted_write_matrix_errors, load_mounted_write_matrix,
         validate_mounted_write_matrix,
     },
-    open_ended_inventory::validate_current_inventory,
+    open_ended_inventory::{
+        DEFAULT_SOURCE_SCOPE_MANIFEST_PATH, load_source_scope_manifest, scan_source_scope_manifest,
+        validate_current_inventory,
+    },
     operational_readiness_report::{
         OperationalReadinessReportConfig, build_operational_readiness_report,
         render_operational_readiness_markdown,
@@ -162,6 +165,7 @@ fn run() -> Result<()> {
         Some("validate-operational-manifest") => validate_operational_manifest_cmd(&args[1..]),
         Some("fuse-capability-probe") => fuse_capability_probe_cmd(&args[1..]),
         Some("validate-open-ended-inventory") => validate_open_ended_inventory_cmd(&args[1..]),
+        Some("validate-source-scope-manifest") => validate_source_scope_manifest_cmd(&args[1..]),
         Some("validate-deferred-parity-audit") => validate_deferred_parity_audit_cmd(&args[1..]),
         Some("validate-ambition-evidence-matrix") => {
             validate_ambition_evidence_matrix_cmd(&args[1..])
@@ -1849,6 +1853,93 @@ fn validate_open_ended_inventory_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_source_scope_manifest_cmd(args: &[String]) -> Result<()> {
+    let mut manifest_path = DEFAULT_SOURCE_SCOPE_MANIFEST_PATH.to_owned();
+    let mut workspace_root = ".".to_owned();
+    let mut out_path: Option<String> = None;
+    let mut remove_source_family: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--manifest" => {
+                i += 1;
+                args.get(i)
+                    .context("--manifest requires a path")?
+                    .clone_into(&mut manifest_path);
+            }
+            "--workspace-root" => {
+                i += 1;
+                args.get(i)
+                    .context("--workspace-root requires a path")?
+                    .clone_into(&mut workspace_root);
+            }
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--remove-source-family" => {
+                i += 1;
+                remove_source_family = Some(
+                    args.get(i)
+                        .context("--remove-source-family requires a source family")?
+                        .to_owned(),
+                );
+            }
+            "--help" | "-h" => {
+                print_source_scope_manifest_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-source-scope-manifest argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let mut manifest = load_source_scope_manifest(&manifest_path)?;
+    if let Some(source_family) = &remove_source_family {
+        manifest
+            .sources
+            .retain(|entry| entry.source_family != *source_family);
+    }
+    let out = out_path.as_deref().map(Path::new);
+    let reproduction_command = format!(
+        "cargo run -p ffs-harness -- validate-source-scope-manifest --manifest {manifest_path} --workspace-root {workspace_root}"
+    );
+    let report = scan_source_scope_manifest(
+        &manifest,
+        Path::new(&workspace_root),
+        out,
+        &reproduction_command,
+    );
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "source scope manifest report written: {} sources={} valid={}",
+            path.display(),
+            report.source_count,
+            report.valid
+        );
+    } else {
+        println!("{json}");
+    }
+    if !report.valid {
+        bail!(
+            "source scope manifest failed with {} error(s): {}",
+            report.errors.len(),
+            report.errors.join("; ")
+        );
+    }
+    Ok(())
+}
+
 fn validate_deferred_parity_audit_cmd(args: &[String]) -> Result<()> {
     let mut config = DeferredParityAuditConfig::default();
     let mut out_path: Option<String> = None;
@@ -2474,6 +2565,9 @@ fn print_usage() {
     );
     println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
     println!(
+        "  ffs-harness validate-source-scope-manifest [--manifest FILE] [--workspace-root DIR] [--out FILE]"
+    );
+    println!(
         "  ffs-harness validate-deferred-parity-audit [--issues FILE] [--report FILE] [--doc FILE] [--out FILE]"
     );
     println!("  ffs-harness validate-ambition-evidence-matrix [--issues FILE] [--out FILE]");
@@ -2549,6 +2643,9 @@ fn print_usage_examples() {
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
     println!(
         "  ffs-harness validate-open-ended-inventory --out artifacts/conformance/open_ended_inventory.json"
+    );
+    println!(
+        "  ffs-harness validate-source-scope-manifest --out artifacts/conformance/source_scope_manifest.json"
     );
     println!(
         "  ffs-harness validate-deferred-parity-audit --out artifacts/parity/deferred_parity_audit.json"
@@ -2708,6 +2805,18 @@ fn print_open_ended_inventory_usage() {
     println!();
     println!("Options:");
     println!("  --out FILE                         Write JSON report to FILE");
+}
+
+fn print_source_scope_manifest_usage() {
+    println!("Usage: ffs-harness validate-source-scope-manifest [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --manifest FILE                    Source scope manifest JSON");
+    println!("  --workspace-root DIR               Workspace root to scan (default: .)");
+    println!("  --out FILE                         Write JSON report to FILE");
+    println!(
+        "  --remove-source-family FAMILY      Negative smoke: omit a required family before validation"
+    );
 }
 
 fn print_deferred_parity_audit_usage() {
