@@ -23,20 +23,16 @@
 //!   3. Parse the root directory block via `Ext4ImageReader::read_dir`,
 //!      record each entry's name + rec_len.
 //!   4. debugfs `rm /beta` to unlink the middle entry.
-//!   5. Re-parse the root directory block, assert:
-//!      a. /beta is no longer listed.
-//!      b. /alpha and /gamma are both present with matching inode numbers.
-//!      c. The sum of rec_lens of the live-after-unlink entries plus the
-//!         coalesced gap covers the entire usable directory block.
-//!      d. The previous entry (`.` or `alpha`, whichever is sequentially
-//!         before /beta) has its rec_len extended to span the freed slot.
+//!   5. Re-parse the root directory block and assert that `/beta` is gone,
+//!      `/alpha` and `/gamma` keep their inode numbers, rec_lens cover the
+//!      usable block, and the previous entry spans the freed slot.
 
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use ffs_ondisk::{Ext4ImageReader, parse_dir_block};
+use ffs_ondisk::{Ext4DirEntry, Ext4ImageReader, parse_dir_block};
 
 fn has_command(name: &str) -> bool {
     matches!(
@@ -72,26 +68,21 @@ fn run_debugfs_w(image: &Path, cmd: &str) {
     assert!(st.success(), "debugfs -w -R {cmd:?} failed");
 }
 
-#[test]
-fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
-    if !ext4_tools_available() {
-        eprintln!("SKIPPED: ext4 kernel tools not available");
-        return;
-    }
-
-    let path = unique_path("dir");
-    let f = std::fs::File::create(&path).expect("create image file");
+fn make_ext4_image(path: &Path) {
+    let f = std::fs::File::create(path).expect("create image file");
     f.set_len(16 * 1024 * 1024).expect("set image length");
     drop(f);
     let st = Command::new("mkfs.ext4")
         .args(["-q", "-F", "-O", "^has_journal", "-b", "4096"])
-        .arg(&path)
+        .arg(path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .expect("spawn mkfs.ext4");
     assert!(st.success(), "mkfs.ext4 failed");
+}
 
+fn stage_debugfs_files(image: &Path, names: &[&str]) {
     let scratch = std::env::temp_dir().join(format!(
         "ffs_dirreclen_stage_{}_{}",
         std::process::id(),
@@ -101,13 +92,33 @@ fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
     ));
     std::fs::create_dir_all(&scratch).expect("create scratch dir");
 
-    // Stage three files via debugfs write.
-    for name in ["alpha", "beta", "gamma"] {
+    for name in names {
         let local = scratch.join(name);
         std::fs::write(&local, b"x").expect("write seed content");
-        run_debugfs_w(&path, &format!("write {} /{}", local.display(), name));
+        run_debugfs_w(image, &format!("write {} /{}", local.display(), name));
     }
     std::fs::remove_dir_all(&scratch).ok();
+}
+
+fn assert_rec_lens_cover(entries: &[Ext4DirEntry], usable_block: usize, phase: &str) {
+    let total_rec: u32 = entries.iter().map(|e| e.rec_len).sum();
+    let usable_block = u32::try_from(usable_block).expect("usable block fits u32");
+    assert_eq!(
+        total_rec, usable_block,
+        "{phase} rec_lens must cover the usable block"
+    );
+}
+
+#[test]
+fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
+    if !ext4_tools_available() {
+        eprintln!("SKIPPED: ext4 kernel tools not available");
+        return;
+    }
+
+    let path = unique_path("dir");
+    make_ext4_image(&path);
+    stage_debugfs_files(&path, &["alpha", "beta", "gamma"]);
 
     // Pre-unlink: parse root dir, capture entries.
     let image = std::fs::read(&path).expect("read image");
@@ -153,11 +164,7 @@ fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
 
     // Pre-unlink rec_lens cover the usable block (block_size minus the
     // 12-byte checksum tail, when present).
-    let pre_total_rec: u32 = pre_entries.iter().map(|e| u32::from(e.rec_len)).sum();
-    assert_eq!(
-        pre_total_rec, usable_block as u32,
-        "pre-unlink rec_lens must cover the usable block"
-    );
+    assert_rec_lens_cover(&pre_entries, usable_block, "pre-unlink");
 
     // Unlink the middle entry.
     run_debugfs_w(&path, "rm /beta");
@@ -202,11 +209,7 @@ fn ext4_dir_rec_len_kernel_reference_coalesces_after_unlink() {
     // The sum of rec_lens (including any coalesced or stale-but-zero-inode
     // slots) must still cover the usable block — this is the load-bearing
     // invariant the kernel and e2fsprogs enforce.
-    let post_total_rec: u32 = post_entries.iter().map(|e| u32::from(e.rec_len)).sum();
-    assert_eq!(
-        post_total_rec, usable_block_after as u32,
-        "post-unlink rec_lens must still cover the usable block"
-    );
+    assert_rec_lens_cover(&post_entries, usable_block_after, "post-unlink");
 
     // The number of LIVE entries dropped by exactly one (beta).
     let post_live = post_entries.iter().filter(|e| e.inode != 0).count();
