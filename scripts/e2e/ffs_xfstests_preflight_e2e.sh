@@ -65,6 +65,7 @@ import json
 import os
 import pathlib
 import platform
+import shlex
 import shutil
 import socket
 import subprocess
@@ -80,6 +81,51 @@ STATUS_VALUES = {
     "unsupported-locally",
     "available-on-worker",
 }
+
+RISK_VALUES = {"satisfied", "blocking", "advisory"}
+LANE_IMPACT_VALUES = {
+    "none",
+    "blocks_permissioned_real_xfstests",
+    "release_evidence_requires_worker",
+}
+SIDE_EFFECT_POLICY = "read_only_probe_no_install_no_mount_no_host_mutation"
+SAFE_REMEDIATION = {
+    "automation": "manual_only",
+    "runner_executes_remediation": False,
+    "auto_install": False,
+    "mounts_or_unmounts": False,
+    "creates_persistent_paths": False,
+}
+PACKAGE_MANAGER_COMMANDS = {
+    "apt",
+    "apt-get",
+    "dnf",
+    "yum",
+    "pacman",
+    "zypper",
+    "brew",
+}
+PERSISTENT_MUTATION_COMMANDS = {
+    "cp",
+    "dd",
+    "install",
+    "mkdir",
+    "mv",
+    "rm",
+    "rmdir",
+    "tee",
+    "touch",
+    "truncate",
+}
+VERSION_ONLY_COMMANDS = {
+    "mkfs.ext4",
+    "mkfs.xfs",
+    "mount",
+    "umount",
+    "fusermount",
+    "fusermount3",
+}
+VERSION_ARGS = {"--version", "-V", "-v", "-h", "--help"}
 
 REQUIRED_PROBES = [
     "xfs_headers",
@@ -148,6 +194,32 @@ def run_probe(name: str, argv: list[str], transcript_dir: pathlib.Path) -> dict:
     }
 
 
+def preflight_reproduction_command() -> str:
+    env_parts = []
+    for key in ["XFSTESTS_DIR", "TEST_DIR", "SCRATCH_MNT"]:
+        value = os.environ.get(key, "")
+        if value:
+            env_parts.append(f"{key}={shlex.quote(value)}")
+    command = f"{repo_root}/scripts/e2e/ffs_xfstests_preflight_e2e.sh --out {shlex.quote(str(out_path))}"
+    return " ".join([*env_parts, command])
+
+
+def risk_level_for(status: str, blocks: bool) -> str:
+    if blocks and status != "present":
+        return "blocking"
+    if status in {"unsupported-locally", "available-on-worker"}:
+        return "advisory"
+    return "satisfied"
+
+
+def lane_impact_for(name: str, status: str, blocks: bool) -> str:
+    if blocks and status != "present":
+        return "blocks_permissioned_real_xfstests"
+    if name == "rch_ci_worker_identity" and status == "unsupported-locally":
+        return "release_evidence_requires_worker"
+    return "none"
+
+
 def command_version(command: str, args: list[str], transcript_dir: pathlib.Path) -> tuple[bool, str | None, dict]:
     path = shutil.which(command)
     if path is None:
@@ -181,11 +253,20 @@ def prereq(
     probes: list[dict] | None = None,
 ) -> dict:
     assert status in STATUS_VALUES, status
+    risk_level = risk_level_for(status, blocks)
+    lane_impact = lane_impact_for(name, status, blocks)
     return {
         "name": name,
         "status": status,
+        "classification": f"{name}:{status}",
         "blocks_real_xfstests": blocks,
         "remediation": remediation,
+        "remediation_text_id": f"xfstests-preflight-{name.replace('_', '-')}",
+        "risk_level": risk_level,
+        "authoritative_lane_impact": lane_impact,
+        "side_effect_policy": SIDE_EFFECT_POLICY,
+        "safe_remediation": dict(SAFE_REMEDIATION),
+        "reproduction_command": preflight_reproduction_command(),
         "evidence": evidence or [],
         "version": version,
         "probes": probes or [],
@@ -483,13 +564,24 @@ def build_manifest(prereqs: list[dict], *, artifact_dir: pathlib.Path, fixture: 
     return {
         "schema_version": 1,
         "bead_id": "bd-rchk3.1.1",
+        "refinement_bead_id": "bd-f3hug",
         "created_at": iso_now(),
         "fixture_mode": fixture,
         "verdict": "pass" if not blocking else "blocked",
         "status_vocabulary": sorted(STATUS_VALUES),
+        "risk_vocabulary": sorted(RISK_VALUES),
+        "authoritative_lane_impact_vocabulary": sorted(LANE_IMPACT_VALUES),
         "blocking_prerequisites": blocking,
         "status_counts": dict(sorted(status_counts.items())),
         "prerequisites": prereqs,
+        "remediation_safety": {
+            "side_effect_policy": SIDE_EFFECT_POLICY,
+            "runner_executes_remediation": False,
+            "auto_install": False,
+            "mounts_or_unmounts": False,
+            "creates_persistent_paths": False,
+            "requires_fresh_follow_up_probe": True,
+        },
         "host": {
             "hostname": socket.gethostname(),
             "kernel": platform.release(),
@@ -521,12 +613,7 @@ def build_manifest(prereqs: list[dict], *, artifact_dir: pathlib.Path, fixture: 
         "stdout_path": str(artifact_dir / "stdout.log"),
         "stderr_path": str(artifact_dir / "stderr.log"),
         "cleanup_status": "no_mounts_or_temp_files_created",
-        "reproduction_command": (
-            f"XFSTESTS_DIR={os.environ.get('XFSTESTS_DIR', '')} "
-            f"TEST_DIR={os.environ.get('TEST_DIR', '')} "
-            f"SCRATCH_MNT={os.environ.get('SCRATCH_MNT', '')} "
-            f"{repo_root}/scripts/e2e/ffs_xfstests_preflight_e2e.sh --out {out_path}"
-        ),
+        "reproduction_command": preflight_reproduction_command(),
         "links": {
             "selected_test_policy_bead": "bd-rchk3.2",
             "real_execution_bead": "bd-rchk3.3",
@@ -534,8 +621,37 @@ def build_manifest(prereqs: list[dict], *, artifact_dir: pathlib.Path, fixture: 
     }
 
 
+def is_safe_probe_argv(argv: object) -> bool:
+    if not isinstance(argv, list) or not argv:
+        return False
+    command = pathlib.Path(str(argv[0])).name
+    args = [str(arg) for arg in argv[1:]]
+    if command in PACKAGE_MANAGER_COMMANDS or command in PERSISTENT_MUTATION_COMMANDS:
+        return False
+    if command in VERSION_ONLY_COMMANDS:
+        return bool(args) and all(arg in VERSION_ARGS for arg in args)
+    return True
+
+
 def validate_manifest(manifest: dict) -> list[str]:
     errors: list[str] = []
+    safety = manifest.get("remediation_safety")
+    if not isinstance(safety, dict):
+        errors.append("manifest missing remediation_safety")
+    else:
+        if safety.get("side_effect_policy") != SIDE_EFFECT_POLICY:
+            errors.append("manifest has unexpected side_effect_policy")
+        for field in [
+            "runner_executes_remediation",
+            "auto_install",
+            "mounts_or_unmounts",
+            "creates_persistent_paths",
+        ]:
+            if safety.get(field) is not False:
+                errors.append(f"manifest remediation_safety {field} must be false")
+        if safety.get("requires_fresh_follow_up_probe") is not True:
+            errors.append("manifest remediation_safety requires_fresh_follow_up_probe must be true")
+
     prereqs = manifest.get("prerequisites")
     if not isinstance(prereqs, list):
         return ["manifest prerequisites must be a list"]
@@ -552,12 +668,51 @@ def validate_manifest(manifest: dict) -> list[str]:
             errors.append(f"{name} has invalid status {item.get('status')!r}")
         if not item.get("remediation"):
             errors.append(f"{name} missing remediation")
+        if not str(item.get("remediation_text_id", "")).startswith("xfstests-preflight-"):
+            errors.append(f"{name} missing remediation_text_id")
+        if item.get("risk_level") not in RISK_VALUES:
+            errors.append(f"{name} has invalid risk_level {item.get('risk_level')!r}")
+        if item.get("authoritative_lane_impact") not in LANE_IMPACT_VALUES:
+            errors.append(
+                f"{name} has invalid authoritative_lane_impact {item.get('authoritative_lane_impact')!r}"
+            )
+        if item.get("side_effect_policy") != SIDE_EFFECT_POLICY:
+            errors.append(f"{name} has unexpected side_effect_policy")
+        safe = item.get("safe_remediation")
+        if not isinstance(safe, dict):
+            errors.append(f"{name} missing safe_remediation")
+        else:
+            if safe.get("automation") != "manual_only":
+                errors.append(f"{name} remediation automation must be manual_only")
+            for field in [
+                "runner_executes_remediation",
+                "auto_install",
+                "mounts_or_unmounts",
+                "creates_persistent_paths",
+            ]:
+                if safe.get(field) is not False:
+                    errors.append(f"{name} safe_remediation {field} must be false")
+        if not item.get("reproduction_command"):
+            errors.append(f"{name} missing reproduction_command")
         if "blocks_real_xfstests" not in item:
             errors.append(f"{name} missing blocks_real_xfstests")
+        expected_risk = risk_level_for(str(item.get("status")), bool(item.get("blocks_real_xfstests")))
+        if item.get("risk_level") != expected_risk:
+            errors.append(f"{name} risk_level must be {expected_risk}")
+        expected_impact = lane_impact_for(
+            str(item.get("name")), str(item.get("status")), bool(item.get("blocks_real_xfstests"))
+        )
+        if item.get("authoritative_lane_impact") != expected_impact:
+            errors.append(f"{name} authoritative_lane_impact must be {expected_impact}")
+        for probe in item.get("probes", []):
+            if isinstance(probe, dict) and not is_safe_probe_argv(probe.get("argv")):
+                errors.append(f"{name} probe argv is not side-effect safe: {probe.get('argv')}")
     for field in [
         "created_at",
         "verdict",
         "status_vocabulary",
+        "risk_vocabulary",
+        "authoritative_lane_impact_vocabulary",
         "blocking_prerequisites",
         "transcript_dir",
         "stdout_path",
@@ -606,10 +761,23 @@ def run_self_test() -> int:
             for required_status in {"missing", "blocked-by-host", "blocked-by-lock", "unsupported-locally"}:
                 if required_status not in observed_statuses:
                     errors.append(f"blocked fixture missing status {required_status}")
+            unsafe_rows = [
+                row["name"]
+                for row in manifest["prerequisites"]
+                if row.get("blocks_real_xfstests")
+                and row.get("status") != "present"
+                and row.get("risk_level") != "blocking"
+            ]
+            if unsafe_rows:
+                errors.append(f"blocked fixture missing blocking risk rows: {unsafe_rows}")
         if mode == "worker":
             worker_row = next(row for row in manifest["prerequisites"] if row["name"] == "rch_ci_worker_identity")
             if worker_row["status"] != "available-on-worker":
                 errors.append("worker fixture did not classify worker identity as available-on-worker")
+        for row in manifest["prerequisites"]:
+            safe = row.get("safe_remediation", {})
+            if safe.get("runner_executes_remediation") is not False or safe.get("auto_install") is not False:
+                errors.append(f"fixture {mode} unsafe remediation row: {row.get('name')}")
         out = base / mode / "preflight.json"
         write_manifest(manifest, out)
         outcome = "PASS" if not errors else "FAIL"

@@ -647,6 +647,45 @@ required = {
     "dpkg_lock_state",
     "rch_ci_worker_identity",
 }
+side_effect_policy = "read_only_probe_no_install_no_mount_no_host_mutation"
+risk_values = {"satisfied", "blocking", "advisory"}
+lane_impacts = {
+    "none",
+    "blocks_permissioned_real_xfstests",
+    "release_evidence_requires_worker",
+}
+package_manager_commands = {"apt", "apt-get", "dnf", "yum", "pacman", "zypper", "brew"}
+persistent_mutation_commands = {"cp", "dd", "install", "mkdir", "mv", "rm", "rmdir", "tee", "touch", "truncate"}
+version_only_commands = {"mkfs.ext4", "mkfs.xfs", "mount", "umount", "fusermount", "fusermount3"}
+version_args = {"--version", "-V", "-v", "-h", "--help"}
+
+
+def risk_level_for(status, blocks):
+    if blocks and status != "present":
+        return "blocking"
+    if status in {"unsupported-locally", "available-on-worker"}:
+        return "advisory"
+    return "satisfied"
+
+
+def lane_impact_for(name, status, blocks):
+    if blocks and status != "present":
+        return "blocks_permissioned_real_xfstests"
+    if name == "rch_ci_worker_identity" and status == "unsupported-locally":
+        return "release_evidence_requires_worker"
+    return "none"
+
+
+def safe_probe_argv(argv):
+    if not isinstance(argv, list) or not argv:
+        return False
+    command = pathlib.Path(str(argv[0])).name
+    args = [str(arg) for arg in argv[1:]]
+    if command in package_manager_commands or command in persistent_mutation_commands:
+        return False
+    if command in version_only_commands:
+        return bool(args) and all(arg in version_args for arg in args)
+    return True
 
 if not manifest_path.exists():
     print(f"missing preflight manifest: {manifest_path}")
@@ -679,6 +718,26 @@ if missing_names:
     print(f"preflight manifest missing prerequisite probes: {', '.join(missing_names)}")
     sys.exit(1)
 
+safety = manifest.get("remediation_safety")
+if not isinstance(safety, dict):
+    print("preflight manifest missing remediation_safety")
+    sys.exit(1)
+if safety.get("side_effect_policy") != side_effect_policy:
+    print("preflight manifest has unsupported side-effect policy")
+    sys.exit(1)
+for field in [
+    "runner_executes_remediation",
+    "auto_install",
+    "mounts_or_unmounts",
+    "creates_persistent_paths",
+]:
+    if safety.get(field) is not False:
+        print(f"preflight remediation_safety {field} must be false")
+        sys.exit(1)
+if safety.get("requires_fresh_follow_up_probe") is not True:
+    print("preflight remediation_safety must require a fresh follow-up probe")
+    sys.exit(1)
+
 blocking = manifest.get("blocking_prerequisites", [])
 if manifest.get("verdict") != "pass" or blocking:
     blocking_text = ", ".join(blocking) if isinstance(blocking, list) else str(blocking)
@@ -689,9 +748,50 @@ for row in prereqs:
     if not isinstance(row, dict):
         print("preflight prerequisite row must be an object")
         sys.exit(1)
-    if row.get("blocks_real_xfstests") and row.get("status") != "present":
-        print(f"blocking prerequisite is not present: {row.get('name')} status={row.get('status')}")
+    name = str(row.get("name"))
+    status = str(row.get("status"))
+    blocks = bool(row.get("blocks_real_xfstests"))
+    if blocks and status != "present":
+        print(f"blocking prerequisite is not present: {name} status={status}")
         sys.exit(1)
+    if row.get("risk_level") not in risk_values:
+        print(f"preflight prerequisite {name} has invalid risk_level")
+        sys.exit(1)
+    if row.get("risk_level") != risk_level_for(status, blocks):
+        print(f"preflight prerequisite {name} has inconsistent risk_level")
+        sys.exit(1)
+    if row.get("authoritative_lane_impact") not in lane_impacts:
+        print(f"preflight prerequisite {name} has invalid authoritative_lane_impact")
+        sys.exit(1)
+    if row.get("authoritative_lane_impact") != lane_impact_for(name, status, blocks):
+        print(f"preflight prerequisite {name} has inconsistent authoritative_lane_impact")
+        sys.exit(1)
+    if row.get("side_effect_policy") != side_effect_policy:
+        print(f"preflight prerequisite {name} has unsupported side-effect policy")
+        sys.exit(1)
+    safe = row.get("safe_remediation")
+    if not isinstance(safe, dict) or safe.get("automation") != "manual_only":
+        print(f"preflight prerequisite {name} missing manual-only remediation contract")
+        sys.exit(1)
+    for field in [
+        "runner_executes_remediation",
+        "auto_install",
+        "mounts_or_unmounts",
+        "creates_persistent_paths",
+    ]:
+        if safe.get(field) is not False:
+            print(f"preflight prerequisite {name} safe_remediation {field} must be false")
+            sys.exit(1)
+    if not str(row.get("remediation_text_id", "")).startswith("xfstests-preflight-"):
+        print(f"preflight prerequisite {name} missing remediation_text_id")
+        sys.exit(1)
+    if not row.get("reproduction_command"):
+        print(f"preflight prerequisite {name} missing reproduction_command")
+        sys.exit(1)
+    for probe in row.get("probes", []):
+        if isinstance(probe, dict) and not safe_probe_argv(probe.get("argv")):
+            print(f"preflight prerequisite {name} has mutating probe argv: {probe.get('argv')}")
+            sys.exit(1)
 
 print("preflight passed")
 PY
