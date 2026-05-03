@@ -18,11 +18,13 @@ use std::path::Path;
 
 pub const PERFORMANCE_BASELINE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-const REQUIRED_ENVIRONMENT_FIELDS: [&str; 12] = [
+const REQUIRED_ENVIRONMENT_FIELDS: [&str; 21] = [
     "manifest_version",
     "git_sha",
     "built_with",
     "os",
+    "host_id",
+    "worker_id",
     "cpu_model",
     "cpu_cores_logical",
     "cpu_cores_physical",
@@ -30,21 +32,58 @@ const REQUIRED_ENVIRONMENT_FIELDS: [&str; 12] = [
     "storage_class",
     "governor",
     "mitigations",
+    "kernel.version",
+    "fuse.version",
+    "kernel_fuse_mode",
+    "cargo_profile",
+    "target_dir",
+    "resource_limits.cpu_cores",
+    "resource_limits.memory_gib",
     "capabilities.fuse",
 ];
 
-const REQUIRED_LOG_FIELDS: [&str; 11] = [
+const REQUIRED_LOG_FIELDS: [&str; 24] = [
     "workload_id",
+    "baseline_id",
+    "current_artifact_id",
+    "current_artifact_hash",
+    "environment_fingerprint",
     "command",
     "profile",
+    "target_dir",
     "artifact_path",
     "metric_unit",
+    "observed_value",
     "comparison_target",
     "warn_percent",
     "fail_percent",
     "max_cv",
+    "stale_baseline_expiry_days",
+    "noise_decision",
+    "stale_decision",
+    "comparison_verdict",
+    "public_claim_state",
+    "raw_stdout_path",
+    "raw_stderr_path",
     "environment_manifest",
     "reproduction_command",
+];
+
+const REQUIRED_WORKLOAD_KINDS: [PerformanceWorkloadKind; 5] = [
+    PerformanceWorkloadKind::CoreNonMounted,
+    PerformanceWorkloadKind::PermissionedMounted,
+    PerformanceWorkloadKind::RepairScrubRefresh,
+    PerformanceWorkloadKind::CliInspectParity,
+    PerformanceWorkloadKind::LongCampaignObservation,
+];
+
+const REQUIRED_FIXTURE_CLASSIFICATIONS: [PerformanceEvidenceClassification; 6] = [
+    PerformanceEvidenceClassification::Pass,
+    PerformanceEvidenceClassification::Warn,
+    PerformanceEvidenceClassification::Fail,
+    PerformanceEvidenceClassification::Noisy,
+    PerformanceEvidenceClassification::Stale,
+    PerformanceEvidenceClassification::Missing,
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,6 +97,8 @@ pub struct PerformanceBaselineManifest {
     pub required_environment_fields: Vec<String>,
     pub required_log_fields: Vec<String>,
     pub workloads: Vec<PerformanceWorkload>,
+    #[serde(default)]
+    pub fixture_evidence: Vec<PerformanceFixtureEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,8 +107,14 @@ pub struct PerformanceWorkload {
     pub workstream: String,
     pub description: String,
     pub command_template: String,
+    pub workload_kind: PerformanceWorkloadKind,
+    pub cargo_profile: String,
+    pub target_dir_template: String,
+    pub kernel_fuse_mode: PerformanceKernelFuseMode,
     pub required_capabilities: Vec<String>,
+    pub skip_semantics: PerformanceSkipSemantics,
     pub dataset: String,
+    pub input_fixture_hash: String,
     pub image_size_mib: u64,
     pub warmup_runs: u32,
     pub measured_runs: u32,
@@ -76,7 +123,90 @@ pub struct PerformanceWorkload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_data_note: Option<String>,
     pub threshold: PerformanceThreshold,
+    pub required_raw_logs: Vec<String>,
+    pub quarantine_policy: PerformanceQuarantinePolicy,
     pub output_artifact: PerformanceOutputArtifact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceWorkloadKind {
+    CoreNonMounted,
+    PermissionedMounted,
+    RepairScrubRefresh,
+    CliInspectParity,
+    LongCampaignObservation,
+}
+
+impl PerformanceWorkloadKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CoreNonMounted => "core_non_mounted",
+            Self::PermissionedMounted => "permissioned_mounted",
+            Self::RepairScrubRefresh => "repair_scrub_refresh",
+            Self::CliInspectParity => "cli_inspect_parity",
+            Self::LongCampaignObservation => "long_campaign_observation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceKernelFuseMode {
+    NotRequired,
+    HostCapabilitySkip,
+    PermissionedRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceSkipSemantics {
+    NeverSkip,
+    CapabilitySkip,
+    HostQuarantine,
+    LongCampaignDeferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerformanceQuarantinePolicy {
+    pub stale_baseline_expiry_days: u32,
+    pub claim_when_quarantined: PerformancePublicClaimState,
+    pub follow_up_bead: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformancePublicClaimState {
+    Unknown,
+    Experimental,
+    FixtureSmokeOnly,
+    MeasuredLocal,
+    MeasuredAuthoritative,
+    RegressionFree,
+    DegradedButAccepted,
+    Blocked,
+}
+
+impl PerformancePublicClaimState {
+    #[must_use]
+    pub const fn is_safe_quarantine_claim(self) -> bool {
+        matches!(self, Self::Unknown | Self::Experimental)
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Experimental => "experimental",
+            Self::FixtureSmokeOnly => "fixture_smoke_only",
+            Self::MeasuredLocal => "measured_local",
+            Self::MeasuredAuthoritative => "measured_authoritative",
+            Self::RegressionFree => "regression_free",
+            Self::DegradedButAccepted => "degraded_but_accepted",
+            Self::Blocked => "blocked",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -109,6 +239,61 @@ pub struct PerformanceThreshold {
     pub max_cv: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceEvidenceClassification {
+    Pass,
+    Warn,
+    Fail,
+    Noisy,
+    Stale,
+    Missing,
+}
+
+impl PerformanceEvidenceClassification {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Fail => "fail",
+            Self::Noisy => "noisy",
+            Self::Stale => "stale",
+            Self::Missing => "missing",
+        }
+    }
+
+    #[must_use]
+    pub const fn needs_quarantine(self) -> bool {
+        matches!(self, Self::Fail | Self::Noisy | Self::Stale | Self::Missing)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceMeasurementState {
+    Measured,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceFixtureEvidence {
+    pub fixture_id: String,
+    pub workload_id: String,
+    pub measurement_state: PerformanceMeasurementState,
+    pub baseline_id: String,
+    pub current_artifact_id: String,
+    pub current_artifact_hash: String,
+    pub environment_fingerprint: String,
+    pub baseline_age_days: u32,
+    pub observed_value: f64,
+    pub delta_percent: f64,
+    pub coefficient_of_variation: f64,
+    pub raw_stdout_path: String,
+    pub raw_stderr_path: String,
+    pub reproduction_command: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerformanceOutputArtifact {
     pub path_template: String,
@@ -121,12 +306,41 @@ pub struct PerformanceOutputArtifact {
 pub struct PerformanceCommandExpansion {
     pub workload_id: String,
     pub command: String,
+    pub cargo_profile: String,
+    pub target_dir: String,
     pub artifact_path: String,
+    pub workload_kind: String,
+    pub kernel_fuse_mode: PerformanceKernelFuseMode,
+    pub skip_semantics: PerformanceSkipSemantics,
     pub metric_unit: String,
     pub comparison_target: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceEvidenceReport {
+    pub fixture_id: String,
+    pub workload_id: String,
+    pub baseline_id: String,
+    pub current_artifact_id: String,
+    pub current_artifact_hash: String,
+    pub environment_fingerprint: String,
+    pub metric_unit: String,
+    pub observed_value: f64,
+    pub threshold: PerformanceThreshold,
+    pub baseline_age_days: u32,
+    pub stale_baseline_expiry_days: u32,
+    pub coefficient_of_variation: f64,
+    pub noise_decision: String,
+    pub stale_decision: String,
+    pub comparison_verdict: PerformanceEvidenceClassification,
+    pub public_claim_state: PerformancePublicClaimState,
+    pub follow_up_bead: String,
+    pub raw_stdout_path: String,
+    pub raw_stderr_path: String,
+    pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PerformanceBaselineManifestReport {
     pub schema_version: u32,
     pub manifest_id: String,
@@ -136,6 +350,11 @@ pub struct PerformanceBaselineManifestReport {
     pub required_environment_fields: Vec<String>,
     pub required_log_fields: Vec<String>,
     pub command_expansions: Vec<PerformanceCommandExpansion>,
+    pub workload_kind_counts: BTreeMap<String, usize>,
+    pub missing_required_workload_kinds: Vec<String>,
+    pub fixture_evidence_reports: Vec<PerformanceEvidenceReport>,
+    pub fixture_classification_counts: BTreeMap<String, usize>,
+    pub quarantined_workloads: Vec<String>,
     pub sample_artifact_manifest_errors: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -155,6 +374,29 @@ pub fn validate_performance_baseline_manifest(
     let mut errors = Vec::new();
     validate_manifest_shape(manifest, &mut errors);
     let command_expansions = expand_performance_commands(manifest, artifact_root);
+    let workload_kind_counts = count_workload_kinds(manifest);
+    let missing_required_workload_kinds = missing_required_workload_kinds(&workload_kind_counts);
+    errors.extend(
+        missing_required_workload_kinds
+            .iter()
+            .map(|kind| format!("missing workload kind {kind}")),
+    );
+    let fixture_evidence_reports = validate_fixture_evidence(manifest, &mut errors);
+    let fixture_classification_counts = count_fixture_classifications(&fixture_evidence_reports);
+    let missing_fixture_classifications =
+        missing_required_fixture_classifications(&fixture_classification_counts);
+    errors.extend(
+        missing_fixture_classifications
+            .iter()
+            .map(|class| format!("missing fixture evidence classification {class}")),
+    );
+    let quarantined_workloads = fixture_evidence_reports
+        .iter()
+        .filter(|row| row.comparison_verdict.needs_quarantine())
+        .map(|row| row.workload_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let sample_artifact_manifest =
         build_performance_sample_artifact_manifest(manifest, artifact_root);
     let sample_artifact_manifest_errors = validate_manifest(&sample_artifact_manifest)
@@ -176,6 +418,11 @@ pub fn validate_performance_baseline_manifest(
         required_environment_fields: manifest.required_environment_fields.clone(),
         required_log_fields: manifest.required_log_fields.clone(),
         command_expansions,
+        workload_kind_counts,
+        missing_required_workload_kinds,
+        fixture_evidence_reports,
+        fixture_classification_counts,
+        quarantined_workloads,
         sample_artifact_manifest_errors,
         errors,
     }
@@ -204,7 +451,17 @@ pub fn expand_performance_commands(
                     workload,
                     artifact_root,
                 ),
+                cargo_profile: workload.cargo_profile.clone(),
+                target_dir: expand_template(
+                    &workload.target_dir_template,
+                    manifest,
+                    workload,
+                    artifact_root,
+                ),
                 artifact_path,
+                workload_kind: workload.workload_kind.label().to_owned(),
+                kernel_fuse_mode: workload.kernel_fuse_mode,
+                skip_semantics: workload.skip_semantics,
                 metric_unit: workload.metric_unit.label().to_owned(),
                 comparison_target: workload.comparison_target.clone(),
             }
@@ -264,6 +521,8 @@ pub fn build_performance_sample_artifact_manifest(
                 ("workload_id".to_owned(), expansion.workload_id),
                 ("metric_unit".to_owned(), expansion.metric_unit),
                 ("comparison_target".to_owned(), expansion.comparison_target),
+                ("target_dir".to_owned(), expansion.target_dir),
+                ("workload_kind".to_owned(), expansion.workload_kind),
             ]),
         });
     }
@@ -321,7 +580,7 @@ fn validate_manifest_shape(manifest: &PerformanceBaselineManifest, errors: &mut 
         .collect::<BTreeSet<_>>();
     let mut workload_ids = BTreeMap::<&str, usize>::new();
     for workload in &manifest.workloads {
-        validate_workload(workload, &allowed, errors);
+        validate_workload(workload, manifest.profile.as_str(), &allowed, errors);
         *workload_ids
             .entry(workload.workload_id.as_str())
             .or_default() += 1;
@@ -335,6 +594,7 @@ fn validate_manifest_shape(manifest: &PerformanceBaselineManifest, errors: &mut 
 
 fn validate_workload(
     workload: &PerformanceWorkload,
+    manifest_profile: &str,
     allowed_capabilities: &BTreeSet<&str>,
     errors: &mut Vec<String>,
 ) {
@@ -342,11 +602,32 @@ fn validate_workload(
     validate_nonempty("workstream", &workload.workstream, errors);
     validate_nonempty("description", &workload.description, errors);
     validate_nonempty("command_template", &workload.command_template, errors);
+    validate_nonempty("cargo_profile", &workload.cargo_profile, errors);
+    validate_nonempty("target_dir_template", &workload.target_dir_template, errors);
     validate_nonempty("dataset", &workload.dataset, errors);
+    validate_nonempty("input_fixture_hash", &workload.input_fixture_hash, errors);
     validate_nonempty("comparison_target", &workload.comparison_target, errors);
     if !workload.command_template.contains("{profile}") {
         errors.push(format!(
             "workload {} command_template must include {{profile}}",
+            workload.workload_id
+        ));
+    }
+    if workload.cargo_profile != manifest_profile {
+        errors.push(format!(
+            "workload {} cargo_profile must match manifest profile {}",
+            workload.workload_id, manifest_profile
+        ));
+    }
+    if !workload.target_dir_template.contains("{workload_id}") {
+        errors.push(format!(
+            "workload {} target_dir_template must include {{workload_id}}",
+            workload.workload_id
+        ));
+    }
+    if !is_sha256_ref(&workload.input_fixture_hash) {
+        errors.push(format!(
+            "workload {} input_fixture_hash must be sha256:<64 hex chars>",
             workload.workload_id
         ));
     }
@@ -364,6 +645,7 @@ fn validate_workload(
             ));
         }
     }
+    validate_kernel_fuse_mode(workload, errors);
     if workload.warmup_runs == 0 || workload.measured_runs == 0 {
         errors.push(format!(
             "workload {} warmup_runs and measured_runs must be positive",
@@ -384,7 +666,81 @@ fn validate_workload(
             workload.workload_id
         ));
     }
+    validate_required_raw_logs(workload, errors);
+    validate_quarantine_policy(workload, errors);
     validate_artifact(workload, errors);
+}
+
+fn validate_kernel_fuse_mode(workload: &PerformanceWorkload, errors: &mut Vec<String>) {
+    let requires_fuse = workload
+        .required_capabilities
+        .iter()
+        .any(|capability| capability == "fuse");
+    if workload.kernel_fuse_mode == PerformanceKernelFuseMode::PermissionedRequired
+        && !requires_fuse
+    {
+        errors.push(format!(
+            "workload {} permissioned FUSE mode must require fuse capability",
+            workload.workload_id
+        ));
+    }
+    if workload.workload_kind == PerformanceWorkloadKind::PermissionedMounted
+        && workload.skip_semantics != PerformanceSkipSemantics::CapabilitySkip
+    {
+        errors.push(format!(
+            "workload {} mounted workloads must use capability_skip semantics",
+            workload.workload_id
+        ));
+    }
+    if workload.workload_kind == PerformanceWorkloadKind::LongCampaignObservation
+        && workload.skip_semantics != PerformanceSkipSemantics::LongCampaignDeferred
+    {
+        errors.push(format!(
+            "workload {} long campaigns must use long_campaign_deferred semantics",
+            workload.workload_id
+        ));
+    }
+}
+
+fn validate_required_raw_logs(workload: &PerformanceWorkload, errors: &mut Vec<String>) {
+    let logs = workload
+        .required_raw_logs
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    for required in ["stdout", "stderr"] {
+        if !logs.contains(required) {
+            errors.push(format!(
+                "workload {} required_raw_logs missing {required}",
+                workload.workload_id
+            ));
+        }
+    }
+}
+
+fn validate_quarantine_policy(workload: &PerformanceWorkload, errors: &mut Vec<String>) {
+    if workload.quarantine_policy.stale_baseline_expiry_days == 0 {
+        errors.push(format!(
+            "workload {} stale_baseline_expiry_days must be positive",
+            workload.workload_id
+        ));
+    }
+    if !workload
+        .quarantine_policy
+        .claim_when_quarantined
+        .is_safe_quarantine_claim()
+    {
+        errors.push(format!(
+            "workload {} quarantined performance evidence may only claim unknown or experimental",
+            workload.workload_id
+        ));
+    }
+    if workload.quarantine_policy.follow_up_bead.trim().is_empty() {
+        errors.push(format!(
+            "workload {} quarantine policy must link follow_up_bead",
+            workload.workload_id
+        ));
+    }
 }
 
 fn validate_artifact(workload: &PerformanceWorkload, errors: &mut Vec<String>) {
@@ -441,6 +797,197 @@ fn validate_required_fields(
     }
 }
 
+fn validate_fixture_evidence(
+    manifest: &PerformanceBaselineManifest,
+    errors: &mut Vec<String>,
+) -> Vec<PerformanceEvidenceReport> {
+    if manifest.fixture_evidence.is_empty() {
+        errors.push("fixture_evidence must not be empty".to_owned());
+        return Vec::new();
+    }
+
+    let workloads = manifest
+        .workloads
+        .iter()
+        .map(|workload| (workload.workload_id.as_str(), workload))
+        .collect::<BTreeMap<_, _>>();
+    let mut fixture_ids = BTreeSet::new();
+    let mut reports = Vec::new();
+
+    for fixture in &manifest.fixture_evidence {
+        validate_nonempty("fixture_id", &fixture.fixture_id, errors);
+        if !fixture_ids.insert(fixture.fixture_id.as_str()) {
+            errors.push(format!("duplicate fixture_id {}", fixture.fixture_id));
+        }
+        let Some(workload) = workloads.get(fixture.workload_id.as_str()).copied() else {
+            errors.push(format!(
+                "fixture {} references unknown workload {}",
+                fixture.fixture_id, fixture.workload_id
+            ));
+            continue;
+        };
+        validate_nonempty("baseline_id", &fixture.baseline_id, errors);
+        validate_nonempty("current_artifact_id", &fixture.current_artifact_id, errors);
+        validate_nonempty(
+            "current_artifact_hash",
+            &fixture.current_artifact_hash,
+            errors,
+        );
+        validate_nonempty(
+            "environment_fingerprint",
+            &fixture.environment_fingerprint,
+            errors,
+        );
+        validate_nonempty("raw_stdout_path", &fixture.raw_stdout_path, errors);
+        validate_nonempty("raw_stderr_path", &fixture.raw_stderr_path, errors);
+        validate_nonempty(
+            "reproduction_command",
+            &fixture.reproduction_command,
+            errors,
+        );
+        if fixture.measurement_state == PerformanceMeasurementState::Measured
+            && fixture.observed_value <= 0.0
+        {
+            errors.push(format!(
+                "fixture {} measured evidence must have positive observed_value",
+                fixture.fixture_id
+            ));
+        }
+        if fixture.coefficient_of_variation < 0.0 {
+            errors.push(format!(
+                "fixture {} coefficient_of_variation must be non-negative",
+                fixture.fixture_id
+            ));
+        }
+
+        let classification = classify_fixture_evidence(workload, fixture);
+        if classification.needs_quarantine() {
+            if workload.quarantine_policy.follow_up_bead.trim().is_empty() {
+                errors.push(format!(
+                    "fixture {} quarantines workload {} without follow_up_bead",
+                    fixture.fixture_id, workload.workload_id
+                ));
+            }
+            if !workload
+                .quarantine_policy
+                .claim_when_quarantined
+                .is_safe_quarantine_claim()
+            {
+                errors.push(format!(
+                    "fixture {} quarantined workload {} would overclaim public performance state",
+                    fixture.fixture_id, workload.workload_id
+                ));
+            }
+        }
+
+        reports.push(PerformanceEvidenceReport {
+            fixture_id: fixture.fixture_id.clone(),
+            workload_id: fixture.workload_id.clone(),
+            baseline_id: fixture.baseline_id.clone(),
+            current_artifact_id: fixture.current_artifact_id.clone(),
+            current_artifact_hash: fixture.current_artifact_hash.clone(),
+            environment_fingerprint: fixture.environment_fingerprint.clone(),
+            metric_unit: workload.metric_unit.label().to_owned(),
+            observed_value: fixture.observed_value,
+            threshold: workload.threshold,
+            baseline_age_days: fixture.baseline_age_days,
+            stale_baseline_expiry_days: workload.quarantine_policy.stale_baseline_expiry_days,
+            coefficient_of_variation: fixture.coefficient_of_variation,
+            noise_decision: if fixture.coefficient_of_variation > workload.threshold.max_cv {
+                "quarantine_noisy"
+            } else {
+                "noise_within_budget"
+            }
+            .to_owned(),
+            stale_decision: if fixture.baseline_age_days
+                > workload.quarantine_policy.stale_baseline_expiry_days
+            {
+                "quarantine_stale"
+            } else {
+                "fresh"
+            }
+            .to_owned(),
+            comparison_verdict: classification,
+            public_claim_state: if classification.needs_quarantine() {
+                workload.quarantine_policy.claim_when_quarantined
+            } else {
+                PerformancePublicClaimState::MeasuredLocal
+            },
+            follow_up_bead: workload.quarantine_policy.follow_up_bead.clone(),
+            raw_stdout_path: fixture.raw_stdout_path.clone(),
+            raw_stderr_path: fixture.raw_stderr_path.clone(),
+            reproduction_command: fixture.reproduction_command.clone(),
+        });
+    }
+
+    reports
+}
+
+fn classify_fixture_evidence(
+    workload: &PerformanceWorkload,
+    fixture: &PerformanceFixtureEvidence,
+) -> PerformanceEvidenceClassification {
+    if fixture.measurement_state == PerformanceMeasurementState::Missing {
+        return PerformanceEvidenceClassification::Missing;
+    }
+    if fixture.baseline_age_days > workload.quarantine_policy.stale_baseline_expiry_days {
+        return PerformanceEvidenceClassification::Stale;
+    }
+    if fixture.coefficient_of_variation > workload.threshold.max_cv {
+        return PerformanceEvidenceClassification::Noisy;
+    }
+    if fixture.delta_percent > workload.threshold.fail_percent {
+        PerformanceEvidenceClassification::Fail
+    } else if fixture.delta_percent > workload.threshold.warn_percent {
+        PerformanceEvidenceClassification::Warn
+    } else {
+        PerformanceEvidenceClassification::Pass
+    }
+}
+
+fn count_workload_kinds(manifest: &PerformanceBaselineManifest) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for workload in &manifest.workloads {
+        *counts
+            .entry(workload.workload_kind.label().to_owned())
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+fn missing_required_workload_kinds(counts: &BTreeMap<String, usize>) -> Vec<String> {
+    REQUIRED_WORKLOAD_KINDS
+        .iter()
+        .map(|kind| kind.label().to_owned())
+        .filter(|kind| !counts.contains_key(kind))
+        .collect()
+}
+
+fn count_fixture_classifications(reports: &[PerformanceEvidenceReport]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for report in reports {
+        *counts
+            .entry(report.comparison_verdict.label().to_owned())
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+fn missing_required_fixture_classifications(counts: &BTreeMap<String, usize>) -> Vec<String> {
+    REQUIRED_FIXTURE_CLASSIFICATIONS
+        .iter()
+        .map(|classification| classification.label().to_owned())
+        .filter(|classification| !counts.contains_key(classification))
+        .collect()
+}
+
+fn is_sha256_ref(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn validate_nonempty(field: &str, value: &str, errors: &mut Vec<String>) {
     if value.trim().is_empty() {
         errors.push(format!("{field} must not be empty"));
@@ -477,15 +1024,28 @@ mod tests {
         let report =
             validate_performance_baseline_manifest(&manifest, "artifacts/performance/dry-run");
         assert!(report.valid, "{:?}", report.errors);
-        assert_eq!(report.workload_count, 9);
-        assert_eq!(report.sample_artifact_manifest_errors, Vec::<String>::new());
+        assert_eq!(report.workload_count, 10);
+        assert_eq!(report.missing_required_workload_kinds, Vec::<String>::new());
+        assert_eq!(
+            report
+                .fixture_classification_counts
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["fail", "missing", "noisy", "pass", "stale", "warn"]
+        );
         assert!(
             report
-                .command_expansions
+                .quarantined_workloads
                 .iter()
-                .any(|row| row.workload_id == "fuse_metadata_readdir_1k"
-                    && row.command.contains("artifacts/performance/dry-run"))
+                .any(|workload| workload == "mvcc_conflict_detection_rate")
         );
+        assert_eq!(report.sample_artifact_manifest_errors, Vec::<String>::new());
+        assert!(report.command_expansions.iter().any(|row| row.workload_id
+            == "fuse_metadata_readdir_1k"
+            && row.command.contains("artifacts/performance/dry-run")
+            && row.target_dir.contains("fuse_metadata_readdir_1k")
+            && row.kernel_fuse_mode == PerformanceKernelFuseMode::PermissionedRequired));
     }
 
     #[test]
@@ -551,6 +1111,153 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("required_environment_fields missing git_sha"))
         );
+    }
+
+    #[test]
+    fn rejects_missing_worker_metadata_field() {
+        let mut manifest = sample_manifest();
+        manifest
+            .required_environment_fields
+            .retain(|field| field != "worker_id");
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("required_environment_fields missing worker_id") })
+        );
+    }
+
+    #[test]
+    fn rejects_workload_missing_target_dir_template() {
+        let mut manifest = sample_manifest();
+        manifest.workloads[0].target_dir_template.clear();
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| { error.contains("target_dir_template must not be empty") })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_input_fixture_hash() {
+        let mut manifest = sample_manifest();
+        manifest.workloads[0].input_fixture_hash = "abc123".to_owned();
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        assert!(!report.valid);
+        assert!(
+            report.errors.iter().any(|error| {
+                error.contains("input_fixture_hash must be sha256:<64 hex chars>")
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_missing_raw_log_contract() {
+        let mut manifest = sample_manifest();
+        manifest.workloads[0]
+            .required_raw_logs
+            .retain(|field| field != "stderr");
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("required_raw_logs missing stderr"))
+        );
+    }
+
+    #[test]
+    fn fixture_rows_cover_quarantine_states() {
+        let manifest = sample_manifest();
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        let by_fixture = report
+            .fixture_evidence_reports
+            .iter()
+            .map(|row| (row.fixture_id.as_str(), row))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            by_fixture["fixture_pass_core"].comparison_verdict,
+            PerformanceEvidenceClassification::Pass
+        );
+        assert_eq!(
+            by_fixture["fixture_warn_cli"].comparison_verdict,
+            PerformanceEvidenceClassification::Warn
+        );
+        assert_eq!(
+            by_fixture["fixture_fail_mvcc"].comparison_verdict,
+            PerformanceEvidenceClassification::Fail
+        );
+        assert_eq!(
+            by_fixture["fixture_noisy_repair"].comparison_verdict,
+            PerformanceEvidenceClassification::Noisy
+        );
+        assert_eq!(
+            by_fixture["fixture_stale_fuse"].comparison_verdict,
+            PerformanceEvidenceClassification::Stale
+        );
+        assert_eq!(
+            by_fixture["fixture_missing_long_campaign"].comparison_verdict,
+            PerformanceEvidenceClassification::Missing
+        );
+    }
+
+    #[test]
+    fn quarantined_rows_downgrade_public_claims() {
+        let manifest = sample_manifest();
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        for row in &report.fixture_evidence_reports {
+            if row.comparison_verdict.needs_quarantine() {
+                assert!(row.public_claim_state.is_safe_quarantine_claim());
+                assert!(
+                    row.follow_up_bead.starts_with("bd-"),
+                    "missing follow-up bead for {}",
+                    row.fixture_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn important_quarantine_requires_follow_up_bead() {
+        let mut manifest = sample_manifest();
+        let workload = manifest
+            .workloads
+            .iter_mut()
+            .find(|workload| workload.workload_id == "mvcc_conflict_detection_rate")
+            .expect("fixture workload exists");
+        workload.quarantine_policy.follow_up_bead.clear();
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        assert!(!report.valid);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("quarantine policy must link follow_up_bead"))
+        );
+    }
+
+    #[test]
+    fn quarantined_workload_cannot_overclaim_public_state() {
+        let mut manifest = sample_manifest();
+        let workload = manifest
+            .workloads
+            .iter_mut()
+            .find(|workload| workload.workload_id == "repair_lrc_encode_throughput")
+            .expect("fixture workload exists");
+        workload.quarantine_policy.claim_when_quarantined =
+            PerformancePublicClaimState::MeasuredAuthoritative;
+        let report = validate_performance_baseline_manifest(&manifest, "artifacts/perf");
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error
+                .contains("quarantined performance evidence may only claim unknown or experimental")
+        }));
     }
 
     #[test]

@@ -17,10 +17,12 @@ cargo run -p ffs-harness -- validate-performance-baseline-manifest \
   --artifact-out artifacts/performance/sample_artifact_manifest.json
 ```
 
-The validator expands every command template, checks workload ids,
-capability names, thresholds, metric units, environment fields, aggregatable
-artifact fields, and emits a sample shared QA artifact manifest compatible with
-the operational artifact schema from `bd-rchk0.4.1`.
+The validator expands every command template, checks workload ids, cargo
+profiles, target directories, capability names, kernel/FUSE mode, thresholds,
+metric units, input fixture hashes, environment fields, raw-log contracts,
+quarantine policy, aggregatable artifact fields, and emits a sample shared QA
+artifact manifest compatible with the operational artifact schema from
+`bd-rchk0.4.1`.
 
 ## Manifest version
 
@@ -55,6 +57,32 @@ of the run artifact.
 | FUSE mount      | metadata-only readdir                     | `crates/ffs-fuse/benches/mount_runtime.rs`                            | 1k-entry directory, mount required                             |
 | FUSE mount      | sequential read 4K                        | `crates/ffs-fuse/benches/mount_runtime.rs`                            | 16 MiB file, mount required                                    |
 | FUSE mount      | degraded-pressure read                    | `crates/ffs-fuse/benches/degraded_pressure.rs`                        | varied dirty-block ratio                                       |
+| Long campaign   | writeback-cache smoke observation         | `scripts/e2e/ffs_soak_canary_campaign_e2e.sh`                         | bounded soak/canary smoke profile                             |
+
+## Quarantine policy
+
+`bd-rchk5.1.1` adds a fail-closed policy layer between raw benchmark output and
+public performance wording. Each workload row now records:
+
+- `workload_kind` — one of `core_non_mounted`, `permissioned_mounted`,
+  `repair_scrub_refresh`, `cli_inspect_parity`, or
+  `long_campaign_observation`.
+- `cargo_profile` and `target_dir_template` — so RCH/local runs cannot compare
+  mismatched profiles or target directories.
+- `kernel_fuse_mode` and `skip_semantics` — so mounted rows become structured
+  host-capability skips instead of silent absences.
+- `input_fixture_hash` — the fixture or dataset hash used by the row.
+- `required_raw_logs` — at minimum stdout and stderr, plus row-specific raw
+  outputs such as Criterion JSON, mount logs, or heartbeat logs.
+- `quarantine_policy` — stale-baseline expiry, the maximum public claim allowed
+  when quarantined, and the follow-up bead that owns missing/noisy/stale or
+  regressed evidence.
+
+The checked-in manifest also carries fixture evidence rows that exercise the
+policy without running heavy benchmarks. They cover `pass`, `warn`, `fail`,
+`noisy`, `stale`, and `missing`. Any `fail`, `noisy`, `stale`, or `missing`
+row must keep public claims at `unknown` or `experimental` and must link an
+owning follow-up bead.
 
 ## Required environment-field schema
 
@@ -64,6 +92,7 @@ Every run artifact must include a `meta.json` capturing:
 - `git_sha` — output of `git rev-parse HEAD`.
 - `built_with` — `cargo --version` output.
 - `os` — `uname -srv` output (kernel version matters for FUSE benches).
+- `host_id` / `worker_id` — stable identifiers for the local host or RCH worker.
 - `cpu_model` — first `model name` line from `/proc/cpuinfo`.
 - `cpu_cores_logical` / `cpu_cores_physical`.
 - `ram_total_gb` — `/proc/meminfo MemTotal` rounded to integer GiB.
@@ -72,6 +101,14 @@ Every run artifact must include a `meta.json` capturing:
   and the device's transport type.
 - `governor` — CPU frequency governor (`/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`).
 - `mitigations` — `/sys/devices/system/cpu/vulnerabilities/*` summary.
+- `kernel.version` and `fuse.version` — explicit kernel/FUSE probe output used
+  for mounted and permissioned rows.
+- `kernel_fuse_mode` — row mode: not required, host-capability skip, or
+  permissioned required.
+- `cargo_profile` and `target_dir` — the exact profile and target directory
+  used for the run.
+- `resource_limits.cpu_cores` / `resource_limits.memory_gib` — caps or host
+  resources visible to the run.
 - `capabilities.fuse` — `true` when `/dev/fuse` exists, `fusermount3 -V`
   succeeds, and the harness's FUSE capability probe passes (see
   bd-rchk4.1 artifact). `false` triggers SKIP for all FUSE rows.
