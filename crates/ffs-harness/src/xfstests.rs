@@ -102,6 +102,28 @@ pub struct XfstestsAllowlistEntry {
     pub tracker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repro_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_plan: Option<XfstestsCommandPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct XfstestsCommandPlan {
+    pub plan_id: String,
+    pub execution_lane: String,
+    pub scratch_path: String,
+    pub mountpoint: String,
+    pub image_hash: String,
+    #[serde(default)]
+    pub helper_binaries: Vec<String>,
+    #[serde(default)]
+    pub required_privileges: Vec<String>,
+    pub mutation_surface: String,
+    pub cleanup_action: String,
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub destructive: bool,
+    pub expected_plan_outcome: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +175,35 @@ const REQUIRED_XFSTESTS_ARTIFACTS: &[&str] = &[
     "summary.json",
     "results.json",
     "junit.xml",
+];
+
+const KNOWN_XFSTESTS_COMMAND_PLAN_LANES: &[&str] = &[
+    "dry_run_only",
+    "fixture_only",
+    "permissioned_real",
+    "host_skip",
+    "unsupported_by_scope",
+];
+
+const KNOWN_XFSTESTS_COMMAND_PLAN_PRIVILEGES: &[&str] = &[
+    "none",
+    "user_mount",
+    "fuse_mount",
+    "root_required",
+    "cap_sys_admin",
+    "scratch_device",
+    "host_tooling",
+];
+
+const KNOWN_XFSTESTS_COMMAND_PLAN_OUTCOMES: &[&str] = &[
+    "dry_run_only",
+    "fixture_only",
+    "permissioned_real",
+    "host_skip",
+    "unsupported_by_scope",
+    "product_failure",
+    "harness_failure",
+    "cleanup_failure",
 ];
 
 pub fn load_selected_tests(path: &Path) -> Result<Vec<String>> {
@@ -260,6 +311,7 @@ fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors:
     validate_policy_scope(entry, errors);
     validate_policy_risk(entry, errors);
     validate_policy_artifacts(entry, errors);
+    validate_policy_command_plan(entry, errors);
     validate_policy_outcome(entry, errors);
     validate_policy_links(entry, errors);
 }
@@ -414,6 +466,160 @@ fn validate_policy_artifacts(entry: &XfstestsAllowlistEntry, errors: &mut Vec<St
     }
 }
 
+fn validate_policy_command_plan(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
+    let Some(plan) = entry.command_plan.as_ref() else {
+        errors.push(format!(
+            "xfstests policy {} is missing command_plan",
+            entry.test_id
+        ));
+        return;
+    };
+
+    validate_command_plan_identity(entry, plan, errors);
+    validate_command_plan_paths(entry, plan, errors);
+    validate_command_plan_helpers(entry, plan, errors);
+    validate_command_plan_argv(entry, plan, errors);
+
+    if plan.destructive && plan.execution_lane != "permissioned_real" {
+        errors.push(format!(
+            "xfstests policy {} command plan marks destructive action outside permissioned_real lane",
+            entry.test_id
+        ));
+    }
+}
+
+fn validate_command_plan_identity(
+    entry: &XfstestsAllowlistEntry,
+    plan: &XfstestsCommandPlan,
+    errors: &mut Vec<String>,
+) {
+    if !plan.plan_id.starts_with("xfstests-plan-") {
+        errors.push(format!(
+            "xfstests policy {} has malformed command plan id: {}",
+            entry.test_id, plan.plan_id
+        ));
+    }
+
+    if !KNOWN_XFSTESTS_COMMAND_PLAN_LANES.contains(&plan.execution_lane.as_str()) {
+        errors.push(format!(
+            "xfstests policy {} has unknown command plan lane: {}",
+            entry.test_id, plan.execution_lane
+        ));
+    }
+
+    if !KNOWN_XFSTESTS_COMMAND_PLAN_OUTCOMES.contains(&plan.expected_plan_outcome.as_str()) {
+        errors.push(format!(
+            "xfstests policy {} command plan has unknown expected outcome: {}",
+            entry.test_id, plan.expected_plan_outcome
+        ));
+    }
+}
+
+fn validate_command_plan_paths(
+    entry: &XfstestsAllowlistEntry,
+    plan: &XfstestsCommandPlan,
+    errors: &mut Vec<String>,
+) {
+    if !is_temp_scoped_path(&plan.scratch_path) {
+        errors.push(format!(
+            "xfstests policy {} command plan uses non-temporary scratch path: {}",
+            entry.test_id, plan.scratch_path
+        ));
+    }
+
+    if !is_temp_scoped_path(&plan.mountpoint) {
+        errors.push(format!(
+            "xfstests policy {} command plan uses non-temporary mountpoint: {}",
+            entry.test_id, plan.mountpoint
+        ));
+    }
+
+    if !plan.image_hash.starts_with("sha256:") || plan.image_hash.len() <= "sha256:".len() {
+        errors.push(format!(
+            "xfstests policy {} command plan is missing image hash",
+            entry.test_id
+        ));
+    }
+}
+
+fn validate_command_plan_helpers(
+    entry: &XfstestsAllowlistEntry,
+    plan: &XfstestsCommandPlan,
+    errors: &mut Vec<String>,
+) {
+    if plan.helper_binaries.is_empty() {
+        errors.push(format!(
+            "xfstests policy {} command plan is missing helper binaries",
+            entry.test_id
+        ));
+    }
+    for helper in &plan.helper_binaries {
+        if is_broad_shell_token(helper) || helper.contains('<') || helper.trim().is_empty() {
+            errors.push(format!(
+                "xfstests policy {} command plan has unresolved helper binary: {helper}",
+                entry.test_id
+            ));
+        }
+    }
+
+    if plan.required_privileges.is_empty() {
+        errors.push(format!(
+            "xfstests policy {} command plan is missing required privileges",
+            entry.test_id
+        ));
+    }
+    for privilege in &plan.required_privileges {
+        if !KNOWN_XFSTESTS_COMMAND_PLAN_PRIVILEGES.contains(&privilege.as_str()) {
+            errors.push(format!(
+                "xfstests policy {} command plan has unknown privilege requirement: {privilege}",
+                entry.test_id
+            ));
+        }
+    }
+
+    if plan.cleanup_action.trim().is_empty() {
+        errors.push(format!(
+            "xfstests policy {} command plan is missing cleanup action",
+            entry.test_id
+        ));
+    }
+
+    if plan.mutation_surface.trim().is_empty() {
+        errors.push(format!(
+            "xfstests policy {} command plan is missing mutation surface",
+            entry.test_id
+        ));
+    }
+}
+
+fn validate_command_plan_argv(
+    entry: &XfstestsAllowlistEntry,
+    plan: &XfstestsCommandPlan,
+    errors: &mut Vec<String>,
+) {
+    if plan.argv.is_empty() {
+        errors.push(format!(
+            "xfstests policy {} command plan is missing argv",
+            entry.test_id
+        ));
+    }
+    if !plan.argv.iter().any(|arg| arg == &entry.test_id) {
+        errors.push(format!(
+            "xfstests policy {} command plan argv does not name the test id",
+            entry.test_id
+        ));
+    }
+    for arg in &plan.argv {
+        if is_broad_shell_token(arg) || arg.contains("&&") || arg.contains(';') || arg.contains('*')
+        {
+            errors.push(format!(
+                "xfstests policy {} command plan has broad shell command token: {arg}",
+                entry.test_id
+            ));
+        }
+    }
+}
+
 fn validate_policy_outcome(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
     match entry.classification.as_deref() {
         Some(
@@ -501,6 +707,16 @@ fn is_supported_scope_reference(reference: &str) -> bool {
 
 fn is_known_operation_class(operation_class: &str) -> bool {
     REQUIRED_XFSTESTS_OPERATION_CLASSES.contains(&operation_class)
+}
+
+fn is_temp_scoped_path(path: &str) -> bool {
+    path.starts_with("${TMPDIR:-/tmp}/frankenfs-xfstests/")
+        || path.starts_with("$TMPDIR/frankenfs-xfstests/")
+        || path.starts_with("/tmp/frankenfs-xfstests/")
+}
+
+fn is_broad_shell_token(token: &str) -> bool {
+    matches!(token, "sh" | "bash" | "zsh" | "-c" | "shell")
 }
 
 fn expected_outcome_for_classification(entry: &XfstestsAllowlistEntry) -> &'static str {
@@ -830,6 +1046,31 @@ mod tests {
             scope_reference: None,
             tracker_id: Some("bd-rchk3.2".to_owned()),
             repro_command: Some(format!("./check -n {test_id}")),
+            command_plan: Some(XfstestsCommandPlan {
+                plan_id: format!("xfstests-plan-{}", test_id.replace('/', "-")),
+                execution_lane: "dry_run_only".to_owned(),
+                scratch_path: format!(
+                    "${{TMPDIR:-/tmp}}/frankenfs-xfstests/scratch/{}",
+                    test_id.replace('/', "-")
+                ),
+                mountpoint: format!(
+                    "${{TMPDIR:-/tmp}}/frankenfs-xfstests/mnt/{}",
+                    test_id.replace('/', "-")
+                ),
+                image_hash: format!("sha256:test-fixture-{}", test_id.replace('/', "-")),
+                helper_binaries: vec![
+                    "xfstests/check".to_owned(),
+                    "ffs-cli".to_owned(),
+                    "fusermount3".to_owned(),
+                ],
+                required_privileges: vec!["none".to_owned(), "fuse_mount".to_owned()],
+                mutation_surface: "dry-run command selection under temp root".to_owned(),
+                cleanup_action: "umount temp mountpoint if mounted; remove temp scratch root"
+                    .to_owned(),
+                argv: vec!["./check".to_owned(), "-n".to_owned(), test_id.to_owned()],
+                destructive: false,
+                expected_plan_outcome: "dry_run_only".to_owned(),
+            }),
         }
     }
 
@@ -1029,6 +1270,100 @@ generic/001  2s ... pass\n";
                 .any(|error| error.contains("missing expected outcome")),
             "expected missing expected outcome error, got {errors:#?}"
         );
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_missing_command_plan() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        entry.command_plan = None;
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing command_plan")),
+            "expected missing command plan error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_unsafe_command_plan_fields() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        let plan = entry.command_plan.as_mut().expect("command plan");
+        plan.scratch_path = "/srv/xfstests/scratch".to_owned();
+        plan.mountpoint.clear();
+        plan.image_hash.clear();
+        plan.helper_binaries = vec!["bash".to_owned()];
+        plan.required_privileges = vec!["magic_admin".to_owned()];
+        plan.cleanup_action.clear();
+        plan.argv = vec!["bash".to_owned(), "-c".to_owned(), "rm *".to_owned()];
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        for expected in [
+            "non-temporary scratch path",
+            "non-temporary mountpoint",
+            "missing image hash",
+            "unresolved helper binary",
+            "unknown privilege requirement",
+            "missing cleanup action",
+            "does not name the test id",
+            "broad shell command token",
+        ] {
+            assert!(
+                errors.iter().any(|error| error.contains(expected)),
+                "expected {expected} error, got {errors:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_destructive_plan_outside_permissioned_lane() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        let plan = entry.command_plan.as_mut().expect("command plan");
+        plan.destructive = true;
+        plan.execution_lane = "dry_run_only".to_owned();
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("outside permissioned_real lane")),
+            "expected destructive lane error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_accepts_command_plan_lanes_and_outcome_classes() {
+        for (lane, expected_outcome, destructive) in [
+            ("dry_run_only", "dry_run_only", false),
+            ("fixture_only", "fixture_only", false),
+            ("permissioned_real", "permissioned_real", true),
+            ("host_skip", "host_skip", false),
+            ("unsupported_by_scope", "unsupported_by_scope", false),
+            ("dry_run_only", "product_failure", false),
+            ("dry_run_only", "harness_failure", false),
+            ("dry_run_only", "cleanup_failure", false),
+        ] {
+            let selected = vec!["generic/001".to_owned()];
+            let mut entry = valid_policy_entry("generic/001");
+            let plan = entry.command_plan.as_mut().expect("command plan");
+            plan.execution_lane = lane.to_owned();
+            plan.expected_plan_outcome = expected_outcome.to_owned();
+            plan.destructive = destructive;
+
+            let errors = validate_xfstests_policy(&selected, &[entry]);
+
+            assert!(
+                errors.is_empty(),
+                "expected command plan lane={lane} outcome={expected_outcome} to validate, got {errors:#?}"
+            );
+        }
     }
 
     #[test]

@@ -888,6 +888,14 @@ environment blockers, harness blockers, expected unsupported rows, not-run rows,
 and pass candidates separately; CI and README wording must not compress those
 categories into an xfstests pass claim.
 
+Each row also carries a command-plan proof. The plan must name a temp-root
+scratch path, temp-root mountpoint, image hash, helper binaries, required
+privileges, mutation surface, cleanup action, execution lane, and argv vector.
+Default CI planning is non-destructive: broad shell commands, non-temporary
+paths, unknown privilege labels, unresolved helper placeholders, and destructive
+actions outside the `permissioned_real` lane are rejected before any xfstests
+coverage can be counted.
+
 ## Output
 
 Test artifacts are stored in `artifacts/e2e/<timestamp>/`:

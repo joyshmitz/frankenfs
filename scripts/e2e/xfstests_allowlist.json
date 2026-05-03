@@ -29,7 +29,32 @@
     "classification": "product_actionable",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-001",
+      "execution_lane": "dry_run_only",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-001",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-001",
+      "image_hash": "sha256:plan-fixture-generic-001",
+      "helper_binaries": [
+        "xfstests/check",
+        "ffs-cli",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount"
+      ],
+      "mutation_surface": "dry-run command selection for a temp-root FUSE scratch mount",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/001"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "dry_run_only"
+    }
   },
   {
     "test_id": "generic/003",
@@ -60,7 +85,33 @@
     "classification": "environment_blocked",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-003",
+      "execution_lane": "host_skip",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-003",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-003",
+      "image_hash": "sha256:plan-fixture-generic-003",
+      "helper_binaries": [
+        "xfstests/check",
+        "ffs-cli",
+        "mount"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "dry-run command selection for readonly remount preflight under temp root",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/003"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "host_skip"
+    }
   },
   {
     "test_id": "generic/013",
@@ -93,7 +144,32 @@
     "classification": "product_actionable",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-013",
+      "execution_lane": "dry_run_only",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-013",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-013",
+      "image_hash": "sha256:plan-fixture-generic-013",
+      "helper_binaries": [
+        "xfstests/check",
+        "fsstress",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount"
+      ],
+      "mutation_surface": "dry-run command selection for fsstress lifecycle operations under temp root",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/013"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "dry_run_only"
+    }
   },
   {
     "test_id": "generic/030",
@@ -124,7 +200,33 @@
     "classification": "product_actionable",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-030",
+      "execution_lane": "dry_run_only",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-030",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-030",
+      "image_hash": "sha256:plan-fixture-generic-030",
+      "helper_binaries": [
+        "xfstests/check",
+        "xfs_io",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "dry-run command selection for mmap consistency probe under temp root",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/030"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "product_failure"
+    }
   },
   {
     "test_id": "generic/035",
@@ -156,7 +258,32 @@
     "classification": "product_actionable",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-035",
+      "execution_lane": "dry_run_only",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-035",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-035",
+      "image_hash": "sha256:plan-fixture-generic-035",
+      "helper_binaries": [
+        "xfstests/check",
+        "ffs-cli",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount"
+      ],
+      "mutation_surface": "dry-run command selection for overwriting rename probe under temp root",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/035"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "dry_run_only"
+    }
   },
   {
     "test_id": "generic/062",
@@ -188,7 +315,33 @@
     "classification": "environment_blocked",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-062",
+      "execution_lane": "host_skip",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-062",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-062",
+      "image_hash": "sha256:plan-fixture-generic-062",
+      "helper_binaries": [
+        "xfstests/check",
+        "setfattr",
+        "getfattr"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "dry-run command selection for xattr helper probe under temp root",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/062"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "host_skip"
+    }
   },
   {
     "test_id": "generic/068",
@@ -218,7 +371,33 @@
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#allowed-deferrals-and-non-goals",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-068",
+      "execution_lane": "unsupported_by_scope",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-068",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-068",
+      "image_hash": "sha256:plan-fixture-generic-068",
+      "helper_binaries": [
+        "xfstests/check",
+        "xfs_freeze",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "cap_sys_admin"
+      ],
+      "mutation_surface": "no product mutation; unsupported FIFREEZE host capability is classified before execution",
+      "cleanup_action": "skip without mount; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/068"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "unsupported_by_scope"
+    }
   },
   {
     "test_id": "generic/112",
@@ -249,7 +428,33 @@
     "classification": "environment_blocked",
     "scope_reference": "README.md#whats-next",
     "tracker_id": "bd-rchk3.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-112",
+      "execution_lane": "host_skip",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-112",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-112",
+      "image_hash": "sha256:plan-fixture-generic-112",
+      "helper_binaries": [
+        "xfstests/check",
+        "aio-stress",
+        "xfs_io"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "dry-run command selection for aio/preallocation host-helper probe under temp root",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/112"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "host_skip"
+    }
   },
   {
     "test_id": "generic/231",
@@ -279,7 +484,33 @@
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#allowed-deferrals-and-non-goals",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-231",
+      "execution_lane": "unsupported_by_scope",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-231",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-231",
+      "image_hash": "sha256:plan-fixture-generic-231",
+      "helper_binaries": [
+        "xfstests/check",
+        "quotaon",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "root_required"
+      ],
+      "mutation_surface": "no product mutation; kernel quota capability is classified before execution",
+      "cleanup_action": "skip without mount; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/231"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "unsupported_by_scope"
+    }
   },
   {
     "test_id": "generic/321",
@@ -312,7 +543,33 @@
     "classification": "environment_blocked",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-321",
+      "execution_lane": "host_skip",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-321",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-321",
+      "image_hash": "sha256:plan-fixture-generic-321",
+      "helper_binaries": [
+        "xfstests/check",
+        "xfs_io",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "dry-run command selection for fsync boundary probe under temp root",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/321"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "host_skip"
+    }
   },
   {
     "test_id": "generic/524",
@@ -343,7 +600,33 @@
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#allowed-deferrals-and-non-goals",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-generic-524",
+      "execution_lane": "unsupported_by_scope",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/generic-524",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/generic-524",
+      "image_hash": "sha256:plan-fixture-generic-524",
+      "helper_binaries": [
+        "xfstests/check",
+        "xfs_io",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "no product mutation; writeback-cache race is classified before execution",
+      "cleanup_action": "skip without mount; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "generic/524"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "unsupported_by_scope"
+    }
   },
   {
     "test_id": "ext4/001",
@@ -375,7 +658,33 @@
     "classification": "environment_blocked",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-ext4-001",
+      "execution_lane": "host_skip",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/ext4-001",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/ext4-001",
+      "image_hash": "sha256:plan-fixture-ext4-001",
+      "helper_binaries": [
+        "xfstests/check",
+        "xfs_io",
+        "filefrag"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "dry-run command selection for zero-range and fiemap probe under temp root",
+      "cleanup_action": "umount temp mountpoint if mounted; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "ext4/001"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "host_skip"
+    }
   },
   {
     "test_id": "ext4/003",
@@ -406,7 +715,34 @@
     "classification": "environment_blocked",
     "scope_reference": "README.md#allowed-deferrals-and-non-goals",
     "tracker_id": "bd-rchk3.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-ext4-003",
+      "execution_lane": "host_skip",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/ext4-003",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/ext4-003",
+      "image_hash": "sha256:plan-fixture-ext4-003",
+      "helper_binaries": [
+        "xfstests/check",
+        "mkfs.ext4",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "scratch_device",
+        "root_required"
+      ],
+      "mutation_surface": "dry-run command selection for bigalloc scratch-device preflight under temp root",
+      "cleanup_action": "skip without scratch device; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "ext4/003"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "host_skip"
+    }
   },
   {
     "test_id": "ext4/005",
@@ -437,7 +773,33 @@
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#v1-filesystem-scope",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-ext4-005",
+      "execution_lane": "unsupported_by_scope",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/ext4-005",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/ext4-005",
+      "image_hash": "sha256:plan-fixture-ext4-005",
+      "helper_binaries": [
+        "xfstests/check",
+        "chattr",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "host_tooling"
+      ],
+      "mutation_surface": "no product mutation; legacy non-extent conversion is classified before execution",
+      "cleanup_action": "skip unsupported extent conversion; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "ext4/005"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "unsupported_by_scope"
+    }
   },
   {
     "test_id": "ext4/013",
@@ -468,6 +830,33 @@
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#allowed-deferrals-and-non-goals",
     "tracker_id": "bd-rchk3.2.1",
-    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh",
+    "command_plan": {
+      "plan_id": "xfstests-plan-ext4-013",
+      "execution_lane": "unsupported_by_scope",
+      "scratch_path": "${TMPDIR:-/tmp}/frankenfs-xfstests/scratch/ext4-013",
+      "mountpoint": "${TMPDIR:-/tmp}/frankenfs-xfstests/mnt/ext4-013",
+      "image_hash": "sha256:plan-fixture-ext4-013",
+      "helper_binaries": [
+        "xfstests/check",
+        "debugfs",
+        "fusermount3"
+      ],
+      "required_privileges": [
+        "none",
+        "fuse_mount",
+        "scratch_device",
+        "root_required"
+      ],
+      "mutation_surface": "no product mutation; raw-device corruption helper is classified before execution",
+      "cleanup_action": "skip raw-device corruption lane; remove temp scratch root",
+      "argv": [
+        "./check",
+        "-n",
+        "ext4/013"
+      ],
+      "destructive": false,
+      "expected_plan_outcome": "unsupported_by_scope"
+    }
   }
 ]

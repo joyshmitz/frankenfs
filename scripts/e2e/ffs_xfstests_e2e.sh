@@ -187,6 +187,110 @@ required_artifacts = {
     "results.json",
     "junit.xml",
 }
+allowed_plan_lanes = {
+    "dry_run_only",
+    "fixture_only",
+    "permissioned_real",
+    "host_skip",
+    "unsupported_by_scope",
+}
+allowed_plan_privileges = {
+    "none",
+    "user_mount",
+    "fuse_mount",
+    "root_required",
+    "cap_sys_admin",
+    "scratch_device",
+    "host_tooling",
+}
+allowed_plan_outcomes = {
+    "dry_run_only",
+    "fixture_only",
+    "permissioned_real",
+    "host_skip",
+    "unsupported_by_scope",
+    "product_failure",
+    "harness_failure",
+    "cleanup_failure",
+}
+
+def is_temp_path(value):
+    return isinstance(value, str) and (
+        value.startswith("${TMPDIR:-/tmp}/frankenfs-xfstests/")
+        or value.startswith("$TMPDIR/frankenfs-xfstests/")
+        or value.startswith("/tmp/frankenfs-xfstests/")
+    )
+
+def is_broad_shell_token(value):
+    return value in {"sh", "bash", "zsh", "-c", "shell"} or any(
+        token in value for token in ["&&", ";", "*"]
+    )
+
+def validate_command_plan(test_id, plan):
+    plan_errors = []
+    if not isinstance(plan, dict):
+        return [f"policy {test_id} missing command_plan"]
+
+    for field in [
+        "plan_id",
+        "execution_lane",
+        "scratch_path",
+        "mountpoint",
+        "image_hash",
+        "helper_binaries",
+        "required_privileges",
+        "mutation_surface",
+        "cleanup_action",
+        "argv",
+        "expected_plan_outcome",
+    ]:
+        value = plan.get(field)
+        if value is None or value == "":
+            plan_errors.append(f"policy {test_id} command plan missing {field}")
+
+    if not str(plan.get("plan_id", "")).startswith("xfstests-plan-"):
+        plan_errors.append(f"policy {test_id} command plan has malformed plan_id")
+    if plan.get("execution_lane") not in allowed_plan_lanes:
+        plan_errors.append(f"policy {test_id} command plan has unknown execution_lane")
+    if not is_temp_path(plan.get("scratch_path")):
+        plan_errors.append(f"policy {test_id} command plan has non-temporary scratch_path")
+    if not is_temp_path(plan.get("mountpoint")):
+        plan_errors.append(f"policy {test_id} command plan has non-temporary mountpoint")
+    if not str(plan.get("image_hash", "")).startswith("sha256:"):
+        plan_errors.append(f"policy {test_id} command plan missing image_hash")
+
+    helpers = plan.get("helper_binaries", [])
+    if not isinstance(helpers, list) or not helpers:
+        plan_errors.append(f"policy {test_id} command plan missing helper_binaries")
+        helpers = []
+    for helper in helpers:
+        if not isinstance(helper, str) or not helper or "<" in helper or is_broad_shell_token(helper):
+            plan_errors.append(f"policy {test_id} command plan has unresolved helper binary")
+
+    privileges = plan.get("required_privileges", [])
+    if not isinstance(privileges, list) or not privileges:
+        plan_errors.append(f"policy {test_id} command plan missing required_privileges")
+        privileges = []
+    for privilege in privileges:
+        if privilege not in allowed_plan_privileges:
+            plan_errors.append(f"policy {test_id} command plan has unknown privilege {privilege}")
+
+    argv = plan.get("argv", [])
+    if not isinstance(argv, list) or not argv:
+        plan_errors.append(f"policy {test_id} command plan missing argv")
+        argv = []
+    if test_id not in argv:
+        plan_errors.append(f"policy {test_id} command plan argv does not name the test id")
+    for arg in argv:
+        if not isinstance(arg, str) or is_broad_shell_token(arg):
+            plan_errors.append(f"policy {test_id} command plan has broad shell command token")
+
+    if plan.get("expected_plan_outcome") not in allowed_plan_outcomes:
+        plan_errors.append(f"policy {test_id} command plan has unknown expected_plan_outcome")
+    if plan.get("destructive") and plan.get("execution_lane") != "permissioned_real":
+        plan_errors.append(f"policy {test_id} command plan marks destructive action outside permissioned_real lane")
+
+    return plan_errors
 
 for entry in policy_entries:
     test_id = entry.get("test_id")
@@ -207,6 +311,7 @@ for entry in policy_entries:
     missing_artifacts = sorted(required_artifacts - {item for item in artifacts if isinstance(item, str)})
     for artifact in missing_artifacts:
         errors.append(f"policy {test_id} missing artifact requirement: {artifact}")
+    errors.extend(validate_command_plan(test_id, entry.get("command_plan")))
 
 selected_set = set(selected)
 for test_id in selected:
@@ -228,8 +333,21 @@ status_counts = Counter()
 classification_counts = Counter()
 outcome_counts = Counter()
 operation_counts = Counter()
+lane_counts = Counter()
+plan_outcome_counts = Counter()
+command_plans = []
+artifact_paths = {
+    "selected_file": str(artifact_dir / "selected_tests.txt"),
+    "results_json": str(artifact_dir / "results.json"),
+    "junit_xml": str(artifact_dir / "junit.xml"),
+    "check_log": str(artifact_dir / "check.log"),
+    "summary_json": str(artifact_dir / "summary.json"),
+    "policy_plan_json": str(policy_plan),
+    "policy_report_md": str(policy_report),
+}
 for test_id in selected:
     entry = policy_by_id.get(test_id, {})
+    command_plan = entry.get("command_plan", {})
     required = [cap for cap in entry.get("required_capabilities", []) if isinstance(cap, str)]
     capabilities.update(required)
     status = entry.get("status", "missing_policy")
@@ -240,6 +358,9 @@ for test_id in selected:
     classification_counts[classification or "missing"] += 1
     outcome_counts[expected_outcome or "missing"] += 1
     operation_counts[operation_class or "missing"] += 1
+    lane_counts[command_plan.get("execution_lane", "missing")] += 1
+    plan_outcome_counts[command_plan.get("expected_plan_outcome", "missing")] += 1
+    command_plans.append(command_plan)
     for tag in entry.get("operation_class_tags", []):
         if isinstance(tag, str):
             operation_counts[tag] += 1
@@ -268,28 +389,31 @@ for test_id in selected:
             "repro_command",
             f"XFSTESTS_MODE=run XFSTESTS_DRY_RUN={dry_run} ./scripts/e2e/ffs_xfstests_e2e.sh",
         ),
+        "command_plan": command_plan,
         "log_fields": {
             "source_xfstests_id": test_id,
+            "command_plan_id": command_plan.get("plan_id"),
             "policy_row_id": entry.get("policy_row_id"),
             "filesystem_flavor": entry.get("filesystem_flavor", test_id.split("/", 1)[0]),
             "risk_category": entry.get("user_risk_category"),
             "selected_or_skipped": entry.get("selection_decision"),
             "capability_requirement": required,
+            "image_hash": command_plan.get("image_hash"),
+            "helper_versions": {
+                helper: "not_resolved_in_plan_mode"
+                for helper in command_plan.get("helper_binaries", [])
+                if isinstance(helper, str)
+            },
+            "required_privileges": command_plan.get("required_privileges"),
+            "mutation_surface": command_plan.get("mutation_surface"),
+            "execution_lane": command_plan.get("execution_lane"),
+            "cleanup_status": "not_started_plan_mode",
             "linked_artifact_or_bead": entry.get("tracker_id"),
             "docs_scope_citation": entry.get("v1_scope_mapping") or entry.get("scope_reference"),
+            "artifact_paths": artifact_paths,
             "reproduction_command": entry.get("repro_command"),
         },
     })
-
-artifact_paths = {
-    "selected_file": str(artifact_dir / "selected_tests.txt"),
-    "results_json": str(artifact_dir / "results.json"),
-    "junit_xml": str(artifact_dir / "junit.xml"),
-    "check_log": str(artifact_dir / "check.log"),
-    "summary_json": str(artifact_dir / "summary.json"),
-    "policy_plan_json": str(policy_plan),
-    "policy_report_md": str(policy_report),
-}
 
 payload = {
     "requested_mode": requested_mode,
@@ -314,6 +438,19 @@ payload = {
     "classification_counts": dict(sorted(classification_counts.items())),
     "expected_outcome_counts": dict(sorted(outcome_counts.items())),
     "operation_class_counts": dict(sorted(operation_counts.items())),
+    "command_plan_lane_counts": dict(sorted(lane_counts.items())),
+    "command_plan_outcome_counts": dict(sorted(plan_outcome_counts.items())),
+    "command_plan_proof": {
+        "default_non_destructive": all(not plan.get("destructive") for plan in command_plans),
+        "temp_root": "${TMPDIR:-/tmp}/frankenfs-xfstests",
+        "paths_verified_temp_scoped": all(
+            is_temp_path(plan.get("scratch_path")) and is_temp_path(plan.get("mountpoint"))
+            for plan in command_plans
+        ),
+        "broad_shell_commands_rejected": True,
+        "permissioned_destructive_lane_required": True,
+        "plans": command_plans,
+    },
     "tests": tests,
     "validation_errors": errors,
 }
@@ -332,6 +469,8 @@ for label, counter in [
     ("Classification", classification_counts),
     ("Expected outcome", outcome_counts),
     ("Operation class", operation_counts),
+    ("Command plan lane", lane_counts),
+    ("Command plan outcome", plan_outcome_counts),
 ]:
     report_lines.append(f"### {label}")
     report_lines.append("")
@@ -342,19 +481,22 @@ for label, counter in [
 report_lines.extend([
     "## Rows",
     "",
-    "| Policy row | Test id | Flavor | Operation | Risk | Outcome | Decision | Capability requirement | Artifact/bead | Scope | Reproduction |",
-    "|---|---|---|---|---|---|---|---|---|---|---|",
+    "| Policy row | Plan | Test id | Flavor | Operation | Risk | Outcome | Lane | Decision | Capability requirement | Artifact/bead | Scope | Reproduction |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
 ])
 for test in tests:
     capability = ", ".join(test["required_capabilities"])
+    plan = test.get("command_plan", {})
     report_lines.append(
-        "| {policy_row_id} | {test_id} | {filesystem_flavor} | {operation} | {risk} | {outcome} | {decision} | {capability} | {artifact} | {scope} | `{repro}` |".format(
+        "| {policy_row_id} | {plan_id} | {test_id} | {filesystem_flavor} | {operation} | {risk} | {outcome} | {lane} | {decision} | {capability} | {artifact} | {scope} | `{repro}` |".format(
             policy_row_id=test.get("policy_row_id") or "",
+            plan_id=plan.get("plan_id") or "",
             test_id=test["test_id"],
             filesystem_flavor=test.get("filesystem_flavor") or "",
             operation=test.get("expected_operation_class") or "",
             risk=test.get("user_risk_category") or "",
             outcome=test.get("expected_outcome") or "",
+            lane=plan.get("execution_lane") or "",
             decision=test.get("selection_decision") or "",
             capability=capability,
             artifact=test.get("tracker_id") or "",
