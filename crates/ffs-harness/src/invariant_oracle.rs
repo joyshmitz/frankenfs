@@ -15,6 +15,7 @@ use std::fs;
 use std::path::Path;
 
 pub const INVARIANT_ORACLE_SCHEMA_VERSION: u32 = 1;
+pub const INVARIANT_ORACLE_MODEL_VERSION: &str = "ffs-invariant-oracle-model-v1";
 pub const DEFAULT_INVARIANT_ORACLE_ARTIFACT: &str = "artifacts/invariant/oracle_report.json";
 pub const INVARIANT_ORACLE_REPRODUCTION_COMMAND: &str = "ffs-harness validate-invariant-oracle --trace artifacts/invariant/trace.json --out artifacts/invariant/oracle_report.json";
 
@@ -24,6 +25,7 @@ const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvariantTrace {
     pub schema_version: u32,
+    pub model_version: String,
     pub trace_id: String,
     pub seed: u64,
     pub reproduction_command: String,
@@ -103,6 +105,7 @@ pub struct InvariantFileState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvariantOracleReport {
     pub schema_version: u32,
+    pub model_version: String,
     pub trace_id: String,
     pub seed: u64,
     pub operation_count: usize,
@@ -119,15 +122,23 @@ pub struct InvariantOracleReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvariantViolationReport {
+    pub model_version: String,
     pub trace_id: String,
     pub operation_index: usize,
     pub operation_id: String,
     pub violated_invariant: String,
+    pub classification: String,
     pub expected: bool,
     pub failure_class: InvariantFailureClass,
+    pub pre_state_hash: String,
+    pub post_state_hash: String,
+    pub expected_invariant_result: bool,
+    pub observed_invariant_result: bool,
     pub expected_state: InvariantModelState,
     pub observed_state: InvariantModelState,
     pub minimized_trace: MinimizedInvariantTrace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_minimized_follow_up: Option<String>,
     pub reproduction_command: String,
     pub artifact_refs: Vec<String>,
 }
@@ -136,7 +147,9 @@ pub struct InvariantViolationReport {
 pub struct MinimizedInvariantTrace {
     pub original_trace_len: usize,
     pub minimized_trace_len: usize,
+    pub minimized: bool,
     pub operation_ids: Vec<String>,
+    pub shrink_steps: Vec<String>,
     pub reproduction_command: String,
 }
 
@@ -153,11 +166,29 @@ struct ReplayFile {
     content_hash: String,
 }
 
+#[derive(Debug, Clone)]
+struct ViolationEvidence {
+    pre_state_hash: String,
+    post_state_hash: String,
+    expected_invariant_result: bool,
+    observed_invariant_result: bool,
+    expected_state: InvariantModelState,
+    observed_state: InvariantModelState,
+    force_expected: bool,
+}
+
 pub fn load_invariant_trace(path: &Path) -> Result<InvariantTrace> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("failed to read invariant trace {}", path.display()))?;
     parse_invariant_trace(&text)
         .with_context(|| format!("invalid invariant trace {}", path.display()))
+}
+
+pub fn load_invariant_oracle_report(path: &Path) -> Result<InvariantOracleReport> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read invariant oracle report {}", path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("invalid invariant oracle report {}", path.display()))
 }
 
 pub fn parse_invariant_trace(text: &str) -> Result<InvariantTrace> {
@@ -176,17 +207,25 @@ pub fn validate_invariant_trace(trace: &InvariantTrace) -> InvariantOracleReport
     for (sequence_index, operation) in trace.operations.iter().enumerate() {
         validate_operation_shape(operation, sequence_index, &mut operation_ids, &mut errors);
 
+        let pre_state_hash = model_state_hash(&state.to_model_state());
         let replay_violations = state.apply(operation);
         let replay_state = state.to_model_state();
+        let replay_state_hash = model_state_hash(&replay_state);
         if replay_state != operation.expected_state {
             violations.push(build_violation(
                 trace,
                 operation,
                 "model_replay_matches_expected_state",
                 InvariantFailureClass::ModelBug,
-                replay_state,
-                operation.expected_state.clone(),
-                true,
+                ViolationEvidence {
+                    pre_state_hash: pre_state_hash.clone(),
+                    post_state_hash: replay_state_hash.clone(),
+                    expected_invariant_result: true,
+                    observed_invariant_result: false,
+                    expected_state: replay_state,
+                    observed_state: operation.expected_state.clone(),
+                    force_expected: true,
+                },
             ));
         }
 
@@ -196,9 +235,15 @@ pub fn validate_invariant_trace(trace: &InvariantTrace) -> InvariantOracleReport
                 operation,
                 invariant,
                 InvariantFailureClass::ModelBug,
-                operation.expected_state.clone(),
-                operation.observed_state.clone(),
-                false,
+                ViolationEvidence {
+                    pre_state_hash: pre_state_hash.clone(),
+                    post_state_hash: replay_state_hash.clone(),
+                    expected_invariant_result: true,
+                    observed_invariant_result: false,
+                    expected_state: operation.expected_state.clone(),
+                    observed_state: operation.observed_state.clone(),
+                    force_expected: false,
+                },
             ));
         }
 
@@ -215,9 +260,15 @@ pub fn validate_invariant_trace(trace: &InvariantTrace) -> InvariantOracleReport
                 operation,
                 invariant,
                 failure_class,
-                operation.expected_state.clone(),
-                operation.observed_state.clone(),
-                false,
+                ViolationEvidence {
+                    pre_state_hash: pre_state_hash.clone(),
+                    post_state_hash: model_state_hash(&operation.observed_state),
+                    expected_invariant_result: true,
+                    observed_invariant_result: false,
+                    expected_state: operation.expected_state.clone(),
+                    observed_state: operation.observed_state.clone(),
+                    force_expected: false,
+                },
             ));
         }
 
@@ -233,6 +284,7 @@ pub fn validate_invariant_trace(trace: &InvariantTrace) -> InvariantOracleReport
 
     InvariantOracleReport {
         schema_version: INVARIANT_ORACLE_SCHEMA_VERSION,
+        model_version: trace.model_version.clone(),
         trace_id: trace.trace_id.clone(),
         seed: trace.seed,
         operation_count: trace.operations.len(),
@@ -248,10 +300,142 @@ pub fn validate_invariant_trace(trace: &InvariantTrace) -> InvariantOracleReport
     }
 }
 
+#[must_use]
+pub fn validate_invariant_oracle_report(report: &InvariantOracleReport) -> Vec<String> {
+    let mut errors = Vec::new();
+    if report.schema_version != INVARIANT_ORACLE_SCHEMA_VERSION {
+        errors.push(format!(
+            "report schema_version must be {INVARIANT_ORACLE_SCHEMA_VERSION}, got {}",
+            report.schema_version
+        ));
+    }
+    if report.model_version != INVARIANT_ORACLE_MODEL_VERSION {
+        errors.push(format!(
+            "report model_version must be {INVARIANT_ORACLE_MODEL_VERSION}, got {}",
+            report.model_version
+        ));
+    }
+    if !report.valid {
+        errors.push("report valid flag must be true for proof-bundle consumption".to_owned());
+    }
+    if !is_sha256_hex(&report.deterministic_replay_id) {
+        errors.push("deterministic_replay_id must be SHA-256 hex".to_owned());
+    }
+    validate_reproduction_command(
+        "report.reproduction_command",
+        &report.reproduction_command,
+        &mut errors,
+    );
+    if !report.errors.is_empty() {
+        errors.push(format!(
+            "report carries {} trace validation error(s)",
+            report.errors.len()
+        ));
+    }
+
+    let expected_failure_count = report
+        .violations
+        .iter()
+        .filter(|violation| violation.expected)
+        .count();
+    let unexpected_failure_count = report.violations.len() - expected_failure_count;
+    if expected_failure_count != report.expected_failure_count {
+        errors.push(format!(
+            "expected_failure_count {} does not match {} violation(s)",
+            report.expected_failure_count, expected_failure_count
+        ));
+    }
+    if unexpected_failure_count != report.unexpected_failure_count {
+        errors.push(format!(
+            "unexpected_failure_count {} does not match {} violation(s)",
+            report.unexpected_failure_count, unexpected_failure_count
+        ));
+    }
+    let failure_class_counts = count_failure_classes(&report.violations);
+    if failure_class_counts != report.failure_class_counts {
+        errors.push("failure_class_counts does not match violations".to_owned());
+    }
+
+    for violation in &report.violations {
+        validate_violation_report(report, violation, &mut errors);
+    }
+    errors
+}
+
+fn validate_violation_report(
+    report: &InvariantOracleReport,
+    violation: &InvariantViolationReport,
+    errors: &mut Vec<String>,
+) {
+    if violation.model_version != report.model_version {
+        errors.push(format!(
+            "violation {} model_version {} does not match report model_version {}",
+            violation.operation_id, violation.model_version, report.model_version
+        ));
+    }
+    if violation.classification != violation.failure_class.label() {
+        errors.push(format!(
+            "violation {} classification must be {}",
+            violation.operation_id,
+            violation.failure_class.label()
+        ));
+    }
+    if !is_sha256_hex(&violation.pre_state_hash) {
+        errors.push(format!(
+            "violation {} pre_state_hash must be SHA-256 hex",
+            violation.operation_id
+        ));
+    }
+    if !is_sha256_hex(&violation.post_state_hash) {
+        errors.push(format!(
+            "violation {} post_state_hash must be SHA-256 hex",
+            violation.operation_id
+        ));
+    }
+    if violation.expected_invariant_result == violation.observed_invariant_result {
+        errors.push(format!(
+            "violation {} must record disagreeing expected/observed invariant results",
+            violation.operation_id
+        ));
+    }
+    if violation.minimized_trace.shrink_steps.is_empty() {
+        errors.push(format!(
+            "violation {} must include shrink_steps",
+            violation.operation_id
+        ));
+    }
+    if !violation.minimized_trace.minimized
+        && violation
+            .non_minimized_follow_up
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        errors.push(format!(
+            "violation {} non-minimized failure requires follow-up bead",
+            violation.operation_id
+        ));
+    }
+    validate_reproduction_command(
+        "violation.reproduction_command",
+        &violation.reproduction_command,
+        errors,
+    );
+    validate_reproduction_command(
+        "violation.minimized_trace.reproduction_command",
+        &violation.minimized_trace.reproduction_command,
+        errors,
+    );
+}
+
 pub fn fail_on_invariant_oracle_errors(report: &InvariantOracleReport) -> Result<()> {
-    if !report.errors.is_empty() || report.unexpected_failure_count > 0 {
+    let report_errors = validate_invariant_oracle_report(report);
+    if !report.errors.is_empty() || report.unexpected_failure_count > 0 || !report_errors.is_empty()
+    {
         for error in &report.errors {
             eprintln!("invariant oracle validation error: {error}");
+        }
+        for error in &report_errors {
+            eprintln!("invariant oracle report artifact error: {error}");
         }
         for violation in report
             .violations
@@ -267,8 +451,9 @@ pub fn fail_on_invariant_oracle_errors(report: &InvariantOracleReport) -> Result
             );
         }
         bail!(
-            "invariant oracle validation failed: errors={} unexpected_failures={}",
+            "invariant oracle validation failed: errors={} report_errors={} unexpected_failures={}",
             report.errors.len(),
+            report_errors.len(),
             report.unexpected_failure_count
         );
     }
@@ -279,6 +464,7 @@ pub fn fail_on_invariant_oracle_errors(report: &InvariantOracleReport) -> Result
 pub fn render_invariant_oracle_markdown(report: &InvariantOracleReport) -> String {
     let mut out = String::new();
     out.push_str("# Invariant Oracle Report\n\n");
+    let _ = writeln!(out, "- Model version: `{}`", report.model_version);
     let _ = writeln!(out, "- Trace: `{}`", report.trace_id);
     let _ = writeln!(out, "- Seed: `{}`", report.seed);
     let _ = writeln!(
@@ -304,14 +490,16 @@ pub fn render_invariant_oracle_markdown(report: &InvariantOracleReport) -> Strin
         for violation in &report.violations {
             let _ = writeln!(
                 out,
-                "- op `{}` index={} invariant=`{}` class=`{}` expected={} minimized={}/{}",
+                "- op `{}` index={} invariant=`{}` class=`{}` expected={} minimized={}/{} pre={} post={}",
                 violation.operation_id,
                 violation.operation_index,
                 violation.violated_invariant,
                 violation.failure_class.label(),
                 violation.expected,
                 violation.minimized_trace.minimized_trace_len,
-                violation.minimized_trace.original_trace_len
+                violation.minimized_trace.original_trace_len,
+                violation.pre_state_hash,
+                violation.post_state_hash
             );
         }
     }
@@ -326,18 +514,25 @@ fn validate_trace_header(trace: &InvariantTrace, errors: &mut Vec<String>) {
             trace.schema_version
         ));
     }
-    validate_nonempty("trace_id", &trace.trace_id, errors);
-    validate_nonempty("reproduction_command", &trace.reproduction_command, errors);
-    if !trace
-        .reproduction_command
-        .contains("validate-invariant-oracle")
-    {
-        errors.push(
-            "reproduction_command must include validate-invariant-oracle invocation".to_owned(),
-        );
+    if trace.model_version != INVARIANT_ORACLE_MODEL_VERSION {
+        errors.push(format!(
+            "model_version must be {INVARIANT_ORACLE_MODEL_VERSION}, got {}",
+            trace.model_version
+        ));
     }
+    validate_nonempty("trace_id", &trace.trace_id, errors);
+    validate_reproduction_command("reproduction_command", &trace.reproduction_command, errors);
     if trace.operations.is_empty() {
         errors.push("trace must contain at least one operation".to_owned());
+    }
+}
+
+fn validate_reproduction_command(field: &str, command: &str, errors: &mut Vec<String>) {
+    validate_nonempty(field, command, errors);
+    if !command.contains("validate-invariant-oracle") {
+        errors.push(format!(
+            "{field} must include validate-invariant-oracle invocation"
+        ));
     }
 }
 
@@ -574,25 +769,30 @@ fn build_violation(
     operation: &InvariantTraceOperation,
     invariant: &str,
     failure_class: InvariantFailureClass,
-    expected_state: InvariantModelState,
-    observed_state: InvariantModelState,
-    force_expected: bool,
+    evidence: ViolationEvidence,
 ) -> InvariantViolationReport {
-    let expected = force_expected
+    let expected = evidence.force_expected
         || operation
             .expected_violation
             .as_ref()
             .is_some_and(|expected| expected == invariant);
     InvariantViolationReport {
+        model_version: trace.model_version.clone(),
         trace_id: trace.trace_id.clone(),
         operation_index: operation.operation_index,
         operation_id: operation.operation_id.clone(),
         violated_invariant: invariant.to_owned(),
+        classification: failure_class.label().to_owned(),
         expected,
         failure_class,
-        expected_state,
-        observed_state,
+        pre_state_hash: evidence.pre_state_hash,
+        post_state_hash: evidence.post_state_hash,
+        expected_invariant_result: evidence.expected_invariant_result,
+        observed_invariant_result: evidence.observed_invariant_result,
+        expected_state: evidence.expected_state,
+        observed_state: evidence.observed_state,
         minimized_trace: minimize_trace(trace, operation.operation_index),
+        non_minimized_follow_up: None,
         reproduction_command: trace.reproduction_command.clone(),
         artifact_refs: operation.artifact_refs.clone(),
     }
@@ -605,18 +805,30 @@ fn minimize_trace(trace: &InvariantTrace, operation_index: usize) -> MinimizedIn
     MinimizedInvariantTrace {
         original_trace_len: trace.operations.len(),
         minimized_trace_len: limit,
+        minimized: true,
         operation_ids: trace
             .operations
             .iter()
             .take(limit)
             .map(|operation| operation.operation_id.clone())
             .collect(),
+        shrink_steps: shrink_steps(trace, operation_index, limit),
         reproduction_command: trace.reproduction_command.clone(),
     }
 }
 
+fn shrink_steps(trace: &InvariantTrace, operation_index: usize, limit: usize) -> Vec<String> {
+    let dropped_suffix = trace.operations.len().saturating_sub(limit);
+    vec![
+        format!("seed={}", trace.seed),
+        format!("kept prefix through failing operation index {operation_index}"),
+        format!("dropped_suffix_operations={dropped_suffix}"),
+    ]
+}
+
 fn deterministic_replay_id(trace: &InvariantTrace) -> String {
     let mut hasher = Sha256::new();
+    hash_part(&mut hasher, &trace.model_version);
     hash_part(&mut hasher, &trace.trace_id);
     hash_part(&mut hasher, &trace.seed.to_string());
     let mut state = ReplayState::new();
@@ -664,6 +876,12 @@ fn hash_model_state(hasher: &mut Sha256, state: &InvariantModelState) {
     for durable_path in &state.durable_paths {
         hash_part(hasher, durable_path);
     }
+}
+
+fn model_state_hash(state: &InvariantModelState) -> String {
+    let mut hasher = Sha256::new();
+    hash_model_state(&mut hasher, state);
+    hex::encode(hasher.finalize())
 }
 
 fn hash_part(hasher: &mut Sha256, value: &str) {
@@ -753,6 +971,7 @@ mod tests {
     fn valid_trace() -> InvariantTrace {
         InvariantTrace {
             schema_version: INVARIANT_ORACLE_SCHEMA_VERSION,
+            model_version: INVARIANT_ORACLE_MODEL_VERSION.to_owned(),
             trace_id: "trace-valid-write".to_owned(),
             seed: 42,
             reproduction_command:
@@ -788,10 +1007,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_trace_schema_and_replays_deterministically() {
+    fn parses_trace_schema_and_replays_deterministically() -> anyhow::Result<()> {
         let trace = valid_trace();
-        let text = serde_json::to_string(&trace).expect("serialize trace");
-        let parsed = parse_invariant_trace(&text).expect("parse trace");
+        let text = serde_json::to_string(&trace)?;
+        let parsed = parse_invariant_trace(&text)?;
         let first = validate_invariant_trace(&parsed);
         let second = validate_invariant_trace(&parsed);
         assert!(first.valid, "{:?}", first.errors);
@@ -799,7 +1018,10 @@ mod tests {
             first.deterministic_replay_id,
             second.deterministic_replay_id
         );
+        assert_eq!(first.model_version, INVARIANT_ORACLE_MODEL_VERSION);
+        assert!(validate_invariant_oracle_report(&first).is_empty());
         assert_eq!(first.operation_count, 3);
+        Ok(())
     }
 
     #[test]
@@ -853,6 +1075,14 @@ mod tests {
             report.violations[0].failure_class,
             InvariantFailureClass::ProductionBug
         );
+        assert_eq!(
+            report.violations[0].classification,
+            InvariantFailureClass::ProductionBug.label()
+        );
+        assert!(is_sha256_hex(&report.violations[0].pre_state_hash));
+        assert!(is_sha256_hex(&report.violations[0].post_state_hash));
+        assert!(report.violations[0].expected_invariant_result);
+        assert!(!report.violations[0].observed_invariant_result);
     }
 
     #[test]
@@ -892,6 +1122,74 @@ mod tests {
         assert_eq!(
             minimized.operation_ids,
             vec!["op-0", "op-1", "op-2", "op-3"]
+        );
+        assert!(minimized.minimized);
+        assert!(
+            minimized
+                .shrink_steps
+                .iter()
+                .any(|step| step.contains("failing operation index 3"))
+        );
+    }
+
+    #[test]
+    fn report_consumer_rejects_unknown_model_version() {
+        let trace = valid_trace();
+        let mut report = validate_invariant_trace(&trace);
+        report.model_version = "unknown-model".to_owned();
+        let errors = validate_invariant_oracle_report(&report);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("report model_version"))
+        );
+    }
+
+    #[test]
+    fn report_consumer_rejects_missing_classification() {
+        let mut trace = valid_trace();
+        let mut bad = op(
+            3,
+            InvariantAction::ModelInvariantProbe,
+            "/alpha",
+            None,
+            state(&[("/alpha", 5)], &["/alpha"]),
+            state(&[("/alpha", 4)], &["/alpha"]),
+        );
+        bad.expected_violation = Some("file_size_matches_model".to_owned());
+        bad.failure_class = Some(InvariantFailureClass::ProductionBug);
+        trace.operations.push(bad);
+        let mut report = validate_invariant_trace(&trace);
+        report.violations[0].classification.clear();
+        let errors = validate_invariant_oracle_report(&report);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("classification must be production_bug"))
+        );
+    }
+
+    #[test]
+    fn report_consumer_rejects_non_minimized_without_follow_up() {
+        let mut trace = valid_trace();
+        let mut bad = op(
+            3,
+            InvariantAction::ModelInvariantProbe,
+            "/alpha",
+            None,
+            state(&[("/alpha", 5)], &["/alpha"]),
+            state(&[("/alpha", 4)], &["/alpha"]),
+        );
+        bad.expected_violation = Some("file_size_matches_model".to_owned());
+        bad.failure_class = Some(InvariantFailureClass::ProductionBug);
+        trace.operations.push(bad);
+        let mut report = validate_invariant_trace(&trace);
+        report.violations[0].minimized_trace.minimized = false;
+        let errors = validate_invariant_oracle_report(&report);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("non-minimized failure requires follow-up bead"))
         );
     }
 

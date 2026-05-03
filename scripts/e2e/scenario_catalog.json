@@ -847,6 +847,12 @@
           "evidence": "scenario_result \"invariant_oracle_report_contract\" \"PASS\""
         },
         {
+          "id": "invariant_oracle_consumer_rejects_unknown_model",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"invariant_oracle_consumer_rejects_unknown_model\" \"PASS\""
+        },
+        {
           "id": "invariant_oracle_expected_failure_minimized",
           "category": "edge",
           "status": "active",

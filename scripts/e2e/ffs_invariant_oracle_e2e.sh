@@ -5,9 +5,10 @@
 #   1. Harness module and CLI are wired.
 #   2. A create/write/fsync FrankenFS-style operation trace validates offline.
 #   3. Report includes deterministic replay and required artifact fields.
-#   4. Expected invariant failure emits class, violation, and minimized trace.
-#   5. Unexpected invariant failure fails closed.
-#   6. Unit tests pass.
+#   4. Proof-bundle consumer validation rejects unknown model versions.
+#   5. Expected invariant failure emits class, violation, and minimized trace.
+#   6. Unexpected invariant failure fails closed.
+#   7. Unit tests pass.
 
 set -euo pipefail
 
@@ -44,6 +45,9 @@ EXPECTED_FAILURE_TRACE="${E2E_LOG_DIR}/expected_failure_trace.json"
 UNEXPECTED_FAILURE_TRACE="${E2E_LOG_DIR}/unexpected_failure_trace.json"
 VALID_RAW="${E2E_LOG_DIR}/valid_report.raw"
 VALID_REPORT="${E2E_LOG_DIR}/valid_report.json"
+VALID_CONSUMER_RAW="${E2E_LOG_DIR}/valid_consumer.raw"
+UNKNOWN_MODEL_REPORT="${E2E_LOG_DIR}/unknown_model_report.json"
+UNKNOWN_MODEL_RAW="${E2E_LOG_DIR}/unknown_model.raw"
 EXPECTED_RAW="${E2E_LOG_DIR}/expected_failure_report.raw"
 EXPECTED_REPORT="${E2E_LOG_DIR}/expected_failure_report.json"
 UNEXPECTED_RAW="${E2E_LOG_DIR}/unexpected_failure.raw"
@@ -144,6 +148,7 @@ base_ops = [
 
 valid = {
     "schema_version": 1,
+    "model_version": "ffs-invariant-oracle-model-v1",
     "trace_id": "e2e-create-write-fsync",
     "seed": 20260503,
     "reproduction_command": "ffs-harness validate-invariant-oracle --trace artifacts/invariant/trace.json --out artifacts/invariant/oracle_report.json",
@@ -224,6 +229,8 @@ import sys
 data = json.loads(open(sys.argv[1], encoding="utf-8").read())
 if len(data.get("deterministic_replay_id", "")) != 64:
     raise SystemExit("deterministic replay id missing")
+if data.get("model_version") != "ffs-invariant-oracle-model-v1":
+    raise SystemExit("model version missing")
 if len(data.get("required_artifacts", [])) != 3:
     raise SystemExit("required artifacts not preserved")
 if "validate-invariant-oracle" not in data.get("reproduction_command", ""):
@@ -235,7 +242,33 @@ else
     scenario_result "invariant_oracle_report_contract" "FAIL" "report contract missing fields"
 fi
 
-e2e_step "Scenario 4: expected failure emits minimized report"
+e2e_step "Scenario 4: proof-bundle consumer rejects unknown model versions"
+python3 - "$VALID_REPORT" "$UNKNOWN_MODEL_REPORT" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:]
+data = json.loads(open(source, encoding="utf-8").read())
+data["model_version"] = "unknown-model"
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
+    --report "$VALID_REPORT" >"$VALID_CONSUMER_RAW" 2>&1 \
+    && ! RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
+        --report "$UNKNOWN_MODEL_REPORT" >"$UNKNOWN_MODEL_RAW" 2>&1; then
+    if grep -q "report model_version" "$UNKNOWN_MODEL_RAW"; then
+        scenario_result "invariant_oracle_consumer_rejects_unknown_model" "PASS" "consumer rejected unknown model version"
+    else
+        scenario_result "invariant_oracle_consumer_rejects_unknown_model" "FAIL" "unknown model diagnostic missing"
+    fi
+else
+    scenario_result "invariant_oracle_consumer_rejects_unknown_model" "FAIL" "consumer validation command contract failed"
+fi
+
+e2e_step "Scenario 5: expected failure emits minimized report"
 if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
     --trace "$EXPECTED_FAILURE_TRACE" >"$EXPECTED_RAW" 2>&1; then
     if extract_report_json "$EXPECTED_RAW" "$EXPECTED_REPORT" "violations" \
@@ -256,8 +289,16 @@ if row.get("violated_invariant") != "file_size_matches_model":
     raise SystemExit("wrong invariant")
 if row.get("failure_class") != "production_bug":
     raise SystemExit("wrong failure class")
+if row.get("classification") != "production_bug":
+    raise SystemExit("missing classification")
+if len(row.get("pre_state_hash", "")) != 64 or len(row.get("post_state_hash", "")) != 64:
+    raise SystemExit("state hashes missing")
+if row.get("expected_invariant_result") is not True or row.get("observed_invariant_result") is not False:
+    raise SystemExit("invariant result evidence missing")
 if row.get("minimized_trace", {}).get("minimized_trace_len") != 4:
     raise SystemExit("wrong minimized trace length")
+if not row.get("minimized_trace", {}).get("shrink_steps"):
+    raise SystemExit("shrink steps missing")
 if row.get("operation_index") != 3:
     raise SystemExit("operation index missing")
 PY
@@ -270,7 +311,7 @@ else
     scenario_result "invariant_oracle_expected_failure_minimized" "FAIL" "expected failure trace CLI failed"
 fi
 
-e2e_step "Scenario 5: unexpected failure fails closed"
+e2e_step "Scenario 6: unexpected failure fails closed"
 if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-invariant-oracle \
     --trace "$UNEXPECTED_FAILURE_TRACE" >"$UNEXPECTED_RAW" 2>&1; then
     scenario_result "invariant_oracle_unexpected_failure_rejected" "FAIL" "unexpected failure was accepted"
@@ -282,11 +323,11 @@ else
     fi
 fi
 
-e2e_step "Scenario 6: unit tests pass"
+e2e_step "Scenario 7: unit tests pass"
 if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib invariant_oracle -- --nocapture \
     2>"$UNIT_LOG" | tee -a "$UNIT_LOG"; then
     TESTS_RUN=$(grep -c "test invariant_oracle::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
-    if [[ $TESTS_RUN -ge 7 ]]; then
+    if [[ $TESTS_RUN -ge 10 ]]; then
         scenario_result "invariant_oracle_unit_tests" "PASS" "unit tests passed (${TESTS_RUN} tests)"
     else
         scenario_result "invariant_oracle_unit_tests" "FAIL" "too few tests: ${TESTS_RUN}"

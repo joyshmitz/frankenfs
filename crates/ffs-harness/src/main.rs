@@ -19,7 +19,8 @@ use ffs_harness::{
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
     extract_btrfs_superblock, extract_ext4_superblock, extract_region,
     invariant_oracle::{
-        fail_on_invariant_oracle_errors, load_invariant_trace, render_invariant_oracle_markdown,
+        fail_on_invariant_oracle_errors, load_invariant_oracle_report, load_invariant_trace,
+        render_invariant_oracle_markdown, validate_invariant_oracle_report,
         validate_invariant_trace,
     },
     mounted_recovery_matrix::{
@@ -75,6 +76,7 @@ use ffs_harness::{
     },
 };
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -400,6 +402,7 @@ fn parse_proof_bundle_format(raw: &str) -> Result<ProofBundleFormat> {
 
 fn validate_invariant_oracle_cmd(args: &[String]) -> Result<()> {
     let mut trace_path: Option<String> = None;
+    let mut report_path: Option<String> = None;
     let mut out_path: Option<String> = None;
     let mut summary_out_path: Option<String> = None;
     let mut format = ProofBundleFormat::Json;
@@ -410,6 +413,10 @@ fn validate_invariant_oracle_cmd(args: &[String]) -> Result<()> {
             "--trace" => {
                 i += 1;
                 trace_path = Some(args.get(i).context("--trace requires a path")?.to_owned());
+            }
+            "--report" => {
+                i += 1;
+                report_path = Some(args.get(i).context("--report requires a path")?.to_owned());
             }
             "--out" => {
                 i += 1;
@@ -437,7 +444,18 @@ fn validate_invariant_oracle_cmd(args: &[String]) -> Result<()> {
         i += 1;
     }
 
-    let trace_path = trace_path.context("--trace is required")?;
+    if report_path.is_some() {
+        if trace_path.is_some() {
+            bail!("validate-invariant-oracle accepts exactly one of --trace or --report");
+        }
+        return validate_invariant_oracle_report_cmd(
+            report_path.as_deref().context("--report is required")?,
+            out_path.as_deref(),
+            format,
+        );
+    }
+
+    let trace_path = trace_path.context("--trace or --report is required")?;
     let trace = load_invariant_trace(Path::new(&trace_path))?;
     let report = validate_invariant_trace(&trace);
     let output = match format {
@@ -466,6 +484,54 @@ fn validate_invariant_oracle_cmd(args: &[String]) -> Result<()> {
     }
 
     fail_on_invariant_oracle_errors(&report)
+}
+
+fn validate_invariant_oracle_report_cmd(
+    report_path: &str,
+    out_path: Option<&str>,
+    format: ProofBundleFormat,
+) -> Result<()> {
+    let report = load_invariant_oracle_report(Path::new(report_path))?;
+    let errors = validate_invariant_oracle_report(&report);
+    let valid = errors.is_empty();
+    let output = match format {
+        ProofBundleFormat::Json => serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": report.schema_version,
+            "model_version": report.model_version,
+            "trace_id": report.trace_id,
+            "valid": valid,
+            "errors": &errors,
+        }))?,
+        ProofBundleFormat::Markdown => {
+            let mut summary = String::new();
+            summary.push_str("# Invariant Oracle Consumer Report\n\n");
+            let _ = writeln!(summary, "- Trace: `{}`", report.trace_id);
+            let _ = writeln!(summary, "- Model version: `{}`", report.model_version);
+            let _ = writeln!(summary, "- Valid: `{valid}`");
+            if !errors.is_empty() {
+                summary.push_str("\n## Errors\n\n");
+                for error in &errors {
+                    let _ = writeln!(summary, "- {error}");
+                }
+            }
+            summary
+        }
+    };
+
+    if let Some(path) = out_path {
+        write_text_file(Path::new(path), &format!("{output}\n"))?;
+        println!("invariant oracle consumer report written: {path} valid={valid}");
+    } else {
+        println!("{output}");
+    }
+
+    if !valid {
+        bail!(
+            "invariant oracle report artifact validation failed: errors={}",
+            errors.len()
+        );
+    }
+    Ok(())
 }
 
 fn evaluate_release_gates_cmd(args: &[String]) -> Result<()> {
@@ -1901,7 +1967,7 @@ fn print_usage() {
         "  ffs-harness validate-proof-bundle --bundle FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
-        "  ffs-harness validate-invariant-oracle --trace FILE [--format json|markdown] [--out FILE] [--summary-out FILE]"
+        "  ffs-harness validate-invariant-oracle --trace FILE|--report FILE [--format json|markdown] [--out FILE] [--summary-out FILE]"
     );
     println!(
         "  ffs-harness evaluate-release-gates --bundle FILE --policy FILE [--current-git-sha SHA] [--max-age-days N] [--format json|markdown] [--out FILE] [--wording-out FILE]"
@@ -2123,6 +2189,7 @@ fn print_invariant_oracle_usage() {
     println!();
     println!("Options:");
     println!("  --trace FILE                       Read invariant trace JSON");
+    println!("  --report FILE                      Validate existing invariant oracle report JSON");
     println!("  --format json|markdown             Output format (default: json)");
     println!("  --out FILE                         Write selected-format oracle report to FILE");
     println!("  --summary-out FILE                 Write Markdown inspection summary to FILE");
