@@ -91,13 +91,42 @@ pub fn bitmap_count_free(bitmap: &[u8], count: u32) -> u32 {
 #[must_use]
 pub fn bitmap_find_free(bitmap: &[u8], count: u32, start: u32) -> Option<u32> {
     let start = start.min(count);
-    for idx in start..count {
-        if !bitmap_get(bitmap, idx) {
-            return Some(idx);
-        }
+    if let Some(idx) = bitmap_find_free_range(bitmap, start, count) {
+        return Some(idx);
     }
     // Wrap around: search from 0 to start.
-    (0..start).find(|&idx| !bitmap_get(bitmap, idx))
+    bitmap_find_free_range(bitmap, 0, start)
+}
+
+fn bitmap_find_free_range(bitmap: &[u8], mut idx: u32, end: u32) -> Option<u32> {
+    while idx < end && idx % 8 != 0 {
+        let byte_idx = (idx / 8) as usize;
+        let &byte = bitmap.get(byte_idx)?;
+        if (byte >> (idx % 8)) & 1 == 0 {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+
+    while end.saturating_sub(idx) >= 8 {
+        let byte_idx = (idx / 8) as usize;
+        let &byte = bitmap.get(byte_idx)?;
+        if byte != 0xFF {
+            return Some(idx + (!byte).trailing_zeros());
+        }
+        idx += 8;
+    }
+
+    while idx < end {
+        let byte_idx = (idx / 8) as usize;
+        let &byte = bitmap.get(byte_idx)?;
+        if (byte >> (idx % 8)) & 1 == 0 {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+
+    None
 }
 
 /// Find `n` contiguous free bits in the first `count` bits of `bitmap`,
@@ -1851,6 +1880,20 @@ mod tests {
         let mut bm = vec![0xFFu8; 2];
         bitmap_clear(&mut bm, 3);
         assert_eq!(bitmap_find_free(&bm, 16, 5), Some(3));
+    }
+
+    #[test]
+    fn bitmap_find_free_byte_scan_respects_partial_bounds() {
+        let mut bm = vec![0xFFu8; 2];
+        bitmap_clear(&mut bm, 9);
+        assert_eq!(bitmap_find_free(&bm, 10, 1), Some(9));
+        assert_eq!(bitmap_find_free(&bm, 9, 1), None);
+    }
+
+    #[test]
+    fn bitmap_find_free_overscan_treats_missing_bytes_as_allocated() {
+        let bm = vec![0xFFu8; 1];
+        assert_eq!(bitmap_find_free(&bm, 32, 0), None);
     }
 
     #[test]
