@@ -306,6 +306,7 @@ declare -a BENCH_COMMANDS=()
 declare -a BENCH_FILES=()
 declare -a BENCH_OPERATIONS=()
 declare -a BENCH_PAYLOAD_MB=()
+declare -a BENCH_RUNNERS=()
 declare -a SKIPPED_LABELS=()
 declare -a CACHE_WORKLOAD_REPORT_PATHS=()
 declare -a CACHE_WORKLOAD_REPORT_POLICIES=()
@@ -319,12 +320,24 @@ MOUNT_BENCH_IMAGE=""
 MOUNT_RECOVERY_IMAGE=""
 MOUNT_BENCH_ROOT=""
 
+bench_runner_for_command() {
+    case " $1 " in
+        *" cargo bench "*)
+            printf 'criterion_once'
+            ;;
+        *)
+            printf 'hyperfine'
+            ;;
+    esac
+}
+
 add_bench() {
     BENCH_LABELS+=("$1")
     BENCH_COMMANDS+=("$2")
     BENCH_FILES+=("$3")
     BENCH_OPERATIONS+=("$4")
     BENCH_PAYLOAD_MB+=("${5:-0}")
+    BENCH_RUNNERS+=("$(bench_runner_for_command "$2")")
 }
 
 single_line_text() {
@@ -945,20 +958,116 @@ run_cache_workload_report "arc" "${OUT_DIR}/ffs_block_cache_workloads_arc.tsv"
 run_cache_workload_report "s3fifo" "${OUT_DIR}/ffs_block_cache_workloads_s3fifo.tsv"
 CACHE_WORKLOAD_METRICS_JSON="$(collect_cache_workload_metrics_json)"
 
-echo "Running hyperfine benchmarks..."
-for i in "${!BENCH_LABELS[@]}"; do
-    label="${BENCH_LABELS[$i]}"
-    cmd="${BENCH_COMMANDS[$i]}"
-    json_file="${OUT_DIR}/${BENCH_FILES[$i]}"
-    txt_file="${json_file%.json}.txt"
+run_hyperfine_benchmark() {
+    local label="$1"
+    local cmd="$2"
+    local json_file="$3"
+    local txt_file="$4"
 
-    echo ""
     echo "--- ${label} ---"
     hyperfine \
         --warmup "$WARMUP" \
         --runs "$RUNS" \
         --export-json "$json_file" \
         "$cmd" | tee "$txt_file"
+}
+
+run_criterion_once_benchmark() {
+    local label="$1"
+    local cmd="$2"
+    local json_file="$3"
+    local txt_file="$4"
+    local stdout_file="${json_file%.json}.stdout"
+    local stderr_file="${json_file%.json}.stderr"
+    local started_at
+    local finished_at
+    local start_ns
+    local end_ns
+    local duration_s
+    local exit_status
+
+    echo "--- ${label} ---"
+    echo "Criterion benchmark detected; running once and preserving Criterion's own sample report."
+
+    started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    start_ns="$(date +%s%N)"
+    exit_status=0
+    bash -lc "$cmd" >"$stdout_file" 2>"$stderr_file" || exit_status=$?
+    end_ns="$(date +%s%N)"
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    duration_s="$(awk -v start="$start_ns" -v end="$end_ns" 'BEGIN { printf "%.9f", (end - start) / 1000000000.0 }')"
+
+    {
+        echo "benchmark_mode: criterion_once"
+        echo "command: ${cmd}"
+        echo "started_at_utc: ${started_at}"
+        echo "finished_at_utc: ${finished_at}"
+        echo "duration_seconds: ${duration_s}"
+        echo "exit_status: ${exit_status}"
+        echo ""
+        echo "## stdout"
+        cat "$stdout_file"
+        echo ""
+        echo "## stderr"
+        cat "$stderr_file"
+    } > "$txt_file"
+
+    jq -n \
+        --arg command "$cmd" \
+        --arg benchmark_mode "criterion_once" \
+        --arg stdout_file "$stdout_file" \
+        --arg stderr_file "$stderr_file" \
+        --arg text_report "$txt_file" \
+        --arg started_at "$started_at" \
+        --arg finished_at "$finished_at" \
+        --argjson duration_seconds "$duration_s" \
+        --argjson exit_status "$exit_status" \
+        '{
+            results: [{
+                command: $command,
+                mean: $duration_seconds,
+                stddev: 0,
+                median: $duration_seconds,
+                min: $duration_seconds,
+                max: $duration_seconds,
+                times: [$duration_seconds],
+                exit_codes: [$exit_status]
+            }],
+            benchmark_mode: $benchmark_mode,
+            command_stdout: $stdout_file,
+            command_stderr: $stderr_file,
+            text_report: $text_report,
+            started_at: $started_at,
+            finished_at: $finished_at
+        }' > "$json_file"
+
+    if [ "$exit_status" -ne 0 ]; then
+        echo "criterion command failed with exit ${exit_status}; see ${stderr_file}" >&2
+        return "$exit_status"
+    fi
+}
+
+echo "Running benchmarks..."
+for i in "${!BENCH_LABELS[@]}"; do
+    label="${BENCH_LABELS[$i]}"
+    cmd="${BENCH_COMMANDS[$i]}"
+    json_file="${OUT_DIR}/${BENCH_FILES[$i]}"
+    txt_file="${json_file%.json}.txt"
+    runner="${BENCH_RUNNERS[$i]}"
+
+    echo ""
+    case "$runner" in
+        hyperfine)
+            run_hyperfine_benchmark "$label" "$cmd" "$json_file" "$txt_file"
+            ;;
+        criterion_once)
+            run_criterion_once_benchmark "$label" "$cmd" "$json_file" "$txt_file"
+            ;;
+        *)
+            echo "unknown benchmark runner for ${label}: ${runner}" >&2
+            exit 2
+            ;;
+    esac
 done
 echo ""
 
@@ -1009,6 +1118,7 @@ write_perf_baseline_json() {
         local p99_us
         local throughput_ops_sec
         local throughput_mb_sec
+        local benchmark_mode
         mean_s="$(json_mean "$json_file")"
         p50_s="$(json_p50 "$json_file")"
         p95_s="$(json_p95 "$json_file")"
@@ -1018,11 +1128,13 @@ write_perf_baseline_json() {
         p99_us="$(sec_to_us "$p99_s")"
         throughput_ops_sec="$(ops_per_sec "$mean_s")"
         throughput_mb_sec="$(mb_per_sec "${BENCH_PAYLOAD_MB[$i]}" "$mean_s")"
+        benchmark_mode="${BENCH_RUNNERS[$i]}"
 
         jq -n \
             --arg operation "${BENCH_OPERATIONS[$i]}" \
             --arg metric "latency" \
             --arg command "${BENCH_COMMANDS[$i]}" \
+            --arg benchmark_mode "$benchmark_mode" \
             --arg source_json "$json_file" \
             --argjson p50_us "$p50_us" \
             --argjson p95_us "$p95_us" \
@@ -1033,6 +1145,7 @@ write_perf_baseline_json() {
                 operation: $operation,
                 metric: $metric,
                 command: $command,
+                benchmark_mode: $benchmark_mode,
                 source_json: $source_json,
                 p50_us: $p50_us,
                 p95_us: $p95_us,
@@ -1130,6 +1243,7 @@ date_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "- hyperfine: \`${hyperfine_ver}\`"
     echo "- Cargo profile: \`${BENCH_PROFILE}\`"
     echo "- Cargo executor: \`$(cargo_cmd_prefix)\`"
+    echo "- Benchmark runners: \`hyperfine\` for command probes, \`criterion_once\` for \`cargo bench\` workloads"
     echo "- Warmup runs: \`${WARMUP}\`"
     echo "- Measured runs: \`${RUNS}\`"
     echo "- Thresholds file: \`${THRESHOLDS_PATH}\`"
@@ -1166,10 +1280,10 @@ date_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         done
     fi
     echo ""
-    echo "## Hyperfine Summary"
+    echo "## Benchmark Summary"
     echo ""
-    echo "| Command | Mean (ms) | Stddev (ms) | p50 (ms) | p95 (ms) | p99 (ms) | JSON |"
-    echo "|---|---:|---:|---:|---:|---:|---|"
+    echo "| Command | Runner | Mean (ms) | Stddev (ms) | p50 (ms) | p95 (ms) | p99 (ms) | JSON |"
+    echo "|---|---|---:|---:|---:|---:|---:|---|"
     for i in "${!BENCH_LABELS[@]}"; do
         json_file="${OUT_DIR}/${BENCH_FILES[$i]}"
         mean_s="$(json_mean "$json_file")"
@@ -1182,7 +1296,7 @@ date_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         p50_ms="$(sec_to_ms "$p50_s")"
         p95_ms="$(sec_to_ms "$p95_s")"
         p99_ms="$(sec_to_ms "$p99_s")"
-        echo "| ${BENCH_LABELS[$i]} | ${mean_ms} | ${std_ms} | ${p50_ms} | ${p95_ms} | ${p99_ms} | \`${json_file}\` |"
+        echo "| ${BENCH_LABELS[$i]} | ${BENCH_RUNNERS[$i]} | ${mean_ms} | ${std_ms} | ${p50_ms} | ${p95_ms} | ${p99_ms} | \`${json_file}\` |"
     done
     echo ""
     echo "## Cache Workload Metrics (ArcCache::metrics)"
@@ -1248,7 +1362,7 @@ if [ "$COMPARE" -eq 1 ]; then
             cur_p99_s="$(json_p99 "$cur_json" 2>/dev/null || true)"
             prev_p99_s="$(json_p99 "$prev_json" 2>/dev/null || true)"
             if [ -z "$cur_p99_s" ] || [ -z "$prev_p99_s" ] || ! valid_number "$cur_p99_s" || ! valid_number "$prev_p99_s"; then
-                COMPARE_SUMMARY+="| ${BENCH_LABELS[$i]} | n/a | n/a | n/a | ${warn_threshold} | ${fail_threshold} | SKIP (invalid hyperfine JSON) |"$'\n'
+                COMPARE_SUMMARY+="| ${BENCH_LABELS[$i]} | n/a | n/a | n/a | ${warn_threshold} | ${fail_threshold} | SKIP (invalid benchmark JSON) |"$'\n'
                 continue
             fi
             if awk -v base="$prev_p99_s" 'BEGIN { exit !(base <= 0.0) }'; then
@@ -1285,7 +1399,7 @@ echo "Wrote structured baseline JSON: ${PERF_BASELINE_PATH}"
 echo "Wrote dated structured baseline JSON: ${PERF_BASELINE_DATED_PATH}"
 echo "Wrote baseline latest JSON: ${BENCHMARK_BASELINE_LATEST_PATH}"
 echo "Wrote baseline history JSON: ${BENCHMARK_BASELINE_HISTORY_PATH}"
-echo "Wrote hyperfine exports:"
+echo "Wrote benchmark exports:"
 for i in "${!BENCH_LABELS[@]}"; do
     echo "  - ${OUT_DIR}/${BENCH_FILES[$i]}"
 done
