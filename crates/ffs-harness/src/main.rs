@@ -301,7 +301,9 @@ fn parse_workload_corpus_cmd_args(args: &[String]) -> Result<Option<WorkloadCorp
         match args[i].as_str() {
             "--corpus" => {
                 i += 1;
-                corpus_path = args.get(i).context("--corpus requires a path")?.to_owned();
+                args.get(i)
+                    .context("--corpus requires a path")?
+                    .clone_into(&mut corpus_path);
             }
             "--out" => {
                 i += 1;
