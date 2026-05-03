@@ -19114,6 +19114,7 @@ fn ln_gamma(x: f64) -> f64 {
 #[allow(clippy::too_many_lines)]
 pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityReport, FfsError> {
     const MAX_GROUPS_VERIFIED: u32 = 65_536;
+    const MAX_INODES_VERIFIED: u32 = 16_384;
 
     let reader = Ext4ImageReader::new(image).map_err(|e| parse_to_ffs_error(&e))?;
     let sb = &reader.sb;
@@ -19259,11 +19260,6 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     }
 
     // ── Level 3: Inode checksums (sampled) ─────────────────────────────
-    let inodes_count = sb.inodes_count;
-    let first_ino = sb.first_ino;
-    let inode_size = usize::from(sb.inode_size);
-    let block_size_usize = sb.block_size as usize;
-
     // Always check root inode (2) and first non-reserved inode.
     //
     // Cap the per-inode scan at MAX_INODES_VERIFIED to bound worst-case
@@ -19277,7 +19273,10 @@ pub fn verify_ext4_integrity(image: &[u8], max_inodes: u32) -> Result<IntegrityR
     // libFuzzer timeout. 16 384 inodes is well above any realistic
     // scrub window and keeps even the corrupted per-inode cost under
     // ~10 minutes worst case.
-    const MAX_INODES_VERIFIED: u32 = 16_384;
+    let inodes_count = sb.inodes_count;
+    let first_ino = sb.first_ino;
+    let inode_size = usize::from(sb.inode_size);
+    let block_size_usize = sb.block_size as usize;
     let check_limit = if max_inodes == 0 {
         inodes_count.min(MAX_INODES_VERIFIED)
     } else {
@@ -35933,15 +35932,13 @@ mod tests {
             .enable_writes(&cx)
             .expect_err("enable_writes must reject the inflated group_count");
 
-        match err {
-            FfsError::Format(msg) => {
-                assert!(
-                    msg.contains("groups") && msg.contains("blocks"),
-                    "expected Format error mentioning groups vs blocks, got: {msg}"
-                );
-            }
-            other => panic!("expected FfsError::Format, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &err,
+                FfsError::Format(msg) if msg.contains("groups") && msg.contains("blocks")
+            ),
+            "expected Format error mentioning groups vs blocks, got: {err:?}"
+        );
     }
 
     #[test]

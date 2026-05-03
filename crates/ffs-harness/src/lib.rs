@@ -10,6 +10,7 @@ pub mod fuzz_dashboard;
 pub mod health_consistency;
 pub mod log_contract;
 pub mod metrics;
+pub mod open_ended_inventory;
 pub mod oq_decision_matrix;
 pub mod perf_comparison;
 pub mod perf_regression;

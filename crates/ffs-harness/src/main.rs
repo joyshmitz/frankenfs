@@ -5,8 +5,9 @@ use ffs_harness::{
     ParityReport,
     artifact_manifest::{ArtifactManifest, validate_operational_manifest},
     e2e::{CrashReplaySuiteConfig, FsxStressConfig, run_crash_replay_suite, run_fsx_stress},
-    extract_btrfs_superblock, extract_ext4_superblock, extract_region, validate_btrfs_fixture,
-    validate_ext4_fixture,
+    extract_btrfs_superblock, extract_ext4_superblock, extract_region,
+    open_ended_inventory::validate_current_inventory,
+    validate_btrfs_fixture, validate_ext4_fixture,
     verification_runner::{FuseHostProbeOptions, probe_host_fuse_capability},
     xfstests::{
         XfstestsStatus, apply_allowlist, compare_against_baseline, load_allowlist, load_baseline,
@@ -70,6 +71,7 @@ fn run() -> Result<()> {
         Some("xfstests-report") => xfstests_report(&args[1..]),
         Some("validate-operational-manifest") => validate_operational_manifest_cmd(&args[1..]),
         Some("fuse-capability-probe") => fuse_capability_probe_cmd(&args[1..]),
+        Some("validate-open-ended-inventory") => validate_open_ended_inventory_cmd(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
             print_usage();
             Ok(())
@@ -296,6 +298,48 @@ fn validate_operational_manifest_cmd(args: &[String]) -> Result<()> {
         manifest.scenarios.len(),
         manifest.artifacts.len()
     );
+    Ok(())
+}
+
+fn validate_open_ended_inventory_cmd(args: &[String]) -> Result<()> {
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).context("--out requires a path")?.to_owned());
+            }
+            "--help" | "-h" => {
+                print_open_ended_inventory_usage();
+                return Ok(());
+            }
+            other => bail!("unknown validate-open-ended-inventory argument: {other}"),
+        }
+        i += 1;
+    }
+
+    let report = validate_current_inventory()?;
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = out_path {
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!(
+            "open-ended inventory report written: {} rows={}",
+            path.display(),
+            report.row_count
+        );
+    } else {
+        println!("{json}");
+    }
     Ok(())
 }
 
@@ -536,6 +580,7 @@ fn print_usage() {
     println!(
         "  ffs-harness fuse-capability-probe [--out FILE] [--require-mount-probe] [--mount-probe-exit N] [--unmount-probe-exit N] [--user-disabled] [--default-permissions-eacces]"
     );
+    println!("  ffs-harness validate-open-ended-inventory [--out FILE]");
     println!();
     println!("FIXTURE GENERATION:");
     println!("  Extracts sparse JSON fixtures from real filesystem images.");
@@ -566,6 +611,9 @@ fn print_usage() {
         "  ffs-harness validate-operational-manifest artifacts/e2e/run/operational_manifest.json"
     );
     println!("  ffs-harness fuse-capability-probe --out artifacts/e2e/run/fuse_capability.json");
+    println!(
+        "  ffs-harness validate-open-ended-inventory --out artifacts/conformance/open_ended_inventory.json"
+    );
 }
 
 fn print_fuse_capability_probe_usage() {
@@ -580,4 +628,11 @@ fn print_fuse_capability_probe_usage() {
     println!(
         "  --default-permissions-eacces       Classify btrfs DefaultPermissions root-owned EACCES"
     );
+}
+
+fn print_open_ended_inventory_usage() {
+    println!("Usage: ffs-harness validate-open-ended-inventory [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --out FILE                         Write JSON report to FILE");
 }
