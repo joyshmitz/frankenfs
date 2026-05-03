@@ -1,0 +1,7 @@
+block_cache_arc_concurrent_hot_read_64threads
+                        time:   [273.28 ms 288.63 ms 303.49 ms]
+                        change: [−7.9946% −2.3485% +2.8222%] (p = 0.40 > 0.05)
+                        No change in performance detected.
+Found 14 outliers among 100 measurements (14.00%)
+  12 (12.00%) low severe
+  2 (2.00%) low mild

@@ -1,0 +1,31 @@
+benchmark_mode: criterion_once
+command: cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_concurrent_hot_read_64threads
+started_at_utc: 2026-05-03T19:59:38Z
+finished_at_utc: 2026-05-03T20:00:13Z
+wall_time_seconds: 34.976811776
+measurement_source: criterion_estimate
+criterion_estimate_source: baselines/hyperfine/20260503-s3fifo-hot64/ffs_block_s3fifo_concurrent_hot_read_64threads.stdout
+criterion_estimate_seconds: [0.295430000000, 0.300630000000, 0.308830000000]
+exit_status: 0
+
+## stdout
+block_cache_s3fifo_concurrent_hot_read_64threads
+                        time:   [295.43 ms 300.63 ms 308.83 ms]
+                        change: [+3.4248% +6.8041% +11.204%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+
+## stderr
+    Finished `release-perf` profile [optimized] target(s) in 0.14s
+     Running benches/arc_cache.rs (/data/tmp/cargo-target/release-perf/deps/arc_cache-6009747461f06b59)
+Gnuplot not found, using plotters backend
+Benchmarking block_cache_s3fifo_concurrent_hot_read_64threads
+Benchmarking block_cache_s3fifo_concurrent_hot_read_64threads: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 29.8s, or reduce sample count to 10.
+Benchmarking block_cache_s3fifo_concurrent_hot_read_64threads: Collecting 100 samples in estimated 29.783 s (100 iterations)
+Benchmarking block_cache_s3fifo_concurrent_hot_read_64threads: Analyzing

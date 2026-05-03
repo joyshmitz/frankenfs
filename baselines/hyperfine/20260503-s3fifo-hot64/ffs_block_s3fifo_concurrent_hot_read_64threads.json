@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_concurrent_hot_read_64threads",
+      "mean": 0.300630000000,
+      "stddev": 0.003418367347,
+      "median": 0.300630000000,
+      "min": 0.295430000000,
+      "max": 0.308830000000,
+      "times": [
+        0.295430000000,
+        0.300630000000,
+        0.308830000000
+      ],
+      "exit_codes": [
+        0
+      ]
+    }
+  ],
+  "benchmark_mode": "criterion_once",
+  "measurement_source": "criterion_estimate",
+  "criterion_estimate_source": "baselines/hyperfine/20260503-s3fifo-hot64/ffs_block_s3fifo_concurrent_hot_read_64threads.stdout",
+  "wall_time_seconds": 34.976811776,
+  "command_stdout": "baselines/hyperfine/20260503-s3fifo-hot64/ffs_block_s3fifo_concurrent_hot_read_64threads.stdout",
+  "command_stderr": "baselines/hyperfine/20260503-s3fifo-hot64/ffs_block_s3fifo_concurrent_hot_read_64threads.stderr",
+  "text_report": "baselines/hyperfine/20260503-s3fifo-hot64/ffs_block_s3fifo_concurrent_hot_read_64threads.txt",
+  "started_at": "2026-05-03T19:59:38Z",
+  "finished_at": "2026-05-03T20:00:13Z"
+}

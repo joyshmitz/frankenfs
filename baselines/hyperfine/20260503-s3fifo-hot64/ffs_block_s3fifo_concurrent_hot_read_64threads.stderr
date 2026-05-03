@@ -1,0 +1,9 @@
+    Finished `release-perf` profile [optimized] target(s) in 0.14s
+     Running benches/arc_cache.rs (/data/tmp/cargo-target/release-perf/deps/arc_cache-6009747461f06b59)
+Gnuplot not found, using plotters backend
+Benchmarking block_cache_s3fifo_concurrent_hot_read_64threads
+Benchmarking block_cache_s3fifo_concurrent_hot_read_64threads: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 29.8s, or reduce sample count to 10.
+Benchmarking block_cache_s3fifo_concurrent_hot_read_64threads: Collecting 100 samples in estimated 29.783 s (100 iterations)
+Benchmarking block_cache_s3fifo_concurrent_hot_read_64threads: Analyzing
