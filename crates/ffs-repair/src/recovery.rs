@@ -15,8 +15,21 @@ use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, GroupNumber};
 use serde::{Deserialize, Serialize};
 
-use crate::codec::{DecodeOutcome, RecoveredBlock, decode_group_with_owned_repair_symbols};
+use crate::codec::{DecodeOutcome, decode_group_with_owned_repair_symbols};
 use crate::storage::{RepairGroupLayout, RepairGroupStorage};
+
+/// Recovered block plus the bytes observed when repair planning began.
+///
+/// Mounted read-write repair uses `expected_current` as the compare side of a
+/// compare-and-write gate. If the mounted view changed after scrub detected the
+/// corrupt block, the writeback authority must fail closed instead of
+/// overwriting newer client data.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoveryWritebackBlock<'a> {
+    pub block: BlockNumber,
+    pub expected_current: &'a [u8],
+    pub data: &'a [u8],
+}
 
 /// Authority used to make recovered blocks durable.
 pub trait RecoveryWriteback: Send + Sync + std::fmt::Debug {
@@ -24,7 +37,7 @@ pub trait RecoveryWriteback: Send + Sync + std::fmt::Debug {
         &self,
         cx: &Cx,
         device: &dyn BlockDevice,
-        recovered: &[RecoveredBlock],
+        recovered: &[RecoveryWritebackBlock<'_>],
     ) -> Result<()>;
 
     fn authority_name(&self) -> &'static str;
@@ -39,10 +52,10 @@ impl RecoveryWriteback for DirectDeviceRecoveryWriteback {
         &self,
         cx: &Cx,
         device: &dyn BlockDevice,
-        recovered: &[RecoveredBlock],
+        recovered: &[RecoveryWritebackBlock<'_>],
     ) -> Result<()> {
         for block in recovered {
-            device.write_block(cx, block.block, &block.data)?;
+            device.write_block(cx, block.block, block.data)?;
         }
         device.sync(cx)?;
         for block in recovered {
@@ -249,6 +262,20 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
             return self.success_result(0, 0, 0, RecoveryDecoderStats::default(), Vec::new());
         }
 
+        let expected_current = match self.capture_expected_current_blocks(cx, &normalized) {
+            Ok(expected_current) => expected_current,
+            Err(err) => {
+                return self.failure_result(
+                    0,
+                    normalized.len(),
+                    0,
+                    0,
+                    RecoveryDecoderStats::default(),
+                    &err,
+                );
+            }
+        };
+
         let desc = match self.storage.read_group_desc_ext(cx) {
             Ok(desc) => desc,
             Err(err) => {
@@ -302,7 +329,14 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
             }
         };
 
-        self.finish_decode(cx, generation, normalized.len(), symbols_available, &decode)
+        self.finish_decode(
+            cx,
+            generation,
+            normalized.len(),
+            symbols_available,
+            &decode,
+            &expected_current,
+        )
     }
 
     /// Recover from absolute corrupt block numbers.
@@ -332,6 +366,7 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
         corrupt_count: usize,
         symbols_available: usize,
         decode: &DecodeOutcome,
+        expected_current: &[(BlockNumber, Vec<u8>)],
     ) -> RecoveryAttemptResult {
         let stats = RecoveryDecoderStats::from(&decode.stats);
         if !decode.complete {
@@ -346,9 +381,22 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
         }
 
         let recovered_blocks = decode.recovered.iter().map(|b| b.block).collect::<Vec<_>>();
+        let writeback_blocks = match Self::build_writeback_blocks(decode, expected_current) {
+            Ok(writeback_blocks) => writeback_blocks,
+            Err(err) => {
+                return self.failure_result(
+                    generation,
+                    corrupt_count,
+                    symbols_available,
+                    symbols_available,
+                    stats,
+                    &err,
+                );
+            }
+        };
         if let Err(err) = self
             .writeback
-            .writeback_recovered(cx, self.device, &decode.recovered)
+            .writeback_recovered(cx, self.device, &writeback_blocks)
         {
             return self.failure_result(
                 generation,
@@ -367,6 +415,45 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
             stats,
             recovered_blocks,
         )
+    }
+
+    fn capture_expected_current_blocks(
+        &self,
+        cx: &Cx,
+        corrupt_indices: &[u32],
+    ) -> Result<Vec<(BlockNumber, Vec<u8>)>> {
+        let mut expected_current = Vec::with_capacity(corrupt_indices.len());
+        for index in corrupt_indices {
+            cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+            let block = BlockNumber(self.source_first_block.0 + u64::from(*index));
+            let bytes = self.device.read_block(cx, block)?.as_slice().to_vec();
+            expected_current.push((block, bytes));
+        }
+        Ok(expected_current)
+    }
+
+    fn build_writeback_blocks<'b>(
+        decode: &'b DecodeOutcome,
+        expected_current: &'b [(BlockNumber, Vec<u8>)],
+    ) -> Result<Vec<RecoveryWritebackBlock<'b>>> {
+        let mut writeback_blocks = Vec::with_capacity(decode.recovered.len());
+        for recovered in &decode.recovered {
+            let Some((_, expected)) = expected_current
+                .iter()
+                .find(|(block, _)| *block == recovered.block)
+            else {
+                return Err(FfsError::RepairFailed(format!(
+                    "missing scrub-time bytes for recovered block {}",
+                    recovered.block.0
+                )));
+            };
+            writeback_blocks.push(RecoveryWritebackBlock {
+                block: recovered.block,
+                expected_current: expected.as_slice(),
+                data: recovered.data.as_slice(),
+            });
+        }
+        Ok(writeback_blocks)
     }
 
     fn normalize_indices(indices: &mut Vec<u32>, source_block_count: u32) -> Result<()> {

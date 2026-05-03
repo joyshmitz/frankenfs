@@ -25,7 +25,7 @@ use ffs_btrfs::{
 };
 use ffs_core::{
     BtrfsMountSelection, CrashRecoveryOutcome, Ext4DataErrPolicy, Ext4JournalReplayMode, FsFlavor,
-    FsOps, OpenFs, OpenOptions, detect_filesystem_at_path,
+    FsOps, OpenFs, OpenOptions, RepairWritebackBlock, detect_filesystem_at_path,
 };
 use ffs_fuse::{MountConfig, MountOptions, mount_managed};
 use ffs_harness::ParityReport;
@@ -37,6 +37,7 @@ use ffs_ondisk::{
 use ffs_repair::pipeline::{
     GroupConfig, ScrubDaemon, ScrubDaemonConfig, ScrubDaemonMetrics, ScrubWithRecovery,
 };
+use ffs_repair::recovery::{RecoveryWriteback, RecoveryWritebackBlock};
 use ffs_repair::scrub::{
     BlockValidator, BtrfsSuperblockValidator, BtrfsTreeBlockValidator, CompositeValidator,
     Ext4SuperblockValidator, ScrubReport, Scrubber, Severity, ZeroCheckValidator,
@@ -52,6 +53,7 @@ use std::fmt::Write;
 use std::fs::{File, OpenOptions as StdOpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, info_span, warn};
@@ -255,11 +257,6 @@ impl MountBackgroundScrubConfig {
         let background_repair = request.repair.enabled();
         if background_repair && request.scrub == MountBackgroundScrubMode::Disabled {
             bail!("--background-repair cannot be combined with --no-background-scrub");
-        }
-        if background_repair && request.access == MountAccessMode::ReadWrite {
-            bail!(
-                "--background-repair currently requires a client read-only mount; omit --rw so repair writes cannot race mounted write traffic"
-            );
         }
         if background_repair && ledger_path.is_none() {
             bail!("--background-repair requires --background-scrub-ledger for durable evidence");
@@ -510,8 +507,9 @@ enum Command {
         background_scrub_ledger: Option<PathBuf>,
         /// Allow mounted background scrub to repair blocks and refresh repair symbols.
         ///
-        /// This is an explicit backing-image mutation permission for client
-        /// read-only mounts. It requires `--background-scrub-ledger` so every
+        /// This is an explicit backing-image mutation permission. Read-write
+        /// mounts route recovered source blocks through the mounted MVCC
+        /// serializer and still require `--background-scrub-ledger` so every
         /// automatic repair attempt has a durable evidence trail.
         #[arg(long = "background-repair", conflicts_with = "no_background_scrub")]
         background_repair: bool,
@@ -4110,7 +4108,7 @@ fn emit_optional_recovery_banner(open_fs: &OpenFs) {
 }
 
 fn mount_with_fuse(
-    open_fs: OpenFs,
+    open_fs: Arc<OpenFs>,
     mountpoint: &Path,
     read_write: bool,
     allow_other: bool,
@@ -4140,7 +4138,7 @@ struct ManagedMountParams<'a> {
     scenario_id: &'a str,
 }
 
-fn mount_with_managed_fuse(open_fs: OpenFs, params: &ManagedMountParams<'_>) -> Result<()> {
+fn mount_with_managed_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>) -> Result<()> {
     let config = MountConfig {
         options: MountOptions {
             read_only: !params.read_write,
@@ -4185,7 +4183,7 @@ fn mount_with_managed_fuse(open_fs: OpenFs, params: &ManagedMountParams<'_>) -> 
     Ok(())
 }
 
-fn mount_with_per_core_fuse(open_fs: OpenFs, params: &ManagedMountParams<'_>) -> Result<()> {
+fn mount_with_per_core_fuse(open_fs: Arc<OpenFs>, params: &ManagedMountParams<'_>) -> Result<()> {
     use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher};
 
     let per_core_config = PerCoreConfig::default();
@@ -4447,6 +4445,36 @@ fn ensure_mount_background_repair_write_access(image_path: &Path) -> Result<()> 
         })
 }
 
+#[derive(Debug, Clone)]
+struct MountedRecoveryWriteback {
+    open_fs: Arc<OpenFs>,
+}
+
+impl RecoveryWriteback for MountedRecoveryWriteback {
+    fn writeback_recovered(
+        &self,
+        cx: &Cx,
+        _device: &dyn BlockDevice,
+        recovered: &[RecoveryWritebackBlock<'_>],
+    ) -> ffs_error::Result<()> {
+        let entries: Vec<RepairWritebackBlock<'_>> = recovered
+            .iter()
+            .map(|block| RepairWritebackBlock {
+                block: block.block,
+                expected_current: block.expected_current,
+                data: block.data,
+            })
+            .collect();
+        self.open_fs
+            .repair_writeback_blocks_via_mounted_mutation_path(cx, &entries)?;
+        Ok(())
+    }
+
+    fn authority_name(&self) -> &'static str {
+        "mounted_mvcc_request_scope"
+    }
+}
+
 fn mount_background_repair_symbol_count(
     groups: &[GroupConfig],
     repair_writes_enabled: bool,
@@ -4461,11 +4489,12 @@ fn mount_background_repair_symbol_count(
         .unwrap_or(0)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct MountBackgroundScrubThreadConfig<'a> {
     interval: Duration,
     ledger_path: Option<&'a Path>,
     repair_writes_enabled: bool,
+    mounted_repair_writeback: Option<Arc<OpenFs>>,
     operation_id: &'a str,
     scenario_id: &'a str,
 }
@@ -4499,7 +4528,7 @@ fn run_mount_background_scrub_daemon(
     let ledger = open_mount_background_scrub_ledger(config.ledger_path)?;
     let repair_symbol_count =
         mount_background_repair_symbol_count(&plan.groups, repair_writes_enabled);
-    let pipeline = ScrubWithRecovery::new(
+    let mut pipeline = ScrubWithRecovery::new(
         &block_dev,
         validator.as_ref(),
         plan.fs_uuid,
@@ -4508,6 +4537,9 @@ fn run_mount_background_scrub_daemon(
         repair_symbol_count,
     )
     .with_repair_writes_enabled(repair_writes_enabled);
+    if let Some(open_fs) = config.mounted_repair_writeback {
+        pipeline = pipeline.with_recovery_writeback(Arc::new(MountedRecoveryWriteback { open_fs }));
+    }
     let mut daemon = ScrubDaemon::new(
         pipeline,
         ScrubDaemonConfig {
@@ -4532,6 +4564,7 @@ fn start_mount_background_scrub(
     image_path: &Path,
     open_fs: &OpenFs,
     config: &MountBackgroundScrubConfig,
+    mounted_repair_writeback: Option<Arc<OpenFs>>,
     operation_id: &str,
     scenario_id: &str,
 ) -> Result<Option<MountBackgroundScrubGuard>> {
@@ -4607,6 +4640,7 @@ fn start_mount_background_scrub(
                     interval,
                     ledger_path: ledger_path.as_deref(),
                     repair_writes_enabled,
+                    mounted_repair_writeback,
                     operation_id: &thread_operation_id,
                     scenario_id: &thread_scenario_id,
                 },
@@ -4712,12 +4746,22 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
         open_fs
             .enable_writes(&cx)
             .context("failed to enable write support")?;
+        if options.background_scrub.repair_writes_enabled && !open_fs.is_writable() {
+            bail!(
+                "read-write background repair requires the mounted MVCC serialization gate to enable write support"
+            );
+        }
     }
+    let open_fs = Arc::new(open_fs);
+    let mounted_repair_writeback = (options.read_write
+        && options.background_scrub.repair_writes_enabled)
+        .then(|| Arc::clone(&open_fs));
 
     let _background_scrub_guard = start_mount_background_scrub(
         image_path,
-        &open_fs,
+        open_fs.as_ref(),
         &options.background_scrub,
+        mounted_repair_writeback,
         &operation_id,
         scenario_id,
     )?;
@@ -4725,7 +4769,7 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
     match runtime.mode {
         MountRuntimeMode::Standard => {
             mount_with_fuse(
-                open_fs,
+                Arc::clone(&open_fs),
                 mountpoint,
                 options.read_write,
                 options.allow_other,
@@ -4743,9 +4787,9 @@ fn mount_cmd(image_path: &Path, mountpoint: &Path, options: &MountCmdOptions) ->
                 scenario_id,
             };
             if runtime.mode == MountRuntimeMode::PerCore {
-                mount_with_per_core_fuse(open_fs, &params)?;
+                mount_with_per_core_fuse(Arc::clone(&open_fs), &params)?;
             } else {
-                mount_with_managed_fuse(open_fs, &params)?;
+                mount_with_managed_fuse(Arc::clone(&open_fs), &params)?;
             }
         }
     }
@@ -8164,6 +8208,28 @@ mod tests {
     }
 
     #[test]
+    fn mount_background_repair_implies_scrub_for_read_write_mount() {
+        let cfg = MountBackgroundScrubConfig::resolve(
+            MountBackgroundScrubRequest::new(
+                MountAccessMode::ReadWrite,
+                MountBackgroundScrubMode::Auto,
+                MountBackgroundRepairMode::Enabled,
+            ),
+            Some(7),
+            Some(PathBuf::from("/tmp/ffs-rw-repair.jsonl")),
+        )
+        .expect("read-write background repair should resolve after serialization gate");
+        assert!(cfg.enabled);
+        assert!(cfg.explicit);
+        assert!(cfg.repair_writes_enabled);
+        assert_eq!(cfg.interval_secs, 7);
+        assert_eq!(
+            cfg.ledger_path,
+            Some(PathBuf::from("/tmp/ffs-rw-repair.jsonl"))
+        );
+    }
+
+    #[test]
     fn mount_background_repair_rejects_missing_ledger() {
         let err = MountBackgroundScrubConfig::resolve(
             MountBackgroundScrubRequest::new(
@@ -8200,7 +8266,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_background_repair_rejects_read_write_mount() {
+    fn mount_background_repair_rejects_read_write_missing_ledger() {
         let err = MountBackgroundScrubConfig::resolve(
             MountBackgroundScrubRequest::new(
                 MountAccessMode::ReadWrite,
@@ -8208,12 +8274,12 @@ mod tests {
                 MountBackgroundRepairMode::Enabled,
             ),
             None,
-            Some(PathBuf::from("/tmp/ffs-repair.jsonl")),
+            None,
         )
-        .expect_err("background repair must not race mounted writes");
+        .expect_err("read-write background repair needs durable evidence");
         assert!(
             err.to_string()
-                .contains("--background-repair currently requires a client read-only mount")
+                .contains("--background-repair requires --background-scrub-ledger")
         );
     }
 
@@ -8240,6 +8306,7 @@ mod tests {
                 &path,
                 &open_fs,
                 &cfg,
+                None,
                 "mount-bg-scrub-test",
                 "cli_mount_background_scrub_ro",
             )
@@ -9682,6 +9749,41 @@ mod tests {
                 assert_eq!(
                     background_scrub_ledger,
                     Some(PathBuf::from("/tmp/repair.jsonl"))
+                );
+            }
+            other => assert!(
+                matches!(other, Command::Mount { .. }),
+                "expected mount command"
+            ),
+        }
+    }
+
+    #[test]
+    fn cli_parses_read_write_mount_background_repair_flag() {
+        let cli = Cli::try_parse_from([
+            "ffs",
+            "mount",
+            "--rw",
+            "--background-repair",
+            "--background-scrub-ledger",
+            "/tmp/rw-repair.jsonl",
+            "/tmp/fs.img",
+            "/tmp/mnt",
+        ])
+        .expect("read-write mount command with background repair should parse");
+
+        match cli.command {
+            Command::Mount {
+                rw,
+                background_repair,
+                background_scrub_ledger,
+                ..
+            } => {
+                assert!(rw);
+                assert!(background_repair);
+                assert_eq!(
+                    background_scrub_ledger,
+                    Some(PathBuf::from("/tmp/rw-repair.jsonl"))
                 );
             }
             other => assert!(

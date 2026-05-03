@@ -389,6 +389,18 @@
           "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_authority_injected|outcome=PASS"
         },
         {
+          "id": "rw_background_repair_cli_enabled",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rw_background_repair_cli_enabled|outcome=PASS"
+        },
+        {
+          "id": "rw_background_repair_writeback_cache_disabled",
+          "category": "edge",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=rw_background_repair_writeback_cache_disabled|outcome=PASS"
+        },
+        {
           "id": "repair_writeback_route_artifact",
           "category": "happy",
           "status": "active",

@@ -3,7 +3,7 @@
   "contract_id": "bd-rchk0.1.1-repair-writeback-serialization-v1",
   "bead_id": "bd-rchk0.1.1",
   "current_policy": {
-    "policy_id": "rw-repair-fail-closed-v1",
+    "policy_id": "rw-repair-fail-closed-v1-historical",
     "read_write_repair_state": "fail_closed",
     "mutating_rw_repair_enabled": false,
     "serialization_point": "not_implemented",
@@ -164,14 +164,14 @@
     },
     {
       "state_id": "repair_writeback_blocked_rw",
-      "description": "Read-write mounted repair requested mutation, but the unified serializer does not exist, so the path fails closed.",
+        "description": "Historical bd-rchk0.1.1 state: read-write mounted repair requested mutation before the unified serializer existed, so the path failed closed.",
       "client_writes_allowed": true,
       "repair_writeback_allowed": false,
       "mutates_image": false
     },
     {
       "state_id": "repair_writeback_staged",
-      "description": "Future state: decoded block writeback is staged behind the same serializer used by client writes.",
+        "description": "Decoded block writeback is staged behind the same serializer used by client writes.",
       "client_writes_allowed": false,
       "repair_writeback_allowed": true,
       "mutates_image": false
@@ -553,7 +553,7 @@
   "scenarios": [
     {
       "scenario_id": "repair_writeback_rw_fail_closed",
-      "title": "Read-write mounted repair writeback fails closed while a client write is in flight",
+      "title": "Historical missing-serializer gate fails closed while a client write is in flight",
       "coverage_tags": [
         "fail_closed_rw_repair",
         "mvcc_snapshot_boundary"
@@ -755,7 +755,7 @@
     "options": [
       {
         "option_id": "fail_closed_until_unified_serializer",
-        "decision": "Reject read-write mounted automatic repair mutation until client writes and repair writeback share one serializer.",
+        "decision": "Historical bd-rchk0.1.1 gate: reject read-write mounted automatic repair mutation until client writes and repair writeback share one serializer.",
         "semantic_failure_probability_ppm": 500,
         "severity_points": 5,
         "operational_cost_points": 20,
@@ -773,7 +773,7 @@
       },
       {
         "option_id": "future_unified_serializer",
-        "decision": "Enable only after bd-rchk0.1.2 through bd-rchk0.1.4 produce model, mounted, and crash evidence.",
+        "decision": "Current bd-rchk0.1.4 gate: enable only after bd-rchk0.1.2 through bd-rchk0.1.4 produce model, mounted, stale-snapshot, interruption, and writeback-cache-disabled evidence.",
         "semantic_failure_probability_ppm": 3000,
         "severity_points": 5,
         "operational_cost_points": 60,

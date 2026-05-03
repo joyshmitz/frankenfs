@@ -270,7 +270,7 @@ For multi-threaded workloads, `ShardedMvccStore` partitions version chains acros
 
 ## Deep Dive: Self-Healing Durability
 
-FrankenFS can detect corruption during scrub cycles and recover corrupted data from fountain-coded repair symbols through the explicit `ffs repair` / `ffs fsck --repair` paths. The `ffs mount` path also owns the background scrub lifecycle for read-only mounts: by default it remains detection-only, and `--background-repair --background-scrub-ledger <jsonl>` explicitly grants the daemon permission to write recovered blocks and refreshed repair symbols while recording a durable evidence trail.
+FrankenFS can detect corruption during scrub cycles and recover corrupted data from fountain-coded repair symbols through the explicit `ffs repair` / `ffs fsck --repair` paths. The `ffs mount` path also owns the background scrub lifecycle: by default read-only mounts run detection-only scrub and read-write mounts leave scrub disabled. `--background-repair --background-scrub-ledger <jsonl>` explicitly grants the daemon permission to write recovered blocks and refreshed repair symbols while recording a durable evidence trail; on read-write mounts recovered source blocks route through the mounted MVCC repair-writeback serializer before symbol refresh.
 
 Hostile-image safety is a separate release-gated claim. The adversarial threat
 model in `security/adversarial_image_threat_model.json` defines how malformed
@@ -842,7 +842,7 @@ Each inode includes a CRC32c checksum (`i_checksum_lo` + `i_checksum_hi`) comput
 
 ## Deep Dive: Background Scrub Pipeline
 
-The scrub pipeline (`ffs-repair::pipeline`) scans block integrity, emits evidence for detected corruption, and orchestrates recovery when it is run in repair-enabled mode. Mount-time background scrub uses the same pipeline in detection-only mode by default; adding `--background-repair --background-scrub-ledger <jsonl>` turns on the pipeline's real recovery/writeback path for client read-only mounts, including repair-symbol refresh after successful recovery. Read-write mounts still reject this flag until mounted write traffic and repair writeback share a single serialization point.
+The scrub pipeline (`ffs-repair::pipeline`) scans block integrity, emits evidence for detected corruption, and orchestrates recovery when it is run in repair-enabled mode. Mount-time background scrub uses the same pipeline in detection-only mode by default; adding `--background-repair --background-scrub-ledger <jsonl>` turns on the pipeline's real recovery/writeback path, including repair-symbol refresh after successful recovery. Read-only mounted repair uses the direct backing-image authority. Read-write mounted repair uses the mounted MVCC request-scope authority, compares scrub-time bytes against the current mounted view, rejects stale repair snapshots, flushes recovered blocks to the backing image, and keeps kernel FUSE `writeback_cache` disabled.
 
 ### Scrub Cycle
 
@@ -1237,6 +1237,9 @@ cargo run -p ffs-cli -- mount <image-path> <mountpoint>
 # Enable automatic mounted repair for a client read-only mount
 cargo run -p ffs-cli -- mount <image-path> <mountpoint> --background-repair --background-scrub-ledger repair.jsonl
 
+# Enable automatic mounted repair for a read-write mount through the mounted serializer
+cargo run -p ffs-cli -- mount <image-path> <mountpoint> --rw --background-repair --background-scrub-ledger repair.jsonl
+
 # Enable experimental read-write mode
 cargo run -p ffs-cli -- mount <image-path> <mountpoint> --rw
 
@@ -1360,7 +1363,7 @@ These items sit outside the tracked 97-row parity denominator and are the curren
 | `bd-rchk3` | xfstests | Fresh 2026-05-01 subset/regression gate recorded; real execution is blocked by unbuilt xfstests helpers and a dpkg lock blocking `xfslibs-dev`/`libaio-dev` install |
 | `bd-rchk4` | Mounted FUSE CI | Use the permissioned lane documented in `scripts/e2e/README.md` to run critical mounted ext4/btrfs paths with structured capability and cleanup artifacts |
 | `bd-rchk5` | Performance | Re-measure representative throughput/latency targets and record environment metadata |
-| `bd-rchk6` | Mounted self-healing | Automatic mounted repair is implemented for explicit client read-only `--background-repair` mounts; read-write automatic repair remains intentionally blocked until repair writeback is serialized with mounted write traffic |
+| `bd-rchk6` | Mounted self-healing | Automatic mounted repair is implemented for explicit `--background-repair --background-scrub-ledger <jsonl>` mounts; read-write repair uses the mounted MVCC repair-writeback serializer and stale-snapshot rejection |
 | `bd-rchk7` | Fuzz/conformance | Replace remaining open-ended corpus notes with completed fixtures or narrow beads |
 
 See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the full capability matrix and [PLAN_TO_PORT_FRANKENFS_TO_RUST.md](PLAN_TO_PORT_FRANKENFS_TO_RUST.md) for the 9-phase roadmap.
@@ -1390,7 +1393,7 @@ the suite artifact directory:
 | `mount_*.log` | every mounted scenario | Raw `ffs-cli mount` stdout/stderr for postmortem debugging |
 | operational manifest JSON | readiness report consumers | `pass`/`fail`/`skip`/`error` records using the shared artifact schema |
 | `soak_canary_campaign_report.json` | endurance and canary gates | Campaign profile, workload IDs, seeds, heartbeat summaries, resource caps, pass/fail/skip/error/flake classification, and reproduction links |
-| `repair_writeback_serialization_report.json` | `repair.rw.writeback` gate | State-machine, lease, MVCC epoch, fsync/fsyncdir, stale-symbol, cancellation, failure, and expected-loss proof for the current fail-closed read-write repair policy |
+| `repair_writeback_serialization_report.json` and `repair_writeback_route_artifact.json` | `repair.rw.writeback` gate | State-machine, lease, MVCC epoch, fsync/fsyncdir, stale-symbol, cancellation, failure, route, stale-snapshot rejection, and writeback-cache-disabled proof for read-write mounted repair |
 
 ### Readiness Gates
 
@@ -1402,7 +1405,7 @@ the suite artifact directory:
 | `mount.rw.btrfs` | btrfs `--rw` can handle representative write workflows under the experimental contract | Mounted core mutations, fsync/fsyncdir, crash-point reopen checks, and explicit unsupported-path classifications; exact scenario expansion is owned by `bd-rchk0.3.2` | `bd-rchk0.3.2`, `bd-rchk0.1.1`, `bd-rchk0.3.4` |
 | `durability.sync` | `fsync` and `fsyncdir` are the durability boundaries users can reason about | Logs classify `flush` as non-durable, `fsync`/`fsyncdir` as durable boundaries, and crash/reopen checks preserve fsync-backed data | `bd-rchk0.1.1`, `bd-rchk0.3.2` |
 | `repair.ro.auto` | read-only mounted automatic repair is operator-usable when explicitly enabled | `--background-repair --background-scrub-ledger <jsonl>` produces a repair ledger, verifies recovered reads, and keeps read-only mount mutation rules explicit | `bd-rchk6`, `bd-rchk7.3` |
-| `repair.rw.writeback` | repair writeback can safely coexist with client writes | `validate-repair-writeback-serialization` proves the current fail-closed contract; no user-facing upgrade until repair mutation is serialized through the mounted write path with follow-up unit and E2E evidence | `bd-rchk0.1.1`, `bd-rchk0.1.2`, `bd-rchk0.1.3` |
+| `repair.rw.writeback` | repair writeback can safely coexist with client writes | `ffs_repair_writeback_route_e2e.sh` proves mounted MVCC repair-writeback routing, deterministic repair/client-write race schedules, stale-symbol refresh suppression, flush/reopen visibility, CLI read-write enablement, ledger-required rejection, and writeback-cache-disabled mount options | `bd-rchk0.1.1`, `bd-rchk0.1.2`, `bd-rchk0.1.3`, `bd-rchk0.1.4` |
 | `security.hostile_image` | hostile images and hostile proof artifacts cannot escape the safety envelope or create misleading readiness claims | `validate-adversarial-threat-model` plus the security E2E smoke prove path traversal/symlink refusal, critical fail-closed handling, resource caps, repair-ledger tamper refusal, and docs-safe wording | `bd-rchk0.5.11`, `bd-0qx9b` |
 | `writeback_cache` | kernel FUSE writeback-cache mode can be enabled | Remains unsupported until the epoch-barrier acceptance gate, opt-in wiring, crash matrix, and docs are complete | `bd-rchk0.2.1`, `bd-rchk0.2.2`, `bd-rchk0.2.3` |
 | `errors.evidence` | mounted failures are actionable rather than opaque | Every failure path reports `operation_id`, `scenario_id`, `outcome`, `error_class`, remediation hint where applicable, raw logs, and cleanup status | `bd-rchk0.3.4`, `bd-rchk0.4.3` |
@@ -1429,9 +1432,9 @@ the suite artifact directory:
   claims.
 - Kernel FUSE `writeback_cache` remains unsupported until the dedicated
   writeback-cache beads close. The current mount path must not enable it.
-- Read-write mounted automatic repair remains blocked until repair writeback is
-  serialized with normal mounted writes. Read-only explicit repair and
-  detection-only scrub are the only current mounted repair modes.
+- Read-write mounted automatic repair is explicit and ledger-gated. Recovered
+  source blocks route through the mounted MVCC repair-writeback serializer, and
+  stale repair snapshots fail closed before mutation.
 - These SLOs do not authorize production use of irreplaceable data. They define
   the evidence required before the README can reduce experimental caveats.
 
@@ -1467,7 +1470,7 @@ See [COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1.md](COMPREHENSIVE_SPEC_FOR_FRANKENFS_V1
 - **Runtime is still early-stage.** Full tracked parity means the current V1 matrix is implemented and tested; it does not mean operational hardening, performance tuning, or future-scope features are finished. Mount/write paths should still be treated as experimental in operational environments.
 - **Kernel FUSE writeback-cache mode is intentionally unsupported in V1.x.** The epoch barrier design is implemented and crash-tested, but `writeback_cache` is not enabled in mount options. `flush` is a non-durability lifecycle hook; `fsync` / `fsyncdir` are the explicit durability boundaries.
 - **Default CLI mount path does not enable optional backpressure/per-core scheduling hooks.** `ffs-cli mount` currently uses the standard `ffs-fuse` mount path without wiring `BackpressureGate` controls.
-- **Mount background scrub is detection-only by default, with explicit automatic repair available.** `ffs mount` starts `ffs-repair::ScrubDaemon` automatically for default read-only mounts, owns cancellation through the mount lifecycle, and joins the worker on shutdown. Read-write mounts keep the daemon disabled by default; `--background-scrub` can opt into detection-only monitoring, `--no-background-scrub` disables the read-only default, and `--background-scrub-ledger` records evidence JSONL. `--background-repair --background-scrub-ledger <jsonl>` enables real block recovery and repair-symbol refresh for client read-only mounts after checking writable backing-image access. `--background-repair` is rejected with `--rw` until repair writeback is serialized through the mounted write path.
+- **Mount background scrub is detection-only by default, with explicit automatic repair available.** `ffs mount` starts `ffs-repair::ScrubDaemon` automatically for default read-only mounts, owns cancellation through the mount lifecycle, and joins the worker on shutdown. Read-write mounts keep the daemon disabled by default; `--background-scrub` can opt into detection-only monitoring, `--no-background-scrub` disables the read-only default, and `--background-scrub-ledger` records evidence JSONL. `--background-repair --background-scrub-ledger <jsonl>` enables real block recovery and repair-symbol refresh after checking writable backing-image access. Read-write repair uses the mounted MVCC request-scope authority so recovered source blocks share the same serializer as client writes.
 - **External dependencies.** Workspace dependencies currently use crates.io releases (`asupersync = 0.2.5`, `ftui = 0.2.1`); local path overrides can be supplied with Cargo `[patch]` during sibling-repo development.
 - **Legacy reference corpus is not included.** The Linux kernel ext4/btrfs source used for behavioral extraction (~205K lines) is gitignored due to size. The extracted behavioral contracts are fully captured in [EXISTING_EXT4_BTRFS_STRUCTURE.md](EXISTING_EXT4_BTRFS_STRUCTURE.md). For the original source, see `git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git` at tag v6.19.
 
@@ -1517,7 +1520,7 @@ A: Repair symbols become stale when source blocks are modified. FrankenFS suppor
 | Document | What it covers |
 |----------|----------------|
 | [design-writeback-cache-mvcc.md](docs/design-writeback-cache-mvcc.md) | FUSE writeback-cache reordering model, 6 formal invariants, epoch fence state machine, expected-loss decision matrix |
-| [design-repair-writeback-serialization.md](docs/design-repair-writeback-serialization.md) | Fail-closed contract for read-write mounted repair writeback vs client writes, including invariants, evidence fields, and expected-loss decision |
+| [design-repair-writeback-serialization.md](docs/design-repair-writeback-serialization.md) | Read-write mounted repair writeback serialization contract, stale-snapshot rejection invariants, evidence fields, and the historical fail-closed gate |
 | [design-safe-merge-taxonomy.md](docs/design-safe-merge-taxonomy.md) | Safe-merge proof obligations for concurrent block writes |
 | [design-adaptive-refresh.md](docs/design-adaptive-refresh.md) | Expected-loss model for age-only vs block-count vs hybrid refresh triggers |
 | [design-multi-host-repair.md](docs/design-multi-host-repair.md) | Optimistic lease-based repair ownership for shared storage |

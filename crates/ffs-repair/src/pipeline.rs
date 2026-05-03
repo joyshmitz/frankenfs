@@ -2431,6 +2431,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingRecoveryWriteback {
         blocks: Mutex<Vec<BlockNumber>>,
+        expected_current: Mutex<Vec<(BlockNumber, Vec<u8>)>>,
     }
 
     impl RecoveryWriteback for RecordingRecoveryWriteback {
@@ -2438,14 +2439,20 @@ mod tests {
             &self,
             cx: &Cx,
             device: &dyn BlockDevice,
-            recovered: &[crate::codec::RecoveredBlock],
+            recovered: &[crate::recovery::RecoveryWritebackBlock<'_>],
         ) -> Result<()> {
             for block in recovered {
-                device.write_block(cx, block.block, &block.data)?;
+                device.write_block(cx, block.block, block.data)?;
                 self.blocks
                     .lock()
                     .map_err(|_| FfsError::RepairFailed("recording writeback lock".to_owned()))?
                     .push(block.block);
+                self.expected_current
+                    .lock()
+                    .map_err(|_| {
+                        FfsError::RepairFailed("recording expected-current lock".to_owned())
+                    })?
+                    .push((block.block, block.expected_current.to_vec()));
             }
             device.sync(cx)?;
             Ok(())
@@ -2464,7 +2471,7 @@ mod tests {
             &self,
             _cx: &Cx,
             _device: &dyn BlockDevice,
-            _recovered: &[crate::codec::RecoveredBlock],
+            _recovered: &[crate::recovery::RecoveryWritebackBlock<'_>],
         ) -> Result<()> {
             Err(FfsError::RepairFailed(
                 "mounted mutation path rejected stale repair snapshot".to_owned(),
@@ -3327,6 +3334,14 @@ mod tests {
                 .expect("recording writeback lock")
                 .as_slice(),
             &[BlockNumber(3)]
+        );
+        assert_eq!(
+            writeback
+                .expected_current
+                .lock()
+                .expect("recording expected-current lock")
+                .as_slice(),
+            &[(BlockNumber(3), vec![0xAA; block_size as usize])]
         );
         let restored = device.read_block(&cx, BlockNumber(3)).expect("read");
         assert_eq!(restored.as_slice(), originals[3].as_slice());

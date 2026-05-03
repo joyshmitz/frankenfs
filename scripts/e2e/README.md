@@ -254,6 +254,9 @@ authority and fails closed when that authority rejects a stale repair snapshot.
 The same smoke also records deterministic interleavings for repair-before-write,
 write-before-repair stale rejection, disjoint client/repair writes, cancellation
 before staging, stale-symbol refresh suppression, and flush/reopen visibility.
+The read-write enablement leg proves `ffs mount --rw --background-repair
+--background-scrub-ledger <jsonl>` parses and resolves, missing ledgers reject
+before mount, and kernel FUSE writeback-cache mode stays disabled.
 
 ```bash
 ./scripts/e2e/ffs_repair_writeback_route_e2e.sh
@@ -262,7 +265,8 @@ before staging, stale-symbol refresh suppression, and flush/reopen visibility.
 The generated artifact records operation and scenario IDs, expected and
 observed states, interleaving schedule IDs, operation traces, ledger event
 classes, visible data before/after repair, stdout/stderr log paths, cleanup
-status, and the reproduction command.
+status, writeback-cache state, read-write background repair guard state, and
+the reproduction command.
 
 ### Permissioned FUSE Lane
 

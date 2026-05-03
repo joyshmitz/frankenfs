@@ -10,6 +10,7 @@ use ffs_types::{CommitSeq, InodeNumber, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 // ── VFS semantics layer ─────────────────────────────────────────────────────
@@ -1447,5 +1448,549 @@ pub trait FsOps: Send + Sync {
     /// implementation is a no-op.
     fn flush_on_destroy(&self, _cx: &Cx) -> ffs_error::Result<()> {
         Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+impl<T: FsOps + ?Sized> FsOps for Arc<T> {
+    fn getattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.as_ref().getattr(cx, scope, ino)
+    }
+
+    fn lookup(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.as_ref().lookup(cx, scope, parent, name)
+    }
+
+    fn readdir(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+    ) -> ffs_error::Result<Vec<DirEntry>> {
+        self.as_ref().readdir(cx, scope, ino, offset)
+    }
+
+    fn read(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+        size: u32,
+    ) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref().read(cx, scope, ino, offset, size)
+    }
+
+    fn open(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        flags: i32,
+    ) -> ffs_error::Result<(u64, u32)> {
+        self.as_ref().open(cx, scope, ino, flags)
+    }
+
+    fn readlink(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref().readlink(cx, scope, ino)
+    }
+
+    fn statfs(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<FsStat> {
+        self.as_ref().statfs(cx, scope, ino)
+    }
+
+    fn listxattr(&self, cx: &Cx, ino: InodeNumber) -> ffs_error::Result<Vec<String>> {
+        self.as_ref().listxattr(cx, ino)
+    }
+
+    fn getxattr(
+        &self,
+        cx: &Cx,
+        ino: InodeNumber,
+        name: &str,
+    ) -> ffs_error::Result<Option<Vec<u8>>> {
+        self.as_ref().getxattr(cx, ino, name)
+    }
+
+    fn setxattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        name: &str,
+        value: &[u8],
+        mode: XattrSetMode,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().setxattr(cx, scope, ino, name, value, mode)
+    }
+
+    fn removexattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        name: &str,
+    ) -> ffs_error::Result<bool> {
+        self.as_ref().removexattr(cx, scope, ino, name)
+    }
+
+    fn create(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        mode: u16,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.as_ref()
+            .create(cx, scope, parent, name, mode, uid, gid)
+    }
+
+    fn mkdir(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        mode: u16,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.as_ref().mkdir(cx, scope, parent, name, mode, uid, gid)
+    }
+
+    fn unlink(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().unlink(cx, scope, parent, name)
+    }
+
+    fn rmdir(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().rmdir(cx, scope, parent, name)
+    }
+
+    fn rename(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        new_parent: InodeNumber,
+        new_name: &OsStr,
+    ) -> ffs_error::Result<()> {
+        self.as_ref()
+            .rename(cx, scope, parent, name, new_parent, new_name)
+    }
+
+    fn rename2(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        new_parent: InodeNumber,
+        new_name: &OsStr,
+        flags: u32,
+    ) -> ffs_error::Result<()> {
+        self.as_ref()
+            .rename2(cx, scope, parent, name, new_parent, new_name, flags)
+    }
+
+    fn write(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+        data: &[u8],
+    ) -> ffs_error::Result<u32> {
+        self.as_ref().write(cx, scope, ino, offset, data)
+    }
+
+    fn copy_file_range(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino_in: InodeNumber,
+        offset_in: u64,
+        ino_out: InodeNumber,
+        offset_out: u64,
+        len: u64,
+    ) -> ffs_error::Result<u64> {
+        self.as_ref()
+            .copy_file_range(cx, scope, ino_in, offset_in, ino_out, offset_out, len)
+    }
+
+    fn link(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        new_parent: InodeNumber,
+        new_name: &OsStr,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.as_ref().link(cx, scope, ino, new_parent, new_name)
+    }
+
+    fn symlink(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        target: &Path,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.as_ref()
+            .symlink(cx, scope, parent, name, target, uid, gid)
+    }
+
+    fn fallocate(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+        length: u64,
+        mode: i32,
+    ) -> ffs_error::Result<()> {
+        self.as_ref()
+            .fallocate(cx, scope, ino, offset, length, mode)
+    }
+
+    fn fiemap(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        start: u64,
+        length: u64,
+    ) -> ffs_error::Result<Vec<FiemapExtent>> {
+        self.as_ref().fiemap(cx, scope, ino, start, length)
+    }
+
+    fn lseek(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        offset: u64,
+        whence: SeekWhence,
+    ) -> ffs_error::Result<u64> {
+        self.as_ref().lseek(cx, scope, ino, offset, whence)
+    }
+
+    fn get_inode_fsxattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<FsxattrInfo> {
+        self.as_ref().get_inode_fsxattr(cx, scope, ino)
+    }
+
+    fn set_inode_fsxattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        fsxattr: FsxattrInfo,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().set_inode_fsxattr(cx, scope, ino, fsxattr)
+    }
+
+    fn get_inode_flags(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        self.as_ref().get_inode_flags(cx, scope, ino)
+    }
+
+    fn get_inode_state(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        self.as_ref().get_inode_state(cx, scope, ino)
+    }
+
+    fn precache_extents(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().precache_extents(cx, scope, ino)
+    }
+
+    fn clear_extent_status_cache(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().clear_extent_status_cache(cx, scope, ino)
+    }
+
+    fn get_inode_generation(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<u32> {
+        self.as_ref().get_inode_generation(cx, scope, ino)
+    }
+
+    fn set_inode_generation(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        generation: u32,
+    ) -> ffs_error::Result<()> {
+        self.as_ref()
+            .set_inode_generation(cx, scope, ino, generation)
+    }
+
+    fn get_encryption_policy_v1(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<[u8; 12]> {
+        self.as_ref().get_encryption_policy_v1(cx, scope, ino)
+    }
+
+    fn get_encryption_policy_ex(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+    ) -> ffs_error::Result<(u8, Vec<u8>)> {
+        self.as_ref().get_encryption_policy_ex(cx, scope, ino)
+    }
+
+    fn get_fs_label(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref().get_fs_label(cx, scope)
+    }
+
+    fn set_fs_label(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        label: &[u8],
+    ) -> ffs_error::Result<()> {
+        self.as_ref().set_fs_label(cx, scope, label)
+    }
+
+    fn fs_uuid(&self) -> ffs_error::Result<[u8; 16]> {
+        self.as_ref().fs_uuid()
+    }
+
+    fn fs_sysfs_path(&self) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref().fs_sysfs_path()
+    }
+
+    fn get_btrfs_fs_info(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref().get_btrfs_fs_info(cx, scope)
+    }
+
+    fn btrfs_ino_lookup(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        treeid: u64,
+        objectid: u64,
+    ) -> ffs_error::Result<(u64, Vec<u8>)> {
+        self.as_ref().btrfs_ino_lookup(cx, scope, treeid, objectid)
+    }
+
+    fn get_btrfs_dev_info(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        devid_in: u64,
+        uuid_in: [u8; 16],
+    ) -> ffs_error::Result<Vec<u8>> {
+        self.as_ref()
+            .get_btrfs_dev_info(cx, scope, devid_in, uuid_in)
+    }
+
+    fn get_quota_info(&self, cx: &Cx, scope: &mut RequestScope) -> ffs_error::Result<QuotaInfo> {
+        self.as_ref().get_quota_info(cx, scope)
+    }
+
+    fn set_inode_flags(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        flags: u32,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().set_inode_flags(cx, scope, ino, flags)
+    }
+
+    fn trim_range(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        start: u64,
+        len: u64,
+        min_len: u64,
+    ) -> ffs_error::Result<u64> {
+        self.as_ref().trim_range(cx, scope, start, len, min_len)
+    }
+
+    fn mknod(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        parent: InodeNumber,
+        name: &OsStr,
+        mode: u16,
+        rdev: u32,
+        uid: u32,
+        gid: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.as_ref()
+            .mknod(cx, scope, parent, name, mode, rdev, uid, gid)
+    }
+
+    fn move_ext(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        donor_fd: u32,
+        orig_start: u64,
+        donor_start: u64,
+        len: u64,
+    ) -> ffs_error::Result<u64> {
+        self.as_ref()
+            .move_ext(cx, scope, ino, donor_fd, orig_start, donor_start, len)
+    }
+
+    fn register_move_ext_donor_fd(
+        &self,
+        donor_fd: u32,
+        donor_ino: InodeNumber,
+    ) -> ffs_error::Result<()> {
+        self.as_ref()
+            .register_move_ext_donor_fd(donor_fd, donor_ino)
+    }
+
+    fn unregister_move_ext_donor_fd(&self, donor_fd: u32) {
+        self.as_ref().unregister_move_ext_donor_fd(donor_fd);
+    }
+
+    fn setattr(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        attrs: &SetAttrRequest,
+    ) -> ffs_error::Result<InodeAttr> {
+        self.as_ref().setattr(cx, scope, ino, attrs)
+    }
+
+    fn flush(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        fh: u64,
+        lock_owner: u64,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().flush(cx, scope, ino, fh, lock_owner)
+    }
+
+    fn release(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        request: ReleaseRequest,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().release(cx, scope, request)
+    }
+
+    fn fsync(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        fh: u64,
+        datasync: bool,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().fsync(cx, scope, ino, fh, datasync)
+    }
+
+    fn fsyncdir(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        ino: InodeNumber,
+        fh: u64,
+        datasync: bool,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().fsyncdir(cx, scope, ino, fh, datasync)
+    }
+
+    fn begin_request_scope(&self, cx: &Cx, op: RequestOp) -> ffs_error::Result<RequestScope> {
+        self.as_ref().begin_request_scope(cx, op)
+    }
+
+    fn end_request_scope(
+        &self,
+        cx: &Cx,
+        op: RequestOp,
+        scope: RequestScope,
+    ) -> ffs_error::Result<()> {
+        self.as_ref().end_request_scope(cx, op, scope)
+    }
+
+    fn commit_request_scope(&self, scope: &mut RequestScope) -> ffs_error::Result<CommitSeq> {
+        self.as_ref().commit_request_scope(scope)
+    }
+
+    fn flush_on_destroy(&self, cx: &Cx) -> ffs_error::Result<()> {
+        self.as_ref().flush_on_destroy(cx)
     }
 }
