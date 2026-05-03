@@ -1,42 +1,163 @@
 [
   {
+    "test_id": "generic/001",
+    "failure_reason": "Selected generic canary expected to pass under the V1 mounted surface; any failure is product-actionable.",
+    "status": "expected_pass",
+    "filesystem_flavor": "generic",
+    "required_capabilities": [
+      "fuse_mount",
+      "xfstests_generic_case"
+    ],
+    "classification": "product_actionable",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+  },
+  {
+    "test_id": "generic/013",
+    "failure_reason": "Selected generic canary expected to pass under the V1 mounted surface; any failure is product-actionable.",
+    "status": "expected_pass",
+    "filesystem_flavor": "generic",
+    "required_capabilities": [
+      "fuse_mount",
+      "xfstests_generic_case"
+    ],
+    "classification": "product_actionable",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+  },
+  {
     "test_id": "generic/030",
     "failure_reason": "Requires xfs_io mremap command; FUSE mmap consistency and mremap ioctl not fully supported",
-    "status": "known_fail"
+    "status": "known_fail",
+    "filesystem_flavor": "generic",
+    "required_capabilities": [
+      "fuse_mount",
+      "xfs_io_mremap",
+      "mmap_consistency"
+    ],
+    "classification": "product_actionable",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+  },
+  {
+    "test_id": "generic/035",
+    "failure_reason": "Selected generic canary expected to pass under the V1 mounted surface; any failure is product-actionable.",
+    "status": "expected_pass",
+    "filesystem_flavor": "generic",
+    "required_capabilities": [
+      "fuse_mount",
+      "xfstests_generic_case"
+    ],
+    "classification": "product_actionable",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "generic/068",
     "failure_reason": "Requires xfs_freeze (FIFREEZE ioctl); FUSE filesystems lack kernel-level freeze/thaw support",
-    "status": "wont_fix"
+    "status": "wont_fix",
+    "filesystem_flavor": "generic",
+    "required_capabilities": [
+      "fuse_mount",
+      "fifreeze_ioctl"
+    ],
+    "classification": "unsupported_by_v1",
+    "scope_reference": "README.md#allowed-deferrals-and-non-goals",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "generic/112",
     "failure_reason": "Requires AIO + preallocation; fallocate prealloc supported, FUSE AIO supported since Linux 4.2. Needs runtime validation with built xfstests (ltp/aio-stress binary required)",
-    "status": "likely_pass"
+    "status": "likely_pass",
+    "filesystem_flavor": "generic",
+    "required_capabilities": [
+      "fuse_mount",
+      "aio_stress",
+      "preallocation"
+    ],
+    "classification": "environment_blocked",
+    "scope_reference": "README.md#whats-next",
+    "tracker_id": "bd-rchk3.1",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "generic/231",
     "failure_reason": "Requires Linux disk quota subsystem; FUSE filesystems do not integrate with kernel quota infrastructure",
-    "status": "wont_fix"
+    "status": "wont_fix",
+    "filesystem_flavor": "generic",
+    "required_capabilities": [
+      "fuse_mount",
+      "kernel_quota_integration"
+    ],
+    "classification": "unsupported_by_v1",
+    "scope_reference": "README.md#allowed-deferrals-and-non-goals",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "ext4/001",
     "failure_reason": "Mounted-path close analogues now prove ext4 FALLOC_FL_ZERO_RANGE and FS_IOC_FIEMAP separately (`ext4_fuse_fallocate_zero_range_zeroes_range`, `fuse_ioctl_fiemap_reports_valid_extents`). Keep allowlisted as likely-pass until the exact xfstests `fzero` + `fiemap` sequence is rerun end-to-end; this is no longer blocked on missing FIEMAP forwarding.",
-    "status": "likely_pass"
+    "status": "likely_pass",
+    "filesystem_flavor": "ext4",
+    "required_capabilities": [
+      "fuse_mount",
+      "fallocate_zero_range",
+      "fiemap",
+      "built_xfstests"
+    ],
+    "classification": "environment_blocked",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.1",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "ext4/003",
     "failure_reason": "Requires scratch device with ext4 bigalloc mkfs feature; test infrastructure setup for FUSE-backed ext4 not available",
-    "status": "known_fail"
+    "status": "known_fail",
+    "filesystem_flavor": "ext4",
+    "required_capabilities": [
+      "fuse_mount",
+      "scratch_device",
+      "mkfs_ext4_bigalloc"
+    ],
+    "classification": "environment_blocked",
+    "scope_reference": "README.md#allowed-deferrals-and-non-goals",
+    "tracker_id": "bd-rchk3.1",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "ext4/005",
     "failure_reason": "Requires `chattr -e` to clear the system-managed EXTENTS flag and convert an extent file to the legacy non-extent format. FrankenFS now proves mounted-path EXT4_IOC_GETFLAGS and user-settable EXT4_IOC_SETFLAGS, but intentionally preserves EXT4_EXTENTS_FL, so this specific extent-conversion path remains unsupported.",
-    "status": "known_fail"
+    "status": "known_fail",
+    "filesystem_flavor": "ext4",
+    "required_capabilities": [
+      "fuse_mount",
+      "chattr_extent_conversion",
+      "legacy_non_extent_format"
+    ],
+    "classification": "unsupported_by_v1",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "ext4/013",
     "failure_reason": "Requires debugfs for direct inode corruption on raw device; incompatible with FUSE-mounted filesystem testing",
-    "status": "wont_fix"
+    "status": "wont_fix",
+    "filesystem_flavor": "ext4",
+    "required_capabilities": [
+      "fuse_mount",
+      "debugfs",
+      "raw_device_corruption"
+    ],
+    "classification": "unsupported_by_v1",
+    "scope_reference": "README.md#allowed-deferrals-and-non-goals",
+    "tracker_id": "bd-rchk3.2",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
   }
 ]

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -69,11 +69,23 @@ pub struct XfstestsRun {
     pub tests: Vec<XfstestsCase>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct XfstestsAllowlistEntry {
     pub test_id: String,
     pub failure_reason: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_flavor: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repro_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +106,7 @@ pub fn load_selected_tests(path: &Path) -> Result<Vec<String>> {
         .with_context(|| format!("failed to read selected tests {}", path.display()))?;
     Ok(text
         .lines()
+        .map(|line| line.split_once('#').map_or(line, |(prefix, _)| prefix))
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
@@ -111,6 +124,154 @@ pub fn load_baseline(path: &Path) -> Result<Vec<XfstestsBaselineEntry>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("failed to read baseline {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("invalid baseline json {}", path.display()))
+}
+
+#[must_use]
+pub fn validate_xfstests_policy(
+    selected: &[String],
+    allowlist: &[XfstestsAllowlistEntry],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut selected_ids = BTreeSet::new();
+
+    for test_id in selected {
+        if !selected_ids.insert(test_id.as_str()) {
+            errors.push(format!("duplicate selected xfstests id: {test_id}"));
+        }
+    }
+
+    let mut policy_ids = BTreeSet::new();
+    for entry in allowlist {
+        if !policy_ids.insert(entry.test_id.as_str()) {
+            errors.push(format!("duplicate xfstests policy id: {}", entry.test_id));
+        }
+
+        validate_policy_entry(
+            entry,
+            selected_ids.contains(entry.test_id.as_str()),
+            &mut errors,
+        );
+    }
+
+    for test_id in &selected_ids {
+        if !policy_ids.contains(test_id) {
+            errors.push(format!(
+                "selected xfstests id lacks policy metadata: {test_id}"
+            ));
+        }
+    }
+
+    for test_id in &policy_ids {
+        if !selected_ids.contains(test_id) {
+            errors.push(format!(
+                "xfstests policy references unselected id: {test_id}"
+            ));
+        }
+    }
+
+    errors
+}
+
+fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors: &mut Vec<String>) {
+    if !selected {
+        return;
+    }
+
+    let test_prefix = entry.test_id.split('/').next().unwrap_or_default();
+    if !matches!(test_prefix, "generic" | "ext4") {
+        errors.push(format!(
+            "xfstests policy has unsupported test id format: {}",
+            entry.test_id
+        ));
+    }
+
+    match entry.status.as_str() {
+        "expected_pass" | "known_fail" | "wont_fix" | "likely_pass" => {}
+        other => errors.push(format!(
+            "xfstests policy {} has unknown status: {other}",
+            entry.test_id
+        )),
+    }
+
+    match entry.filesystem_flavor.as_deref() {
+        Some("generic" | "ext4") => {
+            if entry.filesystem_flavor.as_deref() != Some(test_prefix) {
+                errors.push(format!(
+                    "xfstests policy {} has filesystem_flavor that does not match id prefix",
+                    entry.test_id
+                ));
+            }
+        }
+        Some(other) => errors.push(format!(
+            "xfstests policy {} has unknown filesystem_flavor: {other}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing filesystem_flavor",
+            entry.test_id
+        )),
+    }
+
+    if entry.required_capabilities.is_empty() {
+        errors.push(format!(
+            "xfstests policy {} is missing required_capabilities",
+            entry.test_id
+        ));
+    }
+
+    match entry.classification.as_deref() {
+        Some(
+            "expected_failure"
+            | "environment_blocked"
+            | "unsupported_by_v1"
+            | "harness_blocked"
+            | "product_actionable",
+        ) => {}
+        Some(other) => errors.push(format!(
+            "xfstests policy {} has unknown classification: {other}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing classification",
+            entry.test_id
+        )),
+    }
+
+    let needs_skip_reason = entry.status != "expected_pass";
+    if needs_skip_reason && entry.failure_reason.trim().is_empty() {
+        errors.push(format!(
+            "xfstests policy {} is missing skip reason",
+            entry.test_id
+        ));
+    }
+
+    if entry.classification.as_deref() == Some("unsupported_by_v1") {
+        match entry.scope_reference.as_deref() {
+            Some(reference) if is_supported_scope_reference(reference) => {}
+            Some(reference) => errors.push(format!(
+                "xfstests policy {} has stale scope reference: {reference}",
+                entry.test_id
+            )),
+            None => errors.push(format!(
+                "xfstests policy {} marks unsupported_by_v1 without scope_reference",
+                entry.test_id
+            )),
+        }
+    }
+
+    if entry.status == "wont_fix" && entry.classification.as_deref() != Some("unsupported_by_v1") {
+        errors.push(format!(
+            "xfstests policy {} is wont_fix without unsupported_by_v1 classification",
+            entry.test_id
+        ));
+    }
+}
+
+fn is_supported_scope_reference(reference: &str) -> bool {
+    reference.starts_with("README.md#")
+        || reference.starts_with("FEATURE_PARITY.md#")
+        || reference == "README.md"
+        || reference == "FEATURE_PARITY.md"
 }
 
 #[must_use]
@@ -398,6 +559,30 @@ mod tests {
             .join("xfstests_allowlist.json")
     }
 
+    fn repo_xfstests_list_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts")
+            .join("e2e")
+            .join(name)
+    }
+
+    fn valid_policy_entry(test_id: &str) -> XfstestsAllowlistEntry {
+        let filesystem_flavor = test_id.split('/').next().unwrap_or("generic").to_owned();
+        XfstestsAllowlistEntry {
+            test_id: test_id.to_owned(),
+            failure_reason: "selected canary; failure is product-actionable".to_owned(),
+            status: "expected_pass".to_owned(),
+            filesystem_flavor: Some(filesystem_flavor),
+            required_capabilities: vec!["fuse_mount".to_owned()],
+            classification: Some("product_actionable".to_owned()),
+            scope_reference: None,
+            tracker_id: Some("bd-rchk3.2".to_owned()),
+            repro_command: Some(format!("./check -n {test_id}")),
+        }
+    }
+
     #[test]
     fn parse_check_output_classifies_statuses_and_duration() {
         let selected = vec![
@@ -468,6 +653,7 @@ generic/001  2s ... pass\n";
             test_id: "generic/001".to_owned(),
             failure_reason: "requires unsupported ioctl".to_owned(),
             status: "known_fail".to_owned(),
+            ..XfstestsAllowlistEntry::default()
         }];
 
         apply_allowlist(&mut run, &allowlist);
@@ -526,6 +712,88 @@ generic/001  2s ... pass\n";
                 && ext4_005.failure_reason.contains("EXT4_IOC_SETFLAGS"),
             "ext4/005 should distinguish the unsupported extent conversion from supported flag ioctls: {}",
             ext4_005.failure_reason
+        );
+    }
+
+    #[test]
+    fn repo_xfstests_policy_covers_curated_subset() -> Result<()> {
+        let mut selected = load_selected_tests(&repo_xfstests_list_path("xfstests_generic.list"))?;
+        selected.extend(load_selected_tests(&repo_xfstests_list_path(
+            "xfstests_ext4.list",
+        ))?);
+        let allowlist = load_allowlist(&repo_xfstests_allowlist_path())?;
+
+        let errors = validate_xfstests_policy(&selected, &allowlist);
+
+        assert!(
+            errors.is_empty(),
+            "xfstests policy must cover the curated subset cleanly: {errors:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_duplicate_ids() {
+        let selected = vec!["generic/001".to_owned()];
+        let allowlist = vec![
+            valid_policy_entry("generic/001"),
+            valid_policy_entry("generic/001"),
+        ];
+
+        let errors = validate_xfstests_policy(&selected, &allowlist);
+
+        assert!(errors.iter().any(|error| error.contains("duplicate")));
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_missing_skip_reasons() {
+        let selected = vec!["generic/030".to_owned()];
+        let mut entry = valid_policy_entry("generic/030");
+        entry.status = "known_fail".to_owned();
+        entry.classification = Some("expected_failure".to_owned());
+        entry.failure_reason.clear();
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing skip reason")),
+            "expected missing skip reason error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_unknown_classifications() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        entry.classification = Some("surprising".to_owned());
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("unknown classification")),
+            "expected unknown classification error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_unsupported_tests_without_scope_rationale() {
+        let selected = vec!["generic/068".to_owned()];
+        let mut entry = valid_policy_entry("generic/068");
+        entry.status = "wont_fix".to_owned();
+        entry.classification = Some("unsupported_by_v1".to_owned());
+        entry.scope_reference = None;
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("without scope_reference")),
+            "expected missing scope reference error, got {errors:#?}"
         );
     }
 

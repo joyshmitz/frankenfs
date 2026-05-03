@@ -38,6 +38,7 @@ SUMMARY_JSON="$ARTIFACT_DIR/summary.json"
 RESULTS_JSON="$ARTIFACT_DIR/results.json"
 JUNIT_FILE="$ARTIFACT_DIR/junit.xml"
 CHECK_LOG="$ARTIFACT_DIR/check.log"
+POLICY_PLAN_JSON="$ARTIFACT_DIR/policy_plan.json"
 mkdir -p "$ARTIFACT_DIR"
 
 declare -a GENERIC_TESTS=()
@@ -81,6 +82,17 @@ write_summary() {
     local safe_results="${RESULTS_JSON//\"/\\\"}"
     local safe_junit="${JUNIT_FILE//\"/\\\"}"
     local safe_selected="${SELECTED_FILE//\"/\\\"}"
+    local safe_check_log="${CHECK_LOG//\"/\\\"}"
+    local safe_policy_plan="${POLICY_PLAN_JSON//\"/\\\"}"
+    local safe_summary="${SUMMARY_JSON//\"/\\\"}"
+    local command_plan="./check"
+    if [[ "$XFSTESTS_DRY_RUN" == "1" ]]; then
+        command_plan+=" -n"
+    fi
+    command_plan+=" ${SELECTED_TESTS[*]}"
+    local safe_command_plan="${command_plan//\"/\\\"}"
+    local repro_command="XFSTESTS_MODE=$XFSTESTS_MODE XFSTESTS_FILTER=$XFSTESTS_FILTER XFSTESTS_DRY_RUN=$XFSTESTS_DRY_RUN XFSTESTS_STRICT=$XFSTESTS_STRICT ./scripts/e2e/ffs_xfstests_e2e.sh"
+    local safe_repro_command="${repro_command//\"/\\\"}"
 
     cat >"$SUMMARY_JSON" <<EOF
 {
@@ -97,12 +109,137 @@ write_summary() {
   "selected_file": "$safe_selected",
   "results_json": "$safe_results",
   "junit_xml": "$safe_junit",
+  "check_log": "$safe_check_log",
+  "policy_plan_json": "$safe_policy_plan",
+  "command_plan": "$safe_command_plan",
+  "reproduction_command": "$safe_repro_command",
+  "artifact_paths": {
+    "selected_file": "$safe_selected",
+    "results_json": "$safe_results",
+    "junit_xml": "$safe_junit",
+    "check_log": "$safe_check_log",
+    "policy_plan_json": "$safe_policy_plan",
+    "summary_json": "$safe_summary"
+  },
   "generic_count": ${#GENERIC_TESTS[@]},
   "ext4_count": ${#EXT4_TESTS[@]},
   "selected_count": ${#SELECTED_TESTS[@]},
   "reason": "$safe_reason"
 }
 EOF
+}
+
+write_policy_plan() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        e2e_fail "python3 is required to validate and emit xfstests policy plan"
+    fi
+
+    python3 - "$SELECTED_FILE" "$XFSTESTS_ALLOWLIST_JSON" "$POLICY_PLAN_JSON" "$ARTIFACT_DIR" "$XFSTESTS_FILTER" "$XFSTESTS_DRY_RUN" "$XFSTESTS_MODE" "$XFSTESTS_DIR" <<'PY'
+import json
+import pathlib
+import sys
+
+selected_file = pathlib.Path(sys.argv[1])
+policy_file = pathlib.Path(sys.argv[2])
+policy_plan = pathlib.Path(sys.argv[3])
+artifact_dir = pathlib.Path(sys.argv[4])
+xfstests_filter = sys.argv[5]
+dry_run = sys.argv[6]
+requested_mode = sys.argv[7]
+xfstests_dir = sys.argv[8]
+
+selected = [line.strip() for line in selected_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+policy_entries = json.loads(policy_file.read_text(encoding="utf-8"))
+policy_by_id = {}
+errors = []
+
+for entry in policy_entries:
+    test_id = entry.get("test_id")
+    if not isinstance(test_id, str) or not test_id:
+        errors.append("policy entry missing test_id")
+        continue
+    if test_id in policy_by_id:
+        errors.append(f"duplicate policy id: {test_id}")
+    policy_by_id[test_id] = entry
+
+selected_set = set(selected)
+for test_id in selected:
+    if test_id not in policy_by_id:
+        errors.append(f"selected xfstests id lacks policy metadata: {test_id}")
+
+for test_id in sorted(policy_by_id):
+    if xfstests_filter == "all" and test_id not in selected_set:
+        errors.append(f"policy references unselected xfstests id: {test_id}")
+
+check_argv = ["./check"]
+if dry_run == "1":
+    check_argv.append("-n")
+check_argv.extend(selected)
+
+tests = []
+capabilities = set()
+for test_id in selected:
+    entry = policy_by_id.get(test_id, {})
+    required = [cap for cap in entry.get("required_capabilities", []) if isinstance(cap, str)]
+    capabilities.update(required)
+    status = entry.get("status", "missing_policy")
+    skip_reason = None if status == "expected_pass" else entry.get("failure_reason")
+    tests.append({
+        "test_id": test_id,
+        "filesystem_flavor": entry.get("filesystem_flavor", test_id.split("/", 1)[0]),
+        "status": status,
+        "classification": entry.get("classification"),
+        "required_capabilities": required,
+        "skip_decision": {
+            "status": status,
+            "reason": skip_reason,
+        },
+        "scope_reference": entry.get("scope_reference"),
+        "tracker_id": entry.get("tracker_id"),
+        "repro_command": entry.get(
+            "repro_command",
+            f"XFSTESTS_MODE=run XFSTESTS_DRY_RUN={dry_run} ./scripts/e2e/ffs_xfstests_e2e.sh",
+        ),
+    })
+
+artifact_paths = {
+    "selected_file": str(artifact_dir / "selected_tests.txt"),
+    "results_json": str(artifact_dir / "results.json"),
+    "junit_xml": str(artifact_dir / "junit.xml"),
+    "check_log": str(artifact_dir / "check.log"),
+    "summary_json": str(artifact_dir / "summary.json"),
+    "policy_plan_json": str(policy_plan),
+}
+
+payload = {
+    "requested_mode": requested_mode,
+    "filter": xfstests_filter,
+    "dry_run": dry_run == "1",
+    "xfstests_dir": xfstests_dir,
+    "command_plan": {
+        "working_directory": xfstests_dir or "<resolved xfstests checkout>",
+        "argv": check_argv,
+        "display": " ".join(check_argv),
+    },
+    "reproduction_command": (
+        f"XFSTESTS_MODE={requested_mode} XFSTESTS_FILTER={xfstests_filter} "
+        f"XFSTESTS_DRY_RUN={dry_run} ./scripts/e2e/ffs_xfstests_e2e.sh"
+    ),
+    "artifact_paths": artifact_paths,
+    "capability_checks": [
+        {"capability": capability, "required": True, "source": "xfstests_policy"}
+        for capability in sorted(capabilities)
+    ],
+    "tests": tests,
+    "validation_errors": errors,
+}
+
+policy_plan.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if errors:
+    for error in errors:
+        print(error, file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 write_uniform_results() {
@@ -488,6 +625,8 @@ build_selection
 printf '%s\n' "${SELECTED_TESTS[@]}" >"$SELECTED_FILE"
 e2e_log "Selected tests written to: $SELECTED_FILE"
 e2e_log "Selected test count: ${#SELECTED_TESTS[@]}"
+write_policy_plan
+e2e_log "Policy plan written to: $POLICY_PLAN_JSON"
 
 resolve_xfstests_dir
 EFFECTIVE_MODE="$XFSTESTS_MODE"
