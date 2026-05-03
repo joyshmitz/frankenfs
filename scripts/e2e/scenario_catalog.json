@@ -717,6 +717,24 @@
           "evidence": "scenario_result \"proof_bundle_missing_artifact_rejected\" \"PASS\""
         },
         {
+          "id": "proof_bundle_hash_chain_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_hash_chain_rejected\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_redaction_leak_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_redaction_leak_rejected\" \"PASS\""
+        },
+        {
+          "id": "proof_bundle_redaction_placeholder_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "scenario_result \"proof_bundle_redaction_placeholder_rejected\" \"PASS\""
+        },
+        {
           "id": "proof_bundle_unit_tests",
           "category": "happy",
           "status": "active",

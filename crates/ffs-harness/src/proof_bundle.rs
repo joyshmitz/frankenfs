@@ -68,6 +68,8 @@ pub struct ProofBundleManifest {
     pub required_lanes: Vec<String>,
     pub lanes: Vec<ProofBundleLane>,
     pub redaction: ProofBundleRedactionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<ProofBundleIntegrityPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +117,21 @@ pub struct ProofBundleRedactionPolicy {
     pub redacted_fields: Vec<String>,
     pub preserved_fields: Vec<String>,
     pub reproduction_command: String,
+    #[serde(default = "default_redaction_policy_version")]
+    pub policy_version: String,
+    #[serde(default = "default_redacted_value_placeholder")]
+    pub redacted_value_placeholder: String,
+    #[serde(default)]
+    pub forbidden_unredacted_markers: Vec<String>,
+    #[serde(default)]
+    pub require_placeholder_in_redacted_artifacts: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleIntegrityPolicy {
+    pub artifact_hash_chain_sha256: String,
+    pub artifact_count: usize,
+    pub redaction_policy_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +148,11 @@ pub struct ProofBundleValidationReport {
     pub stale_timestamp: Option<StaleProofBundleTimestamp>,
     pub broken_links: Vec<ProofBundleBrokenLink>,
     pub artifact_hash_mismatches: Vec<ProofBundleHashMismatch>,
+    pub artifact_hash_chain: Option<ProofBundleHashChainReport>,
+    pub artifact_reports: Vec<ProofBundleArtifactReport>,
     pub redaction_errors: Vec<String>,
+    pub redaction_leaks: Vec<ProofBundleRedactionLeak>,
+    pub integrity_errors: Vec<String>,
     pub lanes: Vec<ProofBundleLaneReport>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
@@ -178,6 +199,31 @@ pub struct ProofBundleHashMismatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleHashChainReport {
+    pub expected_sha256: String,
+    pub observed_sha256: String,
+    pub artifact_count: usize,
+    pub redaction_policy_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleArtifactReport {
+    pub lane_id: String,
+    pub path: String,
+    pub sha256: String,
+    pub redacted: bool,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleRedactionLeak {
+    pub lane_id: String,
+    pub field: String,
+    pub path: String,
+    pub marker: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofBundleLaneReport {
     pub lane_id: String,
     pub status: ProofBundleOutcome,
@@ -193,6 +239,14 @@ pub fn proof_bundle_required_lanes() -> Vec<String> {
         .iter()
         .map(|lane| (*lane).to_owned())
         .collect()
+}
+
+fn default_redaction_policy_version() -> String {
+    "v1".to_owned()
+}
+
+fn default_redacted_value_placeholder() -> String {
+    "[REDACTED]".to_owned()
 }
 
 pub fn load_proof_bundle_manifest(path: &Path) -> Result<ProofBundleManifest> {
@@ -231,7 +285,9 @@ pub fn validate_proof_bundle_manifest(
 
     builder.validate_top_level(manifest, current_git_sha, max_age_days);
     builder.validate_lanes(manifest, bundle_root);
+    builder.validate_integrity_policy(manifest);
     builder.validate_redaction_policy(&manifest.redaction);
+    builder.validate_redaction_contents(manifest, bundle_root);
 
     builder.finish(manifest)
 }
@@ -258,17 +314,30 @@ pub fn render_proof_bundle_markdown(report: &ProofBundleValidationReport) -> Str
     .ok();
     writeln!(
         &mut out,
-        "- Diagnostics: missing_lanes={} duplicate_lanes={} duplicate_scenarios={} broken_links={} hash_mismatches={} redaction_errors={} errors={} warnings={}",
+        "- Diagnostics: missing_lanes={} duplicate_lanes={} duplicate_scenarios={} broken_links={} hash_mismatches={} redaction_errors={} redaction_leaks={} integrity_errors={} errors={} warnings={}",
         report.missing_required_lanes.len(),
         report.duplicate_lane_ids.len(),
         report.duplicate_scenario_ids.len(),
         report.broken_links.len(),
         report.artifact_hash_mismatches.len(),
         report.redaction_errors.len(),
+        report.redaction_leaks.len(),
+        report.integrity_errors.len(),
         report.errors.len(),
         report.warnings.len()
     )
     .ok();
+    if let Some(chain) = &report.artifact_hash_chain {
+        writeln!(
+            &mut out,
+            "- Artifact hash chain: observed=`{}` expected=`{}` artifacts={} redaction_policy_version=`{}`",
+            chain.observed_sha256,
+            chain.expected_sha256,
+            chain.artifact_count,
+            chain.redaction_policy_version
+        )
+        .ok();
+    }
     writeln!(
         &mut out,
         "- Reproduction: `{}`",
@@ -347,7 +416,11 @@ struct ProofBundleReportBuilder {
     stale_timestamp: Option<StaleProofBundleTimestamp>,
     broken_links: Vec<ProofBundleBrokenLink>,
     artifact_hash_mismatches: Vec<ProofBundleHashMismatch>,
+    artifact_hash_chain: Option<ProofBundleHashChainReport>,
+    artifact_reports: Vec<ProofBundleArtifactReport>,
     redaction_errors: Vec<String>,
+    redaction_leaks: Vec<ProofBundleRedactionLeak>,
+    integrity_errors: Vec<String>,
     lanes: Vec<ProofBundleLaneReport>,
     errors: Vec<String>,
     warnings: Vec<String>,
@@ -365,7 +438,11 @@ impl ProofBundleReportBuilder {
             stale_timestamp: None,
             broken_links: Vec::new(),
             artifact_hash_mismatches: Vec::new(),
+            artifact_hash_chain: None,
+            artifact_reports: Vec::new(),
             redaction_errors: Vec::new(),
+            redaction_leaks: Vec::new(),
+            integrity_errors: Vec::new(),
             lanes: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
@@ -557,6 +634,13 @@ impl ProofBundleReportBuilder {
         lane_id: &str,
         artifact: &ProofBundleArtifact,
     ) {
+        self.artifact_reports.push(ProofBundleArtifactReport {
+            lane_id: lane_id.to_owned(),
+            path: artifact.path.clone(),
+            sha256: artifact.sha256.clone(),
+            redacted: artifact.redacted,
+            role: artifact.role.clone(),
+        });
         validate_nonempty(
             &format!("lane {lane_id} artifact role"),
             &artifact.role,
@@ -635,10 +719,69 @@ impl ProofBundleReportBuilder {
         Some(absolute)
     }
 
+    fn validate_integrity_policy(&mut self, manifest: &ProofBundleManifest) {
+        let Some(integrity) = &manifest.integrity else {
+            self.warnings
+                .push("proof bundle has no artifact hash-chain integrity policy".to_owned());
+            return;
+        };
+
+        validate_nonempty(
+            "integrity.redaction_policy_version",
+            &integrity.redaction_policy_version,
+            &mut self.errors,
+        );
+        let observed_sha256 = artifact_hash_chain_sha256(manifest);
+        self.artifact_hash_chain = Some(ProofBundleHashChainReport {
+            expected_sha256: integrity.artifact_hash_chain_sha256.clone(),
+            observed_sha256: observed_sha256.clone(),
+            artifact_count: manifest_artifact_count(manifest),
+            redaction_policy_version: integrity.redaction_policy_version.clone(),
+        });
+
+        if !is_valid_sha256_hex(&integrity.artifact_hash_chain_sha256) {
+            self.integrity_errors
+                .push("integrity artifact_hash_chain_sha256 must be SHA-256 hex".to_owned());
+        } else if integrity.artifact_hash_chain_sha256 != observed_sha256 {
+            self.integrity_errors.push(format!(
+                "artifact hash-chain mismatch expected={} observed={observed_sha256}",
+                integrity.artifact_hash_chain_sha256
+            ));
+        }
+
+        let observed_artifact_count = manifest_artifact_count(manifest);
+        if integrity.artifact_count != observed_artifact_count {
+            self.integrity_errors.push(format!(
+                "integrity artifact_count {} observed {observed_artifact_count}",
+                integrity.artifact_count
+            ));
+        }
+        if integrity.redaction_policy_version != manifest.redaction.policy_version {
+            self.integrity_errors.push(format!(
+                "integrity redaction_policy_version {} observed {}",
+                integrity.redaction_policy_version, manifest.redaction.policy_version
+            ));
+        }
+
+        for error in &self.integrity_errors {
+            self.errors.push(error.clone());
+        }
+    }
+
     fn validate_redaction_policy(&mut self, policy: &ProofBundleRedactionPolicy) {
         validate_nonempty(
             "redaction.reproduction_command",
             &policy.reproduction_command,
+            &mut self.errors,
+        );
+        validate_nonempty(
+            "redaction.policy_version",
+            &policy.policy_version,
+            &mut self.errors,
+        );
+        validate_nonempty(
+            "redaction.redacted_value_placeholder",
+            &policy.redacted_value_placeholder,
             &mut self.errors,
         );
         if !policy
@@ -672,6 +815,107 @@ impl ProofBundleReportBuilder {
         }
     }
 
+    fn validate_redaction_contents(&mut self, manifest: &ProofBundleManifest, bundle_root: &Path) {
+        if manifest.redaction.forbidden_unredacted_markers.is_empty()
+            && !manifest.redaction.require_placeholder_in_redacted_artifacts
+        {
+            return;
+        }
+
+        for lane in &manifest.lanes {
+            self.scan_redaction_file(
+                bundle_root,
+                &lane.lane_id,
+                "raw_log_path",
+                &lane.raw_log_path,
+                &manifest.redaction,
+                false,
+            );
+            self.scan_redaction_file(
+                bundle_root,
+                &lane.lane_id,
+                "summary_path",
+                &lane.summary_path,
+                &manifest.redaction,
+                false,
+            );
+            for gate_input in &lane.gate_inputs {
+                self.scan_redaction_file(
+                    bundle_root,
+                    &lane.lane_id,
+                    "gate_input",
+                    gate_input,
+                    &manifest.redaction,
+                    false,
+                );
+            }
+            for artifact in &lane.artifacts {
+                self.scan_redaction_file(
+                    bundle_root,
+                    &lane.lane_id,
+                    "artifact",
+                    &artifact.path,
+                    &manifest.redaction,
+                    artifact.redacted,
+                );
+            }
+        }
+
+        for leak in &self.redaction_leaks {
+            self.redaction_errors.push(format!(
+                "redaction leak lane={} field={} path={} marker={}",
+                leak.lane_id, leak.field, leak.path, leak.marker
+            ));
+        }
+        for error in &self.redaction_errors {
+            if !self.errors.contains(error) {
+                self.errors.push(error.clone());
+            }
+        }
+    }
+
+    fn scan_redaction_file(
+        &mut self,
+        bundle_root: &Path,
+        lane_id: &str,
+        field: &str,
+        raw_path: &str,
+        policy: &ProofBundleRedactionPolicy,
+        artifact_is_redacted: bool,
+    ) {
+        let Ok(()) = validate_relative_path(raw_path) else {
+            return;
+        };
+        let path = bundle_root.join(raw_path);
+        let Ok(bytes) = fs::read(&path) else {
+            return;
+        };
+
+        for marker in &policy.forbidden_unredacted_markers {
+            if marker.is_empty() {
+                continue;
+            }
+            if bytes_contains(&bytes, marker.as_bytes()) {
+                self.redaction_leaks.push(ProofBundleRedactionLeak {
+                    lane_id: lane_id.to_owned(),
+                    field: field.to_owned(),
+                    path: raw_path.to_owned(),
+                    marker: marker.clone(),
+                });
+            }
+        }
+
+        if policy.require_placeholder_in_redacted_artifacts
+            && artifact_is_redacted
+            && !bytes_contains(&bytes, policy.redacted_value_placeholder.as_bytes())
+        {
+            self.redaction_errors.push(format!(
+                "redacted artifact lane={lane_id} path={raw_path} lacks placeholder {}",
+                policy.redacted_value_placeholder
+            ));
+        }
+    }
+
     fn finish(self, manifest: &ProofBundleManifest) -> ProofBundleValidationReport {
         let valid = self.errors.is_empty();
         ProofBundleValidationReport {
@@ -687,7 +931,11 @@ impl ProofBundleReportBuilder {
             stale_timestamp: self.stale_timestamp,
             broken_links: self.broken_links,
             artifact_hash_mismatches: self.artifact_hash_mismatches,
+            artifact_hash_chain: self.artifact_hash_chain,
+            artifact_reports: self.artifact_reports,
             redaction_errors: self.redaction_errors,
+            redaction_leaks: self.redaction_leaks,
+            integrity_errors: self.integrity_errors,
             lanes: self.lanes,
             errors: self.errors,
             warnings: self.warnings,
@@ -722,6 +970,47 @@ fn validate_relative_path(raw: &str) -> Result<()> {
 
 fn is_valid_sha256_hex(raw: &str) -> bool {
     raw.len() == 64 && raw.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn manifest_artifact_count(manifest: &ProofBundleManifest) -> usize {
+    manifest.lanes.iter().map(|lane| lane.artifacts.len()).sum()
+}
+
+fn artifact_hash_chain_sha256(manifest: &ProofBundleManifest) -> String {
+    let mut hasher = Sha256::new();
+    for lane in &manifest.lanes {
+        hash_chain_part(&mut hasher, "lane");
+        hash_chain_part(&mut hasher, &lane.lane_id);
+        for artifact in &lane.artifacts {
+            hash_chain_part(&mut hasher, "artifact");
+            hash_chain_part(&mut hasher, &artifact.path);
+            hash_chain_part(&mut hasher, &artifact.sha256);
+            hash_chain_part(
+                &mut hasher,
+                if artifact.redacted {
+                    "redacted"
+                } else {
+                    "clear"
+                },
+            );
+            hash_chain_part(&mut hasher, &artifact.role);
+        }
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn hash_chain_part(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b";");
+}
+
+fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 fn parse_utc_timestamp_seconds(raw: &str) -> Result<i64> {
@@ -869,29 +1158,41 @@ mod tests {
             });
         }
 
-        SampleBundle {
-            root,
-            manifest: ProofBundleManifest {
-                schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
-                bundle_id: "proof-bundle-sample".to_owned(),
-                generated_at: "2030-01-01T00:00:00Z".to_owned(),
-                git_sha: "abcdef1".to_owned(),
-                toolchain: "rustc 1.85.0-nightly".to_owned(),
-                kernel: "Linux 6.10.0".to_owned(),
-                mount_capability: "available".to_owned(),
-                required_lanes: proof_bundle_required_lanes(),
-                lanes,
-                redaction: ProofBundleRedactionPolicy {
-                    redacted_fields: vec!["hostname".to_owned(), "api_key".to_owned()],
-                    preserved_fields: PRESERVED_REDACTION_FIELDS
-                        .iter()
-                        .map(|field| (*field).to_owned())
-                        .collect(),
-                    reproduction_command:
-                        "cargo run -p ffs-harness -- validate-proof-bundle --bundle manifest.json"
-                            .to_owned(),
-                },
+        let mut manifest = ProofBundleManifest {
+            schema_version: PROOF_BUNDLE_SCHEMA_VERSION,
+            bundle_id: "proof-bundle-sample".to_owned(),
+            generated_at: "2030-01-01T00:00:00Z".to_owned(),
+            git_sha: "abcdef1".to_owned(),
+            toolchain: "rustc 1.85.0-nightly".to_owned(),
+            kernel: "Linux 6.10.0".to_owned(),
+            mount_capability: "available".to_owned(),
+            required_lanes: proof_bundle_required_lanes(),
+            lanes,
+            redaction: ProofBundleRedactionPolicy {
+                redacted_fields: vec!["hostname".to_owned(), "api_key".to_owned()],
+                preserved_fields: PRESERVED_REDACTION_FIELDS
+                    .iter()
+                    .map(|field| (*field).to_owned())
+                    .collect(),
+                reproduction_command:
+                    "cargo run -p ffs-harness -- validate-proof-bundle --bundle manifest.json"
+                        .to_owned(),
+                policy_version: "redaction-v1".to_owned(),
+                redacted_value_placeholder: "[REDACTED]".to_owned(),
+                forbidden_unredacted_markers: vec!["SECRET_TOKEN".to_owned()],
+                require_placeholder_in_redacted_artifacts: false,
             },
+            integrity: None,
+        };
+        manifest.integrity = Some(integrity_for(&manifest));
+        SampleBundle { root, manifest }
+    }
+
+    fn integrity_for(manifest: &ProofBundleManifest) -> ProofBundleIntegrityPolicy {
+        ProofBundleIntegrityPolicy {
+            artifact_hash_chain_sha256: artifact_hash_chain_sha256(manifest),
+            artifact_count: manifest_artifact_count(manifest),
+            redaction_policy_version: manifest.redaction.policy_version.clone(),
         }
     }
 
@@ -1031,6 +1332,125 @@ mod tests {
     }
 
     #[test]
+    fn artifact_hash_chain_mismatch_is_rejected() {
+        let mut sample = sample_bundle();
+        sample
+            .manifest
+            .integrity
+            .as_mut()
+            .expect("integrity")
+            .artifact_hash_chain_sha256 =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert!(
+            report
+                .integrity_errors
+                .iter()
+                .any(|error| error.contains("artifact hash-chain mismatch"))
+        );
+        assert!(report.artifact_hash_chain.is_some());
+    }
+
+    #[test]
+    fn artifact_count_and_redaction_version_are_integrity_checked() {
+        let mut sample = sample_bundle();
+        let integrity = sample.manifest.integrity.as_mut().expect("integrity");
+        integrity.artifact_count += 1;
+        integrity.redaction_policy_version = "wrong-redaction-version".to_owned();
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert!(
+            report
+                .integrity_errors
+                .iter()
+                .any(|error| error.contains("artifact_count"))
+        );
+        assert!(
+            report
+                .integrity_errors
+                .iter()
+                .any(|error| error.contains("redaction_policy_version"))
+        );
+    }
+
+    #[test]
+    fn artifact_reports_preserve_lane_path_hash_and_role() {
+        let sample = sample_bundle();
+        let report = validate_sample(&sample);
+        assert_eq!(
+            report.artifact_reports.len(),
+            REQUIRED_PROOF_BUNDLE_LANES.len()
+        );
+        let conformance = report
+            .artifact_reports
+            .iter()
+            .find(|artifact| artifact.lane_id == "conformance")
+            .expect("conformance artifact");
+        assert_eq!(conformance.path, "artifacts/conformance.json");
+        assert_eq!(conformance.sha256.len(), 64);
+        assert_eq!(conformance.role, "primary_evidence");
+    }
+
+    #[test]
+    fn redaction_leaks_are_rejected_from_artifacts_and_summaries() {
+        let sample = sample_bundle();
+        write_file(
+            sample.root.path(),
+            "summaries/conformance.md",
+            "# conformance\nSECRET_TOKEN\n",
+        );
+        write_file(
+            sample.root.path(),
+            "artifacts/conformance.json",
+            "{\"token\":\"SECRET_TOKEN\"}\n",
+        );
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert_eq!(report.redaction_leaks.len(), 2);
+        assert!(
+            report
+                .redaction_errors
+                .iter()
+                .any(|error| error.contains("redaction leak"))
+        );
+    }
+
+    #[test]
+    fn redacted_artifact_placeholder_can_be_required() {
+        let mut sample = sample_bundle();
+        sample
+            .manifest
+            .redaction
+            .require_placeholder_in_redacted_artifacts = true;
+        let report = validate_sample(&sample);
+        assert!(!report.valid);
+        assert!(
+            report
+                .redaction_errors
+                .iter()
+                .any(|error| error.contains("lacks placeholder"))
+        );
+
+        for lane in &mut sample.manifest.lanes {
+            for artifact in &mut lane.artifacts {
+                if artifact.redacted {
+                    write_file(
+                        sample.root.path(),
+                        &artifact.path,
+                        "{\"redacted\":\"[REDACTED]\"}\n",
+                    );
+                    artifact.sha256 =
+                        sha256_file_hex(&sample.root.path().join(&artifact.path)).expect("hash");
+                }
+            }
+        }
+        sample.manifest.integrity = Some(integrity_for(&sample.manifest));
+        let report = validate_sample(&sample);
+        assert!(report.valid, "{:?}", report.errors);
+    }
+
+    #[test]
     fn summary_contains_totals_lanes_logs_and_artifacts() {
         let sample = sample_bundle();
         let report = validate_sample(&sample);
@@ -1038,5 +1458,6 @@ mod tests {
         assert!(summary.contains("Totals: pass=3 fail=2 skip=2 error=2"));
         assert!(summary.contains("[logs/conformance.log](logs/conformance.log)"));
         assert!(summary.contains("writeback_cache"));
+        assert!(summary.contains("Artifact hash chain"));
     }
 }

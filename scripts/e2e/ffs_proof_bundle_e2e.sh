@@ -48,6 +48,12 @@ BAD_STALE_MANIFEST="$BUNDLE_DIR/proof_bundle_stale_sha.json"
 BAD_STALE_RAW="$E2E_LOG_DIR/proof_bundle_stale_sha.raw"
 BAD_LINK_MANIFEST="$BUNDLE_DIR/proof_bundle_missing_artifact.json"
 BAD_LINK_RAW="$E2E_LOG_DIR/proof_bundle_missing_artifact.raw"
+BAD_CHAIN_MANIFEST="$BUNDLE_DIR/proof_bundle_bad_hash_chain.json"
+BAD_CHAIN_RAW="$E2E_LOG_DIR/proof_bundle_bad_hash_chain.raw"
+BAD_REDACTION_MANIFEST="$BUNDLE_DIR/proof_bundle_redaction_leak.json"
+BAD_REDACTION_RAW="$E2E_LOG_DIR/proof_bundle_redaction_leak.raw"
+BAD_PLACEHOLDER_MANIFEST="$BUNDLE_DIR/proof_bundle_missing_placeholder.json"
+BAD_PLACEHOLDER_RAW="$E2E_LOG_DIR/proof_bundle_missing_placeholder.raw"
 UNIT_LOG="$E2E_LOG_DIR/proof_bundle_unit_tests.log"
 
 mkdir -p "$BUNDLE_DIR"
@@ -92,11 +98,15 @@ for index, lane in enumerate(lanes):
     summary = pathlib.Path("summaries") / f"{lane}.md"
     gate_input = pathlib.Path("inputs") / f"{lane}.json"
     artifact = pathlib.Path("artifacts") / f"{lane}.json"
+    redacted = index % 2 == 0
+    artifact_payload = {"lane": lane, "artifact": "primary"}
+    if redacted:
+        artifact_payload["redacted_value"] = "[REDACTED]"
     for relative, text in [
         (raw_log, f"lane={lane}\nstatus={statuses[index % len(statuses)]}\n"),
         (summary, f"# {lane}\n\nSummary for {lane}.\n"),
         (gate_input, json.dumps({"lane": lane, "gate": "bd-rchk0.5.4.1"}, sort_keys=True) + "\n"),
-        (artifact, json.dumps({"lane": lane, "artifact": "primary"}, sort_keys=True) + "\n"),
+        (artifact, json.dumps(artifact_payload, sort_keys=True) + "\n"),
     ]:
         path = bundle_dir / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,12 +125,32 @@ for index, lane in enumerate(lanes):
                 {
                     "path": artifact.as_posix(),
                     "sha256": digest,
-                    "redacted": index % 2 == 0,
+                    "redacted": redacted,
                     "role": "primary_evidence",
                 }
             ],
         }
     )
+
+def hash_chain_part(hasher: "hashlib._Hash", value: str) -> None:
+    encoded = value.encode("utf-8")
+    hasher.update(str(len(encoded)).encode("utf-8"))
+    hasher.update(b":")
+    hasher.update(encoded)
+    hasher.update(b";")
+
+def artifact_hash_chain_sha256(bundle_records: list[dict[str, object]]) -> str:
+    hasher = hashlib.sha256()
+    for record in bundle_records:
+        hash_chain_part(hasher, "lane")
+        hash_chain_part(hasher, str(record["lane_id"]))
+        for artifact_record in record["artifacts"]:
+            hash_chain_part(hasher, "artifact")
+            hash_chain_part(hasher, str(artifact_record["path"]))
+            hash_chain_part(hasher, str(artifact_record["sha256"]))
+            hash_chain_part(hasher, "redacted" if artifact_record["redacted"] else "clear")
+            hash_chain_part(hasher, str(artifact_record["role"]))
+    return hasher.hexdigest()
 
 manifest = {
     "schema_version": 1,
@@ -145,6 +175,15 @@ manifest = {
             "cargo run -p ffs-harness -- validate-proof-bundle "
             "--bundle proof_bundle/manifest.json"
         ),
+        "policy_version": "redaction-v1",
+        "redacted_value_placeholder": "[REDACTED]",
+        "forbidden_unredacted_markers": ["SECRET_TOKEN", "/home/ubuntu", "host-prod"],
+        "require_placeholder_in_redacted_artifacts": True,
+    },
+    "integrity": {
+        "artifact_hash_chain_sha256": artifact_hash_chain_sha256(records),
+        "artifact_count": sum(len(record["artifacts"]) for record in records),
+        "redaction_policy_version": "redaction-v1",
     },
 }
 manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -193,6 +232,15 @@ if observed_lanes != required_lanes:
     raise SystemExit(f"unexpected lanes: {sorted(observed_lanes)}")
 if report["totals"]["pass"] < 1 or report["totals"]["fail"] < 1:
     raise SystemExit("pass/fail totals not captured")
+if not report.get("artifact_hash_chain"):
+    raise SystemExit("artifact hash-chain report missing")
+if report["artifact_hash_chain"]["redaction_policy_version"] != "redaction-v1":
+    raise SystemExit("redaction policy version was not preserved in hash-chain report")
+artifact_rows = report.get("artifact_reports", [])
+if len(artifact_rows) != len(required_lanes):
+    raise SystemExit(f"unexpected artifact report count: {len(artifact_rows)}")
+if not all(row.get("sha256") and row.get("path") for row in artifact_rows):
+    raise SystemExit("artifact report rows did not preserve path and hash")
 for lane in required_lanes:
     if f"logs/{lane}.log" not in summary:
         raise SystemExit(f"missing raw log link for {lane}")
@@ -200,6 +248,8 @@ for lane in required_lanes:
         raise SystemExit(f"missing summary link for {lane}")
 if "validate-proof-bundle" not in summary:
     raise SystemExit("summary did not preserve reproduction command")
+if "Artifact hash chain" not in summary:
+    raise SystemExit("summary did not preserve hash-chain diagnostics")
 PY
 then
     scenario_result "proof_bundle_summary_links" "PASS" "summary contains totals and raw log links"
@@ -278,7 +328,90 @@ else
     scenario_result "proof_bundle_missing_artifact_rejected" "FAIL" "validator failed without broken link diagnostic"
 fi
 
-e2e_step "Scenario 7: proof bundle unit tests pass"
+e2e_step "Scenario 7: validator rejects artifact hash-chain tampering"
+python3 - "$MANIFEST_JSON" "$BAD_CHAIN_MANIFEST" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+manifest_path, out_path = sys.argv[1:]
+data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+data["integrity"]["artifact_hash_chain_sha256"] = "f" * 64
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+    --bundle "$BAD_CHAIN_MANIFEST" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000 >"$BAD_CHAIN_RAW" 2>&1; then
+    scenario_result "proof_bundle_hash_chain_rejected" "FAIL" "validator accepted tampered hash chain"
+elif grep -q "artifact hash-chain mismatch" "$BAD_CHAIN_RAW"; then
+    scenario_result "proof_bundle_hash_chain_rejected" "PASS" "hash-chain tamper rejected"
+else
+    scenario_result "proof_bundle_hash_chain_rejected" "FAIL" "validator failed without hash-chain diagnostic"
+fi
+
+e2e_step "Scenario 8: validator rejects unredacted sensitive markers"
+python3 - "$MANIFEST_JSON" "$BAD_REDACTION_MANIFEST" "$BUNDLE_DIR" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+manifest_path, out_path, bundle_dir = sys.argv[1:]
+data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+leaky_summary = pathlib.Path("summaries") / "conformance_leaky.md"
+(pathlib.Path(bundle_dir) / leaky_summary).write_text(
+    "# conformance\n\nhost-prod leaked SECRET_TOKEN\n",
+    encoding="utf-8",
+)
+data["lanes"][0]["summary_path"] = leaky_summary.as_posix()
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+    --bundle "$BAD_REDACTION_MANIFEST" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000 >"$BAD_REDACTION_RAW" 2>&1; then
+    scenario_result "proof_bundle_redaction_leak_rejected" "FAIL" "validator accepted unredacted sensitive marker"
+elif grep -q "redaction leak" "$BAD_REDACTION_RAW"; then
+    scenario_result "proof_bundle_redaction_leak_rejected" "PASS" "unredacted sensitive marker rejected"
+else
+    scenario_result "proof_bundle_redaction_leak_rejected" "FAIL" "validator failed without redaction leak diagnostic"
+fi
+
+e2e_step "Scenario 9: validator rejects redacted artifacts without placeholders"
+python3 - "$MANIFEST_JSON" "$BAD_PLACEHOLDER_MANIFEST" "$BUNDLE_DIR" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path, out_path, bundle_dir = sys.argv[1:]
+data = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+artifact_path = pathlib.Path("artifacts") / "conformance_no_placeholder.json"
+artifact_abs = pathlib.Path(bundle_dir) / artifact_path
+artifact_abs.write_text(json.dumps({"redacted": "missing-placeholder"}, sort_keys=True) + "\n", encoding="utf-8")
+data["lanes"][0]["artifacts"][0]["path"] = artifact_path.as_posix()
+data["lanes"][0]["artifacts"][0]["sha256"] = hashlib.sha256(artifact_abs.read_bytes()).hexdigest()
+data["lanes"][0]["artifacts"][0]["redacted"] = True
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-proof-bundle \
+    --bundle "$BAD_PLACEHOLDER_MANIFEST" \
+    --current-git-sha "$GIT_SHA" \
+    --max-age-days 10000 >"$BAD_PLACEHOLDER_RAW" 2>&1; then
+    scenario_result "proof_bundle_redaction_placeholder_rejected" "FAIL" "validator accepted redacted artifact without placeholder"
+elif grep -q "lacks placeholder" "$BAD_PLACEHOLDER_RAW"; then
+    scenario_result "proof_bundle_redaction_placeholder_rejected" "PASS" "missing redaction placeholder rejected"
+else
+    scenario_result "proof_bundle_redaction_placeholder_rejected" "FAIL" "validator failed without placeholder diagnostic"
+fi
+
+e2e_step "Scenario 10: proof bundle unit tests pass"
 if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib proof_bundle -- --nocapture >"$UNIT_LOG" 2>&1; then
     cat "$UNIT_LOG"
     scenario_result "proof_bundle_unit_tests" "PASS" "proof_bundle unit tests passed"

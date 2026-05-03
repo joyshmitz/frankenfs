@@ -397,9 +397,10 @@ Proof bundles are offline inspection packs for readiness claims. Each bundle is
 a directory rooted at a versioned `manifest.json` that records the schema
 version, bundle id, generation timestamp, git SHA, toolchain, kernel, mount
 capability, required lanes, raw logs, summaries, gate inputs, artifact paths,
-SHA-256 hashes, scenario ids, and redaction policy. The required lanes are
-`conformance`, `xfstests`, `fuse`, `differential_oracle`, `repair_lab`,
-`crash_replay`, `performance`, `writeback_cache`, and `release_gates`.
+SHA-256 hashes, scenario ids, redaction policy, and optional artifact
+hash-chain integrity fields. The required lanes are `conformance`, `xfstests`,
+`fuse`, `differential_oracle`, `repair_lab`, `crash_replay`, `performance`,
+`writeback_cache`, and `release_gates`.
 
 Validate a bundle with:
 
@@ -414,12 +415,15 @@ rch exec -- cargo run -p ffs-harness -- validate-proof-bundle \
 
 The JSON report includes pass/fail/skip/error totals, missing required lanes,
 duplicate lane/scenario ids, stale SHA or timestamp diagnostics, broken links,
-artifact hash mismatches, redaction errors, and per-lane raw-log/summary links.
-The Markdown summary is the human inspection view and must preserve the
-`validate-proof-bundle` reproduction command. Validation is fail-closed: stale
-schema versions, stale git SHAs, old timestamps, absolute or parent-traversal
-paths, missing files, wrong SHA-256 hashes, duplicate scenario ids, and
-redaction policies that remove reproduction fields all fail the gate.
+artifact hash mismatches, artifact path/hash rows, hash-chain diagnostics,
+redaction errors, redaction leaks, and per-lane raw-log/summary links. The
+Markdown summary is the human inspection view and must preserve the
+`validate-proof-bundle` reproduction command plus hash-chain status. Validation
+is fail-closed: stale schema versions, stale git SHAs, old timestamps, absolute
+or parent-traversal paths, missing files, wrong SHA-256 hashes, duplicate
+scenario ids, hash-chain mismatches, redaction policies that remove
+reproduction fields, configured sensitive marker leaks, and redacted artifacts
+that lack required placeholders all fail the gate.
 
 The E2E smoke is:
 
@@ -428,8 +432,9 @@ The E2E smoke is:
 ```
 
 It builds a sample bundle with every required lane, validates it, writes
-JSON/Markdown inspection artifacts, rejects hash drift, stale SHA, and missing
-artifact links, then runs the module unit tests.
+JSON/Markdown inspection artifacts, rejects hash drift, stale SHA, missing
+artifact links, hash-chain tampering, redaction leaks, and missing redaction
+placeholders, then runs the module unit tests.
 
 ## Adversarial Image Threat Model
 
