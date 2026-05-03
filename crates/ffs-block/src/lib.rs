@@ -812,7 +812,7 @@ pub const MIN_PAGE_LOCK_SHARDS: usize = 16;
 pub const MAX_PAGE_LOCK_SHARDS: usize = 1024;
 
 struct PageLockShard {
-    in_flight: Mutex<Vec<BlockNumber>>,
+    in_flight: Mutex<HashSet<BlockNumber>>,
     ready: Condvar,
     waiters: AtomicUsize,
 }
@@ -820,7 +820,7 @@ struct PageLockShard {
 impl PageLockShard {
     fn new() -> Self {
         Self {
-            in_flight: Mutex::new(Vec::with_capacity(4)),
+            in_flight: Mutex::new(HashSet::with_capacity(4)),
             ready: Condvar::new(),
             waiters: AtomicUsize::new(0),
         }
@@ -889,7 +889,8 @@ impl PageLockTable {
             shard.ready.wait(&mut in_flight);
             shard.waiters.fetch_sub(1, Ordering::AcqRel);
         }
-        in_flight.push(block);
+        let inserted = in_flight.insert(block);
+        debug_assert!(inserted, "block should not already be in flight");
         drop(in_flight);
         PageLockPermit { shard, block }
     }
@@ -925,11 +926,7 @@ pub struct PageLockPermit<'a> {
 impl Drop for PageLockPermit<'_> {
     fn drop(&mut self) {
         let mut in_flight = self.shard.in_flight.lock();
-        let removed = in_flight
-            .iter()
-            .position(|block| *block == self.block)
-            .map(|idx| in_flight.swap_remove(idx))
-            .is_some();
+        let removed = in_flight.remove(&self.block);
         drop(in_flight);
         if removed && self.shard.waiters.load(Ordering::Acquire) > 0 {
             self.shard.ready.notify_all();
@@ -6250,6 +6247,23 @@ mod tests {
         assert_eq!(metrics.misses, 1);
         assert_eq!(metrics.hits, u64::try_from(THREADS - 1).expect("fits u64"));
         assert_eq!(cache.page_locks.in_flight_len(), 0);
+    }
+
+    #[test]
+    fn page_lock_table_tracks_large_distinct_in_flight_set() {
+        const IN_FLIGHT_BLOCKS: usize = 256;
+
+        let table = PageLockTable::new(1);
+        let mut permits = Vec::with_capacity(IN_FLIGHT_BLOCKS);
+        for block in 0..IN_FLIGHT_BLOCKS {
+            permits.push(table.acquire(BlockNumber(u64::try_from(block).expect("block id fits"))));
+        }
+
+        assert_eq!(table.in_flight_len(), IN_FLIGHT_BLOCKS);
+        permits.truncate(IN_FLIGHT_BLOCKS / 2);
+        assert_eq!(table.in_flight_len(), IN_FLIGHT_BLOCKS / 2);
+        drop(permits);
+        assert_eq!(table.in_flight_len(), 0);
     }
 
     #[test]
