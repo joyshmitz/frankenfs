@@ -53,7 +53,7 @@ else
 fi
 
 e2e_step "Scenario 2: checked-in closeout config validates artifacts"
-if cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- performance-delta-closeout \
     --config "$CONFIG_JSON" \
     --out "$REPORT_JSON" \
     --summary-out "$SUMMARY_MD" >"$VALIDATE_RAW" 2>&1; then
@@ -133,6 +133,45 @@ if not any(row["classification"] == "improved" for row in report["rows"]):
 for bead in ("bd-rchk5.5", "bd-rchk5.6", "bd-rchk5.7", "bd-rchk5.8", "bd-9vzzk", "bd-t21em"):
     if bead not in summary:
         raise SystemExit(f"summary missing {bead}")
+
+payloads = report.get("follow_up_payloads", [])
+if len(payloads) != report["rows_requiring_follow_up"]:
+    raise SystemExit("expected one deduplicated follow-up payload per required row")
+seen_payload_keys = set()
+required_payload_fields = {
+    "follow_up_bead",
+    "classification",
+    "workload_id",
+    "command_template",
+    "profile",
+    "environment_manifest_id",
+    "baseline_artifact_hash",
+    "current_artifact_hash",
+    "observed_value",
+    "threshold_value",
+    "unit",
+    "suspected_subsystem",
+    "raw_logs",
+    "validation_command",
+}
+for payload in payloads:
+    missing = [field for field in required_payload_fields if field not in payload]
+    if missing:
+        raise SystemExit(f"payload missing fields: {missing}")
+    if not payload["raw_logs"]:
+        raise SystemExit(f"payload missing raw logs: {payload}")
+    key = (payload["follow_up_bead"], payload["classification"], payload["workload_id"])
+    if key in seen_payload_keys:
+        raise SystemExit(f"duplicate follow-up payload: {key}")
+    seen_payload_keys.add(key)
+
+if not any(
+    payload["workload_id"] == "mount_cold"
+    and payload["follow_up_bead"] == "bd-rchk5.5"
+    and payload["unit"] in {"p99_delta_percent", "throughput_delta_percent"}
+    for payload in payloads
+):
+    raise SystemExit("missing bisect-ready mount_cold regression payload")
 PY
 then
     scenario_result "performance_delta_closeout_followups" "PASS" "regression and missing-reference rows linked"
@@ -142,7 +181,7 @@ fi
 
 e2e_step "Scenario 4: missing follow-up bead fails closed"
 grep -v '"id":"bd-rchk5.5"' "$REPO_ROOT/.beads/issues.jsonl" >"$BAD_ISSUES_JSONL"
-if cargo run --quiet -p ffs-harness -- performance-delta-closeout \
+if "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- performance-delta-closeout \
     --config "$CONFIG_JSON" \
     --issues "$BAD_ISSUES_JSONL" >"$BAD_RAW" 2>&1; then
     scenario_result "performance_delta_closeout_missing_followup_rejected" "FAIL" "missing follow-up bead accepted"

@@ -11,6 +11,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -45,7 +46,7 @@ pub struct PerformanceDeltaPolicy {
     pub missing_reference_follow_up_bead: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerformanceDeltaFollowUpOverride {
     pub operation: String,
     pub follow_up_bead: String,
@@ -55,7 +56,7 @@ pub struct PerformanceDeltaFollowUpOverride {
     pub source_contains: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerformanceUnmeasuredClaim {
     pub claim_id: String,
     pub operation: String,
@@ -71,7 +72,13 @@ pub enum PerformanceDeltaClassification {
     WithinThreshold,
     Warning,
     Regression,
+    Noisy,
+    StaleBaseline,
     MissingReference,
+    EnvironmentMismatch,
+    MissingMeasurement,
+    UnsupportedWorkload,
+    OverBudgetInstrumentation,
     PendingCapability,
     Unmeasured,
 }
@@ -84,7 +91,13 @@ impl PerformanceDeltaClassification {
             Self::WithinThreshold => "within_threshold",
             Self::Warning => "warning",
             Self::Regression => "regression",
+            Self::Noisy => "noisy",
+            Self::StaleBaseline => "stale_baseline",
             Self::MissingReference => "missing_reference",
+            Self::EnvironmentMismatch => "environment_mismatch",
+            Self::MissingMeasurement => "missing_measurement",
+            Self::UnsupportedWorkload => "unsupported_workload",
+            Self::OverBudgetInstrumentation => "over_budget_instrumentation",
             Self::PendingCapability => "pending_capability",
             Self::Unmeasured => "unmeasured",
         }
@@ -96,11 +109,35 @@ impl PerformanceDeltaClassification {
             self,
             Self::Warning
                 | Self::Regression
+                | Self::Noisy
+                | Self::StaleBaseline
                 | Self::MissingReference
+                | Self::EnvironmentMismatch
+                | Self::MissingMeasurement
+                | Self::UnsupportedWorkload
+                | Self::OverBudgetInstrumentation
                 | Self::PendingCapability
                 | Self::Unmeasured
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceFollowUpPayload {
+    pub follow_up_bead: String,
+    pub classification: PerformanceDeltaClassification,
+    pub workload_id: String,
+    pub command_template: String,
+    pub profile: String,
+    pub environment_manifest_id: String,
+    pub baseline_artifact_hash: String,
+    pub current_artifact_hash: String,
+    pub observed_value: f64,
+    pub threshold_value: f64,
+    pub unit: String,
+    pub suspected_subsystem: String,
+    pub raw_logs: Vec<String>,
+    pub validation_command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,6 +167,8 @@ pub struct PerformanceDeltaRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up_bead: Option<String>,
     pub follow_up_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up_payload: Option<PerformanceFollowUpPayload>,
     pub rationale: String,
     pub reproduction_command: String,
 }
@@ -144,6 +183,7 @@ pub struct PerformanceDeltaCloseoutReport {
     pub row_count: usize,
     pub classification_counts: BTreeMap<String, usize>,
     pub follow_up_beads: Vec<String>,
+    pub follow_up_payloads: Vec<PerformanceFollowUpPayload>,
     pub rows_requiring_follow_up: usize,
     pub rows: Vec<PerformanceDeltaRow>,
     pub errors: Vec<String>,
@@ -158,6 +198,8 @@ struct Measurement {
     throughput_ops_sec: Option<f64>,
     status: String,
     command: String,
+    environment_manifest_id: String,
+    artifact_hash: String,
 }
 
 pub fn load_performance_delta_closeout_config(
@@ -209,6 +251,7 @@ pub fn run_performance_delta_closeout(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let follow_up_payloads = deduplicate_follow_up_payloads(&rows);
     let rows_requiring_follow_up = rows
         .iter()
         .filter(|row| row.classification.requires_follow_up())
@@ -223,6 +266,7 @@ pub fn run_performance_delta_closeout(
         row_count: rows.len(),
         classification_counts,
         follow_up_beads,
+        follow_up_payloads,
         rows_requiring_follow_up,
         rows,
         errors,
@@ -381,6 +425,8 @@ fn load_current_rows(
         if current.status != "measured" {
             let classification = if current.status == "pending" {
                 PerformanceDeltaClassification::PendingCapability
+            } else if let Some(classification) = classification_from_status(&current.status) {
+                classification
             } else {
                 PerformanceDeltaClassification::Unmeasured
             };
@@ -424,6 +470,8 @@ fn load_comparison_rows(
     errors: &mut Vec<String>,
 ) -> Result<Vec<PerformanceDeltaRow>> {
     let value = load_json_file(artifact)?;
+    let artifact_hash = hash_existing_or_marker(artifact);
+    let environment_manifest_id = environment_manifest_id(&value, artifact);
     let rows = value
         .get("rows")
         .and_then(Value::as_array)
@@ -434,7 +482,8 @@ fn load_comparison_rows(
             .with_context(|| format!("{artifact} comparison row missing operation"))?;
         let p99_delta = number_field(row, "p99_delta_percent");
         let throughput_delta = number_field(row, "throughput_delta_percent");
-        let classification = classify_delta(p99_delta, throughput_delta, config);
+        let classification = explicit_comparison_classification(row)
+            .unwrap_or_else(|| classify_delta(p99_delta, throughput_delta, config));
         let follow_up = follow_up_for(
             &operation,
             classification,
@@ -444,6 +493,23 @@ fn load_comparison_rows(
             errors,
         );
         let current_source_json = string_field(row, "current_source_json");
+        let follow_up_present = follow_up
+            .as_ref()
+            .is_some_and(|bead| issue_ids.contains(bead));
+        let follow_up_payload = follow_up.as_ref().map(|bead| {
+            comparison_follow_up_payload(&ComparisonFollowUpPayloadInput {
+                bead,
+                row,
+                operation: &operation,
+                classification,
+                artifact,
+                artifact_hash: &artifact_hash,
+                environment_manifest_id: &environment_manifest_id,
+                p99_delta,
+                throughput_delta,
+                config,
+            })
+        });
         out.push(PerformanceDeltaRow {
             row_id: format!("comparison:{operation}:{artifact}"),
             row_kind: "comparison".to_owned(),
@@ -459,9 +525,8 @@ fn load_comparison_rows(
             throughput_delta_percent: throughput_delta,
             classification,
             release_claim_state: release_claim_state(classification).to_owned(),
-            follow_up_present: follow_up
-                .as_ref()
-                .is_some_and(|bead| issue_ids.contains(bead)),
+            follow_up_present,
+            follow_up_payload,
             follow_up_bead: follow_up,
             rationale: comparison_rationale(row, classification),
             reproduction_command: format!(
@@ -502,6 +567,7 @@ fn unmeasured_claim_row(
             .to_owned(),
         follow_up_bead: Some(claim.follow_up_bead.clone()),
         follow_up_present,
+        follow_up_payload: Some(claim_follow_up_payload(claim)),
         rationale: claim.reason.clone(),
         reproduction_command: claim.reproduction_command.clone(),
     }
@@ -509,6 +575,8 @@ fn unmeasured_claim_row(
 
 fn load_measurements(artifact: &str) -> Result<Vec<Measurement>> {
     let value = load_json_file(artifact)?;
+    let environment_manifest_id = environment_manifest_id(&value, artifact);
+    let artifact_hash = hash_existing_or_marker(artifact);
     let measurements = value
         .get("measurements")
         .and_then(Value::as_array)
@@ -525,6 +593,8 @@ fn load_measurements(artifact: &str) -> Result<Vec<Measurement>> {
             throughput_ops_sec: number_field(row, "throughput_ops_sec"),
             status: string_field(row, "status").unwrap_or_else(|| "unknown".to_owned()),
             command: string_field(row, "command").unwrap_or_default(),
+            environment_manifest_id: environment_manifest_id.clone(),
+            artifact_hash: artifact_hash.clone(),
         });
     }
     Ok(out)
@@ -565,6 +635,20 @@ fn row_with_reference(
         issue_ids,
         errors,
     );
+    let follow_up_present = follow_up
+        .as_ref()
+        .is_some_and(|bead| issue_ids.contains(bead));
+    let follow_up_payload = follow_up.as_ref().map(|bead| {
+        measurement_follow_up_payload(
+            bead,
+            current,
+            Some(reference),
+            classification,
+            p99_delta,
+            throughput_delta,
+            config,
+        )
+    });
     PerformanceDeltaRow {
         row_id: format!(
             "{row_kind}:{}:{}",
@@ -583,9 +667,8 @@ fn row_with_reference(
         throughput_delta_percent: throughput_delta,
         classification,
         release_claim_state: release_claim_state(classification).to_owned(),
-        follow_up_present: follow_up
-            .as_ref()
-            .is_some_and(|bead| issue_ids.contains(bead)),
+        follow_up_present,
+        follow_up_payload,
         follow_up_bead: follow_up,
         rationale: reference_rationale(current, reference, classification),
         reproduction_command: current.command.clone(),
@@ -608,6 +691,12 @@ fn row_without_reference(
         issue_ids,
         errors,
     );
+    let follow_up_present = follow_up
+        .as_ref()
+        .is_some_and(|bead| issue_ids.contains(bead));
+    let follow_up_payload = follow_up.as_ref().map(|bead| {
+        measurement_follow_up_payload(bead, current, None, classification, None, None, config)
+    });
     PerformanceDeltaRow {
         row_id: format!(
             "{row_kind}:{}:{}",
@@ -626,9 +715,8 @@ fn row_without_reference(
         throughput_delta_percent: None,
         classification,
         release_claim_state: release_claim_state(classification).to_owned(),
-        follow_up_present: follow_up
-            .as_ref()
-            .is_some_and(|bead| issue_ids.contains(bead)),
+        follow_up_present,
+        follow_up_payload,
         follow_up_bead: follow_up,
         rationale: missing_reference_rationale(current, classification),
         reproduction_command: current.command.clone(),
@@ -657,6 +745,31 @@ fn classify_delta(
         return PerformanceDeltaClassification::Improved;
     }
     PerformanceDeltaClassification::WithinThreshold
+}
+
+fn classification_from_status(status: &str) -> Option<PerformanceDeltaClassification> {
+    match status {
+        "noisy" => Some(PerformanceDeltaClassification::Noisy),
+        "stale" | "stale_baseline" => Some(PerformanceDeltaClassification::StaleBaseline),
+        "environment_mismatch" => Some(PerformanceDeltaClassification::EnvironmentMismatch),
+        "missing" | "missing_measurement" => {
+            Some(PerformanceDeltaClassification::MissingMeasurement)
+        }
+        "unsupported" | "unsupported_workload" => {
+            Some(PerformanceDeltaClassification::UnsupportedWorkload)
+        }
+        "over_budget" | "over_budget_instrumentation" => {
+            Some(PerformanceDeltaClassification::OverBudgetInstrumentation)
+        }
+        "unmeasured" => Some(PerformanceDeltaClassification::Unmeasured),
+        _ => None,
+    }
+}
+
+fn explicit_comparison_classification(row: &Value) -> Option<PerformanceDeltaClassification> {
+    string_field(row, "classification")
+        .or_else(|| string_field(row, "verdict"))
+        .and_then(|classification| classification_from_status(&classification))
 }
 
 fn follow_up_for(
@@ -746,7 +859,75 @@ fn validate_required_follow_ups(rows: &[PerformanceDeltaRow], errors: &mut Vec<S
                 row.row_id
             ));
         }
+        if row.classification.requires_follow_up() {
+            match &row.follow_up_payload {
+                Some(payload) => validate_follow_up_payload(row, payload, errors),
+                None => errors.push(format!("{} missing follow-up payload", row.row_id)),
+            }
+        }
     }
+}
+
+fn validate_follow_up_payload(
+    row: &PerformanceDeltaRow,
+    payload: &PerformanceFollowUpPayload,
+    errors: &mut Vec<String>,
+) {
+    let required = [
+        ("workload_id", payload.workload_id.as_str()),
+        ("command_template", payload.command_template.as_str()),
+        ("profile", payload.profile.as_str()),
+        (
+            "environment_manifest_id",
+            payload.environment_manifest_id.as_str(),
+        ),
+        (
+            "baseline_artifact_hash",
+            payload.baseline_artifact_hash.as_str(),
+        ),
+        (
+            "current_artifact_hash",
+            payload.current_artifact_hash.as_str(),
+        ),
+        ("unit", payload.unit.as_str()),
+        ("suspected_subsystem", payload.suspected_subsystem.as_str()),
+        ("validation_command", payload.validation_command.as_str()),
+    ];
+    for (field, value) in required {
+        if value.trim().is_empty() {
+            errors.push(format!("{} follow-up payload missing {field}", row.row_id));
+        }
+    }
+    if payload.raw_logs.is_empty() {
+        errors.push(format!("{} follow-up payload missing raw_logs", row.row_id));
+    }
+    if payload.follow_up_bead.trim().is_empty() {
+        errors.push(format!(
+            "{} follow-up payload missing follow_up_bead",
+            row.row_id
+        ));
+    }
+}
+
+fn deduplicate_follow_up_payloads(rows: &[PerformanceDeltaRow]) -> Vec<PerformanceFollowUpPayload> {
+    let mut payloads = BTreeMap::new();
+    for row in rows {
+        if let Some(payload) = &row.follow_up_payload {
+            payloads
+                .entry(follow_up_payload_key(payload))
+                .or_insert_with(|| payload.clone());
+        }
+    }
+    payloads.into_values().collect()
+}
+
+fn follow_up_payload_key(payload: &PerformanceFollowUpPayload) -> String {
+    format!(
+        "{}:{}:{}",
+        payload.follow_up_bead,
+        payload.classification.label(),
+        payload.workload_id
+    )
 }
 
 fn count_classifications(rows: &[PerformanceDeltaRow]) -> BTreeMap<String, usize> {
@@ -783,10 +964,249 @@ fn release_claim_state(classification: PerformanceDeltaClassification) -> &'stat
         | PerformanceDeltaClassification::WithinThreshold => "measured_local",
         PerformanceDeltaClassification::Warning => "experimental",
         PerformanceDeltaClassification::Regression
+        | PerformanceDeltaClassification::Noisy
+        | PerformanceDeltaClassification::StaleBaseline
         | PerformanceDeltaClassification::MissingReference
+        | PerformanceDeltaClassification::EnvironmentMismatch
+        | PerformanceDeltaClassification::MissingMeasurement
+        | PerformanceDeltaClassification::UnsupportedWorkload
+        | PerformanceDeltaClassification::OverBudgetInstrumentation
         | PerformanceDeltaClassification::PendingCapability
         | PerformanceDeltaClassification::Unmeasured => "unknown",
     }
+}
+
+fn measurement_follow_up_payload(
+    bead: &str,
+    current: &Measurement,
+    reference: Option<&Measurement>,
+    classification: PerformanceDeltaClassification,
+    p99_delta: Option<f64>,
+    throughput_delta: Option<f64>,
+    config: &PerformanceDeltaCloseoutConfig,
+) -> PerformanceFollowUpPayload {
+    let (observed_value, threshold_value, unit) =
+        payload_metric(classification, p99_delta, throughput_delta, current, config);
+    let command = command_or_default(&current.command, &current.operation);
+    PerformanceFollowUpPayload {
+        follow_up_bead: bead.to_owned(),
+        classification,
+        workload_id: current.operation.clone(),
+        command_template: command.clone(),
+        profile: profile_from_command(&command),
+        environment_manifest_id: current.environment_manifest_id.clone(),
+        baseline_artifact_hash: reference.map_or_else(
+            || "missing_reference".to_owned(),
+            |row| row.artifact_hash.clone(),
+        ),
+        current_artifact_hash: current.artifact_hash.clone(),
+        observed_value,
+        threshold_value,
+        unit,
+        suspected_subsystem: suspected_subsystem(&current.operation),
+        raw_logs: raw_logs_for([
+            current.source_json.clone(),
+            Some(current.source_artifact.clone()),
+        ]),
+        validation_command: command,
+    }
+}
+
+struct ComparisonFollowUpPayloadInput<'a> {
+    bead: &'a str,
+    row: &'a Value,
+    operation: &'a str,
+    classification: PerformanceDeltaClassification,
+    artifact: &'a str,
+    artifact_hash: &'a str,
+    environment_manifest_id: &'a str,
+    p99_delta: Option<f64>,
+    throughput_delta: Option<f64>,
+    config: &'a PerformanceDeltaCloseoutConfig,
+}
+
+fn comparison_follow_up_payload(
+    input: &ComparisonFollowUpPayloadInput<'_>,
+) -> PerformanceFollowUpPayload {
+    let (observed_value, threshold_value, unit) = comparison_payload_metric(
+        input.classification,
+        input.p99_delta,
+        input.throughput_delta,
+        input.config,
+    );
+    let command = format!(
+        "cargo run -p ffs-harness -- performance-delta-closeout --config {DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG}"
+    );
+    PerformanceFollowUpPayload {
+        follow_up_bead: input.bead.to_owned(),
+        classification: input.classification,
+        workload_id: input.operation.to_owned(),
+        command_template: command.clone(),
+        profile: string_field(input.row, "cargo_profile")
+            .unwrap_or_else(|| "release-perf".to_owned()),
+        environment_manifest_id: input.environment_manifest_id.to_owned(),
+        baseline_artifact_hash: string_field(input.row, "reference_source_json").map_or_else(
+            || "missing_reference".to_owned(),
+            |path| hash_existing_or_marker(&path),
+        ),
+        current_artifact_hash: string_field(input.row, "current_source_json").map_or_else(
+            || input.artifact_hash.to_owned(),
+            |path| hash_existing_or_marker(&path),
+        ),
+        observed_value,
+        threshold_value,
+        unit,
+        suspected_subsystem: suspected_subsystem(input.operation),
+        raw_logs: raw_logs_for([
+            string_field(input.row, "current_source_json"),
+            string_field(input.row, "current_probe_report_json"),
+            Some(input.artifact.to_owned()),
+        ]),
+        validation_command: command,
+    }
+}
+
+fn claim_follow_up_payload(claim: &PerformanceUnmeasuredClaim) -> PerformanceFollowUpPayload {
+    PerformanceFollowUpPayload {
+        follow_up_bead: claim.follow_up_bead.clone(),
+        classification: PerformanceDeltaClassification::Unmeasured,
+        workload_id: claim.operation.clone(),
+        command_template: claim.reproduction_command.clone(),
+        profile: "deferred".to_owned(),
+        environment_manifest_id: format!("claim:{}", sha256_hex(claim.reason.as_bytes())),
+        baseline_artifact_hash: "missing_measurement".to_owned(),
+        current_artifact_hash: format!("claim:{}", sha256_hex(claim.claim_id.as_bytes())),
+        observed_value: 0.0,
+        threshold_value: 0.0,
+        unit: "claim_state".to_owned(),
+        suspected_subsystem: suspected_subsystem(&claim.operation),
+        raw_logs: vec![claim.claim_id.clone()],
+        validation_command: claim.reproduction_command.clone(),
+    }
+}
+
+fn payload_metric(
+    classification: PerformanceDeltaClassification,
+    p99_delta: Option<f64>,
+    throughput_delta: Option<f64>,
+    current: &Measurement,
+    config: &PerformanceDeltaCloseoutConfig,
+) -> (f64, f64, String) {
+    if matches!(classification, PerformanceDeltaClassification::Regression)
+        && throughput_delta.is_some_and(|delta| delta <= config.policy.throughput_fail_percent)
+        && !p99_delta.is_some_and(|delta| delta >= config.policy.p99_fail_percent)
+    {
+        return (
+            throughput_delta.unwrap_or_default(),
+            config.policy.throughput_fail_percent,
+            "throughput_delta_percent".to_owned(),
+        );
+    }
+    if let Some(delta) = p99_delta {
+        let threshold = if matches!(classification, PerformanceDeltaClassification::Warning) {
+            config.policy.p99_warn_percent
+        } else {
+            config.policy.p99_fail_percent
+        };
+        return (delta, threshold, "p99_delta_percent".to_owned());
+    }
+    if let Some(throughput) = current.throughput_ops_sec {
+        return (throughput, 0.0, "throughput_ops_sec".to_owned());
+    }
+    (current.p99_us.unwrap_or_default(), 0.0, "p99_us".to_owned())
+}
+
+fn comparison_payload_metric(
+    classification: PerformanceDeltaClassification,
+    p99_delta: Option<f64>,
+    throughput_delta: Option<f64>,
+    config: &PerformanceDeltaCloseoutConfig,
+) -> (f64, f64, String) {
+    if matches!(classification, PerformanceDeltaClassification::Regression)
+        && throughput_delta.is_some_and(|delta| delta <= config.policy.throughput_fail_percent)
+        && !p99_delta.is_some_and(|delta| delta >= config.policy.p99_fail_percent)
+    {
+        return (
+            throughput_delta.unwrap_or_default(),
+            config.policy.throughput_fail_percent,
+            "throughput_delta_percent".to_owned(),
+        );
+    }
+    if let Some(delta) = p99_delta {
+        let threshold = if matches!(classification, PerformanceDeltaClassification::Warning) {
+            config.policy.p99_warn_percent
+        } else {
+            config.policy.p99_fail_percent
+        };
+        return (delta, threshold, "p99_delta_percent".to_owned());
+    }
+    (
+        throughput_delta.unwrap_or_default(),
+        config.policy.throughput_fail_percent,
+        "throughput_delta_percent".to_owned(),
+    )
+}
+
+fn command_or_default(command: &str, operation: &str) -> String {
+    if command.trim().is_empty() {
+        format!(
+            "cargo run -p ffs-harness -- performance-delta-closeout --config {DEFAULT_PERFORMANCE_DELTA_CLOSEOUT_CONFIG} --workload {operation}"
+        )
+    } else {
+        command.to_owned()
+    }
+}
+
+fn profile_from_command(command: &str) -> String {
+    command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--profile").then(|| pair[1].to_owned()))
+        .unwrap_or_else(|| "release".to_owned())
+}
+
+fn suspected_subsystem(operation: &str) -> String {
+    operation
+        .split('_')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or("performance")
+        .to_owned()
+}
+
+fn raw_logs_for<const N: usize>(logs: [Option<String>; N]) -> Vec<String> {
+    logs.into_iter()
+        .flatten()
+        .filter(|log| !log.trim().is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn hash_existing_or_marker(path: &str) -> String {
+    fs::read(path).map_or_else(
+        |_| format!("missing:{path}"),
+        |bytes| format!("sha256:{}", sha256_hex(&bytes)),
+    )
+}
+
+fn environment_manifest_id(value: &Value, artifact: &str) -> String {
+    let manifest = value
+        .get("environment")
+        .or_else(|| value.get("current_baseline"))
+        .or_else(|| value.get("reference_baseline"))
+        .unwrap_or(value);
+    serde_json::to_vec(manifest).map_or_else(
+        |_| format!("artifact:{}", hash_existing_or_marker(artifact)),
+        |bytes| format!("sha256:{}", sha256_hex(&bytes)),
+    )
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 fn reference_rationale(
@@ -1006,6 +1426,22 @@ mod tests {
             row_count: 1,
             classification_counts: BTreeMap::from([("regression".to_owned(), 1)]),
             follow_up_beads: vec!["bd-rchk5.5".to_owned()],
+            follow_up_payloads: vec![PerformanceFollowUpPayload {
+                follow_up_bead: "bd-rchk5.5".to_owned(),
+                classification: PerformanceDeltaClassification::Regression,
+                workload_id: "mount_cold".to_owned(),
+                command_template: "cargo run".to_owned(),
+                profile: "release".to_owned(),
+                environment_manifest_id: "sha256:test".to_owned(),
+                baseline_artifact_hash: "sha256:base".to_owned(),
+                current_artifact_hash: "sha256:current".to_owned(),
+                observed_value: 100.0,
+                threshold_value: 50.0,
+                unit: "p99_delta_percent".to_owned(),
+                suspected_subsystem: "mount".to_owned(),
+                raw_logs: vec!["comparison.json".to_owned()],
+                validation_command: "cargo run".to_owned(),
+            }],
             rows_requiring_follow_up: 1,
             rows: vec![PerformanceDeltaRow {
                 row_id: "comparison:mount_cold".to_owned(),
@@ -1024,6 +1460,7 @@ mod tests {
                 release_claim_state: "unknown".to_owned(),
                 follow_up_bead: Some("bd-rchk5.5".to_owned()),
                 follow_up_present: true,
+                follow_up_payload: None,
                 rationale: "slow".to_owned(),
                 reproduction_command: "cargo run".to_owned(),
             }],
@@ -1032,5 +1469,124 @@ mod tests {
         let markdown = render_performance_delta_closeout_markdown(&report);
         assert!(markdown.contains("bd-rchk5.5"));
         assert!(markdown.contains("mount_cold"));
+    }
+
+    #[test]
+    fn status_classification_covers_closeout_dispositions() {
+        let cases = [
+            ("noisy", PerformanceDeltaClassification::Noisy),
+            (
+                "stale_baseline",
+                PerformanceDeltaClassification::StaleBaseline,
+            ),
+            (
+                "environment_mismatch",
+                PerformanceDeltaClassification::EnvironmentMismatch,
+            ),
+            (
+                "missing_measurement",
+                PerformanceDeltaClassification::MissingMeasurement,
+            ),
+            (
+                "unsupported_workload",
+                PerformanceDeltaClassification::UnsupportedWorkload,
+            ),
+            (
+                "over_budget_instrumentation",
+                PerformanceDeltaClassification::OverBudgetInstrumentation,
+            ),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(classification_from_status(status), Some(expected));
+        }
+    }
+
+    #[test]
+    fn follow_up_payload_contains_bisect_ready_fields() {
+        let current = Measurement {
+            operation: "mount_cold".to_owned(),
+            source_artifact: "current.json".to_owned(),
+            source_json: Some("raw/current.json".to_owned()),
+            p99_us: Some(200.0),
+            throughput_ops_sec: Some(5.0),
+            status: "measured".to_owned(),
+            command: "cargo bench --profile release-perf -p ffs-cli --bench mount".to_owned(),
+            environment_manifest_id: "sha256:env".to_owned(),
+            artifact_hash: "sha256:current".to_owned(),
+        };
+        let reference = Measurement {
+            operation: "mount_cold".to_owned(),
+            source_artifact: "reference.json".to_owned(),
+            source_json: Some("raw/reference.json".to_owned()),
+            p99_us: Some(100.0),
+            throughput_ops_sec: Some(10.0),
+            status: "measured".to_owned(),
+            command: String::new(),
+            environment_manifest_id: "sha256:old-env".to_owned(),
+            artifact_hash: "sha256:reference".to_owned(),
+        };
+        let payload = measurement_follow_up_payload(
+            "bd-rchk5.5",
+            &current,
+            Some(&reference),
+            PerformanceDeltaClassification::Regression,
+            Some(100.0),
+            Some(-50.0),
+            &base_config(),
+        );
+        assert_eq!(payload.workload_id, "mount_cold");
+        assert_eq!(payload.command_template, current.command);
+        assert_eq!(payload.profile, "release-perf");
+        assert_eq!(payload.environment_manifest_id, "sha256:env");
+        assert_eq!(payload.baseline_artifact_hash, "sha256:reference");
+        assert_eq!(payload.current_artifact_hash, "sha256:current");
+        assert!((payload.observed_value - 100.0).abs() < f64::EPSILON);
+        assert!((payload.threshold_value - 50.0).abs() < f64::EPSILON);
+        assert_eq!(payload.unit, "p99_delta_percent");
+        assert_eq!(payload.suspected_subsystem, "mount");
+        assert!(payload.raw_logs.contains(&"raw/current.json".to_owned()));
+        assert_eq!(payload.validation_command, current.command);
+    }
+
+    #[test]
+    fn report_suppresses_duplicate_follow_up_payloads() {
+        let payload = PerformanceFollowUpPayload {
+            follow_up_bead: "bd-rchk5.5".to_owned(),
+            classification: PerformanceDeltaClassification::Regression,
+            workload_id: "mount_cold".to_owned(),
+            command_template: "cargo bench".to_owned(),
+            profile: "release-perf".to_owned(),
+            environment_manifest_id: "sha256:env".to_owned(),
+            baseline_artifact_hash: "sha256:base".to_owned(),
+            current_artifact_hash: "sha256:current".to_owned(),
+            observed_value: 100.0,
+            threshold_value: 50.0,
+            unit: "p99_delta_percent".to_owned(),
+            suspected_subsystem: "mount".to_owned(),
+            raw_logs: vec!["raw.json".to_owned()],
+            validation_command: "cargo bench".to_owned(),
+        };
+        let row = PerformanceDeltaRow {
+            row_id: "comparison:mount_cold".to_owned(),
+            row_kind: "comparison".to_owned(),
+            operation: "mount_cold".to_owned(),
+            source_artifact: "comparison.json".to_owned(),
+            reference_artifact: None,
+            current_source_json: None,
+            reference_p99_us: Some(10.0),
+            current_p99_us: Some(20.0),
+            p99_delta_percent: Some(100.0),
+            reference_throughput_ops_sec: None,
+            current_throughput_ops_sec: None,
+            throughput_delta_percent: None,
+            classification: PerformanceDeltaClassification::Regression,
+            release_claim_state: "unknown".to_owned(),
+            follow_up_bead: Some("bd-rchk5.5".to_owned()),
+            follow_up_present: true,
+            follow_up_payload: Some(payload),
+            rationale: "slow".to_owned(),
+            reproduction_command: "cargo bench".to_owned(),
+        };
+        assert_eq!(deduplicate_follow_up_payloads(&[row.clone(), row]).len(), 1);
     }
 }
