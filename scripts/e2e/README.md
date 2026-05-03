@@ -781,11 +781,20 @@ If rch offload runs the test but does not materialize custom artifact files loca
 The xfstests E2E suite exercises:
 
 1. Curated generic/ext4 subset selection from tracked list files
-2. Planning artifacts for CI (`selected_tests.txt`, `summary.json`)
+2. Planning artifacts for CI (`selected_tests.txt`, `summary.json`, `policy_plan.json`, `policy_report.md`)
 3. Optional direct `xfstests check` execution when a configured checkout is available
 4. Structured result artifacts (`results.json`, `junit.xml`) for per-commit tracking
 5. Regression guard enforcement in run mode (`must_pass`, `min_pass_count`, `min_pass_rate`)
 6. Safe skip/fail behavior via strictness toggle
+
+The policy plan is a non-destructive planning artifact by default. It records
+one row per curated xfstests id with the policy row id, filesystem flavor, V1
+scope mapping, required capability, expected operation class, user-risk
+category, expected outcome, artifact requirements, owning bead, and
+reproduction command. The Markdown report counts product-actionable failures,
+environment blockers, harness blockers, expected unsupported rows, not-run rows,
+and pass candidates separately; CI and README wording must not compress those
+categories into an xfstests pass claim.
 
 ## Output
 

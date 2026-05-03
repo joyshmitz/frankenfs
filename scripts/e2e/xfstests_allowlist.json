@@ -1,37 +1,121 @@
 [
   {
     "test_id": "generic/001",
-    "failure_reason": "Selected generic canary expected to pass under the V1 mounted surface; any failure is product-actionable.",
+    "failure_reason": "Creates, writes, renames, and unlinks files across directory sizes; failures are product-actionable for the V1 mounted namespace.",
     "status": "expected_pass",
+    "policy_row_id": "xfstests-policy-generic-001",
     "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "directory_mutation",
+    "operation_class_tags": [
+      "rw_file_lifecycle"
+    ],
+    "user_risk_category": "namespace_integrity",
+    "expected_outcome": "expected_pass",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "xfstests_generic_case"
     ],
     "classification": "product_actionable",
     "scope_reference": "README.md#v1-filesystem-scope",
-    "tracker_id": "bd-rchk3.2",
+    "tracker_id": "bd-rchk3.2.1",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+  },
+  {
+    "test_id": "generic/003",
+    "failure_reason": "Read-only remount and strictatime behavior needs a built xfstests checkout plus scratch mount support before it can be called pass/fail.",
+    "status": "likely_pass",
+    "policy_row_id": "xfstests-policy-generic-003",
+    "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "read_only_mount",
+    "operation_class_tags": [],
+    "user_risk_category": "data_visibility",
+    "expected_outcome": "environment_blocked",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
+    "required_capabilities": [
+      "fuse_mount",
+      "readonly_remount",
+      "built_xfstests"
+    ],
+    "classification": "environment_blocked",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2.1",
     "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "generic/013",
-    "failure_reason": "Selected generic canary expected to pass under the V1 mounted surface; any failure is product-actionable.",
+    "failure_reason": "Fsstress create/link/rename/stat/unlink/truncate canary expected to pass under the V1 mounted surface; any failure is product-actionable.",
     "status": "expected_pass",
+    "policy_row_id": "xfstests-policy-generic-013",
     "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "rw_file_lifecycle",
+    "operation_class_tags": [
+      "directory_mutation",
+      "rename_link_semantics"
+    ],
+    "user_risk_category": "data_integrity",
+    "expected_outcome": "expected_pass",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "xfstests_generic_case"
     ],
     "classification": "product_actionable",
     "scope_reference": "README.md#v1-filesystem-scope",
-    "tracker_id": "bd-rchk3.2",
+    "tracker_id": "bd-rchk3.2.1",
     "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "generic/030",
-    "failure_reason": "Requires xfs_io mremap command; FUSE mmap consistency and mremap ioctl not fully supported",
+    "failure_reason": "Requires xfs_io mremap command; FUSE mmap consistency and mremap ioctl coverage remains product-actionable until the mounted path is proven.",
     "status": "known_fail",
+    "policy_row_id": "xfstests-policy-generic-030",
     "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "rw_file_lifecycle",
+    "operation_class_tags": [],
+    "user_risk_category": "data_integrity",
+    "expected_outcome": "product_actionable_failure",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "xfs_io_mremap",
@@ -39,42 +123,124 @@
     ],
     "classification": "product_actionable",
     "scope_reference": "README.md#v1-filesystem-scope",
-    "tracker_id": "bd-rchk3.2",
+    "tracker_id": "bd-rchk3.2.1",
     "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "generic/035",
-    "failure_reason": "Selected generic canary expected to pass under the V1 mounted surface; any failure is product-actionable.",
+    "failure_reason": "Overwriting rename canary expected to pass under the V1 mounted namespace; any failure is product-actionable.",
     "status": "expected_pass",
+    "policy_row_id": "xfstests-policy-generic-035",
     "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "rename_link_semantics",
+    "operation_class_tags": [
+      "directory_mutation"
+    ],
+    "user_risk_category": "namespace_integrity",
+    "expected_outcome": "expected_pass",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
-      "xfstests_generic_case"
+      "rename_overwrite"
     ],
     "classification": "product_actionable",
     "scope_reference": "README.md#v1-filesystem-scope",
-    "tracker_id": "bd-rchk3.2",
+    "tracker_id": "bd-rchk3.2.1",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+  },
+  {
+    "test_id": "generic/062",
+    "failure_reason": "User xattr get/set/list/remove coverage is in V1 scope but needs built xfstests attr helpers before it can be counted as pass/fail.",
+    "status": "likely_pass",
+    "policy_row_id": "xfstests-policy-generic-062",
+    "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "xattr_semantics",
+    "operation_class_tags": [],
+    "user_risk_category": "metadata_integrity",
+    "expected_outcome": "environment_blocked",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
+    "required_capabilities": [
+      "fuse_mount",
+      "setfattr",
+      "getfattr",
+      "built_xfstests"
+    ],
+    "classification": "environment_blocked",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2.1",
     "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "generic/068",
-    "failure_reason": "Requires xfs_freeze (FIFREEZE ioctl); FUSE filesystems lack kernel-level freeze/thaw support",
+    "failure_reason": "Requires xfs_freeze (FIFREEZE ioctl); FUSE filesystems lack kernel-level freeze/thaw support in the V1 mounted surface.",
     "status": "wont_fix",
+    "policy_row_id": "xfstests-policy-generic-068",
     "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#allowed-deferrals-and-non-goals",
+    "expected_operation_class": "host_capability_skip",
+    "operation_class_tags": [],
+    "user_risk_category": "host_environment",
+    "expected_outcome": "unsupported_by_v1",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "fifreeze_ioctl"
     ],
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#allowed-deferrals-and-non-goals",
-    "tracker_id": "bd-rchk3.2",
+    "tracker_id": "bd-rchk3.2.1",
     "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "generic/112",
-    "failure_reason": "Requires AIO + preallocation; fallocate prealloc supported, FUSE AIO supported since Linux 4.2. Needs runtime validation with built xfstests (ltp/aio-stress binary required)",
+    "failure_reason": "Requires AIO plus preallocation; fallocate prealloc is supported, but the exact xfstests aio-stress binary and host setup are not available in CI.",
     "status": "likely_pass",
+    "policy_row_id": "xfstests-policy-generic-112",
     "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#whats-next",
+    "expected_operation_class": "rw_file_lifecycle",
+    "operation_class_tags": [],
+    "user_risk_category": "host_environment",
+    "expected_outcome": "environment_blocked",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "aio_stress",
@@ -87,23 +253,119 @@
   },
   {
     "test_id": "generic/231",
-    "failure_reason": "Requires Linux disk quota subsystem; FUSE filesystems do not integrate with kernel quota infrastructure",
+    "failure_reason": "Requires Linux disk quota subsystem; FUSE filesystems do not integrate with kernel quota infrastructure in the V1 mounted surface.",
     "status": "wont_fix",
+    "policy_row_id": "xfstests-policy-generic-231",
     "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#allowed-deferrals-and-non-goals",
+    "expected_operation_class": "host_capability_skip",
+    "operation_class_tags": [],
+    "user_risk_category": "host_environment",
+    "expected_outcome": "unsupported_by_v1",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "kernel_quota_integration"
     ],
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#allowed-deferrals-and-non-goals",
-    "tracker_id": "bd-rchk3.2",
+    "tracker_id": "bd-rchk3.2.1",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+  },
+  {
+    "test_id": "generic/321",
+    "failure_reason": "Directory fsync and rename fsync recovery coverage is in V1 scope but needs built xfstests helpers and a scratch mount before it can be counted as pass/fail.",
+    "status": "likely_pass",
+    "policy_row_id": "xfstests-policy-generic-321",
+    "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "fsync_boundary",
+    "operation_class_tags": [
+      "rename_link_semantics"
+    ],
+    "user_risk_category": "data_integrity",
+    "expected_outcome": "environment_blocked",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
+    "required_capabilities": [
+      "fuse_mount",
+      "xfs_io_fsync",
+      "built_xfstests"
+    ],
+    "classification": "environment_blocked",
+    "scope_reference": "README.md#v1-filesystem-scope",
+    "tracker_id": "bd-rchk3.2.1",
+    "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
+  },
+  {
+    "test_id": "generic/524",
+    "failure_reason": "Exercises page writeback cache races that are outside the V1 FUSE contract while writeback-cache remains unsupported; this row must stay counted separately from passes.",
+    "status": "wont_fix",
+    "policy_row_id": "xfstests-policy-generic-524",
+    "filesystem_flavor": "generic",
+    "v1_scope_mapping": "README.md#allowed-deferrals-and-non-goals",
+    "expected_operation_class": "writeback_cache_unsupported",
+    "operation_class_tags": [],
+    "user_risk_category": "unsupported_feature",
+    "expected_outcome": "unsupported_by_v1",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
+    "required_capabilities": [
+      "fuse_writeback_cache",
+      "xfs_io_fsync",
+      "page_writeback_race"
+    ],
+    "classification": "unsupported_by_v1",
+    "scope_reference": "README.md#allowed-deferrals-and-non-goals",
+    "tracker_id": "bd-rchk3.2.1",
     "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=generic ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "ext4/001",
-    "failure_reason": "Mounted-path close analogues now prove ext4 FALLOC_FL_ZERO_RANGE and FS_IOC_FIEMAP separately (`ext4_fuse_fallocate_zero_range_zeroes_range`, `fuse_ioctl_fiemap_reports_valid_extents`). Keep allowlisted as likely-pass until the exact xfstests `fzero` + `fiemap` sequence is rerun end-to-end; this is no longer blocked on missing FIEMAP forwarding.",
+    "failure_reason": "Mounted-path close analogues prove ext4 FALLOC_FL_ZERO_RANGE and FS_IOC_FIEMAP separately; keep likely-pass until the exact xfstests fzero plus fiemap sequence is rerun end-to-end. This is no longer blocked on missing FIEMAP forwarding.",
     "status": "likely_pass",
+    "policy_row_id": "xfstests-policy-ext4-001",
     "filesystem_flavor": "ext4",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "rw_file_lifecycle",
+    "operation_class_tags": [],
+    "user_risk_category": "data_integrity",
+    "expected_outcome": "environment_blocked",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "fallocate_zero_range",
@@ -117,9 +379,25 @@
   },
   {
     "test_id": "ext4/003",
-    "failure_reason": "Requires scratch device with ext4 bigalloc mkfs feature; test infrastructure setup for FUSE-backed ext4 not available",
+    "failure_reason": "Requires scratch device with ext4 bigalloc mkfs feature; test infrastructure setup for FUSE-backed ext4 is not available.",
     "status": "known_fail",
+    "policy_row_id": "xfstests-policy-ext4-003",
     "filesystem_flavor": "ext4",
+    "v1_scope_mapping": "README.md#allowed-deferrals-and-non-goals",
+    "expected_operation_class": "host_capability_skip",
+    "operation_class_tags": [],
+    "user_risk_category": "host_environment",
+    "expected_outcome": "environment_blocked",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "scratch_device",
@@ -132,9 +410,25 @@
   },
   {
     "test_id": "ext4/005",
-    "failure_reason": "Requires `chattr -e` to clear the system-managed EXTENTS flag and convert an extent file to the legacy non-extent format. FrankenFS now proves mounted-path EXT4_IOC_GETFLAGS and user-settable EXT4_IOC_SETFLAGS, but intentionally preserves EXT4_EXTENTS_FL, so this specific extent-conversion path remains unsupported.",
+    "failure_reason": "Requires chattr -e to clear the system-managed EXTENTS flag and convert an extent file to the legacy non-extent format. FrankenFS proves mounted-path EXT4_IOC_GETFLAGS and EXT4_IOC_SETFLAGS but intentionally preserves EXT4_EXTENTS_FL.",
     "status": "known_fail",
+    "policy_row_id": "xfstests-policy-ext4-005",
     "filesystem_flavor": "ext4",
+    "v1_scope_mapping": "README.md#v1-filesystem-scope",
+    "expected_operation_class": "host_capability_skip",
+    "operation_class_tags": [],
+    "user_risk_category": "unsupported_feature",
+    "expected_outcome": "unsupported_by_v1",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "chattr_extent_conversion",
@@ -142,14 +436,30 @@
     ],
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#v1-filesystem-scope",
-    "tracker_id": "bd-rchk3.2",
+    "tracker_id": "bd-rchk3.2.1",
     "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
   },
   {
     "test_id": "ext4/013",
-    "failure_reason": "Requires debugfs for direct inode corruption on raw device; incompatible with FUSE-mounted filesystem testing",
+    "failure_reason": "Requires debugfs for direct inode corruption on a raw device; incompatible with FUSE-mounted filesystem testing.",
     "status": "wont_fix",
+    "policy_row_id": "xfstests-policy-ext4-013",
     "filesystem_flavor": "ext4",
+    "v1_scope_mapping": "README.md#allowed-deferrals-and-non-goals",
+    "expected_operation_class": "host_capability_skip",
+    "operation_class_tags": [],
+    "user_risk_category": "host_environment",
+    "expected_outcome": "unsupported_by_v1",
+    "selection_decision": "selected",
+    "artifact_requirements": [
+      "selected_tests.txt",
+      "policy_plan.json",
+      "policy_report.md",
+      "summary.json",
+      "results.json",
+      "junit.xml",
+      "check.log"
+    ],
     "required_capabilities": [
       "fuse_mount",
       "debugfs",
@@ -157,7 +467,7 @@
     ],
     "classification": "unsupported_by_v1",
     "scope_reference": "README.md#allowed-deferrals-and-non-goals",
-    "tracker_id": "bd-rchk3.2",
+    "tracker_id": "bd-rchk3.2.1",
     "repro_command": "XFSTESTS_MODE=run XFSTESTS_DRY_RUN=1 XFSTESTS_FILTER=ext4 ./scripts/e2e/ffs_xfstests_e2e.sh"
   }
 ]

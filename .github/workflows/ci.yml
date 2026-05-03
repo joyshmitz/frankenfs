@@ -146,6 +146,7 @@ jobs:
             conformance/fixtures/checksums.sha256
             artifacts/e2e/**/*.log
             artifacts/e2e/**/xfstests/*.json
+            artifacts/e2e/**/xfstests/*.md
             artifacts/e2e/**/xfstests/*.txt
             artifacts/e2e/**/xfstests/*.xml
 

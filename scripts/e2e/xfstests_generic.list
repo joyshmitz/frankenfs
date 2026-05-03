@@ -2,9 +2,13 @@
 # Keep this list intentionally small and deterministic in early development.
 
 generic/001
+generic/003
 generic/013
 generic/030
 generic/035
+generic/062
 generic/068
 generic/112
 generic/231
+generic/321
+generic/524

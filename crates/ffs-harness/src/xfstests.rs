@@ -75,7 +75,23 @@ pub struct XfstestsAllowlistEntry {
     pub failure_reason: String,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_row_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem_flavor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v1_scope_mapping: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_operation_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operation_class_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_risk_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_requirements: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +116,44 @@ pub struct XfstestsComparison {
     pub improvements: Vec<String>,
     pub unchanged: Vec<String>,
 }
+
+const REQUIRED_XFSTESTS_OPERATION_CLASSES: &[&str] = &[
+    "read_only_mount",
+    "rw_file_lifecycle",
+    "directory_mutation",
+    "rename_link_semantics",
+    "xattr_semantics",
+    "fsync_boundary",
+    "writeback_cache_unsupported",
+    "host_capability_skip",
+];
+
+const KNOWN_XFSTESTS_RISK_CATEGORIES: &[&str] = &[
+    "data_visibility",
+    "data_integrity",
+    "metadata_integrity",
+    "namespace_integrity",
+    "operator_honesty",
+    "unsupported_feature",
+    "host_environment",
+];
+
+const KNOWN_XFSTESTS_OUTCOMES: &[&str] = &[
+    "expected_pass",
+    "product_actionable_failure",
+    "environment_blocked",
+    "unsupported_by_v1",
+    "expected_failure",
+];
+
+const REQUIRED_XFSTESTS_ARTIFACTS: &[&str] = &[
+    "selected_tests.txt",
+    "policy_plan.json",
+    "policy_report.md",
+    "summary.json",
+    "results.json",
+    "junit.xml",
+];
 
 pub fn load_selected_tests(path: &Path) -> Result<Vec<String>> {
     let text = fs::read_to_string(path)
@@ -172,11 +226,45 @@ pub fn validate_xfstests_policy(
     errors
 }
 
+#[must_use]
+pub fn validate_xfstests_policy_coverage(allowlist: &[XfstestsAllowlistEntry]) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut covered = BTreeSet::new();
+
+    for entry in allowlist {
+        if let Some(operation_class) = entry.expected_operation_class.as_deref() {
+            covered.insert(operation_class.to_owned());
+        }
+        for operation_class in &entry.operation_class_tags {
+            covered.insert(operation_class.clone());
+        }
+    }
+
+    for required in REQUIRED_XFSTESTS_OPERATION_CLASSES {
+        if !covered.contains(*required) {
+            errors.push(format!(
+                "xfstests policy is missing representative operation class: {required}"
+            ));
+        }
+    }
+
+    errors
+}
+
 fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors: &mut Vec<String>) {
     if !selected {
         return;
     }
 
+    validate_policy_identity(entry, errors);
+    validate_policy_scope(entry, errors);
+    validate_policy_risk(entry, errors);
+    validate_policy_artifacts(entry, errors);
+    validate_policy_outcome(entry, errors);
+    validate_policy_links(entry, errors);
+}
+
+fn validate_policy_identity(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
     let test_prefix = entry.test_id.split('/').next().unwrap_or_default();
     if !matches!(test_prefix, "generic" | "ext4") {
         errors.push(format!(
@@ -193,15 +281,24 @@ fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors:
         )),
     }
 
+    match entry.policy_row_id.as_deref() {
+        Some(row_id) if row_id.starts_with("xfstests-policy-") => {}
+        Some(row_id) => errors.push(format!(
+            "xfstests policy {} has malformed policy_row_id: {row_id}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing policy_row_id",
+            entry.test_id
+        )),
+    }
+
     match entry.filesystem_flavor.as_deref() {
-        Some("generic" | "ext4") => {
-            if entry.filesystem_flavor.as_deref() != Some(test_prefix) {
-                errors.push(format!(
-                    "xfstests policy {} has filesystem_flavor that does not match id prefix",
-                    entry.test_id
-                ));
-            }
-        }
+        Some("generic" | "ext4") if entry.filesystem_flavor.as_deref() == Some(test_prefix) => {}
+        Some("generic" | "ext4") => errors.push(format!(
+            "xfstests policy {} has filesystem_flavor that does not match id prefix",
+            entry.test_id
+        )),
         Some(other) => errors.push(format!(
             "xfstests policy {} has unknown filesystem_flavor: {other}",
             entry.test_id
@@ -211,6 +308,103 @@ fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors:
             entry.test_id
         )),
     }
+}
+
+fn validate_policy_scope(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
+    match entry.v1_scope_mapping.as_deref() {
+        Some(reference) if is_supported_scope_reference(reference) => {}
+        Some(reference) => errors.push(format!(
+            "xfstests policy {} has stale V1 scope mapping: {reference}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing V1 scope mapping",
+            entry.test_id
+        )),
+    }
+
+    match entry.expected_operation_class.as_deref() {
+        Some(operation_class) if is_known_operation_class(operation_class) => {}
+        Some(operation_class) => errors.push(format!(
+            "xfstests policy {} has unknown expected operation class: {operation_class}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing expected operation class",
+            entry.test_id
+        )),
+    }
+    for operation_class in &entry.operation_class_tags {
+        if !is_known_operation_class(operation_class) {
+            errors.push(format!(
+                "xfstests policy {} has unknown operation class tag: {operation_class}",
+                entry.test_id
+            ));
+        }
+    }
+}
+
+fn validate_policy_risk(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
+    match entry.user_risk_category.as_deref() {
+        Some(category) if KNOWN_XFSTESTS_RISK_CATEGORIES.contains(&category) => {}
+        Some(category) => errors.push(format!(
+            "xfstests policy {} has unknown user risk category: {category}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing user risk category",
+            entry.test_id
+        )),
+    }
+
+    match entry.expected_outcome.as_deref() {
+        Some(outcome) if KNOWN_XFSTESTS_OUTCOMES.contains(&outcome) => {}
+        Some(outcome) => errors.push(format!(
+            "xfstests policy {} has unknown expected outcome: {outcome}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing expected outcome",
+            entry.test_id
+        )),
+    }
+
+    if let Some(outcome) = entry.expected_outcome.as_deref() {
+        let expected = expected_outcome_for_classification(entry);
+        if outcome != expected {
+            errors.push(format!(
+                "xfstests policy {} expected_outcome={outcome} does not match status/classification expectation {expected}",
+                entry.test_id
+            ));
+        }
+    }
+
+    match entry.selection_decision.as_deref() {
+        Some("selected" | "skipped") => {}
+        Some(decision) => errors.push(format!(
+            "xfstests policy {} has unknown selection decision: {decision}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing selection decision",
+            entry.test_id
+        )),
+    }
+}
+
+fn validate_policy_artifacts(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
+    for required_artifact in REQUIRED_XFSTESTS_ARTIFACTS {
+        if !entry
+            .artifact_requirements
+            .iter()
+            .any(|artifact| artifact == required_artifact)
+        {
+            errors.push(format!(
+                "xfstests policy {} is missing artifact requirement: {required_artifact}",
+                entry.test_id
+            ));
+        }
+    }
 
     if entry.required_capabilities.is_empty() {
         errors.push(format!(
@@ -218,7 +412,9 @@ fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors:
             entry.test_id
         ));
     }
+}
 
+fn validate_policy_outcome(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
     match entry.classification.as_deref() {
         Some(
             "expected_failure"
@@ -235,6 +431,13 @@ fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors:
             "xfstests policy {} is missing classification",
             entry.test_id
         )),
+    }
+
+    if entry.failure_reason.trim().is_empty() {
+        errors.push(format!(
+            "xfstests policy {} is missing outcome rationale",
+            entry.test_id
+        ));
     }
 
     let needs_skip_reason = entry.status != "expected_pass";
@@ -267,11 +470,47 @@ fn validate_policy_entry(entry: &XfstestsAllowlistEntry, selected: bool, errors:
     }
 }
 
+fn validate_policy_links(entry: &XfstestsAllowlistEntry, errors: &mut Vec<String>) {
+    match entry.tracker_id.as_deref() {
+        Some(tracker_id) if tracker_id.starts_with("bd-") => {}
+        Some(tracker_id) => errors.push(format!(
+            "xfstests policy {} has malformed tracker_id: {tracker_id}",
+            entry.test_id
+        )),
+        None => errors.push(format!(
+            "xfstests policy {} is missing tracker_id",
+            entry.test_id
+        )),
+    }
+
+    match entry.repro_command.as_deref() {
+        Some(command) if !command.is_empty() => {}
+        Some(_) | None => errors.push(format!(
+            "xfstests policy {} is missing reproduction command",
+            entry.test_id
+        )),
+    }
+}
+
 fn is_supported_scope_reference(reference: &str) -> bool {
     reference.starts_with("README.md#")
         || reference.starts_with("FEATURE_PARITY.md#")
         || reference == "README.md"
         || reference == "FEATURE_PARITY.md"
+}
+
+fn is_known_operation_class(operation_class: &str) -> bool {
+    REQUIRED_XFSTESTS_OPERATION_CLASSES.contains(&operation_class)
+}
+
+fn expected_outcome_for_classification(entry: &XfstestsAllowlistEntry) -> &'static str {
+    match (entry.status.as_str(), entry.classification.as_deref()) {
+        ("expected_pass", _) => "expected_pass",
+        (_, Some("product_actionable")) => "product_actionable_failure",
+        (_, Some("environment_blocked" | "harness_blocked")) => "environment_blocked",
+        (_, Some("unsupported_by_v1")) => "unsupported_by_v1",
+        _ => "expected_failure",
+    }
 }
 
 #[must_use]
@@ -574,7 +813,18 @@ mod tests {
             test_id: test_id.to_owned(),
             failure_reason: "selected canary; failure is product-actionable".to_owned(),
             status: "expected_pass".to_owned(),
+            policy_row_id: Some(format!("xfstests-policy-{}", test_id.replace('/', "-"))),
             filesystem_flavor: Some(filesystem_flavor),
+            v1_scope_mapping: Some("README.md#v1-filesystem-scope".to_owned()),
+            expected_operation_class: Some("read_only_mount".to_owned()),
+            operation_class_tags: Vec::new(),
+            user_risk_category: Some("data_visibility".to_owned()),
+            expected_outcome: Some("expected_pass".to_owned()),
+            selection_decision: Some("selected".to_owned()),
+            artifact_requirements: REQUIRED_XFSTESTS_ARTIFACTS
+                .iter()
+                .map(|artifact| (*artifact).to_owned())
+                .collect(),
             required_capabilities: vec!["fuse_mount".to_owned()],
             classification: Some("product_actionable".to_owned()),
             scope_reference: None,
@@ -723,13 +973,90 @@ generic/001  2s ... pass\n";
         ))?);
         let allowlist = load_allowlist(&repo_xfstests_allowlist_path())?;
 
-        let errors = validate_xfstests_policy(&selected, &allowlist);
+        let mut errors = validate_xfstests_policy(&selected, &allowlist);
+        errors.extend(validate_xfstests_policy_coverage(&allowlist));
 
         assert!(
             errors.is_empty(),
             "xfstests policy must cover the curated subset cleanly: {errors:#?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_missing_artifact_requirements() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        entry
+            .artifact_requirements
+            .retain(|artifact| artifact != "policy_report.md");
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing artifact requirement: policy_report.md")),
+            "expected missing artifact requirement error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_rejects_missing_risk_outcome_or_operation_metadata() {
+        let selected = vec!["generic/001".to_owned()];
+        let mut entry = valid_policy_entry("generic/001");
+        entry.expected_operation_class = None;
+        entry.user_risk_category = None;
+        entry.expected_outcome = None;
+
+        let errors = validate_xfstests_policy(&selected, &[entry]);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing expected operation class")),
+            "expected missing operation class error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing user risk category")),
+            "expected missing risk category error, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing expected outcome")),
+            "expected missing expected outcome error, got {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn xfstests_policy_coverage_requires_representative_operation_classes() {
+        let mut allowlist = Vec::new();
+        for operation_class in REQUIRED_XFSTESTS_OPERATION_CLASSES {
+            let mut entry = valid_policy_entry("generic/001");
+            entry.test_id = format!("generic/{:03}", allowlist.len() + 1);
+            entry.policy_row_id = Some(format!(
+                "xfstests-policy-{}",
+                entry.test_id.replace('/', "-")
+            ));
+            entry.expected_operation_class = Some((*operation_class).to_owned());
+            allowlist.push(entry);
+        }
+        allowlist
+            .last_mut()
+            .expect("allowlist entry")
+            .expected_operation_class = Some("read_only_mount".to_owned());
+
+        let errors = validate_xfstests_policy_coverage(&allowlist);
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("host_capability_skip")),
+            "expected missing representative operation class error, got {errors:#?}"
+        );
     }
 
     #[test]

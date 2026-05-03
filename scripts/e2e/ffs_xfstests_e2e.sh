@@ -39,6 +39,7 @@ RESULTS_JSON="$ARTIFACT_DIR/results.json"
 JUNIT_FILE="$ARTIFACT_DIR/junit.xml"
 CHECK_LOG="$ARTIFACT_DIR/check.log"
 POLICY_PLAN_JSON="$ARTIFACT_DIR/policy_plan.json"
+POLICY_REPORT_MD="$ARTIFACT_DIR/policy_report.md"
 mkdir -p "$ARTIFACT_DIR"
 
 declare -a GENERIC_TESTS=()
@@ -84,6 +85,7 @@ write_summary() {
     local safe_selected="${SELECTED_FILE//\"/\\\"}"
     local safe_check_log="${CHECK_LOG//\"/\\\"}"
     local safe_policy_plan="${POLICY_PLAN_JSON//\"/\\\"}"
+    local safe_policy_report="${POLICY_REPORT_MD//\"/\\\"}"
     local safe_summary="${SUMMARY_JSON//\"/\\\"}"
     local command_plan="./check"
     if [[ "$XFSTESTS_DRY_RUN" == "1" ]]; then
@@ -111,6 +113,7 @@ write_summary() {
   "junit_xml": "$safe_junit",
   "check_log": "$safe_check_log",
   "policy_plan_json": "$safe_policy_plan",
+  "policy_report_md": "$safe_policy_report",
   "command_plan": "$safe_command_plan",
   "reproduction_command": "$safe_repro_command",
   "artifact_paths": {
@@ -119,6 +122,7 @@ write_summary() {
     "junit_xml": "$safe_junit",
     "check_log": "$safe_check_log",
     "policy_plan_json": "$safe_policy_plan",
+    "policy_report_md": "$safe_policy_report",
     "summary_json": "$safe_summary"
   },
   "generic_count": ${#GENERIC_TESTS[@]},
@@ -134,24 +138,49 @@ write_policy_plan() {
         e2e_fail "python3 is required to validate and emit xfstests policy plan"
     fi
 
-    python3 - "$SELECTED_FILE" "$XFSTESTS_ALLOWLIST_JSON" "$POLICY_PLAN_JSON" "$ARTIFACT_DIR" "$XFSTESTS_FILTER" "$XFSTESTS_DRY_RUN" "$XFSTESTS_MODE" "$XFSTESTS_DIR" <<'PY'
+    python3 - "$SELECTED_FILE" "$XFSTESTS_ALLOWLIST_JSON" "$POLICY_PLAN_JSON" "$POLICY_REPORT_MD" "$ARTIFACT_DIR" "$XFSTESTS_FILTER" "$XFSTESTS_DRY_RUN" "$XFSTESTS_MODE" "$XFSTESTS_DIR" <<'PY'
 import json
 import pathlib
 import sys
+from collections import Counter
 
 selected_file = pathlib.Path(sys.argv[1])
 policy_file = pathlib.Path(sys.argv[2])
 policy_plan = pathlib.Path(sys.argv[3])
-artifact_dir = pathlib.Path(sys.argv[4])
-xfstests_filter = sys.argv[5]
-dry_run = sys.argv[6]
-requested_mode = sys.argv[7]
-xfstests_dir = sys.argv[8]
+policy_report = pathlib.Path(sys.argv[4])
+artifact_dir = pathlib.Path(sys.argv[5])
+xfstests_filter = sys.argv[6]
+dry_run = sys.argv[7]
+requested_mode = sys.argv[8]
+xfstests_dir = sys.argv[9]
 
 selected = [line.strip() for line in selected_file.read_text(encoding="utf-8").splitlines() if line.strip()]
 policy_entries = json.loads(policy_file.read_text(encoding="utf-8"))
 policy_by_id = {}
 errors = []
+required_fields = [
+    "policy_row_id",
+    "test_id",
+    "filesystem_flavor",
+    "v1_scope_mapping",
+    "expected_operation_class",
+    "user_risk_category",
+    "expected_outcome",
+    "selection_decision",
+    "status",
+    "classification",
+    "failure_reason",
+    "tracker_id",
+    "repro_command",
+]
+required_artifacts = {
+    "selected_tests.txt",
+    "policy_plan.json",
+    "policy_report.md",
+    "summary.json",
+    "results.json",
+    "junit.xml",
+}
 
 for entry in policy_entries:
     test_id = entry.get("test_id")
@@ -161,6 +190,17 @@ for entry in policy_entries:
     if test_id in policy_by_id:
         errors.append(f"duplicate policy id: {test_id}")
     policy_by_id[test_id] = entry
+    for field in required_fields:
+        value = entry.get(field)
+        if value is None or value == "":
+            errors.append(f"policy {test_id} missing {field}")
+    artifacts = entry.get("artifact_requirements")
+    if not isinstance(artifacts, list):
+        errors.append(f"policy {test_id} missing artifact_requirements")
+        artifacts = []
+    missing_artifacts = sorted(required_artifacts - {item for item in artifacts if isinstance(item, str)})
+    for artifact in missing_artifacts:
+        errors.append(f"policy {test_id} missing artifact requirement: {artifact}")
 
 selected_set = set(selected)
 for test_id in selected:
@@ -178,18 +218,40 @@ check_argv.extend(selected)
 
 tests = []
 capabilities = set()
+status_counts = Counter()
+classification_counts = Counter()
+outcome_counts = Counter()
+operation_counts = Counter()
 for test_id in selected:
     entry = policy_by_id.get(test_id, {})
     required = [cap for cap in entry.get("required_capabilities", []) if isinstance(cap, str)]
     capabilities.update(required)
     status = entry.get("status", "missing_policy")
+    classification = entry.get("classification")
+    expected_outcome = entry.get("expected_outcome")
+    operation_class = entry.get("expected_operation_class")
+    status_counts[status] += 1
+    classification_counts[classification or "missing"] += 1
+    outcome_counts[expected_outcome or "missing"] += 1
+    operation_counts[operation_class or "missing"] += 1
+    for tag in entry.get("operation_class_tags", []):
+        if isinstance(tag, str):
+            operation_counts[tag] += 1
     skip_reason = None if status == "expected_pass" else entry.get("failure_reason")
     tests.append({
+        "policy_row_id": entry.get("policy_row_id"),
         "test_id": test_id,
         "filesystem_flavor": entry.get("filesystem_flavor", test_id.split("/", 1)[0]),
+        "v1_scope_mapping": entry.get("v1_scope_mapping"),
+        "expected_operation_class": operation_class,
+        "operation_class_tags": entry.get("operation_class_tags", []),
+        "user_risk_category": entry.get("user_risk_category"),
+        "expected_outcome": expected_outcome,
+        "selection_decision": entry.get("selection_decision"),
         "status": status,
-        "classification": entry.get("classification"),
+        "classification": classification,
         "required_capabilities": required,
+        "artifact_requirements": entry.get("artifact_requirements", []),
         "skip_decision": {
             "status": status,
             "reason": skip_reason,
@@ -200,6 +262,17 @@ for test_id in selected:
             "repro_command",
             f"XFSTESTS_MODE=run XFSTESTS_DRY_RUN={dry_run} ./scripts/e2e/ffs_xfstests_e2e.sh",
         ),
+        "log_fields": {
+            "source_xfstests_id": test_id,
+            "policy_row_id": entry.get("policy_row_id"),
+            "filesystem_flavor": entry.get("filesystem_flavor", test_id.split("/", 1)[0]),
+            "risk_category": entry.get("user_risk_category"),
+            "selected_or_skipped": entry.get("selection_decision"),
+            "capability_requirement": required,
+            "linked_artifact_or_bead": entry.get("tracker_id"),
+            "docs_scope_citation": entry.get("v1_scope_mapping") or entry.get("scope_reference"),
+            "reproduction_command": entry.get("repro_command"),
+        },
     })
 
 artifact_paths = {
@@ -209,6 +282,7 @@ artifact_paths = {
     "check_log": str(artifact_dir / "check.log"),
     "summary_json": str(artifact_dir / "summary.json"),
     "policy_plan_json": str(policy_plan),
+    "policy_report_md": str(policy_report),
 }
 
 payload = {
@@ -230,11 +304,60 @@ payload = {
         {"capability": capability, "required": True, "source": "xfstests_policy"}
         for capability in sorted(capabilities)
     ],
+    "status_counts": dict(sorted(status_counts.items())),
+    "classification_counts": dict(sorted(classification_counts.items())),
+    "expected_outcome_counts": dict(sorted(outcome_counts.items())),
+    "operation_class_counts": dict(sorted(operation_counts.items())),
     "tests": tests,
     "validation_errors": errors,
 }
 
 policy_plan.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+report_lines = [
+    "# xfstests subset policy report",
+    "",
+    "This report is a planning artifact. It counts product failures, environment blockers, harness blockers, expected unsupported rows, and not-run rows separately from passes.",
+    "",
+    "## Counts",
+    "",
+]
+for label, counter in [
+    ("Status", status_counts),
+    ("Classification", classification_counts),
+    ("Expected outcome", outcome_counts),
+    ("Operation class", operation_counts),
+]:
+    report_lines.append(f"### {label}")
+    report_lines.append("")
+    for key, value in sorted(counter.items()):
+        report_lines.append(f"- {key}: {value}")
+    report_lines.append("")
+
+report_lines.extend([
+    "## Rows",
+    "",
+    "| Policy row | Test id | Flavor | Operation | Risk | Outcome | Decision | Capability requirement | Artifact/bead | Scope | Reproduction |",
+    "|---|---|---|---|---|---|---|---|---|---|---|",
+])
+for test in tests:
+    capability = ", ".join(test["required_capabilities"])
+    report_lines.append(
+        "| {policy_row_id} | {test_id} | {filesystem_flavor} | {operation} | {risk} | {outcome} | {decision} | {capability} | {artifact} | {scope} | `{repro}` |".format(
+            policy_row_id=test.get("policy_row_id") or "",
+            test_id=test["test_id"],
+            filesystem_flavor=test.get("filesystem_flavor") or "",
+            operation=test.get("expected_operation_class") or "",
+            risk=test.get("user_risk_category") or "",
+            outcome=test.get("expected_outcome") or "",
+            decision=test.get("selection_decision") or "",
+            capability=capability,
+            artifact=test.get("tracker_id") or "",
+            scope=test.get("v1_scope_mapping") or test.get("scope_reference") or "",
+            repro=test.get("repro_command") or "",
+        )
+    )
+report_lines.append("")
+policy_report.write_text("\n".join(report_lines), encoding="utf-8")
 if errors:
     for error in errors:
         print(error, file=sys.stderr)
@@ -627,6 +750,7 @@ e2e_log "Selected tests written to: $SELECTED_FILE"
 e2e_log "Selected test count: ${#SELECTED_TESTS[@]}"
 write_policy_plan
 e2e_log "Policy plan written to: $POLICY_PLAN_JSON"
+e2e_log "Policy report written to: $POLICY_REPORT_MD"
 
 resolve_xfstests_dir
 EFFECTIVE_MODE="$XFSTESTS_MODE"
