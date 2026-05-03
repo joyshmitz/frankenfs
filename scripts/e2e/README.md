@@ -244,21 +244,25 @@ The fail-closed artifact must include `operation_id`, `scenario_id`,
 `observed_state`, `error_class`, `artifact_paths`, `cleanup_status`,
 `reproduction_command`, and `follow_up_bead`.
 
-### Repair Writeback Route
+### Repair Writeback Route And Race Gate
 
 The route smoke proves the implementation surface behind the contract:
 `OpenFs::repair_writeback_blocks_via_mounted_mutation_path` stages recovered
 blocks in a mounted MVCC request scope, commits, flushes, and verifies durable
 bytes, while `ffs-repair` consumes an explicit recovered-block writeback
 authority and fails closed when that authority rejects a stale repair snapshot.
+The same smoke also records deterministic interleavings for repair-before-write,
+write-before-repair stale rejection, disjoint client/repair writes, cancellation
+before staging, stale-symbol refresh suppression, and flush/reopen visibility.
 
 ```bash
 ./scripts/e2e/ffs_repair_writeback_route_e2e.sh
 ```
 
 The generated artifact records operation and scenario IDs, expected and
-observed states, ledger event classes, visible data before/after repair,
-stdout/stderr log paths, cleanup status, and the reproduction command.
+observed states, interleaving schedule IDs, operation traces, ledger event
+classes, visible data before/after repair, stdout/stderr log paths, cleanup
+status, and the reproduction command.
 
 ### Permissioned FUSE Lane
 

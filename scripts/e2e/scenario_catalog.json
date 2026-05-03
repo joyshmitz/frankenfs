@@ -393,6 +393,42 @@
           "category": "happy",
           "status": "active",
           "evidence": "SCENARIO_RESULT|scenario_id=repair_writeback_route_artifact|outcome=PASS"
+        },
+        {
+          "id": "repair_race_repair_before_write",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_race_repair_before_write|outcome=PASS"
+        },
+        {
+          "id": "repair_race_write_before_repair_stale_rejected",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_race_write_before_repair_stale_rejected|outcome=PASS"
+        },
+        {
+          "id": "repair_race_disjoint_write_and_repair",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_race_disjoint_write_and_repair|outcome=PASS"
+        },
+        {
+          "id": "repair_race_cancelled_writeback_no_mutation",
+          "category": "error",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_race_cancelled_writeback_no_mutation|outcome=PASS"
+        },
+        {
+          "id": "repair_race_stale_refresh_suppressed",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_race_stale_refresh_suppressed|outcome=PASS"
+        },
+        {
+          "id": "repair_race_flush_reopen_boundary",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=repair_race_flush_reopen_boundary|outcome=PASS"
         }
       ]
     },

@@ -72,12 +72,15 @@ requested before the serializer exists. `flush` is not a durability boundary.
 
 Implementation hook: `OpenFs::repair_writeback_blocks_via_mounted_mutation_path`
 stages recovered physical blocks in a `RequestOp::RepairWriteback` MVCC request
-scope, commits through the same mutation authority as mounted writes, flushes
-the committed versions to the backing image, verifies durable bytes, and only
-then allows repair-symbol refresh consumers to proceed. `ffs-repair` also makes
-recovered-block writeback an explicit `RecoveryWriteback` authority; the
-default direct-device authority remains scoped to offline repair and client
-read-only mount repair.
+scope, first checks that mounted-visible bytes still match the
+repair-planning-time `expected_current` bytes, commits through the same mutation
+authority as mounted writes, flushes the committed versions to the backing
+image, verifies durable bytes, and only then allows repair-symbol refresh
+consumers to proceed. Stale repair snapshots fail closed before staging and do
+not trigger refresh lifecycle notifications. `ffs-repair` also makes
+recovered-block writeback an explicit `RecoveryWriteback` authority; the default
+direct-device authority remains scoped to offline repair and client read-only
+mount repair.
 
 ## Startup Banner
 

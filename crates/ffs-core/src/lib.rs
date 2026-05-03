@@ -604,6 +604,9 @@ pub struct ExternalJournalInfo {
 #[derive(Debug, Clone, Copy)]
 pub struct RepairWritebackBlock<'a> {
     pub block: BlockNumber,
+    /// Bytes observed at repair-planning time. If the mounted view no longer
+    /// matches these bytes, the repair writeback is stale and must fail closed.
+    pub expected_current: &'a [u8],
     pub data: &'a [u8],
 }
 
@@ -4150,6 +4153,113 @@ impl OpenFs {
         self.repair_flush_lifecycle.is_some()
     }
 
+    fn validate_repair_writeback_blocks(
+        &self,
+        recovered_blocks: &[RepairWritebackBlock<'_>],
+    ) -> ffs_error::Result<()> {
+        let expected_len = usize::try_from(self.block_size())
+            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
+        for recovered in recovered_blocks {
+            if recovered.expected_current.len() != expected_len {
+                return Err(FfsError::Format(format!(
+                    "repair writeback block {} expected-current size mismatch: got {} expected {expected_len}",
+                    recovered.block.0,
+                    recovered.expected_current.len()
+                )));
+            }
+            if recovered.data.len() != expected_len {
+                return Err(FfsError::Format(format!(
+                    "repair writeback block {} size mismatch: got {} expected {expected_len}",
+                    recovered.block.0,
+                    recovered.data.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_stale_repair_writeback_blocks(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        recovered_blocks: &[RepairWritebackBlock<'_>],
+    ) -> ffs_error::Result<()> {
+        for recovered in recovered_blocks {
+            cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+            let observed = self.read_block_with_scope(cx, scope, recovered.block)?;
+            if observed.as_slice() != recovered.expected_current {
+                return Err(FfsError::RepairFailed(format!(
+                    "stale repair writeback rejected at block {}: mounted bytes changed since repair planning",
+                    recovered.block.0
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn stage_repair_writeback_blocks(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+        recovered_blocks: &[RepairWritebackBlock<'_>],
+    ) -> ffs_error::Result<()> {
+        let block_dev = self.block_device_adapter();
+        for recovered in recovered_blocks {
+            cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+            Self::write_block_with_scope(cx, scope, &block_dev, recovered.block, recovered.data)?;
+        }
+        Ok(())
+    }
+
+    fn cleanup_repair_writeback_scope(&self, cx: &Cx, scope: RequestScope) {
+        let cleanup = self.end_request_scope(cx, RequestOp::RepairWriteback, scope);
+        if let Err(cleanup_err) = cleanup {
+            warn!(
+                target: "ffs::repair",
+                error = %cleanup_err,
+                "repair_writeback_scope_cleanup_failed"
+            );
+        }
+    }
+
+    fn commit_repair_writeback_scope(
+        &self,
+        cx: &Cx,
+        scope: &mut RequestScope,
+    ) -> ffs_error::Result<CommitSeq> {
+        let tx_id = scope.tx.as_ref().map(Transaction::id);
+        let write_blocks = scope
+            .tx
+            .as_ref()
+            .map_or_else(Vec::new, |tx| tx.write_set().keys().copied().collect());
+        let commit_seq = scope.commit_if_write(&self.mvcc_store)?;
+        if let Some(tx_id) = tx_id {
+            self.notify_repair_flush_lifecycle_with_cx(cx, tx_id, &write_blocks);
+        }
+        Ok(commit_seq)
+    }
+
+    fn flush_and_verify_repair_writeback_blocks(
+        &self,
+        cx: &Cx,
+        recovered_blocks: &[RepairWritebackBlock<'_>],
+    ) -> ffs_error::Result<usize> {
+        cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+        let flushed_blocks = self.flush_mvcc_to_device(cx)?;
+        let durable = self.direct_block_device_adapter();
+        for recovered in recovered_blocks {
+            cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+            let observed = durable.read_block(cx, recovered.block)?;
+            if observed.as_slice() != recovered.data {
+                return Err(FfsError::RepairFailed(format!(
+                    "mounted-path repair writeback verification failed at block {}",
+                    recovered.block.0
+                )));
+            }
+        }
+        Ok(flushed_blocks)
+    }
+
     /// Write recovered physical blocks through the mounted MVCC mutation path.
     ///
     /// This is the repair-side equivalent of a FUSE write request at the block
@@ -4162,6 +4272,8 @@ impl OpenFs {
         cx: &Cx,
         recovered_blocks: &[RepairWritebackBlock<'_>],
     ) -> ffs_error::Result<RepairWritebackCommit> {
+        cx.checkpoint().map_err(|_| FfsError::Cancelled)?;
+
         if recovered_blocks.is_empty() {
             return Ok(RepairWritebackCommit {
                 commit_seq: CommitSeq(0),
@@ -4170,81 +4282,30 @@ impl OpenFs {
             });
         }
 
-        let expected_len = usize::try_from(self.block_size())
-            .map_err(|_| FfsError::Format("block_size does not fit usize".to_owned()))?;
-        for recovered in recovered_blocks {
-            if recovered.data.len() != expected_len {
-                return Err(FfsError::Format(format!(
-                    "repair writeback block {} size mismatch: got {} expected {expected_len}",
-                    recovered.block.0,
-                    recovered.data.len()
-                )));
-            }
-        }
+        self.validate_repair_writeback_blocks(recovered_blocks)?;
 
         let mut scope = self.begin_request_scope(cx, RequestOp::RepairWriteback)?;
-        let block_dev = self.block_device_adapter();
-        let stage_result = (|| {
-            for recovered in recovered_blocks {
-                Self::write_block_with_scope(
-                    cx,
-                    &mut scope,
-                    &block_dev,
-                    recovered.block,
-                    recovered.data,
-                )?;
-            }
-            Ok(())
-        })();
-        if let Err(err) = stage_result {
-            let cleanup = self.end_request_scope(cx, RequestOp::RepairWriteback, scope);
-            if let Err(cleanup_err) = cleanup {
-                warn!(
-                    target: "ffs::repair",
-                    error = %cleanup_err,
-                    "repair_writeback_scope_cleanup_failed"
-                );
-            }
+        if let Err(err) = self.reject_stale_repair_writeback_blocks(cx, &scope, recovered_blocks) {
+            self.cleanup_repair_writeback_scope(cx, scope);
             return Err(err);
         }
 
-        let tx_id = scope.tx.as_ref().map(ffs_mvcc::Transaction::id);
-        let write_blocks = scope
-            .tx
-            .as_ref()
-            .map_or_else(Vec::new, |tx| tx.write_set().keys().copied().collect());
-        let commit_result = scope.commit_if_write(&self.mvcc_store);
-        let commit_seq = match commit_result {
+        if let Err(err) = self.stage_repair_writeback_blocks(cx, &mut scope, recovered_blocks) {
+            self.cleanup_repair_writeback_scope(cx, scope);
+            return Err(err);
+        }
+
+        let commit_seq = match self.commit_repair_writeback_scope(cx, &mut scope) {
             Ok(commit_seq) => commit_seq,
             Err(err) => {
-                let cleanup = self.end_request_scope(cx, RequestOp::RepairWriteback, scope);
-                if let Err(cleanup_err) = cleanup {
-                    warn!(
-                        target: "ffs::repair",
-                        error = %cleanup_err,
-                        "repair_writeback_scope_cleanup_failed"
-                    );
-                }
+                self.cleanup_repair_writeback_scope(cx, scope);
                 return Err(err);
             }
         };
-        if let Some(tx_id) = tx_id {
-            self.notify_repair_flush_lifecycle_with_cx(cx, tx_id, &write_blocks);
-        }
 
         self.end_request_scope(cx, RequestOp::RepairWriteback, scope)?;
 
-        let flushed_blocks = self.flush_mvcc_to_device(cx)?;
-        let durable = self.direct_block_device_adapter();
-        for recovered in recovered_blocks {
-            let observed = durable.read_block(cx, recovered.block)?;
-            if observed.as_slice() != recovered.data {
-                return Err(FfsError::RepairFailed(format!(
-                    "mounted-path repair writeback verification failed at block {}",
-                    recovered.block.0
-                )));
-            }
-        }
+        let flushed_blocks = self.flush_and_verify_repair_writeback_blocks(cx, recovered_blocks)?;
 
         Ok(RepairWritebackCommit {
             commit_seq,
@@ -34629,20 +34690,59 @@ mod tests {
         }
     }
 
+    fn filled_repair_block(fs: &OpenFs, byte: u8) -> Vec<u8> {
+        vec![byte; usize::try_from(fs.block_size()).expect("block size fits")]
+    }
+
+    fn durable_block_bytes(fs: &OpenFs, cx: &Cx, block: BlockNumber) -> Vec<u8> {
+        fs.direct_block_device_adapter()
+            .read_block(cx, block)
+            .expect("read durable block")
+            .as_slice()
+            .to_vec()
+    }
+
+    fn write_block_via_client_request(
+        fs: &OpenFs,
+        cx: &Cx,
+        block: BlockNumber,
+        data: &[u8],
+    ) -> CommitSeq {
+        let mut scope = fs
+            .begin_request_scope(cx, RequestOp::Write)
+            .expect("begin client write scope");
+        {
+            let block_dev = fs.block_device_adapter();
+            OpenFs::write_block_with_scope(cx, &mut scope, &block_dev, block, data)
+                .expect("stage client write");
+        }
+        let commit = fs
+            .commit_request_scope(&mut scope)
+            .expect("commit client write");
+        fs.end_request_scope(cx, RequestOp::Write, scope)
+            .expect("end client write scope");
+        fs.flush_mvcc_to_device(cx).expect("flush client write");
+        commit
+    }
+
+    const REPAIR_RACE_BLOCK: BlockNumber = BlockNumber(8);
+    const REPAIR_RACE_CLIENT_BLOCK: BlockNumber = BlockNumber(9);
+
     #[test]
     fn repair_writeback_uses_mounted_request_scope_and_flushes_to_device() {
         let image = build_ext4_image_with_state(EXT4_VALID_FS);
         let dev = TestDevice::from_vec(image);
-        let dev_view = dev.clone();
         let cx = Cx::for_testing();
         let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
         let lifecycle = Arc::new(RecordingRepairLifecycle::default());
         fs.attach_repair_flush_lifecycle(lifecycle.clone());
 
-        let block = BlockNumber(0);
-        let data = vec![0xA5; usize::try_from(fs.block_size()).expect("block size fits")];
+        let block = REPAIR_RACE_BLOCK;
+        let expected_current = durable_block_bytes(&fs, &cx, block);
+        let data = filled_repair_block(&fs, 0xA5);
         let entries = [RepairWritebackBlock {
             block,
+            expected_current: expected_current.as_slice(),
             data: data.as_slice(),
         }];
 
@@ -34653,12 +34753,7 @@ mod tests {
         assert!(commit.commit_seq.0 > 0);
         assert_eq!(commit.blocks_written, 1);
         assert!(commit.flushed_blocks >= 1);
-        let snapshot = dev_view.snapshot_bytes();
-        assert_eq!(
-            &snapshot[..data.len()],
-            data.as_slice(),
-            "durable device bytes should match recovered block"
-        );
+        assert_eq!(durable_block_bytes(&fs, &cx, block), data);
         assert_eq!(
             lifecycle
                 .blocks
@@ -34678,9 +34773,11 @@ mod tests {
         let dev_view = dev.clone();
         let cx = Cx::for_testing();
         let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+        let expected_current = durable_block_bytes(&fs, &cx, REPAIR_RACE_BLOCK);
         let data = [0xA5; 7];
         let entries = [RepairWritebackBlock {
-            block: BlockNumber(0),
+            block: REPAIR_RACE_BLOCK,
+            expected_current: expected_current.as_slice(),
             data: data.as_slice(),
         }];
 
@@ -34693,6 +34790,196 @@ mod tests {
             "expected format error, got: {err:?}"
         );
         assert_eq!(dev_view.snapshot_bytes(), image);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn repair_writeback_repair_before_client_write_preserves_later_client_commit() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = REPAIR_RACE_BLOCK;
+        let expected_current = durable_block_bytes(&fs, &cx, block);
+        let repair_data = filled_repair_block(&fs, 0xA5);
+        let client_data = filled_repair_block(&fs, 0x5A);
+        let entries = [RepairWritebackBlock {
+            block,
+            expected_current: expected_current.as_slice(),
+            data: repair_data.as_slice(),
+        }];
+
+        let repair_commit = fs
+            .repair_writeback_blocks_via_mounted_mutation_path(&cx, &entries)
+            .expect("repair writeback before client write");
+        let client_commit = write_block_via_client_request(&fs, &cx, block, &client_data);
+
+        assert!(
+            client_commit.0 > repair_commit.commit_seq.0,
+            "client write must commit after repair in this deterministic schedule"
+        );
+        assert_eq!(durable_block_bytes(&fs, &cx, block), client_data);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn repair_writeback_write_before_repair_rejects_stale_snapshot() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = REPAIR_RACE_BLOCK;
+        let stale_expected = durable_block_bytes(&fs, &cx, block);
+        let client_data = filled_repair_block(&fs, 0x5A);
+        write_block_via_client_request(&fs, &cx, block, &client_data);
+
+        let stale_repair_data = filled_repair_block(&fs, 0xA5);
+        let entries = [RepairWritebackBlock {
+            block,
+            expected_current: stale_expected.as_slice(),
+            data: stale_repair_data.as_slice(),
+        }];
+
+        let err = fs
+            .repair_writeback_blocks_via_mounted_mutation_path(&cx, &entries)
+            .expect_err("stale repair snapshot must fail closed");
+
+        assert!(
+            matches!(
+                err,
+                FfsError::RepairFailed(ref message)
+                    if message.contains("stale repair writeback rejected")
+            ),
+            "expected stale repair failure, got {err:?}"
+        );
+        assert_eq!(durable_block_bytes(&fs, &cx, block), client_data);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn repair_writeback_disjoint_client_write_and_repair_both_persist() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let repair_block = REPAIR_RACE_BLOCK;
+        let client_block = REPAIR_RACE_CLIENT_BLOCK;
+        let repair_expected = durable_block_bytes(&fs, &cx, repair_block);
+        let repair_data = filled_repair_block(&fs, 0xA5);
+        let client_data = filled_repair_block(&fs, 0x5A);
+
+        write_block_via_client_request(&fs, &cx, client_block, &client_data);
+        let entries = [RepairWritebackBlock {
+            block: repair_block,
+            expected_current: repair_expected.as_slice(),
+            data: repair_data.as_slice(),
+        }];
+        fs.repair_writeback_blocks_via_mounted_mutation_path(&cx, &entries)
+            .expect("disjoint repair writeback should commit");
+
+        assert_eq!(durable_block_bytes(&fs, &cx, repair_block), repair_data);
+        assert_eq!(durable_block_bytes(&fs, &cx, client_block), client_data);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn repair_writeback_cancellation_before_stage_leaves_device_unchanged() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image.clone());
+        let dev_view = dev.clone();
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = REPAIR_RACE_BLOCK;
+        let expected_current = durable_block_bytes(&fs, &cx, block);
+        let repair_data = filled_repair_block(&fs, 0xA5);
+        let entries = [RepairWritebackBlock {
+            block,
+            expected_current: expected_current.as_slice(),
+            data: repair_data.as_slice(),
+        }];
+        cx.set_cancel_requested(true);
+
+        let err = fs
+            .repair_writeback_blocks_via_mounted_mutation_path(&cx, &entries)
+            .expect_err("cancelled repair writeback must stop before mutation");
+
+        assert!(
+            matches!(err, FfsError::Cancelled),
+            "expected cancellation, got: {err:?}"
+        );
+        assert_eq!(dev_view.snapshot_bytes(), image);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn repair_writeback_stale_rejection_does_not_notify_refresh_lifecycle() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let cx = Cx::for_testing();
+        let mut fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = REPAIR_RACE_BLOCK;
+        let stale_expected = durable_block_bytes(&fs, &cx, block);
+        let client_data = filled_repair_block(&fs, 0x5A);
+        write_block_via_client_request(&fs, &cx, block, &client_data);
+
+        let lifecycle = Arc::new(RecordingRepairLifecycle::default());
+        fs.attach_repair_flush_lifecycle(lifecycle.clone());
+        let stale_repair_data = filled_repair_block(&fs, 0xA5);
+        let entries = [RepairWritebackBlock {
+            block,
+            expected_current: stale_expected.as_slice(),
+            data: stale_repair_data.as_slice(),
+        }];
+
+        fs.repair_writeback_blocks_via_mounted_mutation_path(&cx, &entries)
+            .expect_err("stale repair writeback must fail before refresh notification");
+
+        assert!(
+            lifecycle
+                .blocks
+                .lock()
+                .expect("repair lifecycle lock")
+                .is_empty(),
+            "stale repair writeback must not refresh repair symbols"
+        );
+        assert_eq!(durable_block_bytes(&fs, &cx, block), client_data);
+        assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
+    }
+
+    #[test]
+    fn repair_writeback_flush_survives_reopen_after_boundary() {
+        let image = build_ext4_image_with_state(EXT4_VALID_FS);
+        let dev = TestDevice::from_vec(image);
+        let dev_view = dev.clone();
+        let cx = Cx::for_testing();
+        let fs = OpenFs::from_device(&cx, Box::new(dev), &OpenOptions::default()).unwrap();
+
+        let block = REPAIR_RACE_BLOCK;
+        let expected_current = durable_block_bytes(&fs, &cx, block);
+        let repair_data = filled_repair_block(&fs, 0xA5);
+        let entries = [RepairWritebackBlock {
+            block,
+            expected_current: expected_current.as_slice(),
+            data: repair_data.as_slice(),
+        }];
+
+        let commit = fs
+            .repair_writeback_blocks_via_mounted_mutation_path(&cx, &entries)
+            .expect("repair writeback should flush durable bytes");
+        assert!(commit.flushed_blocks >= 1);
+
+        let reopened = OpenFs::from_device(
+            &cx,
+            Box::new(TestDevice::from_vec(dev_view.snapshot_bytes())),
+            &OpenOptions::default(),
+        )
+        .expect("reopen flushed image");
+        assert_eq!(durable_block_bytes(&reopened, &cx, block), repair_data);
         assert_eq!(fs.mvcc_store().read().active_snapshot_count(), 0);
     }
 
