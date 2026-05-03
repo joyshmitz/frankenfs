@@ -1,0 +1,7 @@
+    Finished `release-perf` profile [optimized] target(s) in 0.10s
+     Running benches/wal_throughput.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/wal_throughput-3ec44fff26e7599c)
+Gnuplot not found, using plotters backend
+Benchmarking mvcc_contention_4writers
+Benchmarking mvcc_contention_4writers: Warming up for 3.0000 s
+Benchmarking mvcc_contention_4writers: Collecting 100 samples in estimated 5.0103 s (1.1M iterations)
+Benchmarking mvcc_contention_4writers: Analyzing

@@ -1,0 +1,7 @@
+    Finished `release-perf` profile [optimized] target(s) in 0.10s
+     Running benches/scrub_codec.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/scrub_codec-ef0a8c85a60e37d8)
+Gnuplot not found, using plotters backend
+Benchmarking repair_symbol_refresh_staleness_latency
+Benchmarking repair_symbol_refresh_staleness_latency: Warming up for 3.0000 s
+Benchmarking repair_symbol_refresh_staleness_latency: Collecting 100 samples in estimated 5.0001 s (78M iterations)
+Benchmarking repair_symbol_refresh_staleness_latency: Analyzing

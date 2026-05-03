@@ -416,6 +416,10 @@ impl Taxonomy {
                     "read_metadata_scrub_ext4_reference",
                     "CLI scrub of ext4 8MB reference image",
                 ),
+                (
+                    "cli_metadata_parse_conformance",
+                    "Criterion metadata parse conformance fixture latency",
+                ),
             ],
             BenchmarkFamily::MetadataOps,
             "ffs-harness",
@@ -428,6 +432,10 @@ impl Taxonomy {
                 ("sequential_scan", "4-pass sequential scan"),
                 ("zipf_distribution", "Zipf(1.07) random access"),
                 ("mixed_seq70_hot30", "70% sequential + 30% hot set"),
+                (
+                    "concurrent_hot_read_64threads",
+                    "64-thread hot-cache read burst",
+                ),
                 ("compile_like", "Metadata hot blocks + file I/O mix"),
                 ("database_like", "B-tree simulation workload"),
             ] {
@@ -656,6 +664,10 @@ impl Taxonomy {
                     "raptorq_decode_group_16blocks",
                     "RaptorQ decode a 16-block repair group",
                 ),
+                (
+                    "repair_symbol_refresh_staleness_latency",
+                    "Refresh policy staleness decision latency",
+                ),
             ],
             BenchmarkFamily::Repair,
             "ffs-repair",
@@ -834,20 +846,34 @@ mod tests {
             "fixture_validation",
             "read_metadata_inspect_ext4_reference",
             "read_metadata_scrub_ext4_reference",
+            "cli_metadata_parse_conformance",
             "block_cache_arc_sequential_scan",
             "block_cache_arc_zipf_distribution",
             "block_cache_arc_mixed_seq70_hot30",
+            "block_cache_arc_concurrent_hot_read_64threads",
             "block_cache_arc_compile_like",
             "block_cache_arc_database_like",
             "block_cache_s3fifo_sequential_scan",
             "block_cache_s3fifo_zipf_distribution",
             "block_cache_s3fifo_mixed_seq70_hot30",
+            "block_cache_s3fifo_concurrent_hot_read_64threads",
             "block_cache_s3fifo_compile_like",
             "block_cache_s3fifo_database_like",
             "write_seq_4k",
             "write_random_4k",
             "fsync_single_write",
             "fsync_batch_100",
+            "wal_commit_4k_sync",
+            "wal_write_amplification_1block",
+            "wal_write_amplification_16block",
+            "mvcc_contention_2writers",
+            "mvcc_contention_4writers",
+            "mvcc_contention_8writers",
+            "scrub_clean_256blocks",
+            "scrub_corrupted_256blocks",
+            "raptorq_encode_group_16blocks",
+            "raptorq_decode_group_16blocks",
+            "repair_symbol_refresh_staleness_latency",
             "mount_cold",
             "mount_warm",
             "mount_recovery",
@@ -881,16 +907,30 @@ mod tests {
             "fixture_validation",
             "read_metadata_inspect_ext4_reference",
             "read_metadata_scrub_ext4_reference",
+            "cli_metadata_parse_conformance",
             "block_cache_arc_sequential_scan",
             "block_cache_arc_zipf_distribution",
             "block_cache_arc_mixed_seq70_hot30",
+            "block_cache_arc_concurrent_hot_read_64threads",
             "block_cache_arc_compile_like",
             "block_cache_arc_database_like",
             "block_cache_s3fifo_sequential_scan",
             "block_cache_s3fifo_zipf_distribution",
             "block_cache_s3fifo_mixed_seq70_hot30",
+            "block_cache_s3fifo_concurrent_hot_read_64threads",
             "block_cache_s3fifo_compile_like",
             "block_cache_s3fifo_database_like",
+            "wal_commit_4k_sync",
+            "wal_write_amplification_1block",
+            "wal_write_amplification_16block",
+            "mvcc_contention_2writers",
+            "mvcc_contention_4writers",
+            "mvcc_contention_8writers",
+            "scrub_clean_256blocks",
+            "scrub_corrupted_256blocks",
+            "raptorq_encode_group_16blocks",
+            "raptorq_decode_group_16blocks",
+            "repair_symbol_refresh_staleness_latency",
             "extent_resolve_depth0_cached",
             "extent_resolve_depth1_uncached",
             "extent_resolve_range_50blocks",
@@ -1058,6 +1098,10 @@ mod tests {
         let taxonomy = Taxonomy::canonical();
         // bd-h6nz.5.2: write amplification, contention, repair operations
         let expanded_ops = [
+            "cli_metadata_parse_conformance",
+            "block_cache_arc_concurrent_hot_read_64threads",
+            "block_cache_s3fifo_concurrent_hot_read_64threads",
+            "wal_commit_4k_sync",
             "wal_write_amplification_1block",
             "wal_write_amplification_16block",
             "mvcc_contention_2writers",
@@ -1067,6 +1111,7 @@ mod tests {
             "scrub_corrupted_256blocks",
             "raptorq_encode_group_16blocks",
             "raptorq_decode_group_16blocks",
+            "repair_symbol_refresh_staleness_latency",
         ];
         for op in &expanded_ops {
             assert!(
@@ -1089,9 +1134,10 @@ mod tests {
             "mount_runtime_metrics_record_throughput",
         ];
         for op in &mount_runtime_ops {
-            let entry = taxonomy.operations.get(*op).unwrap_or_else(|| {
-                panic!("missing mount runtime op: {op}");
-            });
+            let entry = taxonomy
+                .operations
+                .get(*op)
+                .expect("mount runtime op registered");
             assert_eq!(entry.family, BenchmarkFamily::Mount);
             assert_eq!(entry.owning_crate, "ffs-fuse");
         }
@@ -1103,9 +1149,10 @@ mod tests {
             "mount_runtime_backpressure_emergency",
         ];
         for op in &backpressure_ops {
-            let entry = taxonomy.operations.get(*op).unwrap_or_else(|| {
-                panic!("missing backpressure op: {op}");
-            });
+            let entry = taxonomy
+                .operations
+                .get(*op)
+                .expect("backpressure op registered");
             assert_eq!(entry.family, BenchmarkFamily::DegradedMode);
             assert_eq!(entry.owning_crate, "ffs-fuse");
         }
@@ -1171,9 +1218,10 @@ mod tests {
             "degraded_backpressure_contention_4threads",
         ];
         for op in &degraded_throughput_ops {
-            let entry = taxonomy.operations.get(*op).unwrap_or_else(|| {
-                panic!("missing degraded throughput op: {op}");
-            });
+            let entry = taxonomy
+                .operations
+                .get(*op)
+                .expect("degraded throughput op registered");
             assert_eq!(
                 entry.family,
                 BenchmarkFamily::DegradedMode,

@@ -1,0 +1,6 @@
+raptorq_encode_group_16blocks
+                        time:   [279.04 µs 282.42 µs 285.96 µs]
+                        change: [−1.6676% +0.3714% +2.4196%] (p = 0.72 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild

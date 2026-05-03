@@ -1,0 +1,27 @@
+benchmark_mode: criterion_once
+command: cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync
+started_at_utc: 2026-05-03T19:51:24Z
+finished_at_utc: 2026-05-03T19:51:38Z
+wall_time_seconds: 14.216565248
+measurement_source: criterion_estimate
+criterion_estimate_source: baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.stdout
+criterion_estimate_seconds: [0.009493900000, 0.009763100000, 0.010075000000]
+exit_status: 0
+
+## stdout
+wal_commit_4k_sync      time:   [9.4939 ms 9.7631 ms 10.075 ms]
+                        change: [+7.2957% +10.756% +15.086%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 12 outliers among 100 measurements (12.00%)
+  4 (4.00%) high mild
+  8 (8.00%) high severe
+
+
+## stderr
+    Finished `release-perf` profile [optimized] target(s) in 0.09s
+     Running benches/wal_throughput.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/wal_throughput-3ec44fff26e7599c)
+Gnuplot not found, using plotters backend
+Benchmarking wal_commit_4k_sync
+Benchmarking wal_commit_4k_sync: Warming up for 3.0000 s
+Benchmarking wal_commit_4k_sync: Collecting 100 samples in estimated 5.8312 s (600 iterations)
+Benchmarking wal_commit_4k_sync: Analyzing

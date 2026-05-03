@@ -12,6 +12,13 @@ expression: json
       "owning_crate": "ffs-block",
       "description": "arc policy: Metadata hot blocks + file I/O mix"
     },
+    "block_cache_arc_concurrent_hot_read_64threads": {
+      "operation_id": "block_cache_arc_concurrent_hot_read_64threads",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "arc policy: 64-thread hot-cache read burst"
+    },
     "block_cache_arc_database_like": {
       "operation_id": "block_cache_arc_database_like",
       "family": "block_cache",
@@ -47,6 +54,13 @@ expression: json
       "owning_crate": "ffs-block",
       "description": "s3fifo policy: Metadata hot blocks + file I/O mix"
     },
+    "block_cache_s3fifo_concurrent_hot_read_64threads": {
+      "operation_id": "block_cache_s3fifo_concurrent_hot_read_64threads",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "s3fifo policy: 64-thread hot-cache read burst"
+    },
     "block_cache_s3fifo_database_like": {
       "operation_id": "block_cache_s3fifo_database_like",
       "family": "block_cache",
@@ -74,6 +88,13 @@ expression: json
       "metric": "latency",
       "owning_crate": "ffs-block",
       "description": "s3fifo policy: Zipf(1.07) random access"
+    },
+    "cli_metadata_parse_conformance": {
+      "operation_id": "cli_metadata_parse_conformance",
+      "family": "metadata_ops",
+      "metric": "latency",
+      "owning_crate": "ffs-harness",
+      "description": "Criterion metadata parse conformance fixture latency"
     },
     "degraded_backpressure_contention_4threads": {
       "operation_id": "degraded_backpressure_contention_4threads",
@@ -333,6 +354,13 @@ expression: json
       "metric": "latency",
       "owning_crate": "ffs-harness",
       "description": "CLI scrub of ext4 8MB reference image"
+    },
+    "repair_symbol_refresh_staleness_latency": {
+      "operation_id": "repair_symbol_refresh_staleness_latency",
+      "family": "repair",
+      "metric": "latency",
+      "owning_crate": "ffs-repair",
+      "description": "Refresh policy staleness decision latency"
     },
     "scrub_clean_256blocks": {
       "operation_id": "scrub_clean_256blocks",

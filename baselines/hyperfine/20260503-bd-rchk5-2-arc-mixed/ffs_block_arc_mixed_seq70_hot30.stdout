@@ -1,0 +1,6 @@
+block_cache_arc_mixed_seq70_hot30
+                        time:   [14.205 ms 14.650 ms 15.129 ms]
+                        change: [+3.2554% +7.9357% +12.355%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild

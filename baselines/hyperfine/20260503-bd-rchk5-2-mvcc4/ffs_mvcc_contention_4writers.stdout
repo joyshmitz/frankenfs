@@ -1,0 +1,6 @@
+mvcc_contention_4writers
+                        time:   [7.5685 µs 7.8645 µs 8.2337 µs]
+                        change: [−13.064% −0.7449% +13.373%] (p = 0.92 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild

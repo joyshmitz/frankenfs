@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan",
+      "mean": 0.014151000000,
+      "stddev": 0.000238010204,
+      "median": 0.014151000000,
+      "min": 0.013685000000,
+      "max": 0.014618000000,
+      "times": [
+        0.013685000000,
+        0.014151000000,
+        0.014618000000
+      ],
+      "exit_codes": [
+        0
+      ]
+    }
+  ],
+  "benchmark_mode": "criterion_once",
+  "measurement_source": "criterion_estimate",
+  "criterion_estimate_source": "baselines/hyperfine/20260503-bd-rchk5-2-arc-seq/ffs_block_arc_sequential_scan.stdout",
+  "wall_time_seconds": 9.512420352,
+  "command_stdout": "baselines/hyperfine/20260503-bd-rchk5-2-arc-seq/ffs_block_arc_sequential_scan.stdout",
+  "command_stderr": "baselines/hyperfine/20260503-bd-rchk5-2-arc-seq/ffs_block_arc_sequential_scan.stderr",
+  "text_report": "baselines/hyperfine/20260503-bd-rchk5-2-arc-seq/ffs_block_arc_sequential_scan.txt",
+  "started_at": "2026-05-03T19:50:53Z",
+  "finished_at": "2026-05-03T19:51:03Z"
+}

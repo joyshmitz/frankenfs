@@ -1,0 +1,4 @@
+block_cache_arc_sequential_scan
+                        time:   [13.685 ms 14.151 ms 14.618 ms]
+                        change: [+14.657% +19.669% +24.816%] (p = 0.00 < 0.05)
+                        Performance has regressed.

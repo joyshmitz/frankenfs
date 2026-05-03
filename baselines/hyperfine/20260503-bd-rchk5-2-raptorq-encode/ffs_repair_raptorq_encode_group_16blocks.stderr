@@ -1,0 +1,7 @@
+    Finished `release-perf` profile [optimized] target(s) in 0.19s
+     Running benches/scrub_codec.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/scrub_codec-ef0a8c85a60e37d8)
+Gnuplot not found, using plotters backend
+Benchmarking raptorq_encode_group_16blocks
+Benchmarking raptorq_encode_group_16blocks: Warming up for 3.0000 s
+Benchmarking raptorq_encode_group_16blocks: Collecting 100 samples in estimated 5.8210 s (20k iterations)
+Benchmarking raptorq_encode_group_16blocks: Analyzing

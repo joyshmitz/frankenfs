@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync",
+      "mean": 0.009763100000,
+      "stddev": 0.000148239796,
+      "median": 0.009763100000,
+      "min": 0.009493900000,
+      "max": 0.010075000000,
+      "times": [
+        0.009493900000,
+        0.009763100000,
+        0.010075000000
+      ],
+      "exit_codes": [
+        0
+      ]
+    }
+  ],
+  "benchmark_mode": "criterion_once",
+  "measurement_source": "criterion_estimate",
+  "criterion_estimate_source": "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.stdout",
+  "wall_time_seconds": 14.216565248,
+  "command_stdout": "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.stdout",
+  "command_stderr": "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.stderr",
+  "text_report": "baselines/hyperfine/20260503-bd-rchk5-2-wal-commit/ffs_mvcc_wal_commit_4k_sync.txt",
+  "started_at": "2026-05-03T19:51:24Z",
+  "finished_at": "2026-05-03T19:51:38Z"
+}

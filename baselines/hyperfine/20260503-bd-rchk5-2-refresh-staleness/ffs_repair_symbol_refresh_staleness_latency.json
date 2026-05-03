@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency",
+      "mean": 6.5756E-8,
+      "stddev": 4.18E-10,
+      "median": 6.5756E-8,
+      "min": 6.4962E-8,
+      "max": 6.6601E-8,
+      "times": [
+        6.4962E-8,
+        6.5756E-8,
+        6.6601E-8
+      ],
+      "exit_codes": [
+        0
+      ]
+    }
+  ],
+  "benchmark_mode": "criterion_once",
+  "measurement_source": "criterion_estimate",
+  "criterion_estimate_source": "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.stdout",
+  "wall_time_seconds": 9.819986944,
+  "command_stdout": "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.stdout",
+  "command_stderr": "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.stderr",
+  "text_report": "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.txt",
+  "started_at": "2026-05-03T19:52:07Z",
+  "finished_at": "2026-05-03T19:52:17Z"
+}

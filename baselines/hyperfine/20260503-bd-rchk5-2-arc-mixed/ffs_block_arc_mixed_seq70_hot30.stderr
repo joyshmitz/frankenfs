@@ -1,0 +1,7 @@
+    Finished `release-perf` profile [optimized] target(s) in 0.09s
+     Running benches/arc_cache.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/arc_cache-f629bc5460280303)
+Gnuplot not found, using plotters backend
+Benchmarking block_cache_arc_mixed_seq70_hot30
+Benchmarking block_cache_arc_mixed_seq70_hot30: Warming up for 3.0000 s
+Benchmarking block_cache_arc_mixed_seq70_hot30: Collecting 100 samples in estimated 6.0342 s (400 iterations)
+Benchmarking block_cache_arc_mixed_seq70_hot30: Analyzing

@@ -13,6 +13,9 @@ use std::fs::{self, File};
 use std::hint::black_box;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc as StdArc, Barrier};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const BLOCK_SIZE_4K: u32 = 4096;
 const WORKLOAD_REPORT_ENV: &str = "FFS_BLOCK_CACHE_WORKLOAD_REPORT";
@@ -443,6 +446,57 @@ fn bench_cache_workload(c: &mut Criterion, case: &WorkloadCase) {
     });
 }
 
+fn bench_concurrent_hot_read_64threads(c: &mut Criterion) {
+    const THREADS: usize = 64;
+    const OPS_PER_THREAD: usize = 2_048;
+    const HOT_BLOCKS: usize = 256;
+    const BLOCK_COUNT: usize = 4_096;
+    const CAPACITY: usize = 512;
+
+    let cx = Cx::for_testing();
+    let cache = StdArc::new(make_cache(BLOCK_SIZE_4K, BLOCK_COUNT, CAPACITY));
+    for block in 0..HOT_BLOCKS {
+        let block = BlockNumber(block as u64);
+        let buf = cache.read_block(&cx, block).expect("warm hot block");
+        black_box(buf.as_slice()[0]);
+    }
+
+    let bench_label = format!(
+        "block_cache_{}_concurrent_hot_read_64threads",
+        policy_label()
+    );
+    c.bench_function(&bench_label, |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for iter in 0..iters {
+                let barrier = StdArc::new(Barrier::new(THREADS));
+                let started = Instant::now();
+                thread::scope(|scope| {
+                    for thread_id in 0..THREADS {
+                        let cache = StdArc::clone(&cache);
+                        let barrier = StdArc::clone(&barrier);
+                        scope.spawn(move || {
+                            let cx = Cx::for_testing();
+                            barrier.wait();
+                            for op in 0..OPS_PER_THREAD {
+                                let mixed = op
+                                    .wrapping_mul(37)
+                                    .wrapping_add(thread_id.wrapping_mul(13))
+                                    .wrapping_add(iter as usize);
+                                let block = BlockNumber((mixed % HOT_BLOCKS) as u64);
+                                let buf = cache.read_block(&cx, block).expect("hot read");
+                                black_box(buf.as_slice()[0]);
+                            }
+                        });
+                    }
+                });
+                elapsed += started.elapsed();
+            }
+            elapsed
+        });
+    });
+}
+
 // ── Benchmarks ──────────────────────────────────────────────────────────
 
 fn bench_cache_hit(c: &mut Criterion) {
@@ -621,6 +675,7 @@ criterion_group!(
     bench_workload_mixed_seq_hot,
     bench_workload_compile_like,
     bench_workload_database_like,
+    bench_concurrent_hot_read_64threads,
 );
 
 fn main() {

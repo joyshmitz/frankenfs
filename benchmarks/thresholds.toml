@@ -56,6 +56,13 @@ warn_percent = 12
 fail_percent = 25
 noise_floor_percent = 5
 
+[operation_thresholds.cli_metadata_parse_conformance]
+# taxonomy_id: cli_metadata_parse_conformance
+# family: metadata_ops
+warn_percent = 10
+fail_percent = 20
+noise_floor_percent = 5
+
 # ── Block Cache family (ARC policy) ─────────────────────────────────────
 # Memory-allocation-heavy; sensitive to allocator behavior and NUMA topology.
 # Family defaults: warn=12%, fail=25%, noise=5%.
@@ -74,6 +81,12 @@ noise_floor_percent = 5
 warn_percent = 12
 fail_percent = 25
 noise_floor_percent = 5
+
+[operation_thresholds.block_cache_arc_concurrent_hot_read_64threads]
+# 64-thread hot-cache bursts are scheduler- and NUMA-sensitive.
+warn_percent = 20
+fail_percent = 40
+noise_floor_percent = 10
 
 [operation_thresholds.block_cache_arc_compile_like]
 warn_percent = 12
@@ -101,6 +114,12 @@ noise_floor_percent = 5
 warn_percent = 12
 fail_percent = 25
 noise_floor_percent = 5
+
+[operation_thresholds.block_cache_s3fifo_concurrent_hot_read_64threads]
+# 64-thread hot-cache bursts are scheduler- and NUMA-sensitive.
+warn_percent = 20
+fail_percent = 40
+noise_floor_percent = 10
 
 [operation_thresholds.block_cache_s3fifo_compile_like]
 warn_percent = 12
@@ -161,6 +180,13 @@ noise_floor_percent = 10
 # ── Concurrency family (expanded) ──────────────────────────────────────
 # Write amplification and multi-writer contention benchmarks.
 # Thread-scheduling-sensitive; wide thresholds justified.
+
+[operation_thresholds.wal_commit_4k_sync]
+# taxonomy_id: wal_commit_4k_sync
+# family: concurrency
+warn_percent = 15
+fail_percent = 30
+noise_floor_percent = 5
 
 [operation_thresholds.wal_write_amplification_1block]
 # taxonomy_id: wal_write_amplification_1block
@@ -229,6 +255,13 @@ noise_floor_percent = 5
 
 [operation_thresholds.raptorq_decode_group_16blocks]
 # taxonomy_id: raptorq_decode_group_16blocks
+# family: repair
+warn_percent = 12
+fail_percent = 25
+noise_floor_percent = 5
+
+[operation_thresholds.repair_symbol_refresh_staleness_latency]
+# taxonomy_id: repair_symbol_refresh_staleness_latency
 # family: repair
 warn_percent = 12
 fail_percent = 25

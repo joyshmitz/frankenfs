@@ -453,15 +453,14 @@ scrub_probe_is_acceptable() {
     # `ffs-cli scrub --json` returns exit 2 when integrity findings are present.
     # Treat that as benchmarkable if structured scrub JSON was emitted.
     if [ "$exit_code" -eq 2 ]; then
-        local scrub_json_tmp
-        scrub_json_tmp="$(mktemp)"
-        sed -n '/^[[:space:]]*{/,${p;}' "$stdout_file" \
-            | sed '/^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T/,$d' > "$scrub_json_tmp"
-        if [ -s "$scrub_json_tmp" ] && jq -e 'has("blocks_scanned") and has("findings")' "$scrub_json_tmp" >/dev/null 2>&1; then
-            rm -f "$scrub_json_tmp"
+        local scrub_json
+        scrub_json="$(
+            sed -n '/^[[:space:]]*{/,${p;}' "$stdout_file" \
+                | sed '/^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T/,$d'
+        )"
+        if [ -n "$scrub_json" ] && jq -e 'has("blocks_scanned") and has("findings")' >/dev/null 2>&1 <<<"$scrub_json"; then
             return 0
         fi
-        rm -f "$scrub_json_tmp"
     fi
     return 1
 }
@@ -747,6 +746,12 @@ else
 fi
 fi
 
+add_bench "ffs-harness metadata parse (criterion)" \
+    "$(cargo_bench_cmd "-p ffs-harness --bench metadata_parse -- metadata_parse")" \
+    "ffs_harness_metadata_parse.json" \
+    "cli_metadata_parse_conformance" \
+    "0"
+
 add_bench "ffs-block arc sequential scan (criterion)" \
     "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan")" \
     "ffs_block_arc_sequential_scan.json" \
@@ -764,6 +769,12 @@ add_bench "ffs-block arc mixed seq70 hot30 (criterion)" \
     "ffs_block_arc_mixed_seq70_hot30.json" \
     "block_cache_arc_mixed_seq70_hot30" \
     "0"
+
+add_bench "ffs-block arc concurrent hot read 64 threads (criterion)" \
+    "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_concurrent_hot_read_64threads")" \
+    "ffs_block_arc_concurrent_hot_read_64threads.json" \
+    "block_cache_arc_concurrent_hot_read_64threads" \
+    "512"
 
 add_bench "ffs-block arc compile-like (criterion)" \
     "$(cargo_bench_cmd "-p ffs-block --bench arc_cache -- block_cache_arc_compile_like")" \
@@ -794,6 +805,12 @@ add_bench "ffs-block s3fifo mixed seq70 hot30 (criterion)" \
     "ffs_block_s3fifo_mixed_seq70_hot30.json" \
     "block_cache_s3fifo_mixed_seq70_hot30" \
     "0"
+
+add_bench "ffs-block s3fifo concurrent hot read 64 threads (criterion)" \
+    "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_concurrent_hot_read_64threads")" \
+    "ffs_block_s3fifo_concurrent_hot_read_64threads.json" \
+    "block_cache_s3fifo_concurrent_hot_read_64threads" \
+    "512"
 
 add_bench "ffs-block s3fifo compile-like (criterion)" \
     "$(cargo_bench_cmd "-p ffs-block --features s3fifo --bench arc_cache -- block_cache_s3fifo_compile_like")" \
@@ -832,6 +849,12 @@ add_bench "ffs-block writeback fsync batch 100x4k (criterion)" \
     "0.390625"
 
 # ── WAL / MVCC expanded (criterion, ffs-mvcc) ─────────────────────────
+
+add_bench "ffs-mvcc WAL commit 4k sync (criterion)" \
+    "$(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- wal_commit_4k_sync")" \
+    "ffs_mvcc_wal_commit_4k_sync.json" \
+    "wal_commit_4k_sync" \
+    "0.00390625"
 
 add_bench "ffs-mvcc WAL write amplification 1-block (criterion)" \
     "$(cargo_bench_cmd "-p ffs-mvcc --bench wal_throughput -- wal_write_amplification_1block")" \
@@ -887,6 +910,12 @@ add_bench "ffs-repair raptorq decode 16-block group (criterion)" \
     "$(cargo_bench_cmd "-p ffs-repair --bench scrub_codec -- raptorq_decode_group_16blocks")" \
     "ffs_repair_raptorq_decode_group_16blocks.json" \
     "raptorq_decode_group_16blocks" \
+    "0"
+
+add_bench "ffs-repair symbol refresh staleness latency (criterion)" \
+    "$(cargo_bench_cmd "-p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency")" \
+    "ffs_repair_symbol_refresh_staleness_latency.json" \
+    "repair_symbol_refresh_staleness_latency" \
     "0"
 
 if [ "$COMMAND_BENCHMARKS_NEEDED" -eq 1 ]; then
@@ -1125,7 +1154,7 @@ scale_criterion_time_seconds() {
 criterion_time_estimates() {
     local output_file="$1"
     local line
-    line="$(grep -E '^[[:space:]]*time:[[:space:]]+\[' "$output_file" | tail -n 1 || true)"
+    line="$(grep -E '(^|[[:space:]])time:[[:space:]]+\[' "$output_file" | tail -n 1 || true)"
     [ -n "$line" ] || return 1
 
     local low
@@ -1189,7 +1218,9 @@ run_criterion_once_benchmark() {
     started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     start_ns="$(date +%s%N)"
     exit_status=0
-    bash -lc "$cmd" >"$stdout_file" 2>"$stderr_file" || exit_status=$?
+    : >"$stdout_file"
+    : >"$stderr_file"
+    bash -lc "$cmd" >>"$stdout_file" 2>>"$stderr_file" || exit_status=$?
     end_ns="$(date +%s%N)"
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     duration_s="$(awk -v start="$start_ns" -v end="$end_ns" 'BEGIN { printf "%.9f", (end - start) / 1000000000.0 }')"
@@ -1226,10 +1257,14 @@ run_criterion_once_benchmark() {
         echo "exit_status: ${exit_status}"
         echo ""
         echo "## stdout"
-        cat "$stdout_file"
+        if [ -f "$stdout_file" ]; then
+            cat "$stdout_file"
+        fi
         echo ""
         echo "## stderr"
-        cat "$stderr_file"
+        if [ -f "$stderr_file" ]; then
+            cat "$stderr_file"
+        fi
     } > "$txt_file"
 
     jq -n \
@@ -1339,8 +1374,8 @@ build_pending_json() {
 }
 
 write_perf_baseline_json() {
-    local tmp_measurements
-    tmp_measurements="$(mktemp)"
+    local measured_json
+    measured_json='[]'
     for i in "${!BENCH_LABELS[@]}"; do
         local json_file="${OUT_DIR}/${BENCH_FILES[$i]}"
         local mean_s
@@ -1353,6 +1388,7 @@ write_perf_baseline_json() {
         local throughput_ops_sec
         local throughput_mb_sec
         local benchmark_mode
+        local measurement_json
         mean_s="$(json_mean "$json_file")"
         p50_s="$(json_p50 "$json_file")"
         p95_s="$(json_p95 "$json_file")"
@@ -1364,7 +1400,7 @@ write_perf_baseline_json() {
         throughput_mb_sec="$(mb_per_sec "${BENCH_PAYLOAD_MB[$i]}" "$mean_s")"
         benchmark_mode="${BENCH_RUNNERS[$i]}"
 
-        jq -n \
+        measurement_json="$(jq -n \
             --arg operation "${BENCH_OPERATIONS[$i]}" \
             --arg metric "latency" \
             --arg command "${BENCH_COMMANDS[$i]}" \
@@ -1387,13 +1423,12 @@ write_perf_baseline_json() {
                 throughput_ops_sec: $throughput_ops_sec,
                 throughput_mb_sec: $throughput_mb_sec,
                 status: "measured"
-            }' >> "$tmp_measurements"
+            }')"
+        measured_json="$(jq -n --argjson prior "$measured_json" --argjson next "$measurement_json" '$prior + [$next]')"
     done
 
-    local measured_json
     local measurements_json
     local pending_json
-    measured_json="$(jq -s '.' "$tmp_measurements")"
     pending_json="$(build_pending_json)"
     measurements_json="$(jq -n --argjson measured "$measured_json" --argjson pending "$pending_json" '$measured + $pending')"
 
@@ -1403,11 +1438,15 @@ write_perf_baseline_json() {
         --arg commit "$git_sha" \
         --arg branch "$git_branch" \
         --arg thresholds_file "$THRESHOLDS_PATH" \
+        --arg hostname "$host_name" \
         --arg cpu_model "$cpu_model" \
         --arg kernel "$kernel_ver" \
+        --arg cargo_target_dir "$cargo_target_dir" \
         --arg rustc "$rustc_ver" \
         --arg cargo "$cargo_ver" \
         --arg hyperfine "$hyperfine_ver" \
+        --argjson memory_total_kib "$memory_total_kib" \
+        --argjson memory_total_gib "$memory_total_gib" \
         --argjson warmup_runs "$WARMUP" \
         --argjson measured_runs "$RUNS" \
         --argjson p99_warn_threshold_percent "$P99_WARN_THRESHOLD" \
@@ -1423,8 +1462,12 @@ write_perf_baseline_json() {
             commit: $commit,
             branch: $branch,
             environment: {
+                hostname: $hostname,
                 cpu_model: $cpu_model,
                 kernel: $kernel,
+                memory_total_kib: $memory_total_kib,
+                memory_total_gib: $memory_total_gib,
+                cargo_target_dir: $cargo_target_dir,
                 rustc: $rustc,
                 cargo: $cargo,
                 hyperfine: $hyperfine
@@ -1451,13 +1494,25 @@ write_perf_baseline_json() {
         WROTE_BENCHMARK_BASELINE_LATEST=0
     fi
     cp "$PERF_BASELINE_PATH" "$BENCHMARK_BASELINE_HISTORY_PATH"
-    rm -f "$tmp_measurements"
 }
 
 cpu_model="$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
 if [ -z "${cpu_model}" ]; then
     cpu_model="unknown"
 fi
+
+host_name="$(hostname 2>/dev/null || true)"
+if [ -z "${host_name}" ]; then
+    host_name="unknown"
+fi
+
+memory_total_kib="$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+if ! valid_number "${memory_total_kib:-}"; then
+    memory_total_kib=0
+fi
+memory_total_gib="$(awk -v kib="$memory_total_kib" 'BEGIN { printf "%.3f", kib / 1048576.0 }')"
+
+cargo_target_dir="${CARGO_TARGET_DIR:-target}"
 
 git_sha="$(git rev-parse HEAD)"
 git_branch="$(git branch --show-current)"
@@ -1475,13 +1530,16 @@ date_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "- Date (UTC): \`${date_iso}\`"
     echo "- Commit: \`${git_sha}\`"
     echo "- Branch: \`${git_branch}\`"
+    echo "- Hostname: \`${host_name}\`"
     echo "- Host kernel: \`${kernel_ver}\`"
     echo "- CPU: \`${cpu_model}\`"
+    echo "- Memory: \`${memory_total_gib} GiB (${memory_total_kib} KiB)\`"
     echo "- rustc: \`${rustc_ver}\`"
     echo "- cargo: \`${cargo_ver}\`"
     echo "- hyperfine: \`${hyperfine_ver}\`"
     echo "- Cargo profile: \`${BENCH_PROFILE}\`"
     echo "- Cargo executor: \`$(cargo_cmd_prefix)\`"
+    echo "- Cargo target dir: \`${cargo_target_dir}\`"
     echo "- Benchmark runners: \`hyperfine\` for command probes, \`criterion_once\` for \`cargo bench\` workloads"
     if [ -n "$OP_FILTER" ]; then
         echo "- Operation filter: \`${OP_FILTER}\`"

@@ -29,6 +29,16 @@ fn bench_metadata_parse(c: &mut Criterion) {
                 .expect("btrfs parse in bench")
         });
     });
+
+    c.bench_function("metadata_parse", |b| {
+        b.iter(|| {
+            let ext4_superblock = Ext4Superblock::parse_superblock_region(black_box(&ext4))
+                .expect("ext4 parse in bench");
+            let btrfs_superblock = BtrfsSuperblock::parse_superblock_region(black_box(&btrfs))
+                .expect("btrfs parse in bench");
+            black_box((ext4_superblock, btrfs_superblock));
+        });
+    });
 }
 
 criterion_group!(metadata, bench_metadata_parse);

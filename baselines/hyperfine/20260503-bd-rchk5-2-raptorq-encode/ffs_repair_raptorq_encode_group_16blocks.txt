@@ -1,0 +1,27 @@
+benchmark_mode: criterion_once
+command: cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- raptorq_encode_group_16blocks
+started_at_utc: 2026-05-03T19:51:56Z
+finished_at_utc: 2026-05-03T19:52:06Z
+wall_time_seconds: 10.945363712
+measurement_source: criterion_estimate
+criterion_estimate_source: baselines/hyperfine/20260503-bd-rchk5-2-raptorq-encode/ffs_repair_raptorq_encode_group_16blocks.stdout
+criterion_estimate_seconds: [0.000279040000, 0.000282420000, 0.000285960000]
+exit_status: 0
+
+## stdout
+raptorq_encode_group_16blocks
+                        time:   [279.04 µs 282.42 µs 285.96 µs]
+                        change: [−1.6676% +0.3714% +2.4196%] (p = 0.72 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+
+
+## stderr
+    Finished `release-perf` profile [optimized] target(s) in 0.19s
+     Running benches/scrub_codec.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/scrub_codec-ef0a8c85a60e37d8)
+Gnuplot not found, using plotters backend
+Benchmarking raptorq_encode_group_16blocks
+Benchmarking raptorq_encode_group_16blocks: Warming up for 3.0000 s
+Benchmarking raptorq_encode_group_16blocks: Collecting 100 samples in estimated 5.8210 s (20k iterations)
+Benchmarking raptorq_encode_group_16blocks: Analyzing

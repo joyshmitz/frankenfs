@@ -1,0 +1,27 @@
+benchmark_mode: criterion_once
+command: cargo bench --profile release-perf -p ffs-harness --bench metadata_parse -- metadata_parse
+started_at_utc: 2026-05-03T19:51:14Z
+finished_at_utc: 2026-05-03T19:51:23Z
+wall_time_seconds: 8.987818496
+measurement_source: criterion_estimate
+criterion_estimate_source: baselines/hyperfine/20260503-bd-rchk5-2-metadata-parse/ffs_harness_metadata_parse.stdout
+criterion_estimate_seconds: [0.000000102550, 0.000000103880, 0.000000105390]
+exit_status: 0
+
+## stdout
+metadata_parse          time:   [102.55 ns 103.88 ns 105.39 ns]
+                        change: [−3.8907% −1.9018% +0.0764%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+
+
+## stderr
+    Finished `release-perf` profile [optimized] target(s) in 0.15s
+     Running benches/metadata_parse.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/metadata_parse-eb91d5345082538d)
+Gnuplot not found, using plotters backend
+Benchmarking metadata_parse
+Benchmarking metadata_parse: Warming up for 3.0000 s
+Benchmarking metadata_parse: Collecting 100 samples in estimated 5.0005 s (48M iterations)
+Benchmarking metadata_parse: Analyzing

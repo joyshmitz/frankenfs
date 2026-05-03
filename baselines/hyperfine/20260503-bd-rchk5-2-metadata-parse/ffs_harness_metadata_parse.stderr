@@ -1,0 +1,7 @@
+    Finished `release-perf` profile [optimized] target(s) in 0.15s
+     Running benches/metadata_parse.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/metadata_parse-eb91d5345082538d)
+Gnuplot not found, using plotters backend
+Benchmarking metadata_parse
+Benchmarking metadata_parse: Warming up for 3.0000 s
+Benchmarking metadata_parse: Collecting 100 samples in estimated 5.0005 s (48M iterations)
+Benchmarking metadata_parse: Analyzing

@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-05-03T19:52:17Z",
+  "date_tag": "20260503-bd-rchk5-2-refresh-staleness",
+  "commit": "94e1aeb71b956520f8bfe1f3a566ef24ef4c54ed",
+  "branch": "main",
+  "environment": {
+    "hostname": "thinkstation1",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "kernel": "Linux 6.17.0-14-generic x86_64 GNU/Linux",
+    "memory_total_kib": 226261604,
+    "memory_total_gib": 215.780,
+    "cargo_target_dir": "/data/tmp/frankenfs_bd_rchk5_2_bench",
+    "rustc": "rustc 1.97.0-nightly (37d85e592 2026-04-28)",
+    "cargo": "cargo 1.97.0-nightly (eb9b60f1f 2026-04-24)",
+    "hyperfine": "hyperfine 1.19.0"
+  },
+  "warmup_runs": 3,
+  "measured_runs": 10,
+  "thresholds_file": "benchmarks/thresholds.toml",
+  "p99_warn_threshold_percent": 10,
+  "p99_fail_threshold_percent": 20,
+  "measurement_coverage": {
+    "measured_count": 1,
+    "pending_count": 0,
+    "cache_workload_metric_count": 0
+  },
+  "measurements": [
+    {
+      "operation": "repair_symbol_refresh_staleness_latency",
+      "metric": "latency",
+      "command": "cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency",
+      "benchmark_mode": "criterion_once",
+      "source_json": "baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.json",
+      "p50_us": 0,
+      "p95_us": 0,
+      "p99_us": 0,
+      "throughput_ops_sec": 15207737.696940,
+      "throughput_mb_sec": 0,
+      "status": "measured"
+    }
+  ],
+  "cache_workload_metrics": []
+}

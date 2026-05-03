@@ -1,0 +1,6 @@
+wal_commit_4k_sync      time:   [9.4939 ms 9.7631 ms 10.075 ms]
+                        change: [+7.2957% +10.756% +15.086%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 12 outliers among 100 measurements (12.00%)
+  4 (4.00%) high mild
+  8 (8.00%) high severe

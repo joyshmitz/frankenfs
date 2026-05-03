@@ -1,0 +1,28 @@
+benchmark_mode: criterion_once
+command: cargo bench --profile release-perf -p ffs-repair --bench scrub_codec -- repair_symbol_refresh_staleness_latency
+started_at_utc: 2026-05-03T19:52:07Z
+finished_at_utc: 2026-05-03T19:52:17Z
+wall_time_seconds: 9.819986944
+measurement_source: criterion_estimate
+criterion_estimate_source: baselines/hyperfine/20260503-bd-rchk5-2-refresh-staleness/ffs_repair_symbol_refresh_staleness_latency.stdout
+criterion_estimate_seconds: [0.000000064962, 0.000000065756, 0.000000066601]
+exit_status: 0
+
+## stdout
+repair_symbol_refresh_staleness_latency
+                        time:   [64.962 ns 65.756 ns 66.601 ns]
+                        change: [−2.0403% −0.5494% +0.8805%] (p = 0.48 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+
+
+## stderr
+    Finished `release-perf` profile [optimized] target(s) in 0.10s
+     Running benches/scrub_codec.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/scrub_codec-ef0a8c85a60e37d8)
+Gnuplot not found, using plotters backend
+Benchmarking repair_symbol_refresh_staleness_latency
+Benchmarking repair_symbol_refresh_staleness_latency: Warming up for 3.0000 s
+Benchmarking repair_symbol_refresh_staleness_latency: Collecting 100 samples in estimated 5.0001 s (78M iterations)
+Benchmarking repair_symbol_refresh_staleness_latency: Analyzing

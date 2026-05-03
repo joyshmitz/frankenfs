@@ -11,11 +11,13 @@ use asupersync::Cx;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_block::{BlockBuf, BlockDevice, ByteBlockDevice, ByteDevice};
 use ffs_error::Result;
+use ffs_repair::autopilot::{RefreshLossModel, WorkloadProfile};
 use ffs_repair::codec::{decode_group, decode_group_with_owned_repair_symbols, encode_group};
 use ffs_repair::lrc::{LrcConfig, encode_global};
 use ffs_repair::scrub::{BlockValidator, BlockVerdict, Scrubber, ZeroCheckValidator};
 use ffs_types::{BlockNumber, ByteOffset, GroupNumber};
 use parking_lot::Mutex;
+use std::hint::black_box;
 
 const BLOCK_SIZE: u32 = 4096;
 const SCRUB_BLOCK_COUNT: u64 = 256;
@@ -278,10 +280,32 @@ fn bench_lrc_codec(c: &mut Criterion) {
     });
 }
 
+// ── Refresh policy/staleness benchmarks ───────────────────────────────────
+
+fn bench_refresh_policy_staleness(c: &mut Criterion) {
+    let model = RefreshLossModel::default();
+    let profiles = WorkloadProfile::ALL;
+
+    c.bench_function("repair_symbol_refresh_staleness_latency", |b| {
+        b.iter(|| {
+            let mut combined_loss = 0.0;
+            for profile in profiles {
+                let comparison = model.compare_policies(30.0, 500, profile);
+                combined_loss += comparison.loss_age_only;
+                combined_loss += comparison.loss_block_count;
+                combined_loss += comparison.loss_hybrid;
+                black_box(comparison.best_policy);
+            }
+            black_box(combined_loss);
+        });
+    });
+}
+
 criterion_group!(
     repair_benches,
     bench_scrub,
     bench_raptorq_codec,
-    bench_lrc_codec
+    bench_lrc_codec,
+    bench_refresh_policy_staleness
 );
 criterion_main!(repair_benches);

@@ -1,0 +1,25 @@
+benchmark_mode: criterion_once
+command: cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_arc_sequential_scan
+started_at_utc: 2026-05-03T19:50:53Z
+finished_at_utc: 2026-05-03T19:51:03Z
+wall_time_seconds: 9.512420352
+measurement_source: criterion_estimate
+criterion_estimate_source: baselines/hyperfine/20260503-bd-rchk5-2-arc-seq/ffs_block_arc_sequential_scan.stdout
+criterion_estimate_seconds: [0.013685000000, 0.014151000000, 0.014618000000]
+exit_status: 0
+
+## stdout
+block_cache_arc_sequential_scan
+                        time:   [13.685 ms 14.151 ms 14.618 ms]
+                        change: [+14.657% +19.669% +24.816%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+
+## stderr
+    Finished `release-perf` profile [optimized] target(s) in 0.11s
+     Running benches/arc_cache.rs (/data/tmp/frankenfs_bd_rchk5_2_bench/release-perf/deps/arc_cache-f629bc5460280303)
+Gnuplot not found, using plotters backend
+Benchmarking block_cache_arc_sequential_scan
+Benchmarking block_cache_arc_sequential_scan: Warming up for 3.0000 s
+Benchmarking block_cache_arc_sequential_scan: Collecting 100 samples in estimated 5.4118 s (400 iterations)
+Benchmarking block_cache_arc_sequential_scan: Analyzing
