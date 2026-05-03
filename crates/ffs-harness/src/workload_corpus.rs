@@ -23,6 +23,13 @@ const REQUIRED_SCENARIO_STATUSES: [WorkloadScenarioStatus; 4] = [
     WorkloadScenarioStatus::HostSkip,
 ];
 
+const HIGH_RISK_USER_RISKS: &[&str] = &[
+    "data_loss",
+    "metadata_incoherence",
+    "repair_overclaim",
+    "permission_boundary",
+];
+
 struct CorpusVocabularies<'a> {
     user_risks: BTreeSet<&'a str>,
     operations: BTreeSet<&'a str>,
@@ -107,6 +114,7 @@ impl WorkloadScenarioStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadCorpusValidationReport {
     pub schema_version: u32,
+    pub coverage_matrix_version: u32,
     pub corpus_id: String,
     pub corpus_version: String,
     pub bead_id: String,
@@ -117,7 +125,9 @@ pub struct WorkloadCorpusValidationReport {
     pub by_filesystem_flavor: BTreeMap<String, usize>,
     pub by_proof_consumer: BTreeMap<String, usize>,
     pub proof_bundle_coverage: WorkloadProofBundleCoverage,
+    pub coverage_matrix: Vec<WorkloadCoverageMatrixRow>,
     pub duplicate_scenario_ids: Vec<String>,
+    pub missing_high_risk_user_risks: Vec<String>,
     pub missing_required_statuses: Vec<String>,
     pub host_skip_scenarios: Vec<String>,
     pub btrfs_default_permissions_scenarios: Vec<String>,
@@ -132,6 +142,26 @@ pub struct WorkloadProofBundleCoverage {
     pub by_user_risk: BTreeMap<String, usize>,
     pub by_filesystem_flavor: BTreeMap<String, usize>,
     pub ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadCoverageMatrixRow {
+    pub matrix_version: u32,
+    pub claim_id: String,
+    pub scenario_id: String,
+    pub status: WorkloadScenarioStatus,
+    pub user_risk: String,
+    pub risk_tier: String,
+    pub filesystem_scope: Vec<String>,
+    pub operation_class: String,
+    pub required_capabilities: Vec<String>,
+    pub proof_consumers: Vec<String>,
+    pub unit_test_obligations: Vec<String>,
+    pub e2e_obligations: Vec<String>,
+    pub fuzz_or_soak_obligations: Vec<String>,
+    pub expected_log_fields: Vec<String>,
+    pub expected_artifact_fields: Vec<String>,
+    pub non_applicability_rationale: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +195,7 @@ pub fn validate_workload_corpus(corpus: &WorkloadCorpus) -> WorkloadCorpusValida
     let mut host_skip_scenarios = Vec::new();
     let mut btrfs_default_permissions_scenarios = Vec::new();
     let mut scenario_logs = Vec::new();
+    let mut coverage_matrix = Vec::new();
 
     validate_header(corpus, &mut errors);
 
@@ -215,6 +246,7 @@ pub fn validate_workload_corpus(corpus: &WorkloadCorpus) -> WorkloadCorpusValida
         }
         validate_scenario(scenario, &vocabularies, &mut errors, &mut warnings);
         scenario_logs.push(build_scenario_log(scenario));
+        coverage_matrix.push(build_coverage_matrix_row(scenario));
     }
 
     for (scenario_id, count) in scenario_ids {
@@ -247,6 +279,17 @@ pub fn validate_workload_corpus(corpus: &WorkloadCorpus) -> WorkloadCorpusValida
         );
     }
 
+    let missing_high_risk_user_risks = HIGH_RISK_USER_RISKS
+        .iter()
+        .filter(|risk| !by_user_risk.contains_key(**risk))
+        .map(|risk| (*risk).to_owned())
+        .collect::<Vec<_>>();
+    for risk in &missing_high_risk_user_risks {
+        errors.push(format!(
+            "high-risk user risk {risk} has no workload scenario"
+        ));
+    }
+
     let proof_bundle_coverage = summarize_proof_bundle_coverage(corpus);
     if !proof_bundle_coverage.ready {
         errors.push(
@@ -257,6 +300,7 @@ pub fn validate_workload_corpus(corpus: &WorkloadCorpus) -> WorkloadCorpusValida
 
     WorkloadCorpusValidationReport {
         schema_version: corpus.schema_version,
+        coverage_matrix_version: WORKLOAD_CORPUS_SCHEMA_VERSION,
         corpus_id: corpus.corpus_id.clone(),
         corpus_version: corpus.corpus_version.clone(),
         bead_id: corpus.bead_id.clone(),
@@ -267,7 +311,9 @@ pub fn validate_workload_corpus(corpus: &WorkloadCorpus) -> WorkloadCorpusValida
         by_filesystem_flavor,
         by_proof_consumer,
         proof_bundle_coverage,
+        coverage_matrix,
         duplicate_scenario_ids,
+        missing_high_risk_user_risks,
         missing_required_statuses,
         host_skip_scenarios,
         btrfs_default_permissions_scenarios,
@@ -310,6 +356,36 @@ pub fn render_workload_corpus_markdown(report: &WorkloadCorpusValidationReport) 
         "Proof Consumer Coverage",
         &report.by_proof_consumer,
     );
+    let _ = writeln!(out, "## Coverage Matrix");
+    let _ = writeln!(
+        out,
+        "| Claim | Scenario | Risk | Tier | Filesystems | Operation | Consumers | E2E/Fuzz/Soak |"
+    );
+    let _ = writeln!(out, "|---|---|---|---|---|---|---|---|");
+    for row in &report.coverage_matrix {
+        let consumers = row.proof_consumers.join(", ");
+        let filesystems = row.filesystem_scope.join(", ");
+        let lanes = row
+            .e2e_obligations
+            .iter()
+            .chain(row.fuzz_or_soak_obligations.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |",
+            row.claim_id,
+            row.scenario_id,
+            row.user_risk,
+            row.risk_tier,
+            filesystems,
+            row.operation_class,
+            consumers,
+            lanes
+        );
+    }
+    let _ = writeln!(out);
     let _ = writeln!(out, "## Scenario Logs");
     for log in &report.scenario_logs {
         let _ = writeln!(out, "- `{}`", log.log_line);
@@ -397,6 +473,12 @@ fn validate_scenario(
         errors.push(format!(
             "scenario {} must be reusable by at least two proof consumers",
             scenario.scenario_id
+        ));
+    }
+    if is_user_visible_risk(&scenario.user_risk) && scenario.linked_e2e_suites.is_empty() {
+        errors.push(format!(
+            "scenario {} maps user-visible risk {} without an E2E or long-campaign proof lane",
+            scenario.scenario_id, scenario.user_risk
         ));
     }
     validate_artifacts(scenario, errors);
@@ -577,6 +659,72 @@ fn summarize_proof_bundle_coverage(corpus: &WorkloadCorpus) -> WorkloadProofBund
     }
 }
 
+fn build_coverage_matrix_row(scenario: &WorkloadScenario) -> WorkloadCoverageMatrixRow {
+    let expected_log_fields = scenario
+        .expected_logs
+        .iter()
+        .flat_map(|log| log.required_fields.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let expected_artifact_fields = ["path", "kind", "required"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let fuzz_or_soak_obligations = scenario
+        .linked_proof_consumers
+        .iter()
+        .filter(|consumer| {
+            matches!(
+                consumer.as_str(),
+                "crash_replay_lab" | "repair_lab" | "performance_baseline"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    WorkloadCoverageMatrixRow {
+        matrix_version: WORKLOAD_CORPUS_SCHEMA_VERSION,
+        claim_id: format!("claim_{}", scenario.scenario_id),
+        scenario_id: scenario.scenario_id.clone(),
+        status: scenario.status,
+        user_risk: scenario.user_risk.clone(),
+        risk_tier: risk_tier(&scenario.user_risk).to_owned(),
+        filesystem_scope: scenario.supported_filesystems.clone(),
+        operation_class: scenario.operation_class.clone(),
+        required_capabilities: scenario.required_capabilities.clone(),
+        proof_consumers: scenario.linked_proof_consumers.clone(),
+        unit_test_obligations: vec![
+            "workload_corpus_schema".to_owned(),
+            "coverage_matrix_row".to_owned(),
+        ],
+        e2e_obligations: scenario.linked_e2e_suites.clone(),
+        fuzz_or_soak_obligations,
+        expected_log_fields,
+        expected_artifact_fields,
+        non_applicability_rationale: scenario
+            .unsupported_reason
+            .clone()
+            .or_else(|| scenario.non_goal_reason.clone())
+            .or_else(|| scenario.host_skip_reason.clone()),
+    }
+}
+
+fn is_user_visible_risk(user_risk: &str) -> bool {
+    matches!(risk_tier(user_risk), "p1" | "p2")
+}
+
+fn risk_tier(user_risk: &str) -> &'static str {
+    if HIGH_RISK_USER_RISKS.contains(&user_risk) {
+        "p1"
+    } else {
+        match user_risk {
+            "tail_latency" | "unsupported_scope_hidden" | "host_capability_ambiguity" => "p2",
+            _ => "p3",
+        }
+    }
+}
+
 fn build_scenario_log(scenario: &WorkloadScenario) -> WorkloadScenarioLog {
     let proof_consumers = scenario.linked_proof_consumers.join(",");
     let filesystem_flavors = scenario.supported_filesystems.join(",");
@@ -680,6 +828,54 @@ mod tests {
         assert!(!report.host_skip_scenarios.is_empty());
         assert!(!report.btrfs_default_permissions_scenarios.is_empty());
         assert!(report.proof_bundle_coverage.ready);
+        assert_eq!(report.coverage_matrix.len(), report.scenario_count);
+        assert!(report.missing_high_risk_user_risks.is_empty());
+    }
+
+    #[test]
+    fn coverage_matrix_contains_user_risk_and_consumer_axes() {
+        let corpus = fixture_corpus();
+        let report = validate_workload_corpus(&corpus);
+        let row = report
+            .coverage_matrix
+            .iter()
+            .find(|row| row.scenario_id == "workload_editor_save_atomic_ext4")
+            .expect("matrix row exists");
+        assert_eq!(row.claim_id, "claim_workload_editor_save_atomic_ext4");
+        assert_eq!(row.risk_tier, "p1");
+        assert_eq!(row.user_risk, "data_loss");
+        assert_eq!(row.operation_class, "editor_save");
+        assert!(row.filesystem_scope.iter().any(|fs| fs == "ext4"));
+        assert!(
+            row.required_capabilities
+                .iter()
+                .any(|cap| cap == "crash_replay")
+        );
+        assert!(
+            row.proof_consumers
+                .iter()
+                .any(|consumer| consumer == "proof_bundle")
+        );
+        assert!(
+            row.unit_test_obligations
+                .iter()
+                .any(|obligation| obligation == "coverage_matrix_row")
+        );
+        assert!(
+            row.e2e_obligations
+                .iter()
+                .any(|path| path.ends_with("ffs_crash_matrix_e2e.sh"))
+        );
+        assert!(
+            row.expected_log_fields
+                .iter()
+                .any(|field| field == "scenario_id")
+        );
+        assert!(
+            row.expected_artifact_fields
+                .iter()
+                .any(|field| field == "required")
+        );
     }
 
     #[test]
@@ -715,6 +911,35 @@ mod tests {
         assert!(!report.valid);
         assert!(report.errors.iter().any(|error| {
             error.contains("user_risk") && error.contains("references unknown value")
+        }));
+    }
+
+    #[test]
+    fn rejects_orphaned_high_risk_categories() {
+        let mut corpus = fixture_corpus();
+        corpus
+            .scenarios
+            .retain(|scenario| scenario.user_risk != "repair_overclaim");
+        let report = validate_workload_corpus(&corpus);
+        assert!(!report.valid);
+        assert_eq!(
+            report.missing_high_risk_user_risks,
+            vec!["repair_overclaim".to_owned()]
+        );
+        assert!(report.errors.iter().any(|error| {
+            error.contains("high-risk user risk repair_overclaim has no workload scenario")
+        }));
+    }
+
+    #[test]
+    fn rejects_user_visible_rows_without_e2e_lane() {
+        let mut corpus = fixture_corpus();
+        corpus.scenarios[0].linked_e2e_suites.clear();
+        let report = validate_workload_corpus(&corpus);
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("workload_editor_save_atomic_ext4")
+                && error.contains("without an E2E or long-campaign proof lane")
         }));
     }
 

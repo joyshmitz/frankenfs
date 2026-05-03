@@ -113,6 +113,32 @@ for consumer in ["invariant_oracle", "mounted_differential_oracle", "proof_bundl
         raise SystemExit(f"missing proof consumer {consumer}")
 if not report["proof_bundle_coverage"]["ready"]:
     raise SystemExit("proof bundle coverage not ready")
+if len(report.get("coverage_matrix", [])) != report["scenario_count"]:
+    raise SystemExit("coverage matrix row count does not match scenario count")
+required_matrix_fields = {
+    "claim_id",
+    "scenario_id",
+    "user_risk",
+    "risk_tier",
+    "filesystem_scope",
+    "operation_class",
+    "required_capabilities",
+    "proof_consumers",
+    "unit_test_obligations",
+    "e2e_obligations",
+    "expected_log_fields",
+    "expected_artifact_fields",
+}
+for row in report["coverage_matrix"]:
+    missing = sorted(required_matrix_fields - set(row))
+    if missing:
+        raise SystemExit(f"coverage matrix row missing fields: {row.get('scenario_id')} {missing}")
+    if row["risk_tier"] in {"p1", "p2"} and not row["e2e_obligations"]:
+        raise SystemExit(f"user-visible matrix row has no E2E lane: {row['scenario_id']}")
+    if "scenario_id" not in row["expected_log_fields"]:
+        raise SystemExit(f"matrix row missing scenario_id log field: {row['scenario_id']}")
+    if "required" not in row["expected_artifact_fields"]:
+        raise SystemExit(f"matrix row missing required artifact field: {row['scenario_id']}")
 if not report["host_skip_scenarios"]:
     raise SystemExit("missing host skip scenario")
 if not report["btrfs_default_permissions_scenarios"]:
@@ -138,6 +164,9 @@ if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib workload_corpus -- 
     for test_name in \
         "rejects_duplicate_scenario_ids" \
         "rejects_unknown_capability_tags" \
+        "rejects_orphaned_high_risk_categories" \
+        "rejects_user_visible_rows_without_e2e_lane" \
+        "coverage_matrix_contains_user_risk_and_consumer_axes" \
         "rejects_missing_required_artifact_declarations" \
         "rejects_unsupported_without_classification" \
         "rejects_host_skip_without_host_capability"; do
