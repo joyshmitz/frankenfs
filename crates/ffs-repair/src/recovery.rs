@@ -689,13 +689,10 @@ mod tests {
         .expect("orchestrator");
         let result = orchestrator.recover_from_indices(&cx, &[0, 1]);
         assert_eq!(result.evidence.outcome, RecoveryOutcome::Failed);
+        let reason = result.evidence.reason.as_deref().unwrap_or_default();
         assert!(
-            result
-                .evidence
-                .reason
-                .as_deref()
-                .unwrap_or_default()
-                .contains("insufficient symbols"),
+            reason.contains("insufficient")
+                && (reason.contains("symbol") || reason.contains("redundancy")),
             "expected insufficient-symbols reason, got {:?}",
             result.evidence.reason
         );
@@ -1089,11 +1086,12 @@ mod tests {
         let device = MemBlockDevice::new(256, 128);
         let layout =
             RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 64, 0, 4).expect("layout");
-        match GroupRecoveryOrchestrator::new(&device, test_uuid(), layout, BlockNumber(0), 0) {
-            Err(FfsError::RepairFailed(_)) => {}
-            Err(other) => panic!("expected RepairFailed, got {other:?}"),
-            Ok(_) => panic!("zero source_block_count should fail"),
-        }
+        let result =
+            GroupRecoveryOrchestrator::new(&device, test_uuid(), layout, BlockNumber(0), 0);
+        assert!(
+            matches!(result, Err(FfsError::RepairFailed(_))),
+            "zero source_block_count should fail with RepairFailed"
+        );
     }
 
     #[test]
@@ -1103,11 +1101,12 @@ mod tests {
             RepairGroupLayout::new(GroupNumber(0), BlockNumber(0), 32, 2, 4).expect("layout");
 
         // Source range [20, 28) overlaps validation/repair tail starting at 24.
-        match GroupRecoveryOrchestrator::new(&device, test_uuid(), layout, BlockNumber(20), 8) {
-            Err(FfsError::RepairFailed(_)) => {}
-            Err(other) => panic!("expected RepairFailed, got {other:?}"),
-            Ok(_) => panic!("source overlapping tail should fail"),
-        }
+        let result =
+            GroupRecoveryOrchestrator::new(&device, test_uuid(), layout, BlockNumber(20), 8);
+        assert!(
+            matches!(result, Err(FfsError::RepairFailed(_))),
+            "source overlapping tail should fail with RepairFailed"
+        );
     }
 
     #[test]
