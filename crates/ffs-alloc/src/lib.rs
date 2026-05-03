@@ -62,25 +62,26 @@ pub fn bitmap_clear(bitmap: &mut [u8], idx: u32) {
 /// Count free (zero) bits in the first `count` bits of `bitmap`.
 #[must_use]
 pub fn bitmap_count_free(bitmap: &[u8], count: u32) -> u32 {
-    let full_bytes = (count / 8) as usize;
+    let requested_full_bytes = (count / 8) as usize;
+    let full_bytes = requested_full_bytes.min(bitmap.len());
     let remainder = count % 8;
     let mut free = 0u32;
 
-    for &byte in bitmap.iter().take(full_bytes) {
-        // Each zero bit is a free slot.
-        // count_zeros() on a u8 returns at most 8, fits in u8.
-        #[expect(clippy::cast_possible_truncation)]
-        let zeros = byte.count_zeros() as u8;
-        free += u32::from(zeros);
+    let mut chunks = bitmap[..full_bytes].chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        free += (!word).count_ones();
+    }
+    for &byte in chunks.remainder() {
+        free += byte.count_zeros();
     }
 
-    if remainder > 0 && full_bytes < bitmap.len() {
-        let byte = bitmap[full_bytes];
-        for bit in 0..remainder {
-            if (byte >> bit) & 1 == 0 {
-                free += 1;
-            }
-        }
+    if remainder > 0 && requested_full_bytes < bitmap.len() {
+        let byte = bitmap[requested_full_bytes];
+        let mask = u8::MAX >> (8 - remainder);
+        free += ((!byte) & mask).count_ones();
     }
 
     free
@@ -1894,6 +1895,18 @@ mod tests {
         bitmap_set(&mut bm, 5);
         bitmap_set(&mut bm, 15);
         assert_eq!(bitmap_count_free(&bm, 16), 13);
+    }
+
+    #[test]
+    fn bitmap_count_free_word_path_handles_partial_tail() {
+        let mut bm = vec![0u8; 9];
+        bm[8] = 0b1111_0000;
+        assert_eq!(bitmap_count_free(&bm, 68), 68);
+    }
+
+    #[test]
+    fn bitmap_count_free_overscan_treats_missing_bytes_as_allocated() {
+        assert_eq!(bitmap_count_free(&[0u8], 16), 8);
     }
 
     #[test]
