@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "comparison_id": "bd-rchk5.3-mount-sudo-20260503-vs-20260218",
+  "bead_id": "bd-rchk5.3",
+  "generated_at": "2026-05-03T21:19:05Z",
+  "reference_baseline": {
+    "date_tag": "20260218",
+    "commit": "19830ad7903f55ba567eb4bbe94393478fb9b475",
+    "artifact": "benchmarks/baselines/history/20260218.json",
+    "sample_count": 3,
+    "cargo_profile": "release"
+  },
+  "current_baseline": {
+    "date_tags": [
+      "20260503-bd-rchk5-3-mount-cold-sudo-measured",
+      "20260503-bd-rchk5-3-mount-warm-sudo-measured",
+      "20260503-bd-rchk5-3-mount-recovery-sudo-measured"
+    ],
+    "commit": "13271f096188daf9513db841eee7d720d137260e",
+    "sample_count": 10,
+    "cargo_profile": "release-perf",
+    "kernel_fuse_mode": "permissioned_required",
+    "mount_options": {
+      "writeback_cache": "disabled",
+      "background_repair": "not_enabled_by_probe"
+    }
+  },
+  "caveats": [
+    "Reference 20260218 mounted rows were supplementary sudo measurements with 3 samples; current rows use benchmark_record.sh with 10 samples.",
+    "Reference used the release profile and current uses release-perf, so deltas are regression signals rather than a fail gate by themselves.",
+    "All current rows preserve structured mount probe reports with cleanup_status=unmounted."
+  ],
+  "rows": [
+    {
+      "operation": "mount_cold",
+      "reference_source_json": "baselines/hyperfine/20260218/ffs_cli_mount_cold_probe.json",
+      "current_source_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe.json",
+      "current_probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-cold-sudo-measured/ffs_cli_mount_cold_probe_report.json",
+      "reference_p99_us": 36029,
+      "current_p99_us": 171096,
+      "p99_delta_percent": 374.884,
+      "reference_throughput_ops_sec": 27.018364,
+      "current_throughput_ops_sec": 5.981086,
+      "throughput_delta_percent": -77.863,
+      "verdict": "slower_than_reference"
+    },
+    {
+      "operation": "mount_warm",
+      "reference_source_json": "baselines/hyperfine/20260218/ffs_cli_mount_warm_probe.json",
+      "current_source_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe.json",
+      "current_probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-warm-sudo-measured/ffs_cli_mount_warm_probe_report.json",
+      "reference_p99_us": 58275,
+      "current_p99_us": 300114,
+      "p99_delta_percent": 414.996,
+      "reference_throughput_ops_sec": 17.138407,
+      "current_throughput_ops_sec": 3.407422,
+      "throughput_delta_percent": -80.118,
+      "verdict": "slower_than_reference"
+    },
+    {
+      "operation": "mount_recovery",
+      "reference_source_json": "baselines/hyperfine/20260218/ffs_cli_mount_recovery_probe.json",
+      "current_source_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe.json",
+      "current_probe_report_json": "baselines/hyperfine/20260503-bd-rchk5-3-mount-recovery-sudo-measured/ffs_cli_mount_recovery_probe_report.json",
+      "reference_p99_us": 35020,
+      "current_p99_us": 74217,
+      "p99_delta_percent": 111.927,
+      "reference_throughput_ops_sec": 28.458766,
+      "current_throughput_ops_sec": 14.143184,
+      "throughput_delta_percent": -50.303,
+      "verdict": "slower_than_reference"
+    }
+  ]
+}
