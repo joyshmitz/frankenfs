@@ -1029,13 +1029,13 @@ run_cache_workload_report() {
 }
 
 collect_cache_workload_metrics_json() {
-    local tmp_json
-    tmp_json="$(mktemp)"
+    local json_chunks='[]'
+    local report_json
     for report_tsv in "${CACHE_WORKLOAD_REPORT_PATHS[@]}"; do
         if [ ! -f "$report_tsv" ]; then
             continue
         fi
-        jq -Rsn --arg source_tsv "$report_tsv" '
+        report_json="$(jq -Rn --arg source_tsv "$report_tsv" '
             [inputs
             | select(length > 0)
             | split("\t")
@@ -1056,15 +1056,11 @@ collect_cache_workload_metrics_json() {
                 source_tsv: $source_tsv
               }
             ]
-        ' < "$report_tsv" >> "$tmp_json"
+        ' < "$report_tsv")"
+        json_chunks="$(jq -n --argjson lhs "$json_chunks" --argjson rhs "$report_json" '$lhs + $rhs')"
     done
 
-    if [ -s "$tmp_json" ]; then
-        jq -s 'add // []' "$tmp_json"
-    else
-        echo '[]'
-    fi
-    rm -f "$tmp_json"
+    printf '%s\n' "$json_chunks"
 }
 
 should_collect_cache_workload_metrics() {
