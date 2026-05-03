@@ -174,6 +174,18 @@ Public wording must keep these states distinct:
 
 Thresholds chosen without enough evidence must be marked `experimental: true` and must link a follow-up bead. Non-experimental mutation thresholds require an evidence artifact and fail closed when any precondition is missing.
 
+## Crash Replay Refinement Contract
+
+The crash replay refinement smoke is:
+
+```bash
+./scripts/e2e/ffs_crash_replay_refinement_e2e.sh
+```
+
+Every crash replay case artifact must include lane type, crash classification, schedule id, seed, crash point, expected survivors, observed survivors, cleanup status, raw structured log marker, minimized operation count, and a minimized reproduction command. Per-schedule artifacts must preserve the full operation trace. Core deterministic schedules must compare survivor sets after replay, while mounted-smoke and repair-interruption lanes must be represented in the taxonomy and use structured host capability skips when the lane cannot run.
+
+Unreduced failing schedules must link a follow-up bead with raw logs and the full operation trace. Passing schedules still emit minimized reproduction commands so a future regression can be rerun from the artifact bundle without re-searching the corpus.
+
 ## Artifact Manifest Contract
 
 The canonical verification artifact manifest schema lives in:

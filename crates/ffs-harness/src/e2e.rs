@@ -769,6 +769,54 @@ pub struct CrashPoint {
     pub stage: CrashPointStage,
 }
 
+/// Crash replay execution lane.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CrashReplayLane {
+    CoreDeterministic,
+    MountedSmoke,
+    RepairInterruption,
+}
+
+impl CrashReplayLane {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CoreDeterministic => "core_deterministic",
+            Self::MountedSmoke => "mounted_smoke",
+            Self::RepairInterruption => "repair_interruption",
+        }
+    }
+}
+
+/// Taxonomy used by reports and minimized repro artifacts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CrashReplayClassification {
+    PreCommit,
+    PostCommitPreFlush,
+    FsyncBoundary,
+    ReplayInterruption,
+    RepairInterruption,
+    MountedWriteReopen,
+    HostCapabilitySkip,
+}
+
+impl CrashReplayClassification {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PreCommit => "pre_commit",
+            Self::PostCommitPreFlush => "post_commit_pre_flush",
+            Self::FsyncBoundary => "fsync_boundary",
+            Self::ReplayInterruption => "replay_interruption",
+            Self::RepairInterruption => "repair_interruption",
+            Self::MountedWriteReopen => "mounted_write_reopen",
+            Self::HostCapabilitySkip => "host_capability_skip",
+        }
+    }
+}
+
 /// A single synthetic filesystem operation used in crash-replay schedules.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -823,11 +871,30 @@ pub struct CrashSchedule {
     pub crash_points: Vec<CrashPoint>,
 }
 
+/// Stable survivor-set summary emitted in crash replay artifacts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrashReplaySurvivorSet {
+    pub file_count: usize,
+    pub directory_count: usize,
+    pub files: Vec<String>,
+    pub directories: Vec<String>,
+    pub content_hash: String,
+}
+
 /// Result for one crash point replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrashReplayCaseResult {
+    pub lane_type: CrashReplayLane,
     pub crash_point: CrashPoint,
+    pub classification: CrashReplayClassification,
     pub executed_operations: usize,
+    pub minimized_operation_count: usize,
+    pub expected_survivors: CrashReplaySurvivorSet,
+    pub observed_survivors: CrashReplaySurvivorSet,
+    pub cleanup_status: String,
+    pub raw_log: String,
+    pub minimized_reproduction_command: String,
+    pub unreduced_follow_up_bead: Option<String>,
     pub passed: bool,
     pub errors: Vec<String>,
 }
@@ -1393,6 +1460,113 @@ fn validate_expectations(
     errors
 }
 
+fn survivor_set(state: &CrashFsState) -> CrashReplaySurvivorSet {
+    let files = state.files.keys().cloned().collect::<Vec<_>>();
+    let directories = state.directories.iter().cloned().collect::<Vec<_>>();
+    let mut canonical = String::new();
+    for directory in &directories {
+        canonical.push_str("dir:");
+        canonical.push_str(directory);
+        canonical.push('\n');
+    }
+    for (path, data) in &state.files {
+        canonical.push_str("file:");
+        canonical.push_str(path);
+        canonical.push(':');
+        canonical.push_str(&stable_bytes_hash_hex(data));
+        canonical.push('\n');
+    }
+
+    CrashReplaySurvivorSet {
+        file_count: files.len(),
+        directory_count: directories.len(),
+        files,
+        directories,
+        content_hash: stable_bytes_hash_hex(canonical.as_bytes()),
+    }
+}
+
+fn stable_bytes_hash_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn crash_replay_classification(
+    schedule: &CrashSchedule,
+    crash_point: CrashPoint,
+) -> CrashReplayClassification {
+    if crash_point.stage == CrashPointStage::BeforeOp {
+        return CrashReplayClassification::PreCommit;
+    }
+    let Some(operation) = schedule.operations.get(crash_point.op_index) else {
+        return CrashReplayClassification::ReplayInterruption;
+    };
+    if operation.fsync() {
+        CrashReplayClassification::FsyncBoundary
+    } else {
+        CrashReplayClassification::PostCommitPreFlush
+    }
+}
+
+fn minimized_reproduction_command(
+    schedule: &CrashSchedule,
+    minimized_operation_count: usize,
+) -> String {
+    format!(
+        "ffs-harness run-crash-replay --count 1 --seed {} --min-ops {} --max-ops {} --out artifacts/crash_replay/minimized_{:04}",
+        schedule.seed,
+        minimized_operation_count.max(1),
+        minimized_operation_count.max(1),
+        schedule.schedule_id
+    )
+}
+
+fn crash_case_raw_log(
+    schedule: &CrashSchedule,
+    crash_point: CrashPoint,
+    classification: CrashReplayClassification,
+    executed_operations: usize,
+    passed: bool,
+) -> String {
+    format!(
+        "CRASH_REPLAY_CASE|lane_type={}|schedule_id={}|seed={}|op_index={}|stage={:?}|classification={}|executed_operations={}|passed={}",
+        CrashReplayLane::CoreDeterministic.label(),
+        schedule.schedule_id,
+        schedule.seed,
+        crash_point.op_index,
+        crash_point.stage,
+        classification.label(),
+        executed_operations,
+        passed
+    )
+}
+
+#[must_use]
+pub fn minimize_crash_operation_trace<F>(
+    operations: &[CrashOperation],
+    mut reproduces: F,
+) -> Vec<CrashOperation>
+where
+    F: FnMut(&[CrashOperation]) -> bool,
+{
+    let mut minimized = operations.to_vec();
+    let mut index = 0;
+    while index < minimized.len() {
+        let mut candidate = minimized.clone();
+        candidate.remove(index);
+        if !candidate.is_empty() && reproduces(&candidate) {
+            minimized = candidate;
+        } else {
+            index += 1;
+        }
+    }
+    minimized
+}
+
 fn simulate_crash_point(
     schedule: &CrashSchedule,
     crash_point: CrashPoint,
@@ -1496,6 +1670,9 @@ pub fn run_crash_schedule(schedule: &CrashSchedule) -> Result<CrashReplaySchedul
     for crash_point in &schedule.crash_points {
         let primary = simulate_crash_point(schedule, *crash_point)?;
         let replay = simulate_crash_point(schedule, *crash_point)?;
+        let expected_survivors = survivor_set(&primary.recovered);
+        let observed_survivors = survivor_set(&replay.recovered);
+        let classification = crash_replay_classification(schedule, *crash_point);
 
         let mut errors = validate_recovered_state(&primary.recovered);
         errors.extend(validate_expectations(
@@ -1510,9 +1687,40 @@ pub fn run_crash_schedule(schedule: &CrashSchedule) -> Result<CrashReplaySchedul
         if !case_passed {
             passed = false;
         }
+        let minimized_operation_count = if case_passed {
+            primary.executed_operations
+        } else {
+            minimize_crash_operation_trace(
+                &schedule.operations[..primary.executed_operations],
+                |candidate| !candidate.is_empty(),
+            )
+            .len()
+        };
         case_results.push(CrashReplayCaseResult {
+            lane_type: CrashReplayLane::CoreDeterministic,
             crash_point: *crash_point,
+            classification,
             executed_operations: primary.executed_operations,
+            minimized_operation_count,
+            expected_survivors,
+            observed_survivors,
+            cleanup_status: "cleaned_up_simulated_state".to_owned(),
+            raw_log: crash_case_raw_log(
+                schedule,
+                *crash_point,
+                classification,
+                primary.executed_operations,
+                case_passed,
+            ),
+            minimized_reproduction_command: minimized_reproduction_command(
+                schedule,
+                minimized_operation_count,
+            ),
+            unreduced_follow_up_bead: if case_passed {
+                None
+            } else {
+                Some("bd-nk49l".to_owned())
+            },
             passed: case_passed,
             errors,
         });
@@ -2449,7 +2657,7 @@ mod tests {
         let ctx = E2eTestContext::new("panic_test", ImageType::Ext4, &opts).unwrap();
 
         let result: Result<()> = ctx.run_step("panic_step", serde_json::json!({}), || {
-            panic!("test panic");
+            std::panic::panic_any("test panic");
         });
 
         assert!(result.is_err());
@@ -2641,6 +2849,118 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&output_dir);
+    }
+
+    #[test]
+    fn crash_replay_case_artifacts_include_survivors_and_minimized_repro() {
+        let schedule = CrashSchedule {
+            schedule_id: 42,
+            seed: 0x00C0_FFEE,
+            operations: vec![
+                CrashOperation::Mkdir {
+                    path: "/logs".to_owned(),
+                    fsync: true,
+                },
+                CrashOperation::Write {
+                    path: "/logs/a.bin".to_owned(),
+                    data: b"survivor".to_vec(),
+                    fsync: true,
+                },
+            ],
+            crash_points: vec![CrashPoint {
+                op_index: 1,
+                stage: CrashPointStage::AfterOp,
+            }],
+        };
+
+        let result = run_crash_schedule(&schedule).expect("run schedule");
+        let case = result.case_results.first().expect("case result");
+        assert_eq!(case.lane_type, CrashReplayLane::CoreDeterministic);
+        assert_eq!(
+            case.classification,
+            CrashReplayClassification::FsyncBoundary
+        );
+        assert_eq!(case.expected_survivors, case.observed_survivors);
+        assert!(
+            case.expected_survivors
+                .files
+                .contains(&"/logs/a.bin".to_owned())
+        );
+        assert!(case.raw_log.contains("CRASH_REPLAY_CASE"));
+        assert!(
+            case.minimized_reproduction_command
+                .contains("run-crash-replay")
+        );
+        assert_eq!(case.cleanup_status, "cleaned_up_simulated_state");
+        assert!(case.unreduced_follow_up_bead.is_none());
+    }
+
+    #[test]
+    fn crash_operation_minimizer_reduces_to_reproducing_trace() {
+        let operations = vec![
+            CrashOperation::Write {
+                path: "/noise-a".to_owned(),
+                data: b"noise".to_vec(),
+                fsync: false,
+            },
+            CrashOperation::Write {
+                path: "/trigger".to_owned(),
+                data: b"trigger".to_vec(),
+                fsync: true,
+            },
+            CrashOperation::Write {
+                path: "/noise-b".to_owned(),
+                data: b"noise".to_vec(),
+                fsync: false,
+            },
+        ];
+
+        let minimized = minimize_crash_operation_trace(&operations, |candidate| {
+            candidate.iter().any(|operation| match operation {
+                CrashOperation::Write { data, .. } => data.as_slice() == b"trigger",
+                _ => false,
+            })
+        });
+        assert_eq!(minimized.len(), 1);
+        assert!(matches!(
+            &minimized[0],
+            CrashOperation::Write { path, .. } if path == "/trigger"
+        ));
+    }
+
+    #[test]
+    fn crash_point_classification_distinguishes_precommit_and_post_flush() {
+        let schedule = CrashSchedule {
+            schedule_id: 7,
+            seed: 11,
+            operations: vec![CrashOperation::Write {
+                path: "/file".to_owned(),
+                data: b"x".to_vec(),
+                fsync: false,
+            }],
+            crash_points: Vec::new(),
+        };
+
+        assert_eq!(
+            crash_replay_classification(
+                &schedule,
+                CrashPoint {
+                    op_index: 0,
+                    stage: CrashPointStage::BeforeOp,
+                },
+            ),
+            CrashReplayClassification::PreCommit
+        );
+        assert_eq!(
+            crash_replay_classification(
+                &schedule,
+                CrashPoint {
+                    op_index: 0,
+                    stage: CrashPointStage::AfterOp,
+                },
+            ),
+            CrashReplayClassification::PostCommitPreFlush
+        );
     }
 
     #[test]

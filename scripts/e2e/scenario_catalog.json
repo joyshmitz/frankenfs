@@ -1252,6 +1252,46 @@
           "evidence": "SCENARIO_RESULT|scenario_id=repair_confidence_unit_tests|outcome=PASS"
         }
       ]
+    },
+    {
+      "suite_id": "ffs_crash_replay_refinement",
+      "script": "scripts/e2e/ffs_crash_replay_refinement_e2e.sh",
+      "required_categories": [
+        "happy",
+        "recovery"
+      ],
+      "scenarios": [
+        {
+          "id": "crash_replay_minimized_artifacts",
+          "category": "recovery",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_minimized_artifacts|outcome=PASS"
+        },
+        {
+          "id": "crash_replay_dual_lane_taxonomy",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_dual_lane_taxonomy|outcome=PASS"
+        },
+        {
+          "id": "crash_replay_mounted_write_reopen",
+          "category": "unsupported_op",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_mounted_write_reopen|outcome=SKIP"
+        },
+        {
+          "id": "crash_replay_repair_interruption",
+          "category": "unsupported_op",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_repair_interruption|outcome=SKIP"
+        },
+        {
+          "id": "crash_replay_refinement_unit_tests",
+          "category": "happy",
+          "status": "active",
+          "evidence": "SCENARIO_RESULT|scenario_id=crash_replay_refinement_unit_tests|outcome=PASS"
+        }
+      ]
     }
   ],
   "gate_minimums": [
