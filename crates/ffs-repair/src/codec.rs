@@ -162,6 +162,14 @@ pub fn decode_group(
     let k = source_block_count as usize;
     let seed = repair_seed(fs_uuid, group);
 
+    if corrupt_indices.is_empty() {
+        return Ok(DecodeOutcome {
+            recovered: Vec::new(),
+            stats: asupersync::raptorq::decoder::DecodeStats::default(),
+            complete: true,
+        });
+    }
+
     let decoder = InactivationDecoder::new(k, block_size, seed);
 
     // Start with constraint symbols (LDPC + HDPC with zero data).
@@ -276,12 +284,14 @@ mod tests {
     use ffs_types::BlockNumber;
     use parking_lot::Mutex;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// In-memory block device for testing.
     struct MemBlockDevice {
         blocks: Mutex<HashMap<u64, Vec<u8>>>,
         block_size: u32,
         block_count: u64,
+        read_count: AtomicUsize,
     }
 
     impl MemBlockDevice {
@@ -290,6 +300,7 @@ mod tests {
                 blocks: Mutex::new(HashMap::new()),
                 block_size,
                 block_count,
+                read_count: AtomicUsize::new(0),
             }
         }
 
@@ -297,10 +308,15 @@ mod tests {
             assert_eq!(data.len(), self.block_size as usize);
             self.blocks.lock().insert(block.0, data);
         }
+
+        fn read_count(&self) -> usize {
+            self.read_count.load(Ordering::Relaxed)
+        }
     }
 
     impl BlockDevice for MemBlockDevice {
         fn read_block(&self, _cx: &Cx, block: BlockNumber) -> Result<BlockBuf> {
+            self.read_count.fetch_add(1, Ordering::Relaxed);
             let data = self
                 .blocks
                 .lock()
@@ -521,13 +537,15 @@ mod tests {
             &repair_data,
         );
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            FfsError::RepairFailed(msg) => {
-                assert!(msg.contains("insufficient") || msg.contains("singular"));
-            }
-            other => panic!("expected RepairFailed, got {other:?}"),
-        }
+        let error = result.expect_err("decode must reject infeasible recovery");
+        assert!(
+            matches!(
+                &error,
+                FfsError::RepairFailed(msg)
+                    if msg.contains("insufficient") || msg.contains("singular")
+            ),
+            "expected RepairFailed with insufficient/singular detail, got: {error:?}"
+        );
     }
 
     /// Pin the upfront repair-symbol length-validation guard added in the
@@ -552,7 +570,7 @@ mod tests {
             .iter()
             .map(|s| (s.esi, s.data.clone()))
             .collect();
-        repair_data[0].1.truncate(8);  // 8 bytes instead of block_size=64
+        repair_data[0].1.truncate(8); // 8 bytes instead of block_size=64
 
         let corrupt = [0_u32];
         let result = decode_group(
@@ -566,16 +584,15 @@ mod tests {
             &repair_data,
         );
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            FfsError::RepairFailed(msg) => {
-                assert!(
-                    msg.contains("malformed") || msg.contains("payload length"),
-                    "expected RepairFailed about malformed payload, got: {msg}"
-                );
-            }
-            other => panic!("expected RepairFailed, got {other:?}"),
-        }
+        let error = result.expect_err("decode must reject malformed repair symbol length");
+        assert!(
+            matches!(
+                &error,
+                FfsError::RepairFailed(msg)
+                    if msg.contains("malformed") || msg.contains("payload length")
+            ),
+            "expected RepairFailed about malformed payload, got: {error:?}"
+        );
     }
 
     #[test]
@@ -737,6 +754,7 @@ mod tests {
             .collect();
 
         // No corrupt blocks — trivially succeeds.
+        let reads_before_decode = device.read_count();
         let outcome = decode_group(
             &cx,
             &device,
@@ -751,6 +769,16 @@ mod tests {
 
         assert!(outcome.complete);
         assert!(outcome.recovered.is_empty());
+        assert_eq!(
+            outcome.stats.peeled + outcome.stats.inactivated + outcome.stats.gauss_ops,
+            0,
+            "empty corruption decode must not enter the solver"
+        );
+        assert_eq!(
+            device.read_count(),
+            reads_before_decode,
+            "empty corruption decode must not reread source blocks"
+        );
     }
 
     // ── Property-based tests (proptest) ────────────────────────────────

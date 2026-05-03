@@ -202,6 +202,24 @@ fn bench_raptorq_codec(c: &mut Criterion) {
             assert!(outcome.complete);
         });
     });
+
+    c.bench_function("raptorq_decode_group_no_corruption_16blocks", |b| {
+        b.iter(|| {
+            let outcome = decode_group(
+                &cx,
+                &device,
+                &fs_uuid,
+                group,
+                BlockNumber(0),
+                RAPTORQ_SOURCE_BLOCKS,
+                &[],
+                &repair_symbols,
+            )
+            .expect("decode");
+            assert!(outcome.complete);
+            assert!(outcome.recovered.is_empty());
+        });
+    });
 }
 
 criterion_group!(repair_benches, bench_scrub, bench_raptorq_codec);
