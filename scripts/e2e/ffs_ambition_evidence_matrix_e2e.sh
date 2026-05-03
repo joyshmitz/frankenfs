@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ffs_ambition_evidence_matrix_e2e.sh - smoke gate for bd-rchk0.5.10.1 / bd-vp5v7.
+# ffs_ambition_evidence_matrix_e2e.sh - smoke gate for bd-rchk0.5.10 / bd-rchk0.5.10.1 / bd-vp5v7.
 #
 # Validates that the ambition evidence matrix is exported, renders a report,
 # groups rows by acceptance dimensions, exposes required log tokens, checks
@@ -13,7 +13,7 @@ export REPO_ROOT
 
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/data/tmp/rch_target_frankenfs_ambition_evidence_matrix}"
+export CARGO_TARGET_DIR="/data/tmp/rch_target_frankenfs_ambition_evidence_matrix"
 export RCH_ENV_ALLOWLIST="${RCH_ENV_ALLOWLIST:+${RCH_ENV_ALLOWLIST},}CARGO_TARGET_DIR"
 
 PASS_COUNT=0
@@ -34,6 +34,9 @@ scenario_result() {
 }
 
 e2e_init "ffs_ambition_evidence_matrix"
+# Preserve the temp workspace as part of the proof artifact. This repo forbids
+# automated file deletion, including cleanup of directories created by a smoke.
+E2E_CLEANUP_ITEMS=()
 
 REPORT_JSON="${E2E_LOG_DIR}/ambition_evidence_matrix_report.json"
 REPORT_RAW="${E2E_LOG_DIR}/ambition_evidence_matrix_report.raw"
@@ -54,7 +57,7 @@ else
 fi
 
 e2e_step "Scenario 2: CLI renders report"
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+if cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
     --issues "$ISSUES_JSONL" >"$REPORT_RAW" 2>&1; then
     if python3 - "$REPORT_RAW" "$REPORT_JSON" <<'PY'
 import json
@@ -119,6 +122,9 @@ TOKENS_FOUND=0
 for token in \
     "matrix_version" \
     "source_bead_ids" \
+    "tracker_limitation" \
+    "dependency_gate_map" \
+    "operational_prerequisites" \
     "consumer_versions" \
     "stale_reference_checks" \
     "missing_field_diagnostics" \
@@ -130,10 +136,10 @@ for token in \
     fi
 done
 
-if [[ $TOKENS_FOUND -eq 8 ]]; then
+if [[ $TOKENS_FOUND -eq 11 ]]; then
     scenario_result "ambition_matrix_log_tokens" "PASS" "all log tokens present"
 else
-    scenario_result "ambition_matrix_log_tokens" "FAIL" "only ${TOKENS_FOUND}/8 log tokens present"
+    scenario_result "ambition_matrix_log_tokens" "FAIL" "only ${TOKENS_FOUND}/11 log tokens present"
 fi
 
 e2e_step "Scenario 5: required downstream outputs are represented"
@@ -142,11 +148,41 @@ import json
 import sys
 
 data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+if "dotted child" not in data.get("tracker_limitation", ""):
+    raise SystemExit("tracker limitation does not mention dotted child dependency edges")
+required_prereqs = {
+    "bd-rchk0.4.1",
+    "bd-rchk0.4.2",
+    "bd-rchk0.4.3",
+    "bd-rchk4.2",
+    "bd-rchk4.3",
+    "bd-rchk7.2",
+    "bd-rchk0.1.3",
+    "bd-rchk0.2.3",
+    "bd-rchk0.3.3",
+}
+prereqs = {
+    row["prerequisite_bead_id"]
+    for row in data.get("operational_prerequisites", [])
+}
+if required_prereqs - prereqs:
+    raise SystemExit(f"missing operational prerequisites: {sorted(required_prereqs - prereqs)}")
+parent_gate = next(
+    (row for row in data.get("dependency_gate_map", [])
+     if row.get("source_bead_id") == "bd-rchk0.5.10"),
+    None,
+)
+if parent_gate is None:
+    raise SystemExit("missing bd-rchk0.5.10 dependency gate")
+missing_parent_prereqs = required_prereqs - set(parent_gate.get("prerequisite_bead_ids", []))
+if missing_parent_prereqs:
+    raise SystemExit(f"parent gate missing prerequisites: {sorted(missing_parent_prereqs)}")
 coverage = {
     row["source_bead_id"]: row
     for row in data.get("required_output_coverage", [])
 }
 required = [
+    "bd-rchk0.5.10",
     "bd-rchk0.5.11",
     "bd-rchk0.5.12",
     "bd-rchk0.5.13",
@@ -227,7 +263,7 @@ with open(source, encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as
             continue
         out.write(json.dumps(row, separators=(",", ":")) + "\n")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+if cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
     --issues "$STALE_ISSUES_JSONL" >"$STALE_RAW" 2>&1; then
     scenario_result "ambition_matrix_stale_reference_fails" "FAIL" "stale reference unexpectedly passed"
 elif grep -q "bd-rchk0.5.14" "$STALE_RAW"; then
@@ -251,7 +287,7 @@ with open(source, encoding="utf-8") as src, open(dest, "w", encoding="utf-8") as
             row["artifact_path"] = ""
         out.write(json.dumps(row, separators=(",", ":")) + "\n")
 PY
-if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
+if cargo run --quiet -p ffs-harness -- validate-ambition-evidence-matrix \
     --issues "$MISSING_ARTIFACT_JSONL" >"$MISSING_ARTIFACT_RAW" 2>&1; then
     scenario_result "ambition_matrix_missing_artifact_fails" "FAIL" "missing artifact unexpectedly passed"
 elif grep -q "artifact_path" "$MISSING_ARTIFACT_RAW"; then
@@ -261,7 +297,7 @@ else
 fi
 
 e2e_step "Scenario 9: unit/schema tests pass"
-if "${RCH_BIN:-rch}" exec -- cargo test -p ffs-harness --lib -- ambition_evidence_matrix \
+if cargo test -p ffs-harness --lib -- ambition_evidence_matrix \
     2>"$UNIT_LOG" | tee -a "$UNIT_LOG"; then
     TESTS_RUN=$(grep -c "test ambition_evidence_matrix::tests::" "$UNIT_LOG" 2>/dev/null || echo "0")
     if [[ $TESTS_RUN -ge 10 ]]; then

@@ -1519,6 +1519,27 @@ A: Repair symbols become stale when source blocks are modified. FrankenFS suppor
 | [FEATURE_PARITY.md](FEATURE_PARITY.md) | 3KB | Quantitative implementation coverage tracking |
 | [AGENTS.md](AGENTS.md) | 10KB | Guidelines for AI coding agents working in this codebase |
 
+### Ambition Evidence Matrix
+
+Before claiming an ambition bead under `bd-rchk0.5.*`, consult the executable
+ambition evidence matrix instead of relying only on tracker graph edges. The
+matrix records the current dotted-child dependency-edge limitation, maps
+ambition rows to operational prerequisites, proof lanes, unit/E2E/log/artifact
+contracts, downstream proof-bundle and release-gate consumers, and the release
+claim each row may or may not strengthen.
+
+```bash
+cargo run -p ffs-harness -- validate-ambition-evidence-matrix \
+  --issues .beads/issues.jsonl \
+  --out artifacts/ambition/evidence_matrix.json
+```
+
+The smoke gate is:
+
+```bash
+./scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh
+```
+
 ### Design Documents
 
 | Document | What it covers |

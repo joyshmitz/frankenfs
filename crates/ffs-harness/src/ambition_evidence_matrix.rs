@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-//! Ambition evidence matrix control plane for `bd-rchk0.5.10.1` and
-//! `bd-vp5v7`.
+//! Ambition evidence matrix control plane for `bd-rchk0.5.10`,
+//! `bd-rchk0.5.10.1`, and `bd-vp5v7`.
 //!
 //! The matrix keeps ambition beads from becoming loose planning text. It turns
 //! tracker rows into a versioned evidence-control surface that downstream proof
@@ -14,14 +14,54 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
-pub const MATRIX_VERSION: &str = "bd-vp5v7-ambition-evidence-matrix-v2";
+pub const MATRIX_VERSION: &str = "bd-rchk0.5.10-ambition-evidence-matrix-v3";
 
-const REQUIRED_SOURCE_BEADS: [&str; 5] = [
+const TRACKER_LIMITATION_NOTE: &str = concat!(
+    "Current br dependency edges for dotted child IDs are unreliable in this ",
+    "checkout, so this matrix records the intended cross-workstream gate order ",
+    "as data and validates every referenced bead directly from issues.jsonl."
+);
+
+const REQUIRED_SOURCE_BEADS: [&str; 15] = [
+    "bd-rchk0.5.10",
     "bd-rchk0.5.10.1",
     "bd-rchk0.5.11",
     "bd-rchk0.5.12",
     "bd-rchk0.5.13",
     "bd-rchk0.5.14",
+    "bd-rchk0.4.1",
+    "bd-rchk0.4.2",
+    "bd-rchk0.4.3",
+    "bd-rchk4.2",
+    "bd-rchk4.3",
+    "bd-rchk7.2",
+    "bd-rchk0.1.3",
+    "bd-rchk0.2.3",
+    "bd-rchk0.3.3",
+];
+
+const KEY_OPERATIONAL_PREREQUISITES: [(&str, &str, usize); 9] = [
+    ("bd-rchk0.4.1", "artifact schema and logging vocabulary", 10),
+    (
+        "bd-rchk0.4.2",
+        "shared E2E runner and artifact validation",
+        20,
+    ),
+    ("bd-rchk0.4.3", "one-command readiness report consumer", 30),
+    (
+        "bd-rchk4.2",
+        "permissioned FUSE lane and capability artifacts",
+        40,
+    ),
+    ("bd-rchk4.3", "critical mounted scenario matrix", 50),
+    ("bd-rchk7.2", "repair and ledger corruption corpus", 60),
+    ("bd-rchk0.1.3", "repair/client-write race proof", 70),
+    ("bd-rchk0.2.3", "writeback-cache crash and fsync proof", 80),
+    (
+        "bd-rchk0.3.3",
+        "mounted crash, unmount, and reopen proof",
+        90,
+    ),
 ];
 
 const MATRIX_STATUSES: [&str; 6] = [
@@ -42,9 +82,12 @@ const ALLOWED_CONSUMERS: [&str; 6] = [
     "readiness-report",
 ];
 
-const REQUIRED_LOG_TOKENS: [&str; 8] = [
+const REQUIRED_LOG_TOKENS: [&str; 11] = [
     "matrix_version",
     "source_bead_ids",
+    "tracker_limitation",
+    "dependency_gate_map",
+    "operational_prerequisites",
     "consumer_versions",
     "stale_reference_checks",
     "missing_field_diagnostics",
@@ -74,12 +117,15 @@ impl Default for AmbitionEvidenceMatrixConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmbitionEvidenceMatrixReport {
     pub matrix_version: String,
+    pub tracker_limitation: String,
     pub source_issue_count: usize,
     pub row_count: usize,
     pub source_bead_ids: Vec<String>,
     pub required_source_beads: Vec<String>,
     pub allowed_consumers: Vec<String>,
     pub rows: Vec<AmbitionEvidenceMatrixRow>,
+    pub dependency_gate_map: Vec<AmbitionDependencyGate>,
+    pub operational_prerequisites: Vec<OperationalPrerequisiteGate>,
     pub grouped_by_user_risk: BTreeMap<String, Vec<String>>,
     pub grouped_by_security_coverage: BTreeMap<String, Vec<String>>,
     pub grouped_by_remediation_coverage: BTreeMap<String, Vec<String>>,
@@ -104,6 +150,15 @@ pub struct AmbitionEvidenceMatrixRow {
     pub source_bead_id: String,
     pub source_status: String,
     pub title: String,
+    pub prerequisites: Vec<String>,
+    pub owning_proof_lane: String,
+    pub unit_test_contract: String,
+    pub e2e_contract: String,
+    pub logging_fields: Vec<String>,
+    pub artifacts_emitted: Vec<String>,
+    pub capability_skips: Vec<String>,
+    pub feature_gates_consumed: Vec<String>,
+    pub downstream_release_claim: String,
     pub matrix_status: String,
     pub user_risk: String,
     pub threat_class: String,
@@ -133,6 +188,28 @@ pub struct AmbitionEvidenceMatrixRow {
     pub artifact_path: String,
     pub required_logs: String,
     pub reproduction_command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AmbitionDependencyGate {
+    pub source_bead_id: String,
+    pub prerequisite_bead_ids: Vec<String>,
+    pub intended_order: usize,
+    pub owning_proof_lane: String,
+    pub release_gate_consumer: String,
+    pub downstream_release_claim: String,
+    pub tracker_limitation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationalPrerequisiteGate {
+    pub prerequisite_bead_id: String,
+    pub title: String,
+    pub status: String,
+    pub gate_role: String,
+    pub intended_order: usize,
+    pub exists: bool,
+    pub consumed_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,12 +301,26 @@ pub fn analyze_ambition_evidence_matrix(
     let mut missing_field_diagnostics = validate_matrix_rows(&rows);
     let stale_reference_checks = collect_reference_checks(&rows, &issues);
     let required_output_coverage = collect_required_output_coverage(&rows);
+    let dependency_gate_map = build_dependency_gate_map(&rows);
+    let operational_prerequisites = build_operational_prerequisites(&issues);
     let consumer_contracts = build_consumer_contracts(&rows);
     let consumer_summaries =
         summarize_consumer_contracts(&consumer_contracts, generated_artifact_paths);
     let downgrade_decisions = collect_downgrade_decisions(&consumer_contracts);
 
     errors.extend(missing_field_diagnostics.iter().cloned());
+    errors.extend(validate_dependency_gate_map(&dependency_gate_map));
+    errors.extend(
+        operational_prerequisites
+            .iter()
+            .filter(|prerequisite| !prerequisite.exists)
+            .map(|prerequisite| {
+                format!(
+                    "operational prerequisite {} is missing",
+                    prerequisite.prerequisite_bead_id
+                )
+            }),
+    );
     errors.extend(
         stale_reference_checks
             .iter()
@@ -259,6 +350,7 @@ pub fn analyze_ambition_evidence_matrix(
 
     AmbitionEvidenceMatrixReport {
         matrix_version: MATRIX_VERSION.to_owned(),
+        tracker_limitation: TRACKER_LIMITATION_NOTE.to_owned(),
         source_issue_count: issues_jsonl
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -271,6 +363,8 @@ pub fn analyze_ambition_evidence_matrix(
             .collect(),
         allowed_consumers: ALLOWED_CONSUMERS.iter().map(ToString::to_string).collect(),
         rows: rows.clone(),
+        dependency_gate_map,
+        operational_prerequisites,
         grouped_by_user_risk: group_by(&rows, |row| row.user_risk.as_str()),
         grouped_by_security_coverage: group_by(&rows, |row| row.threat_model_status.as_str()),
         grouped_by_remediation_coverage: group_by(&rows, |row| row.remediation_status.as_str()),
@@ -370,7 +464,7 @@ fn build_matrix_rows(
     row_ids.extend(
         issues
             .values()
-            .filter(|issue| issue.labels.iter().any(|label| label == "ambition"))
+            .filter(|issue| issue_is_in_matrix_scope(issue))
             .map(|issue| issue.id.clone()),
     );
 
@@ -383,6 +477,15 @@ fn build_matrix_rows(
         }
     }
     rows
+}
+
+fn issue_is_in_matrix_scope(issue: &IssueSummary) -> bool {
+    issue.labels.iter().any(|label| label == "ambition")
+        || issue.id == "bd-rchk0.5"
+        || issue.id.starts_with("bd-rchk0.5.")
+        || KEY_OPERATIONAL_PREREQUISITES
+            .iter()
+            .any(|(id, _, _)| *id == issue.id)
 }
 
 fn row_from_issue(issue: &IssueSummary) -> AmbitionEvidenceMatrixRow {
@@ -406,11 +509,32 @@ fn row_from_issue(issue: &IssueSummary) -> AmbitionEvidenceMatrixRow {
     let consumer_contracts = consumers_for_issue(issue, &matrix_status);
     let release_claim_effect = release_claim_effect_for(&matrix_status);
     let downgrade_decision = downgrade_decision_for(&matrix_status);
+    let artifact_path = issue
+        .artifact_path_override
+        .clone()
+        .unwrap_or_else(|| DEFAULT_ARTIFACT_PATH.to_owned());
+    let prerequisites = prerequisites_for_issue(issue);
+    let owning_proof_lane = owning_proof_lane_for(issue);
+    let logging_fields = REQUIRED_LOG_TOKENS
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let artifacts_emitted = artifacts_emitted_for_issue(issue, &artifact_path);
+    let feature_gates_consumed = feature_gates_for_issue(issue);
 
     AmbitionEvidenceMatrixRow {
         source_bead_id: issue.id.clone(),
         source_status: issue.status.clone(),
         title: issue.title.clone(),
+        prerequisites,
+        owning_proof_lane,
+        unit_test_contract: unit_test_contract_for_issue(issue),
+        e2e_contract: e2e_contract_for_issue(issue),
+        logging_fields,
+        artifacts_emitted,
+        capability_skips: capability_skips_for_issue(issue),
+        feature_gates_consumed,
+        downstream_release_claim: release_claim_effect.clone(),
         matrix_status,
         user_risk: classify_user_risk(issue),
         threat_class: classify_threat_class(issue),
@@ -456,13 +580,145 @@ fn row_from_issue(issue: &IssueSummary) -> AmbitionEvidenceMatrixRow {
         consumer_contracts,
         release_claim_effect,
         downgrade_decision,
-        artifact_path: issue
-            .artifact_path_override
-            .clone()
-            .unwrap_or_else(|| DEFAULT_ARTIFACT_PATH.to_owned()),
+        artifact_path,
         required_logs: REQUIRED_LOG_TOKENS.join(","),
         reproduction_command: REPRODUCTION_COMMAND.to_owned(),
     }
+}
+
+fn prerequisites_for_issue(issue: &IssueSummary) -> Vec<String> {
+    let mut prerequisites = BTreeSet::new();
+    if issue.id == "bd-rchk0.5.10" {
+        prerequisites.extend(
+            KEY_OPERATIONAL_PREREQUISITES
+                .iter()
+                .map(|(id, _, _)| (*id).to_owned()),
+        );
+    } else if issue_is_key_prerequisite(issue) {
+        prerequisites.insert("none:root-operational-prerequisite".to_owned());
+    } else if issue_is_in_matrix_scope(issue) {
+        prerequisites.insert("bd-rchk0.4.1".to_owned());
+        prerequisites.insert("bd-rchk0.4.2".to_owned());
+        prerequisites.insert("bd-rchk0.4.3".to_owned());
+    }
+
+    if applies_to_security(issue) {
+        prerequisites.insert("bd-rchk7.2".to_owned());
+        prerequisites.insert("bd-rchk4.2".to_owned());
+        prerequisites.insert("bd-rchk4.3".to_owned());
+    }
+    if applies_to_remediation(issue) {
+        prerequisites.insert("bd-rchk0.1.3".to_owned());
+        prerequisites.insert("bd-rchk0.4.3".to_owned());
+    }
+    if applies_to_demo(issue) {
+        prerequisites.insert("bd-rchk4.2".to_owned());
+        prerequisites.insert("bd-rchk4.3".to_owned());
+        prerequisites.insert("bd-rchk7.2".to_owned());
+    }
+    if applies_to_budget(issue) {
+        prerequisites.insert("bd-rchk0.4.1".to_owned());
+        prerequisites.insert("bd-rchk0.4.2".to_owned());
+        prerequisites.insert("bd-rchk0.4.3".to_owned());
+    }
+    if issue.haystack.contains("writeback-cache") || issue.haystack.contains("writeback_cache") {
+        prerequisites.insert("bd-rchk0.2.3".to_owned());
+    }
+    if issue.haystack.contains("mounted") || issue.haystack.contains("mount") {
+        prerequisites.insert("bd-rchk0.3.3".to_owned());
+    }
+
+    prerequisites.into_iter().collect()
+}
+
+fn issue_is_key_prerequisite(issue: &IssueSummary) -> bool {
+    KEY_OPERATIONAL_PREREQUISITES
+        .iter()
+        .any(|(id, _, _)| *id == issue.id)
+}
+
+fn owning_proof_lane_for(issue: &IssueSummary) -> String {
+    if issue.id == "bd-rchk0.5.10" || issue.id == "bd-rchk0.5.10.1" {
+        "ambition-evidence-matrix".to_owned()
+    } else if applies_to_security(issue) {
+        "security-hostile-artifact".to_owned()
+    } else if applies_to_remediation(issue) {
+        "operator-remediation".to_owned()
+    } else if applies_to_demo(issue) {
+        "low-privilege-proof-demo".to_owned()
+    } else if applies_to_budget(issue) {
+        "proof-overhead-budget".to_owned()
+    } else if issue_is_key_prerequisite(issue) {
+        "operational-prerequisite".to_owned()
+    } else {
+        "readiness-traceability".to_owned()
+    }
+}
+
+fn unit_test_contract_for_issue(issue: &IssueSummary) -> String {
+    if issue.id == "bd-rchk0.5.10" {
+        "schema rejects missing user risk, prerequisites, unit test contract, E2E contract, log fields, artifact consumers, and stale bead references".to_owned()
+    } else {
+        "schema validates status vocabulary, required fields, consumer contract, artifact path, log tokens, and stale-reference checks".to_owned()
+    }
+}
+
+fn e2e_contract_for_issue(issue: &IssueSummary) -> String {
+    if issue.id == "bd-rchk0.5.10" {
+        "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh renders the matrix, verifies real bead references, and checks dependency gate order".to_owned()
+    } else {
+        "scripts/e2e/ffs_ambition_evidence_matrix_e2e.sh includes this row in generated JSON and fail-closed stale-reference probes".to_owned()
+    }
+}
+
+fn artifacts_emitted_for_issue(issue: &IssueSummary, artifact_path: &str) -> Vec<String> {
+    let mut artifacts = BTreeSet::from([artifact_path.to_owned()]);
+    if issue.id == "bd-rchk0.5.10" {
+        artifacts.insert("artifacts/ambition/dependency_gate_map.json".to_owned());
+    }
+    if applies_to_security(issue) {
+        artifacts.insert("security/adversarial_image_threat_model.json".to_owned());
+    }
+    if applies_to_remediation(issue) {
+        artifacts.insert("artifacts/remediation/catalog.json".to_owned());
+    }
+    if applies_to_demo(issue) {
+        artifacts.insert("artifacts/proof/bundle/manifest.json".to_owned());
+    }
+    artifacts.into_iter().collect()
+}
+
+fn capability_skips_for_issue(issue: &IssueSummary) -> Vec<String> {
+    if issue.haystack.contains("fuse")
+        || issue.haystack.contains("mounted")
+        || issue.haystack.contains("mount")
+    {
+        vec!["host-fuse-capability-skip".to_owned()]
+    } else {
+        vec!["not-applicable".to_owned()]
+    }
+}
+
+fn feature_gates_for_issue(issue: &IssueSummary) -> Vec<String> {
+    let mut gates = BTreeSet::new();
+    gates.insert(classify_release_gate_consumer(issue));
+    if applies_to_security(issue) {
+        gates.insert("security.hostile_image".to_owned());
+    }
+    if applies_to_remediation(issue) {
+        gates.insert("errors.evidence".to_owned());
+        gates.insert("repair.rw.writeback".to_owned());
+    }
+    if applies_to_demo(issue) {
+        gates.insert("proof.low_privilege_demo".to_owned());
+    }
+    if applies_to_budget(issue) {
+        gates.insert("performance.baseline".to_owned());
+    }
+    if issue.haystack.contains("writeback-cache") || issue.haystack.contains("writeback_cache") {
+        gates.insert("writeback_cache".to_owned());
+    }
+    gates.into_iter().collect()
 }
 
 fn applies_to_security(issue: &IssueSummary) -> bool {
@@ -760,6 +1016,98 @@ fn collect_downgrade_decisions(
         .collect()
 }
 
+fn build_dependency_gate_map(rows: &[AmbitionEvidenceMatrixRow]) -> Vec<AmbitionDependencyGate> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| AmbitionDependencyGate {
+            source_bead_id: row.source_bead_id.clone(),
+            prerequisite_bead_ids: row.prerequisites.clone(),
+            intended_order: dependency_order_for(row, index),
+            owning_proof_lane: row.owning_proof_lane.clone(),
+            release_gate_consumer: row.release_gate_consumer.clone(),
+            downstream_release_claim: row.downstream_release_claim.clone(),
+            tracker_limitation: TRACKER_LIMITATION_NOTE.to_owned(),
+        })
+        .collect()
+}
+
+fn dependency_order_for(row: &AmbitionEvidenceMatrixRow, index: usize) -> usize {
+    KEY_OPERATIONAL_PREREQUISITES
+        .iter()
+        .find_map(|(id, _, order)| (*id == row.source_bead_id).then_some(*order))
+        .unwrap_or(1000 + index)
+}
+
+fn build_operational_prerequisites(
+    issues: &BTreeMap<String, IssueSummary>,
+) -> Vec<OperationalPrerequisiteGate> {
+    KEY_OPERATIONAL_PREREQUISITES
+        .iter()
+        .map(|(id, role, order)| {
+            let issue = issues.get(*id);
+            OperationalPrerequisiteGate {
+                prerequisite_bead_id: (*id).to_owned(),
+                title: issue.map_or_else(
+                    || "missing prerequisite bead".to_owned(),
+                    |issue| issue.title.clone(),
+                ),
+                status: issue.map_or_else(|| "missing".to_owned(), |issue| issue.status.clone()),
+                gate_role: (*role).to_owned(),
+                intended_order: *order,
+                exists: issue.is_some(),
+                consumed_by: vec![
+                    "bd-rchk0.5.10".to_owned(),
+                    "proof-bundle".to_owned(),
+                    "release-gates".to_owned(),
+                    "readiness-report".to_owned(),
+                ],
+            }
+        })
+        .collect()
+}
+
+fn validate_dependency_gate_map(gates: &[AmbitionDependencyGate]) -> Vec<String> {
+    let mut errors = Vec::new();
+    if gates.is_empty() {
+        errors.push("dependency_gate_map is empty".to_owned());
+        return errors;
+    }
+    let parent_gate = gates
+        .iter()
+        .find(|gate| gate.source_bead_id == "bd-rchk0.5.10");
+    match parent_gate {
+        Some(gate) => {
+            for (required_id, _, _) in KEY_OPERATIONAL_PREREQUISITES {
+                if !gate
+                    .prerequisite_bead_ids
+                    .iter()
+                    .any(|prerequisite| prerequisite == required_id)
+                {
+                    errors.push(format!(
+                        "bd-rchk0.5.10 missing operational prerequisite {required_id}"
+                    ));
+                }
+            }
+        }
+        None => errors.push("dependency_gate_map missing bd-rchk0.5.10".to_owned()),
+    }
+    for gate in gates {
+        if gate.prerequisite_bead_ids.is_empty() {
+            errors.push(format!(
+                "{} dependency gate has no prerequisites",
+                gate.source_bead_id
+            ));
+        }
+        if gate.tracker_limitation.trim().is_empty() {
+            errors.push(format!(
+                "{} dependency gate missing tracker limitation",
+                gate.source_bead_id
+            ));
+        }
+    }
+    errors
+}
+
 fn validate_matrix_rows(rows: &[AmbitionEvidenceMatrixRow]) -> Vec<String> {
     let mut errors = Vec::new();
     let mut seen = BTreeSet::new();
@@ -778,6 +1126,33 @@ fn validate_row(
         errors.push(format!("duplicate matrix row {}", row.source_bead_id));
     }
     require_non_empty(row, "source_bead_id", &row.source_bead_id, errors);
+    if row.prerequisites.is_empty() {
+        errors.push(format!("{} missing prerequisites", row.source_bead_id));
+    }
+    require_non_empty(row, "owning_proof_lane", &row.owning_proof_lane, errors);
+    require_non_empty(row, "unit_test_contract", &row.unit_test_contract, errors);
+    require_non_empty(row, "e2e_contract", &row.e2e_contract, errors);
+    if row.logging_fields.is_empty() {
+        errors.push(format!("{} missing logging_fields", row.source_bead_id));
+    }
+    if row.artifacts_emitted.is_empty() {
+        errors.push(format!("{} missing artifacts_emitted", row.source_bead_id));
+    }
+    if row.capability_skips.is_empty() {
+        errors.push(format!("{} missing capability_skips", row.source_bead_id));
+    }
+    if row.feature_gates_consumed.is_empty() {
+        errors.push(format!(
+            "{} missing feature_gates_consumed",
+            row.source_bead_id
+        ));
+    }
+    require_non_empty(
+        row,
+        "downstream_release_claim",
+        &row.downstream_release_claim,
+        errors,
+    );
     validate_status(
         row,
         "matrix_status",
@@ -890,6 +1265,12 @@ fn validate_required_log_contract(row: &AmbitionEvidenceMatrixRow, errors: &mut 
                 row.source_bead_id
             ));
         }
+        if !row.logging_fields.contains(&token.to_owned()) {
+            errors.push(format!(
+                "{} logging_fields missing {token}",
+                row.source_bead_id
+            ));
+        }
     }
     if !row
         .reproduction_command
@@ -897,6 +1278,12 @@ fn validate_required_log_contract(row: &AmbitionEvidenceMatrixRow, errors: &mut 
     {
         errors.push(format!(
             "{} missing validate-ambition-evidence-matrix reproduction command",
+            row.source_bead_id
+        ));
+    }
+    if row.downstream_release_claim != row.release_claim_effect {
+        errors.push(format!(
+            "{} downstream_release_claim must mirror release_claim_effect",
             row.source_bead_id
         ));
     }
@@ -1043,6 +1430,15 @@ fn collect_reference_checks(
             "overhead_budget_follow_up",
             issues,
         );
+        for prerequisite in &row.prerequisites {
+            push_reference_if_bead(
+                &mut checks,
+                &row.source_bead_id,
+                prerequisite,
+                "prerequisites",
+                issues,
+            );
+        }
     }
     checks
 }
@@ -1111,8 +1507,20 @@ fn collect_required_output_coverage(
         .collect()
 }
 
-fn required_output_specs() -> [(&'static str, &'static str, &'static [&'static str]); 5] {
+fn required_output_specs() -> [(&'static str, &'static str, &'static [&'static str]); 6] {
     [
+        (
+            "bd-rchk0.5.10",
+            "parent ambition evidence matrix and dependency gate map",
+            &[
+                "prerequisites",
+                "owning_proof_lane",
+                "unit_test_contract",
+                "e2e_contract",
+                "logging_fields",
+                "feature_gates_consumed",
+            ],
+        ),
         (
             "bd-rchk0.5.10.1",
             "versioned ambition evidence matrix control plane",
@@ -1164,6 +1572,20 @@ fn required_output_specs() -> [(&'static str, &'static str, &'static [&'static s
 
 fn required_output_is_represented(source_bead_id: &str, row: &AmbitionEvidenceMatrixRow) -> bool {
     match source_bead_id {
+        "bd-rchk0.5.10" => {
+            !row.unit_test_contract.trim().is_empty()
+                && !row.e2e_contract.trim().is_empty()
+                && !row.owning_proof_lane.trim().is_empty()
+                && !row.logging_fields.is_empty()
+                && !row.feature_gates_consumed.is_empty()
+                && KEY_OPERATIONAL_PREREQUISITES
+                    .iter()
+                    .all(|(required_id, _, _)| {
+                        row.prerequisites
+                            .iter()
+                            .any(|prerequisite| prerequisite.as_str() == *required_id)
+                    })
+        }
         "bd-rchk0.5.10.1" => {
             !row.artifact_path.trim().is_empty()
                 && row
@@ -1281,8 +1703,13 @@ mod tests {
         )
     }
 
-    fn fixture_issues() -> String {
-        [
+    fn ambition_fixture_issues() -> Vec<String> {
+        vec![
+            fixture_issue(
+                "bd-rchk0.5.10",
+                "Create ambition evidence matrix and dependency gate map",
+                &["ambition", "gates", "logging", "planning", "traceability"],
+            ),
             fixture_issue_with_status(
                 "bd-rchk0.5.10.1",
                 "Refine ambition evidence matrix for safety remediation demos and budgets",
@@ -1325,13 +1752,76 @@ mod tests {
                 "closed",
                 &["ambition", "metrics", "performance", "release-gates"],
             ),
+        ]
+    }
+
+    fn operational_prerequisite_fixture_issues() -> Vec<String> {
+        vec![
+            fixture_issue_with_status(
+                "bd-rchk0.4.1",
+                "Define the operational artifact schema and logging vocabulary",
+                "closed",
+                &["docs", "e2e", "logging", "qa"],
+            ),
+            fixture_issue_with_status(
+                "bd-rchk0.4.2",
+                "Build the shared E2E runner harness with unit-tested artifact validation",
+                "closed",
+                &["e2e", "logging", "qa", "scripts"],
+            ),
+            fixture_issue_with_status(
+                "bd-rchk0.4.3",
+                "Create a one-command operational readiness report aggregator",
+                "closed",
+                &["e2e", "logging", "reporting"],
+            ),
+            fixture_issue_with_status(
+                "bd-rchk4.2",
+                "Provision or document a permissioned CI/RCH FUSE lane",
+                "closed",
+                &["ci", "fuse", "infra"],
+            ),
+            fixture_issue_with_status(
+                "bd-rchk4.3",
+                "Run the critical mounted ext4 and btrfs scenario matrix",
+                "closed",
+                &["btrfs", "conformance", "ext4", "fuse"],
+            ),
+            fixture_issue_with_status(
+                "bd-rchk7.2",
+                "Add repair and ledger corruption corpus fixtures",
+                "closed",
+                &["conformance", "repair"],
+            ),
+            fixture_issue_with_status(
+                "bd-rchk0.1.3",
+                "Add deterministic race tests for repair versus client writes",
+                "closed",
+                &["fuse", "repair", "rw", "tests"],
+            ),
             fixture_issue(
-                "bd-other",
-                "Unrelated implementation task",
-                &["implementation"],
+                "bd-rchk0.2.3",
+                "Add writeback-cache crash/replay and fsync integration tests",
+                &["fuse", "tests", "writeback-cache"],
+            ),
+            fixture_issue_with_status(
+                "bd-rchk0.3.3",
+                "Exercise crash, unmount, and reopen recovery for mounted writes",
+                "closed",
+                &["mount", "recovery", "rw", "tests"],
             ),
         ]
-        .join("\n")
+    }
+
+    fn fixture_issues() -> String {
+        let mut issues = ambition_fixture_issues();
+        issues.extend(operational_prerequisite_fixture_issues());
+        issues.push(fixture_issue(
+            "bd-other",
+            "Unrelated implementation task",
+            &["implementation"],
+        ));
+        issues.join("\n")
     }
 
     fn valid_row() -> AmbitionEvidenceMatrixRow {
@@ -1364,7 +1854,11 @@ mod tests {
             report.errors
         );
         assert_eq!(report.matrix_version, MATRIX_VERSION);
-        assert_eq!(report.row_count, 5);
+        assert_eq!(report.row_count, 15);
+        assert!(
+            report.tracker_limitation.contains("dotted child IDs"),
+            "tracker limitation should explain dotted child edge risk"
+        );
         assert!(
             report
                 .rows
@@ -1377,11 +1871,7 @@ mod tests {
                 .allowed_consumers
                 .contains(&"release-gates".to_owned())
         );
-        assert!(
-            report
-                .source_bead_ids
-                .contains(&"bd-rchk0.5.10.1".to_owned())
-        );
+        assert!(report.source_bead_ids.contains(&"bd-rchk0.5.10".to_owned()));
     }
 
     #[test]
@@ -1493,6 +1983,14 @@ mod tests {
         missing_artifact.artifact_path.clear();
         let mut missing_logs = valid_row();
         missing_logs.required_logs = "matrix_version".to_owned();
+        let mut missing_unit_contract = valid_row();
+        missing_unit_contract.unit_test_contract.clear();
+        let mut missing_e2e_contract = valid_row();
+        missing_e2e_contract.e2e_contract.clear();
+        let mut missing_log_fields = valid_row();
+        missing_log_fields.logging_fields.clear();
+        let mut missing_feature_gates = valid_row();
+        missing_feature_gates.feature_gates_consumed.clear();
         let mut unsupported_status = valid_row();
         unsupported_status.matrix_status = "optimistic".to_owned();
 
@@ -1502,6 +2000,10 @@ mod tests {
             ("release_claim_effect", missing_effect),
             ("artifact_path", missing_artifact),
             ("required_logs missing source_bead_ids", missing_logs),
+            ("unit_test_contract", missing_unit_contract),
+            ("e2e_contract", missing_e2e_contract),
+            ("logging_fields", missing_log_fields),
+            ("feature_gates_consumed", missing_feature_gates),
             ("invalid matrix_status", unsupported_status),
         ] {
             let errors = validate_matrix_rows(&[row]);
@@ -1540,8 +2042,9 @@ mod tests {
             &fixture_issues(),
             &[DEFAULT_ARTIFACT_PATH.to_owned()],
         );
-        assert_eq!(report.required_output_coverage.len(), 5);
+        assert_eq!(report.required_output_coverage.len(), 6);
         for required_id in [
+            "bd-rchk0.5.10",
             "bd-rchk0.5.11",
             "bd-rchk0.5.12",
             "bd-rchk0.5.13",
@@ -1563,6 +2066,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dependency_gate_map_records_parent_prerequisites_and_order() {
+        let report = analyze_ambition_evidence_matrix(
+            &fixture_issues(),
+            &[DEFAULT_ARTIFACT_PATH.to_owned()],
+        );
+        assert_eq!(report.operational_prerequisites.len(), 9);
+        assert!(
+            report
+                .operational_prerequisites
+                .iter()
+                .all(|prerequisite| prerequisite.exists),
+            "all fixture prerequisites should exist"
+        );
+        let parent_gate = report
+            .dependency_gate_map
+            .iter()
+            .find(|gate| gate.source_bead_id == "bd-rchk0.5.10")
+            .expect("missing parent dependency gate");
+        for (required_id, _, _) in KEY_OPERATIONAL_PREREQUISITES {
+            assert!(
+                parent_gate
+                    .prerequisite_bead_ids
+                    .iter()
+                    .any(|prerequisite| prerequisite == required_id),
+                "missing prerequisite {required_id}"
+            );
+        }
+        assert!(parent_gate.tracker_limitation.contains("dotted child IDs"));
     }
 
     #[test]
