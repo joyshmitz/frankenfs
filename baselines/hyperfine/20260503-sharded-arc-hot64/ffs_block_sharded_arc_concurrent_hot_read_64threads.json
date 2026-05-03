@@ -1,0 +1,29 @@
+{
+  "results": [
+    {
+      "command": "cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "mean": 0.009050000000,
+      "stddev": 0.000099617347,
+      "median": 0.009050000000,
+      "min": 0.008874000000,
+      "max": 0.009264500000,
+      "times": [
+        0.008874000000,
+        0.009050000000,
+        0.009264500000
+      ],
+      "exit_codes": [
+        0
+      ]
+    }
+  ],
+  "benchmark_mode": "criterion_once",
+  "measurement_source": "criterion_estimate",
+  "criterion_estimate_source": "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.stdout",
+  "wall_time_seconds": 40.147803392,
+  "command_stdout": "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.stdout",
+  "command_stderr": "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.stderr",
+  "text_report": "baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.txt",
+  "started_at": "2026-05-03T20:19:33Z",
+  "finished_at": "2026-05-03T20:20:13Z"
+}

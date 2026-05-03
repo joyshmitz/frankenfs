@@ -1,0 +1,28 @@
+benchmark_mode: criterion_once
+command: cargo bench --profile release-perf -p ffs-block --bench arc_cache -- block_cache_sharded_arc_concurrent_hot_read_64threads
+started_at_utc: 2026-05-03T20:19:33Z
+finished_at_utc: 2026-05-03T20:20:13Z
+wall_time_seconds: 40.147803392
+measurement_source: criterion_estimate
+criterion_estimate_source: baselines/hyperfine/20260503-sharded-arc-hot64/ffs_block_sharded_arc_concurrent_hot_read_64threads.stdout
+criterion_estimate_seconds: [0.008874000000, 0.009050000000, 0.009264500000]
+exit_status: 0
+
+## stdout
+block_cache_sharded_arc_concurrent_hot_read_64threads
+                        time:   [8.8740 ms 9.0500 ms 9.2645 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+
+
+## stderr
+   Compiling ffs-error v0.1.0 (/data/tmp/frankenfs_bench_bd_rchk5_2_sharded_evidence_20260503161038/crates/ffs-error)
+   Compiling ffs-types v0.1.0 (/data/tmp/frankenfs_bench_bd_rchk5_2_sharded_evidence_20260503161038/crates/ffs-types)
+   Compiling ffs-block v0.1.0 (/data/tmp/frankenfs_bench_bd_rchk5_2_sharded_evidence_20260503161038/crates/ffs-block)
+    Finished `release-perf` profile [optimized] target(s) in 29.62s
+     Running benches/arc_cache.rs (/data/tmp/cargo-target/release-perf/deps/arc_cache-f629bc5460280303)
+Gnuplot not found, using plotters backend
+Benchmarking block_cache_sharded_arc_concurrent_hot_read_64threads
+Benchmarking block_cache_sharded_arc_concurrent_hot_read_64threads: Warming up for 3.0000 s
+Benchmarking block_cache_sharded_arc_concurrent_hot_read_64threads: Collecting 100 samples in estimated 5.6973 s (600 iterations)
+Benchmarking block_cache_sharded_arc_concurrent_hot_read_64threads: Analyzing

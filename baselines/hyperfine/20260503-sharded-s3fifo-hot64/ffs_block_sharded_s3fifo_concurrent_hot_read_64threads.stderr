@@ -1,0 +1,8 @@
+   Compiling ffs-block v0.1.0 (/data/tmp/frankenfs_bench_bd_rchk5_2_sharded_evidence_20260503161038/crates/ffs-block)
+    Finished `release-perf` profile [optimized] target(s) in 27.64s
+     Running benches/arc_cache.rs (/data/tmp/cargo-target/release-perf/deps/arc_cache-6009747461f06b59)
+Gnuplot not found, using plotters backend
+Benchmarking block_cache_sharded_s3fifo_concurrent_hot_read_64threads
+Benchmarking block_cache_sharded_s3fifo_concurrent_hot_read_64threads: Warming up for 3.0000 s
+Benchmarking block_cache_sharded_s3fifo_concurrent_hot_read_64threads: Collecting 100 samples in estimated 5.1139 s (500 iterations)
+Benchmarking block_cache_sharded_s3fifo_concurrent_hot_read_64threads: Analyzing

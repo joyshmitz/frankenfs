@@ -89,6 +89,20 @@ expression: json
       "owning_crate": "ffs-block",
       "description": "s3fifo policy: Zipf(1.07) random access"
     },
+    "block_cache_sharded_arc_concurrent_hot_read_64threads": {
+      "operation_id": "block_cache_sharded_arc_concurrent_hot_read_64threads",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "sharded arc policy: 64-thread hot-cache read burst"
+    },
+    "block_cache_sharded_s3fifo_concurrent_hot_read_64threads": {
+      "operation_id": "block_cache_sharded_s3fifo_concurrent_hot_read_64threads",
+      "family": "block_cache",
+      "metric": "latency",
+      "owning_crate": "ffs-block",
+      "description": "sharded s3fifo policy: 64-thread hot-cache read burst"
+    },
     "cli_metadata_parse_conformance": {
       "operation_id": "cli_metadata_parse_conformance",
       "family": "metadata_ops",

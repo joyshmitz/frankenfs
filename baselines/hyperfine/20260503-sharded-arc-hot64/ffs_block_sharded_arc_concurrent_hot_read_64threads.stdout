@@ -1,0 +1,4 @@
+block_cache_sharded_arc_concurrent_hot_read_64threads
+                        time:   [8.8740 ms 9.0500 ms 9.2645 ms]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe

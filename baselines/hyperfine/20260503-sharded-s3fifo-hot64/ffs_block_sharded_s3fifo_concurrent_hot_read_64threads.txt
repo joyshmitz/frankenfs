@@ -1,0 +1,27 @@
+benchmark_mode: criterion_once
+command: cargo bench --profile release-perf -p ffs-block --features s3fifo --bench arc_cache -- block_cache_sharded_s3fifo_concurrent_hot_read_64threads
+started_at_utc: 2026-05-03T20:23:21Z
+finished_at_utc: 2026-05-03T20:24:00Z
+wall_time_seconds: 38.283936768
+measurement_source: criterion_estimate
+criterion_estimate_source: baselines/hyperfine/20260503-sharded-s3fifo-hot64/ffs_block_sharded_s3fifo_concurrent_hot_read_64threads.stdout
+criterion_estimate_seconds: [0.010192000000, 0.010394000000, 0.010612000000]
+exit_status: 0
+
+## stdout
+block_cache_sharded_s3fifo_concurrent_hot_read_64threads
+                        time:   [10.192 ms 10.394 ms 10.612 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+
+
+## stderr
+   Compiling ffs-block v0.1.0 (/data/tmp/frankenfs_bench_bd_rchk5_2_sharded_evidence_20260503161038/crates/ffs-block)
+    Finished `release-perf` profile [optimized] target(s) in 27.64s
+     Running benches/arc_cache.rs (/data/tmp/cargo-target/release-perf/deps/arc_cache-6009747461f06b59)
+Gnuplot not found, using plotters backend
+Benchmarking block_cache_sharded_s3fifo_concurrent_hot_read_64threads
+Benchmarking block_cache_sharded_s3fifo_concurrent_hot_read_64threads: Warming up for 3.0000 s
+Benchmarking block_cache_sharded_s3fifo_concurrent_hot_read_64threads: Collecting 100 samples in estimated 5.1139 s (500 iterations)
+Benchmarking block_cache_sharded_s3fifo_concurrent_hot_read_64threads: Analyzing
