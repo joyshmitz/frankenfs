@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "bead_id": "bd-rchk0.3.2",
+  "runner": "scripts/e2e/ffs_mounted_write_workload_matrix.sh",
+  "results_contract": {
+    "formats": ["json", "csv"],
+    "required_fields": [
+      "scenario_id",
+      "filesystem",
+      "mount_flags",
+      "operation_sequence",
+      "write_sizes",
+      "fsync_pattern",
+      "concurrency",
+      "expected_outcome",
+      "actual_outcome",
+      "stdout_path",
+      "stderr_path",
+      "cleanup_status",
+      "skip_reason"
+    ],
+    "artifact_paths": [
+      "mounted_write_workload_results.json",
+      "mounted_write_workload_results.csv",
+      "run.log"
+    ]
+  },
+  "scenarios": [
+    {
+      "scenario_id": "mounted_write_ext4_small_fsync_each",
+      "filesystem": "ext4",
+      "image_setup": "fresh ext4 image with default inode and dir-index features",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["errors=remount-ro"],
+      "workload": {
+        "operation_sequence": ["create", "write_readback", "fsync", "rename", "unlink"],
+        "write_sizes": [4096, 16384],
+        "fsync_pattern": "every_write",
+        "concurrency": 1,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "small synchronous writes survive readback and rename before unlink cleanup",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_ext4_parallel_metadata_churn",
+      "filesystem": "ext4",
+      "image_setup": "fresh ext4 image with two writable subdirectories",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["dir_index", "extent"],
+      "workload": {
+        "operation_sequence": ["mkdir", "create", "write_readback", "hardlink", "symlink", "chmod", "rmdir"],
+        "write_sizes": [65536],
+        "fsync_pattern": "metadata_only",
+        "concurrency": 4,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "parallel metadata churn preserves link targets and directory cleanup ordering",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_ext4_sparse_and_xattr",
+      "filesystem": "ext4",
+      "image_setup": "fresh ext4 image with user_xattr enabled",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["user_xattr"],
+      "workload": {
+        "operation_sequence": ["create", "fallocate_keep_size", "truncate_extend", "xattr_set_get", "fsync"],
+        "write_sizes": [1048576],
+        "fsync_pattern": "final_only",
+        "concurrency": 1,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "sparse preallocation, truncate growth, xattrs, and final fsync are visible after readback",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_ext4_unsupported_mknod_reject",
+      "filesystem": "ext4",
+      "image_setup": "fresh ext4 image with read-write mount",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["nodev_contract"],
+      "workload": {
+        "operation_sequence": ["create", "write_readback"],
+        "write_sizes": [4096],
+        "fsync_pattern": "none",
+        "concurrency": 1,
+        "unsupported_operations": ["mknod_block_device"],
+        "no_partial_mutation": true
+      },
+      "expected_outcome": {
+        "outcome_class": "unsupported_rejected",
+        "detail": "unsupported device node creation rejects deterministically and leaves the preexisting file unchanged",
+        "no_partial_mutation": true,
+        "follow_up_bead": "bd-rchk0.3.4"
+      }
+    },
+    {
+      "scenario_id": "mounted_write_btrfs_small_fsync_each",
+      "filesystem": "btrfs",
+      "image_setup": "fresh single-device btrfs image with default subvolume",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["single_device", "csum"],
+      "workload": {
+        "operation_sequence": ["create", "write_readback", "fsync", "rename", "unlink"],
+        "write_sizes": [4096, 16384],
+        "fsync_pattern": "every_write",
+        "concurrency": 1,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "btrfs mounted write/readback and rename follow the same durability envelope as ext4",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_btrfs_parallel_metadata_churn",
+      "filesystem": "btrfs",
+      "image_setup": "fresh single-device btrfs image with writable subvolume",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["subvolume_root", "single_device"],
+      "workload": {
+        "operation_sequence": ["mkdir", "create", "write_readback", "hardlink", "symlink", "chmod", "rmdir"],
+        "write_sizes": [65536],
+        "fsync_pattern": "metadata_only",
+        "concurrency": 4,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "parallel btrfs metadata churn preserves link and directory invariants",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_btrfs_sparse_and_xattr",
+      "filesystem": "btrfs",
+      "image_setup": "fresh single-device btrfs image with xattr support",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["user_subvol_rm_allowed", "xattr"],
+      "workload": {
+        "operation_sequence": ["create", "fallocate_keep_size", "truncate_extend", "xattr_set_get", "fsync"],
+        "write_sizes": [1048576],
+        "fsync_pattern": "final_only",
+        "concurrency": 1,
+        "unsupported_operations": [],
+        "no_partial_mutation": false
+      },
+      "expected_outcome": {
+        "outcome_class": "pass",
+        "detail": "btrfs sparse write path keeps extents and xattr visibility coherent",
+        "no_partial_mutation": false,
+        "follow_up_bead": ""
+      }
+    },
+    {
+      "scenario_id": "mounted_write_btrfs_root_owned_default_permissions_reject",
+      "filesystem": "btrfs",
+      "image_setup": "root-owned btrfs test directory mounted with default_permissions",
+      "mount_flags": ["rw", "default_permissions"],
+      "fs_specific_options": ["root_owned_testdir", "single_device"],
+      "workload": {
+        "operation_sequence": ["create", "write_readback"],
+        "write_sizes": [4096],
+        "fsync_pattern": "none",
+        "concurrency": 1,
+        "unsupported_operations": ["root_owned_write_eacces"],
+        "no_partial_mutation": true
+      },
+      "expected_outcome": {
+        "outcome_class": "unsupported_rejected",
+        "detail": "root-owned DefaultPermissions write rejects with no partial mutation and records host-vs-product classification",
+        "no_partial_mutation": true,
+        "follow_up_bead": "bd-rchk0.3.4"
+      }
+    }
+  ]
+}
