@@ -47,6 +47,33 @@ BAD_STALE_OUT="$E2E_LOG_DIR/cross_oracle_bad_stale_validation.json"
 BAD_STALE_RAW="$E2E_LOG_DIR/cross_oracle_bad_stale.raw"
 UNIT_LOG="$E2E_LOG_DIR/cross_oracle_unit_tests.log"
 
+extract_validation_json() {
+    local raw_path="$1"
+    local report_path="$2"
+    python3 - "$raw_path" "$report_path" <<'PY'
+import json
+import sys
+
+raw_path, report_path = sys.argv[1:]
+text = open(raw_path, encoding="utf-8", errors="replace").read()
+decoder = json.JSONDecoder()
+for index, char in enumerate(text):
+    if char != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[index:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict) and "arbitration_count" in obj:
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        break
+else:
+    raise SystemExit("cross-oracle validation JSON object not found")
+PY
+}
+
 e2e_step "Scenario 1: cross-oracle arbitration module and CLI are wired"
 if grep -q "pub mod cross_oracle_arbitration" crates/ffs-harness/src/lib.rs \
     && grep -q "validate-cross-oracle-arbitration" crates/ffs-harness/src/main.rs; then
@@ -219,20 +246,19 @@ scenario_result "cross_oracle_fixture_conflicts_generated" "PASS" "fixture confl
 e2e_step "Scenario 3: validator accepts fixture conflicts"
 if RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- \
     validate-cross-oracle-arbitration \
-    --report "$REPORT_JSON" \
-    --out "$VALIDATION_JSON" >"$VALIDATE_RAW" 2>&1 \
+    --report "$REPORT_JSON" >"$VALIDATE_RAW" 2>&1 \
+    && extract_validation_json "$VALIDATE_RAW" "$VALIDATION_JSON" \
     && RCH_VISIBILITY=none "${RCH_BIN:-rch}" exec -- cargo run --quiet -p ffs-harness -- \
         validate-cross-oracle-arbitration \
         --report "$REPORT_JSON" \
-        --format markdown \
-        --out "$VALIDATION_MD" >"$MARKDOWN_RAW" 2>&1; then
+        --format markdown >"$MARKDOWN_RAW" 2>&1; then
     scenario_result "cross_oracle_fixture_conflicts_classified" "PASS" "validation JSON and markdown generated"
 else
     scenario_result "cross_oracle_fixture_conflicts_classified" "FAIL" "validator rejected fixture conflicts"
 fi
 
 e2e_step "Scenario 4: validation output preserves blocked claims and control artifacts"
-if python3 - "$VALIDATION_JSON" "$VALIDATION_MD" <<'PY'
+if python3 - "$VALIDATION_JSON" "$MARKDOWN_RAW" <<'PY'
 from __future__ import annotations
 
 import json
